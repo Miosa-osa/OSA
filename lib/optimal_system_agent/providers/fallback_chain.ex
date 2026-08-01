@@ -23,6 +23,19 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   # against the next provider too (excluded below, ahead of this list).
   @always_retryable_categories [:server_error, :server_overload, :rate_limit]
 
+  # Auth/config failures — never worth a cross-provider fallback. Mirrors
+  # RetryClassifier's @auth_categories plus :missing_api_key, so the sync path
+  # (Registry.chat/2 delegates to retryable_error?/1) and the fallback path
+  # agree that a rejected key must surface, not be papered over.
+  @auth_config_categories [
+    :auth,
+    :invalid_api_key,
+    :missing_api_key,
+    :token_revoked,
+    :oauth_org_not_allowed,
+    :org_disabled
+  ]
+
   @doc "Get the configured fallback chain."
   def chain do
     Application.get_env(:optimal_system_agent, :fallback_chain, @default_chain)
@@ -164,6 +177,20 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       # :model_not_found; FallbackChain used to disagree via the substring
       # matcher below (finding #9).
       ErrorCatalog.classify(reason) == :model_not_found ->
+        false
+
+      # An auth failure is a CONFIG error, exactly like :model_not_found — the
+      # user's key is wrong, missing, or revoked. Falling back to another
+      # provider silently answers from a different model and hides the fact
+      # that the key they just pasted was rejected.
+      #
+      # These categories were previously excluded only BY ACCIDENT: they are
+      # absent from @always_retryable_categories, so they fell through to
+      # substring_retryable?/1 and survived only because a 401 body happens not
+      # to contain "timeout"/"connection"/"500"/... A provider whose 401
+      # payload carries a request id like `req_5004a` matches the bare "500"
+      # substring and would have been silently failed over.
+      ErrorCatalog.classify(reason) in @auth_config_categories ->
         false
 
       ErrorCatalog.classify(reason) in @always_retryable_categories ->

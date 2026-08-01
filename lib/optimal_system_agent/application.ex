@@ -225,6 +225,15 @@ defmodule OptimalSystemAgent.Application do
     # not lost when the transient task that first touched it exits.
     OptimalSystemAgent.Agent.RunStore.init_store()
 
+    # Shared row-cap bookkeeping for every bounded ETS table (healing,
+    # speculative, peer, reminders) and the memory vector cache's LRU tables.
+    # Created here, from the long-lived app master, for the same reason as
+    # RunStore above: lazily created named tables are owned by whatever
+    # transient process inserted first, and losing them mid-run inverts
+    # eviction order instead of failing loudly. See the @doc on each.
+    OptimalSystemAgent.Infra.BoundedTable.init_tables()
+    OptimalSystemAgent.Memory.Search.init_tables()
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 
@@ -296,6 +305,19 @@ defmodule OptimalSystemAgent.Application do
 
         # Run pending Ecto migrations (session_transcripts FTS5, etc.)
         run_migrations()
+
+        # Bound the session_transcripts archive (age + row cap). MUST run here
+        # rather than next to SessionPersistence.purge_expired/0 in
+        # Supervisors.Sessions: that runs during supervisor init, before the
+        # migrations above, so the table may not exist yet. Compaction shrinks
+        # the model's context and does nothing to these rows, so this sweep is
+        # the only thing bounding the table. Best-effort — never blocks boot.
+        OptimalSystemAgent.Store.SessionTranscript.purge_expired()
+
+        # Sweep background-task output files (<tmp>/osa/<session>/tasks/*.out)
+        # orphaned by a previous daemon that died before its retirement timers
+        # fired. Age-gated so a second OSA instance's live files are untouched.
+        OptimalSystemAgent.Shell.TaskOutput.sweep_orphans()
 
         # Load agent definitions (needs Tools.Registry running)
         OptimalSystemAgent.Agents.Registry.load()

@@ -40,6 +40,8 @@ defmodule OptimalSystemAgent.Speculative.Executor do
   tracked under its own `speculative_id` in the GenServer's ETS table.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   use GenServer
   require Logger
 
@@ -48,6 +50,10 @@ defmodule OptimalSystemAgent.Speculative.Executor do
   alias OptimalSystemAgent.Events.Bus
 
   @table :osa_speculative_executions
+
+  # Row cap. A finished speculative execution is history and was never deleted.
+  # Oldest-first eviction; see Infra.BoundedTable.
+  @max_rows 500
 
   # ── Child Spec ─────────────────────────────────────────────────────────────
 
@@ -177,7 +183,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
       resolved_at: nil
     }
 
-    :ets.insert(@table, {spec_id, record})
+    BoundedTable.insert(@table, spec_id, record, max: @max_rows)
 
     Bus.emit(:system_event, %{
       event: :speculative_started,
@@ -202,7 +208,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         case Assumption.check_assumptions(record.assumptions, context, effective_check) do
           {:ok, confirmed_assumptions} ->
             updated = %{record | assumptions: confirmed_assumptions}
-            :ets.insert(@table, {spec_id, updated})
+            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
             {:reply, {:ok, updated}, state}
 
           {:invalidated, failed} ->
@@ -217,7 +223,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
                 resolved_at: now
             }
 
-            :ets.insert(@table, {spec_id, updated})
+            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
 
             Bus.emit(:system_event, %{
               event: :speculative_invalidated,
@@ -255,7 +261,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
                 resolved_at: now
             }
 
-            :ets.insert(@table, {spec_id, updated})
+            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
 
             Bus.emit(:system_event, %{
               event: :speculative_promoted,
@@ -270,7 +276,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
           {:error, reason} ->
             now = DateTime.utc_now()
             updated = %{record | status: :failed, resolved_at: now}
-            :ets.insert(@table, {spec_id, updated})
+            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
             Logger.warning("[Speculative.Executor] #{spec_id} promotion failed: #{reason}")
             {:reply, {:error, reason}, state}
         end
@@ -289,7 +295,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         WorkProduct.discard(record.work_product)
         now = DateTime.utc_now()
         updated = %{record | status: :discarded, resolved_at: now}
-        :ets.insert(@table, {spec_id, updated})
+        BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
 
         Bus.emit(:system_event, %{
           event: :speculative_discarded,
@@ -316,7 +322,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
     case :ets.lookup(@table, spec_id) do
       [{_, %{status: :running} = record}] ->
         updated_wp = update_fn.(record.work_product)
-        :ets.insert(@table, {spec_id, %{record | work_product: updated_wp}})
+        BoundedTable.insert(@table, spec_id, %{record | work_product: updated_wp}, max: @max_rows)
         {:reply, :ok, state}
 
       [{_, %{status: status}}] ->

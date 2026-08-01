@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.ToolHint
   alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
   alias OptimalSystemAgent.Permissions
+  alias OptimalSystemAgent.Permissions.AskFlow
   alias OptimalSystemAgent.Permissions.AutoClassifier
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
@@ -836,14 +837,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp truncate_content(bin), do: bin
 
   defp permission_suggestions(name, args) do
-    rule_suggestion = [
-      %{
-        type: "addRules",
-        behavior: "allow",
-        rule: Permissions.suggested_rule(name, args),
-        destination: "localSettings"
-      }
-    ]
+    # `suggested_rule/2` returns nil when NO honest "always" rule exists for
+    # this call — an interpreter/shell prefix (`bash:*` would pre-approve every
+    # command run through bash), a bare `rm`, a heredoc, or a compound command.
+    # Offer no "always" option at all rather than a rule that looks scoped and
+    # is not; a one-time allow is still available.
+    rule_suggestion =
+      case Permissions.suggested_rule(name, args) do
+        nil ->
+          []
+
+        rule ->
+          [
+            %{
+              type: "addRules",
+              behavior: "allow",
+              rule: rule,
+              destination: "localSettings"
+            }
+          ]
+      end
 
     dir_suggestion =
       case Permissions.out_of_scope_write(name, args) do
@@ -895,15 +908,27 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :allow_always ->
         # Persist a SCOPED rule, not a whole-tool allow: shell calls save a
         # command-prefix rule (e.g. shell_execute(npm test:*)); other tools
-        # keep the tool-level rule.
-        tool_call |> saved_rule_for() |> Permissions.save_rule(:allow_always)
+        # keep the tool-level rule. A nil suggestion means no honest "always"
+        # rule exists for this command (interpreter/shell prefix, bare rm,
+        # heredoc, compound) — allow it ONCE and persist nothing.
+        case saved_rule_for(tool_call) do
+          nil -> :ok
+          rule -> Permissions.save_rule(rule, :allow_always)
+        end
+
         :allow
 
       :deny ->
         {:blocked, "Blocked: you declined to run #{tool_call.name}"}
 
       :deny_always ->
-        tool_call |> saved_rule_for() |> Permissions.save_rule(:deny_always)
+        # Deny rules are never over-broad in the dangerous direction, so a nil
+        # suggestion falls back to a tool-level deny rather than saving nothing.
+        case saved_rule_for(tool_call) do
+          nil -> Permissions.save_rule(tool_call.name, :deny_always)
+          rule -> Permissions.save_rule(rule, :deny_always)
+        end
+
         {:blocked, "Blocked: #{tool_call.name} denied and saved as a standing rule"}
 
       :clarify ->
@@ -961,6 +986,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # `{:image, media_type, b64, path}` tuple, a binary, or a "Blocked:"/"Error:"
   # string. Only reached when approve_tool_call/2 returned :allow.
   defp run_tool(tool_call, state) do
+    # This call is approved (a rule, the permission mode, or the operator's own
+    # answer to the dialog above). Record it so the handler-level `:ask` tier
+    # (`Permissions.AskFlow`, reached via Tools.LegacyAdapter) does not open a
+    # SECOND dialog for the same tool_use. Callers that never went through this
+    # approval — the MCP dispatcher, Tools.Pipeline, HTTP tool routes, the cron
+    # scheduler — carry no mark and still get prompted.
+    AskFlow.mark_call_approved(state.session_id, Map.get(tool_call, :id))
+
     # Validate the model's tool arguments against the tool schema BEFORE running
     # any hook or the tool itself. On invalid/malformed input, hand the model a
     # REASK error (verbatim tool result) so it rewrites the call next step —
@@ -1369,7 +1402,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         # the tool ran and reported a MODEL mistake — retrying a sibling edit
         # tool with the same args is wasted work and risks running a different
         # tool on mismatched args. Return the real error instead.
-        if semantic_tool_error?(reason) do
+        # An OPERATOR decision (a permission decline, a timed-out/cancelled
+        # approval, a reject-with-steer surfaced by the handler-level ask tier)
+        # is never a dispatch failure: retrying the same action through a
+        # sibling tool would route straight around the refusal. Return the
+        # decision verbatim so the model reads it and picks another route.
+        if semantic_tool_error?(reason) or ToolError.user_decision?(to_text(reason)) do
           "Error: " <> to_text(reason)
         else
           case Tools.suggest_fallback_tool(tool_name) do

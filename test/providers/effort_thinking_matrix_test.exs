@@ -9,14 +9,21 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
 
   Expected matrix (tier → provider param):
 
-      tier    anthropic-opus        anthropic-nonopus   openai (o-series)   gemini-2.5      ollama
+      tier    anthropic-adaptive    anthropic-budget    openai (reasoning)  gemini-2.5      ollama
+              (4.6+, Claude 5)      (haiku-4-5, older)
       ----    ------------------    -----------------   -----------------   ------------    ------
       fast    (none — fast_mode)    (none — fast_mode)  reasoning=low       (none, budget0) no-op
       medium  adaptive              enabled/5000        reasoning=medium    budget 5000     no-op
       high    adaptive              enabled/10000       reasoning=high      budget 10000    no-op
       xhigh   adaptive              enabled/32000       reasoning=high      budget 32000    no-op
-      ultra   enabled/64000         enabled/64000       reasoning=high      budget 64000    no-op
+      ultra   adaptive              enabled/64000       reasoning=high      budget 64000    no-op
       off     (none)                (none)              (omit)              (none, budget0) no-op
+
+  The anthropic split is by MODEL, not by opus-vs-sonnet. Anthropic removed the
+  fixed thinking budget on the Claude 5 family and on Opus 4.7/4.8: sending
+  `{type: "enabled", budget_tokens: N}` to those models is a hard 400. Depth on
+  them is steered by `output_config.effort`, not a token count — so every tier
+  maps to plain `adaptive` and the effort tier rides the separate effort param.
   """
   use ExUnit.Case, async: false
 
@@ -26,6 +33,9 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
 
   @opus "claude-opus-4-8"
   @sonnet "claude-sonnet-4-6"
+  # Haiku 4.5 is the one current model that still speaks the fixed-budget
+  # thinking dialect; every 4.6+ model takes adaptive only.
+  @haiku "claude-haiku-4-5"
   @openai_model "o3-mini"
   @gemini_thinking "gemini-2.5-pro"
   @gemini_flat "gemini-2.0-flash"
@@ -68,13 +78,13 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       end
     end
 
-    test "opus at ultra → enabled with the 64k max budget" do
+    test "opus at ultra → STILL adaptive (budget_tokens is a 400 on this model)" do
       Effort.set(:ultra)
       cfg = LLMClient.thinking_config(%{provider: :anthropic, model: @opus})
-      assert cfg == %{type: "enabled", budget_tokens: 64_000}
+      assert cfg == %{type: "adaptive"}
 
       body = Anthropic.maybe_add_thinking(%{model: @opus}, cfg)
-      assert body.thinking == %{type: "enabled", budget_tokens: 64_000}
+      assert body.thinking == %{type: "adaptive"}
     end
 
     test "opus at fast → no thinking block" do
@@ -83,21 +93,63 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
     end
   end
 
-  describe "anthropic — non-opus (enabled + effort budget at every non-fast tier)" do
-    for {tier, budget} <- [{:medium, 5_000}, {:high, 10_000}, {:xhigh, 32_000}, {:ultra, 64_000}] do
-      test "sonnet at #{tier} → enabled with budget #{budget}" do
+  describe "anthropic — adaptive-thinking models (the Claude 5 family, 4.6+)" do
+    for tier <- [:medium, :high, :xhigh, :ultra] do
+      test "sonnet at #{tier} → adaptive (never budget_tokens)" do
         Effort.set(unquote(tier))
         cfg = LLMClient.thinking_config(%{provider: :anthropic, model: @sonnet})
-        assert cfg == %{type: "enabled", budget_tokens: unquote(budget)}
+        assert cfg == %{type: "adaptive"}
 
         body = Anthropic.maybe_add_thinking(%{model: @sonnet}, cfg)
-        assert body.thinking == %{type: "enabled", budget_tokens: unquote(budget)}
+        assert body.thinking == %{type: "adaptive"}
+      end
+    end
+
+    for model <- ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"] do
+      test "#{model} never receives budget_tokens at any tier" do
+        for tier <- [:medium, :high, :xhigh, :ultra] do
+          Effort.set(tier)
+          cfg = LLMClient.thinking_config(%{provider: :anthropic, model: unquote(model)})
+          assert cfg == %{type: "adaptive"}
+        end
       end
     end
 
     test "sonnet at fast → no thinking block" do
       Effort.set(:fast)
       assert LLMClient.thinking_config(%{provider: :anthropic, model: @sonnet}) == nil
+    end
+  end
+
+  describe "anthropic — budget-thinking models (Haiku 4.5 and older)" do
+    for {tier, budget} <- [{:medium, 5_000}, {:high, 10_000}, {:xhigh, 32_000}, {:ultra, 64_000}] do
+      test "haiku at #{tier} → enabled with budget #{budget}" do
+        Effort.set(unquote(tier))
+        cfg = LLMClient.thinking_config(%{provider: :anthropic, model: @haiku})
+        assert cfg == %{type: "enabled", budget_tokens: unquote(budget)}
+
+        body = Anthropic.maybe_add_thinking(%{model: @haiku}, cfg)
+        assert body.thinking == %{type: "enabled", budget_tokens: unquote(budget)}
+      end
+    end
+  end
+
+  describe "normalize_thinking/2 — the provider-level 400 guard" do
+    test "coerces a stray budget config to adaptive on an adaptive-only model" do
+      stray = %{type: "enabled", budget_tokens: 32_000}
+
+      for model <- ["claude-opus-5", "claude-sonnet-5", "claude-fable-5", @sonnet, @opus] do
+        assert Anthropic.normalize_thinking(stray, model) == %{type: "adaptive"}
+      end
+    end
+
+    test "leaves a budget config intact on a budget model" do
+      stray = %{type: "enabled", budget_tokens: 32_000}
+      assert Anthropic.normalize_thinking(stray, @haiku) == stray
+    end
+
+    test "nil stays nil" do
+      assert Anthropic.normalize_thinking(nil, @sonnet) == nil
     end
   end
 
@@ -148,6 +200,117 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
 
     test "non-integer budget is a no-op (never emits thinkingBudget: nil)" do
       assert Google.build_thinking_config(@gemini_thinking, thinking_budget: nil) == %{}
+    end
+  end
+
+  # ── Gemini 3.x (thinkingLevel enum, NOT a token budget) ─────────────────────
+
+  describe "gemini 3.x — effort maps to thinkingLevel, not thinkingBudget" do
+    @gemini3 "gemini-3.6-flash"
+    @gemini3_pro "gemini-3.1-pro-preview"
+
+    # The regression this locks down: the old predicate was
+    # `String.contains?(name, "2.5")`. When the default moved to
+    # gemini-3.6-flash it went false, so OSA sent NO thinking config at all and
+    # the whole effort ladder was a silent no-op on Google.
+    test "the current default model gets a thinking config at all" do
+      cfg = Google.build_thinking_config(@gemini3, reasoning_effort: "high")
+      refute cfg == %{}, "gemini-3.6-flash must not fall through as a non-thinking model"
+    end
+
+    for {effort, level} <- [
+          {"fast", "minimal"},
+          {"low", "low"},
+          {"medium", "medium"},
+          {"high", "high"},
+          {"xhigh", "high"},
+          {"ultra", "high"}
+        ] do
+      test "effort #{effort} → thinkingLevel #{level}" do
+        assert Google.build_thinking_config(@gemini3, reasoning_effort: unquote(effort)) ==
+                 %{thinkingLevel: unquote(level)}
+      end
+    end
+
+    test "never emits a thinkingBudget for a 3.x model" do
+      # thinkingLevel and thinkingBudget are MUTUALLY EXCLUSIVE — sending both
+      # is a hard request error.
+      cfg = Google.build_thinking_config(@gemini3, thinking_budget: 32_000, reasoning_effort: "high")
+      refute Map.has_key?(cfg, :thinkingConfig)
+      assert Map.has_key?(cfg, :thinkingLevel)
+    end
+
+    test "off clamps to the model floor rather than disabling — 3.x cannot disable thinking" do
+      assert Google.build_thinking_config(@gemini3, reasoning_effort: "off") ==
+               %{thinkingLevel: "minimal"}
+    end
+
+    test "Pro has no minimal level, so off/fast clamps UP to low" do
+      # gemini-3.1-pro-preview accepts only low/medium/high. Emitting "minimal"
+      # would be rejected by the API.
+      assert Google.build_thinking_config(@gemini3_pro, reasoning_effort: "off") ==
+               %{thinkingLevel: "low"}
+
+      assert Google.build_thinking_config(@gemini3_pro, reasoning_effort: "fast") ==
+               %{thinkingLevel: "low"}
+    end
+
+    test "the legacy 2.5 dialect still emits a token budget" do
+      # 2.5 is no longer offered but a pinned config can still name it, and it
+      # takes the OTHER dialect.
+      assert Google.build_thinking_config(@gemini_thinking, thinking_budget: 5_000) ==
+               %{thinkingConfig: %{thinkingBudget: 5_000}}
+    end
+  end
+
+  # ── DeepSeek V4 (thinking moved from a model id to a request parameter) ──────
+
+  describe "deepseek v4 — thinking is a request parameter" do
+    alias OptimalSystemAgent.Providers.DeepSeekModels
+
+    @ds_flash "deepseek-v4-flash"
+    @ds_pro "deepseek-v4-pro"
+
+    test "reasoning_model?/1 is true for V4 even though the id is not deepseek-reasoner" do
+      # The old code compared `name == "deepseek-reasoner"`, so V4 models
+      # silently lost the 600s reasoning timeout.
+      assert OpenAICompat.reasoning_model?(@ds_flash)
+      assert OpenAICompat.reasoning_model?(@ds_pro)
+    end
+
+    test "the request body carries a thinking object" do
+      body = OpenAICompat.build_stream_body(@ds_flash, [], reasoning_effort: "high")
+      assert body["thinking"] == %{"type" => "enabled", "reasoning_effort" => "high"}
+      assert body["reasoning_effort"] == "high"
+    end
+
+    test "off sends type disabled EXPLICITLY — omitting it would leave thinking on" do
+      # DeepSeek defaults thinking.type to "enabled", so an absent object is ON.
+      assert DeepSeekModels.thinking_params(@ds_flash, "off") ==
+               %{"thinking" => %{"type" => "disabled"}}
+    end
+
+    test "pro rejects low, so a low effort clamps up to high" do
+      assert %{"reasoning_effort" => "high"} = DeepSeekModels.thinking_params(@ds_pro, "low")
+      assert %{"reasoning_effort" => "low"} = DeepSeekModels.thinking_params(@ds_flash, "low")
+    end
+
+    test "OSA medium maps to high — DeepSeek has no medium" do
+      assert %{"reasoning_effort" => "high"} = DeepSeekModels.thinking_params(@ds_flash, "medium")
+      assert %{"reasoning_effort" => "max"} = DeepSeekModels.thinking_params(@ds_flash, "ultra")
+    end
+
+    test "the DeepSeek effort overwrites the generic medium a reasoning model would get" do
+      # maybe_add_reasoning/3 sets "medium", which DeepSeek does not accept, so
+      # the provider-specific step must run last and win.
+      body = OpenAICompat.build_stream_body(@ds_flash, [], [])
+      assert body["reasoning_effort"] in ["low", "high", "max"]
+    end
+
+    test "a non-DeepSeek model is untouched" do
+      assert DeepSeekModels.thinking_params(@openai_model, "high") == %{}
+      body = OpenAICompat.build_stream_body(@openai_model, [], reasoning_effort: "high")
+      refute Map.has_key?(body, "thinking")
     end
   end
 
@@ -215,9 +378,15 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       assert LLMClient.thinking_config(%{provider: :anthropic, model: @opus}) ==
                %{type: "adaptive"}
 
-      cfg = LLMClient.thinking_config(%{provider: :anthropic, model: @sonnet})
+      # sonnet-4-6 is adaptive-only, so a corrupt effort cannot produce a
+      # budget_tokens payload for it either.
+      assert LLMClient.thinking_config(%{provider: :anthropic, model: @sonnet}) ==
+               %{type: "adaptive"}
+
+      # Haiku still takes a budget, and falls back to the medium one.
+      cfg = LLMClient.thinking_config(%{provider: :anthropic, model: @haiku})
       assert cfg == %{type: "enabled", budget_tokens: 5_000}
-      assert Anthropic.maybe_add_thinking(%{model: @sonnet}, cfg).thinking.budget_tokens == 5_000
+      assert Anthropic.maybe_add_thinking(%{model: @haiku}, cfg).thinking.budget_tokens == 5_000
     end
 
     test "openai maps an unknown effort to medium (not omit)" do

@@ -66,8 +66,7 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
   end
 
   defp do_discover(dir) do
-    git_root = find_git_root(dir)
-    search_dirs = Enum.uniq([dir | if(git_root && git_root != dir, do: [git_root], else: [])])
+    search_dirs = search_dirs(dir)
 
     result =
       Enum.find_value(search_dirs, fn search_dir ->
@@ -109,6 +108,44 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
     end
   rescue
     _ -> nil
+  end
+
+  @doc """
+  Directories searched for a project context file, innermost first.
+
+  `git rev-parse --show-toplevel` alone is not enough. Inside a **nested
+  independent repository** — a repo whose `.git` lives inside another repo's
+  working tree, which the parent tracks as a single opaque gitlink — git answers
+  with the *inner* repo. Anchoring discovery on that answer means the enclosing
+  monorepo's `AGENTS.md` is never found, even though the operator is plainly
+  working inside that monorepo. Submodules behave the same way.
+
+  So we search the cwd, the git root, and every *enclosing workspace root* above
+  it (`Topology.enclosing_roots/1`: outer git repos, Elixir umbrellas, Cargo /
+  pnpm / npm workspaces, `go.work`). First match still wins, so an inner
+  component's own instruction file continues to take precedence over the
+  constellation's — only the fallback chain got longer.
+
+  `enclosing_roots/1` walks upward with a handful of `File.exists?` probes and
+  never triggers a topology walk, so this stays cheap enough for the cached
+  discovery path.
+  """
+  @spec search_dirs(String.t()) :: [String.t()]
+  def search_dirs(dir) do
+    git_root = find_git_root(dir)
+
+    enclosing =
+      try do
+        OptimalSystemAgent.Workspace.Topology.enclosing_roots(dir)
+      rescue
+        _ -> []
+      end
+
+    [dir, git_root]
+    |> Enum.concat(enclosing)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
   end
 
   defp find_git_root(dir) do

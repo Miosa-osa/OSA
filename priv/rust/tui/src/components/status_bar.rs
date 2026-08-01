@@ -192,6 +192,80 @@ fn mcp_label(count: usize) -> Option<String> {
     }
 }
 
+/// Substrings that mark a "gap" string as a HARNESS DIAGNOSTIC rather than a
+/// review finding. A skeptic whose response could not be parsed, or that timed
+/// out / crashed, is an internal detail: it belongs in the log, never on the
+/// status bar as a `⚠` badge. The backend filters these before emitting, so
+/// this is defence in depth — the invariant is asserted by
+/// `internal_diagnostics_never_reach_the_status_bar`.
+const INTERNAL_GAP_MARKERS: &[&str] = &[
+    "unparsable",
+    "unparseable",
+    "unstructured review",
+    "skeptic failed",
+    "panel spawn",
+    "unrecognized skeptic",
+    "no reason given",
+];
+
+/// The gaps that may be shown to a user: non-empty, and not a harness
+/// diagnostic.
+fn displayable_gaps(gaps: &[String]) -> Vec<&str> {
+    gaps.iter()
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty() && !is_internal_gap(g))
+        .collect()
+}
+
+fn is_internal_gap(gap: &str) -> bool {
+    let lower = gap.to_ascii_lowercase();
+    INTERNAL_GAP_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Minimum pane width before the chip names the first gap at all — below this
+/// the counts alone are all that fits.
+const GAP_LABEL_MIN_WIDTH: u16 = 100;
+
+/// The first showable gap, fitted to a share of the pane width. `None` when the
+/// pane is too narrow or nothing is showable.
+fn first_gap_label(shown: &[&str], width: u16) -> Option<String> {
+    if width < GAP_LABEL_MIN_WIDTH {
+        return None;
+    }
+    let first = shown.first()?;
+    let budget = ((width as usize) / 3).clamp(20, 60);
+    Some(fit_cols_words(first, budget))
+}
+
+/// Fit `s` into `max_cols` DISPLAY COLUMNS, ellipsizing on a WORD boundary.
+///
+/// `util::fit_cols` is already column-correct (never byte/char counting), but it
+/// cuts wherever the budget runs out — which is what produced the reported
+/// `… (fai…` mid-word. This backs the cut off to the last whitespace so the
+/// label always ends on a whole word, falling back to the raw column fit for a
+/// single token longer than the whole budget.
+fn fit_cols_words(s: &str, max_cols: usize) -> String {
+    use crate::util::{cols, fit_cols};
+    if cols(s) <= max_cols {
+        return s.to_string();
+    }
+    let clipped = fit_cols(s, max_cols);
+    let body = clipped.strip_suffix('\u{2026}').unwrap_or(clipped.as_str());
+    match body.rfind(char::is_whitespace) {
+        Some(idx) => {
+            let head = body[..idx].trim_end();
+            // Don't back off so far that almost nothing is left (one very long
+            // leading token) — the raw column fit is better than an empty chip.
+            if cols(head) * 3 >= max_cols {
+                format!("{}\u{2026}", head)
+            } else {
+                clipped
+            }
+        }
+        None => clipped,
+    }
+}
+
 /// Cheap local token estimate for the composer's pending input, so the context
 /// meter can reflect what the user is about to add before the turn is committed
 /// (CC parity). Char/4 heuristic — the same rough ratio the activity counter
@@ -986,15 +1060,33 @@ impl Component for StatusBar {
                     gaps,
                 } => {
                     let sym = if legacy { "!" } else { "\u{26A0}" }; // ⚠
-                    let plural = if gaps.len() == 1 { "" } else { "s" };
-                    let mut label =
-                        format!("{} {}/{} \u{00b7} {} gap{}", sym, refuted, total, gaps.len(), plural);
+                    // Only genuine, user-meaningful findings are countable or
+                    // showable. Harness diagnostics ("unparsable skeptic
+                    // response", "skeptic failed: :timeout") are filtered out
+                    // by the backend already; this is defence in depth so an
+                    // internal detail can never become a user-facing badge.
+                    let shown: Vec<&str> = displayable_gaps(gaps);
+                    let mut label = if shown.is_empty() {
+                        // Nothing meaningful to name — say the useful thing
+                        // (the goal is not confirmed done) rather than "0 gaps".
+                        format!("{} {}/{} \u{00b7} goal not confirmed", sym, refuted, total)
+                    } else {
+                        let plural = if shown.len() == 1 { "" } else { "s" };
+                        format!(
+                            "{} {}/{} \u{00b7} {} gap{}",
+                            sym,
+                            refuted,
+                            total,
+                            shown.len(),
+                            plural
+                        )
+                    };
                     // Only name the first gap when the pane is wide enough that
                     // it won't crowd the line — the chip stays one line, compact.
-                    if self.width >= 100 {
-                        if let Some(first) = gaps.first().filter(|g| !g.trim().is_empty()) {
-                            label.push_str(&format!(" \u{00b7} {}", first));
-                        }
+                    // Ellipsized on a WORD boundary in DISPLAY COLUMNS (never
+                    // bytes/chars), so it can never render as `… (fai…`.
+                    if let Some(first) = first_gap_label(&shown, self.width) {
+                        label.push_str(&format!(" \u{00b7} {}", first));
                     }
                     spans.push(Span::styled(
                         label,
@@ -1211,10 +1303,10 @@ mod status_bar_tests {
     #[test]
     fn cwd_path_shows_basename_and_home_tilde() {
         let mut sb = StatusBar::new();
-        sb.set_cwd_path("/home/miosa/projects/osa/OSA");
+        sb.set_cwd_path("/home/user/projects/osa/OSA");
         assert_eq!(sb.cwd_basename, "OSA");
         // A trailing slash still yields the folder name.
-        sb.set_cwd_path("/home/miosa/projects/osa/OSA/");
+        sb.set_cwd_path("/home/user/projects/osa/OSA/");
         assert_eq!(sb.cwd_basename, "OSA");
         // A blank path leaves the label untouched.
         sb.set_cwd_path("   ");
@@ -1600,6 +1692,98 @@ mod status_bar_tests {
             ],
         }));
         assert!(render_sb(&sb).contains("2 gaps"), "plural gaps");
+    }
+
+    /// The reported regression: a parse failure was leaking onto the status bar
+    /// as a `⚠ … [correctness] unparsable skeptic response (fai…` badge. An
+    /// internal diagnostic must never be shown, counted, or half-rendered.
+    #[test]
+    fn internal_diagnostics_never_reach_the_status_bar() {
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_goal_verification(Some(GoalVerifyState::Incomplete {
+            refuted: 3,
+            total: 3,
+            gaps: vec![
+                "[correctness] unparsable skeptic response (fail-closed): blah blah".to_string(),
+                "[verifiability] skeptic failed: :timeout".to_string(),
+            ],
+        }));
+        let text = render_sb(&sb);
+        assert!(!text.contains("unparsable"), "parse failure leaked: {text:?}");
+        assert!(!text.contains("fail-closed"), "internal marker leaked: {text:?}");
+        assert!(!text.contains("skeptic failed"), "internal marker leaked: {text:?}");
+        assert!(!text.contains("(fai"), "mid-word cut of an internal string: {text:?}");
+        // Nothing meaningful to name ⇒ say so, never "0 gaps".
+        assert!(!text.contains("0 gap"), "must not report zero gaps: {text:?}");
+        assert!(text.contains("goal not confirmed"), "meaningful fallback: {text:?}");
+        assert!(text.contains("3/3"), "vote counts still shown: {text:?}");
+    }
+
+    /// A mix of real findings and diagnostics counts and shows ONLY the real ones.
+    #[test]
+    fn gap_count_excludes_internal_diagnostics() {
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_goal_verification(Some(GoalVerifyState::Incomplete {
+            refuted: 2,
+            total: 3,
+            gaps: vec![
+                "[correctness] unparsable skeptic response".to_string(),
+                "[completeness] exporter drops the header row".to_string(),
+            ],
+        }));
+        let text = render_sb(&sb);
+        assert!(text.contains("1 gap"), "only the real finding counts: {text:?}");
+        assert!(!text.contains("1 gaps"), "singular for one gap: {text:?}");
+        assert!(text.contains("completeness"), "real finding is named: {text:?}");
+        assert!(!text.contains("unparsable"), "diagnostic filtered: {text:?}");
+    }
+
+    /// The gap label is fitted in DISPLAY COLUMNS and ellipsized on a word
+    /// boundary — never mid-word, never mid-glyph.
+    #[test]
+    fn gap_label_is_width_aware_and_word_ellipsized() {
+        // Long single line, wide-ish pane: must be cut on whitespace.
+        let long = "[correctness] the exporter writes CSV output but the goal explicitly asked for newline delimited JSON records";
+        let fitted = fit_cols_words(long, 40);
+        assert!(crate::util::cols(&fitted) <= 40, "over budget: {fitted:?}");
+        assert!(fitted.ends_with('\u{2026}'), "ellipsized: {fitted:?}");
+        let body = fitted.trim_end_matches('\u{2026}');
+        assert!(
+            long.starts_with(body) && (long[body.len()..].starts_with(' ') || body.is_empty()),
+            "cut must land on a word boundary, got: {fitted:?}"
+        );
+
+        // Short enough ⇒ untouched, no ellipsis.
+        assert_eq!(fit_cols_words("short gap", 40), "short gap");
+
+        // Wide (CJK) glyphs are counted at 2 columns, so the result never
+        // overflows the budget.
+        let cjk = "[correctness] 出力形式が要求と一致していません 詳細は仕様を参照";
+        let fitted_cjk = fit_cols_words(cjk, 30);
+        assert!(crate::util::cols(&fitted_cjk) <= 30, "cjk over budget: {fitted_cjk:?}");
+
+        // A single unbroken token longer than the budget still yields a
+        // non-empty label (falls back to the raw column fit).
+        let one_word = "[correctness] aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let fitted_one = fit_cols_words(one_word, 20);
+        assert!(crate::util::cols(&fitted_one) <= 20);
+        assert!(fitted_one.len() > 5, "not collapsed to nothing: {fitted_one:?}");
+    }
+
+    /// Narrow panes drop the label entirely rather than crowding the line.
+    #[test]
+    fn gap_label_hidden_on_narrow_panes() {
+        let gaps = vec!["[completeness] missing the export step".to_string()];
+        let shown = displayable_gaps(&gaps);
+        assert!(first_gap_label(&shown, 80).is_none(), "hidden under 100 cols");
+        assert!(first_gap_label(&shown, 120).is_some(), "shown on a wide pane");
+        // …and an all-diagnostic list yields nothing at any width.
+        let internal = vec!["[correctness] unparsable skeptic response".to_string()];
+        let none = displayable_gaps(&internal);
+        assert!(none.is_empty());
+        assert!(first_gap_label(&none, 200).is_none());
     }
 
     #[test]

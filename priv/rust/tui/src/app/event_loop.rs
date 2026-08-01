@@ -44,6 +44,77 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 /// returns 0 when there's nothing to show, so the row collapses when idle.
 pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
 
+/// Rows the live task checklist may occupy inside the inline region.
+///
+/// The checklist used to be drawn as an OVERLAY into the streaming band's own
+/// rect (`draw_inline` passed `a_stream` to both `Chat::draw_live` and
+/// `TaskChecklist::draw`). Nothing reserved space for it, so it painted straight
+/// over whatever the reply had already drawn there — the interleaved
+/// "Plan 3/3" on top of a markdown table row. It now gets its OWN band; this cap
+/// only bounds how much of the stream band it may take.
+pub(crate) const CHECKLIST_INLINE_CAP: u16 = 12;
+
+/// Rows the checklist band should take inside an inline region of `area_h` rows.
+///
+/// `want` is the reserved slot (`App::checklist_slot`); `floor` is the rows that
+/// must survive around it (chrome + a minimum stream band). Kept as a free pure
+/// function so the "the checklist never starves the rest of the live region"
+/// invariant is unit-testable without constructing a full `App`.
+pub(crate) fn checklist_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
+    want.min(CHECKLIST_INLINE_CAP)
+        .min(area_h.saturating_sub(floor))
+}
+
+/// Rows the inline `ask_user` survey band should take inside an inline region of
+/// `area_h` rows.
+///
+/// Same contract as [`checklist_band_height`]: `want` is the reserved slot
+/// (`App::survey_slot`, itself `SurveyDialog::band_height`), `floor` is the rows
+/// that must survive around it. The survey band is a REAL reserved band — it is
+/// never drawn as an overlay into the stream rect, which is the class of bug
+/// that had the checklist painting over a streaming markdown table.
+pub(crate) fn survey_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
+    want.min(crate::dialogs::survey::SURVEY_INLINE_CAP)
+        .min(area_h.saturating_sub(floor))
+}
+
+/// Row indices into [`inline_split`]'s result.
+pub(crate) const ROW_STREAM: usize = 0;
+pub(crate) const ROW_CHECKLIST: usize = 1;
+pub(crate) const ROW_THINK: usize = 2;
+pub(crate) const ROW_AGENTS: usize = 3;
+pub(crate) const ROW_SURVEY: usize = 4;
+pub(crate) const ROW_HINT: usize = 5;
+pub(crate) const ROW_INPUT: usize = 6;
+pub(crate) const ROW_STATUS: usize = 7;
+
+/// The inline live region's vertical split. Kept as a free function so the
+/// "no two components share a row" invariant is testable against the REAL
+/// layout instead of a hand-copied mirror of it — the checklist overdraw bug
+/// was invisible precisely because nothing exercised this split.
+pub(crate) fn inline_split(
+    area: Rect,
+    checklist_h: u16,
+    think_h: u16,
+    agents_h: u16,
+    survey_h: u16,
+    input_h: u16,
+) -> std::rc::Rc<[Rect]> {
+    RLayout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0), // streaming preview (collapses to 0 when idle - no dead rows)
+            Constraint::Length(checklist_h), // live task checklist (own band, never over the reply)
+            Constraint::Length(think_h), // thinking / activity
+            Constraint::Length(agents_h), // agents panel / background summary
+            Constraint::Length(survey_h), // inline ask_user question band (own band, never overlay)
+            Constraint::Length(1), // right-aligned "N% context used" hint
+            Constraint::Length(input_h), // input box (top + bottom dividers)
+            Constraint::Length(2), // status line + permission/shell line
+        ])
+        .split(area)
+}
+
 /// Shrink `slot` to its bottom `content` rows.
 ///
 /// The live region reserves STABLE per-turn slots (so the inline viewport never
@@ -93,11 +164,24 @@ pub(crate) const STREAM_PREVIEW_ROWS: u16 = 10;
 /// given terminal size and chrome, the streaming height does not change as the
 /// reply grows, so the viewport is never rebuilt mid-turn. Kept as a free pure
 /// function so the invariant is unit-testable without constructing a full `App`.
+///
+/// `bands_h` is EVERY reserved band that `inline_split` carves out of the
+/// `Min(0)` stream slot — today the task checklist and the inline `ask_user`
+/// survey. **Omitting it is a real bug that shipped:** `want` was built from the
+/// chrome + `STREAM_PREVIEW_ROWS` alone and then `clamp(base, hi)`ed. Whenever
+/// `want > base` (the normal case) the clamp returns `want`, so the checklist's
+/// rows — counted in `base` but not in `want` — silently vanished from the
+/// reservation. `draw_inline` still carved the checklist band out of the same
+/// area, so the streaming preview collapsed from 10 rows to whatever was left,
+/// and the final response came out truncated with the plan block sitting where
+/// the rest of it should have been. Every band that consumes stream rows must be
+/// counted in BOTH terms.
 pub(crate) fn streaming_inline_height(
     base: u16,
     overhead: u16,
     input_needed: u16,
     agents_h: u16,
+    bands_h: u16,
     popup_h: u16,
     hi: u16,
 ) -> u16 {
@@ -105,6 +189,7 @@ pub(crate) fn streaming_inline_height(
         .saturating_add(input_needed)
         .saturating_add(STREAM_PREVIEW_ROWS)
         .saturating_add(agents_h)
+        .saturating_add(bands_h)
         .saturating_add(popup_h);
     want.clamp(base, hi)
 }
@@ -122,7 +207,19 @@ pub fn safe_render_widget<W: ratatui::widgets::Widget>(frame: &mut Frame, widget
 }
 
 impl App {
-    pub async fn run(&mut self, mut terminal: Term, inline_h: u16) -> Result<()> {
+    /// Run the app to completion.
+    ///
+    /// Returns how the process should end (see `app::resume::ExitOutcome`): the
+    /// copy-pasteable resume hint on a normal quit, or a loud failure message
+    /// when a launch-time `resume <id>` could not be honoured. Neither is
+    /// printed here — the inline viewport is repainted during teardown, so
+    /// anything written before `restore_terminal()` is wiped off the screen.
+    /// `main` prints it AFTER the terminal is restored.
+    pub async fn run(
+        &mut self,
+        mut terminal: Term,
+        inline_h: u16,
+    ) -> Result<crate::app::resume::ExitOutcome> {
         // Spawn terminal event reader (reassigned when we pause it around an
         // inline-viewport rebuild — see the switch below).
         let mut term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
@@ -518,7 +615,10 @@ impl App {
                 }
             }
 
-            if should_quit {
+            // A failed launch-time resume is a quit condition in its own right:
+            // there is no session to sit in, and staying would present an empty
+            // conversation as if it were the one the user asked for.
+            if should_quit || self.fatal_exit.is_some() {
                 break;
             }
         }
@@ -533,12 +633,58 @@ impl App {
         self.chrome_title.reset(); // hand the tab title back to the shell
         tick_handle.abort();
         term_handle.abort();
+
+        // If a dialog still owned the full/alternate screen when the loop broke
+        // (quitting through the `/quit` confirm does exactly this), come back to
+        // the primary screen FIRST. Everything below — and the exit hint `main`
+        // prints — has to act on the surface the shell will inherit.
+        if was_full && crate::app::alt_screen::is_active() {
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            crate::app::alt_screen::mark_left();
+        }
+
+        // Erase the inline chrome (composer + status rows) on the way out, so
+        // the exit hint lands on clean lines instead of half-overwriting the
+        // status bar. The chrome is bottom-anchored at `term_rows - inline_h`
+        // (the geometry asserted by `resize_clear_top_from_bottom`), so clearing
+        // from there down erases exactly it and never the real transcript
+        // scrollback above it.
+        let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
+        if let Some(top) = clamp_inline_top(Some(term_rows.saturating_sub(cur_inline_h)), term_rows)
+        {
+            let _ = execute!(
+                std::io::stdout(),
+                crossterm::cursor::MoveTo(0, top),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+            );
+        }
         if let Some(cancel) = self.sse_cancel.take() {
             cancel.cancel();
         }
 
+        // A launch-time resume that could not be resolved leaves through the
+        // LOUD arm: stderr + exit 2, never a blank conversation that reads as a
+        // normal fresh session.
+        if let Some(msg) = self.fatal_exit.take() {
+            info!("App exiting with a launch failure: {}", msg);
+            return Ok(crate::app::resume::ExitOutcome::Failed(msg));
+        }
+
         info!("App exiting cleanly");
-        Ok(())
+        Ok(crate::app::resume::ExitOutcome::normal(self.exit_resume_hint()))
+    }
+
+    /// The `Resume this session with: …` block to print after teardown, or
+    /// `None` when this session has nothing worth coming back to.
+    fn exit_resume_hint(&self) -> Option<String> {
+        let had_user_turn = self.chat.last_user_message().is_some();
+        if !crate::app::resume::should_print_hint(&self.session_id, had_user_turn) {
+            return None;
+        }
+        Some(crate::app::resume::resume_hint_block(
+            &self.session_id,
+            &self.launch_mode,
+        ))
     }
 
     /// Route an event through the transcript overlay layer before the normal
@@ -762,11 +908,12 @@ impl App {
                             // (see draw_inline), and PlanReview is no longer an
                             // is_overlay() state, so this full-viewport branch was
                             // unreachable. It falls through to the `_ => {}` no-op.
-                            AppState::Survey => {
-                                if let Some(ref s) = self.survey {
-                                    s.draw(frame, area);
-                                }
-                            }
+                            // AppState::Survey has no draw arm either: the
+                            // ask_user picker renders INLINE in its own reserved
+                            // band (see `survey_slot` / `draw_inline`) and Survey
+                            // is no longer an is_overlay() state, so this
+                            // full-viewport branch is unreachable. It falls
+                            // through to the `_ => {}` no-op.
                             AppState::Status => {
                                 // Stateless: build a live snapshot each frame so the
                                 // dashboard numbers are never stale.
@@ -906,6 +1053,15 @@ impl App {
         } else {
             0
         };
+        // The checklist owns a real band in `draw_inline` (it used to overlay the
+        // stream band and paint over the reply). Reserve it here too, or the band
+        // would be carved out of the streaming preview and squeeze the composer.
+        let checklist_h = self.checklist_slot();
+        // Same treatment for the inline `ask_user` band: it owns a real band in
+        // `draw_inline`, so the viewport must be built tall enough for it or the
+        // question would be carved out of the streaming preview (or clipped off
+        // the bottom entirely, which is how the picker "shipped invisible").
+        let survey_h = self.survey_slot();
         let hi0 = term_rows.saturating_sub(1).max(1);
         // Reserve rows for an open slash-completions popup so the upward-growing
         // menu always has room above the input (same mechanism as the agents
@@ -920,6 +1076,8 @@ impl App {
         let activity_feed_extra = self.think_row_height();
         let base = live_region_height(input_needed, term_rows)
             .saturating_add(agents_h)
+            .saturating_add(checklist_h)
+            .saturating_add(survey_h)
             .saturating_add(popup_h)
             .saturating_add(activity_feed_extra)
             .min(hi0);
@@ -972,13 +1130,68 @@ impl App {
         }
         // Chrome below the streaming preview: thinking/activity row (dynamic —
         // shared with draw_inline via think_row_height so the two can never drift a
-        // row apart) + ctx-hint(1) + status(2). `agents_h`/`popup_h` are counted in
-        // BOTH branches so viewport sizing and the draw_inline layout stay in
-        // lockstep — a 1-row disagreement is the height-thrash that stacked a ghost
-        // Thinking box + composer.
+        // row apart) + ctx-hint(1) + status(2). `agents_h`/`popup_h` — and the
+        // reserved BANDS (checklist + survey) — are counted in BOTH branches so
+        // viewport sizing and the draw_inline layout stay in lockstep. A
+        // disagreement here is not cosmetic: the bands are carved out of the same
+        // `Min(0)` slot the streaming preview lives in, so every row missing from
+        // this reservation is a row taken off the visible reply.
         let overhead: u16 = self.think_row_height() + 1 + 2;
         let hi = term_rows.saturating_sub(1).max(1);
-        streaming_inline_height(base, overhead, input_needed, agents_h, popup_h, hi)
+        streaming_inline_height(
+            base,
+            overhead,
+            input_needed,
+            agents_h,
+            checklist_h.saturating_add(survey_h),
+            popup_h,
+            hi,
+        )
+    }
+
+    /// Rows the live task checklist reserves in the inline region. The SINGLE
+    /// source of truth for BOTH `desired_inline_height` (viewport sizing) and
+    /// `draw_inline` (layout), so the reserved band can never disagree with the
+    /// drawn one — the disagreement class that let the checklist paint over the
+    /// streaming reply.
+    ///
+    /// Unlike the agents roster (which grows a row per spawned teammate all turn
+    /// long, hence its constant cap), the checklist's height is set by the plan
+    /// burst and then holds: the frequent event is a STATUS change, which never
+    /// changes the row count. So reserving the exact height costs at most one
+    /// viewport rebuild per plan and leaves no dead rows.
+    ///
+    /// Zero whenever an inline permission prompt or plan-review panel owns the
+    /// band, or the user hid the checklist with Ctrl+T.
+    fn checklist_slot(&self) -> u16 {
+        if self.task_checklist_hidden
+            || self.permissions.is_some()
+            || self.plan_review.is_some()
+            || !self.task_checklist.is_visible()
+        {
+            return 0;
+        }
+        self.task_checklist.height().min(CHECKLIST_INLINE_CAP)
+    }
+
+    /// Rows the inline `ask_user` question band reserves. The SINGLE source of
+    /// truth for BOTH `desired_inline_height` (viewport sizing) and `draw_inline`
+    /// (layout) — exactly the `checklist_slot` contract, and for exactly the same
+    /// reason: the bug that shipped was ONE rect handed to TWO components, so the
+    /// band a component draws into must be the band the sizing reserved.
+    ///
+    /// Bounded by `SurveyDialog::band_height` (≤ `SURVEY_INLINE_CAP` = 14 rows),
+    /// so a 12-option question scrolls INTERNALLY instead of swallowing the
+    /// terminal. Zero while an inline permission prompt or plan-review panel owns
+    /// the live region — two blocking asks are never stacked.
+    pub(crate) fn survey_slot(&self) -> u16 {
+        if self.permissions.is_some() || self.plan_review.is_some() {
+            return 0;
+        }
+        match self.survey {
+            Some(ref s) => s.band_height(self.width),
+            None => 0,
+        }
     }
 
     /// Height of the thinking/activity row. The SINGLE source of truth used by
@@ -1037,25 +1250,41 @@ impl App {
             let reserved = think_h + 1 + 2 + 2; // hint + status + stream/input floor
             slot.min(area.height.saturating_sub(reserved))
         };
-        // Chrome overhead below the streaming preview: activity + agents + ctx-hint(1)
-        // + status(2). The input takes whatever is left, clamped to what it needs.
-        let overhead = think_h + agents_h + 1 + 2;
+        // Live task checklist band. It USED to be drawn as an overlay into
+        // `a_stream` — the same rect `Chat::draw_live` had already painted the
+        // reply into — so a plan and a streaming markdown table interleaved
+        // ("Plan 3/3" printed on top of a table row). It now owns a band of its
+        // own, taken out of the `Min(0)` stream band, so the two can never share
+        // a row. Zero when hidden/empty or while an inline prompt owns the band.
+        // Must MATCH `desired_inline_height`'s reservation (`checklist_slot`)
+        // exactly; the trailing `.min(...)` is only a tiny-terminal safety clamp
+        // (a no-op at normal sizes), same shape as `agents_h` above.
+        let checklist_h = checklist_band_height(
+            self.checklist_slot(),
+            area.height,
+            // chrome that must survive + one row of stream band
+            think_h + agents_h + 1 + 2 + 2,
+        );
+        // Inline `ask_user` question band — same reserved-band contract as the
+        // checklist directly above (see `survey_slot`). NEVER an overlay into
+        // `a_stream`: the question is a blocking ask, and painting it over the
+        // reply is the exact defect the checklist band was created to end.
+        // Must MATCH `desired_inline_height`'s reservation (`survey_slot`).
+        let survey_h = survey_band_height(
+            self.survey_slot(),
+            area.height,
+            think_h + agents_h + checklist_h + 1 + 2 + 2,
+        );
+        // Chrome overhead below the streaming preview: activity + agents +
+        // checklist + survey + ctx-hint(1) + status(2). The input takes whatever
+        // is left, clamped to what it needs.
+        let overhead = think_h + agents_h + checklist_h + survey_h + 1 + 2;
         let input_h = self
             .input
             .needed_height()
             .min(area.height.saturating_sub(overhead)) // streaming row is content-sized (0 when idle)
             .max(1);
-        let rows = RLayout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),           // streaming preview (collapses to 0 when idle - no dead rows)
-                Constraint::Length(think_h),  // thinking / activity
-                Constraint::Length(agents_h), // agents panel / background summary
-                Constraint::Length(1),        // right-aligned "N% context used" hint
-                Constraint::Length(input_h),  // input box (top + bottom dividers)
-                Constraint::Length(2),        // status line + permission/shell line
-            ])
-            .split(area);
+        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
 
         // Wipe the whole inline region first so no stale rows from a previous,
         // differently-sized frame bleed through (belt-and-braces against the
@@ -1068,12 +1297,14 @@ impl App {
         // `area`, but a lagged resize or an under-reported inline viewport can
         // leave a row partly outside the frame buffer; clamping keeps each
         // component's internal `render_widget` calls inside the buffer.
-        let a_stream = clamp_to_frame(frame, rows[0]);
-        let a_think = clamp_to_frame(frame, rows[1]);
-        let a_agents = clamp_to_frame(frame, rows[2]);
-        let a_hint = clamp_to_frame(frame, rows[3]);
-        let a_input = clamp_to_frame(frame, rows[4]);
-        let a_status = clamp_to_frame(frame, rows[5]);
+        let a_stream = clamp_to_frame(frame, rows[ROW_STREAM]);
+        let a_checklist = clamp_to_frame(frame, rows[ROW_CHECKLIST]);
+        let a_think = clamp_to_frame(frame, rows[ROW_THINK]);
+        let a_agents = clamp_to_frame(frame, rows[ROW_AGENTS]);
+        let a_survey = clamp_to_frame(frame, rows[ROW_SURVEY]);
+        let a_hint = clamp_to_frame(frame, rows[ROW_HINT]);
+        let a_input = clamp_to_frame(frame, rows[ROW_INPUT]);
+        let a_status = clamp_to_frame(frame, rows[ROW_STATUS]);
 
         if let Some(ref perm) = self.permissions {
             // Inline approval prompt takes over the stream band while pending.
@@ -1107,23 +1338,31 @@ impl App {
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
         self.status.draw(frame, a_status);
-        // Live task checklist floats bottom-right of the streaming/chat region
-        // (Claude Code's todo panel). It self-positions and no-ops when empty.
-        // It additionally clamps its own panel to the frame internally.
-        // Ctrl+T (chat:todosToggle) hides it.
-        if !self.task_checklist_hidden
-            && self.permissions.is_none()
-            && self.plan_review.is_none()
-        {
-            self.task_checklist.draw(frame, a_stream);
+        // Live task checklist (Claude Code's todo panel), drawn into the band
+        // reserved for it above the activity row — NEVER into `a_stream`, which
+        // the reply owns. `checklist_h` is already `height()`-derived, so the
+        // component fills its band exactly; it still clamps internally.
+        if a_checklist.height > 0 {
+            self.task_checklist.draw(frame, a_checklist);
+        }
+        // Inline `ask_user` question band, in the rows reserved by `survey_slot`
+        // — again NEVER `a_stream`. The conversation above stays visible and
+        // scrollable while the operator answers, and the composer keeps its rows.
+        if a_survey.height > 0 {
+            if let Some(ref survey) = self.survey {
+                survey.draw_inline(frame, a_survey);
+            }
         }
         if self.toasts.has_toasts() {
             self.toasts.draw(frame, toast_rect(area).intersection(bounds));
         }
     }
 
-    /// Right-aligned "N% context used" hint that sits just above the input box's
-    /// top divider (mirrors Claude Code's notification row above the prompt).
+    /// Right-aligned notice row just above the input box's top divider (mirrors
+    /// Claude Code's notification row above the prompt): the backend reconnect
+    /// state, or the actionable low-context warning. The PASSIVE context readout
+    /// is not drawn here — it is stated once, on the status bar, so the two can
+    /// never disagree (see the note at the end of this function).
     fn draw_context_hint(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -1184,13 +1423,21 @@ impl App {
             frame.render_widget(para, area);
             return;
         }
-        let pct = (self.status.context_utilization() * 100.0).round() as u32;
-        let text = format!("{}% context used", pct);
-        let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
-            ratatui::text::Span::styled(text, crate::style::theme().ctx_hint()),
-        ))
-        .alignment(ratatui::layout::Alignment::Right);
-        frame.render_widget(para, area);
+        // ONE context indicator. The passive "N% context used" readout used to be
+        // drawn here as well as on the status bar, from the same `StatusBar` —
+        // but through a DIFFERENT expression of it: this row printed
+        // `context_utilization()` as a raw percentage, while the status bar was
+        // taught that an unknown context window (`context_max == 0`) has no
+        // honest denominator and must render the token count instead. With the
+        // window unknown, `context_utilization()` is exactly 0.0, so the screen
+        // carried "0% context used" down here and "~53.3k ctx" up there — two
+        // indicators disagreeing about the same fact, one of them fabricated.
+        //
+        // Rather than teach a second widget the same unknown-window rule and
+        // leave two numbers that can drift apart again, the passive readout is
+        // now stated once, on the status bar. This row keeps only what the status
+        // bar cannot say: the reconnect notice and the actionable low-context
+        // warning, both handled above.
     }
 }
 
@@ -1198,6 +1445,7 @@ impl App {
 /// dialogs, onboarding, connecting, and the file picker.
 fn switch_to_full(terminal: &mut Term) -> Result<()> {
     execute!(std::io::stdout(), EnterAlternateScreen)?;
+    crate::app::alt_screen::mark_entered();
     *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?; // fresh diff state after rebuild
     Ok(())
@@ -1270,6 +1518,7 @@ fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
 /// so the freshly built viewport lands in the same place the old one started.
 fn switch_to_inline(terminal: &mut Term, inline_h: u16, prev_inline_top: Option<u16>) -> Result<()> {
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    crate::app::alt_screen::mark_left();
 
     // Viewport::Inline queries the cursor (DSR); the first query after leaving the
     // alt screen can be dropped and time out ("cursor position could not be read"),
@@ -2352,9 +2601,9 @@ mod render_tests {
         // Simulate a reply growing from 1 to thousands of rendered rows. The stream
         // row count deliberately does NOT appear in the call — proving the reserved
         // height cannot track it — so every height is identical.
-        let h0 = streaming_inline_height(base, overhead, input_needed, 0, 0, hi);
+        let h0 = streaming_inline_height(base, overhead, input_needed, 0, 0, 0, hi);
         for _simulated_stream_rows in [1u16, 5, 20, 200, 9999] {
-            let h = streaming_inline_height(base, overhead, input_needed, 0, 0, hi);
+            let h = streaming_inline_height(base, overhead, input_needed, 0, 0, 0, hi);
             assert_eq!(
                 h, h0,
                 "streaming inline height must stay constant as the reply grows"
@@ -2371,16 +2620,31 @@ mod render_tests {
         use super::streaming_inline_height;
         // Never exceed the terminal clamp (term_rows - 1) on a tiny terminal.
         let hi = 5u16;
-        assert_eq!(streaming_inline_height(3, 3, 3, 0, 0, hi), hi);
+        assert_eq!(streaming_inline_height(3, 3, 3, 0, 0, 0, hi), hi);
         // Never drop below the idle base even when the chrome is minimal.
         let base = 20u16;
-        assert!(streaming_inline_height(base, 1, 0, 0, 0, 40) >= base);
+        assert!(streaming_inline_height(base, 1, 0, 0, 0, 0, 40) >= base);
         // Agents panel + slash popup rows are additive in the streaming branch too
         // (kept in lockstep with draw_inline's layout), still independent of stream
         // length.
-        let with_extras = streaming_inline_height(6, 3, 3, 4, 3, 40);
-        let without = streaming_inline_height(6, 3, 3, 0, 0, 40);
+        let with_extras = streaming_inline_height(6, 3, 3, 4, 0, 3, 40);
+        let without = streaming_inline_height(6, 3, 3, 0, 0, 0, 40);
         assert_eq!(with_extras, without + 4 + 3);
+
+        // **The regression that clipped the final response.** The reserved BANDS
+        // (checklist + inline survey) are carved out of the same `Min(0)` slot
+        // the streaming preview lives in. They used to be counted in `base` but
+        // NOT in `want` — and since `want > base` in the normal case, the clamp
+        // returned `want`, so the band's rows silently disappeared from the
+        // reservation and the visible reply shrank by exactly the plan's height.
+        for bands in 1u16..=12 {
+            let with_bands = streaming_inline_height(6, 3, 3, 0, bands, 0, 60);
+            assert_eq!(
+                with_bands,
+                without + bands,
+                "a {bands}-row band must add {bands} rows to the streaming reservation"
+            );
+        }
     }
 
     #[test]

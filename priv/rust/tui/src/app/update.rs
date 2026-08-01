@@ -87,18 +87,6 @@ pub(crate) fn paste_is_file_paths(text: &str) -> bool {
     true
 }
 
-/// Advance the "Updated plan" snapshot debounce one tick. Returns true on the
-/// tick the counter reaches 0 (flush the snapshot now). A burst of task events
-/// keeps re-arming the counter, so this fires once after the burst settles,
-/// coalescing a whole plan set into a single history cell. No-op at 0.
-fn tick_plan_snapshot_debounce(counter: &mut u8) -> bool {
-    if *counter > 0 {
-        *counter -= 1;
-        *counter == 0
-    } else {
-        false
-    }
-}
 
 /// True only for the two keys that dismiss a read-only overlay: Esc, or an
 /// unmodified `q`. Enter/Space/other keys (and Ctrl/Alt-chorded `q`) return
@@ -1056,7 +1044,9 @@ impl App {
         }
     }
 
-    fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+    // `pub(super)` so the inline ask_user band's Ctrl+C path can decline the
+    // question and then fall through to the normal interrupt handling.
+    pub(super) fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         // NOTE: vim does NOT get Esc first-refusal while Processing — Esc must
         // interrupt the running turn ("esc to interrupt"). Non-Esc Normal-mode
         // motions still reach the composer via the `_` fall-through arm below
@@ -1298,18 +1288,14 @@ impl App {
         self.agents.tick();
         self.task_checklist.tick();
 
-        // Flush the debounced "Updated plan" snapshot once the task-event burst
-        // has settled, so a whole plan set (N task_created events) yields one
-        // history cell instead of N. snapshot_if_changed dedups, so a settled
-        // state identical to the last snapshot flushes to nothing.
-        if tick_plan_snapshot_debounce(&mut self.plan_snapshot_debounce) {
-            // Snapshot at the width it will be rendered at (less the plan cell's
-            // own inset) so every item fits exactly one row.
-            let snap_w = self.width.saturating_sub(2).max(20);
-            if let Some((body, plain)) = self.task_checklist.snapshot_if_changed(snap_w) {
-                self.chat.add_plan_snapshot(body, plain);
-            }
-        }
+        // NOTE: no plan snapshot is pushed here. The checklist is a LIVE panel
+        // with its own band in the inline region (see `checklist_slot`), so
+        // scrollback needs exactly ONE frozen copy per turn — pushed by
+        // `handle_turn_complete`. This used to flush on a settled debounce after
+        // every task mutation, which is what produced the wall of near-identical
+        // "Plan 0/3 / Plan 1/3 / …" cells: a 3-step plan mutates state 7 times
+        // (1 create + 3 starts + 3 completions), each a distinct dedupe key, so
+        // each one earned its own history cell and buried the conversation.
 
         // Poll audio level and elapsed time from active voice capture
         if self.voice.recording {
@@ -1362,7 +1348,7 @@ impl App {
                         cancel.cancel();
                     }
                     self.chat.clear_streaming();
-                    self.stream_buf.clear();
+                    self.assistant_stream.reset();
                     self.thinking_buf.clear();
                     self.agent_header_sent = false;
                     self.activity.stop();
@@ -1411,9 +1397,7 @@ impl App {
 
 #[cfg(test)]
 mod paste_path_tests {
-    use super::{
-        looks_like_path, paste_is_file_paths, tick_plan_snapshot_debounce, MAX_PATH_TOKENS,
-    };
+    use super::{looks_like_path, paste_is_file_paths, MAX_PATH_TOKENS};
 
     #[test]
     fn bare_words_are_never_paths() {
@@ -1454,26 +1438,6 @@ mod paste_path_tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(!paste_is_file_paths(&many));
-    }
-
-    #[test]
-    fn plan_snapshot_debounce_flushes_once_after_burst() {
-        // Armed at 2: first tick decrements to 1 (no flush), second tick hits 0
-        // (flush once), third tick is idle.
-        let mut c: u8 = 2;
-        assert!(!tick_plan_snapshot_debounce(&mut c));
-        assert_eq!(c, 1);
-        assert!(tick_plan_snapshot_debounce(&mut c));
-        assert_eq!(c, 0);
-        assert!(!tick_plan_snapshot_debounce(&mut c));
-
-        // Re-arming mid-countdown (a fresh task event during the burst) defers the
-        // flush, so the whole burst collapses to a single flush at settle.
-        let mut c: u8 = 2;
-        assert!(!tick_plan_snapshot_debounce(&mut c)); // -> 1
-        c = 2; // another task event arrives
-        assert!(!tick_plan_snapshot_debounce(&mut c)); // -> 1
-        assert!(tick_plan_snapshot_debounce(&mut c)); // -> 0, single flush
     }
 
     #[test]

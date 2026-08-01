@@ -121,6 +121,10 @@ pub(super) fn trail_actions(entry: &AgentEntry) -> Vec<String> {
         if t.is_empty() || (!head.is_empty() && t == head) {
             continue;
         }
+        // A bare verb identifies nothing. See `action_has_detail`.
+        if !action_has_detail(t) {
+            continue;
+        }
         if out.iter().any(|e| e == t) {
             continue;
         }
@@ -131,6 +135,85 @@ pub(super) fn trail_actions(entry: &AgentEntry) -> Vec<String> {
     }
     out.reverse();
     out
+}
+
+/// True when a trail entry carries the VALUE that identifies the call, not just
+/// the tool's verb.
+///
+/// The backend records a progress line twice per tool call, and the two halves
+/// are not the same shape (`Orchestrator.forwarder_loop` / `Fleet.watch_loop`):
+///
+///   * the `start` phase records `format_action(tool, args)` → `"file_read:
+///     /Users/rhl/.osa/backend.log"` — the tool AND its argument;
+///   * the `end` phase records `to_string(tool_name)` → `"file_read"` — a bare
+///     verb with the argument thrown away.
+///
+/// Both land in `recent_actions`, and `RunStore.progress`'s duplicate collapse
+/// only folds CONSECUTIVE identical strings, so the two halves both survive.
+/// That is exactly the trail the capture showed: `file_read: …/backend.log`
+/// followed by a naked `file_read` and a naked `dir_list`, entries that tell the
+/// reader nothing they did not already know from the row above.
+///
+/// A trail line's whole job is to name a distinct piece of work, so an entry
+/// that cannot is dropped rather than rendered as a bare verb — the dropped call
+/// is still counted by the "+N earlier tool uses" line, so nothing is lost.
+pub fn action_has_detail(action: &str) -> bool {
+    let t = action.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // `verb: value` — the shape `format_action/2` emits when it has an argument.
+    if let Some((verb, rest)) = t.split_once(':') {
+        if !verb.trim().is_empty() && !rest.trim().is_empty() {
+            return true;
+        }
+    }
+    // Anything phrased as more than a single token ("click (3, 4)", "waiting on
+    // review") is already saying something beyond the verb.
+    t.split_whitespace().count() > 1
+}
+
+/// Human label for a batch header, or `None` when the batch id carries no
+/// human-readable part and the header should read "Batch N" alone.
+///
+/// Batch ids are internal routing keys —
+/// `team:session-1785550977551-3f4a8179a573:207491`. Rendered raw they ate the
+/// whole separator line with a session id no reader can act on. Keep only the
+/// segments that are actual words (`team`, `alpha`, `background`) and drop every
+/// id-shaped one (`session-…`, hex blobs, bare numbers); when nothing survives,
+/// the ordinal alone is the honest label.
+pub fn short_batch_label(batch_id: &str) -> Option<String> {
+    fn id_shaped(seg: &str) -> bool {
+        let s = seg.trim();
+        if s.is_empty() {
+            return true;
+        }
+        // `session-…`, `run-…`, `task-…` prefixed handles, bare numbers, and
+        // long hex/digit blobs are machine identity, never a human label.
+        if s.starts_with("session-") || s.starts_with("run-") || s.starts_with("task-") {
+            return true;
+        }
+        if s.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        let hexish = s.len() >= 8
+            && s.chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_');
+        hexish && s.chars().any(|c| c.is_ascii_digit())
+    }
+
+    let kept: Vec<&str> = batch_id
+        .split(':')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !id_shaped(s))
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let label = kept.join(":");
+    // A surviving label is still bounded — the separator line is one row, and the
+    // ordinal already carries the identity.
+    Some(crate::util::fit_cols(&label, 24))
 }
 
 /// Compact an internal agent routing key into a short human label.

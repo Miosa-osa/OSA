@@ -57,6 +57,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       check_tui(),
       check_api(),
       check_config(),
+      check_model(),
       check_provider(),
       check_miosa_cli(),
       check_event_router(),
@@ -149,6 +150,35 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp present?(nil), do: false
   defp present?(""), do: false
   defp present?(v) when is_binary(v), do: true
+
+  # The EFFECTIVE model and WHICH file supplied it.
+  #
+  # Three files can specify a model (`~/.osa/config.toml`, `~/.osa/config.json`,
+  # `~/.osa/.env`) and nothing used to report which one won. A user staring at
+  # three disagreeing files had no way to debug the chain short of reading
+  # `application.ex` — so they guessed, and so did the agent. Printing the
+  # winner *and its origin* makes the precedence chain self-documenting.
+  defp check_model do
+    id = OptimalSystemAgent.Runtime.Identity.describe()
+
+    ctx =
+      case id.context_window do
+        n when is_integer(n) -> ", #{ctx_label(n)} ctx"
+        _ -> ", ctx unknown"
+      end
+
+    url = if id.base_url, do: " → #{id.base_url}", else: ""
+
+    {:pass, "Model", "#{id.model} (from #{id.source_label}#{ctx})#{url}"}
+  rescue
+    _ -> {:optional, "Model", "unresolved"}
+  catch
+    :exit, _ -> {:optional, "Model", "unresolved"}
+  end
+
+  defp ctx_label(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M"
+  defp ctx_label(n) when n >= 1_000, do: "#{div(n, 1000)}k"
+  defp ctx_label(n), do: to_string(n)
 
   # ── Check Implementations ──────────────────────────────────────
 

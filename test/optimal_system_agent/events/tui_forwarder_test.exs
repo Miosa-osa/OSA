@@ -109,6 +109,38 @@ defmodule OptimalSystemAgent.Events.TuiForwarderTest do
       assert second.description == "faster but the bug class stays"
     end
 
+    # The inline question band renders `header` as a small category chip before
+    # the question text. It must survive the reshape, and be absent (nil) rather
+    # than invented when the model omits it.
+    test "forwards the optional category header", %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :ask_user,
+        session_id: sid,
+        ref: "r-hdr",
+        question: "Which parser should we keep?",
+        options: ["Yes", "No"],
+        header: "parser"
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert [q] = event.questions
+      assert q.header == "parser"
+    end
+
+    test "a question with no header forwards a nil chip", %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :ask_user,
+        session_id: sid,
+        ref: "r-nohdr",
+        question: "Yes or no?",
+        options: ["Yes", "No"]
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert [q] = event.questions
+      assert q.header == nil
+    end
+
     test "the forwarded frame is JSON-encodable (no PIDs)", %{session_id: sid} do
       Bus.emit(:system_event, %{
         event: :ask_user,

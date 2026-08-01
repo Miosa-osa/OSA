@@ -7,7 +7,13 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
 
   # Unique session id per test so the per-session claimed set never bleeds
   # across cases (and BackgroundManager.list/RunStore.list filtering isolates).
-  defp sid, do: "rem-test-" <> (:crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false))
+  # The session id doubles as an on-disk scratch dir (`<tmp>/osa/<session>`),
+  # so remove it on exit instead of leaving residue behind in /tmp.
+  defp sid do
+    id = "rem-test-" <> (:crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false))
+    on_exit(fn -> File.rm_rf(Path.join([System.tmp_dir!(), "osa", id])) end)
+    id
+  end
 
   describe "format_with_reminders/2" do
     test "returns output unchanged when there are no reminders" do

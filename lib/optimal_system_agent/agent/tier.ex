@@ -3,9 +3,9 @@ defmodule OptimalSystemAgent.Agent.Tier do
   Model tier system for agent dispatch.
 
   Maps agent tiers to LLM model configurations across all 18 providers:
-    :elite      → opus-class (claude-opus-4-6, gpt-4o, gemini-2.5-pro)
-    :specialist → sonnet-class (claude-sonnet-4-6, gpt-4o-mini, gemini-2.0-flash)
-    :utility    → haiku-class (claude-haiku-4-5, gpt-3.5-turbo, gemini-2.0-flash-lite)
+    :elite      → opus-class (claude-opus-5, gpt-5.6-sol, gemini-3.1-pro-preview)
+    :specialist → sonnet-class (claude-sonnet-5, gpt-5.6-terra, gemini-3.6-flash)
+    :utility    → haiku-class (claude-haiku-4-5, gpt-5.6-luna, gemini-3.5-flash-lite)
 
   Ollama uses dynamic tier detection — scans installed models, sorts by size,
   and maps largest→elite, medium→specialist, smallest→utility.
@@ -25,63 +25,90 @@ defmodule OptimalSystemAgent.Agent.Tier do
   @tier_models %{
     # --- Frontier providers ---
     anthropic: %{
-      elite: "claude-opus-4-6",
-      specialist: "claude-sonnet-4-6",
-      utility: "claude-haiku-4-5-20251001"
+      elite: "claude-opus-5",
+      specialist: "claude-sonnet-5",
+      utility: "claude-haiku-4-5"
     },
     openai: %{
-      elite: "gpt-4o",
-      specialist: "gpt-4o-mini",
-      utility: "gpt-4o-mini"
+      elite: "gpt-5.6-sol",
+      specialist: "gpt-5.6-terra",
+      utility: "gpt-5.6-luna"
     },
+    # `gemini-2.0-flash` held :utility until 2026-08-01; Google shut it down
+    # 2026-06-01, so that tier resolved to a 404. The 2.5 pair that replaced it
+    # shuts down 2026-10-16 — inside the 90-day guard — so all three tiers now
+    # sit on the current 3.x family.
     google: %{
-      elite: "gemini-2.5-pro",
-      specialist: "gemini-2.5-flash",
-      utility: "gemini-2.0-flash"
+      elite: "gemini-3.1-pro-preview",
+      specialist: "gemini-3.6-flash",
+      utility: "gemini-3.5-flash-lite"
     },
+    # Both ids were RETIRED 2026-07-24 — all three tiers were dead. Note that
+    # :elite is no longer a different MODEL: DeepSeek V4 moved thinking onto a
+    # request parameter, so reasoning depth is now chosen by effort, not by id.
     deepseek: %{
-      elite: "deepseek-reasoner",
-      specialist: "deepseek-chat",
-      utility: "deepseek-chat"
+      elite: "deepseek-v4-pro",
+      specialist: "deepseek-v4-flash",
+      utility: "deepseek-v4-flash"
     },
+    # `mistral-large-latest` now resolves to Large 3, which is CHEAPER and
+    # weaker than Medium 3.5 — so the old elite/specialist ordering was
+    # inverted. Medium 3.5 is Mistral's frontier agentic/coding model.
     mistral: %{
-      elite: "mistral-large-latest",
-      specialist: "mistral-medium-latest",
+      elite: "mistral-medium-latest",
+      specialist: "mistral-large-latest",
       utility: "mistral-small-latest"
     },
+    # The undated `command-r-plus` / `command-r` aliases were shut down
+    # 2025-09-15 — all three tiers were dead ids.
     cohere: %{
-      elite: "command-r-plus",
-      specialist: "command-r-plus",
-      utility: "command-r"
+      elite: "command-a-plus-05-2026",
+      specialist: "command-a-plus-05-2026",
+      utility: "command-r-08-2024"
     },
 
     # --- Fast inference providers (all 70B+ for tool calling) ---
+    # Groq shuts down both Llama ids on 2026-08-16, and `qwen-qwq-32b` is gone
+    # from its production model list — so all three tiers were about to break.
     groq: %{
-      elite: "llama-3.3-70b-versatile",
-      specialist: "llama-3.3-70b-versatile",
-      utility: "qwen-qwq-32b"
+      elite: "openai/gpt-oss-120b",
+      specialist: "openai/gpt-oss-120b",
+      utility: "openai/gpt-oss-20b"
     },
+    # `llama-v3p3-70b-instruct` resolves on Fireworks but its card says
+    # "Serverless: Not supported" — dedicated-GPU only, so every serverless
+    # call 400s. `qwen3-30b-a3b` is not on the serverless list either.
     fireworks: %{
-      elite: "accounts/fireworks/models/llama-v3p3-70b-instruct",
-      specialist: "accounts/fireworks/models/qwen3-30b-a3b",
-      utility: "accounts/fireworks/models/qwen3-30b-a3b"
+      elite: "accounts/fireworks/models/kimi-k2p7-code",
+      specialist: "accounts/fireworks/models/deepseek-v4-flash",
+      utility: "accounts/fireworks/models/gpt-oss-20b"
     },
     together: %{
       elite: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       specialist: "Qwen/Qwen3-30B-A3B",
       utility: "Qwen/Qwen3-30B-A3B"
     },
+    # All three tiers pointed at `meta/llama-3.3-70b-instruct`, which 404s on
+    # Replicate — the slug was never published there. See Providers.Replicate.
     replicate: %{
-      elite: "meta/llama-3.3-70b-instruct",
-      specialist: "meta/llama-3.3-70b-instruct",
-      utility: "meta/llama-3.1-70b-instruct"
+      elite: "openai/gpt-oss-120b",
+      specialist: "openai/gpt-oss-120b",
+      utility: "openai/gpt-oss-20b"
     },
 
     # --- Aggregator / search providers ---
+    # OpenRouter namespaces Anthropic ids with a DOT where Anthropic's own API
+    # uses a DASH: the live catalog has `anthropic/claude-haiku-4.5`, NOT
+    # `anthropic/claude-haiku-4-5`. Ids with no version dot (`claude-opus-5`,
+    # `claude-sonnet-5`) are identical under both conventions, which is exactly
+    # why this went unnoticed — only the :utility tier was broken, and only on
+    # OpenRouter. Verified against the live GET /api/v1/models catalog
+    # (2026-08-01). Anything built by concatenating "anthropic/" onto an
+    # Anthropic API id is unsafe for any dotted version.
     openrouter: %{
-      elite: "anthropic/claude-opus-4-6",
-      specialist: "anthropic/claude-sonnet-4-6",
-      utility: "anthropic/claude-haiku-4-5"
+      elite: "anthropic/claude-opus-5",
+      specialist: "anthropic/claude-sonnet-5",
+      utility: "anthropic/claude-haiku-4.5"
     },
     perplexity: %{
       elite: "sonar-pro",
@@ -352,7 +379,11 @@ defmodule OptimalSystemAgent.Agent.Tier do
     key = :"#{provider}_model"
 
     Application.get_env(:optimal_system_agent, key) ||
-      Application.get_env(:optimal_system_agent, :default_model, "claude-sonnet-4-6")
+      Application.get_env(
+        :optimal_system_agent,
+        :default_model,
+        OptimalSystemAgent.Providers.AnthropicModels.default_model()
+      )
   end
 
   # Fetch the cached Ollama tier model, falling back to auto_model

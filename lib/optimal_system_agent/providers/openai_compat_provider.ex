@@ -14,26 +14,62 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   @provider_configs %{
     openai: %{
       default_url: "https://api.openai.com/v1",
-      default_model: "gpt-4o",
-      available_models: ["gpt-4o", "gpt-4o-mini", "o3", "o3-mini", "o4-mini"]
+      default_model: OptimalSystemAgent.Providers.OpenAIModels.default_model(),
+      available_models: OptimalSystemAgent.Providers.OpenAIModels.ids()
     },
+    # `mixtral-8x7b-32768` was shut down by Groq on 2025-03-20 and is removed.
+    # The two Llama ids are still live but Groq has scheduled them for shutdown
+    # on 2026-08-16, so the default moves to `openai/gpt-oss-120b` — Groq's own
+    # named migration target and its top production model with no pending
+    # shutdown (131,072 context / 65,536 max completion tokens).
+    #
+    # Sources: https://console.groq.com/docs/models and
+    # https://console.groq.com/docs/deprecations (checked 2026-08-01).
     groq: %{
       default_url: "https://api.groq.com/openai/v1",
-      default_model: "llama-3.3-70b-versatile",
-      available_models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+      default_model: "openai/gpt-oss-120b",
+      # The two Llama ids are REMOVED, not just demoted from default. They still
+      # work today, which is exactly why leaving them in the picker was unsafe:
+      # a user would select one now and break on 2026-08-16, fifteen days out.
+      # The 90-day guard in model_retirement_test.exs enforces this.
+      available_models: [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b"
+      ]
     },
+    # `deepseek-chat` / `deepseek-reasoner` were FULLY RETIRED 2026-07-24 —
+    # both the default and every tier entry were dead. Thinking also moved from
+    # a separate model id onto an `extra_body.thinking` request parameter; see
+    # Providers.DeepSeekModels for the routing consequences.
     deepseek: %{
       default_url: "https://api.deepseek.com/v1",
-      default_model: "deepseek-chat",
-      available_models: ["deepseek-chat", "deepseek-reasoner"]
+      default_model: OptimalSystemAgent.Providers.DeepSeekModels.default_model(),
+      available_models: OptimalSystemAgent.Providers.DeepSeekModels.ids()
     },
     together: %{
       default_url: "https://api.together.xyz/v1",
       default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo"
     },
+    # `llama-v3p3-70b-instruct` still RESOLVES on Fireworks, which is why this
+    # looked healthy — but its model card says "Serverless: Not supported", so
+    # it is on-demand-dedicated-GPU only and every serverless call against it
+    # fails. A resolving-but-unservable id is the worst kind of dead default.
+    # `kimi-k2p7-code` is Fireworks' own named best serverless coding model
+    # (262,144 ctx, $0.95/$4.00); `gpt-oss-120b` is the cheap portable tier.
+    #
+    # Source: https://fireworks.ai/models?infrastructure=serverless and
+    # https://docs.fireworks.ai/serverless/pricing (checked 2026-08-01).
     fireworks: %{
       default_url: "https://api.fireworks.ai/inference/v1",
-      default_model: "accounts/fireworks/models/llama-v3p3-70b-instruct"
+      default_model: "accounts/fireworks/models/kimi-k2p7-code",
+      available_models: [
+        "accounts/fireworks/models/kimi-k2p7-code",
+        "accounts/fireworks/models/deepseek-v4-pro",
+        "accounts/fireworks/models/deepseek-v4-flash",
+        "accounts/fireworks/models/glm-5p2",
+        "accounts/fireworks/models/gpt-oss-120b",
+        "accounts/fireworks/models/gpt-oss-20b"
+      ]
     },
     perplexity: %{
       default_url: "https://api.perplexity.ai",
@@ -41,11 +77,25 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     },
     mistral: %{
       default_url: "https://api.mistral.ai/v1",
-      default_model: "mistral-large-latest"
+      default_model: OptimalSystemAgent.Providers.MistralModels.default_model(),
+      available_models: OptimalSystemAgent.Providers.MistralModels.ids()
     },
+    # OpenRouter namespaces Anthropic ids with a DOT where Anthropic's own API
+    # uses a DASH (`anthropic/claude-haiku-4.5`, not `-4-5`), so anything built
+    # by concatenating "anthropic/" onto an Anthropic API id is unsafe for a
+    # dotted version. Verified against the live GET /api/v1/models catalog
+    # (2026-08-01); the ids below are all present in it.
     openrouter: %{
       default_url: "https://openrouter.ai/api/v1",
-      default_model: "meta-llama/llama-3.3-70b-instruct",
+      default_model: "anthropic/claude-opus-5",
+      available_models: [
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.6-sol",
+        "google/gemini-3.6-flash",
+        "deepseek/deepseek-v4-pro"
+      ],
       extra_headers: [
         {"HTTP-Referer", "https://github.com/Miosa-osa/OSA"},
         {"X-Title", "OSA"}
@@ -83,15 +133,34 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
       default_url: "https://optimal.miosa.ai/v1",
       default_model: "nemotron-3-miosa"
     },
-    # xAI Grok
+    # xAI Grok. The bare `grok-4` default did not resolve at all — it is not in
+    # xAI's model list. Note that xAI's RETIRED slugs do still resolve and
+    # silently redirect (grok-3 → grok-4.3 at `none` effort), so a stale pin
+    # keeps "working" while running a different model with reasoning off.
     xai: %{
       default_url: "https://api.x.ai/v1",
-      default_model: "grok-4"
+      default_model: OptimalSystemAgent.Providers.XAIModels.default_model(),
+      available_models: OptimalSystemAgent.Providers.XAIModels.ids()
     },
-    # Cerebras — ultra-fast inference
+    # Cerebras — ultra-fast inference. BOTH ids OSA carried were deprecated:
+    # `llama-3.3-70b` on 2026-02-16 and `llama3.1-8b` on 2026-05-27, both with
+    # `gpt-oss-120b` as Cerebras' own named replacement. Cerebras has no Llama
+    # models left at all, and `gpt-oss-120b` is its ONLY Production-tier model
+    # (`gemma-4-31b` and `zai-glm-4.7` are marked evaluation-only, and
+    # `zai-glm-4.7` is itself already scheduled for deprecation 2026-08-17 —
+    # deliberately not offered).
+    #
+    # NOTE: Cerebras' context window is ACCOUNT-TIER dependent — 131,072 on a
+    # paid key but 65,536 on a free one, with max output 40,960 vs 32,768. The
+    # static table records the paid figure; a free-tier key will be over-budgeted
+    # until a runtime probe exists (see `Registry.effective_context_window_info/2`).
+    #
+    # Sources: https://inference-docs.cerebras.ai/models/overview and
+    # https://inference-docs.cerebras.ai/support/deprecation (checked 2026-08-01).
     cerebras: %{
       default_url: "https://api.cerebras.ai/v1",
-      default_model: "llama-3.3-70b"
+      default_model: "gpt-oss-120b",
+      available_models: ["gpt-oss-120b"]
     },
     # SambaNova
     sambanova: %{
@@ -128,6 +197,25 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     config = get_config!(provider)
     Map.get(config, :available_models, [config.default_model])
   end
+
+  @doc """
+  The provider's base URL — the SAME value `chat/3` dials, honouring a
+  `:<provider>_url` override.
+
+  Read-only accessor. Exists so onboarding's health check can probe each
+  provider at ITS OWN endpoint instead of keeping a second copy of this table:
+  a duplicated URL list is how a Google/Groq key ended up being POSTed to
+  `api.openai.com`. Raises for an unknown provider, same as every other
+  accessor here.
+  """
+  @spec base_url(atom()) :: String.t()
+  def base_url(provider) do
+    Application.get_env(:optimal_system_agent, :"#{provider}_url", get_config!(provider).default_url)
+  end
+
+  @doc "True when this provider is a local server that needs no API key."
+  @spec keyless?(atom()) :: boolean()
+  def keyless?(provider), do: Map.get(get_config!(provider), :keyless, false)
 
   @doc false
   # Test/introspection seam for the private `resolve_api_key/2` — lets the

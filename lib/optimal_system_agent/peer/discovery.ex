@@ -22,10 +22,18 @@ defmodule OptimalSystemAgent.Peer.Discovery do
   Pending cross-team queries at `:osa_peer_queries` — keyed by `query_id`.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   require Logger
 
   @agents_table :osa_peer_agents
   @queries_table :osa_peer_queries
+
+  # Row cap for the QUERY log only. `@agents_table` is a live registry that is
+  # explicitly deleted from on unregister, so it is bounded by the number of
+  # live agents and deliberately left uncapped; the query log is append-only
+  # history that nothing ever removed. See Infra.BoundedTable.
+  @max_query_rows 1_000
 
   # ---------------------------------------------------------------------------
   # ETS bootstrap
@@ -135,7 +143,7 @@ defmodule OptimalSystemAgent.Peer.Discovery do
       answered_by: nil
     }
 
-    :ets.insert(@queries_table, {query_id, record})
+    BoundedTable.insert(@queries_table, query_id, record, max: @max_query_rows)
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
@@ -180,7 +188,7 @@ defmodule OptimalSystemAgent.Peer.Discovery do
             answered_by: agent_id
         }
 
-        :ets.insert(@queries_table, {query_id, updated})
+        BoundedTable.insert(@queries_table, query_id, updated, max: @max_query_rows)
 
         Phoenix.PubSub.broadcast(
           OptimalSystemAgent.PubSub,

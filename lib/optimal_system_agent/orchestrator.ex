@@ -223,7 +223,19 @@ defmodule OptimalSystemAgent.Orchestrator do
     batch_id = Map.get(config, :batch_id)
     wave = Map.get(config, :wave)
 
-    task_preview = String.slice(task, 0, 80)
+    # Human label for this worker, shown next to its name in the TUI roster and
+    # the live feed. A caller that knows what the agent IS should say so via
+    # `:description`; only fall back to slicing the prompt when it doesn't.
+    #
+    # The fallback alone is why the roster read
+    # `goal-verifier-skeptic  You are an ADVERSARIAL, INDEPENDENT reviewer (skeptic #1, COMPLETENE…`
+    # — for a panel member the "task" IS a multi-paragraph system prompt, so its
+    # first 80 characters are prompt boilerplate, not a description of the work.
+    task_preview =
+      case config[:description] do
+        d when is_binary(d) -> if String.trim(d) == "", do: String.slice(task, 0, 80), else: d
+        _ -> String.slice(task, 0, 80)
+      end
 
     RunStore.start_run(%{
       agent_id: subagent_id,
@@ -1308,7 +1320,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   # Format a human-readable action string from tool name + args hint.
-  # e.g., "file_read /Users/roberto/..." or "web_search Rust TUI frameworks"
+  # e.g., "file_read /home/user/..." or "web_search Rust TUI frameworks"
   defp format_action(tool_name, args) when is_binary(args) do
     hint = String.slice(args, 0, 60)
 

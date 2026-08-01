@@ -68,8 +68,19 @@ defmodule OptimalSystemAgent.SettingsCoreTest do
   end
 
   test "apply_env_settings applies the merged env key to the OS environment" do
+    tmp = File.cwd!()
     File.write!(".osa/settings.json", Jason.encode!(%{"env" => %{"OSA_WS2_ENV_TEST" => "yes"}}))
     on_exit(fn -> System.delete_env("OSA_WS2_ENV_TEST") end)
+
+    # `env` in a CHECKED-IN project settings file is workspace-supplied
+    # executable config (PATH, loader vars), so it is trust-gated like project
+    # hooks and permission rules: withheld until the workspace is trusted.
+    Settings.apply_env_settings()
+    assert System.get_env("OSA_WS2_ENV_TEST") == nil
+
+    OptimalSystemAgent.Workspace.Trust.accept(tmp)
+    on_exit(fn -> OptimalSystemAgent.Workspace.Trust.forget(tmp) end)
+    Settings.reset_cache()
 
     Settings.apply_env_settings()
     assert System.get_env("OSA_WS2_ENV_TEST") == "yes"

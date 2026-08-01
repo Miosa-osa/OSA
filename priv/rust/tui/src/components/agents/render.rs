@@ -226,11 +226,19 @@ impl Agents {
 
             // Render batch header if any entries use batch_id
             if has_batches {
+                // NEVER the raw batch id. It is an internal routing key
+                // (`team:session-1785550977551-3f4a8179a573:207491`) that means
+                // nothing to a reader and consumed the entire separator line.
+                // `short_batch_label` keeps only the word-shaped segments; when
+                // none survive, the ordinal alone is the honest header.
                 let label = match group.batch_id.as_deref() {
                     // Foreground-vs-background display: background agents get a
                     // named section instead of an opaque "Batch N: background".
                     Some("background") => "─── Background agents ".to_string(),
-                    Some(id) => format!("─── Batch {}: {} ", group_idx + 1, id),
+                    Some(id) => match super::short_batch_label(id) {
+                        Some(name) => format!("─── Batch {}: {} ", group_idx + 1, name),
+                        None => format!("─── Batch {} ", group_idx + 1),
+                    },
                     None => "─── Ungrouped ".to_string(),
                 };
                 // Display-width, not byte-len: the leading `───` are 3-byte box
@@ -351,9 +359,17 @@ impl Agents {
                         let mut rows: Vec<(String, Style)> = Vec::new();
                         let actions = super::trail_actions(entry);
                         let shown = actions.len();
+                        // The counter is FRAMED, not floated. The trail is drawn
+                        // oldest → newest, so the calls it stands for are the
+                        // ones that happened BEFORE the visible entries — its
+                        // position at the top is chronologically correct, and it
+                        // says so ("+8 earlier tool uses"). The previous wording,
+                        // "+8 more tool uses", read as a trailing overflow
+                        // indicator that had been printed above the very items it
+                        // was supposed to summarize.
                         if entry.tool_uses as usize > shown {
                             rows.push((
-                                format!("+{} more tool uses", entry.tool_uses as usize - shown),
+                                format!("+{} earlier tool uses", entry.tool_uses as usize - shown),
                                 theme.faint(),
                             ));
                         }

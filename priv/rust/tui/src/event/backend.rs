@@ -20,14 +20,35 @@ pub enum BackendEvent {
     SseAuthFailed,
 
     // === Streaming ===
-    StreamingToken { text: String, session_id: String },
+    //
+    // `message_id` is the backend's stable identity for the assistant message
+    // these deltas belong to — the text analogue of `tool_call_id`. ONE turn can
+    // produce SEVERAL assistant messages (the backend re-enters its ReAct loop
+    // after a text-only response for the auto-continue / coding / verification /
+    // goal-verifier nudges), and with no tool call between them nothing else
+    // marks the boundary: without the id the deltas of a superseded generation
+    // and its replacement land in one buffer and render welded together.
+    //
+    // `Option` on purpose — a new TUI must still work against an older backend
+    // that does not emit it, in which case the client keeps its legacy
+    // single-buffer behaviour.
+    StreamingToken {
+        text: String,
+        session_id: String,
+        message_id: Option<String>,
+    },
     ThinkingDelta { text: String },
 
     // === Agent Response ===
+    //
+    // The turn's finished assistant text. `message_id` says WHICH message this
+    // finalizes, so the client can replace exactly that generation's streamed
+    // accumulation and can ignore a repeat delivery of the same finalization.
     AgentResponse {
         response: String,
         response_type: String,
         signal: Option<Signal>,
+        message_id: Option<String>,
     },
 
     // === Tool Calls ===
@@ -402,6 +423,11 @@ pub enum BackendEvent {
 
     // === Additional HTTP Response Results (Phase 2+) ===
     SessionMessages(Result<Vec<SessionMessage>, String>),
+    /// Outcome of resolving a launch-time `osa resume <ref>` (full id or an
+    /// unambiguous prefix). `Ok(id)` switches to that session; `Err(explanation)`
+    /// is FATAL — the TUI quits with the message on stderr rather than dropping
+    /// the user into an empty conversation that looks like the one they asked for.
+    SessionResolved(Result<String, String>),
     // (removed: dead `SkillsLoaded` event — it had no producer (the skills
     // browser is fed by `SkillsBrowserLoaded`) and its handler only logged.
     // U-B5: dead feed pruned rather than wired to a second, redundant UI.)

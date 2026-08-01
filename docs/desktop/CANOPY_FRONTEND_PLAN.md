@@ -6,7 +6,7 @@
 
 Full desktop app rebuild for orchestrating proactive autonomous AI agents. **This plan covers FRONTEND ONLY** (SvelteKit + Tauri). A separate agent handles the backend (Elixir/OTP API, adapters, heartbeat runtime, database). Frontend builds against a **mock API layer** so both proceed in parallel.
 
-**Existing code to port from**: `/Users/rhl/Desktop/MIOSA/code/OptimalSystemAgent/desktop/` — 100+ Svelte 5 components, 26 stores, full API client, Tauri 2 integration, Foundation CSS.
+**Existing code to port from**: `<miosa-checkout>/code/OptimalSystemAgent/desktop/` — 100+ Svelte 5 components, 26 stores, full API client, Tauri 2 integration, Foundation CSS.
 
 ---
 

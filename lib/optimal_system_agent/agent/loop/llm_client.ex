@@ -18,13 +18,65 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # on complex multi-tool requests.
   @idle_timeout_ms 300_000
 
+  # Process-dictionary key holding the id of the assistant message currently
+  # being generated. See `mint_message_id/1`.
+  @message_id_key :osa_stream_message_id
+
+  @doc """
+  Identity of the assistant message currently being generated in THIS process.
+
+  One turn can run several LLM generations back to back with no tool call
+  between them (auto-continue / coding nudge / verification gate / goal
+  verifier all re-enter `ReactLoop.run/1` after a text-only response). Every
+  generation is a distinct assistant message, but on the wire they were
+  indistinguishable: the TUI saw one undifferentiated run of `streaming_token`
+  deltas and appended them all into a single buffer, so a superseded
+  generation and its replacement rendered concatenated with no separator.
+
+  `message_id` is to assistant text what `tool_call_id` is to tool calls — the
+  backend's stable per-message identity. It rides every `streaming_token` and
+  the terminal `agent_response` so the client can tell "more of the same
+  message" from "a new message", and can recognise a repeated finalization.
+
+  Returns `nil` when no generation has run in this process this turn (a genre
+  reply, a canned error frame) — clients must treat that as "no id" and fall
+  back to their legacy behaviour, never as a matching id.
+  """
+  @spec current_message_id() :: String.t() | nil
+  def current_message_id, do: Process.get(@message_id_key)
+
+  @doc """
+  Drop the current message id. Called at turn start so a turn that performs no
+  LLM generation at all cannot inherit the previous turn's id — which the
+  client would read as a repeat of an already-finalized message and discard.
+  """
+  @spec reset_message_id() :: :ok
+  def reset_message_id do
+    Process.delete(@message_id_key)
+    :ok
+  end
+
+  # Mint + publish the id for a new generation. Monotonic, session-scoped, and
+  # only ever compared for equality by clients.
+  defp mint_message_id(session_id) do
+    id = "#{session_id}-m#{:erlang.unique_integer([:positive, :monotonic])}"
+    Process.put(@message_id_key, id)
+    id
+  end
+
   @doc """
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
-  def llm_chat(%{provider: provider, model: model}, messages, opts) do
+  def llm_chat(%{provider: provider, model: model} = state, messages, opts) do
     Logger.debug(
       "[llm] chat — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))}"
     )
+
+    # A non-streaming round-trip is still a distinct assistant message — mint an
+    # id for it too, so the terminal `agent_response` never carries the id of an
+    # EARLIER generation (which the client would treat as a repeat finalization
+    # and drop).
+    _ = mint_message_id(Map.get(state, :session_id, "session"))
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
@@ -49,6 +101,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # The watchdog checks if the counter has changed since last poll.
     heartbeat = :atomics.new(1, signed: false)
     :atomics.put(heartbeat, 1, 1)
+
+    # Identity of the assistant message this stream produces. Minted HERE, in
+    # the Loop process, so the terminal `agent_response` (broadcast later from
+    # the same process) can stamp the SAME id via `current_message_id/0`.
+    message_id = mint_message_id(session_id)
 
     # WS5 — reset this session's partial-text buffer for the new stream so an
     # interrupt persists only THIS stream's text.
@@ -82,14 +139,24 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         Bus.emit(:system_event, %{
           event: :streaming_token,
           session_id: session_id,
+          message_id: message_id,
           delta: text
         })
 
-        # Bridge to PubSub for SSE delivery to TUI
+        # Bridge to PubSub for SSE delivery to TUI. `message_id` marks which
+        # assistant message this delta belongs to — the client starts a fresh
+        # buffer when it changes instead of appending a new generation onto the
+        # superseded one.
         Phoenix.PubSub.broadcast(
           OptimalSystemAgent.PubSub,
           "osa:session:#{session_id}",
-          {:osa_event, %{type: :streaming_token, session_id: session_id, text: text}}
+          {:osa_event,
+           %{
+             type: :streaming_token,
+             session_id: session_id,
+             message_id: message_id,
+             text: text
+           }}
         )
 
       {:done, result} ->
@@ -286,15 +353,36 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           {:cancelled, %{content: partial_text(session_id)}}
 
         {:llm_idle_timeout, elapsed_ms} ->
-          # Watchdog detected idle connection — kill the stream
+          # Watchdog detected idle connection — kill the stream.
+          #
+          # RETRYABLE, not terminal (Codex parity: the same idle condition is a
+          # retryable turn error there). Brutal-killing the task destroys every
+          # `Resilience`/`RetryClassifier` retry that was running INSIDE it, so
+          # the retry decision has to be re-made one level up — which is why this
+          # returns a STRUCTURED reason `{:idle_timeout, %{...}}` instead of a
+          # bare string the caller can only render. `ReactLoop.handle_result/3`
+          # matches on it to retry the turn.
+          #
+          # `partial` carries whatever assistant text streamed before the silence
+          # so the caller can own the already-executed tool_use ids in a real
+          # assistant message when it commits their results to history.
           Logger.warning(
             "[stream] Idle timeout after #{div(elapsed_ms, 1000)}s of silence — killing stream for session:#{session_id}"
           )
 
           Task.shutdown(stream_task, :brutal_kill)
+          # Drop the {:done}/task-result messages a dying stream may already have
+          # enqueued so they cannot leak into the Loop mailbox as stale infos.
+          flush_stream_messages()
 
           {:error,
-           "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"}
+           {:idle_timeout,
+            %{
+              elapsed_ms: elapsed_ms,
+              partial: partial_text(session_id),
+              message:
+                "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"
+            }}}
 
         {:llm_stream_task_result, {:error, _} = err} ->
           # The stream task terminated with an error WITHOUT ever firing the
@@ -483,19 +571,29 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     if enabled and not Effort.fast_mode?() and provider in [:anthropic, nil] and
          is_anthropic_provider?() do
+      alias OptimalSystemAgent.Providers.AnthropicModels
+
       model =
         state.model ||
-          Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+          Application.get_env(
+            :optimal_system_agent,
+            :anthropic_model,
+            AnthropicModels.default_model()
+          )
 
-      if String.contains?(to_string(model), "opus") and not Effort.current_at_least?(:ultra) do
-        # Opus uses adaptive thinking by default (it self-sizes reasoning). At :ultra we
-        # force an explicit max budget so ultra visibly thinks harder on opus too, honoring
-        # the "effort = how much it thinks" model at the top tier.
-        %{type: "adaptive"}
-      else
-        # Use effort level's thinking budget instead of flat config.
-        budget = Effort.thinking_budget()
-        %{type: "enabled", budget_tokens: budget}
+      # Which thinking dialect the model speaks is a MODEL FACT, not an effort
+      # decision. Anthropic removed the fixed thinking budget on the Claude 5
+      # family (and Opus 4.7/4.8): sending
+      # `{type: "enabled", budget_tokens: N}` to claude-opus-5 / claude-sonnet-5
+      # / claude-fable-5 is a hard 400, not a degraded response — so the old
+      # "opus gets adaptive, everything else gets a budget" heuristic broke
+      # extended thinking outright on every current model except Haiku.
+      # Depth on adaptive models is steered by `output_config.effort`
+      # (Agent.Effort), not by a token count.
+      case AnthropicModels.thinking_mode(model) do
+        :adaptive -> %{type: "adaptive"}
+        :budget -> %{type: "enabled", budget_tokens: Effort.thinking_budget()}
+        :none -> nil
       end
     else
       nil

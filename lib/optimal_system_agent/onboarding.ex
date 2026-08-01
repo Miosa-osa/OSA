@@ -209,7 +209,7 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "recommended",
         requires_key: true,
         env_var: "OPENROUTER_API_KEY",
-        default_model: "anthropic/claude-sonnet-4-20250514",
+        default_model: "anthropic/" <> OptimalSystemAgent.Providers.AnthropicModels.default_model(),
         base_url: "https://openrouter.ai/api/v1",
         signup_url: "https://openrouter.ai/keys",
         # Any vendor/model id may be entered free-text; model_list/2 also fetches
@@ -268,33 +268,10 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "bring_your_own",
         requires_key: true,
         env_var: "ANTHROPIC_API_KEY",
-        default_model: "claude-sonnet-4-20250514",
+        default_model: OptimalSystemAgent.Providers.AnthropicModels.default_model(),
         base_url: "https://api.anthropic.com",
         signup_url: "https://console.anthropic.com/account/keys",
-        models: [
-          %{
-            id: "claude-sonnet-4-6-20260316",
-            name: "Claude Sonnet 4.6",
-            ctx: 1_000_000,
-            tools: true,
-            recommended: true,
-            note: "1M ctx — best for coding"
-          },
-          %{
-            id: "claude-opus-4-6-20260316",
-            name: "Claude Opus 4.6",
-            ctx: 1_000_000,
-            tools: true,
-            note: "1M ctx — strongest reasoning"
-          },
-          %{
-            id: "claude-haiku-4-5-20251001",
-            name: "Claude Haiku 4.5",
-            ctx: 200_000,
-            tools: true,
-            note: "fast + cheap"
-          }
-        ]
+        models: OptimalSystemAgent.Providers.AnthropicModels.picker_models()
       },
       %{
         id: "openai",
@@ -303,34 +280,10 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "bring_your_own",
         requires_key: true,
         env_var: "OPENAI_API_KEY",
-        default_model: "gpt-4o",
+        default_model: OptimalSystemAgent.Providers.OpenAIModels.default_model(),
         base_url: "https://api.openai.com/v1",
         signup_url: "https://platform.openai.com/api-keys",
-        models: [
-          %{
-            id: "gpt-5.4-pro",
-            name: "GPT-5.4 Pro",
-            ctx: 1_050_000,
-            tools: true,
-            recommended: true,
-            note: "1M ctx — latest frontier"
-          },
-          %{
-            id: "gpt-5.2-pro",
-            name: "GPT-5.2 Pro",
-            ctx: 400_000,
-            tools: true,
-            note: "400K ctx — agentic coding"
-          },
-          %{
-            id: "gpt-5.2-chat",
-            name: "GPT-5.2 Chat",
-            ctx: 128_000,
-            tools: true,
-            note: "fast + low latency"
-          },
-          %{id: "o3", name: "o3", ctx: 200_000, tools: true, note: "strongest reasoning"}
-        ]
+        models: OptimalSystemAgent.Providers.OpenAIModels.picker_models()
       },
       %{
         id: "custom",
@@ -344,8 +297,195 @@ defmodule OptimalSystemAgent.Onboarding do
         signup_url: nil,
         models: :manual
       }
-    ]
+    ] ++ additional_providers()
   end
+
+  # ── The rest of the routable catalog ─────────────────────────────────────
+  #
+  # `Providers.Registry` routes ~26 providers, but onboarding offered seven.
+  # Everything else — Google, xAI, Groq, DeepSeek, Mistral, Cohere, Cerebras,
+  # Fireworks, Together, Perplexity, Replicate, the Chinese providers and the
+  # local OpenAI-compatible servers — was reachable only by hand-editing
+  # `~/.osa/.env`, which is exactly the "config file editing" the setup flow
+  # exists to remove.
+  #
+  # ONLY the presentation fields (label, blurb, grouping, signup URL, the
+  # env-var name) live here. `default_model`, `base_url` and the model list are
+  # DERIVED from the provider modules at call time, so this table can never
+  # drift from the catalogs — a model id or endpoint is corrected in one place
+  # and this picker follows. Adding a provider here without routing in the
+  # Registry would be worse than omitting it, so the list is filtered against
+  # `Registry.list_providers/0` before it is returned.
+  @additional_providers [
+    {"google", "Google Gemini", "Gemini direct — long context", "bring_your_own",
+     "GOOGLE_API_KEY", "https://aistudio.google.com/apikey"},
+    {"xai", "xAI", "Grok models", "bring_your_own", "XAI_API_KEY", "https://console.x.ai"},
+    {"groq", "Groq", "Fastest inference", "bring_your_own", "GROQ_API_KEY",
+     "https://console.groq.com/keys"},
+    {"deepseek", "DeepSeek", "Strong reasoning, low cost", "bring_your_own", "DEEPSEEK_API_KEY",
+     "https://platform.deepseek.com/api_keys"},
+    {"mistral", "Mistral", "European models", "bring_your_own", "MISTRAL_API_KEY",
+     "https://console.mistral.ai/api-keys"},
+    {"cohere", "Cohere", "Command models", "bring_your_own", "COHERE_API_KEY",
+     "https://dashboard.cohere.com/api-keys"},
+    {"cerebras", "Cerebras", "Ultra-fast inference", "more", "CEREBRAS_API_KEY",
+     "https://cloud.cerebras.ai"},
+    {"fireworks", "Fireworks", "Open models, serverless", "more", "FIREWORKS_API_KEY",
+     "https://fireworks.ai/account/api-keys"},
+    {"together", "Together AI", "Open models", "more", "TOGETHER_API_KEY",
+     "https://api.together.xyz/settings/api-keys"},
+    {"perplexity", "Perplexity", "Search-grounded answers", "more", "PERPLEXITY_API_KEY",
+     "https://www.perplexity.ai/settings/api"},
+    {"replicate", "Replicate", "Hosted open models", "more", "REPLICATE_API_KEY",
+     "https://replicate.com/account/api-tokens"},
+    {"sambanova", "SambaNova", "Fast open models", "more", "SAMBANOVA_API_KEY",
+     "https://cloud.sambanova.ai/apis"},
+    {"hyperbolic", "Hyperbolic", "Open models", "more", "HYPERBOLIC_API_KEY",
+     "https://app.hyperbolic.xyz/settings"},
+    {"qwen", "Qwen (Alibaba)", "Qwen models", "more", "QWEN_API_KEY",
+     "https://dashscope.console.aliyun.com"},
+    {"moonshot", "Moonshot (Kimi)", "Kimi models", "more", "MOONSHOT_API_KEY",
+     "https://platform.moonshot.cn/console/api-keys"},
+    {"zhipu", "Zhipu (GLM)", "GLM models", "more", "ZHIPU_API_KEY",
+     "https://open.bigmodel.cn/usercenter/apikeys"},
+    {"volcengine", "Volcengine (Doubao)", "Doubao models", "more", "VOLCENGINE_API_KEY",
+     "https://console.volcengine.com/ark"},
+    {"baichuan", "Baichuan", "Baichuan models", "more", "BAICHUAN_API_KEY",
+     "https://platform.baichuan-ai.com"}
+  ]
+
+  # Local OpenAI-compatible servers: no key, no signup, discovered by URL.
+  @local_providers [
+    {"lmstudio", "LM Studio", "Local server — no key needed", "http://localhost:1234/v1"},
+    {"llamacpp", "llama.cpp", "Local server — no key needed", "http://localhost:8080/v1"}
+  ]
+
+  defp additional_providers do
+    routable = routable_provider_ids()
+
+    keyed =
+      for {id, name, description, group, env_var, signup_url} <- @additional_providers,
+          MapSet.member?(routable, id) do
+        %{
+          id: id,
+          name: name,
+          description: description,
+          group: group,
+          requires_key: true,
+          env_var: env_var,
+          default_model: derived_default_model(id),
+          base_url: derived_base_url(id),
+          signup_url: signup_url,
+          models: :dynamic
+        }
+      end
+
+    local =
+      for {id, name, description, base_url} <- @local_providers,
+          MapSet.member?(routable, id) do
+        %{
+          id: id,
+          name: name,
+          description: description,
+          group: "bring_your_own",
+          requires_key: false,
+          env_var: nil,
+          default_model: derived_default_model(id),
+          base_url: base_url,
+          signup_url: nil,
+          models: :dynamic
+        }
+      end
+
+    keyed ++ local
+  end
+
+  defp routable_provider_ids do
+    MapSet.new(OptimalSystemAgent.Providers.Registry.list_providers(), &Atom.to_string/1)
+  rescue
+    _ -> MapSet.new()
+  catch
+    _, _ -> MapSet.new()
+  end
+
+  # Ask the Registry (which asks the provider module / catalog) rather than
+  # keeping a second copy of any model id.
+  defp derived_default_model(provider_id) do
+    with {:ok, atom} <- known_provider_atom(provider_id),
+         {:ok, info} <- OptimalSystemAgent.Providers.Registry.provider_info(atom) do
+      to_string(info.default_model)
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp derived_base_url(provider_id) do
+    case known_provider_atom(provider_id) do
+      {:ok, atom} -> provider_base_url(atom)
+      _ -> nil
+    end
+  end
+
+  @doc """
+  The endpoint OSA will actually dial for a provider — the same value the
+  provider module resolves, never a second hand-maintained copy.
+
+  Returns nil when the provider has no fixed endpoint (a Custom Endpoint the
+  user supplies, or a provider we don't route).
+  """
+  @spec provider_base_url(atom()) :: String.t() | nil
+  def provider_base_url(:anthropic),
+    do: Application.get_env(:optimal_system_agent, :anthropic_url, "https://api.anthropic.com")
+
+  def provider_base_url(:google),
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :google_url,
+        "https://generativelanguage.googleapis.com/v1beta"
+      )
+
+  def provider_base_url(:cohere),
+    do: Application.get_env(:optimal_system_agent, :cohere_url, "https://api.cohere.com/v2")
+
+  def provider_base_url(:replicate),
+    do: Application.get_env(:optimal_system_agent, :replicate_url, "https://api.replicate.com/v1")
+
+  def provider_base_url(:ollama),
+    do: Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+  def provider_base_url(provider) when is_atom(provider) do
+    OptimalSystemAgent.Providers.OpenAICompatProvider.base_url(provider)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # Resolve a picker id to a Registry provider atom WITHOUT `String.to_atom` on
+  # caller-supplied data (an unbounded atom table is a memory-exhaustion vector
+  # on a public endpoint) — only atoms the Registry already declares can match.
+  @doc false
+  @spec known_provider_atom(String.t()) :: {:ok, atom()} | :error
+  def known_provider_atom(provider_id) when is_binary(provider_id) do
+    case Enum.find(
+           OptimalSystemAgent.Providers.Registry.list_providers(),
+           &(Atom.to_string(&1) == provider_id)
+         ) do
+      nil -> :error
+      atom -> {:ok, atom}
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  def known_provider_atom(_), do: :error
 
   @doc """
   Fetch available models for a provider.
@@ -386,14 +526,160 @@ defmodule OptimalSystemAgent.Onboarding do
           _ -> {:ok, hardcoded_models(provider_id)}
         end
 
-      _ ->
-        # Static providers (anthropic, openai, …): prefer the refreshable
-        # Catalog (models.dev-style), fall back to the curated hardcoded list.
-        case catalog_model_maps(provider_id) do
-          [] -> {:ok, hardcoded_models(provider_id)}
-          models -> {:ok, models}
+      p when p in ["openai", "anthropic"] ->
+        # Ollama Local probes the daemon for the models that account/box can
+        # actually serve; do the equivalent for the two direct BYO-key
+        # providers so onboarding offers a list the user's key can really use.
+        # OpenAI exposes `GET /v1/models`, Anthropic `GET /v1/models` — both
+        # authoritative for a given key. STRICTLY narrowing: the catalog stays
+        # the source of names/context/pricing and the probe only filters it, so
+        # a probe failure, an unauthenticated call, or an id shape we don't
+        # recognise degrades to the full catalog rather than an empty picker.
+        catalog = static_models(p)
+
+        probe_opts =
+          case Keyword.get(opts, :req_plug) do
+            nil -> []
+            plug -> [plug: plug, retry: false]
+          end
+
+        case probe_accessible_ids(
+               p,
+               Keyword.get(opts, :api_key),
+               Keyword.get(opts, :base_url),
+               probe_opts
+             ) do
+          {:ok, ids} -> {:ok, narrow_to_accessible(catalog, ids)}
+          :skip -> {:ok, catalog}
         end
+
+      _ ->
+        {:ok, static_models(provider_id)}
     end
+  end
+
+  # Static providers (anthropic, openai, …): prefer the refreshable Catalog
+  # (models.dev-style, with `Catalog.apply_sot_overlay/1` forcing the
+  # Anthropic/OpenAI sections to come from the SoT modules), fall back to the
+  # curated hardcoded list.
+  defp static_models(provider_id) do
+    case catalog_model_maps(provider_id) do
+      [] ->
+        case hardcoded_models(provider_id) do
+          [] -> registry_model_maps(provider_id)
+          models -> models
+        end
+
+      models ->
+        models
+    end
+  end
+
+  # Last resort for a provider whose catalog entry is `:dynamic` and that
+  # models.dev doesn't cover: ask the Registry, which asks the provider module
+  # itself. Keeps every model id in ONE place (the provider catalogs) instead
+  # of a second copy in the onboarding table — a picker entry with no models is
+  # a provider the user can select but never finish configuring.
+  defp registry_model_maps(provider_id) do
+    with {:ok, atom} <- known_provider_atom(provider_id),
+         {:ok, %{available_models: ids}} when is_list(ids) <-
+           OptimalSystemAgent.Providers.Registry.provider_info(atom) do
+      Enum.map(ids, fn id ->
+        id = to_string(id)
+
+        %{
+          id: id,
+          name: id,
+          ctx: OptimalSystemAgent.Providers.Catalog.context_window(id) || 0,
+          tools: true
+        }
+      end)
+    else
+      _ -> []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  # Keep only catalog entries the key can actually reach.
+  #
+  # Matching is exact, plus ONE deliberate tolerance: Anthropic's `/v1/models`
+  # answers with dated snapshots (`claude-opus-5-20260115`) where OSA's catalog
+  # carries the moving alias (`claude-opus-5`). That tolerance is scoped to a
+  # literal `-YYYYMMDD` suffix rather than a general prefix test, because a
+  # general one silently over-matches: `gpt-4o` returned by the API would also
+  # admit `gpt-4o-mini`, a DIFFERENT model the key may not have.
+  #
+  # If nothing matches — an unfamiliar id scheme, a proxy that lists nothing we
+  # know — the catalog is returned untouched. Offering too many models is
+  # recoverable; offering none is a dead end.
+  @dated_snapshot_suffix ~r/^-\d{8}$/
+
+  @spec narrow_to_accessible([map()], [String.t()]) :: [map()]
+  defp narrow_to_accessible(catalog, ids) do
+    available = MapSet.new(ids)
+
+    filtered =
+      Enum.filter(catalog, fn %{id: id} ->
+        MapSet.member?(available, id) or Enum.any?(ids, &dated_snapshot_of?(&1, id))
+      end)
+
+    if filtered == [], do: catalog, else: filtered
+  end
+
+  defp dated_snapshot_of?(returned_id, catalog_id) do
+    String.starts_with?(returned_id, catalog_id) and
+      Regex.match?(
+        @dated_snapshot_suffix,
+        binary_part(returned_id, byte_size(catalog_id), byte_size(returned_id) - byte_size(catalog_id))
+      )
+  end
+
+  # `{:ok, ids}` when we got an authoritative list, `:skip` when we could not
+  # (no key, transport error, non-200) — never an error, because failing to
+  # probe must not fail model selection.
+  @spec probe_accessible_ids(String.t(), String.t() | nil, String.t() | nil, keyword()) ::
+          {:ok, [String.t()]} | :skip
+  defp probe_accessible_ids(_provider, key, _base_url, _req_opts) when key in [nil, ""], do: :skip
+
+  defp probe_accessible_ids("openai", key, base_url, req_opts) do
+    fetch_model_ids(
+      "#{base_url || "https://api.openai.com/v1"}/models",
+      [{"authorization", "Bearer #{key}"}],
+      req_opts
+    )
+  end
+
+  defp probe_accessible_ids("anthropic", key, base_url, req_opts) do
+    fetch_model_ids(
+      "#{base_url || "https://api.anthropic.com"}/v1/models?limit=1000",
+      [{"x-api-key", key}, {"anthropic-version", "2023-06-01"}],
+      req_opts
+    )
+  end
+
+  defp probe_accessible_ids(_provider, _key, _base_url, _req_opts), do: :skip
+
+  # Both providers answer `GET .../models` with `{"data": [{"id": ...}, ...]}`.
+  defp fetch_model_ids(url, headers, req_opts) do
+    case Req.get([url: url, headers: headers, receive_timeout: 10_000, retry: false] ++ req_opts) do
+      {:ok, %{status: 200, body: %{"data" => entries}}} when is_list(entries) ->
+        ids =
+          entries
+          |> Enum.map(fn e -> is_map(e) && e["id"] end)
+          |> Enum.filter(&(is_binary(&1) and &1 != ""))
+
+        if ids == [], do: :skip, else: {:ok, ids}
+
+      _ ->
+        :skip
+    end
+  rescue
+    _ -> :skip
+  catch
+    _, _ -> :skip
   end
 
   # Curated per-provider models from the onboarding catalog (fallback source).
@@ -576,8 +862,41 @@ defmodule OptimalSystemAgent.Onboarding do
           keyword()
         ) :: {:ok, map()} | {:error, map()}
   defp run_health_request(provider, api_key, model, base_url, req_opts) do
-    {url, headers, body} = build_health_check_request(provider, api_key, model, base_url)
+    case build_health_check_request(provider, api_key, model, base_url) do
+      {nil, _headers, _body} ->
+        # No endpoint we can honestly probe for this provider. Refusing is the
+        # only safe answer — the alternative was POSTing the user's key to
+        # api.openai.com to find out.
+        {:error,
+         %{
+           verified: :unverified,
+           error: "no_endpoint",
+           message:
+             "No API endpoint is configured for provider '#{provider}'. " <>
+               "Set a base URL to verify this key."
+         }}
 
+      {url, headers, body} ->
+        do_health_request(url, headers, body, model, req_opts)
+    end
+  end
+
+  # A `nil` body means the provider's key check is a GET (Replicate's
+  # `/account`), not a chat completion. Everything downstream — the three-way
+  # classification, the latency stamp — is identical.
+  defp do_health_request(url, headers, nil, model, req_opts) do
+    start_time = System.monotonic_time(:millisecond)
+
+    get_opts =
+      [headers: headers, receive_timeout: 15_000, retry: :transient, max_retries: 2] ++ req_opts
+
+    classify_health_response(Req.get([url: url] ++ get_opts), url, model, start_time)
+  rescue
+    e ->
+      {:error, %{verified: :unverified, error: "exception", message: Exception.message(e)}}
+  end
+
+  defp do_health_request(url, headers, body, model, req_opts) do
     start_time = System.monotonic_time(:millisecond)
 
     # req_opts LAST: Req folds options into a map via `Map.new/1`, where the
@@ -593,7 +912,17 @@ defmodule OptimalSystemAgent.Onboarding do
         max_retries: 2
       ] ++ req_opts
 
-    case Req.post([url: url] ++ post_opts) do
+    classify_health_response(Req.post([url: url] ++ post_opts), url, model, start_time)
+  rescue
+    e ->
+      {:error, %{verified: :unverified, error: "exception", message: Exception.message(e)}}
+  end
+
+  # Shared three-way classification for BOTH the POST (chat probe) and GET
+  # (Replicate's account probe) shapes, so a provider can never end up with a
+  # subtly different notion of "your key was rejected".
+  defp classify_health_response(result, url, model, start_time) do
+    case result do
       {:ok, %{status: status}} when status in 200..299 ->
         latency = System.monotonic_time(:millisecond) - start_time
 
@@ -847,6 +1176,13 @@ defmodule OptimalSystemAgent.Onboarding do
       Application.put_env(:optimal_system_agent, app_key, api_key)
     end
 
+    # The CredentialPool snapshots keys at boot and its get_key/1 takes
+    # PRIORITY over Application env in the providers — so without this reload
+    # the pool keeps serving the key captured at startup and the key the user
+    # just entered never takes effect. They would watch their corrected key be
+    # rejected over and over.
+    _ = OptimalSystemAgent.Providers.CredentialPool.reload()
+
     :ok
   end
 
@@ -868,7 +1204,10 @@ defmodule OptimalSystemAgent.Onboarding do
       "anthropic" -> :anthropic_api_key
       "openai" -> :openai_api_key
       "custom" -> :openai_api_key
-      _ -> nil
+      # Every other routable provider follows the `:<provider>_api_key`
+      # convention `config/runtime.exs` declares. Returning nil here meant
+      # `apply_provider_key/2` was a no-op for two-thirds of the catalog.
+      other -> if match?({:ok, _}, known_provider_atom(other)), do: :"#{other}_api_key", else: nil
     end
   end
 
@@ -1141,9 +1480,29 @@ defmodule OptimalSystemAgent.Onboarding do
          ], []}
 
       other ->
-        {[{"OSA_DEFAULT_PROVIDER", other}, maybe_pair("OSA_MODEL", model)], []}
+        # Every other routable provider (google, xai, groq, deepseek, mistral,
+        # cohere, cerebras, fireworks, …). The old catch-all wrote the provider
+        # and the model but silently DROPPED the API key, so picking any of
+        # them produced a `.env` that selected a provider with no credential —
+        # "not configured" on the first turn, with the key the user had just
+        # typed nowhere on disk.
+        # No base-URL var is persisted here on purpose: `config/runtime.exs`
+        # only reads OPENAI_BASE_URL / ANTHROPIC_BASE_URL back, so writing a
+        # `GOOGLE_BASE_URL` would be a setting that silently does nothing after
+        # a restart. A non-standard endpoint is what the Custom Endpoint entry
+        # is for.
+        {[
+           {"OSA_DEFAULT_PROVIDER", other},
+           maybe_pair(provider_env_var(other) || generic_env_var(other), api_key),
+           maybe_pair("OSA_MODEL", model)
+         ], ["OLLAMA_MODEL"]}
     end
   end
+
+  # `<PROVIDER>_API_KEY` — the convention `config/runtime.exs` already reads
+  # for every provider it declares.
+  defp generic_env_var(provider_id),
+    do: provider_id |> to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
 
   defp maybe_pair(_k, nil), do: nil
   defp maybe_pair(_k, ""), do: nil
@@ -1182,15 +1541,26 @@ defmodule OptimalSystemAgent.Onboarding do
     |> Kernel.<>("\n")
   end
 
+  # Picker id -> the provider id the rest of OSA resolves. `ollama_cloud` and
+  # `ollama_local` are two credential routes to the SAME `:ollama` provider
+  # (distinguished by OLLAMA_URL); `custom` is the OpenAI-compatible client
+  # pointed at a user-supplied base URL.
+  @doc false
+  @spec runtime_provider_id(String.t()) :: String.t()
+  def runtime_provider_id("ollama_cloud"), do: "ollama"
+  def runtime_provider_id("ollama_local"), do: "ollama"
+  def runtime_provider_id("custom"), do: "openai"
+  def runtime_provider_id(provider), do: provider
+
   defp apply_env_vars(provider, model, api_key, base_url) do
-    # Map provider to the runtime.exs provider atom
+    # Resolve to a provider atom the Registry ALREADY declares. The old
+    # `String.to_atom(p)` minted an atom from whatever string arrived, which
+    # both grows the atom table without bound and could install a
+    # `:default_provider` that routes nowhere.
     provider_atom =
-      case provider do
-        "miosa" -> :miosa
-        "ollama_cloud" -> :ollama
-        "ollama_local" -> :ollama
-        "custom" -> :openai
-        p -> String.to_atom(p)
+      case known_provider_atom(runtime_provider_id(provider)) do
+        {:ok, atom} -> atom
+        :error -> :ollama
       end
 
     Application.put_env(:optimal_system_agent, :default_provider, provider_atom)
@@ -1257,17 +1627,63 @@ defmodule OptimalSystemAgent.Onboarding do
           Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
         end
 
+        # `provider_env_pairs/4` persists OPENAI_BASE_URL for "openai" too (an
+        # Azure/proxy front-end still selected as the OpenAI provider). Applying
+        # it in-process as well means the very next request honours it instead
+        # of silently dialling api.openai.com until the daemon restarts —
+        # `OpenAICompatProvider` reads `:openai_url`, not the env var.
+        if base_url do
+          System.put_env("OPENAI_BASE_URL", base_url)
+          Application.put_env(:optimal_system_agent, :openai_url, base_url)
+        end
+
       "custom" ->
         if api_key do
           System.put_env("OPENAI_API_KEY", api_key)
           Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
         end
 
-        if base_url, do: System.put_env("OPENAI_BASE_URL", base_url)
+        if base_url do
+          System.put_env("OPENAI_BASE_URL", base_url)
+          Application.put_env(:optimal_system_agent, :openai_url, base_url)
+        end
 
-      _ ->
-        :ok
+      other ->
+        # Generic path for every other routable provider. Previously a no-op,
+        # so a Google/xAI/Groq/… key entered in the wizard was written to disk
+        # but never applied to the running node — the user had to restart to
+        # get the thing they had just configured.
+        if api_key do
+          System.put_env(generic_env_var(other), api_key)
+          Application.put_env(:optimal_system_agent, :"#{other}_api_key", api_key)
+        end
+
+        if base_url do
+          Application.put_env(:optimal_system_agent, :"#{other}_url", base_url)
+        end
     end
+
+    # The provider itself is applied for EVERY branch (the per-provider cases
+    # above only handle keys/URLs). `Registry.default_provider/0` re-reads
+    # OSA_DEFAULT_PROVIDER live, so setting it here is what makes the switch
+    # land on the next turn without a restart.
+    case known_provider_atom(runtime_provider_id(provider)) do
+      {:ok, _atom} -> System.put_env("OSA_DEFAULT_PROVIDER", runtime_provider_id(provider))
+      :error -> :ok
+    end
+
+    # The CredentialPool snapshots every *_API_KEY at boot and its `get_key/1`
+    # takes PRIORITY over Application env in `Providers.Anthropic.resolve_auth/0`.
+    # `apply_provider_key/2` already reloaded it; `apply_env_vars/4` — the path
+    # every onboarding/setup write actually goes through (`write_setup/1`,
+    # `upsert_provider_key/1` with `set_active: true`) — did not. So a user who
+    # booted with a wrong/expired ANTHROPIC_API_KEY and corrected it in the
+    # wizard watched the OLD key be rejected turn after turn, no matter how
+    # many times they re-entered the right one. One reload closes it for every
+    # write path.
+    _ = OptimalSystemAgent.Providers.CredentialPool.reload()
+
+    :ok
   end
 
   # ── Private: Channel Token Handling ───────────────────────────────────
@@ -1421,7 +1837,7 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
 
         body = %{
-          model: model || "claude-sonnet-4-20250514",
+          model: model || OptimalSystemAgent.Providers.AnthropicModels.default_model(),
           max_tokens: 5,
           messages: [%{role: "user", content: "hi"}]
         }
@@ -1458,15 +1874,88 @@ defmodule OptimalSystemAgent.Onboarding do
 
         {url, headers, body}
 
+      # ── Native (non-OpenAI-shaped) protocols ──────────────────────────
+      #
+      # Google, Cohere and Replicate do NOT speak `/chat/completions`. Probing
+      # them with an OpenAI-shaped request is how "your key was rejected" gets
+      # reported for a perfectly good key — and routing them to a DEFAULT
+      # OpenAI URL is how a Google key ends up POSTed to a third party. Each
+      # gets its own real endpoint, in its own wire format.
+      "google" ->
+        model_id = model || OptimalSystemAgent.Providers.Google.default_model()
+        base = base_url || provider_base_url(:google)
+
+        # Key travels in `x-goog-api-key`, not `?key=` — a query-string
+        # credential leaks into proxy logs and crash reports.
+        headers = [
+          {"x-goog-api-key", api_key || ""},
+          {"content-type", "application/json"}
+        ]
+
+        body = %{
+          contents: [%{role: "user", parts: [%{text: "hi"}]}],
+          generationConfig: %{maxOutputTokens: 5}
+        }
+
+        {"#{base}/models/#{model_id}:generateContent", headers, body}
+
+      "cohere" ->
+        headers = [
+          {"authorization", "Bearer #{api_key || ""}"},
+          {"content-type", "application/json"}
+        ]
+
+        body = %{
+          model: model || OptimalSystemAgent.Providers.Cohere.default_model(),
+          max_tokens: 5,
+          messages: [%{role: "user", content: "hi"}]
+        }
+
+        {"#{base_url || provider_base_url(:cohere)}/chat", headers, body}
+
+      "replicate" ->
+        # Replicate authenticates with `Token <key>` and has no cheap chat
+        # probe — its account endpoint is the documented key check. `nil` body
+        # marks this as a GET (see `do_health_request/5`).
+        headers = [{"authorization", "Token #{api_key || ""}"}]
+        {"#{base_url || provider_base_url(:replicate)}/account", headers, nil}
+
       _ ->
-        # OpenAI-compatible (miosa, openrouter, openai, custom, etc.)
+        # OpenAI-compatible (miosa, openrouter, openai, custom, groq, xai,
+        # deepseek, mistral, cerebras, fireworks, together, perplexity, the
+        # Chinese providers, and the local lmstudio/llamacpp servers).
+        #
+        # The URL is resolved from the provider's OWN routing table
+        # (`OpenAICompatProvider.base_url/1`, via `provider_base_url/1`) rather
+        # than defaulting to api.openai.com — that default is what previously
+        # sent a Groq/xAI/DeepSeek key to OpenAI. A provider we cannot resolve
+        # an endpoint for still yields `nil`, and `run_health_request/5` says
+        # so honestly instead of guessing.
         resolved_url =
           case provider do
-            "miosa" -> "https://optimal.miosa.ai/v1/chat/completions"
-            "openrouter" -> "https://openrouter.ai/api/v1/chat/completions"
-            "openai" -> "#{base_url || "https://api.openai.com/v1"}/chat/completions"
-            "custom" -> "#{base_url}/chat/completions"
-            _ -> "#{base_url || "https://api.openai.com/v1"}/chat/completions"
+            "custom" ->
+              if base_url, do: "#{base_url}/chat/completions", else: nil
+
+            "openai" ->
+              "#{base_url || provider_base_url(:openai)}/chat/completions"
+
+            other ->
+              cond do
+                is_binary(base_url) and base_url != "" ->
+                  "#{base_url}/chat/completions"
+
+                true ->
+                  case known_provider_atom(runtime_provider_id(other)) do
+                    {:ok, atom} ->
+                      case provider_base_url(atom) do
+                        url when is_binary(url) and url != "" -> "#{url}/chat/completions"
+                        _ -> nil
+                      end
+
+                    :error ->
+                      nil
+                  end
+              end
           end
 
         headers = [
@@ -1474,11 +1963,30 @@ defmodule OptimalSystemAgent.Onboarding do
           {"content-type", "application/json"}
         ]
 
-        body = %{
-          model: model || "gpt-4o",
-          max_tokens: 5,
-          messages: [%{role: "user", content: "hi"}]
-        }
+        # Default to the PROVIDER'S own model, not OpenAI's. Probing Groq or
+        # xAI with `gpt-5.6-terra` returns a model-not-found 404 that the user
+        # reads as "my key failed" — the endpoint was right and the model was
+        # borrowed from the wrong catalog.
+        resolved_model =
+          model || derived_default_model(runtime_provider_id(provider)) ||
+            OptimalSystemAgent.Providers.OpenAIModels.default_model()
+
+        # Reasoning models (the o-series AND the GPT-5.x family) reject
+        # `max_tokens` with a 400 and require `max_completion_tokens`. The
+        # runtime path already gets this right; the health check did not, so
+        # probing a reasoning model with a perfectly valid key returned
+        # "server_error" and the user was told their key failed.
+        token_field =
+          if OptimalSystemAgent.Providers.OpenAIModels.reasoning?(resolved_model),
+            do: :max_completion_tokens,
+            else: :max_tokens
+
+        body =
+          %{
+            model: resolved_model,
+            messages: [%{role: "user", content: "hi"}]
+          }
+          |> Map.put(token_field, 5)
 
         {resolved_url, headers, body}
     end

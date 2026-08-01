@@ -84,7 +84,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
 
   @doc "Register hooks from settings (both CC and legacy shapes)."
   def register_from_settings do
-    if OptimalSystemAgent.Settings.get("disableAllHooks", false) == true do
+    if OptimalSystemAgent.Settings.get_trusted("disableAllHooks", false) == true do
       Logger.info("[hooks] disableAllHooks is set — skipping settings-driven hooks")
       :ok
     else

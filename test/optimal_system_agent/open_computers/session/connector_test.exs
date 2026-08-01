@@ -244,22 +244,24 @@ defmodule OptimalSystemAgent.OpenComputers.Session.ConnectorTest do
   # ── Helpers ───────────────────────────────────────────────────────────────────
 
   defp write_temp_toml(control_url, host_key) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "oc_connector_test_#{System.unique_integer([:positive])}.toml"
-      )
+    # Random (not `System.unique_integer/1`, which restarts every BEAM boot) so
+    # a rerun can never land on a leftover file; both paths are removed on exit.
+    path = Path.join(System.tmp_dir!(), "oc_connector_test_#{rand_suffix()}.toml")
+    fingerprint_path = Path.join(System.tmp_dir!(), "oc_test_fp_#{rand_suffix()}.ed25519")
+    on_exit(fn -> File.rm(fingerprint_path) end)
 
     File.write!(path, """
     control_url = "#{control_url}"
     host_key = "#{host_key}"
-    fingerprint_path = "/tmp/oc_test_fp_#{System.unique_integer([:positive])}.ed25519"
+    fingerprint_path = "#{fingerprint_path}"
     modes = ["direct"]
     heartbeat_ms = 60000
     """)
 
     path
   end
+
+  defp rand_suffix, do: Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
   # ── Raw WebSocket server helpers ──────────────────────────────────────────────
 

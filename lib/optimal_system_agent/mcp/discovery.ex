@@ -1,7 +1,24 @@
 defmodule OptimalSystemAgent.MCP.Discovery do
   @moduledoc """
-  Auto-discover MCP servers a user already configured in OTHER tools so they
-  "just appear" in OSA with no manual setup.
+  Read MCP servers a user configured in OTHER tools (Claude Code, Claude
+  Desktop, Cursor, Codex).
+
+  ## This is OPT-IN and OFF by default
+
+  Importing another tool's MCP config is not a neutral convenience: every
+  imported entry spawns a subprocess OSA's operator never authorized and adds
+  tool definitions they never chose, with no attribution explaining where the
+  server came from. `discover/0` therefore returns `[]` unless the operator
+  explicitly opts in via `config :optimal_system_agent, mcp_import_foreign:
+  true` or `{"mcp_import_foreign": true}` in `~/.osa/settings.json`.
+
+  OSA's OWN configs are unaffected by this switch — `~/.osa/mcp.json`, the
+  workspace `.mcp.json`, and `.osa/mcp.local.json` are servers the user
+  deliberately gave OSA and always load (see `MCP.Config`).
+
+  `available/0` reads the foreign sources regardless of the switch WITHOUT
+  importing anything, so `/mcp` can tell the user "12 servers are available to
+  import from claude_code" without silently running them.
 
   Each external source is read best-effort: a missing file is skipped, a
   malformed file is logged at debug level and skipped, and NOTHING here ever
@@ -32,20 +49,99 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   # Sources in precedence order (earlier wins on name collision).
   @sources [:codex, :claude_code, :claude_desktop, :cursor]
 
-  @doc """
-  Discover external MCP servers as `%Server{}` structs, deduped by name.
+  @doc "Every foreign source this module knows how to read, in precedence order."
+  @spec all_sources() :: [atom()]
+  def all_sources, do: @sources
 
-  Precedence among external tools follows `@sources`; any name already defined
-  natively (`Config.load_all/0`) is excluded so native always wins.
+  @doc """
+  Whether importing OTHER tools' MCP configs is enabled.
+
+  Resolution order (first present wins):
+
+    1. `~/.osa/settings.json` (and the rest of the settings cascade) key
+       `"mcp_import_foreign"`
+    2. `config :optimal_system_agent, :mcp_import_foreign`
+    3. `false` — the default
+
+  `:mcp_discovery_enabled` remains a hard kill switch layered on top: when it
+  is set to `false` (as `config/test.exs` does, so the suite never picks up the
+  operator's real `$HOME`) no foreign config is imported regardless of the
+  opt-in above.
+  """
+  @spec import_enabled?() :: boolean()
+  def import_enabled? do
+    kill_switch =
+      Application.get_env(:optimal_system_agent, :mcp_discovery_enabled, true) != false
+
+    kill_switch and opted_in?()
+  end
+
+  defp opted_in? do
+    case settings_get("mcp_import_foreign") do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :mcp_import_foreign, false) == true
+    end
+  end
+
+  # Settings reads must never take discovery down (missing ETS at early boot,
+  # unreadable file, etc.) — fall through to app env on any trouble.
+  defp settings_get(key) do
+    OptimalSystemAgent.Settings.get_trusted(key)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  @doc "The foreign sources that will be read when import is enabled."
+  @spec sources() :: [atom()]
+  def sources do
+    case Application.get_env(:optimal_system_agent, :mcp_import_sources, @sources) do
+      list when is_list(list) -> Enum.filter(@sources, &(&1 in list))
+      _ -> @sources
+    end
+  end
+
+  @doc """
+  Import external MCP servers as `%Server{}` structs, deduped by name.
+
+  Returns `[]` unless `import_enabled?/0` — foreign import is opt-in.
+
+  Precedence among external tools follows `sources/0`; any name already defined
+  natively (`Config.load_all/0`) is excluded so native always wins, and any name
+  on the `mcp_exclude` deny list is dropped.
   """
   @spec discover() :: [Server.t()]
   def discover do
+    if import_enabled?(), do: read_all(), else: []
+  end
+
+  @doc """
+  Read the foreign sources WITHOUT importing — always, regardless of the opt-in.
+
+  This is the "here is what you could inherit" peek used by `/mcp` so the
+  operator can see what exists in other tools' configs without OSA running any
+  of it. Excluded names are still filtered out (an exclusion is a decision, not
+  a suggestion).
+  """
+  @spec available() :: [Server.t()]
+  def available do
+    kill_switch =
+      Application.get_env(:optimal_system_agent, :mcp_discovery_enabled, true) != false
+
+    if kill_switch, do: read_all(), else: []
+  end
+
+  defp read_all do
     native_names =
       Config.load_all()
       |> Enum.map(& &1.name)
       |> MapSet.new()
 
-    @sources
+    sources()
     |> Enum.reduce(%{}, fn source, acc ->
       Enum.reduce(servers_for(source), acc, fn server, a ->
         # put_new: earlier (higher-precedence) source keeps the entry.
@@ -54,8 +150,13 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     end)
     |> Map.values()
     |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
-    # Discovered servers keep their parsed `enabled: true` and auto-connect on
-    # boot. This is SAFE because of the failure cap in `MCP.Client.ServerSession`:
+    # Deny list applies to imported servers too — killing one noisy server must
+    # not require turning the whole source off.
+    |> Enum.reject(&Config.excluded?(&1.name))
+    # Imported servers keep their parsed `enabled: true` and auto-connect on
+    # boot — but ONLY reach this path when the operator opted in above, so
+    # nothing runs unasked. This is additionally bounded by the failure cap in
+    # `MCP.Client.ServerSession`:
     # a borrowed config that 404s or needs an absent key makes a bounded burst of
     # connect attempts (`@max_connect_failures`) then goes `:dormant` and stops
     # reconnecting, so it can no longer storm the daemon with an unbounded npx
@@ -66,9 +167,40 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     |> Enum.sort_by(& &1.name)
   rescue
     e ->
-      Logger.debug("[MCP.Discovery] discover/0 failed: #{inspect(e)}")
+      Logger.debug("[MCP.Discovery] read_all/0 failed: #{inspect(e)}")
       []
   end
+
+  @doc """
+  Human-readable origin for a server's `:source` tag — the answer to "why is
+  this server here?". `:osa` means it came from one of OSA's own config files.
+  """
+  @spec source_label(atom()) :: String.t()
+  def source_label(:osa), do: "osa config"
+  def source_label(:claude_code), do: "inherited from claude code"
+  def source_label(:claude_desktop), do: "inherited from claude desktop"
+  def source_label(:cursor), do: "inherited from cursor"
+  def source_label(:codex), do: "inherited from codex"
+  def source_label(other), do: "inherited from #{other}"
+
+  @doc """
+  The config file a foreign `:source` is read from, so the user can go delete
+  the entry at the root. `nil` for `:osa` (use `MCP.Config.scope_path/1`) and
+  for a source with no existing file on this machine.
+  """
+  @spec source_path(atom()) :: String.t() | nil
+  def source_path(:codex), do: existing(Path.join([home(), ".codex", "config.toml"]))
+  def source_path(:cursor), do: existing(Path.join([home(), ".cursor", "mcp.json"]))
+
+  def source_path(:claude_code) do
+    existing(Path.join([home(), ".claude", "mcp.json"])) ||
+      existing(Path.join([home(), ".claude.json"]))
+  end
+
+  def source_path(:claude_desktop), do: claude_desktop_path()
+  def source_path(_), do: nil
+
+  defp existing(path), do: if(File.exists?(path), do: path)
 
   # ── Per-source readers ────────────────────────────────────────────────
 
@@ -106,19 +238,26 @@ defmodule OptimalSystemAgent.MCP.Discovery do
 
   # Claude Desktop: first existing of the platform config locations.
   defp read_claude_desktop do
-    candidates = [
-      Path.join([home(), "Library", "Application Support", "Claude", "claude_desktop_config.json"]),
-      Path.join([home(), ".config", "Claude", "claude_desktop_config.json"]),
-      appdata_claude_desktop()
-    ]
-
-    candidates
-    |> Enum.reject(&is_nil/1)
-    |> Enum.find(&File.exists?/1)
-    |> case do
+    case claude_desktop_path() do
       nil -> []
       path -> servers_from_spec_map(read_json_mcp_servers(path), :claude_desktop)
     end
+  end
+
+  defp claude_desktop_path do
+    [
+      Path.join([
+        home(),
+        "Library",
+        "Application Support",
+        "Claude",
+        "claude_desktop_config.json"
+      ]),
+      Path.join([home(), ".config", "Claude", "claude_desktop_config.json"]),
+      appdata_claude_desktop()
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.find(&File.exists?/1)
   end
 
   defp read_cursor do

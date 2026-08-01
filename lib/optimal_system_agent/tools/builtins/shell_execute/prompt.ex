@@ -58,11 +58,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt do
     - If the command is still running when the window elapses it is MOVED TO THE BACKGROUND, \
     not killed. The result says "Still running … moved to the background (NOT killed)" and \
     carries a `background_id`. The command is STILL RUNNING and its work is not lost.
-    - When that happens do NOT re-run the command. Continue with other work and poll it later \
-    with the bash_output tool using that `background_id` (or stop it with `kill: true`). You are \
-    also notified automatically when it completes, with its exit code.
+    - When that happens do NOT re-run the command.
     - If you already expect the command to be long (builds, full test suites, servers), pass \
     `run_in_background: true` up front to get a `background_id` immediately.
+
+    Once a command is in the background you WILL be notified when it finishes — automatically, \
+    with its exit code, its output tail and a path to its full output file. The notification \
+    re-enters your context on its own. Therefore:
+    - Do NOT poll. Do NOT call bash_output "just to check". Do NOT run `sleep`. Do NOT re-run \
+    `ls`/`wc`/`test -f` to see whether the artifact appeared yet. Waiting burns turns and \
+    wall-clock on work the harness already reports.
+    - Instead, move on: do unrelated work that does not depend on the result, or if there is \
+    nothing else to do, stop and let the notification wake you.
+    - Only call bash_output when you need the output of a command you were ALREADY told finished, \
+    or to stop one early with `kill: true`.
 
     Discovery scans (du, find, ls -R): bound the FIRST pass cheaply (`-maxdepth`, `-d 1`), never \
     re-scan ground an earlier command covered, and stop once the question is answered. On a \

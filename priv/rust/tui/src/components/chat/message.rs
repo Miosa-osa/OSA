@@ -23,7 +23,7 @@ pub enum MessageType {
     ToolCall,
     Help,
     SurveyQA,
-    /// A frozen "Updated plan" checklist snapshot pushed into scrollback when the
+    /// A frozen `Plan` checklist snapshot pushed into scrollback when the
     /// task plan meaningfully changes. Renders its pre-built styled lines (carried
     /// in `prerendered_body`) with no border, mirroring the live inline panel.
     Plan,
@@ -681,36 +681,85 @@ fn expand_tabs_4(line: &str) -> String {
     out
 }
 
+/// The machine's UTC offset in seconds, resolved once per process.
+///
+/// Chat timestamps are wall-clock times a human reads off the screen, so they
+/// must be LOCAL. This used to be missing entirely: `format_timestamp` took
+/// `epoch % 86400` — a raw UTC time-of-day — and stamped "AM"/"PM" on it, so a
+/// user in UTC+7 saw `2:23 AM` for a message sent at `9:23 AM`.
+///
+/// Resolved via `localtime_r` rather than pulling in `chrono`: the TUI has no
+/// date/time crate and the offset is the only thing missing.
+///
+/// Cached, so a DST transition mid-session is not picked up until restart. That
+/// is a deliberate trade — the alternative is a libc call per message per frame.
+fn local_utc_offset_secs() -> i64 {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(resolve_local_utc_offset_secs)
+}
+
+#[cfg(unix)]
+fn resolve_local_utc_offset_secs() -> i64 {
+    // SAFETY: `localtime_r` fills a `tm` we own on the stack and reads a
+    // `time_t` we own; unlike `localtime` it touches no shared static and is
+    // reentrant. A null return means the conversion failed, in which case we
+    // fall back to UTC (offset 0) rather than reading uninitialised memory.
+    unsafe {
+        let now: libc::time_t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return 0;
+        }
+        tm.tm_gmtoff as i64
+    }
+}
+
+#[cfg(not(unix))]
+fn resolve_local_utc_offset_secs() -> i64 {
+    0
+}
+
 /// Format a `SystemTime` as a human-readable timestamp string.
 ///
-/// Returns `"2:34 PM"` for messages from today (same UTC calendar day)
+/// Returns `"2:34 PM"` for messages from today (same LOCAL calendar day)
 /// and `"Mar 7, 2:34 PM"` for messages from a previous day. Uses only
-/// `std::time` — no external crate dependency.
+/// `std::time` plus a one-off libc offset lookup — no date/time crate.
 fn format_timestamp(ts: SystemTime) -> Option<String> {
     let now = SystemTime::now();
-    let secs = ts.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    let now_secs = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let secs = ts.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let now_secs = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
 
-    let day = secs / 86400;
-    let now_day = now_secs / 86400;
+    // Shift into local time BEFORE splitting into day / time-of-day. Applying
+    // the offset only to the clock would leave the today/yesterday rollover on
+    // UTC midnight, so between 00:00 and 07:00 local a message sent minutes ago
+    // would render with yesterday's date prefix.
+    let offset = local_utc_offset_secs();
+    let local = secs.checked_add(offset)?;
+    let now_local = now_secs.checked_add(offset)?;
+
+    // Negative local epoch means a pre-1970 timestamp; nothing sane to show.
+    let day = local.div_euclid(86400);
+    let now_day = now_local.div_euclid(86400);
+    if day < 0 {
+        return None;
+    }
     let is_today = day == now_day;
 
-    // Compute time-of-day components (UTC).
-    let time_of_day = secs % 86400;
-    let hour_utc = (time_of_day / 3600) as u8;
+    let time_of_day = local.rem_euclid(86400);
+    let hour_local = (time_of_day / 3600) as u8;
     let minute = ((time_of_day % 3600) / 60) as u8;
 
-    let (hour12, ampm) = match hour_utc {
+    let (hour12, ampm) = match hour_local {
         0 => (12u8, "AM"),
-        1..=11 => (hour_utc, "AM"),
+        1..=11 => (hour_local, "AM"),
         12 => (12u8, "PM"),
-        _ => (hour_utc - 12, "PM"),
+        _ => (hour_local - 12, "PM"),
     };
 
     if is_today {
         Some(format!("{}:{:02} {}", hour12, minute, ampm))
     } else {
-        let (month_name, day_of_month) = epoch_days_to_month_day(day);
+        let (month_name, day_of_month) = epoch_days_to_month_day(day as u64);
         Some(format!("{} {}, {}:{:02} {}", month_name, day_of_month, hour12, minute, ampm))
     }
 }
@@ -1005,5 +1054,83 @@ mod raw_mode_tests {
         m.set_raw_mode(true);
         // 3 source lines + 1 label row for an Agent message.
         assert_eq!(m.height(80), 4);
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tz_tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn local_now() -> i64 {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        secs + local_utc_offset_secs()
+    }
+
+    /// The regression: `format_timestamp` used `epoch % 86400` — a raw UTC
+    /// time-of-day — and labelled it AM/PM as if it were local. In UTC+7 a
+    /// message sent at 9:23 AM rendered as "2:23 AM".
+    ///
+    /// Asserts the rendered clock matches what libc says local time is, which
+    /// is exactly the property that was broken. Timezone-agnostic: it passes in
+    /// UTC (where the old code was accidentally right) and in any offset zone
+    /// (where it was not), so CI and this machine both exercise it.
+    #[test]
+    fn today_timestamp_is_local_not_utc() {
+        let now = SystemTime::now();
+        let rendered = format_timestamp(now).expect("now formats");
+
+        let tod = local_now().rem_euclid(86400);
+        let hour = (tod / 3600) as u8;
+        let minute = ((tod % 3600) / 60) as u8;
+        let (h12, ampm) = match hour {
+            0 => (12u8, "AM"),
+            1..=11 => (hour, "AM"),
+            12 => (12u8, "PM"),
+            _ => (hour - 12, "PM"),
+        };
+
+        assert_eq!(rendered, format!("{}:{:02} {}", h12, minute, ampm));
+    }
+
+    /// The day rollover must use the LOCAL calendar day too. Applying the
+    /// offset to the clock but not to the day bucket would make a message sent
+    /// minutes ago carry a "Mar 7," date prefix during the hours where UTC is
+    /// still on the previous day (00:00-07:00 local at UTC+7).
+    #[test]
+    fn recent_message_never_gets_a_date_prefix() {
+        // Skip within the first two minutes of the local day, where "60s ago"
+        // legitimately IS yesterday and a date prefix is correct.
+        if local_now().rem_euclid(86400) < 120 {
+            return;
+        }
+        let recent = SystemTime::now() - Duration::from_secs(60);
+        let rendered = format_timestamp(recent).expect("recent formats");
+        assert!(
+            !rendered.contains(','),
+            "a message from 60s ago must render as bare time-of-day, got {rendered:?}"
+        );
+    }
+
+    /// A timestamp from several days back still takes the dated branch, so the
+    /// offset change did not collapse the two formats into one.
+    #[test]
+    fn older_message_keeps_its_date_prefix() {
+        let old = SystemTime::now() - Duration::from_secs(5 * 86400);
+        let rendered = format_timestamp(old).expect("old formats");
+        assert!(
+            rendered.contains(','),
+            "a 5-day-old message must carry a date prefix, got {rendered:?}"
+        );
+    }
+
+    /// The offset is a real IANA-style offset: whole minutes, within ±14h.
+    /// Guards against `tm_gmtoff` being misread on a platform where it is not
+    /// seconds, which would silently shift every timestamp instead of failing.
+    #[test]
+    fn local_offset_is_plausible() {
+        let off = local_utc_offset_secs();
+        assert!((-14 * 3600..=14 * 3600).contains(&off), "implausible offset {off}");
+        assert_eq!(off % 60, 0, "offset must be a whole number of minutes");
     }
 }

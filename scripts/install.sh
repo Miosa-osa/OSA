@@ -761,22 +761,87 @@ do_update() {
   return 0
 }
 
-# ── Subcommand pre-translation (verbs → TUI flags, then fall through) ──
+# `osa opencomputers …` owns its own argument vector (it is a passthrough to the
+# release binary), so it is matched positionally and never enters the verb scan
+# below — otherwise its sub-arguments would be mistaken for OSA's.
+if [ "${1:-}" = "opencomputers" ]; then
+  shift
+  exec "$RELEASE_BIN" opencomputers "$@"
+fi
+
+# ── Subcommand scan ───────────────────────────────────────────────
+#
+# The verb is found WHEREVER it sits in argv, not only at $1, so mode flags may
+# come before it as well as after:
+#
+#   osa resume <id> --overdrive
+#   osa --overdrive resume <id>      ← this ordering specifically
+#
+# A flag's VALUE is never a verb: `osa --model resume` selects a model named
+# "resume" and launches normally. That is why value-taking flags are listed
+# explicitly and their argument is skipped.
 OVERDRIVE=0
-case "${1:-}" in
-  overdrive)
-    OVERDRIVE=1; shift; set -- "$@" "--overdrive"
-    ;;
-  continue)
-    shift; set -- "$@" "--continue"
-    ;;
-  resume)
-    shift
-    if [ -n "${1:-}" ] && [ "${1#-}" = "${1:-}" ]; then
-      rid="$1"; shift; set -- "$@" "--resume" "$rid"
-    else
-      set -- "$@" "--resume"
-    fi
+OSA_VERB=""
+_skip=0
+for a in "$@"; do
+  if [ "$_skip" -eq 1 ]; then _skip=0; continue; fi
+  case "$a" in
+    --) break ;;
+    --profile|--permission-mode|--model|-m|--provider) _skip=1 ;;
+    --help|-h) OSA_VERB="help"; break ;;
+    --version|-V|-v) OSA_VERB="version"; break ;;
+    -*) ;;
+    overdrive|continue|resume|help|version|setup|serve|doctor|stop|update)
+      OSA_VERB="$a"; break ;;
+    # Any other bare token is not ours — leave argv untouched and let the TUI's
+    # parser reject it loudly rather than silently swallowing a typo here.
+    *) break ;;
+  esac
+done
+
+# ── Verb → TUI flag translation ───────────────────────────────────
+#
+# `overdrive` / `continue` / `resume` are launch verbs: strip the verb (and, for
+# `resume`, the id that immediately follows it) out of argv and append the
+# equivalent flag, so the TUI keeps ONE parser and every other flag the user
+# typed survives in place. `update` is stripped with no translation because it
+# runs here and then falls through to launch.
+case "$OSA_VERB" in
+  overdrive|continue|resume|update)
+    _n=$#; _i=0; _skip=0; _hit=0; _next=0; _rid=""
+    while [ "$_i" -lt "$_n" ]; do
+      a="$1"; shift; _i=$((_i + 1))
+      if [ "$_skip" -eq 1 ]; then _skip=0; set -- "$@" "$a"; continue; fi
+      case "$a" in
+        --profile|--permission-mode|--model|-m|--provider)
+          _skip=1; set -- "$@" "$a"; continue ;;
+      esac
+      if [ "$_hit" -eq 0 ] && [ "$a" = "$OSA_VERB" ]; then
+        _hit=1; _next=1; continue
+      fi
+      if [ "$_next" -eq 1 ]; then
+        _next=0
+        # Only the token IMMEDIATELY after `resume`, and only if it is not
+        # itself a flag, is the session id.
+        if [ "$OSA_VERB" = "resume" ] && [ "${a#-}" = "$a" ]; then
+          _rid="$a"; continue
+        fi
+      fi
+      set -- "$@" "$a"
+    done
+    case "$OSA_VERB" in
+      overdrive) OVERDRIVE=1; set -- "$@" "--overdrive" ;;
+      continue)  set -- "$@" "--continue" ;;
+      resume)
+        if [ -n "$_rid" ]; then
+          set -- "$@" "--resume" "$_rid"
+        else
+          # Bare `osa resume` → the session picker, populated from recent
+          # sessions. Nothing to fail on, nothing to guess.
+          set -- "$@" "--resume"
+        fi
+        ;;
+    esac
     ;;
 esac
 
@@ -787,8 +852,8 @@ for a in "$@"; do
 done
 
 # ── Subcommand dispatch ───────────────────────────────────────────
-case "${1:-}" in
-  version|--version|-v)
+case "$OSA_VERB" in
+  version)
     # Report BOTH halves. `osa update` swaps a backend release and a separate
     # TUI binary; printing only the backend hides a half-applied update, which
     # is precisely how "I updated but the TUI shows the old version" happens.
@@ -809,14 +874,14 @@ case "${1:-}" in
   setup)                exec "$RELEASE_BIN" setup ;;
   serve)                exec "$RELEASE_BIN" serve ;;
   doctor)               exec "$RELEASE_BIN" doctor ;;
-  opencomputers)        shift; exec "$RELEASE_BIN" opencomputers "$@" ;;
   stop)                 stop_daemon; exit 0 ;;
   update)
-    shift || true
+    # The `update` token was already stripped from argv by the verb translation
+    # above, so the remaining flags launch normally after a successful update.
     do_update || exit $?
     # fall through to launch on success
     ;;
-  help|--help|-h)       print_help; exit 0 ;;
+  help)                 print_help; exit 0 ;;
 esac
 
 # ── Default: warm the daemon (attach instantly if healthy), then TUI ──

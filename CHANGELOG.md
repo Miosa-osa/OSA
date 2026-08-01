@@ -9,6 +9,120 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.48] — displays as `v1.0.048`
+
+### Fixed — web page fetching was completely broken
+
+- **Every successful fetch raised internally, and the crash message was handed back
+  as the page.** Response headers arrive as a map of lists; the code assumed a
+  string. So a fetch that had genuinely succeeded — the page was retrieved, the
+  bytes were there — blew up on the way out, and the resulting error text was
+  returned in the slot where the page content belongs. The agent then read that
+  error message as though it were the documentation it had asked for, and reasoned
+  from it. Nothing signalled that anything had gone wrong.
+- Along with the crash, the fetch path was missing most of what real sites require:
+  - A **browser User-Agent** is now sent; many hosts refuse the default outright.
+  - **303 redirects** are followed, and a **relative `Location`** is resolved
+    against the request URL instead of being treated as a whole address.
+  - **Empty bodies and bot-challenge pages now report failure** rather than being
+    passed upward as legitimate content — an interstitial is not the page you asked
+    for, and the agent should not be reasoning over one.
+
+### Fixed — `/model` could switch you to the wrong provider entirely
+
+- **`claude-opus-5` resolved through Azure to OpenAI**, which does not serve it, so
+  the session 404'd on every single turn after the switch. You asked for one vendor's
+  model and were connected to another's endpoint. Provider resolution is now
+  deterministic and prefers the vendor that actually owns the model.
+
+### Fixed — context was compacted at roughly 11% of a large window
+
+- **Compaction divided by a hardcoded 128k instead of the model's real context
+  window.** On a large-window model that meant compaction fired at around **11% of
+  the space actually available**, over and over — and compaction is lossy and
+  irreversible, so each premature run permanently discarded conversation fidelity
+  that never needed to go. The real window is now used.
+
+### Fixed — prompt blocks were silently evicted on small-context models
+
+- **Plan-mode instructions, tool doctrine and the runtime block were being dropped
+  from the prompt with no signal anywhere.** Two faults drove the budget negative:
+  the reserve held back for the response **did not scale with the window**, and a
+  truncation helper **overshot its target**, cutting further than it was asked to.
+  On a small-context model the remaining budget went below zero and essential blocks
+  simply fell out — the agent stopped behaving as if it were in plan mode, and
+  nothing said why.
+
+### Fixed — asking you a question deadlocked the turn
+
+- The question now renders **inline in the transcript** rather than blocking the
+  turn: keyboard selection for the offered choices, **free-text entry** for anything
+  else, and **Esc to decline**, which is delivered to the waiting tool immediately so
+  the turn continues.
+
+### Fixed — the long-session guard was ending sessions early
+
+- **The guard read successful edits as failures and distinct edits as repetition.**
+  It keyed on the **first 100 characters of a tool result**, which are identical for
+  every edit to the same file, so a run of different successful edits looked like one
+  action repeated; and it then judged those successes as *failures*. Both halves of
+  its verdict were wrong at once, and it ended sessions that were going fine.
+
+### Fixed — session saves were dropped, and tool work was discarded
+
+- **Session saves were silently dropped while the agent was busy.** The save was
+  simply skipped, with no error and no retry, so work performed during a busy stretch
+  never reached disk.
+- **A dropped model connection discarded tool work that had already executed.** Tools
+  that ran to completion — with real side effects — had their results thrown away
+  because the connection carrying the turn went down afterwards.
+
+### Fixed — worktrees silently omitted submodule and nested-repo contents
+
+- A worktree created for isolated work came up **missing the contents of submodules
+  and nested repositories**, so the agent operated on an incomplete tree while
+  believing it had the whole project.
+
+### Security
+
+- **A checked-in project settings file could grant itself permissions before any
+  trust prompt.** A repository could ship a settings file that took effect on the way
+  in — before you were ever asked whether you trusted that workspace.
+- **"Allow always" could persist a rule that disabled the command classifier
+  entirely.** A single approval could be stored in a form broad enough to switch off
+  the classification of subsequent commands, well past the scope of what was approved.
+- **The permission "ask" tier was dead code**, so a decision path that was meant to
+  stop and ask never did.
+- **A refusal could be retried through a different tool.** Denying an action in one
+  tool did not prevent the same action being carried out via another route.
+
+### Added
+
+- **Session resume.** `osa resume <id>` picks a previous session back up, and the id
+  is printed on exit so it is available when you need it.
+- **`--model` and `--provider` flags** for selecting both from the command line.
+- **`/map`**, which renders the structure of a monorepo — including submodules and
+  nested repositories — rather than stopping at the top-level tree.
+
+### Changed — providers
+
+- **Added:** the Claude 5 family (**Opus 5, Sonnet 5, Fable 5, Haiku 4.5**),
+  **GPT-5.6**, **kimi-k3** and **gemma4**.
+- **Retired model ids removed** across Google, Groq, Cohere, DeepSeek, xAI, Mistral,
+  Replicate, Cerebras and Fireworks, so the catalog no longer offers models that no
+  longer answer.
+- **Gemini thinking configuration and tool round-trip both fixed** — each was broken,
+  so thinking settings did not apply and tool calls did not complete their loop.
+- **Onboarding validates keys against each provider's own API**, so a key that will
+  not work is caught while you are setting it up rather than at first use.
+
+### Changed — resource growth and timestamps
+
+- **Unbounded memory and disk growth is now bounded** across transcripts, embeddings,
+  background task files and several ETS tables, each of which previously grew without
+  limit for the life of the process or the install.
+- **Timestamps render in local time** instead of leaving you to convert.
+
 ## [1.0.47] — displays as `v1.0.047`
 
 ### Fixed — asking you a question deadlocked the turn

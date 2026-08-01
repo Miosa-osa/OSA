@@ -122,30 +122,66 @@ defmodule OptimalSystemAgent.MCP.Config do
         %Server{scope: :project} = s -> OptimalSystemAgent.MCP.ProjectApproval.approved?(s.name)
         _ -> true
       end)
+      |> Enum.reject(&excluded?(&1.name))
 
-    # Auto-discovered servers from other tools (Codex/Claude/Cursor). Native
-    # servers always win on name collision; discovered ones fill the rest and
-    # are enabled by default so they "just appear". Discovery is best-effort
-    # and never raises, but we still guard the whole append.
-    discovered =
-      if discovery_enabled?() do
-        native_names = MapSet.new(native, & &1.name)
+    # Servers imported from other tools (Codex/Claude/Cursor). OPT-IN — see
+    # `MCP.Discovery.import_enabled?/0`; `discover/0` returns [] when the
+    # operator has not asked for the inheritance. Native servers always win on
+    # name collision. Discovery is best-effort and never raises, but we still
+    # guard the whole append.
+    native_names = MapSet.new(native, & &1.name)
 
-        OptimalSystemAgent.MCP.Discovery.discover()
-        |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
-      else
-        []
-      end
+    imported =
+      OptimalSystemAgent.MCP.Discovery.discover()
+      |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
 
-    native ++ discovered
+    native ++ imported
   rescue
     _ -> load!()
   end
 
-  # Whether external-tool MCP discovery runs at boot. Off in tests so the suite
-  # never picks up the operator's real Codex/Claude config from $HOME.
-  defp discovery_enabled? do
-    Application.get_env(:optimal_system_agent, :mcp_discovery_enabled, true)
+  @doc """
+  Sanitized names on the MCP deny list.
+
+  Sources, unioned: the settings cascade key `"mcp_exclude"` (so
+  `~/.osa/settings.json` can carry it) and `config :optimal_system_agent,
+  :mcp_exclude`. Honoured for EVERY server source — OSA's own config, the
+  project `.mcp.json`, and anything imported from another tool — so one noisy
+  server can be killed without disabling a whole source.
+  """
+  @spec exclusions() :: MapSet.t(String.t())
+  def exclusions do
+    from_settings = normalize_exclusions(settings_get("mcp_exclude"))
+    from_env = normalize_exclusions(Application.get_env(:optimal_system_agent, :mcp_exclude, []))
+
+    MapSet.union(from_settings, from_env)
+  end
+
+  @doc "Whether `name` is on the MCP deny list (compared after sanitization)."
+  @spec excluded?(String.t()) :: boolean()
+  def excluded?(name) when is_binary(name), do: MapSet.member?(exclusions(), sanitize_name(name))
+  def excluded?(_), do: false
+
+  defp normalize_exclusions(list) when is_list(list) do
+    list
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&sanitize_name/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
+
+  defp normalize_exclusions(value) when is_binary(value), do: normalize_exclusions([value])
+  defp normalize_exclusions(_), do: MapSet.new()
+
+  # Settings reads must never take the boot path down. Trust-gated: an
+  # untrusted project's `.osa/settings.json` must not be able to register MCP
+  # servers (arbitrary subprocesses) before the workspace is trusted.
+  defp settings_get(key) do
+    OptimalSystemAgent.Settings.get_trusted(key)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
   end
 
   @doc """

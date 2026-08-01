@@ -138,9 +138,11 @@ defmodule OptimalSystemAgent.Agents.RegistryTest do
   end
 
   defp tmp_dir do
-    dir = Path.join(System.tmp_dir!(), "osa_agent_registry_#{System.unique_integer([:positive])}")
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+    dir = Path.join(System.tmp_dir!(), "osa_agent_registry_#{suffix}")
     File.rm_rf!(dir)
     File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
     dir
   end
 end

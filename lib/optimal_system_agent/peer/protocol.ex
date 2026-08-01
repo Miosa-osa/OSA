@@ -19,9 +19,15 @@ defmodule OptimalSystemAgent.Peer.Protocol do
   by async receivers. The table is public and set-typed — one record per ID.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   require Logger
 
   @handoffs_table :osa_peer_handoffs
+
+  # Row cap — handoffs are completed history and were never deleted. See
+  # Infra.BoundedTable.
+  @max_rows 1_000
 
   # ---------------------------------------------------------------------------
   # Structs
@@ -178,7 +184,7 @@ defmodule OptimalSystemAgent.Peer.Protocol do
   # ---------------------------------------------------------------------------
 
   defp store(%__MODULE__{} = handoff) do
-    :ets.insert(@handoffs_table, {handoff.id, handoff})
+    BoundedTable.insert(@handoffs_table, handoff.id, handoff, max: @max_rows)
   rescue
     _ -> :ok
   end

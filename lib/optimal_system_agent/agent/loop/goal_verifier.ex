@@ -35,10 +35,33 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       (not just "not yet done"). This should be surfaced to the model as a
       redirect, not a "try harder" nudge.
 
-  ## Budget discipline
+  ## Budget discipline — the three-tier gate
 
-  Two independent, cheap circuit breakers bound the cost of this stage before
-  it ever reaches for the expensive one (spawning a fresh subagent panel):
+  The panel is EXPENSIVE (N fresh subagent sessions) and must be unreachable
+  except through cheaper stages that decided it was warranted. Three tiers,
+  cheapest first:
+
+    * **Tier 0 — free, pure-local** (`skip_reason/1`). No session, no
+      accumulated write, run cap spent, stalled, no goal anywhere, or a
+      trivial turn (`trivial_turn?/1`). Costs nothing and short-circuits the
+      common interactive turn entirely.
+    * **Tier 1 — one cheap call** (`triage/1`). A low-token, zero-temperature,
+      hard-timeout classification returning `continue | candidate_complete |
+      blocked`, ported from grok-build's `goal_evaluator.rs`. `:continue` and
+      `:blocked` both stop here; only `:candidate_complete` may proceed. A
+      `:blocked` verdict carries a stable `blocker_key`, and the SAME key for
+      `@blocker_streak_threshold` consecutive rounds auto-pauses the goal loop
+      instead of spinning (identical to Codex's "`blocked` only after the same
+      blocker repeats 3 consecutive turns").
+    * **Tier 2 — the panel** (`verify/1`). Reached only from
+      `:candidate_complete`.
+
+  `maybe_gate/1` is the single entry point that runs all three in order; the
+  loop calls it at the TOOL-RESULT boundary (see `react_loop.ex`'s
+  `continue_after_tools/4`) so verification always precedes the model's
+  conclusion rather than re-entering after one was already presented.
+
+  Two further circuit breakers bound tier 2 once it is reached:
 
     * **Run cap** (`@max_runs`, mirrors `VerificationGate`'s `@max_reprompts`)
       — after N goal-verification rounds in a turn, the gate steps aside and
@@ -73,8 +96,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   alias OptimalSystemAgent.Agent.ProgressLedger
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Orchestrator
+  alias OptimalSystemAgent.Providers.Registry, as: Providers
 
   @type verdict :: :complete | :incomplete | :off_track
+  @type triage :: :continue | :candidate_complete | :blocked
 
   defmodule Result do
     @moduledoc "Aggregated panel verdict returned by `GoalVerifier.verify/1`."
@@ -111,6 +136,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Byte cap on the embedded diff sent to each skeptic. Past this the diff is
   # truncated with an explicit marker.
   @diff_max_bytes 256 * 1024
+
+  # Wall-clock bound for a SINGLE skeptic (env-overridable via
+  # `:goal_verifier_skeptic_timeout_ms`). See `panel_runner/0` for why the
+  # generic subagent backstop is the wrong bound here.
+  @default_skeptic_timeout_ms 120_000
 
   # Tool inventory available to a skeptic (must stay a subset of ToolExecutor's
   # :read_only tier — enforced again, redundantly, by
@@ -259,6 +289,541 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   # ---------------------------------------------------------------------------
+  # Cheap triage gate (grok `goal_evaluator.rs` parity)
+  # ---------------------------------------------------------------------------
+  #
+  # THE MISSING KEYSTONE. Previously `check/1`/`verify/1` were the only entry
+  # points and the expensive adversarial panel ran UNCONDITIONALLY whenever the
+  # local preconditions held — three read-only subagents, each a full LLM
+  # session, on every eligible boundary including a one-file config edit.
+  #
+  # grok-build never does that: `goal_evaluator.rs` is a ~30s SINGLE cheap call
+  # returning `continue | candidate_complete | blocked`, and ONLY
+  # `candidate_complete` is allowed to reach the expensive panel. OSA had ported
+  # the panel and not the gate. This section is the gate.
+  #
+  # Three tiers, cheapest first — each must pass before the next is paid for:
+  #
+  #   Tier 0 (free, pure-local)  — `skip_reason/1`: no session, no accumulated
+  #     work, run cap exhausted, stalled, no goal anywhere, or a trivial turn.
+  #   Tier 1 (~1 short call)     — `triage/1`: one low-token, tightly-timed
+  #     classification call. `:continue` and `:blocked` both stop here.
+  #   Tier 2 (N subagents)       — `verify/1`: the adversarial skeptic panel,
+  #     reached ONLY on `:candidate_complete`.
+
+  # A turn shorter than this (in ReAct iterations) is a pure question / one-shot
+  # answer — nothing an adversarial panel could usefully judge.
+  @trivial_max_iterations 2
+
+  # A turn that produced at most this many successful writes is a trivial edit
+  # (the observed pathology: installing an MCP server = ONE JSON config write).
+  @trivial_max_writes 1
+
+  # Consecutive triage rounds citing the SAME `blocker_key` before the loop
+  # auto-pauses instead of spinning. grok uses this; Codex uses the identical
+  # rule ("`blocked` only after the same blocker repeats 3 consecutive turns").
+  @blocker_streak_threshold 3
+
+  # Bounds on the triage call itself. It must stay CHEAP or it is just a second
+  # tax on top of the panel: low token cap, zero temperature, hard wall clock.
+  @default_triage_timeout_ms 30_000
+  @default_triage_max_tokens 200
+
+  @doc """
+  The single gate the loop calls. Runs the cheapest sufficient tier and returns
+  the (possibly directive-augmented) state.
+
+  Called at the TOOL-RESULT boundary — before the model generates its next
+  message — never after a response has already been presented to the user. See
+  the "one ending" note in `react_loop.ex`'s `continue_after_tools/4`.
+
+  Returns `state`, with at most one `system` directive appended to
+  `state.messages` and the run-cap / stall / blocker counters advanced. Never
+  raises: any failure degrades to "skip this boundary" (see `triage/1`).
+  """
+  @spec maybe_gate(map()) :: map()
+  def maybe_gate(state) when is_map(state) do
+    cond do
+      not activated?(state) ->
+        state
+
+      Map.get(state, :goal_verifier_paused, false) ->
+        state
+
+      (reason = skip_reason(state)) != nil ->
+        log_skip(state, reason)
+        state
+
+      not GoalTracker.reverify_due?(Map.get(state, :session_id)) ->
+        state
+
+      true ->
+        run_gate(state)
+    end
+  end
+
+  def maybe_gate(state), do: state
+
+  defp run_gate(state) do
+    case triage(state) do
+      {:candidate_complete, _meta} ->
+        state = clear_blocker(state)
+        {result, state} = verify(state)
+        GoalTracker.advance(Map.get(state, :session_id), result)
+
+        case result.verdict do
+          :complete ->
+            state
+
+          _ ->
+            {directive, state} = build_directive(result, state)
+            append_directive(state, directive)
+        end
+
+      {:blocked, meta} ->
+        handle_blocked(state, meta)
+
+      {:continue, _meta} ->
+        clear_blocker(state)
+
+      # Triage could not be classified at all. FAIL-OPEN (skip the panel), and
+      # deliberately so — see `triage/1`'s moduledoc note.
+      {:error, reason} ->
+        Logger.info("[goal-verifier] triage unavailable (#{inspect(reason)}) — deferring panel")
+
+        Bus.emit(:system_event, %{
+          event: :goal_verifier_triage,
+          session_id: Map.get(state, :session_id),
+          status: :error,
+          reason: to_string(inspect(reason))
+        })
+
+        state
+    end
+  end
+
+  @doc """
+  Pure-local, zero-cost skip decision. Returns `nil` when this boundary is
+  worth spending a triage call on, or the reason atom to skip.
+
+  Skip conditions (each is a turn that obviously cannot benefit from an
+  adversarial goal panel):
+
+    * `:no_session`  — no session id to verify against.
+    * `:no_work`     — no successful write on record this session. A read-only
+      or purely conversational turn produced nothing to refute.
+    * `:run_cap`     — the per-turn goal-verification round cap is spent.
+    * `:stalled`     — the stall early-exit already tripped.
+    * `:no_goal`     — no goal anywhere (no `ProgressLedger` goal, no anchored
+      `GoalTracker` goal). Without a goal the panel would be judging the work
+      against a guess at the first user message — expensive and meaningless.
+    * `:trivial`     — a trivial turn, per `trivial_turn?/1`.
+  """
+  @spec skip_reason(map()) :: atom() | nil
+  def skip_reason(state) when is_map(state) do
+    session_id = Map.get(state, :session_id)
+
+    cond do
+      session_id == nil -> :no_session
+      Map.get(state, :goal_verifier_runs, 0) >= max_runs() -> :run_cap
+      stalled?(state) -> :stalled
+      not has_accumulated_work?(session_id) -> :no_work
+      not has_goal?(state) -> :no_goal
+      trivial_turn?(state) -> :trivial
+      true -> nil
+    end
+  end
+
+  def skip_reason(_), do: :no_session
+
+  @doc """
+  `true` for a turn too small to be worth ANY verification spend.
+
+  Triviality is about SIZE, not about whether a goal is anchored — a goal can
+  be "install the MCP server", which is one JSON write and needs no panel. A
+  long turn (past `goal_verifier_activate_after_iterations`) is never trivial;
+  that escape is what keeps a genuinely complex turn on the full-verification
+  path even if it happens to concentrate its edits in one file.
+
+  Otherwise trivial when EITHER:
+
+    * the turn ran at most `@trivial_max_iterations` ReAct iterations — a pure
+      question answered in one round; or
+    * the session has at most `@trivial_max_writes` successful write(s) — a
+      single-file edit. This is the observed pathology: an MCP-server install
+      is one JSON config write and paid for a full skeptic panel.
+  """
+  @spec trivial_turn?(map()) :: boolean()
+  def trivial_turn?(state) when is_map(state) do
+    cond do
+      Map.get(state, :iteration, 0) >= activate_after_iterations() -> false
+      Map.get(state, :iteration, 0) <= trivial_max_iterations() -> true
+      write_count(Map.get(state, :session_id)) <= trivial_max_writes() -> true
+      true -> false
+    end
+  end
+
+  def trivial_turn?(_), do: true
+
+  @doc """
+  The cheap triage call. ONE low-token, zero-temperature, hard-timeout
+  classification that decides whether the expensive panel is warranted.
+
+  Returns `{:continue | :candidate_complete | :blocked, meta}` or
+  `{:error, reason}`.
+
+  ## Fail-open, and why that is not weakening correctness
+
+  A triage that cannot run degrades to SKIP, not to "run the panel". The
+  triage call goes to the same provider that just drove the turn, so a triage
+  failure means that provider is unhealthy — in which case every skeptic would
+  also fail, and a fail-closed panel of failures is a synthetic
+  majority-refute, i.e. an `:incomplete` gate that loops the agent for no
+  information at 3× the cost. Skipping does NOT assert completion: the
+  `GoalTracker` "verified" state is left untouched, so `reverify_due?/1` still
+  fires at the next boundary and the panel's own fail-closed vote semantics are
+  unchanged wherever the panel actually runs. The gate defers; it never passes.
+
+  Injectable for tests via `:goal_verifier_triage_runner` —
+  `fn state -> {:ok, raw_text} | {:error, reason} end`.
+  """
+  @spec triage(map()) :: {triage(), map()} | {:error, term()}
+  def triage(state) when is_map(state) do
+    case call_triage(state) do
+      {:ok, raw} when is_binary(raw) -> parse_triage(raw)
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_triage_result, other}}
+    end
+  end
+
+  def triage(_), do: {:error, :no_state}
+
+  defp call_triage(state) do
+    runner =
+      Application.get_env(:optimal_system_agent, :goal_verifier_triage_runner, &default_triage/1)
+
+    # The runner is rescued INSIDE the task: `Task.async` links, so an
+    # unrescued raise in the triage call would take the whole agent loop down
+    # with it. A cost gate must never be able to kill the turn it is gating.
+    task =
+      Task.async(fn ->
+        try do
+          runner.(state)
+        rescue
+          e -> {:error, Exception.message(e)}
+        catch
+          kind, reason -> {:error, {kind, reason}}
+        end
+      end)
+
+    case Task.yield(task, triage_timeout_ms()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> {:error, :timeout}
+      {:exit, reason} -> {:error, {:exit, reason}}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp default_triage(state) do
+    opts = [
+      max_tokens: triage_max_tokens(),
+      temperature: 0.0,
+      # Low reasoning effort: this is a classification, not an analysis. Providers
+      # that don't understand the key ignore it.
+      reasoning_effort: :low
+    ]
+
+    case Providers.chat(triage_messages(state), opts) do
+      {:ok, %{content: content}} when is_binary(content) and content != "" -> {:ok, content}
+      {:ok, other} -> {:error, {:empty_triage_response, inspect(other)}}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected, inspect(other)}}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  # The exact message list the triage call sends. Public (but undocumented) so
+  # its COST is directly assertable — the whole point of this tier is that it
+  # stays small, and in particular that it never carries the diff (that is the
+  # panel's job). See the cost-ceiling assertion in goal_verifier_test.exs.
+  @doc false
+  @spec triage_messages(map()) :: [map()]
+  def triage_messages(state) when is_map(state) do
+    [
+      %{role: "system", content: triage_system_prompt()},
+      %{role: "user", content: triage_user_prompt(state)}
+    ]
+  end
+
+  defp triage_system_prompt do
+    """
+    You are a fast, cheap TRIAGE classifier inside an autonomous coding agent. \
+    You do NOT review the work for correctness — a separate, expensive adversarial \
+    panel does that, and your only job is to decide whether that panel is worth \
+    spending. Answer in one JSON object and nothing else.
+
+        {"status": "continue" | "candidate_complete" | "blocked", "reason": "<one short sentence>", "blocker_key": "<stable_snake_case_id_or_empty>"}
+
+      - "continue": the agent is still mid-work on the goal. There is obviously \
+        more to do. This is the DEFAULT and the cheapest answer — prefer it \
+        whenever work plainly remains.
+      - "candidate_complete": the agent appears to have finished everything the \
+        goal asked for. Only this status triggers the expensive review, so use it \
+        when the work looks done and a rigorous check is genuinely warranted.
+      - "blocked": progress is stuck on something the agent cannot resolve by \
+        itself (a missing credential, an unavailable service, a contradictory \
+        requirement, a needed user decision). When and only when you answer \
+        "blocked", set "blocker_key" to a SHORT, STABLE snake_case identifier for \
+        the blocking reason (e.g. "missing_api_key", "port_in_use", \
+        "ambiguous_requirement"). The SAME underlying blocker must produce the \
+        SAME key every time you see it — the key is compared across rounds, so do \
+        not reword it.
+
+    Output the JSON object only. No prose, no markdown fence.
+    """
+  end
+
+  # A deliberately COMPACT digest — the triage call must stay cheap, so it never
+  # gets the diff (that is the panel's job) and never gets the full transcript.
+  @triage_goal_bytes 1_500
+  @triage_tail_bytes 1_200
+
+  defp triage_user_prompt(state) do
+    session_id = Map.get(state, :session_id)
+
+    """
+    ## Goal
+
+    #{truncate(resolve_goal(state), @triage_goal_bytes)}
+
+    ## Progress so far
+
+    - ReAct iterations this turn: #{Map.get(state, :iteration, 0)}
+    - Successful writes this session: #{write_count(session_id)}
+    - Files touched: #{written_paths(session_id)}
+
+    ## The agent's most recent output
+
+    #{truncate(recent_tail(state), @triage_tail_bytes)}
+
+    Classify. JSON object only.
+    """
+  end
+
+  # Last assistant text plus the last tool result — enough for "is this done?"
+  # without shipping the transcript.
+  defp recent_tail(state) do
+    state
+    |> Map.get(:messages, [])
+    |> Enum.reverse()
+    |> Enum.filter(&(message_role(&1) in ["assistant", "tool"]))
+    |> Enum.take(3)
+    |> Enum.reverse()
+    |> Enum.map_join("\n\n", fn m ->
+      "[#{message_role(m)}] #{content_text(Map.get(m, :content))}"
+    end)
+    |> case do
+      "" -> "(no recent assistant/tool output)"
+      text -> text
+    end
+  end
+
+  defp content_text(c) when is_binary(c), do: c
+  defp content_text(c) when is_list(c), do: Enum.map_join(c, " ", &content_text/1)
+  defp content_text(%{"text" => t}) when is_binary(t), do: t
+  defp content_text(%{text: t}) when is_binary(t), do: t
+  defp content_text(other), do: inspect(other)
+
+  defp truncate(text, max) when is_binary(text) do
+    if byte_size(text) > max, do: binary_part(text, 0, max) <> "\u{2026}", else: text
+  end
+
+  defp truncate(other, max), do: truncate(to_string(other), max)
+
+  # Reuses the panel's already-lenient JSON extraction — the same models produce
+  # the same fenced/prose-wrapped output here.
+  defp parse_triage(raw) do
+    case extract_json(raw) do
+      {:ok, json} when is_map(json) ->
+        meta = %{
+          reason: json_reason(json),
+          blocker_key: normalize_blocker_key(Map.get(json, "blocker_key"), json_reason(json))
+        }
+
+        case status_atom(Map.get(json, "status")) do
+          nil -> fallback_triage(raw, meta)
+          status -> {status, meta}
+        end
+
+      _ ->
+        fallback_triage(raw, %{reason: raw_summary(raw), blocker_key: nil})
+    end
+  end
+
+  defp status_atom(v) when is_binary(v) do
+    case v |> String.downcase() |> String.trim() do
+      "continue" -> :continue
+      "candidate_complete" -> :candidate_complete
+      "candidate-complete" -> :candidate_complete
+      "complete" -> :candidate_complete
+      "blocked" -> :blocked
+      _ -> nil
+    end
+  end
+
+  defp status_atom(_), do: nil
+
+  # No JSON / no recognizable status. Look for a bare token; failing that, treat
+  # it as an error so the caller's fail-open path (defer, don't pass) runs —
+  # rather than guessing `candidate_complete` and paying for a panel on noise.
+  defp fallback_triage(raw, meta) do
+    down = String.downcase(raw)
+
+    cond do
+      String.contains?(down, "candidate_complete") -> {:candidate_complete, meta}
+      String.contains?(down, "blocked") -> {:blocked, meta}
+      String.contains?(down, "continue") -> {:continue, meta}
+      true -> {:error, {:unparsable_triage, raw_summary(raw)}}
+    end
+  end
+
+  # ── blocker_key streak (grok + Codex: 3 consecutive identical blockers) ────
+
+  defp handle_blocked(state, meta) do
+    key = meta[:blocker_key] || "unknown_blocker"
+    prev = Map.get(state, :goal_verifier_blocker_key)
+    streak = if prev == key, do: Map.get(state, :goal_verifier_blocker_streak, 0) + 1, else: 1
+
+    state =
+      state
+      |> Map.put(:goal_verifier_blocker_key, key)
+      |> Map.put(:goal_verifier_blocker_streak, streak)
+      |> Map.put_new(:goal_verifier_paused, false)
+
+    Bus.emit(:system_event, %{
+      event: :goal_verifier_triage,
+      session_id: Map.get(state, :session_id),
+      status: :blocked,
+      blocker_key: key,
+      streak: streak,
+      threshold: blocker_streak_threshold()
+    })
+
+    if streak >= blocker_streak_threshold() do
+      Logger.info(
+        "[goal-verifier] blocker #{inspect(key)} repeated #{streak}× — auto-pausing the goal loop"
+      )
+
+      directive = %{
+        role: "system",
+        content:
+          "[GOAL VERIFIER: AUTO-PAUSE] The same blocker (`#{key}`) has stopped progress for " <>
+            "#{streak} consecutive rounds: #{meta[:reason] || "(no reason given)"}\n" <>
+            "Repeating the same approach will not clear it. STOP working the goal now. " <>
+            "Explain to the user, in your final answer, exactly what is blocking you and what " <>
+            "you need from them (a credential, a decision, an unavailable dependency). Do NOT " <>
+            "attempt the same step again."
+      }
+
+      state
+      |> Map.put(:goal_verifier_paused, true)
+      |> append_directive(directive)
+    else
+      Logger.info(
+        "[goal-verifier] triage=blocked key=#{inspect(key)} streak=#{streak}/#{blocker_streak_threshold()}"
+      )
+
+      state
+    end
+  end
+
+  defp clear_blocker(state) do
+    state
+    |> Map.put(:goal_verifier_blocker_key, nil)
+    |> Map.put(:goal_verifier_blocker_streak, 0)
+  end
+
+  # Stability is the whole point of the key — normalize aggressively so trivial
+  # rewording ("Missing API key" vs "missing_api_key") does not reset the streak.
+  defp normalize_blocker_key(key, fallback_reason) do
+    normalized =
+      key
+      |> to_string()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+
+    cond do
+      normalized != "" -> normalized
+      is_binary(fallback_reason) -> "reason_" <> to_string(:erlang.phash2(significant_words(fallback_reason)))
+      true -> "unknown_blocker"
+    end
+  end
+
+  defp append_directive(state, directive) do
+    Map.put(state, :messages, Map.get(state, :messages, []) ++ [directive])
+  end
+
+  defp log_skip(state, reason) do
+    Logger.debug(
+      "[goal-verifier] skipped (#{reason}) session=#{inspect(Map.get(state, :session_id))} " <>
+        "iteration=#{Map.get(state, :iteration, 0)}"
+    )
+  end
+
+  defp has_goal?(state) do
+    goal_loop?(state) or ledger_goal(state) != nil
+  end
+
+  defp write_entries(session_id) when is_binary(session_id) do
+    Enum.filter(VerificationEvidence.entries(session_id), fn e ->
+      Map.get(e, :kind) == :write and Map.get(e, :success) == true
+    end)
+  rescue
+    _ -> []
+  end
+
+  defp write_entries(_), do: []
+
+  # DISTINCT write TARGETS, not write calls: five edits to one config file is
+  # one thing changed, and the trivial-turn test is about how much of the
+  # workspace moved. Falls back to the raw entry count when no path was
+  # extractable (a write tool whose args the ledger could not parse).
+  defp write_count(session_id) do
+    entries = write_entries(session_id)
+
+    case written_path_list(entries) do
+      [] -> length(entries)
+      paths -> length(paths)
+    end
+  end
+
+  defp written_path_list(entries) do
+    entries
+    |> Enum.flat_map(fn e -> List.wrap(Map.get(e, :paths)) end)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.map(&to_string/1)
+    |> Enum.uniq()
+  end
+
+  defp written_paths(session_id) do
+    session_id
+    |> write_entries()
+    |> written_path_list()
+    |> Enum.take(12)
+    |> case do
+      [] -> "(none recorded)"
+      paths -> Enum.join(paths, ", ")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Panel run
   # ---------------------------------------------------------------------------
 
@@ -306,7 +871,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       stall_count: stall_count,
       # Compact, already lens-tagged gap summary (first two, each truncated) so
       # the TUI can show WHAT is missing without shipping the full findings.
-      gaps: compact_gaps(gaps)
+      #
+      # Deliberately NOT `result.gaps`: only findings that are genuinely
+      # user-meaningful reach the status bar. Harness diagnostics (a skeptic
+      # that timed out / crashed) and low-confidence unparsed responses are
+      # logged instead — an internal parse failure must never render as a
+      # user-facing warning badge.
+      gaps: compact_gaps(display_gaps(skeptic_results))
     })
 
     Logger.info(
@@ -397,6 +968,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
           task: skeptic_prompt(goal, diff, idx, lens),
           role: "goal-verifier-skeptic",
           name: "goal-skeptic-#{idx}-#{lens.key}",
+          # What this worker IS, for the TUI roster. Without it the orchestrator
+          # falls back to the first 80 chars of `:task` — which for a skeptic is
+          # the adversarial system prompt, so the roster showed prompt body
+          # ("You are an ADVERSARIAL, INDEPENDENT reviewer…") as the agent label.
+          description: "skeptic ##{idx + 1} · #{String.downcase(lens.title)}",
           lens: lens.key,
           tier: :specialist,
           permission_tier: :read_only,
@@ -418,11 +994,32 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       Logger.warning("[goal-verifier] panel spawn raised: #{Exception.message(e)}")
       # Fail-closed: a panel that could not run at all is treated as a single
       # synthetic refute so a crashed panel can never silently pass the goal.
-      [%{refuted: true, off_track: false, reason: "panel spawn failed: #{Exception.message(e)}", lens: :panel}]
+      # Flagged `internal` — it votes, but it is a harness diagnostic, not a
+      # finding, so it never reaches the status bar or the feedback nudge.
+      [
+        %{
+          refuted: true,
+          off_track: false,
+          reason: "panel spawn failed: #{Exception.message(e)}",
+          lens: :panel,
+          confidence: :low,
+          internal: true
+        }
+      ]
   catch
     :exit, reason ->
       Logger.warning("[goal-verifier] panel spawn exited: #{inspect(reason)}")
-      [%{refuted: true, off_track: false, reason: "panel spawn exited: #{inspect(reason)}", lens: :panel}]
+
+      [
+        %{
+          refuted: true,
+          off_track: false,
+          reason: "panel spawn exited: #{inspect(reason)}",
+          lens: :panel,
+          confidence: :low,
+          internal: true
+        }
+      ]
   end
 
   # Attach the lens each skeptic was assigned to its parsed verdict, so a
@@ -443,13 +1040,27 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   # Injectable for tests: `Application.put_env(:optimal_system_agent,
   # :goal_verifier_panel_runner, fn session_id, configs -> [...] end)`.
-  # Production default spawns via `Orchestrator.run_read_only_panel/2`, which
+  # Production default spawns via `Orchestrator.run_read_only_panel/3`, which
   # itself force-locks every config to the read-only tier/tool set.
+  #
+  # The explicit `await_timeout:` is load-bearing. Without it the panel
+  # inherits `Orchestrator`'s generic `:subagent_await_timeout_ms` backstop of
+  # **two hours**, which is the right bound for a long delegated workstream and
+  # badly wrong for a skeptic: a skeptic is a read-only vote capped at 6
+  # iterations that BLOCKS the user's turn while the panel is joined, so one
+  # wedged skeptic (a stuck provider stream, a retry storm) silently stalls the
+  # whole turn behind it. `goal_verifier_skeptic_timeout_ms` gives the stage its
+  # own, much tighter bound; a skeptic past it is reaped by `run_parallel` and
+  # counted as a fail-closed refute, exactly like a crash.
   defp panel_runner do
     Application.get_env(
       :optimal_system_agent,
       :goal_verifier_panel_runner,
-      &Orchestrator.run_read_only_panel/2
+      fn session_id, configs ->
+        Orchestrator.run_read_only_panel(session_id, configs,
+          await_timeout: skeptic_timeout_ms()
+        )
+      end
     )
   end
 
@@ -543,14 +1154,30 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
        to inspect the actual repository state (the diff can lie about context; the files cannot).
     2. Judge the goal THROUGH YOUR #{lens.title} LENS specifically — do not try to re-check every \
        possible angle; other independent reviewers cover the other angles.
-    3. Reply with EXACTLY one JSON object on its own line, and nothing else after it:
+    3. Reply with your verdict as a SINGLE JSON object.
 
-       {"refuted": true|false, "off_track": true|false, "reason": "one sentence, cite a concrete gap or confirmation"}
+    ## Output contract (strict — read this twice)
 
-       - "refuted": true means you found a concrete reason the goal is NOT fully met.
-       - "off_track": true means (only when refuted) the goal looks unachievable as currently \
-         framed (contradiction, missing prerequisite, wrong approach) rather than simply \
-         unfinished. Leave it false for an ordinary "not done yet" gap.
+    Your ENTIRE final message must be exactly one JSON object and nothing else. No prose before \
+    it, no prose after it, no markdown code fence, no explanation of your reasoning outside the \
+    object. The object has EXACTLY these three fields, all required:
+
+        {"refuted": <boolean>, "off_track": <boolean>, "reason": "<one sentence>"}
+
+      - "refuted" (boolean, required): `true` means you found a concrete reason the goal is NOT \
+        fully met. `false` means you did not. Must be a JSON boolean — not "true", not "yes".
+      - "off_track" (boolean, required): `true` only when "refuted" is also true AND the goal \
+        looks unachievable as currently framed (contradiction, missing prerequisite, wrong \
+        approach) rather than simply unfinished. Otherwise `false`.
+      - "reason" (string, required): ONE sentence. When refuting, cite the concrete gap \
+        (file / symbol / requirement). When not refuting, name what you checked. Keep it under \
+        200 characters and do not embed newlines.
+
+    Two valid examples, exactly as they should appear:
+
+        {"refuted": false, "off_track": false, "reason": "the exporter is implemented in lib/widget/exporter.ex and handles the empty-input case"}
+
+        {"refuted": true, "off_track": false, "reason": "lib/widget/exporter.ex writes CSV but the goal asked for JSON output"}
     """
   end
 
@@ -602,7 +1229,28 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Each gap is prefixed with the lens that caught it, so the feedback nudge
   # tells the agent WHICH failure mode is unmet (correctness vs completeness
   # vs verifiability) — strictly more actionable than a bare reason.
-  defp gap_list(refuters), do: Enum.map(refuters, &lens_prefixed_reason/1)
+  #
+  # Harness diagnostics (`internal: true` — a skeptic that crashed or timed
+  # out) are dropped: they still count as fail-closed refutes in the VOTE, but
+  # "skeptic failed: :timeout" is not a gap the agent can act on. A
+  # low-confidence raw-text review IS kept — an unstructured review is still
+  # information — but is labelled so the agent knows it was not structured.
+  defp gap_list(refuters) do
+    refuters
+    |> Enum.reject(&internal?/1)
+    |> Enum.map(&lens_prefixed_reason/1)
+  end
+
+  # The strictly narrower projection that may reach the USER (status bar):
+  # refuting, non-internal, and confidently parsed. Anything the harness could
+  # not read properly is logged, not badged.
+  defp display_gaps(results) do
+    results
+    |> Enum.filter(&(&1.refuted and not internal?(&1) and Map.get(&1, :confidence, :high) != :low))
+    |> Enum.map(&lens_prefixed_reason/1)
+  end
+
+  defp internal?(result), do: Map.get(result, :internal, false) == true
 
   # A tiny, TUI-sized projection of the gap list for the emitted event: at most
   # the first two lens-tagged gaps, each truncated, so the status indicator can
@@ -627,12 +1275,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   defp truncate_gap(gap), do: to_string(gap)
 
-  defp lens_prefixed_reason(%{lens: lens, reason: reason})
-       when lens in [:correctness, :completeness, :verifiability] do
-    "[#{lens}] #{reason}"
-  end
+  defp lens_prefixed_reason(%{reason: reason} = result) do
+    lens = Map.get(result, :lens)
+    prefix = if lens in [:correctness, :completeness, :verifiability], do: "[#{lens}] ", else: ""
 
-  defp lens_prefixed_reason(%{reason: reason}), do: reason
+    # A tier-3 (unstructured) review is still fed back, but honestly labelled
+    # so the agent weighs it as a free-form note rather than a crisp finding.
+    marker =
+      if Map.get(result, :confidence, :high) == :low, do: "(unstructured review) ", else: ""
+
+    prefix <> marker <> to_string(reason)
+  end
 
   # Stable fingerprint of the CURRENT refuting gaps, used by the stall
   # early-exit: two consecutive rounds citing the SAME underlying gap set
@@ -741,17 +1394,50 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   # ---------------------------------------------------------------------------
-  # Skeptic response parsing (JSON, with fail-closed fallback)
+  # Skeptic response parsing — LENIENT, three-tier (never errors out)
   # ---------------------------------------------------------------------------
+  #
+  # A review that cannot be parsed is still information; failing the whole
+  # verification (or, worse, surfacing "unparsable skeptic response" to the
+  # user as a *gap*) because of formatting is strictly worse than degrading.
+  # So parsing always produces a usable verdict, via three tiers:
+  #
+  #   1. STRICT     — the whole response (fences stripped) is a JSON object.
+  #   2. BRACE-SLICE— the outermost `{...}` span in the text, then each
+  #      balanced `{...}` candidate, decoded in turn. Models routinely wrap the
+  #      object in prose or a ```json fence despite instructions.
+  #   3. DEGRADE    — no JSON at all: look for an explicit REFUTED /
+  #      NOT_REFUTED token, and failing even that, keep the RAW TEXT as the
+  #      explanation and return a valid, `confidence: :low` result. Never an
+  #      error, never a synthetic "unparsable…" string masquerading as a
+  #      finding.
+  #
+  # Every parsed result carries two housekeeping keys used by the surfacing
+  # layer (see `display_gaps/1`):
+  #
+  #   * `:confidence` — `:high` (structured JSON), `:medium` (token fallback),
+  #     `:low` (tier 3 — raw text kept as the explanation).
+  #   * `:internal`   — `true` when the "reason" is a harness diagnostic
+  #     (spawn failed, timed out, unrecognized shape) rather than a review
+  #     finding. Internal diagnostics are logged, never shown to the user and
+  #     never fed back to the model as a "gap".
 
   defp parse_skeptic_result({:ok, response}) when is_binary(response) do
     case extract_json(response) do
-      {:ok, %{"refuted" => refuted} = json} when is_boolean(refuted) ->
-        %{
-          refuted: refuted,
-          off_track: Map.get(json, "off_track", false) == true,
-          reason: Map.get(json, "reason", "(no reason given)") |> to_string()
-        }
+      {:ok, json} when is_map(json) ->
+        case coerce_bool(Map.get(json, "refuted")) do
+          refuted when is_boolean(refuted) ->
+            %{
+              refuted: refuted,
+              off_track: coerce_bool(Map.get(json, "off_track")) == true,
+              reason: json_reason(json),
+              confidence: :high,
+              internal: false
+            }
+
+          _ ->
+            fallback_parse(response)
+        end
 
       _ ->
         fallback_parse(response)
@@ -760,49 +1446,219 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   defp parse_skeptic_result({:error, reason}) do
     # A skeptic that failed to run at all (crashed / timed out) cannot vouch
-    # for completion — count it as a refute, same as a malformed verdict.
-    %{refuted: true, off_track: false, reason: "skeptic failed: #{inspect(reason)}"}
+    # for completion — count it as a refute, same as a malformed verdict. The
+    # reason is a harness diagnostic, so it is flagged `internal` and never
+    # surfaces as a user-facing gap.
+    Logger.warning("[goal-verifier] skeptic did not complete: #{inspect(reason)}")
+    %{refuted: true, off_track: false, reason: "skeptic failed: #{inspect(reason)}", confidence: :low, internal: true}
   end
 
   defp parse_skeptic_result(other) do
-    %{refuted: true, off_track: false, reason: "unrecognized skeptic result: #{inspect(other)}"}
+    Logger.warning("[goal-verifier] unrecognized skeptic result shape: #{inspect(other)}")
+
+    %{
+      refuted: true,
+      off_track: false,
+      reason: "unrecognized skeptic result: #{inspect(other)}",
+      confidence: :low,
+      internal: true
+    }
   end
 
-  # Find the first JSON object in the response text (models often wrap it in
-  # prose or a code fence despite instructions).
-  defp extract_json(text) do
-    case Regex.run(~r/\{[^{}]*"refuted"[^{}]*\}/s, text) do
-      [json_str] -> Jason.decode(json_str)
-      nil -> :error
+  # Tiers 1 + 2. Returns `{:ok, map}` or `:error` — never raises.
+  defp extract_json(text) when is_binary(text) do
+    stripped = strip_fences(text)
+
+    with :error <- decode_map(stripped),
+         :error <- brace_slice(stripped),
+         :error <- brace_slice(text),
+         :error <- balanced_candidates(stripped),
+         :error <- balanced_candidates(text) do
+      :error
     end
   rescue
     _ -> :error
   end
 
-  # Terminal-token fallback (mirrors grok's non-JSON fallback): look for an
-  # explicit REFUTED / NOT_REFUTED token; anything else defaults to refuted
-  # (fail-closed — "default to not-complete if uncertain").
+  defp extract_json(_), do: :error
+
+  # Strip a leading/trailing markdown code fence (```json … ```), which models
+  # add roughly as often as they omit it.
+  defp strip_fences(text) do
+    text
+    |> String.trim()
+    |> String.replace(~r/\A```[a-zA-Z0-9_-]*\s*\n?/, "")
+    |> String.replace(~r/\n?```\s*\z/, "")
+    |> String.trim()
+  end
+
+  defp decode_map(str) when is_binary(str) do
+    case Jason.decode(String.trim(str)) do
+      {:ok, map} when is_map(map) -> {:ok, map}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp decode_map(_), do: :error
+
+  # Tier 2a — the OUTERMOST `{...}` span (first `{` through last `}`). Handles
+  # the common "prose … {json} … prose" wrapper in one shot.
+  defp brace_slice(text) when is_binary(text) do
+    with {open, _} <- first_match(text, "{"),
+         close when is_integer(close) and close > open <- last_match(text, "}") do
+      text |> binary_part(open, close - open + 1) |> decode_map()
+    else
+      _ -> :error
+    end
+  end
+
+  defp brace_slice(_), do: :error
+
+  defp first_match(text, pattern) do
+    case :binary.match(text, pattern) do
+      :nomatch -> nil
+      match -> match
+    end
+  end
+
+  defp last_match(text, pattern) do
+    case :binary.matches(text, pattern) do
+      [] -> nil
+      matches -> matches |> List.last() |> elem(0)
+    end
+  end
+
+  # Tier 2b — every balanced `{...}` candidate, innermost-first, preferring the
+  # one that actually carries a "refuted" key. Rescues the case where the model
+  # emitted several objects (e.g. an example plus the real verdict).
+  @max_object_candidates 24
+
+  defp balanced_candidates(text) when is_binary(text) do
+    candidates = object_candidates(text)
+
+    Enum.find_value(candidates, fn cand ->
+      case decode_map(cand) do
+        {:ok, map} -> if Map.has_key?(map, "refuted"), do: {:ok, map}, else: nil
+        :error -> nil
+      end
+    end) ||
+      Enum.find_value(candidates, :error, fn cand ->
+        case decode_map(cand) do
+          {:ok, map} -> {:ok, map}
+          :error -> nil
+        end
+      end)
+  end
+
+  defp balanced_candidates(_), do: :error
+
+  defp object_candidates(text) do
+    opens = Enum.map(:binary.matches(text, "{"), fn {p, _} -> {p, :open} end)
+    closes = Enum.map(:binary.matches(text, "}"), fn {p, _} -> {p, :close} end)
+
+    {objects, _stack} =
+      (opens ++ closes)
+      |> Enum.sort()
+      |> Enum.reduce({[], []}, fn
+        {p, :open}, {objs, stack} ->
+          {objs, [p | stack]}
+
+        {p, :close}, {objs, [open | rest]} ->
+          {[binary_part(text, open, p - open + 1) | objs], rest}
+
+        {_p, :close}, {objs, []} ->
+          {objs, []}
+      end)
+
+    objects |> Enum.reverse() |> Enum.take(@max_object_candidates)
+  end
+
+  defp coerce_bool(v) when is_boolean(v), do: v
+
+  defp coerce_bool(v) when is_binary(v) do
+    case String.downcase(String.trim(v)) do
+      s when s in ~w(true yes y 1) -> true
+      s when s in ~w(false no n 0) -> false
+      _ -> nil
+    end
+  end
+
+  defp coerce_bool(1), do: true
+  defp coerce_bool(0), do: false
+  defp coerce_bool(_), do: nil
+
+  # The explanation field, under any of the names a model plausibly picks.
+  @reason_keys ~w(reason explanation summary justification rationale detail message)
+
+  defp json_reason(json) do
+    Enum.find_value(@reason_keys, "(no reason given)", fn key ->
+      case Map.get(json, key) do
+        v when is_binary(v) ->
+          case String.trim(v) do
+            "" -> nil
+            trimmed -> trimmed
+          end
+
+        v when not is_nil(v) and not is_map(v) and not is_list(v) ->
+          to_string(v)
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  # Tier 3 — no JSON anywhere. Look for an explicit REFUTED / NOT_REFUTED token
+  # (mirrors grok's non-JSON fallback); anything else keeps the raw text as the
+  # explanation and degrades to a low-confidence, fail-closed refute rather than
+  # erroring or fabricating an "unparsable…" finding.
+  @raw_reason_max 240
+
   defp fallback_parse(text) do
     down = String.downcase(text)
 
     cond do
       String.contains?(down, "off_track") or String.contains?(down, "off-track") ->
-        %{refuted: true, off_track: true, reason: String.slice(text, 0, 240)}
+        %{refuted: true, off_track: true, reason: raw_summary(text), confidence: :medium, internal: false}
 
       String.contains?(down, "not_refuted") or String.contains?(down, "not refuted") ->
-        %{refuted: false, off_track: false, reason: String.slice(text, 0, 240)}
+        %{refuted: false, off_track: false, reason: raw_summary(text), confidence: :medium, internal: false}
 
       String.contains?(down, "refuted") ->
-        %{refuted: true, off_track: false, reason: String.slice(text, 0, 240)}
+        %{refuted: true, off_track: false, reason: raw_summary(text), confidence: :medium, internal: false}
 
       true ->
+        # Deliberately NOT surfaced as a gap (see `display_gaps/1`): a
+        # formatting failure is an internal detail, not something the user
+        # should read off the status bar. Logged so it stays diagnosable.
+        Logger.warning(
+          "[goal-verifier] skeptic response carried no parseable verdict; degrading to " <>
+            "low-confidence fail-closed refute. raw=#{inspect(String.slice(text, 0, 400))}"
+        )
+
         %{
           refuted: true,
           off_track: false,
-          reason: "unparsable skeptic response (fail-closed): #{String.slice(text, 0, 200)}"
+          reason: raw_summary(text),
+          confidence: :low,
+          internal: false
         }
     end
   end
+
+  defp raw_summary(text) when is_binary(text) do
+    collapsed = text |> String.replace(~r/\s+/, " ") |> String.trim()
+
+    cond do
+      collapsed == "" -> "(reviewer returned an empty response)"
+      String.length(collapsed) > @raw_reason_max -> String.slice(collapsed, 0, @raw_reason_max) <> "\u{2026}"
+      true -> collapsed
+    end
+  end
+
+  defp raw_summary(other), do: raw_summary(to_string(other))
 
   # ---------------------------------------------------------------------------
   # Goal / diff sourcing
@@ -813,18 +1669,27 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # accomplish. Falls back to the first user message when no ledger goal has
   # been set yet.
   defp resolve_goal(state) do
+    ledger_goal(state) || first_user_message(state) ||
+      "(no explicit goal captured for this session)"
+  end
+
+  # The DURABLE goal only (no first-user-message fallback) — `skip_reason/1`'s
+  # `:no_goal` check must not be satisfied by a guess at the opening message.
+  defp ledger_goal(state) do
     session_id = Map.get(state, :session_id)
 
-    ledger_goal =
+    goal =
       case session_id && ProgressLedger.summarize(session_id) do
         {:ok, summary} -> extract_ledger_goal(summary)
         _ -> nil
       end
 
-    case ledger_goal do
-      goal when is_binary(goal) and goal != "" and goal != "_Not set._" -> goal
-      _ -> first_user_message(state) || "(no explicit goal captured for this session)"
+    case goal do
+      g when is_binary(g) and g != "" and g != "_Not set._" -> g
+      _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   defp extract_ledger_goal(summary) do
@@ -920,7 +1785,55 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     )
   end
 
+  defp skeptic_timeout_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_skeptic_timeout_ms,
+      @default_skeptic_timeout_ms
+    )
+  end
+
   defp diff_max_bytes do
     Application.get_env(:optimal_system_agent, :goal_verifier_diff_max_bytes, @diff_max_bytes)
+  end
+
+  defp trivial_max_iterations do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_trivial_max_iterations,
+      @trivial_max_iterations
+    )
+  end
+
+  defp trivial_max_writes do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_trivial_max_writes,
+      @trivial_max_writes
+    )
+  end
+
+  defp blocker_streak_threshold do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_blocker_streak_threshold,
+      @blocker_streak_threshold
+    )
+  end
+
+  defp triage_timeout_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_triage_timeout_ms,
+      @default_triage_timeout_ms
+    )
+  end
+
+  defp triage_max_tokens do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_triage_max_tokens,
+      @default_triage_max_tokens
+    )
   end
 end

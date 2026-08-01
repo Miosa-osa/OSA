@@ -18,8 +18,7 @@ defmodule OptimalSystemAgent.Settings.Schema do
   # or a fractional port, so does OSA).
   @known %{
     "env" => {:string_map, ~s(Use an object of NAME → value strings: {"env": {"FOO": "bar"}})},
-    "hooks" =>
-      {:map, ~s(Use {"hooks": {"pre_tool_use": [{"type": "shell", "command": "..."}]}})},
+    "hooks" => {:map, ~s(Use {"hooks": {"pre_tool_use": [{"type": "shell", "command": "..."}]}})},
     "permissions" =>
       {:map, ~s(Use {"permissions": {"allow": [...], "deny": [...], "ask": [...]}})},
     "agent_overrides" =>
@@ -42,6 +41,12 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "skin_engine_enabled" => {:boolean, "Use true or false (no quotes)"},
     "skill_curator_enabled" => {:boolean, "Use true or false (no quotes)"},
     "http_port" => {:pos_integer, "Use a whole-number port 1–65535, e.g. 9089"},
+    "mcp_import_foreign" =>
+      {:boolean,
+       "Use true or false — whether OSA imports MCP servers configured in OTHER tools such as Claude Code/Desktop, Cursor and Codex. Default false"},
+    "mcp_exclude" =>
+      {:string_list,
+       ~s(Use a list of server names to never load, from any source: {"mcp_exclude": ["serena"]})},
 
     # ── CC-parity keys (camelCase to match Claude Code settings.json) ──
     # Read by OSA today: disableAllHooks (agent/hooks/shell_hook.ex). The rest
@@ -164,11 +169,14 @@ defmodule OptimalSystemAgent.Settings.Schema do
   defp type_ok?(:string_map, v),
     do: is_map(v) and Enum.all?(v, fn {k, val} -> is_binary(k) and is_binary(val) end)
 
+  defp type_ok?(:string_list, v), do: is_list(v) and Enum.all?(v, &is_binary/1)
+
   defp type_name({:enum, values}), do: "one of " <> Enum.map_join(values, ", ", &inspect/1)
   defp type_name(:integer), do: "a whole number"
   defp type_name(:non_neg_integer), do: "a whole number ≥ 0"
   defp type_name(:pos_integer), do: "a whole number ≥ 1"
   defp type_name(:string_map), do: "an object of string values"
+  defp type_name(:string_list), do: "a list of strings"
   defp type_name(:map), do: "an object"
   defp type_name(:string), do: "a string"
   defp type_name(:boolean), do: "a boolean"

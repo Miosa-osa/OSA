@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop.Guardrails
+  alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Reminders
   alias OptimalSystemAgent.Events.Bus
@@ -164,6 +165,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
            %{
              type: :agent_response,
              session_id: state.session_id,
+             message_id: LLMClient.current_message_id(),
              response: plan_text,
              response_type: "plan"
            }}

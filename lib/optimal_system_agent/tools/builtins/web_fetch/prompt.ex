@@ -35,6 +35,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Prompt do
       - Up to #{OptimalSystemAgent.Tools.Builtins.WebFetch.Constants.max_redirects()} redirects are followed; each redirect target is validated.
       - HTML pages have scripts/styles stripped and entities decoded before being returned.
       - Results are truncated at `max_length` characters (default #{OptimalSystemAgent.Tools.Builtins.WebFetch.Constants.default_max_length()}).
+      - A successful result starts with the FINAL url (after redirects) and an `HTTP <status> <content-type>` line, then `---`, then the content.
+      - An error status (403/404/429/5xx), an empty body, or a bot-protection challenge page is returned as an ERROR naming the status and the reason — never as content. When you see one, fetch a different source rather than guessing at what the page said.
       - This tool is read-only and does not modify any files.
       - For GitHub URLs, prefer the `gh` CLI via shell_execute instead.
       - To discover URLs to fetch, use `#{web_search_name}` first.

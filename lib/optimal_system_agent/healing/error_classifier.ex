@@ -168,7 +168,20 @@ defmodule OptimalSystemAgent.Healing.ErrorClassifier do
       contains_any?(lower, ["rate limit", "too many requests", "429"]) ->
         {:llm_error, :medium, true}
 
-      contains_any?(lower, ["unauthorized", "invalid api key", "403", "authentication"]) ->
+      # "401" and "x-api-key" are load-bearing: Anthropic's rejection string is
+      # "Anthropic returned 401: invalid x-api-key", which matches NEITHER
+      # "invalid api key" (different spelling) nor "unauthorized". Without them
+      # a rejected key from a provider whose message happens not to mention
+      # the vendor name fell through to {:unknown, :medium, true} — i.e. the
+      # healer treated a dead credential as a transient fault and retried it.
+      contains_any?(lower, [
+        "unauthorized",
+        "invalid api key",
+        "x-api-key",
+        "401",
+        "403",
+        "authentication"
+      ]) ->
         {:llm_error, :critical, false}
 
       contains_any?(lower, ["timeout", "timed out", "deadline", "took too long"]) ->

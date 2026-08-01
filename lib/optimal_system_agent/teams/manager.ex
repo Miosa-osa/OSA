@@ -430,8 +430,12 @@ defmodule OptimalSystemAgent.Teams.Manager do
   # Private — meta ETS helpers
   # ---------------------------------------------------------------------------
 
+  # Meta lives in the ONE shared `:osa_team_meta` table under a
+  # `{team_id, :team}` composite key — see TableRegistry's moduledoc for why the
+  # per-team named tables (one un-collectable atom each) had to go.
   defp write_meta(team_id, meta) do
-    :ets.insert(TableRegistry.meta_table(team_id), {:team, meta})
+    TableRegistry.ensure_tables(team_id)
+    :ets.insert(TableRegistry.meta_table(), {TableRegistry.meta_key(team_id), meta})
     :ok
   rescue
     _ -> :ok
@@ -445,9 +449,11 @@ defmodule OptimalSystemAgent.Teams.Manager do
   end
 
   defp get_meta(team_id) do
-    case :ets.lookup(TableRegistry.meta_table(team_id), :team) do
-      [{:team, meta}] -> meta
-      [] -> nil
+    key = TableRegistry.meta_key(team_id)
+
+    case :ets.lookup(TableRegistry.meta_table(), key) do
+      [{^key, meta}] -> meta
+      _ -> nil
     end
   rescue
     _ -> nil

@@ -875,7 +875,12 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "knowledge" => OptimalSystemAgent.Tools.Builtins.Knowledge,
       "orchestrate" => OptimalSystemAgent.Tools.Builtins.Orchestrate,
       "diff" => OptimalSystemAgent.Tools.Builtins.Diff,
-      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus
+      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,
+
+      # ── Workspace shape ────────────────────────────────────────────────
+      # Classifies submodules / nested independent repos / workspace members,
+      # which `git ls-files` collapses to a single entry each. Cached per root.
+      "workspace_map" => OptimalSystemAgent.Tools.Builtins.WorkspaceMap
 
       # NOT registered on purpose: mcts_index, wallet_ops, and the vault_*
       # tools have no backend (MCTS.Indexer / Integrations.Wallet / Vault do

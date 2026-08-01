@@ -55,15 +55,30 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     "o3-mini" => {1.10, 4.40},
     "gpt-3.5-turbo" => {0.50, 1.50},
 
-    # DeepSeek
+    # DeepSeek — RETIRED 2026-07-24. Kept so an unmigrated pinned config still
+    # accounts at the rate it was actually billed, rather than at $0.00. The V4
+    # replacements come from Providers.DeepSeekModels, merged below.
     "deepseek-chat" => {0.27, 1.10},
     "deepseek-reasoner" => {0.55, 2.19}
   }
 
-  @pricing Map.merge(
-             @static_pricing,
-             OptimalSystemAgent.Providers.OllamaCloud.pricing()
-           )
+  # Hosted-provider catalogs win over the hand-written rows above, so a current
+  # model can never fall through to the `@families` substring guess (which is
+  # how claude-opus-5 would otherwise have been billed at Sonnet rates, and how
+  # gpt-5.6-* would have accounted at $0.00).
+  @pricing @static_pricing
+           |> Map.merge(OptimalSystemAgent.Providers.OllamaCloud.pricing())
+           |> Map.merge(OptimalSystemAgent.Providers.AnthropicModels.pricing())
+           |> Map.merge(OptimalSystemAgent.Providers.OpenAIModels.pricing())
+           |> Map.merge(OptimalSystemAgent.Providers.GoogleModels.pricing())
+           |> Map.merge(OptimalSystemAgent.Providers.DeepSeekModels.pricing())
+           # xAI and Gemini 3.1 Pro bill the WHOLE request at a higher rate once
+           # the prompt crosses a threshold (200k for both). These are the
+           # sub-threshold rates, so a long-context turn under-accounts by
+           # ~1.5–2x. Recorded rather than blended: most turns sit under the
+           # threshold, and a blended rate would be wrong for every turn.
+           |> Map.merge(OptimalSystemAgent.Providers.XAIModels.pricing())
+           |> Map.merge(OptimalSystemAgent.Providers.MistralModels.pricing())
 
   # Ordered family fallbacks — first substring match wins. Checked only when
   # there is no exact hit. Keep specific families before generic ones.
@@ -102,7 +117,26 @@ defmodule OptimalSystemAgent.Agent.Pricing do
       # Local Ollama-hosted models (e.g. "ollama/llama3", "qwen2.5:7b") are free.
       ollama_local?(key) -> {0.0, 0.0}
       Map.has_key?(@pricing, key) -> Map.fetch!(@pricing, key)
+      rate = ssot_rate(key) -> rate
       true -> family_rate(key)
+    end
+  end
+
+  # Exact-key lookup happens above; this catches DATED SNAPSHOT ids that the
+  # exact map has no row for — e.g. "claude-haiku-4-5-20251001", which
+  # otherwise fell through to the `@families` substring table and matched
+  # "claude-haiku" => {0.80, 4.0}, billing Haiku 4.5 at the retired Haiku 3.5
+  # rate instead of its real {1.00, 5.00}.
+  defp ssot_rate(key) do
+    case OptimalSystemAgent.Providers.AnthropicModels.resolve(key) do
+      %{pricing: {_, _} = p} ->
+        p
+
+      _ ->
+        case OptimalSystemAgent.Providers.OpenAIModels.resolve(key) do
+          %{pricing: {_, _} = p} -> p
+          _ -> nil
+        end
     end
   end
 

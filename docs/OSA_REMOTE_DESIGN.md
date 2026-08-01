@@ -6,8 +6,8 @@ Scope: build "OSA remote" on top of the existing OpenComputers subsystem. No cod
 
 This document is grounded in two codebases:
 
-- Hermes remote (source clone at `/home/miosa/projects/research/hermes-agent`), studied for its enrollment and relay model.
-- OSA OpenComputers (`/home/miosa/projects/osa/OSA/lib/optimal_system_agent/open_computers/`), which is the foundation OSA remote reuses.
+- Hermes remote (source clone at `<research-root>/hermes-agent`), studied for its enrollment and relay model.
+- OSA OpenComputers (`lib/optimal_system_agent/open_computers/`), which is the foundation OSA remote reuses.
 
 ---
 

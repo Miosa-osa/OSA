@@ -495,6 +495,301 @@ mod panel_invariants {
         }
     }
 
+    /// The sweep above uses short, narrow, bare subjects — which is exactly why
+    /// the sibling `Agents` overdraw shipped green: nothing in it could ever
+    /// WRAP. Model-written task subjects are long prose, contain markdown and
+    /// wide (CJK / emoji) glyphs, and are routinely far wider than the pane.
+    ///
+    /// The 1-row-per-item height contract only holds if `draw` fits every subject
+    /// to the pane width; if it ever stopped, an item would take two rows and the
+    /// panel would silently paint one row past its reservation — straight over
+    /// whatever sits above it.
+    #[test]
+    fn task_checklist_reserved_height_holds_for_wrapping_content() {
+        // Long prose, markdown markers, wide glyphs, and a subject with no spaces
+        // (no wrap opportunity) — every shape that can defeat a naive fit.
+        let subjects: [&str; 5] = [
+            "Test invisible tasks fix — create tasks and verify they render in both TUIs, with no spiral and no duplicated blocks anywhere",
+            "**Bold plan step** with `inline code` and _emphasis_ that must be stripped before it is measured",
+            "検証する非常に長い日本語のタスクの説明であり、全角文字は一文字で二桁分の幅を占有します",
+            "supercalifragilisticexpialidocious/no/word/break/anywhere/in/this/entire/subject/at/all/nope",
+            "mixed 混在 content with emoji 🚀 and ascii tail that runs well past any sane pane width",
+        ];
+        for &width in &[24u16, 40, 60, 100, 200] {
+            for n in 1usize..=15 {
+                let mut cl = TaskChecklist::new();
+                for i in 0..n {
+                    cl.add(format!("t{i}"), subjects[i % subjects.len()].to_string(), None);
+                }
+                cl.update("t0", ChecklistStatus::InProgress);
+                if n > 1 {
+                    cl.update("t1", ChecklistStatus::Completed);
+                }
+                let reserved = cl.height();
+                let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), width, reserved);
+                assert_eq!(
+                    drawn, reserved,
+                    "w={width}, {n} wide items: reserved {reserved} rows, drew {drawn}.\n{}",
+                    snapshot_buffer(&render_to_buffer(|f| cl.draw(f, f.area()), width, reserved))
+                );
+
+                // And handed MORE room, it must still occupy only `reserved` rows
+                // measured from the bottom (it bottom-anchors).
+                let area_h = reserved + 4;
+                let buf = render_to_buffer(|f| cl.draw(f, f.area()), width, area_h);
+                let first_inked = (0..area_h)
+                    .find(|&y| (0..width).any(|x| !super::is_blank(buf[(x, y)].symbol())))
+                    .unwrap_or(area_h);
+                assert!(
+                    area_h - first_inked <= reserved,
+                    "w={width}, {n} wide items: reserved {reserved} but occupied {}.\n{}",
+                    area_h - first_inked,
+                    snapshot_buffer(&buf)
+                );
+            }
+        }
+    }
+
+    /// No item line may exceed the pane width — a line wider than the pane is what
+    /// a `Paragraph` would wrap (or hard-clip mid-word) and is the precondition for
+    /// an item taking two rows.
+    #[test]
+    fn task_checklist_item_rows_never_exceed_the_pane_width() {
+        for &width in &[20u16, 33, 48, 81] {
+            let mut cl = TaskChecklist::new();
+            for i in 0..6 {
+                cl.add(
+                    format!("t{i}"),
+                    format!(
+                        "step {i}: a deliberately overlong 混在 subject 🚀 that cannot fit in a narrow pane at all"
+                    ),
+                    None,
+                );
+            }
+            let h = cl.height();
+            let buf = render_to_buffer(|f| cl.draw(f, f.area()), width, h);
+            for y in 0..h {
+                let text = buffer_row_text(&buf, y);
+                assert!(
+                    crate::util::cols(&text) <= width as usize,
+                    "w={width} row {y} is {} cols: {text:?}",
+                    crate::util::cols(&text)
+                );
+            }
+        }
+    }
+
+    /// **The regression that shipped.** `draw_inline` used to hand the checklist
+    /// the SAME rect it had just handed `Chat::draw_live`, so a plan painted
+    /// straight over the streaming reply (a checklist row landing mid-way through
+    /// a rendered markdown table row). The checklist now owns a band; the split
+    /// must keep the two disjoint at every size.
+    #[test]
+    fn checklist_band_never_shares_a_row_with_the_stream_band() {
+        use crate::app::event_loop::{
+            checklist_band_height, inline_split, ROW_CHECKLIST, ROW_STREAM,
+        };
+        use ratatui::layout::Rect;
+
+        for area_h in 8u16..=40 {
+            for n in 1usize..=15 {
+                let mut cl = TaskChecklist::new();
+                for i in 0..n {
+                    cl.add(format!("t{i}"), format!("step {i}"), None);
+                }
+                let think_h = 3u16;
+                let agents_h = 0u16;
+                let input_h = 3u16;
+                let checklist_h = checklist_band_height(
+                    cl.height(),
+                    area_h,
+                    think_h + agents_h + 1 + 2 + 2,
+                );
+                let area = Rect::new(0, 0, W, area_h);
+                let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+                let stream = rows[ROW_STREAM];
+                let list = rows[ROW_CHECKLIST];
+                assert_eq!(
+                    stream.intersection(list).height,
+                    0,
+                    "h={area_h}, {n} items: stream {stream:?} overlaps checklist {list:?}"
+                );
+                // The chrome below must survive: the composer never gets starved
+                // to nothing by a long plan.
+                assert!(
+                    rows[crate::app::event_loop::ROW_INPUT].height >= 1,
+                    "h={area_h}, {n} items: composer starved to 0 rows"
+                );
+            }
+        }
+    }
+
+    /// Ink proof of the same thing: fill the stream band, draw the checklist into
+    /// its own band, and the stream band's content must come out untouched.
+    #[test]
+    fn drawing_the_checklist_does_not_erase_the_stream_band() {
+        use crate::app::event_loop::{checklist_band_height, inline_split, ROW_CHECKLIST, ROW_STREAM};
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Paragraph;
+
+        let area_h = 24u16;
+        let mut cl = TaskChecklist::new();
+        for i in 0..4 {
+            cl.add(format!("t{i}"), format!("plan step {i}"), None);
+        }
+        let (think_h, agents_h, input_h) = (3u16, 0u16, 3u16);
+        let checklist_h =
+            checklist_band_height(cl.height(), area_h, think_h + agents_h + 1 + 2 + 2);
+        assert!(checklist_h > 0, "checklist must reserve a band");
+
+        let buf = render_to_buffer(
+            |f| {
+                let area = Rect::new(0, 0, W, area_h);
+                let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+                // Stand in for a streaming markdown table.
+                let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from("│ table cell │ table cell │"))
+                    .collect();
+                f.render_widget(Paragraph::new(filler), rows[ROW_STREAM]);
+                cl.draw(f, rows[ROW_CHECKLIST]);
+            },
+            W,
+            area_h,
+        );
+
+        let rows = inline_split(Rect::new(0, 0, W, area_h), checklist_h, think_h, agents_h, 0, input_h);
+        for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+            let text = buffer_row_text(&buf, y);
+            assert!(
+                text.starts_with("│ table cell │"),
+                "stream row {y} was overpainted: {text:?}\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+        // …and the checklist really did paint into its own band.
+        let list_text = buffer_row_text(&buf, rows[ROW_CHECKLIST].y);
+        assert!(list_text.starts_with("Plan"), "got {list_text:?}\n{}", snapshot_buffer(&buf));
+    }
+
+    /// **The turn-completion defect.** With a plan on screen, the FINAL response
+    /// came out short with the plan block sitting where the rest of it should
+    /// have been. Root cause: `streaming_inline_height` built its `want` from the
+    /// chrome + `STREAM_PREVIEW_ROWS` only, then `clamp(base, hi)`ed it. The
+    /// checklist's rows were in `base` but not in `want`, and because `want >
+    /// base` in the normal case the clamp returned `want` — so the reservation
+    /// silently lost the plan's height while `draw_inline` still carved the band
+    /// out of the same area. The streaming preview absorbed the whole deficit.
+    ///
+    /// The invariant: whatever the plan's height, the stream band must still get
+    /// its full `STREAM_PREVIEW_ROWS` out of the reserved viewport.
+    #[test]
+    fn a_visible_plan_never_steals_rows_from_the_streaming_reply() {
+        use crate::app::event_loop::{
+            checklist_band_height, inline_split, streaming_inline_height, ROW_STREAM,
+            STREAM_PREVIEW_ROWS,
+        };
+        use ratatui::layout::Rect;
+
+        let term_rows = 60u16;
+        let hi = term_rows - 1;
+        let (think_h, agents_h, input_h) = (1u16, 0u16, 3u16);
+        let overhead = think_h + 1 + 2; // activity + ctx hint + status
+        let base = 6u16;
+
+        for n in 1usize..=12 {
+            let mut cl = TaskChecklist::new();
+            for i in 0..n {
+                cl.add(format!("t{i}"), format!("step {i}"), None);
+            }
+            let want_checklist = cl.height().min(12);
+            let area_h = streaming_inline_height(
+                base.saturating_add(want_checklist),
+                overhead,
+                input_h,
+                agents_h,
+                want_checklist,
+                0,
+                hi,
+            );
+            let area = Rect::new(0, 0, W, area_h);
+            let checklist_h = checklist_band_height(
+                want_checklist,
+                area_h,
+                think_h + agents_h + 1 + 2 + 2,
+            );
+            let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+            assert_eq!(
+                checklist_h, want_checklist,
+                "{n} tasks: the plan band was squeezed ({want_checklist} → {checklist_h})"
+            );
+            assert!(
+                rows[ROW_STREAM].height >= STREAM_PREVIEW_ROWS,
+                "{n} tasks: the plan ate the reply — stream band is {} rows, \
+                 needs {STREAM_PREVIEW_ROWS}",
+                rows[ROW_STREAM].height
+            );
+        }
+    }
+
+    /// Ink proof of the same thing at TURN COMPLETION: the final assistant block
+    /// occupies the stream band while the plan sits in its own, and every row of
+    /// the committed text must survive verbatim.
+    #[test]
+    fn a_committed_final_block_survives_beside_the_plan_band() {
+        use crate::app::event_loop::{
+            checklist_band_height, inline_split, streaming_inline_height, ROW_CHECKLIST,
+            ROW_STREAM,
+        };
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Paragraph;
+
+        let mut cl = TaskChecklist::new();
+        for i in 0..5 {
+            cl.add(format!("t{i}"), format!("plan step {i}"), None);
+        }
+        let (think_h, agents_h, input_h) = (1u16, 0u16, 3u16);
+        let want_checklist = cl.height().min(12);
+        let area_h = streaming_inline_height(
+            6 + want_checklist,
+            think_h + 1 + 2,
+            input_h,
+            agents_h,
+            want_checklist,
+            0,
+            59,
+        );
+        let checklist_h =
+            checklist_band_height(want_checklist, area_h, think_h + agents_h + 1 + 2 + 2);
+        let area = Rect::new(0, 0, W, area_h);
+        let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+
+        let final_text = "The parser rewrite is done; here is what changed and why.";
+        let buf = render_to_buffer(
+            |f| {
+                let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from(final_text))
+                    .collect();
+                f.render_widget(Paragraph::new(lines), rows[ROW_STREAM]);
+                cl.draw(f, rows[ROW_CHECKLIST]);
+            },
+            W,
+            area_h,
+        );
+        for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+            assert_eq!(
+                buffer_row_text(&buf, y).trim_end(),
+                final_text,
+                "final-response row {y} was clobbered by the plan band\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+        assert!(
+            buffer_row_text(&buf, rows[ROW_CHECKLIST].y).starts_with("Plan"),
+            "the plan must still render in its own band\n{}",
+            snapshot_buffer(&buf)
+        );
+    }
+
     /// An invisible checklist must paint nothing at all, so the caller's `0`-row
     /// reservation is honest.
     #[test]
@@ -761,6 +1056,143 @@ mod panel_invariants {
         );
     }
 
+    /// A fleet grouped into a real backend batch, whose id is the internal
+    /// routing key the orchestrator actually mints.
+    fn batched_fleet(batch: &str) -> Agents {
+        let mut a = Agents::new();
+        a.set_main_row("shipping the fleet view", 40, 678);
+        for i in 0..2 {
+            let name = format!("agent:session-1785550977551-3f4a8179a573:osa-verifier-{i}");
+            a.agent_started(&name, "goal-verifier-skeptic", "", "verify the goal", Some(batch.to_string()));
+            a.agent_progress(
+                &name,
+                "dir_list: /Users/rhl/.osa/workspace/src",
+                9,
+                0,
+                "",
+                vec![
+                    "dir_list".into(),
+                    "file_read".into(),
+                    "file_read: /Users/rhl/.osa/backend.log".into(),
+                ],
+            );
+        }
+        a
+    }
+
+    /// **DEFECT 1.** The batch header may never print a session id. It is the
+    /// widest single string the panel handles and it consumes the whole
+    /// separator row to say nothing a reader can act on.
+    #[test]
+    fn fleet_view_batch_header_never_shows_a_session_id() {
+        let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            screen.contains("Batch 1"),
+            "the batch header lost its ordinal:\n{screen}"
+        );
+        for leak in ["session-", "1785550977551", "3f4a8179a573", "207491"] {
+            assert!(
+                !screen.contains(leak),
+                "routing-key fragment {leak:?} reached the batch header:\n{screen}"
+            );
+        }
+    }
+
+    /// A batch id that IS a word keeps it — only the machine-shaped segments are
+    /// dropped, so a meaningful team name still labels its section.
+    #[test]
+    fn fleet_view_batch_header_keeps_a_human_label() {
+        let a = batched_fleet("alpha");
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            screen.contains("Batch 1: alpha"),
+            "a human batch name must survive:\n{screen}"
+        );
+    }
+
+    /// Every child-trail row of a running agent, and the row's own action label.
+    /// A trail row looks like `   └─ <text>` or `│  └─ <text>`.
+    fn trail_texts(screen: &str) -> Vec<String> {
+        screen
+            .lines()
+            .filter_map(|l| l.split_once("\u{2514}\u{2500} "))
+            .map(|(_, rest)| rest.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// **DEFECT 3.** No trail entry may be a bare tool verb. The backend records
+    /// each call twice — `file_read: <path>` on start and a naked `file_read` on
+    /// end — and the naked half identifies nothing, so it must not reach a row of
+    /// its own. Entries that survive all carry their value.
+    #[test]
+    fn fleet_view_trail_entries_all_carry_a_detail() {
+        let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        let trail = trail_texts(&screen);
+        assert!(!trail.is_empty(), "no trail rows drawn at all:\n{screen}");
+        for t in &trail {
+            // The counter line is the one legitimate non-action row.
+            if t.contains("tool uses") {
+                continue;
+            }
+            assert!(
+                crate::components::agents::action_has_detail(t),
+                "trail row {t:?} is a bare verb with no identifying value:\n{screen}"
+            );
+        }
+    }
+
+    /// **DEFECT 4.** The overflow counter stands for the calls that happened
+    /// BEFORE the visible entries (the trail is drawn oldest → newest), so it
+    /// sits at the top of the block — and it must SAY so. The old wording,
+    /// "+N more tool uses", read as a trailing overflow indicator printed above
+    /// the very items it summarized.
+    #[test]
+    fn fleet_view_overflow_counter_is_framed_as_earlier_work() {
+        let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        let trail = trail_texts(&screen);
+        let counter = trail
+            .iter()
+            .position(|t| t.contains("tool uses"))
+            .expect(&format!("no overflow counter drawn:\n{screen}"));
+        assert!(
+            trail[counter].contains("earlier tool uses"),
+            "counter must be framed as earlier work, got {:?}:\n{screen}",
+            trail[counter]
+        );
+        assert!(
+            !screen.contains("more tool uses"),
+            "the unframed 'more tool uses' wording is back:\n{screen}"
+        );
+        // It heads its own block: the row directly after it is a real action.
+        assert!(
+            trail
+                .get(counter + 1)
+                .map(|t| !t.contains("tool uses"))
+                .unwrap_or(false),
+            "the counter must be followed by the actions it precedes:\n{screen}"
+        );
+    }
+
     /// The background-terminals summary renders even with no live agents, so it
     /// must contribute its row to the reservation.
     #[test]
@@ -922,6 +1354,120 @@ mod width_sweep {
                 }
             }
         }
+    }
+
+    /// **DEFECT 5 — the interrupt hint must never be truncated.**
+    ///
+    /// It is the one control the user has mid-turn, and it renders to the RIGHT
+    /// of the spinner verb. During orchestration the verb is
+    /// `@<agent>: <tool>: <absolute path>`, which is wider than the pane on its
+    /// own — it pushed the hint past the edge and the renderer clipped it
+    /// ("esc to inte"). The line now reserves the hint FIRST and gives the verb
+    /// the remainder, ellipsizing the path so its tail survives.
+    ///
+    /// Swept across every width wide enough to hold the hint at all, and through
+    /// the REAL terminal emulator so a wide-glyph advance bug cannot hide.
+    #[test]
+    fn activity_status_line_never_truncates_the_interrupt_hint() {
+        use crate::test_backend::VT100Backend;
+
+        const HINT: &str = "esc to interrupt";
+        let verbs = [
+            "@goal-verifier-skeptic: dir_list: /Users/rhl/.osa/workspace/src",
+            "@explorer: file_read: /Users/rhl/.osa/deeply/nested/path/to/backend.log",
+            // Wide glyphs in both the label and the detail.
+            "@\u{6a21}\u{578b}-worker: shell_execute: /w/\u{6a21}\u{578b}/build.sh",
+            "Working",
+        ];
+
+        for verb in verbs {
+            // Both hint widths: the armed form ("esc again to interrupt") is the
+            // widest the reservation ever has to hold.
+            for armed in [false, true] {
+                let hint = if armed { "esc again to interrupt" } else { HINT };
+                for w in 60u16..=140 {
+                    let mut act = Activity::new();
+                    act.start();
+                    act.set_model_name("glm-5.2:cloud");
+                    act.set_active_verb(Some(verb.to_string()));
+                    act.arm_interrupt(armed);
+
+                    let h = act.height().max(1);
+                    let screen =
+                        snapshot_buffer(&render_to_buffer(|f| act.draw(f, f.area()), w, h));
+                    assert!(
+                        screen.contains(hint),
+                        "verb {verb:?} armed={armed} w={w}: the interrupt hint was \
+                         truncated off the status line:\n{screen}"
+                    );
+
+                    // …and the emulator agrees, row for row, with no overflow.
+                    let mut term = Terminal::new(VT100Backend::new(w, h)).unwrap();
+                    term.draw(|f| act.draw(f, f.area())).unwrap();
+                    let backend = term.backend();
+                    let mut emulated = String::new();
+                    for y in 0..h {
+                        let mut x = 0u16;
+                        while x < w {
+                            let sym = backend.cell_contents(y, x);
+                            if sym.is_empty() {
+                                emulated.push(' ');
+                                x += 1;
+                            } else {
+                                x += cols(&sym).max(1) as u16;
+                                emulated.push_str(&sym);
+                            }
+                        }
+                        emulated.push('\n');
+                    }
+                    assert!(
+                        emulated.contains(hint),
+                        "verb {verb:?} armed={armed} w={w}: the emulated terminal lost \
+                         the interrupt hint:\n{emulated}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **DEFECT 2 — exactly ONE passive context indicator.**
+    ///
+    /// The status bar and the hint row above the composer both used to state
+    /// "context used", from the same `StatusBar` but through different
+    /// expressions of it: the status bar knows an unknown window has no honest
+    /// denominator and renders the token count, the hint row printed
+    /// `context_utilization()` raw — which is exactly 0.0 when the window is
+    /// unknown. On screen that read "0% context used" against "~53.3k ctx".
+    ///
+    /// The passive readout now lives only on the status bar. This pins that the
+    /// second renderer is gone (so the two can never disagree again) and that the
+    /// surviving one carries the unknown-window semantics.
+    #[test]
+    fn only_one_passive_context_indicator_exists() {
+        // The hint row keeps the reconnect notice and the actionable low-context
+        // warning; it must not render a passive percentage of its own.
+        const EVENT_LOOP_SRC: &str = include_str!("app/event_loop.rs");
+        assert!(
+            !EVENT_LOOP_SRC.contains("format!(\"{}% context used\""),
+            "a second passive context readout has reappeared in event_loop.rs — \
+             the status bar is the single source for it"
+        );
+
+        // And the surviving indicator declines to fabricate a percentage when the
+        // window is unknown, which is precisely the state that produced the "0%".
+        use crate::components::status_bar::StatusBar;
+        let mut sb = StatusBar::new();
+        sb.set_context(0.0, 0, 0); // unknown window
+        sb.note_input_tokens(53_300);
+        let screen = snapshot_buffer(&render_to_buffer(|f| sb.draw(f, f.area()), 160, 2));
+        assert!(
+            screen.contains("ctx"),
+            "the one context indicator vanished:\n{screen}"
+        );
+        assert!(
+            !screen.contains("0% ctx"),
+            "the surviving indicator fabricated a zero percent:\n{screen}"
+        );
     }
 
     /// The same sweep through the REAL terminal emulator ([`crate::test_backend`]).
@@ -1260,18 +1806,31 @@ mod table_invariants {
     }
 }
 
-// ───────────────────── ask_user survey picker ─────────────────────
+
+// ─────────────── ask_user survey band (INLINE, never an overlay) ───────────────
 //
 // `ask_user` blocks the whole turn on the operator, so its picker has to be
-// visible, keyboard-driven and dismissable. It shipped invisible: the backend
-// never forwarded the question, and nothing here checked that the dialog draws
-// what it was handed.
+// visible, keyboard-driven and dismissable. It shipped invisible (the backend
+// never forwarded the question), and when it was finally reachable it was a
+// full-screen modal that hid the conversation the operator needed in order to
+// answer. It is now a BOUNDED INLINE BAND above the composer, reserved through
+// `App::survey_slot` → `inline_split(ROW_SURVEY)` exactly like the task
+// checklist. These tests hold that shape: drawn ≤ reserved at every size, and
+// the band never shares a row with the chat stream or the composer.
 mod survey_invariants {
     use super::*;
-    use crate::dialogs::survey::{
-        wrapped_line_count, SurveyAction, SurveyDialog, SurveyOption, SurveyQuestion,
+    use crate::app::event_loop::{
+        inline_split, survey_band_height, ROW_INPUT, ROW_STREAM, ROW_SURVEY,
     };
+    use crate::dialogs::survey::{
+        option_columns, option_window, question_rows, wrap_to, wrapped_line_count, SurveyAction,
+        SurveyDialog, SurveyOption, SurveyQuestion, MAX_VISIBLE_OPTIONS, SURVEY_INLINE_CAP,
+    };
+    use crate::util::cols;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+
+    const W: u16 = 100;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1280,6 +1839,7 @@ mod survey_invariants {
     fn question() -> SurveyQuestion {
         SurveyQuestion {
             text: "Which parser should we keep?".to_string(),
+            header: None,
             multi_select: false,
             options: vec![
                 SurveyOption {
@@ -1299,87 +1859,410 @@ mod survey_invariants {
         SurveyDialog::new("sv-1".to_string(), vec![question()], true)
     }
 
-    /// The question and EVERY option label must actually be on screen — the
-    /// live bug was a picker that rendered nothing at all.
-    #[test]
-    fn draws_the_question_and_all_options() {
-        let d = dialog();
-        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
-        let screen = snapshot_buffer(&buf);
-
-        for needle in [
-            "Which parser should we keep?",
-            "Rewrite the parser (Recommended)",
-            "removes the whole class of escaping bugs",
-            "Patch in place",
-            "Type your own answer",
-            "Esc",
-            "Enter",
-        ] {
-            assert!(
-                screen.contains(needle),
-                "survey picker never drew {needle:?}.\n{screen}"
-            );
+    /// `n` options with deliberately awkward content: a very long label, CJK and
+    /// an emoji, so the column budget is exercised on real wide glyphs.
+    fn wide_question(n: usize) -> SurveyQuestion {
+        let fixtures = [
+            (
+                "Rewrite the parser end to end so every escaping edge case dies at once",
+                "removes the whole class of escaping bugs but takes a week of work",
+            ),
+            ("日本語のラベルはここにあります", "説明も日本語で書かれています"),
+            ("🚀 Ship it 🎉", "emoji labels advance two columns each"),
+            ("Patch in place", "faster but the bug class stays"),
+        ];
+        SurveyQuestion {
+            text: "パーサをどうしますか — which parser should we keep going forward?".to_string(),
+            header: Some("parser".to_string()),
+            multi_select: false,
+            options: (0..n)
+                .map(|i| {
+                    let (l, d) = fixtures[i % fixtures.len()];
+                    SurveyOption {
+                        label: format!("{} #{}", l, i + 1),
+                        description: Some(d.to_string()),
+                    }
+                })
+                .collect(),
+            skippable: true,
         }
     }
 
-    /// The recommended option is listed FIRST — the model is told to order them
-    /// that way and the dialog must not reorder.
-    #[test]
-    fn recommended_option_is_drawn_first() {
-        let d = dialog();
-        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
-        let screen = snapshot_buffer(&buf);
-        let rec = screen.find("Rewrite the parser").expect("recommended row");
-        let other = screen.find("Patch in place").expect("second row");
-        assert!(rec < other, "recommended option must render first:\n{screen}");
+    fn multi_question_dialog() -> SurveyDialog {
+        let qs = vec![
+            SurveyQuestion {
+                text: "Which visual direction?".to_string(),
+                header: Some("style".to_string()),
+                multi_select: false,
+                options: vec![
+                    SurveyOption {
+                        label: "Minimal & terminal-native".to_string(),
+                        description: Some("keyboard-first, no excess chrome".to_string()),
+                    },
+                    SurveyOption {
+                        label: "Bold & expressive".to_string(),
+                        description: Some("strong visuals, gradients".to_string()),
+                    },
+                ],
+                skippable: true,
+            },
+            SurveyQuestion {
+                text: "Which backend?".to_string(),
+                header: None,
+                multi_select: false,
+                options: vec![
+                    SurveyOption {
+                        label: "Postgres".to_string(),
+                        description: None,
+                    },
+                    SurveyOption {
+                        label: "SQLite".to_string(),
+                        description: None,
+                    },
+                ],
+                skippable: true,
+            },
+            SurveyQuestion {
+                text: "Ship behind a flag?".to_string(),
+                header: None,
+                multi_select: false,
+                options: vec![
+                    SurveyOption {
+                        label: "Yes".to_string(),
+                        description: None,
+                    },
+                    SurveyOption {
+                        label: "No".to_string(),
+                        description: None,
+                    },
+                ],
+                skippable: true,
+            },
+        ];
+        SurveyDialog::new("sv-multi".to_string(), qs, true)
     }
 
-    /// All ink stays inside the centered dialog rect (70% x 75%), at every size
-    /// from "barely fits" upward — no spill onto the transcript behind it.
+    // ── The core invariant: drawn ≤ reserved, swept ────────────────────────
+
+    /// **Drawn ≤ reserved**, across an option-count sweep × widths, with long
+    /// labels, CJK and emoji. This is the assertion the old full-screen dialog
+    /// never had: the band is handed exactly `band_height()` rows and must not
+    /// put ink outside them.
     #[test]
-    fn ink_stays_inside_the_reserved_dialog_rect() {
-        for (w, h) in [(60u16, 16u16), (80, 24), (100, 30), (160, 50), (200, 60)] {
-            let d = dialog();
-            let buf = render_to_buffer(|f| d.draw(f, f.area()), w, h);
-
-            let dw = (w * 70 / 100).max(40).min(w);
-            let dh = (h * 75 / 100).max(12).min(h);
-            let x0 = w.saturating_sub(dw) / 2;
-            let y0 = h.saturating_sub(dh) / 2;
-            let x1 = x0 + dw;
-            let y1 = y0 + dh;
-
-            for y in 0..h {
-                for x in 0..w {
-                    if x >= x0 && x < x1 && y >= y0 && y < y1 {
-                        continue;
-                    }
+    fn drawn_never_exceeds_the_reserved_band() {
+        for n in 1usize..=12 {
+            for w in [24u16, 40, 60, 100, 200] {
+                let mut d = SurveyDialog::new("sv".into(), vec![wide_question(n)], true);
+                d.set_turn_meta(431, 53_600);
+                let reserved = d.band_height(w);
+                assert!(
+                    reserved <= SURVEY_INLINE_CAP,
+                    "n={n} w={w}: band wants {reserved} rows, cap is {SURVEY_INLINE_CAP}"
+                );
+                // Give the renderer a taller canvas than it reserved: anything it
+                // paints below `reserved` is an overflow it would have inflicted
+                // on the composer.
+                let canvas = reserved + 4;
+                let drawn = drawn_row_extent(
+                    |f| d.draw_inline(f, Rect::new(0, 0, w, reserved)),
+                    w,
+                    canvas,
+                );
+                assert!(
+                    drawn <= reserved,
+                    "n={n} w={w}: reserved {reserved} rows but drew into {drawn}\n{}",
+                    snapshot_buffer(&render_to_buffer(
+                        |f| d.draw_inline(f, Rect::new(0, 0, w, reserved)),
+                        w,
+                        canvas,
+                    ))
+                );
+                // …and no row may overflow its width (wide glyphs measured as 2).
+                let buf = render_to_buffer(
+                    |f| d.draw_inline(f, Rect::new(0, 0, w, reserved)),
+                    w,
+                    canvas,
+                );
+                for y in 0..canvas {
+                    let text = buffer_row_text(&buf, y);
                     assert!(
-                        super::is_blank(buf[(x, y)].symbol()),
-                        "{w}x{h}: ink at ({x},{y}) outside dialog rect \
-                         ({x0}..{x1}, {y0}..{y1}).\n{}",
-                        snapshot_buffer(&buf)
+                        cols(&text) <= w as usize,
+                        "n={n} w={w} row {y} is {} cols: {text:?}",
+                        cols(&text)
                     );
                 }
             }
         }
     }
 
-    /// A pathologically long question must not push the options off-screen: the
-    /// question block is capped, so the option rows still render.
+    /// A 12-option question must SCROLL, not grow: the band is capped and the
+    /// cursor's option stays on screen wherever it is.
+    #[test]
+    fn many_options_scroll_internally_instead_of_growing_the_band() {
+        let mut d = SurveyDialog::new("sv".into(), vec![wide_question(12)], true);
+        // 12 options, but only MAX_VISIBLE_OPTIONS rows of them — the band stops
+        // at the cap and the rest scroll inside it.
+        assert!(
+            d.band_height(W) <= SURVEY_INLINE_CAP,
+            "12 options must not exceed the cap, got {}",
+            d.band_height(W)
+        );
+        assert_eq!(
+            d.band_height(W),
+            d.band_height(W).min(4 + 1 + MAX_VISIBLE_OPTIONS),
+            "the option rows must be clamped to MAX_VISIBLE_OPTIONS"
+        );
+        // Walk the cursor to the last option; the window must follow it.
+        for _ in 0..11 {
+            d.handle_key(key(KeyCode::Down));
+        }
+        let buf = render_to_buffer(
+            |f| d.draw_inline(f, Rect::new(0, 0, W, SURVEY_INLINE_CAP)),
+            W,
+            SURVEY_INLINE_CAP,
+        );
+        let screen = snapshot_buffer(&buf);
+        assert!(
+            screen.contains("#12"),
+            "the cursor's option scrolled out of the band:\n{screen}"
+        );
+    }
+
+    /// The option window keeps the cursor visible at every position.
+    #[test]
+    fn option_window_always_contains_the_cursor() {
+        for total in 1usize..=20 {
+            for visible in 1usize..=10 {
+                for cursor in 0..total {
+                    let (start, len) = option_window(total, cursor, visible);
+                    assert!(len <= visible && len <= total, "{total}/{visible}/{cursor}");
+                    if total > visible {
+                        assert!(
+                            cursor >= start && cursor < start + len,
+                            "cursor {cursor} outside window [{start},{})",
+                            start + len
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Band vs. stream / composer: the ink proof ─────────────────────────
+
+    /// **The regression class this band must not repeat.** `draw_inline` once
+    /// handed ONE rect to TWO components, so the checklist painted over the
+    /// streaming reply. The survey band is a real slot in `inline_split`; the
+    /// split must keep it disjoint from the stream band AND leave the composer
+    /// alive, at every terminal height and option count.
+    #[test]
+    fn survey_band_never_shares_a_row_with_stream_or_composer() {
+        for area_h in 10u16..=40 {
+            for n in 1usize..=12 {
+                let d = SurveyDialog::new("sv".into(), vec![wide_question(n)], true);
+                let (think_h, agents_h, checklist_h, input_h) = (3u16, 0u16, 0u16, 3u16);
+                let survey_h = survey_band_height(
+                    d.band_height(W),
+                    area_h,
+                    think_h + agents_h + checklist_h + 1 + 2 + 2,
+                );
+                let area = Rect::new(0, 0, W, area_h);
+                let rows =
+                    inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+                assert_eq!(
+                    rows[ROW_STREAM].intersection(rows[ROW_SURVEY]).height,
+                    0,
+                    "h={area_h} n={n}: stream {:?} overlaps survey {:?}",
+                    rows[ROW_STREAM],
+                    rows[ROW_SURVEY]
+                );
+                assert_eq!(
+                    rows[ROW_INPUT].intersection(rows[ROW_SURVEY]).height,
+                    0,
+                    "h={area_h} n={n}: composer {:?} overlaps survey {:?}",
+                    rows[ROW_INPUT],
+                    rows[ROW_SURVEY]
+                );
+                assert!(
+                    rows[ROW_INPUT].height >= 1,
+                    "h={area_h} n={n}: composer starved to 0 rows by the survey band"
+                );
+            }
+        }
+    }
+
+    /// Ink proof of the same thing: fill the stream band with a "streaming
+    /// markdown table", draw the survey into its own band, and every stream row
+    /// must come out verbatim.
+    #[test]
+    fn drawing_the_survey_does_not_erase_the_stream_band() {
+        use ratatui::widgets::Paragraph;
+
+        let area_h = 30u16;
+        let d = SurveyDialog::new("sv".into(), vec![wide_question(4)], true);
+        let (think_h, agents_h, checklist_h, input_h) = (3u16, 0u16, 0u16, 3u16);
+        let survey_h = survey_band_height(
+            d.band_height(W),
+            area_h,
+            think_h + agents_h + checklist_h + 1 + 2 + 2,
+        );
+        assert!(survey_h > 0, "the survey must reserve a band");
+
+        let area = Rect::new(0, 0, W, area_h);
+        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        let buf = render_to_buffer(
+            |f| {
+                let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from("│ table cell │ table cell │"))
+                    .collect();
+                f.render_widget(Paragraph::new(filler), rows[ROW_STREAM]);
+                d.draw_inline(f, rows[ROW_SURVEY]);
+            },
+            W,
+            area_h,
+        );
+        for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+            let text = buffer_row_text(&buf, y);
+            assert!(
+                text.starts_with("│ table cell │"),
+                "stream row {y} was overpainted by the survey: {text:?}\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+        // …and the survey really did paint into its own band.
+        let head = buffer_row_text(&buf, rows[ROW_SURVEY].y);
+        assert!(
+            head.contains("Waiting"),
+            "survey header missing from its band: {head:?}\n{}",
+            snapshot_buffer(&buf)
+        );
+    }
+
+    /// A final assistant block committing to scrollback while the question band
+    /// is up must not be interleaved with it: the band is bounded and reserved,
+    /// so the rows above it belong entirely to the transcript.
+    #[test]
+    fn a_committed_block_survives_beside_the_survey_band() {
+        use ratatui::widgets::Paragraph;
+
+        let area_h = 26u16;
+        let d = SurveyDialog::new("sv".into(), vec![wide_question(3)], true);
+        let (think_h, agents_h, checklist_h, input_h) = (1u16, 0u16, 4u16, 3u16);
+        let survey_h = survey_band_height(
+            d.band_height(W),
+            area_h,
+            think_h + agents_h + checklist_h + 1 + 2 + 2,
+        );
+        let area = Rect::new(0, 0, W, area_h);
+        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+
+        // Stand in for the just-committed final assistant block.
+        let final_text = "The parser rewrite is done; here is the summary of what changed.";
+        let buf = render_to_buffer(
+            |f| {
+                let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from(final_text))
+                    .collect();
+                f.render_widget(Paragraph::new(lines), rows[ROW_STREAM]);
+                d.draw_inline(f, rows[ROW_SURVEY]);
+            },
+            W,
+            area_h,
+        );
+        for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+            assert_eq!(
+                buffer_row_text(&buf, y).trim_end(),
+                final_text,
+                "committed block row {y} was clobbered by the survey band\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+
+    // ── Content ───────────────────────────────────────────────────────────
+
+    /// The question text, EVERY option label, the free-text row and the footer
+    /// affordances must actually be on screen.
+    #[test]
+    fn draws_the_question_options_and_footer() {
+        let d = dialog();
+        let h = d.band_height(W);
+        let buf = render_to_buffer(|f| d.draw_inline(f, Rect::new(0, 0, W, h)), W, h);
+        let screen = snapshot_buffer(&buf);
+        for needle in [
+            "Waiting",
+            "Which parser should we keep?",
+            "Rewrite the parser (Recommended)",
+            "removes the whole class of escaping bugs",
+            "Patch in place",
+            "Type your answer here",
+            "navigate",
+            "Enter:",
+        ] {
+            assert!(
+                screen.contains(needle),
+                "inline survey never drew {needle:?}.\n{screen}"
+            );
+        }
+        // Numbered gutter + radio glyphs, per the reference design.
+        assert!(screen.contains('\u{25c9}') || screen.contains('\u{25cb}'), "no radio glyph:\n{screen}");
+        assert!(screen.contains(" 1 "), "no numbered gutter:\n{screen}");
+        assert!(screen.contains(" z "), "no free-text gutter:\n{screen}");
+    }
+
+    /// The recommended option is listed FIRST — the model is told to order them
+    /// that way and the band must not reorder.
+    #[test]
+    fn recommended_option_is_drawn_first() {
+        let d = dialog();
+        let h = d.band_height(W);
+        let buf = render_to_buffer(|f| d.draw_inline(f, Rect::new(0, 0, W, h)), W, h);
+        let screen = snapshot_buffer(&buf);
+        let rec = screen.find("Rewrite the parser").expect("recommended row");
+        let other = screen.find("Patch in place").expect("second row");
+        assert!(rec < other, "recommended option must render first:\n{screen}");
+    }
+
+    /// Descriptions degrade before labels do: at a width where both cannot fit,
+    /// the label survives and the description is dropped.
+    #[test]
+    fn descriptions_degrade_before_labels() {
+        // Wide: a description column exists.
+        let (_lw, dw) = option_columns(100, 30);
+        assert!(dw.is_some(), "a 100-col band must keep descriptions");
+        // Narrow: no room, so the label takes everything.
+        let (lw, dw) = option_columns(24, 30);
+        assert!(dw.is_none(), "a 24-col band must drop descriptions");
+        assert!(lw > 0, "the label column must survive");
+
+        let d = dialog();
+        let h = d.band_height(24);
+        let buf = render_to_buffer(|f| d.draw_inline(f, Rect::new(0, 0, 24, h)), 24, h);
+        let screen = snapshot_buffer(&buf);
+        assert!(
+            !screen.contains("escaping bugs"),
+            "description survived at 24 cols where the label should have won:\n{screen}"
+        );
+    }
+
+    /// A pathologically long question is capped at two rows, so the options the
+    /// operator has to interact with are never pushed out of the band.
     #[test]
     fn a_long_question_never_hides_the_options() {
         let mut q = question();
         q.text = "why ".repeat(200);
         let d = SurveyDialog::new("sv-long".to_string(), vec![q], true);
-        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
+        assert!(d.band_height(W) <= SURVEY_INLINE_CAP);
+        let h = d.band_height(W);
+        let buf = render_to_buffer(|f| d.draw_inline(f, Rect::new(0, 0, W, h)), W, h);
         let screen = snapshot_buffer(&buf);
         assert!(
-            screen.contains("Rewrite the parser (Recommended)"),
-            "options were pushed off-screen by a long question:\n{screen}"
+            screen.contains("Rewrite the parser"),
+            "options were pushed out of the band by a long question:\n{screen}"
         );
     }
+
+    // ── Keyboard ──────────────────────────────────────────────────────────
 
     /// Down/Up move the cursor and Enter returns the chosen option's label —
     /// the value that travels back to the blocked tool.
@@ -1396,7 +2279,7 @@ mod survey_invariants {
             other => panic!("expected Submit, got {other:?}"),
         }
 
-        // ...and the first (recommended) option when the cursor never moves.
+        // …and the first (recommended) option when the cursor never moves.
         let mut d = dialog();
         match d.handle_key(key(KeyCode::Enter)) {
             Some(SurveyAction::Submit(result)) => assert_eq!(
@@ -1415,23 +2298,43 @@ mod survey_invariants {
         );
     }
 
-    /// Esc declines. Without this the operator has no way out and the turn
-    /// deadlocks until the tool's own timeout fires.
+    /// Number keys jump straight to an option and answer with it.
     #[test]
-    fn esc_declines_the_question() {
+    fn number_keys_jump_directly_to_an_option() {
         let mut d = dialog();
-        assert!(matches!(
-            d.handle_key(key(KeyCode::Esc)),
-            Some(SurveyAction::Skip)
-        ));
+        match d.handle_key(key(KeyCode::Char('2'))) {
+            Some(SurveyAction::Submit(r)) => {
+                assert_eq!(r.answers[0].selected, vec!["Patch in place".to_string()])
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        // A digit past the end of the list is inert, not a panic.
+        let mut d = dialog();
+        assert!(d.handle_key(key(KeyCode::Char('9'))).is_none());
     }
 
-    /// Free text is always reachable, so the operator can answer something the
-    /// model did not offer (the client-supplied "Other").
+    /// `z` jumps to the free-text row and starts capturing keystrokes.
+    #[test]
+    fn z_opens_the_free_text_row() {
+        let mut d = dialog();
+        assert!(d.handle_key(key(KeyCode::Char('z'))).is_none());
+        assert!(d.is_typing(), "z must put the band into free-text capture");
+        for c in "custom".chars() {
+            assert!(d.handle_key(key(KeyCode::Char(c))).is_none());
+        }
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(r)) => {
+                assert_eq!(r.answers[0].free_text.as_deref(), Some("custom"))
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    /// Free text is always reachable via the list too, so the operator can
+    /// answer something the model did not offer (the client-supplied "Other").
     #[test]
     fn free_text_is_always_offered_and_submits_its_content() {
         let mut d = dialog();
-        // Down past both options lands on the free-text row.
         d.handle_key(key(KeyCode::Down));
         d.handle_key(key(KeyCode::Down));
         assert!(d.handle_key(key(KeyCode::Enter)).is_none());
@@ -1446,6 +2349,151 @@ mod survey_invariants {
         }
     }
 
+    /// While the free-text row is capturing, ordinary characters must NOT be
+    /// interpreted as option shortcuts — `x` would otherwise decline mid-word.
+    #[test]
+    fn free_text_capture_swallows_shortcut_characters() {
+        let mut d = dialog();
+        d.handle_key(key(KeyCode::Char('z')));
+        for c in "xz1 fix".chars() {
+            assert!(
+                d.handle_key(key(KeyCode::Char(c))).is_none(),
+                "typing {c:?} escaped the free-text row"
+            );
+        }
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(r)) => {
+                assert_eq!(r.answers[0].free_text.as_deref(), Some("xz1 fix"))
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    /// Esc declines, from the option list, immediately. Without this the
+    /// operator has no way out and the turn deadlocks until the tool's own
+    /// timeout fires. Esc INSIDE the editor only leaves the editor.
+    #[test]
+    fn esc_declines_without_hanging() {
+        let mut d = dialog();
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(SurveyAction::Skip)
+        ));
+
+        // In the editor, Esc backs out to the list and the NEXT Esc declines.
+        let mut d = dialog();
+        d.handle_key(key(KeyCode::Char('z')));
+        assert!(d.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(!d.is_typing());
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(SurveyAction::Skip)
+        ));
+    }
+
+    /// The `[×]` header affordance, on the keyboard: `x` declines exactly like
+    /// Esc (mouse capture is off outside the transcript reader).
+    #[test]
+    fn x_declines_like_esc() {
+        let mut d = dialog();
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Char('x'))),
+            Some(SurveyAction::Skip)
+        ));
+    }
+
+    /// Ctrl/Alt chords are NOT swallowed — Ctrl+C must still reach the app's
+    /// interrupt path.
+    #[test]
+    fn control_chords_fall_through_to_the_app() {
+        let mut d = dialog();
+        assert!(d
+            .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .is_none());
+    }
+
+    // ── Multi-question navigation ─────────────────────────────────────────
+
+    /// ←/→ move between questions without submitting, `[n/N]` tracks position,
+    /// and an already-answered question comes back SHOWING its answer rather
+    /// than resetting to a blank list.
+    #[test]
+    fn multi_question_navigation_preserves_answers() {
+        let mut d = multi_question_dialog();
+        let h = d.band_height(W);
+        let screen = |d: &SurveyDialog| {
+            snapshot_buffer(&render_to_buffer(
+                |f| d.draw_inline(f, Rect::new(0, 0, W, h)),
+                W,
+                h,
+            ))
+        };
+        assert!(screen(&d).contains("[1/3]"), "{}", screen(&d));
+        assert!(screen(&d).contains("Which visual direction?"), "{}", screen(&d));
+
+        // Answer Q1 with option 2 → auto-advance to Q2.
+        assert!(d.handle_key(key(KeyCode::Char('2'))).is_none());
+        let s = screen(&d);
+        assert!(s.contains("[2/3]"), "did not advance to Q2:\n{s}");
+        assert!(s.contains("Which backend?"), "Q2 text missing:\n{s}");
+
+        // → reviews Q3 without submitting, ← walks back to Q1.
+        assert!(d.handle_key(key(KeyCode::Right)).is_none());
+        assert!(screen(&d).contains("[3/3]"));
+        assert!(d.handle_key(key(KeyCode::Left)).is_none());
+        assert!(d.handle_key(key(KeyCode::Left)).is_none());
+        let s = screen(&d);
+        assert!(s.contains("[1/3]"), "← did not return to Q1:\n{s}");
+        // Q1 reads as ANSWERED: the chosen value is shown and its radio is filled.
+        assert!(
+            s.contains("answered: Bold & expressive"),
+            "an answered question must show its answer:\n{s}"
+        );
+        assert!(s.contains('\u{25c9}'), "the chosen option's radio must be filled:\n{s}");
+
+        // ← on the first question is a no-op, not an underflow.
+        assert!(d.handle_key(key(KeyCode::Left)).is_none());
+        assert!(screen(&d).contains("[1/3]"));
+    }
+
+    /// Enter on the LAST question submits every answer collected so far.
+    #[test]
+    fn the_last_question_submits_the_whole_survey() {
+        let mut d = multi_question_dialog();
+        assert!(d.handle_key(key(KeyCode::Enter)).is_none()); // Q1 → Q2
+        assert!(d.handle_key(key(KeyCode::Enter)).is_none()); // Q2 → Q3
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(r)) => {
+                assert_eq!(r.answers.len(), 3, "every question must be reported");
+                assert_eq!(r.answers[0].selected, vec!["Minimal & terminal-native".to_string()]);
+                assert_eq!(r.answers[2].selected, vec!["Yes".to_string()]);
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    /// Multi-select questions get toggles instead of pick-and-advance.
+    #[test]
+    fn multi_select_toggles_with_space_and_confirms_with_enter() {
+        let mut q = question();
+        q.multi_select = true;
+        let mut d = SurveyDialog::new("sv-multi-select".into(), vec![q], true);
+        assert!(d.handle_key(key(KeyCode::Char(' '))).is_none());
+        assert!(d.handle_key(key(KeyCode::Down)).is_none());
+        assert!(d.handle_key(key(KeyCode::Char(' '))).is_none());
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(r)) => assert_eq!(r.answers[0].selected.len(), 2),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        // A digit toggles rather than submitting in multi-select.
+        let mut q = question();
+        q.multi_select = true;
+        let mut d = SurveyDialog::new("sv2".into(), vec![q], true);
+        assert!(d.handle_key(key(KeyCode::Char('1'))).is_none());
+    }
+
+    // ── Pure helpers ──────────────────────────────────────────────────────
+
     #[test]
     fn wrapped_line_count_is_sane() {
         assert_eq!(wrapped_line_count("", 40), 1);
@@ -1454,4 +2502,64 @@ mod survey_invariants {
         assert_eq!(wrapped_line_count("anything", 0), 1);
         assert!(wrapped_line_count(&"why ".repeat(200), 40) > 3);
     }
+
+    #[test]
+    fn question_rows_is_capped_at_two() {
+        assert_eq!(question_rows("short", 80), 1);
+        assert_eq!(question_rows(&"why ".repeat(200), 40), 2);
+        // A zero width degrades to the 2-row cap rather than panicking.
+        assert_eq!(question_rows("anything", 0), 2);
+    }
+
+    /// `wrap_to` is column-aware and never returns a line wider than asked, on
+    /// CJK and emoji as well as ASCII.
+    #[test]
+    fn wrap_to_respects_columns_on_wide_glyphs() {
+        for text in [
+            "plain english words that will need to wrap somewhere",
+            "日本語のテキストはここで折り返されます、たぶん",
+            "🚀🚀🚀 rocket rocket rocket 🎉🎉🎉",
+        ] {
+            for w in [8u16, 12, 20, 40] {
+                for rows in 1u16..=3 {
+                    let out = wrap_to(text, w, rows);
+                    assert!(out.len() as u16 <= rows);
+                    for l in &out {
+                        assert!(cols(l) <= w as usize, "{l:?} is {} cols, cap {w}", cols(l));
+                    }
+                }
+            }
+        }
+        assert!(wrap_to("anything", 0, 2).is_empty());
+        assert!(wrap_to("anything", 10, 0).is_empty());
+    }
+
+    /// The band's own arithmetic: chrome + question + options, capped.
+    #[test]
+    fn band_height_is_bounded_and_monotonic() {
+        let mut prev = 0u16;
+        for n in 0usize..=12 {
+            let d = SurveyDialog::new("sv".into(), vec![wide_question(n.max(1))], true);
+            let h = d.band_height(W);
+            assert!(h <= SURVEY_INLINE_CAP, "n={n}: {h} > cap");
+            assert!(h >= prev, "n={n}: band shrank ({prev} → {h})");
+            prev = h;
+        }
+        // The option window itself is what stops growth past the cap.
+        assert_eq!(
+            option_window(12, 0, MAX_VISIBLE_OPTIONS as usize).1,
+            MAX_VISIBLE_OPTIONS as usize
+        );
+    }
+
+    /// A zero-height or zero-width band draws nothing rather than panicking.
+    #[test]
+    fn a_degenerate_band_draws_nothing() {
+        let d = dialog();
+        assert_eq!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, W, 0)), W, 4), 0);
+        assert_eq!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, 0, 4)), 4, 4), 0);
+        // A 1-row band draws only its header and stops.
+        assert!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, W, 1)), W, 4) <= 1);
+    }
 }
+

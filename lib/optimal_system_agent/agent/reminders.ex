@@ -62,6 +62,12 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   alias OptimalSystemAgent.Shell.BackgroundManager
 
   @claims_table :osa_reminders_claimed
+
+  # Row cap for the claim set. One row per (session, reminder key) is written and
+  # nothing ever removed one, so a daemon serving many sessions accumulated them
+  # forever. Generous because a false eviction merely re-surfaces a reminder once
+  # — the failure mode is cosmetic, not correctness. See Infra.BoundedTable.
+  @max_claim_rows 20_000
   @tag "system-reminder"
 
   # Directory names (parents of a `skills/` dir) that hold skill definitions.
@@ -582,7 +588,12 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   @spec claim(String.t(), term()) :: boolean()
   def claim(session_id, key) do
     ensure_table()
-    :ets.insert_new(@claims_table, {{session_id, key}, true})
+    OptimalSystemAgent.Infra.BoundedTable.insert_new(
+      @claims_table,
+      {session_id, key},
+      true,
+      max: @max_claim_rows
+    )
   rescue
     _ -> true
   end

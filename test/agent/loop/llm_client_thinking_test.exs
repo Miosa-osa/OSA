@@ -1,8 +1,12 @@
 defmodule OptimalSystemAgent.Agent.Loop.LLMClientThinkingTest do
   @moduledoc """
-  `thinking_config/1` honors the effort ladder — including on opus, which uses
-  adaptive thinking by default but is forced to an explicit max budget at `:ultra`
-  so ultra visibly thinks harder on opus too.
+  `thinking_config/1` emits the thinking dialect the target model actually
+  accepts.
+
+  Anthropic removed the fixed thinking budget on the Claude 5 family and on
+  Opus 4.7/4.8 — `{type: "enabled", budget_tokens: N}` returns a 400 there, so
+  those models must always get plain `adaptive` and depth is steered by
+  `output_config.effort` instead. Only Haiku 4.5 and older still take a budget.
   """
   use ExUnit.Case, async: false
 
@@ -35,16 +39,28 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClientThinkingTest do
              %{type: "adaptive"}
   end
 
-  test "opus at ultra forces an explicit max thinking budget" do
+  test "opus at ultra stays adaptive — budget_tokens is a 400 on this model" do
     Effort.set(:ultra)
 
     assert LLMClient.thinking_config(%{provider: :anthropic, model: "claude-opus-4-8"}) ==
-             %{type: "enabled", budget_tokens: 64_000}
+             %{type: "adaptive"}
   end
 
-  test "non-opus uses the effort thinking budget at every tier" do
+  test "the Claude 5 family never receives budget_tokens at any tier" do
+    for model <- ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"],
+        tier <- [:medium, :high, :xhigh, :ultra] do
+      Effort.set(tier)
+
+      assert LLMClient.thinking_config(%{provider: :anthropic, model: model}) ==
+               %{type: "adaptive"},
+             "#{model} at #{tier} must be adaptive — Anthropic removed the fixed " <>
+               "thinking budget on this model and rejects budget_tokens with a 400"
+    end
+  end
+
+  test "budget-dialect models still use the effort thinking budget" do
     Effort.set(:high)
-    cfg = LLMClient.thinking_config(%{provider: :anthropic, model: "claude-sonnet-5"})
+    cfg = LLMClient.thinking_config(%{provider: :anthropic, model: "claude-haiku-4-5"})
 
     assert cfg.type == "enabled"
     assert cfg.budget_tokens == Effort.thinking_budget()

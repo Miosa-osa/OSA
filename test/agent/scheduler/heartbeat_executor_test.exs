@@ -8,7 +8,18 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutorTest do
     {:ok, pid} = GenServer.start_link(HeartbeatExecutor, [], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      # `start_link` links the executor to the TEST process, and `on_exit` runs
+      # only after that process is already gone — so the executor is normally
+      # mid-shutdown by the time we get here. `Process.alive?/1` followed by
+      # `GenServer.stop/1` is therefore a TOCTOU race: the pid can die in the
+      # gap, `stop` exits with :noproc, and an otherwise-passing test fails in
+      # teardown. An already-dead process is the outcome this callback wanted,
+      # so treat it as success instead of racing to observe it alive.
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
     end)
 
     {pid, name}

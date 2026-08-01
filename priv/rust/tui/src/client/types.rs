@@ -751,6 +751,9 @@ pub struct SurveyOptionWire {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SurveyQuestionWire {
     pub text: String,
+    /// Optional ≤12-char categorising chip rendered before the question text.
+    #[serde(default)]
+    pub header: Option<String>,
     #[serde(default)]
     pub multi_select: bool,
     pub options: Vec<SurveyOptionWire>,

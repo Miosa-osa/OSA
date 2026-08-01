@@ -2,8 +2,8 @@
 
 Goal: spawn full-power OSA agents that run in the background, see how many are
 running plus each one's task and elapsed time, and switch/attach to any of them.
-Grounded in the Claude Code source clone (`/home/miosa/projects/research/ClaudeCode-Source-March31`)
-and the OSA tree (`/home/miosa/projects/osa/OSA`). No em dashes used deliberately.
+Grounded in the Claude Code source clone (`<research-root>/ClaudeCode-Source-March31`)
+and the OSA tree (repo root). No em dashes used deliberately.
 
 ---
 

@@ -351,24 +351,84 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     _ -> []
   end
 
-  @doc "Auto-save session state (called from hooks)."
+  @doc """
+  Auto-save session state (called from hooks).
+
+  Sends the Loop a `{:persist_session, id}` cast instead of scraping its state
+  with `:sys.get_state/1`.
+
+  The old shape was a silent-data-loss defect: `auto_save/1` runs in the
+  `:post_response` HOOK process (`Hooks.run_async/2`), so `:sys.get_state(pid)`
+  was a cross-process `:sys` call with a 5s default timeout. A loop that is slow
+  or busy — exactly what a long session produces — made it exit with
+  `{:timeout, _}`, and the whole save (transcript AND spend) was dropped with no
+  log and no retry while the turn reported success.
+
+  A cast is QUEUED by a busy loop rather than dropped, and the loop supplies its
+  own state (`handle_cast({:persist_session, _})` → `save_from_state/2`) instead
+  of having it scraped from outside. If the cast itself cannot be delivered we
+  LOG at warning with the session id — never a blanket `rescue _ -> :ok`.
+  """
   def auto_save(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{pid, _}] ->
         try do
-          state = :sys.get_state(pid)
-          save(session_id, state.messages, Map.get(state, :working_dir))
-          # Persist the running spend at the turn boundary too (audit gap C2).
-          # The crash-recovery checkpoint is cleared on a clean turn end, so this
-          # is what carries accumulated spend into a resume AFTER a completed turn.
-          save_spend(session_id, spend_from_state(state))
+          GenServer.cast(pid, {:persist_session, session_id})
+          :ok
         rescue
-          _ -> :ok
+          e ->
+            Logger.warning(
+              "[session_persist] #{session_id}: could not enqueue save: #{Exception.message(e)}"
+            )
+
+            {:error, Exception.message(e)}
+        catch
+          :exit, reason ->
+            Logger.warning(
+              "[session_persist] #{session_id}: could not enqueue save: #{inspect(reason)}"
+            )
+
+            {:error, reason}
         end
 
       _ ->
         :ok
     end
+  end
+
+  @doc """
+  Persist a live Loop's state. Called by the Loop itself from
+  `handle_cast({:persist_session, id}, state)` so the save is serialized by the
+  loop's own mailbox and always sees a consistent state.
+
+  A failure here LOGS at warning with the session id — a persistence path must
+  never fail silently.
+  """
+  @spec save_from_state(String.t(), map()) :: :ok | {:error, term()}
+  def save_from_state(session_id, state) when is_binary(session_id) and is_map(state) do
+    with :ok <- save(session_id, Map.get(state, :messages, []), Map.get(state, :working_dir)),
+         # Persist the running spend at the turn boundary too (audit gap C2).
+         # The crash-recovery checkpoint is cleared on a clean turn end, so this
+         # is what carries accumulated spend into a resume AFTER a completed turn.
+         :ok <- save_spend(session_id, spend_from_state(state)) do
+      :ok
+    else
+      {:error, reason} = err ->
+        Logger.warning("[session_persist] #{session_id}: save failed: #{inspect(reason)}")
+        err
+
+      other ->
+        other
+    end
+  rescue
+    e ->
+      Logger.warning("[session_persist] #{session_id}: save crashed: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
+  end
+
+  def save_from_state(session_id, _state) do
+    Logger.warning("[session_persist] #{inspect(session_id)}: save skipped — invalid state")
+    {:error, :invalid_state}
   end
 
   # ── Durable spend sidecar (audit gap C2) ─────────────────────────────────
@@ -502,13 +562,48 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     Path.join(sessions_dir(), "#{safe_id}.updates.jsonl")
   end
 
+  # Path of the projection cursor sidecar (see `append_updates/2`). Lives next to
+  # the log as `<id>.updates.jsonl.cursor` so `Jsonl.delete/1` — which sweeps the
+  # log's sidecars — retires it with the session, and so neither `list/1` nor
+  # `purge_expired/0` (both filter on a `.json` suffix) ever sees it.
+  defp cursor_path(session_id), do: updates_path(session_id) <> ".cursor"
+
   # Append only the messages not already present in the immutable log.
   #
   # `save/3` is called every turn with the full CURRENT (post-compaction)
-  # message list — not a delta — so we diff against what the log already holds.
-  # Identity is a content hash counted as a MULTISET: the log already has
-  # `seen[h]` copies of a message that hashes to `h`; we append the current
-  # list's occurrences beyond that. This is compaction-safe by construction:
+  # message list — not a delta — so we must work out what the log does not have
+  # yet. There are two paths:
+  #
+  # ## Fast path — the projection cursor (O(new messages))
+  #
+  # The append-only log stays the source of truth; a tiny `*.cursor` sidecar
+  # makes it *incrementally projectable* (Codex's `thread_history_projection_state`
+  # idea). The cursor records, for the last message list we projected:
+  #
+  #   * `log_size`   — byte size of the log right after that append,
+  #   * `next_seq`   — the seq to assign the next event,
+  #   * `msg_count`  — how many of the list's messages are already in the log,
+  #   * `head_hash` / `tail_hash` — the hashes of message 0 and message
+  #     `msg_count - 1`.
+  #
+  # When the log's on-disk size still matches `log_size` (nobody else appended,
+  # and we did not crash between the append and the cursor write) and the current
+  # list still has the same head and the same message at index `msg_count - 1`,
+  # the list is a pure APPEND onto what we already projected. We then hash and
+  # write only `Enum.drop(messages, msg_count)`. Per-turn cost stops scaling with
+  # history length — which is the whole point: the previous implementation read
+  # the entire log back and SHA-256'd every message in it on every single turn,
+  # i.e. O(N) work per turn and O(N²) over a session (~17 ms/turn at 1600
+  # messages, and climbing).
+  #
+  # ## Slow path — full multiset diff (correctness backstop)
+  #
+  # Any cursor miss (no cursor, stale size after a crash or a concurrent writer,
+  # head/tail divergence — which is exactly what compaction and rewind look like)
+  # falls back to the original full-log diff, then rewrites the cursor. Identity
+  # is a content hash counted as a MULTISET: the log already has `seen[h]` copies
+  # of a message that hashes to `h`; we append the current list's occurrences
+  # beyond that. That is compaction-safe by construction:
   #
   #   * a normal turn appends the turn's new tail messages,
   #   * compaction (a shorter list) appends nothing — the log keeps every
@@ -518,23 +613,144 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   #   * legitimately duplicated content (e.g. "ok" twice) is preserved via the
   #     occurrence count rather than being collapsed.
   #
+  # Because every miss self-heals into the slow path, the cursor can be deleted,
+  # truncated or corrupted at any time without losing an event: it is a cache of
+  # a derivable fact, never a second source of truth. Crash-resumability comes
+  # from `log_size` — a crash between append and cursor write leaves a short size
+  # and the next turn re-derives from the log itself.
+  #
   # Best-effort: never raises, so the already-committed <id>.json save stands.
   defp append_updates(session_id, messages) do
     path = updates_path(session_id)
 
-    existing =
-      case Jsonl.read(path) do
-        {:ok, events, _skipped} -> events
-        _ -> []
-      end
+    case fast_forward(path, session_id, messages) do
+      {:ok, new_events, cursor} ->
+        Jsonl.append(path, new_events)
+        write_cursor(session_id, Map.put(cursor, "log_size", file_size(path)))
 
-    new_events = compute_new_events(messages, existing)
-    Jsonl.append(path, new_events)
+      :miss ->
+        existing =
+          case Jsonl.read(path) do
+            {:ok, events, _skipped} -> events
+            _ -> []
+          end
+
+        new_events = compute_new_events(messages, existing)
+        Jsonl.append(path, new_events)
+
+        next_seq =
+          (existing ++ new_events)
+          |> Enum.reduce(-1, fn e, m -> max(m, seq_of(e)) end)
+          |> Kernel.+(1)
+
+        rebuild_cursor(session_id, path, next_seq, messages)
+    end
+
     :ok
   rescue
     e ->
       Logger.warning("[session_persist] updates log append failed: #{Exception.message(e)}")
       :ok
+  end
+
+  # Try to satisfy the append from the cursor alone. Returns the events to write
+  # plus the updated cursor (its `log_size` is filled in after the append), or
+  # `:miss` to force the full-diff path.
+  defp fast_forward(path, session_id, messages) do
+    with %{
+           "v" => 1,
+           "log_size" => log_size,
+           "next_seq" => next_seq,
+           "msg_count" => n,
+           "head_hash" => head_hash,
+           "tail_hash" => tail_hash
+         }
+         when is_integer(log_size) and is_integer(next_seq) and is_integer(n) and n >= 0 <-
+           read_cursor(session_id),
+         true <- file_size(path) == log_size,
+         total = length(messages),
+         true <- total >= n,
+         true <- boundary_matches?(messages, n, head_hash, tail_hash) do
+      ts = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      {events, last_seq} =
+        messages
+        |> Enum.drop(n)
+        |> sanitize_messages()
+        |> Enum.map_reduce(next_seq, fn msg, seq ->
+          {%{"seq" => seq, "ts" => ts, "hash" => event_hash(msg), "msg" => msg}, seq + 1}
+        end)
+
+      cursor = %{
+        "v" => 1,
+        "log_size" => log_size,
+        "next_seq" => last_seq,
+        "msg_count" => total,
+        "head_hash" => if(total == 0, do: nil, else: hash_at(messages, 0)),
+        "tail_hash" => if(total == 0, do: nil, else: hash_at(messages, total - 1))
+      }
+
+      {:ok, events, cursor}
+    else
+      _ -> :miss
+    end
+  end
+
+  # A pure append leaves message 0 and message `n - 1` untouched. Compaction
+  # rewrites the head (summary replaces the pruned prefix) and rewind drops the
+  # tail, so both show up here as a mismatch and route to the full diff.
+  defp boundary_matches?(_messages, 0, _head_hash, _tail_hash), do: true
+
+  defp boundary_matches?(messages, n, head_hash, tail_hash) do
+    hash_at(messages, 0) == head_hash and hash_at(messages, n - 1) == tail_hash
+  end
+
+  defp hash_at(messages, index) do
+    case Enum.at(messages, index) do
+      nil -> nil
+      msg -> msg |> List.wrap() |> sanitize_messages() |> hd() |> event_hash()
+    end
+  end
+
+  defp file_size(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} -> size
+      _ -> 0
+    end
+  end
+
+  defp read_cursor(session_id) do
+    with {:ok, json} <- File.read(cursor_path(session_id)),
+         {:ok, data} when is_map(data) <- Jason.decode(json) do
+      data
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp write_cursor(session_id, cursor) do
+    write_json(cursor_path(session_id), cursor)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # After a slow-path append, re-derive the cursor from the message list we just
+  # projected. `next_seq` is `max(seq) + 1` over the whole log (not the event
+  # count) so legacy logs written before seqs were dense stay monotonic.
+  defp rebuild_cursor(session_id, path, next_seq, messages) do
+    total = length(messages)
+
+    write_cursor(session_id, %{
+      "v" => 1,
+      "log_size" => file_size(path),
+      "next_seq" => next_seq,
+      "msg_count" => total,
+      "head_hash" => if(total == 0, do: nil, else: hash_at(messages, 0)),
+      "tail_hash" => if(total == 0, do: nil, else: hash_at(messages, total - 1))
+    })
   end
 
   defp compute_new_events(messages, existing_events) do

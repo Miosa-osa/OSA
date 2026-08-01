@@ -21,10 +21,31 @@ config :optimal_system_agent, post_edit_verify: [enabled: false]
 # prior run collide with leftover rows and corrupt exact-count assertions
 # (e.g. session fork message_count). The file is deleted here, before the Repo
 # connects at boot; migrations recreate the schema on startup.
-test_db_path = Path.join(System.tmp_dir!(), "osa-test.db")
+#
+# The path is also per-RUN, not a single fixed name. This deletion happens at
+# config-load time, so with one shared filename a second `mix test` starting
+# while a first is still running deletes the database out from under it, and the
+# already-connected Repo fails every later query with "no such table: …". That
+# is not hypothetical: it turns a green suite into dozens of unrelated
+# persistence failures that look like a code regression. Runs are already
+# isolated by `OSA_HTTP_PORT`, so key the database off the same knob (falling
+# back to the OS pid) and concurrent suites stop clobbering each other.
+test_db_tag = System.get_env("OSA_HTTP_PORT") || System.pid()
+test_db_path = Path.join(System.tmp_dir!(), "osa-test-#{test_db_tag}.db")
 
 for suffix <- ["", "-shm", "-wal"] do
   _ = File.rm(test_db_path <> suffix)
+end
+
+# Per-run naming means nothing ever reuses (and therefore ever cleans up) an old
+# file, so sweep databases left by runs that finished more than a day ago. Only
+# age is considered — a file younger than that may belong to a suite running
+# right now, which is the exact thing this scheme exists to protect.
+stale_before = System.os_time(:second) - 86_400
+
+for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-*.db*")),
+    match?({:ok, %{mtime: mtime}} when mtime < stale_before, File.stat(stale, time: :posix)) do
+  _ = File.rm(stale)
 end
 
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
@@ -68,10 +89,19 @@ config :optimal_system_agent, disable_models_fetch: true
 
 config :optimal_system_agent,
   models_cache_path: Path.join(System.tmp_dir!(), "osa-test-no-such-models-cache.json")
+
 # External-tool MCP discovery (Codex/Claude/Cursor) is OFF in the suite so tests
 # never load the operator's real ~/.codex, ~/.claude, ~/.cursor config from
 # $HOME. The discovery unit test enables it explicitly via a fake home override.
 config :optimal_system_agent, mcp_discovery_enabled: false
+
+# Never launch a real browser from the suite. `Utils.Browser.open/1` shells out
+# to `xdg-open`/`open`, so on a developer's DESKTOP machine (real $DISPLAY) any
+# test that exercises it genuinely opens a tab — which is how a placeholder
+# OAuth URL from a test fixture kept popping up on the user's screen every time
+# the suite ran. The Browser unit test re-enables this explicitly, with PATH
+# pointed at a harmless stub opener.
+config :optimal_system_agent, browser_open_enabled: false
 
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false

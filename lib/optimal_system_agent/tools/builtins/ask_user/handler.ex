@@ -36,6 +36,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"question" => question} = params, ctx) do
     options = params["options"] || []
+    # Optional ≤12-char category chip. Enforced here rather than trusted: the
+    # TUI renders it in a fixed-width slot, so an over-long header would just be
+    # cut off on screen with no signal to the model.
+    header = normalize_header(params["header"])
     session_id = ctx.session_id || params["__session_id__"]
     ref = make_ref()
     ref_str = inspect(ref)
@@ -55,6 +59,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
       event: :ask_user,
       question: question,
       options: options,
+      header: header,
       ref: ref_str,
       session_id: session_id
     })
@@ -107,6 +112,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
     "No answer — the question timed out with no response. " <>
       "Do not ask it again; continue with your best judgment and state the assumption you made."
   end
+
+  # A blank/oversized header is dropped rather than shown clipped.
+  defp normalize_header(h) when is_binary(h) do
+    case String.trim(h) do
+      "" -> nil
+      trimmed -> if String.length(trimmed) <= 12, do: trimmed, else: nil
+    end
+  end
+
+  defp normalize_header(_), do: nil
 
   defp register_pending(ref_str, session_id, question, options) do
     if is_binary(session_id) and session_id != "" do

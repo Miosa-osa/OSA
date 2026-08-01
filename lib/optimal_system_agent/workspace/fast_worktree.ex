@@ -173,12 +173,23 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
   defp run_tiers([], _branch, _path, _repo, _ref, _caps), do: {:error, :no_tiers}
 
   defp run_tiers([:git | _rest], branch, path, repo_dir, ref, _caps) do
-    # Ultimate fallback: exactly the legacy behavior — a full checkout. Clean
-    # HEAD (no dirty mirroring), but guaranteed to work anywhere git does.
+    # Ultimate fallback: a full checkout. Clean HEAD (no dirty mirroring), but
+    # guaranteed to work anywhere git does.
+    #
+    # A plain checkout has git's own blind spot: it leaves every gitlink path
+    # (submodule, embedded independent repo) as an EMPTY directory. Filling
+    # exactly those paths afterwards adds the missing components without
+    # touching a single file the checkout wrote — see
+    # `Populate.fill_hidden_subtrees/2`. A failure there is a real failure: this
+    # is the last tier, so "succeed with the code missing" has no fallback left
+    # to hide behind.
     ensure_absent(path, repo_dir)
 
-    case git(["worktree", "add", "-b", branch, path, ref], repo_dir) do
-      {_out, 0} -> {:ok, :git}
+    with {_out, 0} <- git(["worktree", "add", "-b", branch, path, ref], repo_dir),
+         :ok <- Populate.fill_hidden_subtrees(repo_dir, path) do
+      {:ok, :git}
+    else
+      {:error, reason} -> {:error, {:subtree_fill, reason}}
       {out, _} -> {:error, {:git_checkout, String.trim(out)}}
     end
   end
@@ -195,12 +206,25 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
         Logger.debug("[fast_worktree] tier #{tier} unsupported, falling through")
         run_tiers(rest, branch, path, repo_dir, ref, caps)
 
+      # The source tree could not be fully enumerated. No other tier can
+      # enumerate it either, so falling through would produce a worktree that
+      # reports success while missing whole components — the exact silent
+      # data-loss shape this guard exists to prevent. Abort instead.
       {:error, reason} ->
-        Logger.warning(
-          "[fast_worktree] tier #{tier} failed (#{inspect(reason)}), falling through"
-        )
+        if Populate.fatal?(reason) do
+          Logger.error(
+            "[fast_worktree] aborting: source tree could not be fully enumerated " <>
+              "(#{inspect(reason)})"
+          )
 
-        run_tiers(rest, branch, path, repo_dir, ref, caps)
+          {:error, reason}
+        else
+          Logger.warning(
+            "[fast_worktree] tier #{tier} failed (#{inspect(reason)}), falling through"
+          )
+
+          run_tiers(rest, branch, path, repo_dir, ref, caps)
+        end
 
       {out, _code} ->
         Logger.warning("[fast_worktree] worktree add failed for #{tier}: #{String.trim(out)}")

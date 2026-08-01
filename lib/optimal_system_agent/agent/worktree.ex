@@ -44,18 +44,19 @@ defmodule OptimalSystemAgent.Agent.Worktree do
       {_output, 0} ->
         Logger.info("[worktree] Created #{worktree_path} on branch #{branch_name}")
 
-        # Emit hook event
-        try do
-          OptimalSystemAgent.Agent.Hooks.run_async(:worktree_create, %{
-            agent_id: agent_id,
-            path: worktree_path,
-            branch: branch_name
-          })
-        rescue
-          _ -> :ok
+        # A plain checkout leaves every gitlink path (submodule / embedded repo)
+        # as an EMPTY directory — git never checks their contents out. Filling
+        # exactly those paths adds the missing components without touching a
+        # file the checkout wrote. A failure here is reported, never swallowed:
+        # handing back a worktree with whole components missing is the silent
+        # data-loss shape this guards against.
+        case OptimalSystemAgent.Workspace.FastWorktree.Populate.fill_hidden_subtrees(
+               base_dir,
+               worktree_path
+             ) do
+          :ok -> emit_create_hook_and_ok(agent_id, worktree_path, branch_name)
+          {:error, reason} -> {:error, "worktree subtree population failed: #{inspect(reason)}"}
         end
-
-        {:ok, %{path: worktree_path, branch: branch_name}}
 
       {output, _code} ->
         Logger.warning("[worktree] Failed to create: #{output}")
@@ -65,6 +66,20 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     e ->
       Logger.error("[worktree] Exception: #{Exception.message(e)}")
       {:error, "Worktree error: #{Exception.message(e)}"}
+  end
+
+  defp emit_create_hook_and_ok(agent_id, worktree_path, branch_name) do
+    try do
+      OptimalSystemAgent.Agent.Hooks.run_async(:worktree_create, %{
+        agent_id: agent_id,
+        path: worktree_path,
+        branch: branch_name
+      })
+    rescue
+      _ -> :ok
+    end
+
+    {:ok, %{path: worktree_path, branch: branch_name}}
   end
 
   @doc """
@@ -159,7 +174,8 @@ defmodule OptimalSystemAgent.Agent.Worktree do
       )
 
       # Merge the branch back
-      case OptimalSystemAgent.Git.cmd(["merge", "--no-ff", branch, "-m", "Merge agent worktree #{branch}"],
+      case OptimalSystemAgent.Git.cmd(
+             ["merge", "--no-ff", branch, "-m", "Merge agent worktree #{branch}"],
              cd: base_dir,
              stderr_to_stdout: true
            ) do
@@ -209,7 +225,10 @@ defmodule OptimalSystemAgent.Agent.Worktree do
   end
 
   defp get_worktree_branch(path) do
-    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"],
+           cd: path,
+           stderr_to_stdout: true
+         ) do
       {branch, 0} -> String.trim(branch)
       _ -> nil
     end

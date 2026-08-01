@@ -59,6 +59,28 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     :ets.tab2list(@tracked_sessions_table) |> Enum.map(fn {id, _meta} -> id end)
   end
 
+  @doc """
+  Metadata recorded for a tracked session, or `nil` when it was never tracked.
+
+  Carries `:created_at` (ISO8601), which is what lets a listing put the newest
+  sessions first. Without it a caller can only see tracked ids in ETS order,
+  which is arbitrary — so a session created a moment ago can sort behind
+  hundreds of older ones and fall off the first page of its own listing.
+  """
+  @spec tracked_session_meta(session_id()) :: map() | nil
+  def tracked_session_meta(session_id) when is_binary(session_id) do
+    ensure_tracked_sessions_table()
+
+    case :ets.lookup(@tracked_sessions_table, session_id) do
+      [{^session_id, meta}] when is_map(meta) -> meta
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def tracked_session_meta(_), do: nil
+
   @doc "Return live session IDs registered by running loop processes."
   @spec live_session_ids() :: [session_id()]
   def live_session_ids do
@@ -229,6 +251,11 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   @doc "Stop a live loop process and forget runtime tracking."
   @spec stop_session(session_id()) :: :ok | {:error, :not_found} | {:error, term()}
   def stop_session(session_id) do
+    # Cascade first: a stopped parent must not strand its fleet delegates as
+    # live loops holding full transcripts. Each child's stop recurses here, so a
+    # deep tree unwinds level by level. Best-effort — never blocks this stop.
+    _ = OptimalSystemAgent.Agent.Fleet.stop_children(session_id)
+
     case lookup_loop(session_id) do
       {:ok, pid, _owner} ->
         GenServer.stop(pid, :normal)
@@ -303,11 +330,20 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     e -> {:error, e}
   end
 
-  @doc "Forget runtime tracking for a session."
+  @doc """
+  Forget runtime tracking for a session, and release its per-session state.
+
+  This is OSA's single session-teardown path. Seven per-session cleanup
+  functions existed with zero production callers, so every session that ever ran
+  left its ETS slice behind for the life of the daemon;
+  `Runtime.SessionTeardown.run/1` is what finally calls them. See that module
+  for what is released and what is deliberately kept (durable resume artifacts).
+  """
   @spec untrack_session(session_id()) :: :ok
   def untrack_session(session_id) do
     ensure_tracked_sessions_table()
     :ets.delete(@tracked_sessions_table, session_id)
+    _ = OptimalSystemAgent.Runtime.SessionTeardown.run(session_id)
     :ok
   end
 

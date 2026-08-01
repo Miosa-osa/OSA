@@ -537,6 +537,129 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
     end
   end
 
+  # ── GET /sessions/resolve ─────────────────────────────────────────────
+  #
+  # The endpoint `osa resume <id>` goes through. Its whole job is to turn a bad
+  # reference into a LOUD non-2xx: GET /:id/messages answers 200 + [] for an id
+  # that never existed, so resuming a typo used to be indistinguishable from
+  # resuming an empty conversation.
+
+  describe "GET /sessions/resolve" do
+    setup do
+      conn = json_post("/", %{})
+      {:ok, session_id: decode_body(conn)["id"]}
+    end
+
+    test "resolves a full session id to itself", %{session_id: session_id} do
+      conn = json_get("/resolve?id=#{session_id}")
+
+      assert conn.status == 200
+      assert decode_body(conn)["id"] == session_id
+    end
+
+    test "resolves an unambiguous prefix to the full id", %{session_id: session_id} do
+      # git-short-SHA style: enough characters to be unique is enough to resume.
+      prefix = String.slice(session_id, 0, String.length(session_id) - 4)
+      conn = json_get("/resolve?id=#{prefix}")
+
+      case conn.status do
+        200 -> assert decode_body(conn)["id"] == session_id
+        # Another session created by a concurrent test may share the prefix;
+        # ambiguity is still an explicit failure, never a silent fresh session.
+        409 -> assert decode_body(conn)["error"] == "session_ref_ambiguous"
+      end
+    end
+
+    test "404s on an unknown id instead of falling back to a fresh session" do
+      conn = json_get("/resolve?id=definitely-not-a-session-#{System.unique_integer([:positive])}")
+
+      assert conn.status == 404
+      body = decode_body(conn)
+      assert body["error"] == "session_not_found"
+      # The message has to be actionable, not just a status code.
+      assert body["details"] =~ "osa resume"
+    end
+
+    test "404s on a one-character typo of a real id", %{session_id: session_id} do
+      typo = session_id <> "x"
+      conn = json_get("/resolve?id=#{typo}")
+
+      assert conn.status == 404
+      assert decode_body(conn)["error"] == "session_not_found"
+    end
+
+    test "404s when no id is supplied at all" do
+      conn = json_get("/resolve")
+
+      assert conn.status == 404
+      assert decode_body(conn)["error"] == "session_not_found"
+    end
+
+    test "409s with candidates on an ambiguous prefix" do
+      # Two sessions share the "session-" prefix by construction.
+      json_post("/", %{})
+      json_post("/", %{})
+
+      conn = json_get("/resolve?id=session-")
+
+      assert conn.status == 409
+      body = decode_body(conn)
+      assert body["error"] == "session_ref_ambiguous"
+      assert length(body["candidates"]) >= 2
+      assert body["details"] =~ "Use more characters"
+    end
+  end
+
+  # ── End-to-end: resume restores the prior conversation ────────────────
+
+  describe "resume round-trip" do
+    test "a persisted conversation is resolvable and its messages come back" do
+      session_id = "session-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"
+
+      SessionTranscript.save_turn(session_id, "user", "what is 2 + 2?")
+      SessionTranscript.save_turn(session_id, "assistant", "4")
+      SessionTranscript.save_turn(session_id, "user", "and 3 + 3?")
+      SessionTranscript.save_turn(session_id, "assistant", "6")
+
+      # 1. The id the exit hint printed resolves to itself.
+      resolve = json_get("/resolve?id=#{session_id}")
+      assert resolve.status == 200
+      resolved = decode_body(resolve)["id"]
+      assert resolved == session_id
+
+      # 2. Resuming it hands back the ACTUAL prior turns, in order — this is
+      #    the thing that makes resume worth having.
+      conn = json_get("/#{resolved}/messages")
+      assert conn.status == 200
+      body = decode_body(conn)
+
+      contents = Enum.map(body["messages"], & &1["content"])
+      assert "what is 2 + 2?" in contents
+      assert "4" in contents
+      assert "and 3 + 3?" in contents
+      assert "6" in contents
+      assert body["count"] == length(body["messages"])
+
+      roles = Enum.map(body["messages"], & &1["role"])
+      assert "user" in roles
+      assert "assistant" in roles
+    end
+
+    test "an unknown id yields NO messages — which is exactly why resolve must gate it" do
+      unknown = "session-does-not-exist-#{System.unique_integer([:positive])}"
+
+      # The silent-fallback failure mode, pinned: /messages happily answers 200
+      # with an empty list, so nothing downstream can tell "no such session"
+      # apart from "empty session".
+      messages = json_get("/#{unknown}/messages")
+      assert messages.status == 200
+      assert decode_body(messages)["messages"] == []
+
+      # /resolve is the gate that turns it into a loud failure.
+      assert json_get("/resolve?id=#{unknown}").status == 404
+    end
+  end
+
   # ── Unknown endpoint ──────────────────────────────────────────────────
 
   describe "unknown session endpoint" do

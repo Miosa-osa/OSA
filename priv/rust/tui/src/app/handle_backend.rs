@@ -177,14 +177,17 @@ impl App {
                     );
                 }
             }
-            BackendEvent::StreamingToken { text, .. } => {
+            BackendEvent::StreamingToken {
+                text, message_id, ..
+            } => {
                 // Gate on the whole turn, not just `Processing`: ~20 overlays can
                 // open FROM Processing (/context, /cost, /tools, …), which parks
                 // the live turn on the return stack and flips `is_processing()`
                 // false. The old `is_processing()` gate silently DROPPED every
                 // token streamed while such an overlay was up, so closing it lost
-                // a chunk of the answer. `turn_is_active()` keeps `stream_buf`
-                // accumulating so the text is intact when the overlay closes.
+                // a chunk of the answer. `turn_is_active()` keeps the assistant
+                // buffer accumulating so the text is intact when the overlay
+                // closes.
                 if self.turn_is_active() {
                     // Reasoning is over once real tokens stream. Freeze the
                     // thinking box to its done state ("∴ Thought for Ns") instead
@@ -195,8 +198,26 @@ impl App {
                     if !self.thinking_box.is_empty() {
                         self.thinking_box.finish();
                     }
-                    self.stream_buf.push_str(&text);
-                    self.chat.update_streaming(&self.stream_buf);
+                    // A delta carrying a NEW message_id means the backend started
+                    // a fresh assistant message — it re-entered its ReAct loop
+                    // after a text-only response (auto-continue / coding nudge /
+                    // verification gate / goal verifier), with no tool call in
+                    // between to flush the buffer. Commit the superseded
+                    // generation as its own block; the new one starts clean
+                    // instead of being appended onto the text it replaces.
+                    if let Some(superseded) =
+                        self.assistant_stream.push(message_id.as_deref(), &text)
+                    {
+                        self.chat.clear_streaming();
+                        self.flush_collapse();
+                        crate::app::assistant_stream::commit_assistant_block(
+                            &mut self.chat,
+                            &mut self.agent_header_sent,
+                            &superseded,
+                            None,
+                        );
+                    }
+                    self.chat.update_streaming(self.assistant_stream.text());
                     // Count CHARACTERS, not UTF-8 bytes — the ~4-chars/token
                     // estimate inflates badly on non-ASCII output if we use len().
                     self.activity.add_stream_chars(text.chars().count());
@@ -221,9 +242,10 @@ impl App {
                 response,
                 response_type: _,
                 signal,
+                message_id,
             } => {
                 let was_processing = self.state.is_processing();
-                self.handle_agent_response(response, signal);
+                self.handle_agent_response(response, signal, message_id);
                 // True turn-end edge: `handle_agent_response` flips Processing →
                 // Idle only when the turn actually completes. Fire the completion
                 // notification exactly on that transition (mid-turn agent_response
@@ -237,6 +259,16 @@ impl App {
                 args,
                 tool_call_id,
             } => {
+                // `task_write` hints arrive as `"<action> <task_id>"` — an opaque
+                // id the operator cannot read. Substitute the step's subject from
+                // the live checklist before the hint reaches the feed, the stashed
+                // args (→ the finished transcript cell) or the permission dialog.
+                let args = if is_task_tool(&name) {
+                    humanize_task_hint(&args, |id| self.task_checklist.subject_for(id))
+                        .unwrap_or(args)
+                } else {
+                    args
+                };
                 // Flush any accumulated streaming text as a chat message BEFORE
                 // the tool call. This interleaves text and tool calls
                 // chronologically instead of dumping all text at the end.
@@ -248,7 +280,7 @@ impl App {
                 // "◈ OSA" blocks.
                 //
                 // agent_header_sent is set unconditionally here — even when
-                // stream_buf is empty (LLM went straight to a tool call with no
+                // the buffer is empty (LLM went straight to a tool call with no
                 // preamble). Without this, the flag would stay false and the
                 // next non-empty ToolCallStart flush would call add_agent_message
                 // again, emitting a duplicate "◈ OSA" header mid-turn.
@@ -256,19 +288,22 @@ impl App {
                 // Finalize any still-pending tool call into native scrollback
                 // first, so ordering stays: [prior text][prior tool][this text].
                 self.chat.flush_pending_tools();
-                if !self.stream_buf.is_empty() {
+                if !self.assistant_stream.is_empty() {
                     // Assistant text separates the previous tool run from this
                     // one — commit the collapsed summary before the text so the
                     // scrollback order stays [prior tools][text][this tool].
                     self.flush_collapse();
-                    let text = self.stream_buf.clone();
+                    // `take` (not `reset`): the message identity is kept, so the
+                    // deltas that resume after this tool call are recognised as
+                    // more of the SAME assistant message rather than a new one.
+                    let text = self.assistant_stream.take();
                     self.chat.clear_streaming();
-                    if self.agent_header_sent {
-                        self.chat.add_agent_continuation(&text);
-                    } else {
-                        self.chat.add_agent_message(&text, None);
-                    }
-                    self.stream_buf.clear();
+                    crate::app::assistant_stream::commit_assistant_block(
+                        &mut self.chat,
+                        &mut self.agent_header_sent,
+                        &text,
+                        None,
+                    );
                 }
                 self.agent_header_sent = true;
 
@@ -589,10 +624,6 @@ impl App {
             } => {
                 self.tasks.add(task_id.clone(), subject.clone(), String::new());
                 self.task_checklist.add(task_id, subject, Some(active_form));
-                // Arm the debounced "Updated plan" snapshot. A plan of N steps
-                // arrives as N task_created events in one burst; re-arming here and
-                // flushing on tick coalesces them into a single history cell.
-                self.plan_snapshot_debounce = 2;
                 self.recompute_layout();
             }
             BackendEvent::TaskUpdated { task_id, status } => {
@@ -609,9 +640,6 @@ impl App {
                 // progress (current_active_form -> None).
                 let verb = self.task_checklist.current_active_form();
                 self.activity.set_active_verb(verb);
-                // Debounced snapshot (dedup in snapshot_if_changed still guards a
-                // no-op update, so an unchanged TaskUpdated flushes to nothing).
-                self.plan_snapshot_debounce = 2;
             }
             BackendEvent::TaskChecklistShow { tasks } => {
                 self.task_checklist.clear();
@@ -628,9 +656,6 @@ impl App {
                 }
                 self.task_checklist.show();
                 self.activity.set_active_verb(self.task_checklist.current_active_form());
-                // One event carries the whole plan; still route through the
-                // debounce so it produces a single "Updated plan" history cell.
-                self.plan_snapshot_debounce = 2;
                 self.recompute_layout();
             }
             BackendEvent::TaskChecklistHide => {
@@ -1142,7 +1167,7 @@ impl App {
                     self.session_id = resp.id.clone();
                     self.chat.clear();
                     self.tasks.clear();
-                    self.stream_buf.clear();
+                    self.assistant_stream.reset();
                     self.thinking_buf.clear();
                     self.agent_header_sent = false;
 
@@ -1842,7 +1867,11 @@ impl App {
                                 self.continue_session();
                             } else if let Some(resume) = self.startup_resume.take() {
                                 match resume {
-                                    Some(id) => self.switch_session(&id),
+                                    // Resolve BEFORE switching: an unknown or
+                                    // ambiguous reference must fail loudly, and
+                                    // an unambiguous prefix must expand to the
+                                    // full id.
+                                    Some(id) => self.resolve_and_switch_session(&id),
                                     None => {
                                         self.create_session();
                                         self.load_recent_sessions();
@@ -1856,6 +1885,21 @@ impl App {
                 }
                 Err(e) => {
                     debug!("Onboarding check failed: {}", e);
+                }
+            },
+
+            // === Launch-time `osa resume <ref>` resolution ===
+            BackendEvent::SessionResolved(result) => match result {
+                Ok(id) => {
+                    info!("Resolved launch resume reference to session {}", id);
+                    self.switch_session(&id);
+                }
+                Err(e) => {
+                    // FATAL, on purpose. The alternative — carry on in the fresh
+                    // session we already created — is the silent-fallback bug:
+                    // the user asked for a specific conversation, got a blank
+                    // one, and nothing on screen said so.
+                    self.fatal_exit = Some(format!("error: {}", e));
                 }
             },
 
@@ -1884,7 +1928,14 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    // Visible, not just a log line: a resume whose history fails
+                    // to load leaves an EMPTY transcript on screen, which is
+                    // indistinguishable from a fresh session unless we say so.
                     debug!("Failed to load session messages: {}", e);
+                    self.chat.add_system_message(
+                        &format!("Could not load this session's history: {}", e),
+                        "error",
+                    );
                 }
             },
 
@@ -2325,6 +2376,7 @@ impl App {
                 let qs: Vec<SurveyQuestion> = questions.into_iter().map(|q| {
                     SurveyQuestion {
                         text: q.text,
+                        header: q.header,
                         multi_select: q.multi_select,
                         options: q.options.into_iter().map(|o| SurveyOption {
                             label: o.label,
@@ -2336,8 +2388,15 @@ impl App {
                 self.survey = Some(SurveyDialog::new(survey_id, qs, skippable));
                 // Item 5 — waiting on the user's answer → pulse the pending cue.
                 self.activity.set_pending_user(true);
+                // `Survey` is deliberately NOT an `is_overlay()` state (see
+                // state.rs): the picker renders INLINE in its own reserved band
+                // above the composer, so the conversation stays visible while
+                // the operator answers. Entering it via `enter_overlay` is still
+                // right — it records the caller so `exit_overlay` returns to
+                // Processing/Idle — it just does not switch the viewport.
                 if self.state.can_transition_to(AppState::Survey) {
                     self.enter_overlay(AppState::Survey);
+                    self.recompute_layout();
                 }
             }
             BackendEvent::SurveyAnswered { survey_id, summary } => {
@@ -2389,6 +2448,47 @@ impl App {
         }
         false
     }
+}
+
+/// Names OSA uses for the task/plan tool (shown as `planning` in the feed).
+fn is_task_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "task_write" | "taskwrite" | "taskcreate" | "task_update"
+    )
+}
+
+/// Rewrite a `task_write` argument hint so it names the STEP rather than an
+/// opaque id.
+///
+/// The backend's `ToolHint` has only the raw arguments to work with, and
+/// `start`/`complete` carry a bare `task_id` — so the live feed read
+/// `> planning  complete 171c8358`, which tells a human nothing. The TUI does
+/// hold the id→subject mapping (the live checklist), so the substitution happens
+/// here, at the one point every tool call passes through.
+///
+/// Returns `None` (leave the hint alone) unless the hint is exactly
+/// `"<action> <id>"` AND the id resolves — never invents text, never falls back
+/// to raw JSON or schema field names.
+fn humanize_task_hint(hint: &str, resolve: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let hint = hint.trim();
+    // A hint that already carries a title (`"add Wire the checklist"`) has spaces
+    // past the action; a bare-id hint has exactly two whitespace-separated parts.
+    let (action, id) = hint.split_once(char::is_whitespace)?;
+    let id = id.trim();
+    if id.is_empty() || id.contains(char::is_whitespace) {
+        return None;
+    }
+    // Ids are opaque handles; a token with a space, slash or dot is prose/path.
+    if id.contains('/') {
+        return None;
+    }
+    let subject = resolve(id)?;
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return None;
+    }
+    Some(format!("{} {}", action, subject))
 }
 
 /// Names OSA uses for a shell-command tool. The model may invoke any alias
@@ -2527,6 +2627,53 @@ pub(crate) fn builtin_command_entries() -> Vec<crate::client::types::CommandEntr
 mod handle_backend_tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// `> planning  complete 171c8358` — the feed showed a bare opaque id. The
+    /// backend hint cannot do better (it only has the raw arguments), so the TUI
+    /// substitutes the step's subject from the live checklist.
+    #[test]
+    fn task_hint_ids_are_replaced_with_the_step_subject() {
+        let resolve = |id: &str| match id {
+            "171c8358" => Some("Fix the invisible tasks bug".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            humanize_task_hint("complete 171c8358", resolve).as_deref(),
+            Some("complete Fix the invisible tasks bug")
+        );
+        assert_eq!(
+            humanize_task_hint("  start 171c8358 ", resolve).as_deref(),
+            Some("start Fix the invisible tasks bug")
+        );
+    }
+
+    /// It must never invent, mangle or drop a hint it cannot improve.
+    #[test]
+    fn task_hint_is_left_alone_when_it_cannot_be_resolved() {
+        let none = |_: &str| None::<String>;
+        // Unknown id → untouched by the caller (helper says "no").
+        assert_eq!(humanize_task_hint("complete deadbeef", none), None);
+        // Already carries a title → not an "<action> <id>" shape.
+        let any = |_: &str| Some("subject".to_string());
+        assert_eq!(humanize_task_hint("add Wire up the checklist", any), None);
+        // Single token / empty.
+        assert_eq!(humanize_task_hint("add", any), None);
+        assert_eq!(humanize_task_hint("", any), None);
+        // Paths are not ids.
+        assert_eq!(humanize_task_hint("read src/app/mod.rs", any), None);
+        // An empty subject is not an improvement.
+        assert_eq!(humanize_task_hint("complete abc", |_| Some("  ".to_string())), None);
+    }
+
+    #[test]
+    fn task_tool_aliases_are_recognised() {
+        for n in ["task_write", "TaskWrite", "TaskCreate", "task_update"] {
+            assert!(is_task_tool(n), "{n} should be a task tool");
+        }
+        for n in ["bash", "file_read", "delegate"] {
+            assert!(!is_task_tool(n), "{n} is not a task tool");
+        }
+    }
 
     #[test]
     fn bg_shell_signature_is_stable_and_dedups_replay() {

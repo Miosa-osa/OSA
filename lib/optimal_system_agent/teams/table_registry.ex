@@ -1,48 +1,85 @@
 defmodule OptimalSystemAgent.Teams.TableRegistry do
   @moduledoc """
-  ETS table management for per-team state storage.
+  ETS storage for per-team state.
 
-  Each team gets two named ETS tables:
+  Two FIXED, globally-named tables hold every team's state, partitioned by a
+  composite key:
 
-    - `:"team_<id>_meta"`   — team metadata, parent/child relationships, status
-    - `:"team_<id>_agents"` — agent state records keyed by agent_id
+    - `:osa_team_meta`   — `{{team_id, :team}, meta}` (plus a presence marker)
+    - `:osa_team_agents` — `{{team_id, agent_id}, agent_state}`
 
-  Tables are owned by the calling process (typically the TeamManager GenServer).
-  Idempotent creation: `ensure_table/1` is safe to call multiple times.
-  Cleanup removes both tables atomically on team dissolution.
+  ## Why fixed tables and not one table per team
+
+  This module used to mint the table names dynamically —
+  `:"team_<id>_meta"` and `:"team_<id>_agents"` — one brand-new atom per team,
+  per table. Atoms are **never garbage collected**, and the BEAM atom table is a
+  hard, fixed-size limit (`+t`, default ~1,048,576): once it fills, the VM
+  aborts with `system_limit`. Every other unbounded-growth issue in this
+  codebase degrades performance; this one is the only class that ends in an
+  unrecoverable crash, and it needed no attacker — a long-running daemon that
+  creates and dissolves teams gets there on its own, because dissolving a team
+  frees its ETS table but can never free its name.
+
+  The same class was fixed once already in `Agent.Scheduler` (see
+  `String.to_existing_atom` there, with the comment "prevent atom table
+  exhaustion"). This follows that precedent, taking the stronger of the two
+  options: a fixed table plus a key creates NO atoms at all, so team ids stay
+  free-form and unbounded without ever touching the atom table.
+
+  Tables are `:public` so nervous-system processes can read/write without going
+  through the owning GenServer. They are created on demand and, unlike the old
+  per-team tables, are never destroyed — `destroy_tables/1` deletes a team's
+  ROWS, which is what dissolution actually needs.
   """
 
   require Logger
 
-  @doc "Return the atom name for the team metadata table."
-  @spec meta_table(String.t()) :: atom()
-  def meta_table(team_id), do: :"team_#{team_id}_meta"
+  @meta_table :osa_team_meta
+  @agents_table :osa_team_agents
 
-  @doc "Return the atom name for the team agents table."
-  @spec agents_table(String.t()) :: atom()
-  def agents_table(team_id), do: :"team_#{team_id}_agents"
+  # Marker row proving a team was set up, so `tables_exist?/1` keeps meaning
+  # "this team has storage" now that the tables themselves are global and always
+  # present. Written by `ensure_tables/1`, removed by `destroy_tables/1`.
+  @presence :__present__
+
+  @doc "The fixed ETS table holding every team's metadata."
+  @spec meta_table() :: atom()
+  def meta_table, do: @meta_table
+
+  @doc "The fixed ETS table holding every team's agent-state records."
+  @spec agents_table() :: atom()
+  def agents_table, do: @agents_table
+
+  @doc "Key for a team's metadata row in `meta_table/0`."
+  @spec meta_key(String.t()) :: {String.t(), :team}
+  def meta_key(team_id), do: {team_id, :team}
+
+  @doc "Key for one agent's state row in `agents_table/0`."
+  @spec agent_key(String.t(), String.t()) :: {String.t(), String.t()}
+  def agent_key(team_id, agent_id), do: {team_id, agent_id}
 
   @doc """
-  Idempotently create both ETS tables for the given team_id.
+  Idempotently create the shared tables and mark `team_id` as present.
 
-  Safe to call multiple times — returns `:ok` whether tables already exist
-  or were just created. Tables are `:public` so nervous-system processes can
-  read/write without going through the owning GenServer.
+  Safe to call any number of times, from any process.
   """
   @spec ensure_tables(String.t()) :: :ok
   def ensure_tables(team_id) do
-    ensure_table(meta_table(team_id), :set)
-    ensure_table(agents_table(team_id), :set)
+    ensure_table(@meta_table)
+    ensure_table(@agents_table)
+    :ets.insert(@meta_table, {{team_id, @presence}, true})
     :ok
+  rescue
+    _ -> :ok
   end
 
-  @doc "Idempotently create a single named ETS table with the given type."
-  @spec ensure_table(atom(), :set | :bag | :duplicate_bag | :ordered_set) :: :ok
-  def ensure_table(name, type \\ :set) do
+  @doc "Idempotently create one of the shared named ETS tables."
+  @spec ensure_table(atom()) :: :ok
+  def ensure_table(name) do
     :ets.new(name, [
       :named_table,
       :public,
-      type,
+      :set,
       {:read_concurrency, true},
       {:write_concurrency, true}
     ])
@@ -54,63 +91,66 @@ defmodule OptimalSystemAgent.Teams.TableRegistry do
   end
 
   @doc """
-  Destroy both ETS tables for the given team_id.
+  Remove ALL rows belonging to `team_id` (metadata, presence marker, and every
+  agent-state record).
 
-  Safe to call even when the tables do not exist (silent no-op on missing tables).
+  Replaces the old `:ets.delete/1` of two per-team tables. The shared tables
+  themselves survive — they are storage for every other live team.
+
+  Safe to call for a team that was never created.
   """
   @spec destroy_tables(String.t()) :: :ok
   def destroy_tables(team_id) do
-    destroy_table(meta_table(team_id))
-    destroy_table(agents_table(team_id))
-    :ok
-  end
+    ensure_table(@meta_table)
+    ensure_table(@agents_table)
 
-  @doc "Destroy a single named ETS table. No-op when the table is already gone."
-  @spec destroy_table(atom()) :: :ok
-  def destroy_table(name) do
-    :ets.delete(name)
+    # `:"$1"` matches any second key element, so this deletes {team_id, :team},
+    # {team_id, :__present__} and every {team_id, agent_id} row in one pass.
+    _ = :ets.match_delete(@meta_table, {{team_id, :"$1"}, :_})
+    _ = :ets.match_delete(@agents_table, {{team_id, :"$1"}, :_})
     :ok
   rescue
-    ArgumentError -> :ok
+    _ -> :ok
   end
 
-  @doc """
-  Check whether both tables for the given team_id currently exist.
-
-  Returns `true` only when both the meta and agents tables are present.
-  """
+  @doc "Whether `team_id` currently has storage set up."
   @spec tables_exist?(String.t()) :: boolean()
   def tables_exist?(team_id) do
-    table_exists?(meta_table(team_id)) and table_exists?(agents_table(team_id))
+    :ets.lookup(@meta_table, {team_id, @presence}) != []
+  rescue
+    _ -> false
   end
 
-  @doc "Check whether a single named ETS table exists."
+  @doc "Whether one of the shared named ETS tables exists yet."
   @spec table_exists?(atom()) :: boolean()
-  def table_exists?(name) do
-    :ets.info(name) != :undefined
-  end
+  def table_exists?(name), do: :ets.info(name) != :undefined
 
   @doc """
-  List all team_ids for which both ETS tables currently exist.
+  Every team_id that currently has storage.
 
-  Scans all ETS tables looking for the `_meta` suffix pattern. Useful for
-  recovery after a supervisor restart to discover surviving teams.
+  Reads presence markers out of the shared meta table instead of scanning
+  `:ets.all/0` for a name pattern. Useful for recovery after a supervisor
+  restart, to discover surviving teams.
   """
   @spec list_live_teams() :: [String.t()]
   def list_live_teams do
-    :ets.all()
-    |> Enum.filter(fn name ->
-      name_str = to_string(name)
-      String.ends_with?(name_str, "_meta") and String.starts_with?(name_str, "team_")
-    end)
-    |> Enum.map(fn name ->
-      name
-      |> to_string()
-      |> String.replace_prefix("team_", "")
-      |> String.replace_suffix("_meta", "")
-    end)
-    |> Enum.filter(&tables_exist?/1)
+    @meta_table
+    |> :ets.match({{:"$1", @presence}, :_})
+    |> Enum.map(fn [team_id] -> team_id end)
   rescue
     _ -> []
+  end
+
+  @doc """
+  Number of rows stored for `team_id` — diagnostics, and the handle tests use
+  to assert dissolution actually frees storage.
+  """
+  @spec row_count(String.t()) :: non_neg_integer()
+  def row_count(team_id) do
+    meta = @meta_table |> :ets.match({{team_id, :"$1"}, :_}) |> length()
+    agents = @agents_table |> :ets.match({{team_id, :"$1"}, :_}) |> length()
+    meta + agents
+  rescue
+    _ -> 0
   end
 end

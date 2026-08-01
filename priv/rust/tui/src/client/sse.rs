@@ -294,6 +294,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 text: String,
                 #[serde(default)]
                 session_id: String,
+                /// Absent on an older backend — see `BackendEvent::StreamingToken`.
+                #[serde(default)]
+                message_id: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -302,6 +305,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::StreamingToken {
                 text: ev.text,
                 session_id: ev.session_id,
+                message_id: ev.message_id,
             })
         }
 
@@ -324,6 +328,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 #[serde(default)]
                 response_type: String,
                 signal: Option<Signal>,
+                /// Absent on an older backend — see `BackendEvent::AgentResponse`.
+                #[serde(default)]
+                message_id: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -333,6 +340,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 response: ev.response,
                 response_type: ev.response_type,
                 signal: ev.signal,
+                message_id: ev.message_id,
             })
         }
 
@@ -1076,11 +1084,15 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 text: String,
                 #[serde(default)]
                 session_id: String,
+                /// Absent on an older backend — see `BackendEvent::StreamingToken`.
+                #[serde(default)]
+                message_id: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::StreamingToken {
                 text: ev.text,
                 session_id: ev.session_id,
+                message_id: ev.message_id,
             })
         }
 

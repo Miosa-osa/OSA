@@ -14,7 +14,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Prompt do
       )
 
     """
-    Poll the output and status of a background shell command.
+    Retrieve the output and status of a background shell command.
 
     Use this after starting a command with `#{shell_name}` and
     `run_in_background: true`, which returns a `background_id`. Call this tool
@@ -27,8 +27,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Prompt do
     - `kill` (optional) — when true, terminate the running command (SIGTERM,
       then SIGKILL) and return its final output/status.
 
-    You can poll repeatedly while status is `running`. Output is returned
-    cumulatively from the start of the command each time.
+    DO NOT USE THIS TOOL TO WAIT. Every background command notifies you
+    automatically when it finishes, with its exit code and the path to its full
+    output file — the notification re-enters your context by itself. So do not
+    poll while status is `running`, do not `sleep` between calls, and do not
+    re-check for the artifact the command produces. Doing so burns turns and
+    wall-clock on information you are already going to be handed. Continue with
+    unrelated work, or stop and let the notification wake you.
+
+    Legitimate uses: reading the full output of a command you were ALREADY
+    notified about, and stopping a command early with `kill: true`. Output is
+    returned cumulatively from the start of the command each time.
     """
   end
 

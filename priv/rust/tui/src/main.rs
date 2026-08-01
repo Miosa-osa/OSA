@@ -71,7 +71,27 @@ fn main() -> Result<()> {
     // Always restore terminal
     restore_terminal()?;
 
-    result
+    // ONLY NOW is it safe to write to the terminal. The inline viewport is
+    // repainted as part of teardown, so anything printed before
+    // `restore_terminal()` is scrolled over / wiped; printing here lands the
+    // block in the shell's real scrollback, above the returning prompt.
+    match result {
+        Ok(app::resume::ExitOutcome::Normal(hint)) => {
+            if let Some(block) = hint.as_ref() {
+                print!("{}", block);
+                let _ = io::stdout().flush();
+            }
+            Ok(())
+        }
+        // Loud failure: stderr + exit 2, matching the CLI parser's contract for
+        // "you asked for something I could not do".
+        Ok(app::resume::ExitOutcome::Failed(msg)) => {
+            eprintln!("{}", msg);
+            let _ = io::stderr().flush();
+            std::process::exit(2);
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Inline viewport height for the live region (Claude-Code chrome). Sized to the
@@ -89,7 +109,7 @@ fn compute_viewport_height(term_rows: u16) -> u16 {
     LIVE_H_BASE.min(term_rows.saturating_sub(1).max(1))
 }
 
-fn run(cli: config::cli::Cli) -> Result<()> {
+fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     // Load config
     let cfg = config::Config::load(&cli)?;
 
@@ -281,8 +301,19 @@ fn restore_terminal() -> Result<()> {
     // be left holding output. Close any open synchronized update first so the
     // shell never inherits a frozen screen.
     let _ = execute!(stdout, crossterm::terminal::EndSynchronizedUpdate);
-    // Best-effort: if we crashed while in a modal we may still be on the alt screen.
-    let _ = execute!(stdout, LeaveAlternateScreen);
+    // Leave the alternate screen ONLY if we are actually on it (a crash inside a
+    // modal, say). This used to be unconditional, and that was a real bug once
+    // anything printed on exit: `LeaveAlternateScreen` (DECRST 1049) RESTORES
+    // the cursor position saved by the matching `EnterAlternateScreen`, so an
+    // UNPAIRED call — the normal case, since the app returns to the inline view
+    // when the last dialog closes — teleported the cursor back to wherever the
+    // boot-time Connecting screen had left it, near the top. Everything written
+    // afterwards (the resume hint, then the shell's own prompt) landed on top of
+    // the transcript. `app::alt_screen` tracks the real state, so the panic path
+    // still recovers a terminal genuinely stuck on the alt screen.
+    if app::alt_screen::is_active() {
+        let _ = execute!(stdout, LeaveAlternateScreen);
+    }
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, DisableMouseCapture);
     // U-T11: stop focus reporting (paired with EnableFocusChange in setup) so the

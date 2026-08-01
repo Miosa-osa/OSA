@@ -30,11 +30,25 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClientFastModeTest do
     assert LLMClient.thinking_config(%{provider: :anthropic, model: "claude-sonnet-4-6"}) == nil
   end
 
-  test "non-fast mode keeps configured thinking" do
+  # Which thinking DIALECT a model speaks is a model fact, not an effort decision.
+  # Anthropic removed the fixed thinking budget on the Claude 5 family (and on
+  # Opus/Sonnet 4.6, where it is deprecated): sending
+  # `{type: "enabled", budget_tokens: N}` to those models is a hard 400, not a
+  # degraded response. So "non-fast mode keeps thinking" must assert the
+  # PER-MODEL shape, not one hardcoded shape for every model.
+  test "non-fast mode keeps thinking, in the dialect the model actually speaks" do
     Effort.set(:medium)
 
+    # Adaptive family — budget_tokens would be a 400. Depth is steered by effort.
+    for model <- ["claude-opus-5", "claude-sonnet-5", "claude-sonnet-4-6"] do
+      assert %{type: "adaptive"} =
+               LLMClient.thinking_config(%{provider: :anthropic, model: model}),
+             "expected adaptive thinking for #{model}"
+    end
+
+    # Haiku 4.5 predates adaptive thinking and still takes an explicit budget.
     assert %{type: "enabled", budget_tokens: 5_000} =
-             LLMClient.thinking_config(%{provider: :anthropic, model: "claude-sonnet-4-6"})
+             LLMClient.thinking_config(%{provider: :anthropic, model: "claude-haiku-4-5"})
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:optimal_system_agent, key)

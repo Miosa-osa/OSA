@@ -68,7 +68,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.HttpHook do
   Called at session startup.
   """
   def register_from_settings do
-    if OptimalSystemAgent.Settings.get("disableAllHooks", false) == true do
+    if OptimalSystemAgent.Settings.get_trusted("disableAllHooks", false) == true do
       Logger.info("[http_hook] disableAllHooks is set — skipping HTTP hooks")
       :ok
     else

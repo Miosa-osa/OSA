@@ -37,6 +37,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemorySave.Prompt do
 
     Save as you go. Don't batch. Don't wait for end-of-task. Don't ask permission.
 
+    ## Save what you VERIFIED, never what you inferred
+    Reading one config file is not verification — another file or env can
+    override it. If a fact is knowable from runtime state, read runtime state
+    instead of persisting a guess (your own model/version/context window are
+    already in Runtime Context — never save them as a discovery). Don't save
+    "current" anything that can change without you. If it's uncertain, say so
+    in the content ("as of X, per Y") rather than asserting it.
+
+    Relying on memory for a fact you didn't verify this turn? Say so. Never
+    present unverified memory-derived facts as confirmed-current.
+
     Use `#{recall_name}` to retrieve saved memories.
     """
   end

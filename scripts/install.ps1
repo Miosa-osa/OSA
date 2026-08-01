@@ -664,31 +664,76 @@ function Drop-First($arr) { if ($arr.Count -le 1) { @() } else { @($arr[1..($arr
 
 $argList = @($args)
 $overdrive = $false
-if ($argList.Count -ge 1) {
-  switch ($argList[0]) {
-    'overdrive' { $overdrive = $true; $argList = @(Drop-First $argList) + '--overdrive' }
-    'continue'  { $argList = @(Drop-First $argList) + '--continue' }
-    'resume' {
-      $r = Drop-First $argList
-      if ($r.Count -ge 1 -and -not ([string]$r[0]).StartsWith('-')) {
-        $rid = $r[0]; $r = Drop-First $r
-        $argList = @($r) + '--resume' + $rid
-      } else {
-        $argList = @($r) + '--resume'
-      }
+
+# `osa opencomputers ...` owns its own argument vector (a passthrough to the
+# release binary), so it is matched positionally and never enters the verb scan.
+if ($argList.Count -ge 1 -and [string]$argList[0] -eq 'opencomputers') {
+  & $ReleaseBat opencomputers @(Drop-First $argList); exit $LASTEXITCODE
+}
+
+# Flags that consume the NEXT token as their value. Their argument is never a
+# verb: `osa --model resume` selects a model named "resume".
+$ValueFlags = @('--profile', '--permission-mode', '--model', '-m', '--provider')
+$Verbs = @('overdrive', 'continue', 'resume', 'help', 'version', 'setup', 'serve', 'doctor', 'stop', 'update')
+
+# ── Subcommand scan ───────────────────────────────────────────────
+# The verb is found WHEREVER it sits in argv, not only at position 0, so mode
+# flags may precede it:  osa --overdrive resume <id>   as well as
+#                        osa resume <id> --overdrive
+$verb = ''
+$skip = $false
+foreach ($a in $argList) {
+  $s = [string]$a
+  if ($skip) { $skip = $false; continue }
+  if ($s -eq '--') { break }
+  if ($ValueFlags -contains $s) { $skip = $true; continue }
+  if ($s -in @('--help', '-h')) { $verb = 'help'; break }
+  if ($s -in @('--version', '-V', '-v')) { $verb = 'version'; break }
+  if ($s.StartsWith('-')) { continue }
+  if ($Verbs -contains $s) { $verb = $s; break }
+  # Any other bare token is not ours; let the TUI's parser reject it loudly.
+  break
+}
+
+# ── Verb -> TUI flag translation ──────────────────────────────────
+# Strip the verb (and, for `resume`, the id immediately after it) out of argv
+# and append the equivalent flag, so the TUI keeps ONE parser and every other
+# flag the user typed survives in place. `update` is stripped untranslated.
+if ($verb -in @('overdrive', 'continue', 'resume', 'update')) {
+  $kept = @()
+  $skip = $false; $hit = $false; $next = $false; $rid = ''
+  foreach ($a in $argList) {
+    $s = [string]$a
+    if ($skip) { $skip = $false; $kept += $s; continue }
+    if ($ValueFlags -contains $s) { $skip = $true; $kept += $s; continue }
+    if (-not $hit -and $s -eq $verb) { $hit = $true; $next = $true; continue }
+    if ($next) {
+      $next = $false
+      # Only the token IMMEDIATELY after `resume`, and only if not a flag.
+      if ($verb -eq 'resume' -and -not $s.StartsWith('-')) { $rid = $s; continue }
+    }
+    $kept += $s
+  }
+  switch ($verb) {
+    'overdrive' { $overdrive = $true; $kept += '--overdrive' }
+    'continue'  { $kept += '--continue' }
+    'resume'    {
+      # Bare `osa resume` -> the session picker, populated from recent sessions.
+      if ($rid) { $kept += '--resume'; $kept += $rid } else { $kept += '--resume' }
     }
   }
+  $argList = @($kept)
 }
+
 foreach ($a in $argList) {
   if ($a -in @('--overdrive', '--dangerously-skip-permissions', '--yolo')) { $overdrive = $true }
 }
 
 # ── Subcommand dispatch ───────────────────────────────────────────
-$cmd  = if ($argList.Count -ge 1) { [string]$argList[0] } else { '' }
-$rest = Drop-First $argList
+$cmd = $verb
 
 switch -Exact ($cmd) {
-  { $_ -in @('version', '--version', '-v') } {
+  'version' {
     # Report BOTH halves. `osa update` swaps a backend release and a separate
     # TUI binary; printing only the backend hides a half-applied update, which
     # is precisely how "I updated but the TUI shows the old version" happens.
@@ -706,14 +751,15 @@ switch -Exact ($cmd) {
   'setup'  { & $ReleaseBat setup;  exit $LASTEXITCODE }
   'serve'  { & $ReleaseBat serve;  exit $LASTEXITCODE }
   'doctor' { & $ReleaseBat doctor; exit $LASTEXITCODE }
-  'opencomputers' { & $ReleaseBat opencomputers @rest; exit $LASTEXITCODE }
   'stop'   { Stop-Daemon; exit 0 }
   'update' {
+    # The `update` token was already stripped from $argList by the verb
+    # translation above, so the remaining flags launch normally afterwards.
     $urc = Update-Osa
     if ($urc -ne 0) { exit $urc }
     # fall through to launch on success
   }
-  { $_ -in @('help', '--help', '-h') } { Show-Help; exit 0 }
+  'help' { Show-Help; exit 0 }
 }
 
 # ── Default: warm the daemon (attach instantly if healthy), then TUI ──

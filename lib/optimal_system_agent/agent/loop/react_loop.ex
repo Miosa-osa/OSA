@@ -209,8 +209,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Proactive context compaction: shrink history before building context /
     # calling the model so the window stays under threshold. Complementary to
     # the reactive ContextCollapse fallback in handle_result/3 (413 retry).
+    #
+    # The window must be the EFFECTIVE one (`effective_context_window/2`), not
+    # the trained one. For a LOCAL provider (ollama/lmstudio/llamacpp) the usable
+    # window is min(:ollama_num_ctx, trained) — e.g. a qwen3.5 tag advertises a
+    # 262k trained window but is served at the 32k num_ctx ceiling. Budgeting
+    # against the trained number puts `compact_at` at ~229k, so compaction NEVER
+    # fires before Ollama silently truncates the prompt at 32k and the session
+    # degrades invisibly (the model just stops seeing its own history). The
+    # status-bar meter already uses the effective window
+    # (`Loop.Telemetry.provider_context_window/1`); this makes the compaction
+    # DECISION agree with the meter instead of drifting ~8x above it.
     state =
-      case OptimalSystemAgent.Providers.Registry.context_window(state.model) do
+      case effective_context_window(state) do
         cw when is_integer(cw) and cw > 0 ->
           cond do
             ProactiveCompaction.should_compact?(state, cw) ->
@@ -715,37 +726,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             run(state)
         end
 
-      # Goal-level verifier: an independent read-only skeptic panel reads the diff
-      # and votes whether the user's GOAL (not just "a file compiles") was met.
-      # Off by default (cost/latency: spawns N subagents per turn, and skeptics
-      # fail closed to "incomplete" on flaky providers) — enable for autonomous
-      # runs via `config :optimal_system_agent, goal_verifier_enabled: true`.
-      # `needs_verification?/1` self-gates on accumulated work + a run cap + a
-      # stall early-exit, so it never fires on read-only turns. :gate injects the
-      # panel's directive and loops; :pass falls through to the terminal finish.
-      goal_verifier_enabled?(state) and GoalVerifier.needs_verification?(state) and
-          GoalTracker.reverify_due?(state.session_id) ->
-        # Run the skeptic panel, advance the cross-turn goal tracker with its
-        # verdict (which queues re-plan / keep-going Steer nudges and trips the
-        # stall + run-cap auto-pause internally), then gate or finish on the result.
-        {result, state} = GoalVerifier.verify(state)
-        GoalTracker.advance(state.session_id, result)
-
-        case result.verdict do
-          :complete ->
-            finish_turn(content, state)
-
-          _ ->
-            {directive, state} = GoalVerifier.build_directive(result, state)
-
-            state = %{
-              state
-              | messages: state.messages ++ [%{role: "assistant", content: content}, directive],
-                iteration: state.iteration + 1
-            }
-
-            run(state)
-        end
+      # NOTE — the goal-level verifier used to re-enter `run/1` from HERE, after a
+      # text-only response. That produced the double-ending defect: the model's
+      # "Done. Here's what I set up: …" had ALREADY streamed to the user
+      # (`LLMClient.llm_chat_stream` broadcasts every `:text_delta` live, so a
+      # presented conclusion cannot be un-presented), the panel then ran, gated,
+      # and the turn worked on and delivered a SECOND closing summary. One turn,
+      # two endings.
+      #
+      # The gate now runs at the TOOL-RESULT boundary instead — see
+      # `continue_after_tools/4`. Verification therefore happens BEFORE the model
+      # writes its conclusion, and its findings are in context when that single
+      # conclusion is generated. Nothing re-enters the loop after a response has
+      # been shown.
 
       # CC token-budget "work to target": when an explicit output-token target is
       # set and the accumulated output is under it, auto-continue instead of
@@ -888,6 +881,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp just_compacted?(state), do: Map.get(state, :just_compacted, false) == true
+
+  # Usable context window for the state's model+provider, in tokens.
+  #
+  # Delegates to `Loop.ContextWindow.resolve/1` so the compaction DECISION, the
+  # displayed context meter, and `Agent.Compactor` share ONE denominator —
+  # resolved from `effective_context_window_info/2`, the variant that admits
+  # ignorance.
+  #
+  # Returns 0 for "unknown", which makes the caller's `cw > 0` guard skip
+  # compaction entirely. That deferral is deliberate: the previous behaviour
+  # here fell back to the trained window and ultimately to the flat 128k config
+  # default, on the reasoning that "never compacting is far worse than
+  # compacting against a rough number". That reasoning was wrong and is the
+  # exact shape of the bug this path now avoids — a rough number on a 1M-window
+  # model fires a fidelity-destroying summarization at ~11% occupancy, every
+  # turn, unrecoverably. An unknown window instead waits for the provider's own
+  # context-length error, which the reactive ContextCollapse / forced-compaction
+  # path in handle_result/3 already handles.
+  @spec effective_context_window(map()) :: non_neg_integer()
+  defp effective_context_window(state) do
+    case OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state) do
+      {:ok, cw} -> cw
+      :unknown -> 0
+    end
+  end
 
   # Forced model-authored wrap-up at the iteration cap. One tools-disabled model
   # turn so the user gets a real state summary + handoff instead of a canned
@@ -1181,6 +1199,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
             {pause_message, state}
           else
+            # Goal-level verification runs HERE — at the tool-result boundary,
+            # before the next generation — and nowhere else. Two reasons:
+            #
+            #   1. ONE ENDING. Assistant text streams to the user token-by-token,
+            #      so a conclusion cannot be retracted once generated. Verifying
+            #      after a text response and then looping is what made a turn end
+            #      twice. Verifying here puts the panel's findings in context
+            #      *before* the model writes its conclusion, so there is exactly
+            #      one.
+            #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
+            #      local skips → one cheap triage call → the expensive skeptic
+            #      panel only on `candidate_complete`. It appends at most one
+            #      system directive and never raises.
+            state = GoalVerifier.maybe_gate(state)
             run(state)
           end
       end
@@ -1216,11 +1248,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     finalize_interrupt(state, partial)
   end
 
+  # Turn-level retry budget for a stream idle timeout. Small on purpose: each
+  # attempt costs a full generation, and the committed tool results mean the
+  # retry resumes rather than restarts.
+  @max_idle_timeout_retries 2
+
   # LLM error — compact and retry or surface error
   defp handle_result({:error, reason}, state, _context) do
     alias OptimalSystemAgent.Agent.Loop.ContextCollapse
 
     reason_str = if is_binary(reason), do: reason, else: inspect(reason)
+
+    # DURABILITY (defect: executed tool work discarded on the error path).
+    # Tools stream-execute EAGERLY, so by the time the LLM call fails their side
+    # effects have already happened. Commit their results to message history
+    # BEFORE erroring or retrying — Codex's turn retry RESUMES from history
+    # rather than replaying, and that is only possible if the outputs are in
+    # history first. Without this a retry re-runs `git push` / re-writes files.
+    # A no-op when no tool ever streamed (the common case, incl. overflow).
+    {state, executed_tools} = commit_streamed_tool_results(state, reason)
 
     if context_overflow?(reason_str) and state.overflow_retries < 3 do
       retry_num = state.overflow_retries + 1
@@ -1239,10 +1285,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             # Collapse failed — fall back to full compaction
             Logger.info("[loop] Context collapse insufficient, running full compaction")
 
+            # `force: true` — the provider has ALREADY returned a
+            # context-length error, so this is the real overflow signal the
+            # compactor's `:unknown`-window deferral policy waits for. Compact
+            # even when the window cannot be resolved; the threaded window
+            # still sizes the target when it CAN be.
             OptimalSystemAgent.Agent.Compactor.maybe_compact(
               state.messages,
               Map.get(state, :last_input_tokens, 0),
-              state.session_id
+              state.session_id,
+              context_window:
+                OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+              force: true
             )
         end
 
@@ -1270,26 +1324,124 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         {"I've exceeded the context window. Try breaking your request into smaller parts.", state}
       else
-        Logger.error("LLM call failed: #{reason_str}")
+        idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
 
-        category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
+        if idle_timeout?(reason) and idle_attempt <= @max_idle_timeout_retries do
+          # RETRYABLE (Codex parity), not terminal. The provider connection went
+          # silent; killing the stream task also destroyed the in-task
+          # Resilience retries, so the retry decision is re-made here — where the
+          # already-executed tool results have just been committed to history, so
+          # the retry RESUMES from that history and never re-runs a tool.
+          Logger.warning(
+            "[loop] Stream idle timeout — retrying turn " <>
+              "(#{idle_attempt}/#{@max_idle_timeout_retries}, iteration #{state.iteration}" <>
+              if(executed_tools == [],
+                do: ")",
+                else: ", resuming after #{length(executed_tools)} already-executed tool(s))"
+              )
+          )
 
-        Observability.emit(
-          :system_event,
-          %{
-            event: :error,
-            kind: :llm_error,
-            category: category,
-            reason: reason_str,
-            iteration: state.iteration
-          },
-          state,
-          source: "agent.react_loop"
-        )
+          Observability.emit(
+            :system_event,
+            %{
+              event: :error,
+              kind: :llm_idle_timeout,
+              category: :timeout,
+              retryable: true,
+              attempt: idle_attempt,
+              max_attempts: @max_idle_timeout_retries,
+              resumed_tools: executed_tools,
+              iteration: state.iteration
+            },
+            state,
+            source: "agent.react_loop"
+          )
 
-        {OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason), state}
+          state
+          |> Map.put(:idle_timeout_retries, idle_attempt)
+          |> Map.put(:iteration, state.iteration + 1)
+          |> run()
+        else
+          Logger.error("LLM call failed: #{reason_str}")
+
+          category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
+
+          Observability.emit(
+            :system_event,
+            %{
+              event: :error,
+              kind: :llm_error,
+              category: category,
+              reason: reason_str,
+              iteration: state.iteration
+            },
+            state,
+            source: "agent.react_loop"
+          )
+
+          message =
+            OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason) <>
+              executed_tools_note(executed_tools)
+
+          {message, state}
+        end
       end
     end
+  end
+
+  @doc false
+  # Turn-level retry budget for a stream idle timeout. Public for tests.
+  def max_idle_timeout_retries, do: @max_idle_timeout_retries
+
+  @doc false
+  # True for the structured idle-timeout reason minted by `LLMClient` (and for
+  # the legacy bare-string form, and for either wrapped in a `:stream_error`).
+  # This is the RETRYABLE classification: an idle stream is a transient
+  # connection failure, not a terminal turn error.
+  def idle_timeout?({:idle_timeout, _}), do: true
+  def idle_timeout?({:stream_error, reason}), do: idle_timeout?(reason)
+  def idle_timeout?({:stream_error, reason, _partial}), do: idle_timeout?(reason)
+  def idle_timeout?(reason) when is_binary(reason), do: String.contains?(reason, "went silent")
+  def idle_timeout?(_), do: false
+
+  # Assistant text that streamed before the failure, when the reason carries it.
+  defp idle_partial({:idle_timeout, %{partial: p}}) when is_binary(p), do: p
+  defp idle_partial({:stream_error, reason}), do: idle_partial(reason)
+  defp idle_partial({:stream_error, reason, _}), do: idle_partial(reason)
+  defp idle_partial(_), do: ""
+
+  # Drain the streaming tool executor into message history on the ERROR path.
+  # Returns `{state, executed_tool_names}`.
+  defp commit_streamed_tool_results(state, reason) do
+    ctx = Process.get(:osa_streaming_tool_ctx)
+
+    result = StreamingToolExecutor.drain_to_messages(ctx, idle_partial(reason))
+    Process.delete(:osa_streaming_tool_ctx)
+
+    case result do
+      {:ok, msgs, names} ->
+        Logger.warning(
+          "[loop] LLM call failed AFTER #{length(names)} tool(s) had already executed " <>
+            "(#{Enum.join(names, ", ")}) — committing their results to history so the turn " <>
+            "resumes instead of re-running them"
+        )
+
+        {%{state | messages: state.messages ++ msgs}, names}
+
+      :none ->
+        {state, []}
+    end
+  end
+
+  # Appended to a terminal LLM error message when tools already ran this turn.
+  # The model reads this back as conversation context, so it must say plainly
+  # that the work is done and must not be repeated.
+  defp executed_tools_note([]), do: ""
+
+  defp executed_tools_note(names) do
+    "\n\n[System: #{length(names)} tool call(s) — #{Enum.join(names, ", ")} — ALREADY EXECUTED " <>
+      "before this failure and their results are recorded above. Do NOT run them again; " <>
+      "continue from those results.]"
   end
 
   @interrupt_marker "[Request interrupted by user]"

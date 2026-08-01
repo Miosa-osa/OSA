@@ -39,6 +39,32 @@ defmodule OptimalSystemAgent.Memory.Learning do
 
   alias OptimalSystemAgent.Memory.{VIGIL, Observation, Consolidator}
 
+  # ── Call bounds ────────────────────────────────────────────────────────────
+  #
+  # These four calls used `:infinity`, and `patterns/0` + `solutions/0` are
+  # invoked INLINE by the `semantic_search` tool — i.e. on the user's turn. They
+  # share this GenServer's serialized `handle_call` loop with `:consolidate`,
+  # which is the expensive cross-referencing pass that fires every 50
+  # interactions. In a long session, a consolidation landing just before a
+  # search would block the turn with no ceiling. Bounded + degraded (empty
+  # result) rather than fatal.
+  @read_timeout_ms 5_000
+  @consolidate_timeout_ms 60_000
+
+  defp bounded_call(request, timeout, fallback) do
+    GenServer.call(__MODULE__, request, timeout)
+  catch
+    :exit, {:timeout, _} ->
+      Logger.warning(
+        "[learning] #{inspect(request)} timed out after #{timeout}ms — returning #{inspect(fallback)}"
+      )
+
+      fallback
+
+    :exit, _reason ->
+      fallback
+  end
+
   @ets_table :osa_learning
   @max_observations 500
   @incremental_every 5
@@ -75,25 +101,25 @@ defmodule OptimalSystemAgent.Memory.Learning do
   @doc "Return all persisted patterns from SQLite."
   @spec patterns() :: {:ok, [map()]}
   def patterns do
-    GenServer.call(__MODULE__, :patterns, :infinity)
+    bounded_call(:patterns, @read_timeout_ms, {:ok, []})
   end
 
   @doc "Return stored solutions (correction/solution category patterns)."
   @spec solutions() :: {:ok, [map()]}
   def solutions do
-    GenServer.call(__MODULE__, :solutions, :infinity)
+    bounded_call(:solutions, @read_timeout_ms, {:ok, []})
   end
 
   @doc "Force a full consolidation cycle. Returns a report map."
   @spec consolidate() :: {:ok, map()}
   def consolidate do
-    GenServer.call(__MODULE__, :consolidate, :infinity)
+    bounded_call(:consolidate, @consolidate_timeout_ms, {:ok, %{}})
   end
 
   @doc "Return consolidation stats from GenServer state."
   @spec metrics() :: {:ok, map()}
   def metrics do
-    GenServer.call(__MODULE__, :metrics, :infinity)
+    bounded_call(:metrics, @read_timeout_ms, {:ok, %{}})
   end
 
   # ---------------------------------------------------------------------------

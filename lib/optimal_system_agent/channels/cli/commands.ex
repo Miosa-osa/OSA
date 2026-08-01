@@ -68,6 +68,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "persona" => {"Show or switch persona preset", :cmd_persona},
     "mcp" => {"List MCP servers and connection status", :cmd_mcp},
     "init" => {"Scan the project and write an AGENTS.md guide", :cmd_init},
+    "map" => {"Map the workspace — components, submodules, nested repos", :cmd_map},
     "copy" => {"Copy the last assistant reply", :cmd_copy},
     "files" => {"List files currently in context", :cmd_files},
     "rename" => {"Rename the current session", :cmd_rename},
@@ -280,14 +281,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("  #{@bold}Session Status#{@reset}")
 
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-    model = get_model_name(provider)
+    # Identity.model/0 rather than the old Format.get_model_name/1: that read
+    # `:ollama_model` while /health (and therefore the status bar) reads
+    # `:default_model`. Both are written at boot, but a mid-session /switch
+    # writes them separately, so `/status` could report a different model than
+    # the bar. One resolver, no drift.
+    model = OptimalSystemAgent.Runtime.Identity.model()
+    {_src, model_source} = OptimalSystemAgent.Runtime.Identity.model_source()
     tool_count = length(ToolsRegistry.list_tools_direct())
     uptime_ms = :erlang.statistics(:wall_clock) |> elem(0)
 
     IO.puts("  #{@dim}Session:#{@reset}   #{session_id}")
     IO.puts("  #{@dim}Uptime:#{@reset}    #{Renderer.format_elapsed(uptime_ms)}")
     IO.puts("  #{@dim}Provider:#{@reset}  #{provider}")
-    IO.puts("  #{@dim}Model:#{@reset}     #{model}")
+    IO.puts("  #{@dim}Model:#{@reset}     #{model} #{@dim}(from #{model_source})#{@reset}")
     IO.puts("  #{@dim}Tools:#{@reset}     #{tool_count} loaded")
 
     case Loop.get_state(session_id) do
@@ -815,7 +822,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     cond do
       target == "" ->
         IO.puts("  #{@dim}Usage: /fg <run-id>#{@reset}")
-        IO.puts("  #{@dim}Run ids come from /bg or /agents (the live subagent/fleet runs).#{@reset}")
+
+        IO.puts(
+          "  #{@dim}Run ids come from /bg or /agents (the live subagent/fleet runs).#{@reset}"
+        )
+
         IO.puts("")
         session_id
 
@@ -845,7 +856,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
           true ->
             role = to_string(Map.get(run, :role, "agent"))
-            IO.puts("  #{@green}✓#{@reset} Foregrounded #{@cyan}#{target}#{@reset} #{@dim}(#{role})#{@reset}")
+
+            IO.puts(
+              "  #{@green}✓#{@reset} Foregrounded #{@cyan}#{target}#{@reset} #{@dim}(#{role})#{@reset}"
+            )
 
             IO.puts(
               "  #{@dim}Active session switched — your next message goes to this agent. " <>
@@ -1062,7 +1076,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       end
 
     IO.puts("")
-    IO.puts("  #{@bold}What's New#{@reset} #{@dim}(OSA v#{ReleaseNotes.current_version()})#{@reset}")
+
+    IO.puts(
+      "  #{@bold}What's New#{@reset} #{@dim}(OSA v#{ReleaseNotes.current_version()})#{@reset}"
+    )
+
     IO.puts("")
 
     text = ReleaseNotes.latest_text(n)
@@ -1436,7 +1454,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end)
 
     IO.puts("")
-    IO.puts("  #{@dim}See examples/ (or examples/README.md) for ready-to-copy templates.#{@reset}")
+
+    IO.puts(
+      "  #{@dim}See examples/ (or examples/README.md) for ready-to-copy templates.#{@reset}"
+    )
 
     IO.puts(
       "  #{@dim}Run #{@reset}#{@cyan}/customize seed#{@reset}#{@dim} to copy starter templates into ~/.osa/ (never overwrites).#{@reset}"
@@ -1459,7 +1480,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         end)
 
       true ->
-        IO.puts("  #{@dim}All starter templates already present in #{osa_dir}/ — nothing to copy.#{@reset}")
+        IO.puts(
+          "  #{@dim}All starter templates already present in #{osa_dir}/ — nothing to copy.#{@reset}"
+        )
     end
 
     IO.puts(
@@ -1995,6 +2018,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       ["add" | opts] -> mcp_add(opts, session_id)
       [rm | opts] when rm in ["remove", "rm"] -> mcp_remove(opts, session_id)
       ["get", name | _] -> mcp_get(name, session_id)
+      ["exclude"] -> mcp_exclude_list(session_id)
+      ["exclude", name | _] -> mcp_exclude(name, session_id)
+      [un, name | _] when un in ["unexclude", "include"] -> mcp_unexclude(name, session_id)
       _ -> mcp_usage(session_id)
     end
   end
@@ -2021,12 +2047,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
           IO.puts(
             "  #{icon} #{@cyan}#{String.pad_trailing(to_string(s[:name]), 20)}#{@reset}" <>
-              " #{@dim}#{s[:transport]} · #{label} · #{tools} tools#{@reset}"
+              " #{@dim}#{s[:transport]} · #{label} · #{tools} tools · " <>
+              "#{mcp_origin(s[:source], s[:scope])}#{@reset}"
           )
         end)
 
+        total_tools = Enum.reduce(running, 0, fn s, acc -> acc + (s[:tool_count] || 0) end)
+
         IO.puts("")
-        IO.puts("  #{@dim}#{length(running)} server(s)#{@reset}")
+
+        IO.puts("  #{@dim}#{length(running)} server(s) · #{total_tools} tools total#{@reset}")
 
       true ->
         configured =
@@ -2042,13 +2072,144 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           Enum.each(configured, fn s ->
             IO.puts(
               "  #{@dim}○#{@reset} #{@cyan}#{String.pad_trailing(s.name, 20)}#{@reset}" <>
-                " #{@dim}#{s.transport} · not started#{@reset}"
+                " #{@dim}#{s.transport} · not started · #{mcp_origin(s.source, s.scope)}#{@reset}"
             )
           end)
 
           IO.puts("")
-          IO.puts("  #{@dim}#{length(configured)} server(s) configured (manager offline)#{@reset}")
+
+          IO.puts(
+            "  #{@dim}#{length(configured)} server(s) configured (manager offline)#{@reset}"
+          )
         end
+    end
+
+    mcp_import_footer()
+
+    IO.puts("")
+    session_id
+  end
+
+  # "Where did this server come from?" — the attribution line. `:osa` source
+  # means one of OSA's own config files (named by scope); anything else was
+  # inherited from another tool's config, which is only possible when the
+  # operator opted into `mcp_import_foreign`.
+  defp mcp_origin(source, scope) do
+    case source || :osa do
+      :osa ->
+        case scope || :user do
+          :user -> "osa config (~/.osa/mcp.json)"
+          :project -> "project (.mcp.json)"
+          :local -> "project-local (.osa/mcp.local.json)"
+          other -> "osa config (#{other})"
+        end
+
+      foreign ->
+        path = MCP.Discovery.source_path(foreign)
+        label = MCP.Discovery.source_label(foreign)
+        if path, do: "#{label} (#{path})", else: label
+    end
+  end
+
+  # Report the state of foreign-config import, and — when it is off — how many
+  # servers COULD be inherited plus how to opt in. This is the whole point of
+  # making the import opt-in: the operator can still see what exists without
+  # OSA having quietly run it.
+  defp mcp_import_footer do
+    excluded = MCP.Config.exclusions() |> Enum.sort()
+
+    if excluded != [] do
+      IO.puts("")
+      IO.puts("  #{@dim}excluded: #{Enum.join(excluded, ", ")} (/mcp unexclude <name>)#{@reset}")
+    end
+
+    IO.puts("")
+
+    if MCP.Discovery.import_enabled?() do
+      IO.puts(
+        "  #{@dim}Importing MCP servers from other tools is ON " <>
+          "(settings: mcp_import_foreign). Turn off to run only OSA's own servers.#{@reset}"
+      )
+    else
+      available =
+        try do
+          MCP.Discovery.available()
+        rescue
+          _ -> []
+        end
+
+      if available != [] do
+        by_source =
+          available
+          |> Enum.group_by(& &1.source)
+          |> Enum.map_join(", ", fn {src, list} -> "#{length(list)} from #{src}" end)
+
+        IO.puts(
+          "  #{@dim}#{length(available)} server(s) available in other tools' configs " <>
+            "(#{by_source}) — NOT imported.#{@reset}"
+        )
+
+        IO.puts("  #{@dim}Import them with: /settings set mcp_import_foreign true#{@reset}")
+      end
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp mcp_exclude_list(session_id) do
+    IO.puts("")
+
+    case MCP.Config.exclusions() |> Enum.sort() do
+      [] ->
+        IO.puts("  #{@dim}No MCP servers excluded.#{@reset}")
+        IO.puts("  #{@dim}Exclude one with: /mcp exclude <name>#{@reset}")
+
+      names ->
+        IO.puts("  #{@bold}Excluded MCP servers#{@reset}")
+        IO.puts("")
+        Enum.each(names, fn n -> IO.puts("  #{@dim}·#{@reset} #{n}") end)
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  # Add a name to the persistent deny list in ~/.osa/settings.json. Honoured for
+  # every source, so this kills one noisy server without disabling anything else.
+  defp mcp_exclude(name, session_id) do
+    sanitized = MCP.Config.sanitize_name(name)
+    current = MCP.Config.exclusions() |> Enum.sort()
+    updated = Enum.sort(Enum.uniq([sanitized | current]))
+
+    IO.puts("")
+
+    case OptimalSystemAgent.Settings.set_user("mcp_exclude", updated) do
+      :ok ->
+        IO.puts("  #{@green}✓#{@reset} Excluded #{@cyan}#{sanitized}#{@reset}")
+        IO.puts("  #{@dim}It will not load from any source. Restart or /mcp reload.#{@reset}")
+        mcp_safe_reload()
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp mcp_unexclude(name, session_id) do
+    sanitized = MCP.Config.sanitize_name(name)
+    updated = MCP.Config.exclusions() |> Enum.reject(&(&1 == sanitized)) |> Enum.sort()
+
+    IO.puts("")
+
+    case OptimalSystemAgent.Settings.set_user("mcp_exclude", updated) do
+      :ok ->
+        IO.puts("  #{@green}✓#{@reset} No longer excluding #{@cyan}#{sanitized}#{@reset}")
+        mcp_safe_reload()
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
     end
 
     IO.puts("")
@@ -2057,11 +2218,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   defp mcp_status_display(status) do
     case status do
-      s when s in [:ready, :connected, :running] -> {"#{@green}●#{@reset}", "connected"}
-      s when s in [:initializing, :connecting, :starting] -> {"#{@yellow}◐#{@reset}", "connecting"}
-      :disabled -> {"#{@dim}○#{@reset}", "disabled"}
-      :down -> {"#{@red}○#{@reset}", "down"}
-      other -> {"#{@dim}○#{@reset}", to_string(other || "unknown")}
+      s when s in [:ready, :connected, :running] ->
+        {"#{@green}●#{@reset}", "connected"}
+
+      s when s in [:initializing, :connecting, :starting] ->
+        {"#{@yellow}◐#{@reset}", "connecting"}
+
+      :disabled ->
+        {"#{@dim}○#{@reset}", "disabled"}
+
+      :down ->
+        {"#{@red}○#{@reset}", "down"}
+
+      other ->
+        {"#{@dim}○#{@reset}", to_string(other || "unknown")}
     end
   end
 
@@ -2096,7 +2266,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
         case MCP.Config.add_server(name, spec, scope) do
           {:ok, path} ->
-            IO.puts("  #{@green}✓#{@reset} Added MCP server #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}")
+            IO.puts(
+              "  #{@green}✓#{@reset} Added MCP server #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}"
+            )
+
             IO.puts("  #{@dim}File modified: #{path}#{@reset}")
             mcp_safe_reload()
 
@@ -2129,7 +2302,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           [scope] ->
             case MCP.Config.remove_server(name, scope) do
               {:ok, path} ->
-                IO.puts("  #{@green}✓#{@reset} Removed #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}")
+                IO.puts(
+                  "  #{@green}✓#{@reset} Removed #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}"
+                )
+
                 IO.puts("  #{@dim}File modified: #{path}#{@reset}")
                 mcp_safe_reload()
 
@@ -2161,7 +2337,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("")
         IO.puts("  #{@bold}#{s.name}#{@reset} #{@dim}(#{s.scope})#{@reset}")
         IO.puts("  #{@dim}transport:#{@reset} #{s.transport}")
-        if s.command, do: IO.puts("  #{@dim}command:#{@reset} #{s.command} #{Enum.join(s.args, " ")}")
+
+        if s.command,
+          do: IO.puts("  #{@dim}command:#{@reset} #{s.command} #{Enum.join(s.args, " ")}")
+
         if s.url, do: IO.puts("  #{@dim}url:#{@reset} #{s.url}")
 
         if map_size(s.env) > 0,
@@ -2177,10 +2356,29 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp mcp_usage(session_id) do
     IO.puts("")
     IO.puts("  #{@bold}/mcp#{@reset} #{@dim}— manage MCP servers#{@reset}")
-    IO.puts("  #{@cyan}/mcp list#{@reset}                     #{@dim}Show servers and status#{@reset}")
-    IO.puts("  #{@cyan}/mcp add <name> <cmd|url> ...#{@reset}  #{@dim}Add a server (-s scope -t transport -e K=V -H hdr)#{@reset}")
+
+    IO.puts(
+      "  #{@cyan}/mcp list#{@reset}                     #{@dim}Show servers and status#{@reset}"
+    )
+
+    IO.puts(
+      "  #{@cyan}/mcp add <name> <cmd|url> ...#{@reset}  #{@dim}Add a server (-s scope -t transport -e K=V -H hdr)#{@reset}"
+    )
+
     IO.puts("  #{@cyan}/mcp remove <name> [-s scope]#{@reset}  #{@dim}Remove a server#{@reset}")
-    IO.puts("  #{@cyan}/mcp get <name>#{@reset}               #{@dim}Show a server's config#{@reset}")
+
+    IO.puts(
+      "  #{@cyan}/mcp get <name>#{@reset}               #{@dim}Show a server's config#{@reset}"
+    )
+
+    IO.puts(
+      "  #{@cyan}/mcp exclude <name>#{@reset}            #{@dim}Never load this server, from any source#{@reset}"
+    )
+
+    IO.puts(
+      "  #{@cyan}/mcp unexclude <name>#{@reset}          #{@dim}Remove a name from the deny list#{@reset}"
+    )
+
     IO.puts("")
     session_id
   end
@@ -2336,6 +2534,59 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   defp extract_text(_), do: ""
 
+  # ── Workspace map ────────────────────────────────────────────────────
+
+  @doc """
+  `/map [path] [--refresh] [--depth N]` — print the workspace topology.
+
+  Renders `OptimalSystemAgent.Workspace.Topology` at the terminal's real width,
+  so the table sheds columns rather than wrapping on a narrow terminal. Served
+  from the per-root cache unless `--refresh` is passed.
+  """
+  def cmd_map(args, session_id) do
+    tokens = String.split(args || "", ~r/\s+/, trim: true)
+    refresh? = "--refresh" in tokens or "-r" in tokens
+
+    depth =
+      case Enum.drop_while(tokens, &(&1 not in ["--depth", "-d"])) do
+        [_, value | _] -> case Integer.parse(value) do
+                            {n, _} when n > 0 -> min(n, 6)
+                            _ -> 3
+                          end
+
+        _ -> 3
+      end
+
+    path = Enum.find(tokens, &(not String.starts_with?(&1, "-") and &1 not in [to_string(depth)]))
+
+    cwd = OptimalSystemAgent.Workspace.Cwd.get()
+
+    root =
+      if path,
+        do: Path.expand(path, cwd),
+        else: OptimalSystemAgent.Workspace.Topology.workspace_root(cwd) || cwd
+
+    IO.puts("")
+
+    if File.dir?(root) do
+      topo =
+        OptimalSystemAgent.Workspace.Topology.get(root, refresh: refresh?, max_depth: depth)
+
+      width =
+        case :io.columns() do
+          {:ok, cols} when is_integer(cols) and cols > 20 -> cols - 4
+          _ -> 100
+        end
+
+      IO.puts(OptimalSystemAgent.Workspace.Topology.Render.report(topo, width: width))
+    else
+      IO.puts("  #{@red}Not a directory:#{@reset} #{root}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
   # ── Files in context ─────────────────────────────────────────────────
 
   def cmd_files(_args, session_id) do
@@ -2431,7 +2682,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       true ->
         updated = (existing ++ [tag]) |> Enum.uniq()
         persist_session_metadata(session_id, %{tags: updated})
-        IO.puts("  #{@green}✓#{@reset} Tagged #{@bold}#{tag}#{@reset} (#{Enum.join(updated, ", ")})")
+
+        IO.puts(
+          "  #{@green}✓#{@reset} Tagged #{@bold}#{tag}#{@reset} (#{Enum.join(updated, ", ")})"
+        )
     end
 
     IO.puts("")

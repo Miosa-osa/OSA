@@ -23,9 +23,17 @@ defmodule OptimalSystemAgent.Peer.Negotiation do
   History is append-only inside the record; no rows are deleted during the run.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   require Logger
 
   @negotiations_table :osa_peer_negotiations
+
+  # Row cap. Negotiations are history: once resolved, nothing reads them back.
+  # Nothing deleted them before, so this table grew one permanent row per
+  # negotiating tool call for the life of the daemon. Oldest-first eviction —
+  # see Infra.BoundedTable.
+  @max_rows 1_000
   @auto_accept_ms 30_000
 
   # ---------------------------------------------------------------------------
@@ -353,7 +361,7 @@ defmodule OptimalSystemAgent.Peer.Negotiation do
   # ---------------------------------------------------------------------------
 
   defp store(%__MODULE__{} = n) do
-    :ets.insert(@negotiations_table, {n.id, n})
+    BoundedTable.insert(@negotiations_table, n.id, n, max: @max_rows)
   rescue
     _ -> :ok
   end

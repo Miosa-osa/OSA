@@ -55,6 +55,27 @@ defmodule OptimalSystemAgent.Memory.Search do
   `forget/1` deletes both the ETS entry and the persisted row (e.g. after a
   memory entry is deleted or its content is merged into another row).
 
+  ### Cache bound (LRU)
+
+  The ETS half is a **cache**, and it is capped like one: `@default_cache_max`
+  entries (override with `config :optimal_system_agent, :memory_vector_cache_max`),
+  evicted least-recently-used first. Nothing else prunes it — in particular
+  `Memory.Consolidator` LOOKS like it covers this and does not: it is a plain
+  module (no GenServer, no timer), it is called only from
+  `Memory.Learning.run_consolidation/2`, and everything it prunes is *patterns*
+  in the `Store.Pattern` SQLite table via `Repo.delete_all`. It never touches
+  `:osa_memory_vectors` or any ETS table at all. A prune that appears to cover
+  something it doesn't is worse than none, so the cap here is the only thing
+  bounding this table, and `forget/1` (explicit entry deletion) remains the only
+  other way a row leaves it.
+
+  Eviction is safe *because* of the persistence layer above: an evicted vector
+  is still in SQLite, so a subsequent lookup is one disk read, not a re-embed.
+  This is also the heaviest per-row growth in the codebase — a row holds a full
+  float list (~768 floats for `nomic-embed-text`, on the order of 25 KB of BEAM
+  term), so at the default cap the table tops out around 50 MB rather than
+  growing for the life of the process.
+
   ### Degradation
 
   Every SQLite read/write here is wrapped and rescued — a DB error never
@@ -70,6 +91,15 @@ defmodule OptimalSystemAgent.Memory.Search do
   alias OptimalSystemAgent.Memory.VectorEntry
 
   @vector_table :osa_memory_vectors
+  # LRU bookkeeping for @vector_table. Kept in companion tables rather than as
+  # extra elements of the {id, hash, vec} row so the row shape stays exactly
+  # what callers and tests already read.
+  #   @lru_table  :ordered_set of {seq, id}  — eviction order, oldest = :ets.first
+  #   @seq_table  :set         of {id, seq}  — reverse index, so touching an
+  #                                            existing id can drop its old seq
+  @lru_table :osa_memory_vectors_lru
+  @seq_table :osa_memory_vectors_seq
+  @default_cache_max 2_000
   @default_embed_model "nomic-embed-text"
   @embed_timeout 5_000
 
@@ -106,11 +136,30 @@ defmodule OptimalSystemAgent.Memory.Search do
   Never raises — all failure modes (provider disabled, HTTP error, timeout,
   malformed response) are caught and returned as `{:error, reason}` so
   callers can degrade to keyword-only recall.
+
+  ## Injecting an embedder
+
+  A 1-arity function under `config :optimal_system_agent, :embedding_fun`
+  replaces the live provider call and must return the same
+  `{:ok, [float()]} | {:error, term()}` contract:
+
+      config :optimal_system_agent, :embedding_fun, fn _text -> {:ok, [1.0, 2.0]} end
+
+  This exists so tests that exercise the *cache* (LRU bound, eviction order,
+  persistence write-through) can drive hundreds of `embed_cached/2` calls
+  without a live Ollama — a real network dependency there made those tests
+  fail on assertions rather than on the behaviour they were pinning, because
+  a failed embed skips the write-through path that maintains the bound. It is
+  still gated by `available?/0`, so `:embedding_provider, :none` remains an
+  absolute kill switch.
   """
   @spec embed(String.t()) :: {:ok, [float()]} | {:error, term()}
   def embed(text) when is_binary(text) and text != "" do
     if available?() do
-      do_embed(text)
+      case Application.get_env(:optimal_system_agent, :embedding_fun) do
+        fun when is_function(fun, 1) -> fun.(text)
+        _ -> do_embed(text)
+      end
     else
       {:error, :embeddings_unavailable}
     end
@@ -191,6 +240,7 @@ defmodule OptimalSystemAgent.Memory.Search do
 
     try do
       :ets.delete(@vector_table, id)
+      untouch(id)
     rescue
       ArgumentError -> :ok
     end
@@ -353,17 +403,29 @@ defmodule OptimalSystemAgent.Memory.Search do
   # ---------------------------------------------------------------------------
 
   defp ensure_table! do
-    try do
-      :ets.new(@vector_table, [:named_table, :set, :public])
-    rescue
-      ArgumentError -> :ok
-    end
+    new_table(@vector_table, :set)
+    new_table(@lru_table, :ordered_set)
+    new_table(@seq_table, :set)
+    :ok
+  end
+
+  defp new_table(name, type) do
+    :ets.new(name, [:named_table, type, :public])
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   defp safe_lookup(id) do
     case :ets.lookup(@vector_table, id) do
-      [{^id, hash, vec}] -> {hash, vec}
-      _ -> nil
+      [{^id, hash, vec}] ->
+        # A cache HIT is a use — refresh recency so a hot vector is not the one
+        # evicted next.
+        touch(id)
+        {hash, vec}
+
+      _ ->
+        nil
     end
   rescue
     ArgumentError -> nil
@@ -371,7 +433,140 @@ defmodule OptimalSystemAgent.Memory.Search do
 
   defp safe_insert(id, hash, vec) do
     :ets.insert(@vector_table, {id, hash, vec})
+    touch(id)
+    enforce_cache_cap()
+    :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # LRU bound
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Maximum number of vectors held in the `:osa_memory_vectors` ETS cache.
+
+  Exposed so tests can assert the bound and operators can tune it:
+
+      config :optimal_system_agent, :memory_vector_cache_max, 5_000
+
+  `0` (or a non-positive/invalid value) disables eviction, restoring the old
+  unbounded behaviour — deliberately opt-in, never the default.
+  """
+  @spec cache_max() :: non_neg_integer()
+  def cache_max do
+    case Application.get_env(:optimal_system_agent, :memory_vector_cache_max, @default_cache_max) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_cache_max
+    end
+  end
+
+  @doc """
+  Create the vector cache and its LRU bookkeeping tables from a long-lived
+  process.
+
+  Called from `Application.start/2` (Phase 2). Same hazard as
+  `Infra.BoundedTable.init_tables/0`: lazily created named ETS tables are owned
+  by the first caller, and if that is a transient process the tables die with
+  it. Losing `@lru_table`/`@seq_table` while `@vector_table` survives leaves
+  cached vectors with no recency entry, so eviction picks the wrong rows. The
+  lazy `ensure_table!/0` path remains for callers running without the
+  application started.
+  """
+  @spec init_tables() :: :ok
+  def init_tables, do: ensure_table!()
+
+  @doc "Number of vectors currently cached in ETS. Diagnostics + bound tests."
+  @spec cache_size() :: non_neg_integer()
+  def cache_size do
+    case :ets.info(@vector_table, :size) do
+      n when is_integer(n) -> n
+      _ -> 0
+    end
+  end
+
+  @doc """
+  Drop every cached vector (ETS only — the durable `memory_vectors` rows are
+  untouched, so this costs a disk read per entry, never a re-embed).
+  """
+  @spec clear_cache() :: :ok
+  def clear_cache do
+    ensure_table!()
+    :ets.delete_all_objects(@vector_table)
+    :ets.delete_all_objects(@lru_table)
+    :ets.delete_all_objects(@seq_table)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Mark `id` as most-recently-used. Monotonic integers give a strictly
+  # increasing recency key without a shared counter row to contend on.
+  defp touch(id) do
+    case :ets.lookup(@seq_table, id) do
+      [{^id, old_seq}] -> :ets.delete(@lru_table, old_seq)
+      _ -> :ok
+    end
+
+    seq = System.unique_integer([:monotonic, :positive])
+    :ets.insert(@lru_table, {seq, id})
+    :ets.insert(@seq_table, {id, seq})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Drop the LRU bookkeeping for `id` (called on eviction and on forget/1).
+  defp untouch(id) do
+    case :ets.lookup(@seq_table, id) do
+      [{^id, seq}] -> :ets.delete(@lru_table, seq)
+      _ -> :ok
+    end
+
+    :ets.delete(@seq_table, id)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Evict least-recently-used rows until the cache is back under the cap.
+  # Bounded by construction: each pass removes the single oldest key, and the
+  # loop's own guard is the table size, so it always terminates.
+  defp enforce_cache_cap do
+    max = cache_max()
+    if max > 0, do: evict_down_to(max)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp evict_down_to(max) do
+    if cache_size() > max do
+      case :ets.first(@lru_table) do
+        :"$end_of_table" ->
+          # Bookkeeping lost (e.g. the LRU table was cleared out from under us)
+          # while the vector table is over cap — rebuild recency from scratch
+          # rather than spin. Correctness is unaffected: SQLite still holds
+          # every vector.
+          :ets.delete_all_objects(@vector_table)
+          :ets.delete_all_objects(@seq_table)
+          :ok
+
+        seq ->
+          case :ets.lookup(@lru_table, seq) do
+            [{^seq, id}] ->
+              :ets.delete(@vector_table, id)
+              untouch(id)
+
+            _ ->
+              :ets.delete(@lru_table, seq)
+          end
+
+          evict_down_to(max)
+      end
+    else
+      :ok
+    end
   end
 end

@@ -3,6 +3,11 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
   alias OptimalSystemAgent.Agent.{Context, Compactor, Tasks}
 
+  # The compactor has NO hardcoded context-window default any more — an
+  # unresolvable window is `:unknown` and compaction is DEFERRED. Tests that
+  # assert a compaction/utilization outcome must state their window.
+  @cw 128_000
+
   # ---------------------------------------------------------------------------
   # Context builder — token budgeting
   # ---------------------------------------------------------------------------
@@ -177,7 +182,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
 
       # Should have fewer messages after compaction
       assert length(result) < length(messages)
@@ -220,7 +225,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
     test "utilization returns a float between 0.0 and 100.0" do
       messages = [%{role: "user", content: "short message"}]
-      util = Compactor.utilization(messages)
+      util = Compactor.utilization_percent(messages, @cw)
 
       assert is_float(util)
       assert util >= 0.0
@@ -228,18 +233,19 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
     end
 
     test "utilization is nearly 0 for empty message list" do
-      util = Compactor.utilization([])
+      util = Compactor.utilization_percent([], @cw)
       assert util < 1.0
     end
 
     test "utilization increases with more content" do
-      small = Compactor.utilization([%{role: "user", content: "hi"}])
+      small = Compactor.utilization_percent([%{role: "user", content: "hi"}], @cw)
 
       large =
-        Compactor.utilization(
+        Compactor.utilization_percent(
           for i <- 1..50 do
             %{role: "user", content: String.duplicate("word ", 100) <> "#{i}"}
-          end
+          end,
+          @cw
         )
 
       assert large > small

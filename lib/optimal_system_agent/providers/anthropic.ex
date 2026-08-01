@@ -27,13 +27,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @impl true
   def name, do: :anthropic
 
-  @impl true
-  def default_model, do: "claude-sonnet-4-6"
+  alias OptimalSystemAgent.Providers.AnthropicModels
 
   @impl true
-  def available_models do
-    ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
-  end
+  def default_model, do: AnthropicModels.default_model()
+
+  @impl true
+  def available_models, do: AnthropicModels.ids()
 
   @impl true
   def chat(messages, opts \\ []) do
@@ -71,7 +71,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
-    thinking = Keyword.get(opts, :thinking)
+    thinking = normalize_thinking(Keyword.get(opts, :thinking), model)
 
     body =
       %{
@@ -141,7 +141,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
-    thinking = Keyword.get(opts, :thinking)
+    thinking = normalize_thinking(Keyword.get(opts, :thinking), model)
 
     body =
       %{
@@ -568,15 +568,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       default_max_tokens(model)
   end
 
+  # Single source of truth: Providers.AnthropicModels. The old hand-rolled
+  # `cond` here was a third independent copy of the per-model output cap and
+  # had already drifted — it returned 32_000 for claude-sonnet-4-6 while
+  # ModelLimits returned 64_000, and this one is what actually sets max_tokens
+  # on the wire, so long answers truncated at half the real ceiling.
   defp default_max_tokens(model) do
-    m = String.downcase(to_string(model))
+    case AnthropicModels.resolve(model) do
+      nil ->
+        m = String.downcase(to_string(model))
+        if String.contains?(m, "claude-3"), do: 8_192, else: 32_000
 
-    cond do
-      String.contains?(m, "opus-4-6") -> 64_000
-      String.contains?(m, "haiku") -> 32_000
-      String.contains?(m, "sonnet-4") or String.contains?(m, "opus-4") -> 32_000
-      String.contains?(m, "claude-3") -> 8_192
-      true -> 32_000
+      found ->
+        found.max_output
     end
   end
 
@@ -820,6 +824,28 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def maybe_add_thinking(body, _), do: body
 
   @doc """
+  Coerce a thinking config to the dialect `model` actually accepts.
+
+  Belt-and-braces for `Agent.Loop.LLMClient.thinking_config/1`: any caller that
+  hands us `{type: "enabled", budget_tokens: N}` for a model on which Anthropic
+  removed the fixed budget (the Claude 5 family, Opus 4.7/4.8) would otherwise
+  get a 400 rather than a degraded answer. Downgrading to `adaptive` here keeps
+  thinking working instead of failing the whole request.
+  """
+  @spec normalize_thinking(map() | nil, String.t() | atom() | nil) :: map() | nil
+  def normalize_thinking(nil, _model), do: nil
+
+  def normalize_thinking(%{type: "enabled"} = thinking, model) do
+    if AnthropicModels.thinking_mode(model) == :adaptive do
+      %{type: "adaptive"}
+    else
+      thinking
+    end
+  end
+
+  def normalize_thinking(thinking, _model), do: thinking
+
+  @doc """
   True for Claude models that support the 1M-token context window beta, unless
   disabled via the `DISABLE_1M_CONTEXT` env var or `:disable_1m_context` config.
 
@@ -830,10 +856,25 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   """
   @spec supports_1m?(String.t() | atom()) :: boolean()
   def supports_1m?(model) do
-    m = String.downcase(to_string(model))
+    AnthropicModels.context_window(model) == 1_000_000 and
+      (not beta_gated_1m?(model) or not one_m_disabled?())
+  end
 
-    (String.contains?(m, "sonnet-4-6") or String.contains?(m, "opus-4-6")) and
-      not one_m_disabled?()
+  @doc """
+  True only for models whose 1M window is gated behind the `context-1m` beta
+  header.
+
+  The Claude 4.6 generation needed that header to unlock 1M. The Claude 5
+  family (and Opus 4.7/4.8) ship 1M as the DEFAULT window, so sending the beta
+  for them is at best noise and at worst a rejected request — which is why the
+  header decision is separate from `supports_1m?/1` (what window we advertise).
+  """
+  @spec needs_1m_beta?(String.t() | atom()) :: boolean()
+  def needs_1m_beta?(model), do: beta_gated_1m?(model) and not one_m_disabled?()
+
+  defp beta_gated_1m?(model) do
+    m = String.downcase(to_string(model))
+    String.contains?(m, "sonnet-4-6") or String.contains?(m, "opus-4-6")
   end
 
   defp one_m_disabled? do
@@ -875,7 +916,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     betas = []
     betas = if thinking, do: ["interleaved-thinking-2025-05-14" | betas], else: betas
     betas = if prompt_caching_enabled?(), do: ["prompt-caching-2024-07-31" | betas], else: betas
-    betas = if model && supports_1m?(model), do: [@context_1m_beta | betas], else: betas
+    betas = if model && needs_1m_beta?(model), do: [@context_1m_beta | betas], else: betas
 
     case betas do
       [] -> base
@@ -899,7 +940,16 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         :exit, _ -> nil
       end
 
-    api_key = pool_key || Application.get_env(:optimal_system_agent, :anthropic_api_key)
+    # `live_env/1` re-reads ~/.osa/.env on demand. Every other cloud provider
+    # has this fallback (openai_compat_provider.ex, registry.ex) and Anthropic
+    # did not — so a key written by the standalone `mix osa.setup.wizard`
+    # subprocess (whose put_env dies with the subprocess) stayed invisible to
+    # Anthropic until the whole daemon restarted, even though the setup flow
+    # reported success.
+    api_key =
+      pool_key ||
+        Application.get_env(:optimal_system_agent, :anthropic_api_key) ||
+        OptimalSystemAgent.Onboarding.live_env("ANTHROPIC_API_KEY")
 
     cond do
       is_binary(api_key) and api_key != "" ->

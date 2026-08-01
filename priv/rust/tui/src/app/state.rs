@@ -180,7 +180,12 @@ impl AppState {
                 | AppState::Quit
                 | AppState::Sessions
                 | AppState::ModelPicker
-                | AppState::Survey
+                // Survey is intentionally NOT an overlay: like Permissions and
+                // PlanReview it renders INLINE, in its own reserved band above
+                // the composer (see event_loop `survey_slot` / `draw_inline`).
+                // `ask_user` blocks the whole turn on the operator, and hiding
+                // the conversation behind a full-screen modal is exactly what
+                // the user cannot afford while deciding how to answer.
                 | AppState::AgentsDashboard
                 | AppState::Rewind
                 | AppState::Status

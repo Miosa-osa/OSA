@@ -22,20 +22,46 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # the recommended provider that the good first-run wizard
   # (`mix osa.setup.wizard`) leads with. Added here, matching the wizard's
   # catalog entry (`Onboarding.providers_list/0`).
-  @providers [
-    %{value: :ollama, label: "Ollama (Local)", hint: "Free, runs on your machine"},
-    %{value: :ollama_cloud, label: "Ollama Cloud", hint: "No GPU needed — recommended"},
-    %{value: :anthropic, label: "Anthropic", hint: "Claude models"},
-    %{value: :openai, label: "OpenAI", hint: "GPT models"},
-    %{value: :groq, label: "Groq", hint: "Fast inference"},
-    %{value: :openrouter, label: "OpenRouter", hint: "Multi-model gateway"},
-    %{value: :deepseek, label: "DeepSeek", hint: "DeepSeek models"}
-  ]
-
+  # DERIVED from `Onboarding.providers_list/0` — the same catalog the first-run
+  # wizard reads. The hand-written version listed seven providers, so a user in
+  # `/setup` could not reach Google, xAI, Mistral, Cohere, Cerebras, Fireworks,
+  # Together, Perplexity, Replicate, MIOSA, the Chinese providers or the local
+  # OpenAI-compatible servers even though the Registry routes every one of them.
+  #
+  # `:ollama_local` is presented as `:ollama` because that is the atom this
+  # module's `get_auth/1` and `write_config/3` clauses already speak.
   @doc false
-  # Public so the provider catalog (item 1: ollama_cloud parity) is directly
-  # unit-testable without driving the interactive `Prompt.select/2` (TTY).
-  def providers, do: @providers
+  # Public so the provider catalog is directly unit-testable without driving
+  # the interactive `Prompt.select/2` (TTY).
+  def providers do
+    Onboarding.providers_list()
+    |> Enum.map(fn p ->
+      %{value: setup_provider_atom(p.id), label: p.name, hint: p.description}
+    end)
+    |> Enum.uniq_by(& &1.value)
+  rescue
+    # A catalog problem must never leave `/setup` with an empty picker.
+    _ ->
+      [
+        %{value: :ollama_cloud, label: "Ollama Cloud", hint: "No GPU needed — recommended"},
+        %{value: :anthropic, label: "Anthropic", hint: "Claude models"},
+        %{value: :openai, label: "OpenAI", hint: "GPT models"}
+      ]
+  end
+
+  # Picker id -> the atom this module's clauses dispatch on. Only ids the
+  # onboarding catalog declares reach here, so there is no unbounded
+  # `String.to_atom` on user input.
+  defp setup_provider_atom("ollama_local"), do: :ollama
+  defp setup_provider_atom("ollama_cloud"), do: :ollama_cloud
+  defp setup_provider_atom("custom"), do: :custom
+
+  defp setup_provider_atom(id) do
+    case Onboarding.known_provider_atom(id) do
+      {:ok, atom} -> atom
+      :error -> :custom
+    end
+  end
 
   @channels [
     %{value: :skip, label: "Skip for now", hint: "Set up channels later with /channels"},
@@ -72,12 +98,20 @@ defmodule OptimalSystemAgent.CLI.Setup do
       # with the good first-run wizard).
       {api_key, base_url} = get_auth(provider)
 
-      if is_nil(api_key) and provider not in [:ollama, :ollama_cloud] do
+      # Providers that legitimately need no key: local Ollama, a signed-in
+      # local Ollama Cloud route, the local OpenAI-compatible servers, and a
+      # Custom Endpoint whose server may not require auth at all.
+      if is_nil(api_key) and
+           provider not in [:ollama, :ollama_cloud, :lmstudio, :llamacpp, :custom] do
         Prompt.outro("Setup cancelled")
         :skip
       else
-        # Step 3: Validate connection
-        validate_provider(provider, api_key)
+        # Step 3: Validate connection — AT ENTRY, with a re-enter loop, so a
+        # typo'd key is caught while the user is still looking at the prompt
+        # instead of on their first real turn (parity with the first-run
+        # wizard's `handle_health_check_failure/5`). Returns the key the user
+        # settled on, which may differ from the one first typed.
+        api_key = validate_with_retry(provider, api_key)
 
         # Step 4: Model selection (item 1 audit fix — this wizard used to
         # have NO model-selection step at all; the config it wrote always
@@ -236,6 +270,26 @@ defmodule OptimalSystemAgent.CLI.Setup do
     {key, nil}
   end
 
+  # Custom Endpoint is the one entry that is USELESS without a base URL — it is
+  # defined by the URL. Asking for the key and silently dropping the URL is how
+  # a self-hosted/proxy key ended up being sent to api.openai.com.
+  defp get_auth(:custom) do
+    base_url = Prompt.text("Base URL (e.g. https://api.together.ai/v1)")
+    key = Prompt.text("API key (leave blank if the server needs none)", mask: true)
+
+    {
+      if(key && String.trim(key) != "", do: String.trim(key), else: nil),
+      if(base_url && String.trim(base_url) != "", do: String.trim(base_url), else: nil)
+    }
+  end
+
+  # Local OpenAI-compatible servers need no key at all — prompting for one is a
+  # dead end the user cannot satisfy.
+  defp get_auth(provider) when provider in [:lmstudio, :llamacpp] do
+    Prompt.note("#{provider_name(provider)} runs locally — no API key needed.", "Local Provider")
+    {nil, nil}
+  end
+
   defp get_auth(provider) do
     placeholder =
       case provider do
@@ -243,6 +297,9 @@ defmodule OptimalSystemAgent.CLI.Setup do
         :groq -> "gsk_..."
         :openrouter -> "sk-or-..."
         :deepseek -> "sk-..."
+        :anthropic -> "sk-ant-api03-..."
+        :google -> "AIza..."
+        :xai -> "xai-..."
         _ -> "..."
       end
 
@@ -292,6 +349,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   defp onboarding_provider_id(:ollama), do: "ollama_local"
   defp onboarding_provider_id(:ollama_cloud), do: "ollama_cloud"
+  defp onboarding_provider_id(:custom), do: "custom"
   defp onboarding_provider_id(provider), do: to_string(provider)
 
   # ── OAuth ────────────────────────────────────────────────────────
@@ -351,6 +409,62 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   # ── Validation ───────────────────────────────────────────────────
 
+  # Validate the key AT ENTRY and, when the provider explicitly REJECTED it
+  # (401/403 — as opposed to an unreachable network, which says nothing about
+  # the key), offer to re-enter rather than saving a key we already know is
+  # dead. Bounded retries so a user who keeps pasting the same bad key still
+  # reaches a working "save anyway" exit instead of an infinite prompt loop.
+  defp validate_with_retry(provider, key, attempts_left \\ 2)
+
+  defp validate_with_retry(provider, key, 0) do
+    validate_provider(provider, key)
+    key
+  end
+
+  defp validate_with_retry(provider, key, attempts_left) when is_binary(key) do
+    IO.puts("\e[2m│  Verifying connection...\e[0m")
+
+    case test_provider(provider, key) do
+      :ok ->
+        Prompt.completed("Connection", "Verified ✓")
+        key
+
+      :unverified ->
+        Prompt.completed("Connection", "Saved (not verified)")
+        IO.puts("\e[2m│  Couldn't test this provider automatically — if the key is\e[0m")
+        IO.puts("\e[2m│  wrong you'll see an error on your first message.\e[0m")
+        key
+
+      {:key_rejected, reason} ->
+        IO.puts("\e[31m│  ✗ #{reason}\e[0m")
+
+        choice =
+          Prompt.select("What would you like to do?", [
+            %{value: :retry, label: "Re-enter key", hint: "try a different/corrected key"},
+            %{
+              value: :continue,
+              label: "Continue anyway",
+              hint: "save config, fix later with /setup"
+            }
+          ])
+
+        if choice == :retry do
+          {new_key, _base_url} = get_auth(provider)
+          validate_with_retry(provider, new_key || key, attempts_left - 1)
+        else
+          Prompt.completed("Connection", "not verified — saved anyway")
+          key
+        end
+
+      {:error, reason} ->
+        IO.puts("\e[33m│  ⚠ Connection test failed: #{reason}\e[0m")
+        IO.puts("\e[2m│  You can continue — the key will be saved.\e[0m")
+        key
+    end
+  end
+
+  defp validate_with_retry(_provider, key, _attempts_left), do: key
+
   @doc false
   # Public so validation (incl. the ollama_cloud keyless route, item 1) is
   # directly unit-testable without a TTY; still internal API.
@@ -376,6 +490,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
         IO.puts("\e[2m│  Couldn't test this provider automatically — if the key is\e[0m")
         IO.puts("\e[2m│  wrong you'll see an error on your first message.\e[0m")
 
+      {:key_rejected, reason} ->
+        IO.puts("\e[31m│  ✗ #{reason}\e[0m")
+        IO.puts("\e[2m│  Re-run /setup with a corrected key.\e[0m")
+
       {:error, reason} ->
         IO.puts("\e[33m│  ⚠ Connection test failed: #{reason}\e[0m")
         IO.puts("\e[2m│  You can continue — the key will be saved.\e[0m")
@@ -384,84 +502,109 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   def validate_provider(_, _), do: :ok
 
+  # A key the provider EXPLICITLY rejected (401/403) is a different fact from
+  # "we couldn't reach the provider", and only the first is worth asking the
+  # user to re-type. Same three-way split `Onboarding.health_check/1` makes,
+  # and the same wording, so the message is identical whichever surface the
+  # user came through.
+  @rejected_message "API key is invalid or expired."
+
+  @doc false
+  @spec classify_status(integer()) :: :ok | {:key_rejected, String.t()} | {:error, String.t()}
+  def classify_status(status) when status in 200..299, do: :ok
+  def classify_status(401), do: {:key_rejected, @rejected_message}
+  def classify_status(403), do: {:key_rejected, "Access denied. Check your API key permissions."}
+
+  def classify_status(402),
+    do: {:key_rejected, "Insufficient credits on this account."}
+
+  def classify_status(status), do: {:error, "HTTP #{status}"}
+
+  defp classify_response({:ok, %{status: status}}), do: classify_status(status)
+  defp classify_response({:error, reason}), do: {:error, inspect(reason)}
+
   @doc false
   # Public so F4's "actually probe the provider" behavior is directly
   # unit-testable; still internal API (not meant for external callers).
-  def test_provider(:anthropic, key) do
-    case Req.post("https://api.anthropic.com/v1/messages",
-           json: %{
-             model: "claude-haiku-4-5",
-             max_tokens: 1,
-             messages: [%{role: "user", content: "hi"}]
-           },
-           headers: [
-             {"x-api-key", key},
-             {"anthropic-version", "2023-06-01"},
-             {"content-type", "application/json"}
-           ],
-           receive_timeout: 10_000
-         ) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
-      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
-      {:error, reason} -> {:error, inspect(reason)}
-    end
+  # `opts` is a Req option passthrough (e.g. `plug:` for `Req.Test`) so the
+  # 401-vs-network split is testable without real network access.
+  def test_provider(provider, key, opts \\ [])
+
+  def test_provider(:anthropic, key, opts) do
+    Req.post(
+      [
+        url: "https://api.anthropic.com/v1/messages",
+        json: %{
+          model: OptimalSystemAgent.Providers.AnthropicModels.default_model(),
+          max_tokens: 1,
+          messages: [%{role: "user", content: "hi"}]
+        },
+        headers: [
+          {"x-api-key", key},
+          {"anthropic-version", "2023-06-01"},
+          {"content-type", "application/json"}
+        ],
+        receive_timeout: 10_000
+      ] ++ opts
+    )
+    |> classify_response()
   end
 
-  def test_provider(:openai, key) do
-    case Req.get("https://api.openai.com/v1/models",
-           headers: [{"authorization", "Bearer #{key}"}],
-           receive_timeout: 10_000
-         ) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
-      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
-      {:error, reason} -> {:error, inspect(reason)}
-    end
+  def test_provider(:openai, key, opts) do
+    # `GET /v1/models` is authoritative for what this key can reach — the same
+    # call `Onboarding.model_list/2` uses to narrow the picker.
+    probe_get("https://api.openai.com/v1/models", [{"authorization", "Bearer #{key}"}], opts)
   end
 
-  def test_provider(:groq, key) do
-    case Req.get("https://api.groq.com/openai/v1/models",
-           headers: [{"authorization", "Bearer #{key}"}],
-           receive_timeout: 10_000
-         ) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
-      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
-      {:error, reason} -> {:error, inspect(reason)}
-    end
+  def test_provider(:groq, key, opts) do
+    probe_get("https://api.groq.com/openai/v1/models", [{"authorization", "Bearer #{key}"}], opts)
   end
 
-  def test_provider(:openrouter, key) do
+  def test_provider(:openrouter, key, opts) do
     # OpenRouter's documented key-introspection endpoint — returns key/credit
     # info on a valid key, 401 on a bad one.
-    case Req.get("https://openrouter.ai/api/v1/key",
-           headers: [{"authorization", "Bearer #{key}"}],
-           receive_timeout: 10_000
-         ) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
-      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
-      {:error, reason} -> {:error, inspect(reason)}
-    end
+    probe_get("https://openrouter.ai/api/v1/key", [{"authorization", "Bearer #{key}"}], opts)
   end
 
-  def test_provider(:deepseek, key) do
+  def test_provider(:deepseek, key, opts) do
     # DeepSeek's balance endpoint doubles as a cheap, no-token-cost key check.
-    case Req.get("https://api.deepseek.com/user/balance",
-           headers: [{"authorization", "Bearer #{key}"}],
-           receive_timeout: 10_000
-         ) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
-      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
-      {:error, reason} -> {:error, inspect(reason)}
-    end
+    probe_get("https://api.deepseek.com/user/balance", [{"authorization", "Bearer #{key}"}], opts)
   end
 
-  # No real health-check for this provider — say so rather than claiming
-  # "Verified ✓" for a key we never actually tested.
-  def test_provider(_, _key), do: :unverified
+  # Everything else now goes through `Onboarding.health_check/1`, which since
+  # the multi-provider pass has a REAL, correctly-targeted endpoint for every
+  # routable provider (Google's `:generateContent`, Cohere's `/v2/chat`,
+  # Replicate's `/account`, and each OpenAI-compatible provider's OWN base URL
+  # — never a fallback to api.openai.com). `:unverified` is now reserved for
+  # providers we genuinely cannot probe, instead of being the answer for
+  # two-thirds of the catalog.
+  def test_provider(provider, key, opts) do
+    params =
+      %{"provider" => onboarding_provider_id(provider), "api_key" => key}
+      |> then(fn p ->
+        case Keyword.get(opts, :plug) do
+          nil -> p
+          plug -> Map.put(p, "req_plug", plug)
+        end
+      end)
+
+    case Onboarding.health_check(params) do
+      {:ok, _} -> :ok
+      {:error, %{verified: :key_rejected, message: msg}} -> {:key_rejected, msg}
+      {:error, %{error: "no_endpoint"}} -> :unverified
+      {:error, %{message: msg}} -> {:error, msg}
+      {:error, _} -> :unverified
+    end
+  rescue
+    _ -> :unverified
+  catch
+    _, _ -> :unverified
+  end
+
+  defp probe_get(url, headers, opts) do
+    Req.get([url: url, headers: headers, receive_timeout: 10_000] ++ opts)
+    |> classify_response()
+  end
 
   # ── Channel Setup ───────────────────────────────────────────────
 
@@ -581,18 +724,67 @@ defmodule OptimalSystemAgent.CLI.Setup do
     # Restrict permissions — file contains API keys
     File.chmod!(env_path, 0o600)
 
-    # Also set in runtime
-    Application.put_env(:optimal_system_agent, :default_provider, provider)
+    apply_live(provider, api_key, model, pairs)
+  end
+
+  # Make the just-written config take effect in THIS node — no restart hunt.
+  #
+  # Three things were missing here and each one on its own is enough to make a
+  # freshly entered key look ignored:
+  #
+  #   1. `Application.put_env(:default_provider, provider)` stored the PICKER's
+  #      id. `:ollama_cloud` is not a runtime provider atom (the .env correctly
+  #      gets `OSA_DEFAULT_PROVIDER=ollama`), so `Runtime.Identity.provider/0`
+  #      — the single source the status bar and `/health` both read — reported
+  #      a provider that resolves nowhere.
+  #   2. The OS env var was never set, only the Application key. Every live
+  #      re-read path (`Onboarding.live_env/1`, `Registry.live_cloud_key_present?/1`,
+  #      `Onboarding.detect_existing/0`) checks `System.get_env` first.
+  #   3. `CredentialPool` was never reloaded, and its `get_key/1` OUTRANKS
+  #      Application env in `Providers.Anthropic.resolve_auth/0` — so a key
+  #      corrected here lost to the one snapshotted at boot.
+  defp apply_live(provider, api_key, model, pairs) do
+    Application.put_env(:optimal_system_agent, :default_provider, runtime_provider_atom(provider))
+
+    # Mirror every persisted pair into the live OS environment.
+    Enum.each(pairs, fn {k, v} -> if is_binary(v) and v != "", do: System.put_env(k, v) end)
+
+    # A base URL only takes effect through the `:<provider>_url` application
+    # key — `OpenAICompatProvider` never reads OPENAI_BASE_URL directly. Writing
+    # only the env var is how a Custom Endpoint kept dialling api.openai.com
+    # until the next restart.
+    case List.keyfind(pairs, "OPENAI_BASE_URL", 0) do
+      {_, url} when is_binary(url) and url != "" ->
+        Application.put_env(:optimal_system_agent, :openai_url, url)
+
+      _ ->
+        :ok
+    end
 
     if api_key do
-      config_key = provider_config_key(provider)
-      Application.put_env(:optimal_system_agent, config_key, api_key)
+      Application.put_env(:optimal_system_agent, provider_config_key(provider), api_key)
+      _ = OptimalSystemAgent.Providers.CredentialPool.reload()
     end
 
     if model do
       Application.put_env(:optimal_system_agent, :default_model, model)
+
+      if provider in [:ollama, :ollama_cloud] do
+        Application.put_env(:optimal_system_agent, :ollama_model, model)
+      end
     end
+
+    :ok
   end
+
+  # The picker's provider id vs. the atom the rest of OSA resolves. Mirrors
+  # `Onboarding.apply_env_vars/4`'s mapping so the two setup entry points can't
+  # disagree about what "Ollama Cloud" means.
+  @doc false
+  @spec runtime_provider_atom(atom()) :: atom()
+  def runtime_provider_atom(:ollama_cloud), do: :ollama
+  def runtime_provider_atom(:custom), do: :openai
+  def runtime_provider_atom(provider), do: provider
 
   # Returns `{osa_default_provider_value, [{env_key, value}]}` for the given
   # provider selection. `nil` model/api_key are simply omitted (never write a
@@ -611,6 +803,18 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp provider_pairs(:ollama, _api_key, model, _base_url) do
     pairs = if model, do: [{"OLLAMA_MODEL", model}], else: []
     {"ollama", pairs}
+  end
+
+  # Custom Endpoint = the OpenAI-compatible client pointed somewhere else. The
+  # base URL is the whole point, so it is persisted (OPENAI_BASE_URL, which
+  # `config/runtime.exs` reads back into `:openai_url`) rather than dropped.
+  defp provider_pairs(:custom, api_key, model, base_url) do
+    pairs =
+      (if api_key, do: [{"OPENAI_API_KEY", api_key}], else: []) ++
+        (if base_url, do: [{"OPENAI_BASE_URL", base_url}], else: []) ++
+        (if model, do: [{"OSA_MODEL", model}], else: [])
+
+    {"openai", pairs}
   end
 
   defp provider_pairs(provider, api_key, model, _base_url) do
@@ -683,6 +887,12 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp provider_env_key(:deepseek), do: "DEEPSEEK_API_KEY"
   defp provider_env_key(p), do: "#{String.upcase(to_string(p))}_API_KEY"
 
+  # `:ollama_cloud` is a picker id, not a runtime provider — its key lives under
+  # `:ollama_api_key` like every other Ollama route (the generic
+  # `:"#{p}_api_key"` fallback would have stashed it at `:ollama_cloud_api_key`,
+  # where nothing reads it).
+  defp provider_config_key(:ollama_cloud), do: :ollama_api_key
+  defp provider_config_key(:custom), do: :openai_api_key
   defp provider_config_key(:anthropic), do: :anthropic_api_key
   defp provider_config_key(:openai), do: :openai_api_key
   defp provider_config_key(:groq), do: :groq_api_key

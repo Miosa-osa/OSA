@@ -777,23 +777,28 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "o3" => 200_000,
     "o3-mini" => 200_000,
     "o4-mini" => 200_000,
-    # Google
-    "gemini-2.5-pro" => 1_048_576,
-    "gemini-2.5-flash" => 1_048_576,
-    "gemini-2.0-flash" => 1_048_576,
-    # DeepSeek
+    # Google, DeepSeek, xAI and Mistral are NOT listed here — they are merged in
+    # below from Providers.GoogleModels / DeepSeekModels / XAIModels /
+    # MistralModels, which are the single sources of truth for their catalogs.
+    #
+    # `deepseek-chat` / `deepseek-reasoner` (retired 2026-07-24) keep a row only
+    # so an existing pinned config resolves to a sane budget rather than the
+    # flat 128k default while the user migrates.
     "deepseek-chat" => 128_000,
     "deepseek-reasoner" => 128_000,
-    # Groq (context varies by model)
-    "llama-3.3-70b-versatile" => 128_000,
+    # Groq (context varies by model). `mixtral-8x7b-32768` was shut down
+    # 2025-03-20 and is removed. The Llama pair shuts down 2026-08-16; Groq
+    # documents both at 131,072, not the 128,000 recorded here previously.
+    "openai/gpt-oss-120b" => 131_072,
+    "openai/gpt-oss-20b" => 131_072,
+    "llama-3.3-70b-versatile" => 131_072,
     "llama-3.1-8b-instant" => 131_072,
-    "mixtral-8x7b-32768" => 32_768,
-    # Mistral
-    "mistral-large-latest" => 128_000,
-    "mistral-small-latest" => 128_000,
-    # Cohere
-    "command-r-plus" => 128_000,
-    "command-r" => 128_000,
+    # Cohere. The undated `command-r-plus` / `command-r` aliases were shut down
+    # 2025-09-15; the dated variants below are still served.
+    "command-a-plus-05-2026" => 128_000,
+    "command-a-03-2025" => 256_000,
+    "command-r-plus-08-2024" => 128_000,
+    "command-r-08-2024" => 128_000,
     # Zhipu / z.ai GLM (OpenAI-compatible; the ollama_cloud route appends a
     # ":cloud" suffix to the model id, which the prefix match below strips —
     # e.g. "glm-5.2:cloud" starts_with "glm-5.2"). Windows are the vendor's
@@ -812,8 +817,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "nemotron-3-ultra" => 262_144,
     "nemotron-3-super" => 262_144,
     "minimax-m3" => 524_288,
-    "deepseek-v4-pro" => 524_288,
-    "deepseek-v4-flash" => 1_048_576,
+    # `deepseek-v4-pro` / `deepseek-v4-flash` deliberately have NO row here.
+    # They used to, at 524_288 / 1_048_576 — the windows of Ollama's local
+    # quantized builds. But the SAME bare ids are DeepSeek's own first-party
+    # API models, which serve 1,048,576 for both, and this table is keyed by
+    # model name with no provider, so one row cannot be right for both. The
+    # DeepSeek catalog now owns them (merged below); the Ollama path is
+    # unaffected because cloud tags are exact keys from `OllamaCloud` and are
+    # probed live via /api/show anyway, which wins over any static row.
     "kimi-k2.7-code" => 262_144,
     "kimi-k2.6" => 262_144,
     "qwen3.5" => 262_144,
@@ -827,9 +838,27 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # runs, and the same family's local tags keep their own row. These values are
   # only a FALLBACK — `lookup_context_window/1` probes /api/show first for cloud
   # tags, so the live window always wins when the daemon can answer.
-  @fallback_context_windows Map.merge(
-                              @static_context_windows,
-                              OptimalSystemAgent.Providers.OllamaCloud.context_windows()
+  # Hosted-provider catalogs are the single source of truth for their own
+  # models and are merged LAST so they win over any stale hand-written row
+  # above (the Anthropic/OpenAI rows in @static_context_windows are retained
+  # only for older ids the catalogs no longer list).
+  @fallback_context_windows @static_context_windows
+                            |> Map.merge(OptimalSystemAgent.Providers.OllamaCloud.context_windows())
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.AnthropicModels.context_windows()
+                            )
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.OpenAIModels.context_windows()
+                            )
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.GoogleModels.context_windows()
+                            )
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.DeepSeekModels.context_windows()
+                            )
+                            |> Map.merge(OptimalSystemAgent.Providers.XAIModels.context_windows())
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.MistralModels.context_windows()
                             )
 
   @spec context_window(String.t()) :: pos_integer()
@@ -895,7 +924,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   # Catalog → exact static entry → static family prefix. No probing, no default.
   defp static_context_window(model) do
-    case catalog_context_window(model) || Map.get(@fallback_context_windows, model) do
+    # SSoT first — see ModelLimits.max_output/1 for why the catalog must not
+    # win for Anthropic/OpenAI models (the bundled models.dev snapshot lags and
+    # under-reports their windows).
+    case ssot_context_window(model) || catalog_context_window(model) ||
+           Map.get(@fallback_context_windows, model) do
       size when is_integer(size) and size > 0 ->
         {:ok, size}
 
@@ -905,6 +938,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
              end) do
           {_key, size} -> {:ok, size}
           nil -> :unknown
+        end
+    end
+  end
+
+  defp ssot_context_window(model) do
+    case OptimalSystemAgent.Providers.AnthropicModels.resolve(model) do
+      %{ctx: ctx} ->
+        ctx
+
+      nil ->
+        case OptimalSystemAgent.Providers.OpenAIModels.resolve(model) do
+          %{ctx: ctx} -> ctx
+          nil -> nil
         end
     end
   end
@@ -1074,14 +1120,54 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   def provider_for_model(_), do: nil
 
+  # A model id can appear under MANY catalog sections — `claude-opus-5` ships
+  # under anthropic, azure, azure-cognitive-services, github-copilot,
+  # llmgateway, opencode and venice in the models.dev snapshot. `Catalog.find/1`
+  # returns whichever one the underlying map happens to yield first, which is
+  # hash order, not preference order: `azure` won, `provider_id_to_atom/1` maps
+  # `"azure" -> :openai`, and so `/model claude-opus-5` switched the session to
+  # the OPENAI provider carrying an Anthropic model id — a 404 on every
+  # subsequent turn, for the single most likely model a user types.
+  #
+  # So: consider EVERY section carrying the model and prefer the one whose id
+  # is the provider's own name (`"anthropic"` for `:anthropic`) over a reseller
+  # or aggregator that merely relists it. Only if no section names a routable
+  # provider directly do we fall back to the alias mapping.
   defp catalog_provider_for(model) do
-    with %{provider_id: pid} when is_binary(pid) <- safe_catalog_find(model),
-         atom when is_atom(atom) <- provider_id_to_atom(pid),
-         true <- Map.has_key?(@providers, atom) do
-      atom
-    else
-      _ -> nil
-    end
+    candidates = safe_catalog_providers_for(model)
+
+    native =
+      Enum.find_value(candidates, fn pid ->
+        atom = exact_provider_atom(pid)
+        if atom && Map.has_key?(@providers, atom), do: atom
+      end)
+
+    native ||
+      Enum.find_value(candidates, fn pid ->
+        case provider_id_to_atom(pid) do
+          atom when is_atom(atom) -> if Map.has_key?(@providers, atom), do: atom
+          _ -> nil
+        end
+      end)
+  end
+
+  # Catalog provider ids that carry this exact model id, in a STABLE order
+  # (sorted), so resolution can never depend on map iteration order.
+  defp safe_catalog_providers_for(model) do
+    catalog = OptimalSystemAgent.Providers.Catalog
+
+    catalog.providers()
+    |> Enum.sort()
+    |> Enum.filter(&catalog.model(&1, model))
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  # A catalog id that IS the provider's own registered name — never an alias.
+  defp exact_provider_atom(pid) do
+    Enum.find(Map.keys(@providers), &(Atom.to_string(&1) == pid))
   end
 
   defp safe_catalog_find(model) do
@@ -1157,6 +1243,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
       String.starts_with?(m, "moonshot") or String.starts_with?(m, "kimi") ->
         :moonshot
+
+      # Groq serves the OpenAI open-weight models under a namespaced id
+      # ("openai/gpt-oss-120b"). It must be matched explicitly: the id does not
+      # start with "gpt", so without this branch it falls through to nil rather
+      # than routing to :groq. It is now Groq's default model, so nil routing
+      # would break the provider outright.
+      String.starts_with?(m, "openai/gpt-oss") ->
+        :groq
 
       String.starts_with?(m, "llama") ->
         :groq

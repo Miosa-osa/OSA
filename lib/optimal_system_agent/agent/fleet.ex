@@ -820,12 +820,15 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
   defp finish(parent_id, node_id, reason) do
     status = if reason == :normal, do: :completed, else: :failed
+    # MUST read tokens before stop_node/1 below — node_tokens/1 asks the live
+    # Loop for its state, and a stopped loop reports 0.
+    tokens = node_tokens(node_id)
     summary = completion_summary(node_id, status, reason)
 
     RunStore.complete(node_id, %{
       status: status,
       summary: summary,
-      tokens_used: node_tokens(node_id)
+      tokens_used: tokens
     })
 
     emit_fleet_event(parent_id, %{
@@ -834,7 +837,76 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       summary: summary,
       status: to_string(status)
     })
+
+    # Retire the node's Loop GenServer. Without this every delegation leaked a
+    # live loop holding a FULL transcript for the lifetime of the daemon — the
+    # single largest per-delegation leak in the fleet path. Safe here because
+    # everything downstream of completion (`default_await_completion/1`, the
+    # worktree diff, the fan_out result map) reads RunStore and the filesystem,
+    # never the loop; and RunStore.complete/2 above has already recorded the
+    # terminal state a waiter polls for. Reached on every terminal path:
+    # success, failure, driver crash, and the watcher's idle timeout.
+    stop_node(node_id)
   end
+
+  @doc """
+  Stop a fleet node's Loop GenServer and free its transcript.
+
+  Idempotent and best-effort: a node whose loop already exited (crash, prior
+  stop) is a no-op, and no failure here is allowed to disturb the parent's
+  completion accounting.
+  """
+  @spec stop_node(String.t()) :: :ok
+  def stop_node(node_id) when is_binary(node_id) do
+    case SessionManager.stop_session(node_id) do
+      :ok ->
+        :ok
+
+      {:error, :not_found} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("[Fleet] stop_node #{node_id}: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  def stop_node(_), do: :ok
+
+  @doc """
+  Stop every still-running fleet node spawned under `parent_session_id`.
+
+  This is the parent-shutdown half of the leak: `finish/3` retires a node that
+  reaches a terminal state, but a parent that is stopped mid-delegation would
+  otherwise strand its children as live loops with nobody left to finish them.
+  Called from `Runtime.SessionManager.stop_session/1`.
+
+  Only direct children are walked; each child's own `stop_session` recurses, so
+  a deep tree unwinds level by level. Returns the number of nodes stopped.
+  """
+  @spec stop_children(String.t()) :: non_neg_integer()
+  def stop_children(parent_session_id) when is_binary(parent_session_id) do
+    RunStore.all_running()
+    |> Enum.filter(&(Map.get(&1, :parent_session_id) == parent_session_id))
+    |> Enum.map(& &1.agent_id)
+    |> Enum.reject(&(&1 == parent_session_id))
+    |> Enum.map(fn node_id ->
+      RunStore.complete(node_id, %{status: :cancelled, summary: "parent session stopped"})
+      stop_node(node_id)
+      node_id
+    end)
+    |> length()
+  rescue
+    _ -> 0
+  catch
+    _, _ -> 0
+  end
+
+  def stop_children(_), do: 0
 
   defp emit_progress(parent_id, node_id, action, tool_count) do
     emit_fleet_event(parent_id, %{

@@ -90,30 +90,16 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   # ── Health (no auth) ────────────────────────────────────────────────
 
   get "/health" do
+    # Provider/model resolution lives in Runtime.Identity, NOT inline here, so
+    # the string on the TUI status bar (fed by this response) and the answer the
+    # agent gives when asked "what model are you" are the same call. They used to
+    # be independent: the bar read /health while the agent grepped config files,
+    # guessed llama3.2, and saved the guess to memory as fact.
     provider =
       Application.get_env(:optimal_system_agent, :default_provider, "unknown")
       |> to_string()
 
-    model_name =
-      case Application.get_env(:optimal_system_agent, :default_model) do
-        nil ->
-          # Resolve from provider's default model
-          prov = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-
-          try do
-            case OptimalSystemAgent.Providers.Registry.provider_info(prov) do
-              {:ok, info} -> to_string(info.default_model)
-              _ -> to_string(prov)
-            end
-          rescue
-            _ -> to_string(prov)
-          catch
-            :exit, _ -> to_string(prov)
-          end
-
-        m ->
-          to_string(m)
-      end
+    model_name = OptimalSystemAgent.Runtime.Identity.model()
 
     # Single source of truth: OSA_VERSION (CI-stamped) → app spec → VERSION file.
     # Never a hardcoded literal, so a tagged release always reports its real tag.
@@ -750,29 +736,36 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     end
   end
 
-  # The explicit list of provider slugs that may be passed to
-  # POST /onboarding/health-check. Any slug not on this list is rejected,
-  # preventing callers from probing arbitrary URLs through the server.
-  @allowed_health_check_providers ~w(
-    anthropic
-    openai
-    ollama_local
-    ollama_cloud
-    ollama
-    openrouter
-    miosa
-    custom
-    gemini
-    groq
-    mistral
-    xai
-    deepseek
-    cohere
-    azure
-    bedrock
-  )
+  # Provider slugs that may be passed to POST /onboarding/health-check. Any
+  # slug not on this list is rejected, so a caller cannot probe arbitrary URLs
+  # through the server.
+  #
+  # DERIVED from the onboarding catalog rather than hand-listed. The hand-listed
+  # version had drifted in both directions and each direction was its own bug:
+  #
+  #   * it admitted `gemini`, `azure` and `bedrock` — slugs the Registry does
+  #     not route and `build_health_check_request/4` has no branch for, so they
+  #     could only ever answer "no endpoint";
+  #   * it OMITTED most providers that ARE routable (cerebras, fireworks,
+  #     together, perplexity, replicate, the Chinese providers, the local
+  #     servers), so a user who picked one got a 400 `invalid_provider` from
+  #     their own machine instead of a key check.
+  #
+  # Deriving it means the allowlist can never be narrower than the picker (a
+  # provider you can select but not verify) nor wider than the routing table
+  # (a slug with no honest endpoint).
+  @extra_health_check_slugs ~w(ollama)
 
-  defp allowed_health_check_providers, do: @allowed_health_check_providers
+  defp allowed_health_check_providers do
+    ids =
+      OptimalSystemAgent.Onboarding.providers_list()
+      |> Enum.map(& &1.id)
+
+    ids ++ @extra_health_check_slugs
+  rescue
+    # Never let a catalog problem turn every key check into a 400.
+    _ -> ~w(anthropic openai ollama ollama_local ollama_cloud openrouter miosa custom)
+  end
 
   # Run a risky call, degrading to `default` on ANY exception/throw/exit
   # instead of letting it crash the whole response (onboarding hotfix: a

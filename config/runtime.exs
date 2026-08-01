@@ -539,3 +539,23 @@ config :optimal_system_agent,
   jwt_secret: System.get_env("JWT_SECRET"),
   amqp_url: System.get_env("AMQP_URL"),
   platform_enabled: database_url != nil
+
+# ── Custom / proxied provider base URLs ─────────────────────────────────────
+# The onboarding "Custom Endpoint" flow stores the user's URL in
+# OPENAI_BASE_URL, but nothing ever read it back: `:openai_url` stayed pinned to
+# the config.exs default, so OSA sent the user's custom-endpoint API key to
+# api.openai.com. That is a silent wrong-destination credential transmission,
+# and it also meant the custom endpoint never actually worked. Applied last so
+# it wins over the defaults set above.
+openai_base_url = System.get_env("OPENAI_BASE_URL")
+
+if is_binary(openai_base_url) and openai_base_url != "" do
+  config :optimal_system_agent, openai_url: openai_base_url
+end
+
+# Symmetric support for an Anthropic-compatible gateway/proxy.
+anthropic_base_url = System.get_env("ANTHROPIC_BASE_URL")
+
+if is_binary(anthropic_base_url) and anthropic_base_url != "" do
+  config :optimal_system_agent, anthropic_url: anthropic_base_url
+end

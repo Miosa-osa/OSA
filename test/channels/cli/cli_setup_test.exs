@@ -74,16 +74,20 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
   end
 
   describe "F4: test_provider/2 does not falsely claim verification" do
+    # A garbage key now comes back as `{:key_rejected, msg}` when the provider
+    # explicitly said 401/403, and `{:error, msg}` when we merely could not
+    # reach it. Both are "not verified" — which is what F4 is about — so these
+    # assert on that, not on which of the two the network happened to produce.
     test "an unconfigured/garbage groq key is actually rejected, not blindly :ok" do
-      assert {:error, _reason} = Setup.test_provider(:groq, "definitely-not-a-real-key")
+      assert Setup.test_provider(:groq, "definitely-not-a-real-key") not in [:ok, :unverified]
     end
 
     test "an unconfigured/garbage openrouter key is actually rejected, not blindly :ok" do
-      assert {:error, _reason} = Setup.test_provider(:openrouter, "definitely-not-a-real-key")
+      assert Setup.test_provider(:openrouter, "definitely-not-a-real-key") not in [:ok, :unverified]
     end
 
     test "an unconfigured/garbage deepseek key is actually rejected, not blindly :ok" do
-      assert {:error, _reason} = Setup.test_provider(:deepseek, "definitely-not-a-real-key")
+      assert Setup.test_provider(:deepseek, "definitely-not-a-real-key") not in [:ok, :unverified]
     end
 
     test "a provider with no health-check returns :unverified, not a false :ok" do

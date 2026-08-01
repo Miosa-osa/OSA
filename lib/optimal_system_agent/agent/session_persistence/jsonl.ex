@@ -128,10 +128,17 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence.Jsonl do
     e -> {:error, Exception.message(e)}
   end
 
-  @doc "Delete the JSONL file and its `.lock` / `.corrupt` sidecars (best-effort)."
+  @doc """
+  Delete the JSONL file and its `.lock` / `.corrupt` / `.cursor` sidecars
+  (best-effort).
+
+  `.cursor` is `SessionPersistence`'s incremental projection state. It is a
+  derivable cache, so dropping it here is always safe — the next append just
+  falls back to the full-log diff and rewrites it.
+  """
   @spec delete(String.t()) :: :ok
   def delete(path) do
-    Enum.each([path, path <> ".lock", path <> ".corrupt"], fn p ->
+    Enum.each([path, path <> ".lock", path <> ".corrupt", path <> ".cursor"], fn p ->
       _ = File.rm(p)
     end)
 

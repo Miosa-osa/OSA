@@ -128,7 +128,8 @@ fn gate_parts(parts: &[String], budget: usize) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0usize;
     for (i, p) in parts.iter().enumerate() {
-        let cost = p.chars().count() + if i == 0 { 0 } else { 3 };
+        // Columns, not chars — a wide glyph in a status segment costs 2.
+        let cost = crate::util::cols(p) + if i == 0 { 0 } else { 3 };
         if i == 0 || used + cost <= budget {
             used += cost;
             kept.push(p.clone());
@@ -137,6 +138,36 @@ fn gate_parts(parts: &[String], budget: usize) -> Vec<String> {
         }
     }
     kept
+}
+
+/// Floor on the columns the spinner verb may be squeezed to. Below this the
+/// pane is too narrow for the row to be readable at all, and shrinking the verb
+/// further buys the interrupt hint nothing.
+const MIN_VERB_COLS: usize = 8;
+
+/// Fit the spinner's live verb into `max_cols` display columns, preserving the
+/// part that actually identifies the work.
+///
+/// The verb is `@<agent>: <tool>: <argument>` during orchestration and the
+/// argument is usually an absolute path. Cutting from the right would keep the
+/// prefix the reader already knows (`@goal-verifier-skeptic: dir_list: /Users/…`)
+/// and destroy the only part that says WHAT is being touched, so the detail
+/// after the last `": "` is fitted with [`crate::util::fit_arg_summary`], which
+/// ellipsizes a path so its final segment survives. Column-measured throughout.
+fn fit_verb(verb: &str, max_cols: usize) -> String {
+    use crate::util::{cols, fit_arg_summary, fit_cols};
+    if cols(verb) <= max_cols {
+        return verb.to_string();
+    }
+    if let Some(i) = verb.rfind(": ") {
+        let (head, detail) = verb.split_at(i + 2);
+        let head_w = cols(head);
+        // Only keep the labels if the detail still gets room to say something.
+        if !detail.trim().is_empty() && head_w + 6 <= max_cols {
+            return format!("{}{}", head, fit_arg_summary(detail, max_cols - head_w));
+        }
+    }
+    fit_cols(verb, max_cols)
 }
 
 /// Fit `s` into `max_cols` display columns, ALWAYS ending in `…`.
@@ -1680,6 +1711,33 @@ impl Component for Activity {
         //   3. waiting-reason→ named "Waiting on subagent…" (item 3)
         //   4. normal        → shimmer spinner + activity-colored verb (green tool /
         //                      gray thinking / working accent), reddened by stall
+        // ── Verb budget: the interrupt hint is RESERVED FIRST ───────────────
+        //
+        // `parts[0]` is `"<turn timer> · esc to interrupt"` — the one control the
+        // user needs mid-turn — and it renders to the RIGHT of the verb. A long
+        // verb therefore does not merely crowd it, it pushes it past the pane
+        // edge where the renderer hard-clips it ("… esc to inte"). During
+        // orchestration the verb is `@<agent>: <tool>: <argument>` (
+        // `@goal-verifier-skeptic: dir_list: /Users/rhl/.osa/workspace/src`),
+        // which is routinely wider than the whole line on its own. `gate_parts`
+        // could not save it: it only drops TRAILING optional segments, and index
+        // 0 is unconditionally kept — it was kept, and then clipped.
+        //
+        // So the row is budgeted in priority order: model prefix + spinner glyph
+        // (fixed), then the required status part, then the verb takes whatever
+        // remains. All measured in COLUMNS (`util::cols`), never chars/bytes.
+        let model_cols = if self.model_name.is_empty() {
+            0
+        } else {
+            crate::util::cols(&self.model_name) + 3
+        };
+        // The status group is wrapped in " (" … ")" — 3 columns of chrome.
+        let status_reserve = crate::util::cols(&parts[0]) + 3;
+        // 2 columns of spinner glyph + trailing space.
+        let verb_budget = (content.width as usize)
+            .saturating_sub(model_cols + 2 + status_reserve)
+            .max(MIN_VERB_COLS);
+
         let (glyph_span, verb_spans): (Span<'_>, Vec<Span<'_>>) = if self.cancelling {
             let err = Style::default().fg(theme.colors.error);
             (
@@ -1728,7 +1786,8 @@ impl Component for Activity {
             // Code's activeForm). Otherwise ONE flavor verb per turn (CC parity).
             // The verb + glyph are colored by activity (green tool / gray thinking
             // / working accent) and interpolated toward error-red by the stall.
-            let word = self.spinner_verb().to_string();
+            // Fitted to the budget above so the interrupt hint always survives.
+            let word = fit_verb(self.spinner_verb(), verb_budget);
             let base = self.verb_base_color(&theme, stall);
             (
                 Span::styled(
@@ -1741,14 +1800,13 @@ impl Component for Activity {
 
         // U-T27 — drop trailing status segments as the pane narrows. Budget is
         // the width left after the model prefix, spinner glyph (2 cols) and the
-        // verb spans, minus the " (" / ")" wrapper.
-        let model_cols = if self.model_name.is_empty() {
-            0
-        } else {
-            self.model_name.chars().count() + 3
-        };
-        let verb_cols: usize =
-            verb_spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + 2;
+        // verb spans, minus the " (" / ")" wrapper. (`model_cols` is computed
+        // above, where the verb budget is derived from it.)
+        let verb_cols: usize = verb_spans
+            .iter()
+            .map(|s| crate::util::cols(s.content.as_ref()))
+            .sum::<usize>()
+            + 2;
         let budget = (content.width as usize).saturating_sub(model_cols + verb_cols + 4);
         let parts = gate_parts(&parts, budget);
 
@@ -2759,7 +2817,7 @@ mod slot_invariant_tests {
         assert!(is_param_name_list("name, role"));
         assert!(is_param_name_list("task_id, prompt"));
         // Real hints must survive.
-        assert!(!is_param_name_list("/Users/rhl/.osa/workspace/codex"));
+        assert!(!is_param_name_list("/Users/user/.osa/workspace/codex"));
         assert!(!is_param_name_list("cargo test --release"));
         assert!(!is_param_name_list("explorer"));
         assert!(!is_param_name_list("find the dead code, then report"));

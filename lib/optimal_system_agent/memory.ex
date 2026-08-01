@@ -41,6 +41,64 @@ defmodule OptimalSystemAgent.Memory do
   alias OptimalSystemAgent.Memory.{Scoring, Search, MMR, QueryExpansion}
 
   # ---------------------------------------------------------------------------
+  # Call bounds
+  # ---------------------------------------------------------------------------
+  #
+  # Every operation below used `GenServer.call(Store, _, :infinity)`. `Store`
+  # serializes ALL of them in one `handle_call` loop, and the READ paths sit on
+  # the user's turn: `Agent.Context` calls `recall_hybrid/2` during context
+  # assembly on essentially every turn, and the memory_recall / memory_save /
+  # session_search / semantic_search tools call in from tool execution.
+  #
+  # With `:infinity`, one slow neighbour on that same serialized process — a
+  # `:rebuild_index` over a large SQLite store, a `:regenerate_md` writing
+  # ~/.osa/MEMORY.md, a `:consolidate` cycle — head-of-line blocks a live turn
+  # FOREVER. In a multi-hour session those maintenance operations are exactly
+  # what runs while the user is mid-task. This is the "hangs and never comes
+  # back" shape, not a slow-query shape.
+  #
+  # Bounds are generous (a healthy call is single-digit ms) and a breach is
+  # DEGRADED, never fatal: `bounded_call/3` catches the exit and returns the
+  # supplied fallback, so a wedged memory store costs the turn its memory
+  # context instead of the whole turn. Tunable via `:memory_call_timeout_ms` /
+  # `:memory_maintenance_timeout_ms`.
+  @default_read_timeout_ms 5_000
+  @default_maintenance_timeout_ms 30_000
+
+  defp read_timeout,
+    do: Application.get_env(:optimal_system_agent, :memory_call_timeout_ms, @default_read_timeout_ms)
+
+  defp maintenance_timeout,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :memory_maintenance_timeout_ms,
+        @default_maintenance_timeout_ms
+      )
+
+  # Bounded, non-fatal GenServer.call. On timeout//noproc the caller gets
+  # `fallback` and a warning is logged — the turn continues without memory
+  # rather than blocking on it.
+  defp bounded_call(request, timeout, fallback) do
+    GenServer.call(Store, request, timeout)
+  catch
+    :exit, {:timeout, _} ->
+      Logger.warning(
+        "[memory] Store call timed out after #{timeout}ms (#{inspect(elem_or(request))}) — " <>
+          "continuing without memory for this call"
+      )
+
+      fallback
+
+    :exit, reason ->
+      Logger.warning("[memory] Store unavailable (#{inspect(reason)}) — returning #{inspect(fallback)}")
+      fallback
+  end
+
+  defp elem_or(request) when is_tuple(request), do: elem(request, 0)
+  defp elem_or(request), do: request
+
+  # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
 
@@ -65,7 +123,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec save(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def save(content, opts \\ []) when is_binary(content) do
-    GenServer.call(Store, {:save, content, opts}, :infinity)
+    bounded_call({:save, content, opts}, maintenance_timeout(), {:error, :memory_timeout})
   end
 
   @doc """
@@ -89,7 +147,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec recall(String.t(), keyword()) :: {:ok, [map()]}
   def recall(query, opts \\ []) when is_binary(query) do
-    GenServer.call(Store, {:recall, query, opts}, :infinity)
+    bounded_call({:recall, query, opts}, read_timeout(), {:ok, []})
   end
 
   @doc """
@@ -99,7 +157,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec get(String.t()) :: {:ok, map()} | {:error, :not_found}
   def get(id) when is_binary(id) do
-    GenServer.call(Store, {:get, id}, :infinity)
+    bounded_call({:get, id}, read_timeout(), {:error, :not_found})
   end
 
   @doc """
@@ -109,7 +167,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec recent(pos_integer()) :: {:ok, [map()]}
   def recent(limit \\ 10) when is_integer(limit) and limit > 0 do
-    GenServer.call(Store, {:recent, limit}, :infinity)
+    bounded_call({:recent, limit}, read_timeout(), {:ok, []})
   end
 
   @doc """
@@ -121,7 +179,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec delete(String.t()) :: :ok | {:error, term()}
   def delete(id) when is_binary(id) do
-    GenServer.call(Store, {:delete, id}, :infinity)
+    bounded_call({:delete, id}, maintenance_timeout(), {:error, :memory_timeout})
   end
 
   @doc """
@@ -137,7 +195,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec search_sessions(String.t(), keyword()) :: {:ok, [map()]}
   def search_sessions(query, opts \\ []) when is_binary(query) do
-    GenServer.call(Store, {:search_sessions, query, opts}, :infinity)
+    bounded_call({:search_sessions, query, opts}, read_timeout(), {:ok, []})
   end
 
   @doc """
@@ -147,7 +205,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec stats() :: {:ok, map()}
   def stats do
-    GenServer.call(Store, :stats, :infinity)
+    bounded_call(:stats, read_timeout(), {:ok, %{total: 0, by_category: %{}, by_scope: %{}, by_source: %{}, avg_relevance: 0.0}})
   end
 
   @doc """
@@ -160,7 +218,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec rebuild_index() :: :ok
   def rebuild_index do
-    GenServer.call(Store, :rebuild_index, :infinity)
+    bounded_call(:rebuild_index, maintenance_timeout(), :ok)
   end
 
   @doc """
@@ -173,7 +231,7 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec regenerate_md() :: :ok | {:error, term()}
   def regenerate_md do
-    GenServer.call(Store, :regenerate_md, :infinity)
+    bounded_call(:regenerate_md, maintenance_timeout(), {:error, :memory_timeout})
   end
 
   # ---------------------------------------------------------------------------

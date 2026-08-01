@@ -548,75 +548,186 @@ defmodule OptimalSystemAgent.Providers.Catalog do
     end
   end
 
+  @doc false
+  # Force the Anthropic and OpenAI sections of ANY catalog source to come from
+  # their single-source-of-truth modules.
+  #
+  # Deriving them only inside `baked_snapshot/0` was not enough: the baked
+  # snapshot is the *last* fallback, used only when the bundled file is
+  # missing. In practice `priv/catalog/models_dev.json` (or a cached / network
+  # models.dev fetch) is present and wins — and that snapshot is a third-party
+  # artifact on its own release cadence. It listed
+  # `claude-3-5-sonnet-20241022`, which Anthropic RETIRED on 2025-10-28 and
+  # which now 404s at request time, while listing no Claude 5 model at all; the
+  # OpenAI section stopped at the GPT-4.1 / o3 era with no GPT-5.6. Because
+  # `Onboarding.model_list/1` prefers `Catalog.models/1` over
+  # `AnthropicModels.picker_models/0`, that snapshot — not the SoT — is what
+  # the `/model` dialog and `osa setup` actually offered.
+  #
+  # Replacing (not merging) the `"models"` map is deliberate: it is what
+  # removes a retired id. A model absent from the SoT module is a model OSA
+  # does not offer.
+  @spec apply_sot_overlay(map()) :: map()
+  def apply_sot_overlay(raw) when is_map(raw) do
+    raw
+    |> put_sot_models("anthropic", "Anthropic", sot_anthropic_models())
+    |> put_sot_models("openai", "OpenAI", sot_openai_models())
+    |> put_sot_models("google", "Google", sot_google_models())
+    |> put_sot_models("deepseek", "DeepSeek", sot_deepseek_models())
+    |> put_sot_models("xai", "xAI", sot_xai_models())
+    |> put_sot_models("mistral", "Mistral", sot_mistral_models())
+  end
+
+  def apply_sot_overlay(raw), do: raw
+
+  defp put_sot_models(raw, pid, name, models) do
+    existing = Map.get(raw, pid)
+
+    provider =
+      case existing do
+        %{} = p -> Map.put(p, "models", models)
+        _ -> %{"id" => pid, "name" => name, "models" => models}
+      end
+
+    Map.put(raw, pid, provider)
+  end
+
+  defp sot_anthropic_models do
+    Map.new(OptimalSystemAgent.Providers.AnthropicModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         "reasoning" => m.thinking != :none,
+         "attachment" => m.vision,
+         "modalities" => %{
+           "input" => if(m.vision, do: ["text", "image"], else: ["text"]),
+           "output" => ["text"]
+         },
+         "limit" => %{"context" => m.ctx, "output" => m.max_output}
+       }}
+    end)
+  end
+
+  # `limit.output` is OMITTED for xAI and Mistral rather than set to a number.
+  # Neither vendor publishes a max output, and `Catalog.max_output/1` reading a
+  # nil-valued key would be indistinguishable from reading an invented one.
+  defp sot_limit(ctx, nil), do: %{"context" => ctx}
+  defp sot_limit(ctx, output), do: %{"context" => ctx, "output" => output}
+
+  # Per-1M-token USD rates carried straight from a provider's source-of-truth
+  # module. These are published list prices, not guesses — the "no invented
+  # pricing" rule the bundled snapshot follows is about not hand-writing prices
+  # offline, and a SOT module that already states them is exactly the authority
+  # that rule defers to. `nil` for any model whose module declines to state a
+  # price, so an unpriced model stays visibly unpriced instead of reading as free.
+  defp sot_cost(%{pricing: {input, output}}),
+    do: %{"input" => input, "output" => output}
+
+  defp sot_cost(_), do: nil
+
+  defp sot_google_models do
+    Map.new(OptimalSystemAgent.Providers.GoogleModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         "reasoning" => m.thinking != :none,
+         "attachment" => m.vision,
+         "modalities" => %{
+           "input" => if(m.vision, do: ["text", "image"], else: ["text"]),
+           "output" => ["text"]
+         },
+         "limit" => sot_limit(m.ctx, m.max_output),
+         "cost" => sot_cost(m)
+       }}
+    end)
+  end
+
+  defp sot_deepseek_models do
+    Map.new(OptimalSystemAgent.Providers.DeepSeekModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         # Every DeepSeek V4 model reasons — it is now a request parameter, not
+         # a separate model id.
+         "reasoning" => true,
+         "attachment" => false,
+         "modalities" => %{"input" => ["text"], "output" => ["text"]},
+         "limit" => sot_limit(m.ctx, m.max_output),
+         "cost" => sot_cost(m)
+       }}
+    end)
+  end
+
+  defp sot_xai_models do
+    Map.new(OptimalSystemAgent.Providers.XAIModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         "reasoning" => m.reasoning,
+         "attachment" => false,
+         "modalities" => %{"input" => ["text"], "output" => ["text"]},
+         "limit" => sot_limit(m.ctx, m.max_output),
+         "cost" => sot_cost(m)
+       }}
+    end)
+  end
+
+  defp sot_mistral_models do
+    Map.new(OptimalSystemAgent.Providers.MistralModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         "reasoning" => m.reasoning,
+         "attachment" => false,
+         "modalities" => %{"input" => ["text"], "output" => ["text"]},
+         "limit" => sot_limit(m.ctx, m.max_output),
+         "cost" => sot_cost(m)
+       }}
+    end)
+  end
+
+  defp sot_openai_models do
+    Map.new(OptimalSystemAgent.Providers.OpenAIModels.models(), fn m ->
+      {m.id,
+       %{
+         "name" => m.name,
+         "tool_call" => m.tools,
+         "reasoning" => m.reasoning,
+         "attachment" => m.vision,
+         "modalities" => %{
+           "input" => if(m.vision, do: ["text", "image"], else: ["text"]),
+           "output" => ["text"]
+         },
+         "limit" => %{"context" => m.ctx, "output" => m.max_output}
+       }}
+    end)
+  end
+
   # Small inline snapshot — the final offline fallback so the catalog ALWAYS
   # resolves the model families OSA uses even if the bundled file is missing.
   # Raw models.dev shape; carries context + capabilities but NO invented pricing.
   defp baked_snapshot do
     %{
+      # Anthropic and OpenAI are DERIVED from their catalog modules rather than
+      # hand-written. The hand-written versions had drifted badly and, because
+      # the Catalog is consulted BEFORE Registry's static table, the stale
+      # numbers won: Sonnet 4.6 and Opus 4.6 were listed at 200K context when
+      # they are 1M, and Haiku 4.5 at 32K output when it is 64K. Every model
+      # was budgeted against those wrong numbers.
       "anthropic" => %{
         "id" => "anthropic",
         "name" => "Anthropic",
-        "models" => %{
-          "claude-opus-4-6" => %{
-            "name" => "Claude Opus 4.6",
-            "tool_call" => true,
-            "reasoning" => true,
-            "attachment" => true,
-            "release_date" => "2025-11-01",
-            "modalities" => %{"input" => ["text", "image"], "output" => ["text"]},
-            "limit" => %{"context" => 200_000, "output" => 64_000}
-          },
-          "claude-sonnet-4-6" => %{
-            "name" => "Claude Sonnet 4.6",
-            "tool_call" => true,
-            "reasoning" => true,
-            "attachment" => true,
-            "release_date" => "2025-09-01",
-            "modalities" => %{"input" => ["text", "image"], "output" => ["text"]},
-            "limit" => %{"context" => 200_000, "output" => 64_000}
-          },
-          "claude-haiku-4-5" => %{
-            "name" => "Claude Haiku 4.5",
-            "tool_call" => true,
-            "reasoning" => false,
-            "attachment" => true,
-            "release_date" => "2025-10-01",
-            "modalities" => %{"input" => ["text", "image"], "output" => ["text"]},
-            "limit" => %{"context" => 200_000, "output" => 32_000}
-          }
-        }
+        "models" => sot_anthropic_models()
       },
       "openai" => %{
         "id" => "openai",
         "name" => "OpenAI",
-        "models" => %{
-          "gpt-4o" => %{
-            "name" => "GPT-4o",
-            "tool_call" => true,
-            "reasoning" => false,
-            "attachment" => true,
-            "release_date" => "2024-05-13",
-            "modalities" => %{"input" => ["text", "image"], "output" => ["text"]},
-            "limit" => %{"context" => 128_000, "output" => 16_384}
-          },
-          "gpt-4o-mini" => %{
-            "name" => "GPT-4o mini",
-            "tool_call" => true,
-            "reasoning" => false,
-            "attachment" => true,
-            "release_date" => "2024-07-18",
-            "modalities" => %{"input" => ["text", "image"], "output" => ["text"]},
-            "limit" => %{"context" => 128_000, "output" => 16_384}
-          },
-          "o3" => %{
-            "name" => "o3",
-            "tool_call" => true,
-            "reasoning" => true,
-            "release_date" => "2025-04-16",
-            "modalities" => %{"input" => ["text"], "output" => ["text"]},
-            "limit" => %{"context" => 200_000, "output" => 100_000}
-          }
-        }
+        "models" => sot_openai_models()
       },
       "zhipuai" => %{
         "id" => "zhipuai",
@@ -681,7 +792,7 @@ defmodule OptimalSystemAgent.Providers.Catalog do
 
   # Store a raw models.dev-shaped map into ETS as a normalized catalog.
   defp store(raw, source) when is_map(raw) do
-    normalized = normalize(raw)
+    normalized = raw |> apply_sot_overlay() |> normalize()
     ensure_table()
     :ets.insert(@table, {@data_key, normalized})
 

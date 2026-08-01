@@ -29,8 +29,14 @@ export async function validateApiKey(
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
+      // `claude-haiku-20240307` was not a real model id (the retired one was
+      // `claude-3-haiku-20240307`, sunset 2026-04-20). Anthropic answered a
+      // perfectly valid key with a 404, which this function classifies as
+      // `network_error` — so onboarding could never report "verified" for
+      // ANY Anthropic key. Probe the cheapest CURRENT model instead; keep it
+      // in sync with `Providers.AnthropicModels`.
       body: JSON.stringify({
-        model: "claude-haiku-20240307",
+        model: "claude-haiku-4-5",
         max_tokens: 1,
         messages: [{ role: "user", content: "hi" }],
       }),

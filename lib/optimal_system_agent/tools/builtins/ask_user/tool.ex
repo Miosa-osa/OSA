@@ -45,10 +45,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Tool do
           "type" => "array",
           "items" => %{"type" => "string"},
           "description" =>
-            "Optional multiple-choice answers. Provide 2-3 mutually exclusive choices, " <>
-              "the recommended one FIRST with a \"(Recommended)\" suffix, each a short " <>
-              "label plus one sentence on the tradeoff. Do not include an \"Other\" " <>
-              "option — free-text input is always available."
+            "Optional multiple-choice answers. Provide 2-4 mutually exclusive choices, " <>
+              "the recommended one FIRST with a \"(Recommended)\" suffix, each a SHORT " <>
+              "label plus one line on the tradeoff. Do not include an \"Other\" " <>
+              "option — the client always renders a free-text row."
+        },
+        "header" => %{
+          "type" => "string",
+          "description" =>
+            "Optional category chip for the question, at most 12 characters " <>
+              "(\"parser\", \"styling\", \"deploy\"). Omit when nothing short fits."
         }
       },
       "required" => ["question"]

@@ -12,7 +12,11 @@
 #   osa resume [id]        Resume a specific session (or pick one)
 #   osa stop               Stop the background backend daemon
 #   osa setup              Run the setup wizard
-#   osa update             Update in place, show what's new, then launch
+#   osa update             Update in place (your local edits are preserved:
+#                          stashed → rebased onto latest → reapplied), then launch
+#   osa update --discard-local
+#                          Update to a pristine tree; local changes are set aside
+#                          in a named stash and NOT reapplied (asks to confirm)
 #   osa update --staged    Rollback-safe update: stage+build+boot-probe, then
 #                          atomic-swap $OSA_HOME/current (see bin/osa-update)
 #   osa update --rollback  Swap $OSA_HOME/current back to the previous version
@@ -210,6 +214,60 @@ set -- ${_OSA_ARGS[@]+"${_OSA_ARGS[@]}"}
 # ── Daemon helpers ────────────────────────────────────────────────
 backend_healthy() { _http_ok "$HEALTH_URL"; }
 
+# ── Disk vs RAM version skew ────────────────────────────────────────────────
+# `osa update` rebuilds the tree on DISK, but a backend daemon started before
+# the update keeps serving the OLD code from MEMORY. The launch path attaches
+# to whatever is already listening on :$PORT, and the TUI renders whatever
+# /health reports — so the user sees the old version and concludes the release
+# never shipped. The daemon's own /health version is therefore the only
+# trustworthy answer to "did the update actually take effect?".
+
+# Version reported by the LIVE daemon (empty if none / unreadable).
+_daemon_version() {
+  local body=""
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -sf --max-time 3 "$HEALTH_URL" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    body="$(wget -qO- --timeout=3 "$HEALTH_URL" 2>/dev/null || true)"
+  fi
+  [ -n "$body" ] || return 1
+  printf '%s' "$body" \
+    | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Version of the checkout on disk.
+_tree_version() { cat "$ROOT/VERSION" 2>/dev/null || true; }
+
+# Version baked into the built TUI binary (empty if missing/unrunnable).
+_tui_binary_version() {
+  [ -x "$TUI_BIN" ] || return 1
+  "$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}'
+}
+
+# 0 = live daemon matches the tree (or there is nothing to compare), 1 = skew.
+_daemon_matches_tree() {
+  local running tree
+  tree="$(_tree_version)"
+  [ -n "$tree" ] || return 0
+  backend_healthy || return 0
+  running="$(_daemon_version || true)"
+  [ -n "$running" ] || return 0
+  [ "$(_norm_version "$running")" = "$(_norm_version "$tree")" ]
+}
+
+# Loud, never-silent report of a stale backend. A disk/RAM skew is exactly what
+# made several consecutive update cycles look like no-ops.
+_warn_stale_daemon() {
+  local running tree
+  tree="$(_tree_version)"
+  running="$(_daemon_version || true)"
+  echo -e "${YELLOW}⚠${RESET} ${BOLD}A stale OSA backend is running on :${PORT}.${RESET}" >&2
+  echo -e "    ${DIM}on disk:${RESET} v${tree}" >&2
+  echo -e "    ${DIM}running:${RESET} v${running:-<unreadable>}  ${DIM}← this is what the TUI will display${RESET}" >&2
+  echo -e "  ${DIM}That daemon started before the current build, so it still serves the OLD code.${RESET}" >&2
+  echo -e "  ${DIM}Fix with: ${RESET}${CYAN}osa stop${RESET}${DIM} then ${RESET}${CYAN}osa${RESET}" >&2
+}
+
 daemon_pid() {
   # Echo the live daemon PID, or nothing. Prefers the pidfile, falls back to
   # whatever is listening on our port (covers daemons started out-of-band).
@@ -321,7 +379,9 @@ print_help() {
   echo -e "    ${CYAN}osa resume${RESET} ${DIM}[id]${RESET}      Resume a specific session ${DIM}(or pick one)${RESET}"
   echo -e "    ${CYAN}osa stop${RESET}             Stop the background backend daemon"
   echo -e "    ${CYAN}osa setup${RESET}            Run the setup wizard ${DIM}(provider / API keys)${RESET}"
-  echo -e "    ${CYAN}osa update${RESET}           Update in place, show what's new, then launch"
+  echo -e "    ${CYAN}osa update${RESET}           Update in place ${DIM}— your local edits are preserved${RESET}"
+  echo -e "                         ${DIM}(stashed → rebased onto latest → reapplied), then launch${RESET}"
+  echo -e "    ${CYAN}osa update --discard-local${RESET} ${DIM}Pristine tree; local changes stashed, not reapplied${RESET}"
   echo -e "    ${CYAN}osa update --staged${RESET}  ${DIM}Rollback-safe: stage, build, boot-probe, atomic-swap${RESET}"
   echo -e "    ${CYAN}osa update --rollback${RESET} ${DIM}Swap back to the previous staged version${RESET}"
   echo -e "    ${CYAN}osa doctor${RESET}           Run backend health checks"
@@ -348,53 +408,389 @@ warn_overdrive() {
   echo -e "${DIM}    Only use this in a directory you trust. Confirm inside the TUI to proceed.${RESET}" >&2
 }
 
-# ── Update (source checkout, in place): git pull + rebuild, show what's new ─
-# NOT rollback-safe: if the pulled tree fails to compile/boot, this leaves the
-# install broken until fixed manually. This stays the *default* for `osa update`
-# — additive/conservative: zero behavior change for existing users/scripts.
-# For the new rollback-safe path (stage in $OSA_HOME/versions/<rev>, build,
-# boot-probe, then atomic symlink swap — see bin/osa-update for the full design),
-# use `osa update --staged`, or `osa update --rollback` / `osa update --dry-run`
-# (which imply --staged, since neither makes sense against the in-place flow).
+# ── Update (source checkout, in place) ──────────────────────────────────────
+#
+# Contract, in one line: NEVER report success unless the tree really moved to
+# the latest upstream commit, the rebuild really succeeded, and the built TUI
+# really reports the version we just installed — and NEVER lose local work on
+# the way there.
+#
+# The supported workflow is "I have my own edits in this checkout AND I want the
+# latest OSA", so the default is preserve-and-integrate, not choose-one:
+#
+#   git fetch origin                (MUST succeed — otherwise we cannot know)
+#     -> compare HEAD against the tracking branch, i.e. the REAL remote. The old
+#        code compared the local VERSION file against itself, which is how
+#        "Already up to date: v1.0.46" got printed on a tree that had never
+#        moved and was two releases stale.
+#     -> if the tree is dirty: git stash push -u -m osa-update-<timestamp>
+#     -> git rebase <upstream>      (rebase, so local COMMITS survive too)
+#     -> git stash apply, and only on success git stash drop
+#     -> build (every step's exit status checked)
+#     -> verify the freshly built TUI binary reports the new version
+#
+# Why an explicit NAMED stash instead of `git pull --rebase --autostash`:
+# autostash creates an unnamed entry and drops it automatically, so on a
+# conflict there is nothing recoverable we can name in the error message. A
+# stash the user cannot find is the same as lost work. The named stash also
+# survives every failure path here — nothing below ever drops it on error.
+#
+# Why `git stash push -u`: untracked files are the user's work too, and an
+# incoming commit that adds a file at the same path aborts the rebase
+# otherwise. `-u` does NOT touch .gitignore'd paths (that would be `-a`), so
+# _build/, deps/ and priv/rust/tui/target/ are left alone. Note that `apply`
+# restores everything as working-tree changes: the staged/unstaged split is not
+# preserved, which is a deliberate trade for a much safer apply.
+#
+# Nothing here ever runs `git reset --hard`, `git checkout -f`, or `git stash
+# drop` on a failure path. If the only way forward would destroy local work we
+# stop and say so. `--discard-local` is the explicit, confirmed opt-out — and
+# even that only stashes (it never deletes), so the work stays recoverable.
+#
+# NOT rollback-safe: if the rebased tree fails to compile this reports the
+# failure loudly but leaves you on the new commit. For the rollback-safe path
+# (stage in $OSA_HOME/versions/<rev>, build, boot-probe, then atomic symlink
+# swap — see bin/osa-update) use `osa update --staged`.
+
+# git wrapper pinned to the checkout being updated.
+_ug() { git -C "$ROOT" "$@"; }
+
+# Build the checkout. Every step is checked: the old version piped each command
+# into `tail -3`, so `$?` was tail's and a hard compile failure was reported as
+# a successful update. Returns non-zero and names a kept log on failure.
+_update_build() {
+  local log rc=0
+  log="$(mktemp "${TMPDIR:-/tmp}/osa-update-build.XXXXXX")"
+  echo -e "${CYAN}→${RESET} Building (this can take a minute)..."
+  if ! ( cd "$ROOT" && mix deps.get && mix compile ) >"$log" 2>&1; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ -f "$TUI_DIR/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+    if ! ( cd "$TUI_DIR" && cargo build --release ) >>"$log" 2>&1; then
+      rc=1
+    fi
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo -e "${RED}✗${RESET} ${BOLD}Build failed${RESET} — OSA was NOT updated to a working state." >&2
+    echo -e "  ${DIM}Last lines of the build log (${log}):${RESET}" >&2
+    tail -n 25 "$log" >&2 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$log" 2>/dev/null || true
+  return 0
+}
+
+# Does the freshly built TUI binary really report version $1? This is the check
+# that separates "we rebuilt" from "we rebuilt NEW code" — the prebuilt updater
+# in scripts/install.sh has done this since v1.0.46; the source path did not.
+_update_verify_tui() {
+  local want got
+  want="$(_norm_version "${1:-}")"
+  [ -n "$want" ] || return 0
+  if [ ! -x "$TUI_BIN" ]; then
+    echo -e "${RED}✗${RESET} TUI binary missing after the build (${TUI_BIN})." >&2
+    echo -e "  ${DIM}Rebuild it with: ${RESET}${CYAN}(cd $TUI_DIR && cargo build --release)${RESET}" >&2
+    return 1
+  fi
+  got="$(_norm_version "$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')")"
+  if [ "$want" != "$got" ]; then
+    echo -e "${RED}✗${RESET} TUI binary reports ${got:-<unreadable>} but the tree is v${1} — the build did not take." >&2
+    echo -e "  ${DIM}Rebuild it with: ${RESET}${CYAN}(cd $TUI_DIR && cargo build --release)${RESET}" >&2
+    return 1
+  fi
+  echo -e "${GREEN}✓${RESET} Built TUI verified ${DIM}(reports v$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}'))${RESET}"
+  return 0
+}
+
+# True when refs/stash still points at the entry we created (i.e. stash@{0} is
+# ours). Guards every drop so a stash created by someone else is never dropped.
+# Restart the backend after a SUCCESSFUL update. Stopping is NOT optional and
+# NOT best-effort: the launch path below attaches to whatever is already
+# listening on :$PORT, so a surviving old daemon means the user runs the new
+# code's disk image and the old code's memory image — new binary, old behaviour,
+# old version in the banner and status bar. Only ever called on the success
+# path; a failed update never touches a running daemon.
+#
+# If the old process will not die we refuse to report the update as live.
+_update_restart_backend() {
+  local want="$1" running n=0
+  if ! backend_healthy && [ -z "$(daemon_pid)" ]; then
+    return 0   # nothing running — the launch path will start the new build fresh
+  fi
+  echo -e "${CYAN}→${RESET} Restarting the backend so the new build is what actually runs..."
+  stop_daemon || true
+  while [ $n -lt 40 ]; do
+    backend_healthy || break
+    sleep 0.25; n=$((n + 1))
+  done
+  if backend_healthy; then
+    running="$(_daemon_version || true)"
+    echo -e "${RED}✗${RESET} ${BOLD}The old backend on :${PORT} would not stop.${RESET}" >&2
+    echo -e "  ${DIM}The rebuild succeeded, but OSA would attach to that old process and show${RESET}" >&2
+    echo -e "  ${DIM}v${running:-<unreadable>} instead of v${want}, so the update is NOT live and${RESET}" >&2
+    echo -e "  ${DIM}OSA will not claim that it is.${RESET}" >&2
+    echo -e "  ${DIM}Fix with: ${RESET}${CYAN}osa stop${RESET}${DIM} then ${RESET}${CYAN}osa${RESET}" >&2
+    return 1
+  fi
+  echo -e "${GREEN}✓${RESET} Old backend stopped; the next launch starts v${want} fresh."
+  return 0
+}
+
+_update_stash_is_top() {
+  [ -n "${_osa_stash_commit:-}" ] || return 1
+  [ "$(_ug rev-parse -q --verify refs/stash 2>/dev/null || true)" = "$_osa_stash_commit" ]
+}
+
+# How to get the saved work back. Printed on EVERY path that leaves a stash.
+_update_print_stash_recovery() {
+  local name="$1"
+  echo "" >&2
+  echo -e "  ${BOLD}Your local changes are saved and recoverable:${RESET}" >&2
+  echo -e "    stash name: ${BOLD}${YELLOW}${name}${RESET}" >&2
+  echo -e "    list it:    ${CYAN}git -C '$ROOT' stash list${RESET}" >&2
+  echo -e "    restore it: ${CYAN}git -C '$ROOT' stash apply stash@{0}${RESET}" >&2
+  echo -e "  ${DIM}Nothing was deleted. The stash is NOT dropped automatically.${RESET}" >&2
+}
+
 do_update_source() {
+  local discard_local=0 _a
+  for _a in "$@"; do
+    case "$_a" in
+      --discard-local) discard_local=1 ;;
+    esac
+  done
+
   echo -e "${CYAN}→${RESET} Updating OSA ${DIM}(source checkout: $ROOT)${RESET}"
-  local old_ver new_ver
+
+  local old_ver
   old_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)"
 
-  if [ -d "$ROOT/.git" ] && command -v git >/dev/null 2>&1; then
-    echo -e "${CYAN}→${RESET} Checking for updates..."
-    ( cd "$ROOT" && git fetch --quiet --tags origin 2>/dev/null ) || \
-      echo -e "${YELLOW}⚠${RESET} git fetch failed (offline or remote unreachable), updating from the local tree."
-    if ! ( cd "$ROOT" && git pull --ff-only --quiet origin main 2>/dev/null ); then
-      echo -e "${YELLOW}⚠${RESET} Could not fast-forward (local changes?). Continuing with the current tree."
+  # ── (c) Not a git checkout: we cannot check for updates AT ALL. Say exactly
+  # that instead of rebuilding and calling it "up to date".
+  if [ ! -d "$ROOT/.git" ] || ! command -v git >/dev/null 2>&1; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} ${ROOT} is not a git checkout (or git is unavailable)," >&2
+    echo -e "  ${DIM}so there is no remote to compare against and nothing to pull.${RESET}" >&2
+    echo -e "  ${DIM}Reinstall with: ${RESET}${CYAN}curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh${RESET}" >&2
+    return 1
+  fi
+
+  # ── Branch / upstream resolution. A detached HEAD or an untracked branch is
+  # handled explicitly rather than assuming a fast-forward from main.
+  local branch upstream default_branch
+  branch="$(_ug symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -z "$branch" ]; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} ${ROOT} has a detached HEAD ($(_ug rev-parse --short HEAD 2>/dev/null || echo '?'))." >&2
+    echo -e "  ${DIM}Check out a branch first: ${RESET}${CYAN}git -C '$ROOT' checkout main${RESET}" >&2
+    echo -e "  ${DIM}Or update without touching this tree at all: ${RESET}${CYAN}osa update --staged${RESET}" >&2
+    return 1
+  fi
+
+  echo -e "${CYAN}→${RESET} Checking for updates ${DIM}(fetching origin)${RESET}..."
+  if ! _ug fetch --quiet --tags origin; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Could not fetch from origin in ${ROOT}." >&2
+    echo -e "  ${DIM}You may be offline, or the remote is unreachable. Until this succeeds OSA${RESET}" >&2
+    echo -e "  ${DIM}cannot tell whether you are current, so it will not claim that you are.${RESET}" >&2
+    echo -e "  ${DIM}Check with: ${RESET}${CYAN}git -C '$ROOT' fetch origin${RESET}" >&2
+    return 1
+  fi
+
+  # `rev-parse --abbrev-ref @{u}` can echo the literal "@{u}" back on some git
+  # versions when no upstream is configured, so the result is only trusted once
+  # it actually resolves to a commit.
+  upstream="$(_ug rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [ -n "$upstream" ] && ! _ug rev-parse --verify --quiet "${upstream}^{commit}" >/dev/null 2>&1; then
+    upstream=""
+  fi
+  if [ -z "$upstream" ]; then
+    if _ug rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+      upstream="origin/$branch"
+    else
+      echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Branch '${branch}' in ${ROOT} has no upstream on origin," >&2
+      echo -e "  ${DIM}so there is nothing to update from. Either track a branch:${RESET}" >&2
+      echo -e "    ${CYAN}git -C '$ROOT' branch --set-upstream-to=origin/main ${branch}${RESET}" >&2
+      echo -e "  ${DIM}or update without touching this tree: ${RESET}${CYAN}osa update --staged${RESET}" >&2
+      return 1
     fi
-  else
-    echo -e "${YELLOW}⚠${RESET} Not a git checkout, rebuilding from the current tree."
   fi
 
-  echo -e "${CYAN}→${RESET} Building (this can take a minute)..."
-  ( cd "$ROOT" && mix deps.get 2>&1 | tail -3 ) || true
-  ( cd "$ROOT" && mix compile 2>&1 | tail -3 ) || true
-  if [ -f "$TUI_DIR/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-    ( cd "$TUI_DIR" && cargo build --release 2>&1 | grep -E "Compiling|Finished|error" | tail -3 ) || true
+  default_branch="$(_ug symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  [ -n "$default_branch" ] || default_branch="main"
+  if [ "$branch" != "$default_branch" ]; then
+    echo -e "${YELLOW}⚠${RESET} On branch ${BOLD}${branch}${RESET} (not ${default_branch}) — updating against ${BOLD}${upstream}${RESET}."
   fi
 
+  # ── Compare against the REMOTE, not the local VERSION file.
+  local counts ahead behind head_rev target_rev
+  counts="$(_ug rev-list --left-right --count "HEAD...$upstream" 2>/dev/null || true)"
+  if [ -z "$counts" ]; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Could not compare HEAD with ${upstream} in ${ROOT}." >&2
+    echo -e "  ${DIM}Inspect with: ${RESET}${CYAN}git -C '$ROOT' status${RESET}" >&2
+    return 1
+  fi
+  ahead="${counts%%[	 ]*}"
+  behind="${counts##*[	 ]}"
+  head_rev="$(_ug rev-parse --short HEAD 2>/dev/null || echo '?')"
+  target_rev="$(_ug rev-parse --short "$upstream" 2>/dev/null || echo '?')"
+
+  # ── Already current: no rebase, no stash, but still verify the build really
+  # matches the tree (a stale binary self-heals here instead of lying forever).
+  if [ "${behind:-0}" -eq 0 ]; then
+    # The BUILD can still change what actually runs even when git has nothing to
+    # pull — e.g. the tree is at 1.0.47 but the compiled artifacts are still
+    # 1.0.46. Record the artifact version BEFORE building so the report can tell
+    # "nothing happened" from "your binaries were stale and are now current".
+    # Saying "Already up to date" after recompiling a new version is what made
+    # the user believe, correctly for the wrong reason, that nothing shipped.
+    local pre_tui
+    pre_tui="$(_norm_version "$(_tui_binary_version || true)")"
+    _update_build || return 1
+    _update_verify_tui "$old_ver" || return 1
+    _update_restart_backend "$old_ver" || return 1
+    echo ""
+    if [ -n "$pre_tui" ] && [ "$pre_tui" != "$(_norm_version "$old_ver")" ]; then
+      echo -e "${GREEN}✓${RESET} ${BOLD}Updated to v${old_ver}${RESET} ${DIM}(rebuilt from stale v${pre_tui} artifacts; the checkout was already current)${RESET}"
+      print_release_notes "$old_ver"
+    elif [ "${ahead:-0}" -gt 0 ]; then
+      echo -e "${GREEN}✓${RESET} Up to date with ${BOLD}${upstream}${RESET} ${DIM}(${target_rev})${RESET} — v${old_ver}"
+      echo -e "  ${DIM}You have ${ahead} local commit(s) not on ${upstream}; they were left untouched.${RESET}"
+    else
+      echo -e "${GREEN}✓${RESET} Already up to date: ${BOLD}v${old_ver}${RESET} ${DIM}(HEAD ${head_rev} == ${upstream} ${target_rev})${RESET}"
+    fi
+    _update_finish
+    return 0
+  fi
+
+  echo -e "${CYAN}→${RESET} ${BOLD}${behind}${RESET} new commit(s) on ${BOLD}${upstream}${RESET} ${DIM}(${head_rev} → ${target_rev})${RESET}"
+  [ "${ahead:-0}" -gt 0 ] && \
+    echo -e "  ${DIM}You also have ${ahead} local commit(s); a rebase replays them on top (a reset would destroy them).${RESET}"
+
+  # ── Local work: save it before touching anything.
+  local dirty=0 stash_name stashed=0
+  [ -n "$(_ug status --porcelain 2>/dev/null || true)" ] && dirty=1
+  stash_name="osa-update-$(date +%Y%m%d-%H%M%S)"
+  _osa_stash_commit=""
+
+  if [ "$dirty" -eq 1 ] && [ "$discard_local" -eq 1 ]; then
+    # Opt-out. Still a stash, never a delete: "discard" here means "do not
+    # reapply", so the work remains recoverable by name.
+    if [ ! -t 0 ]; then
+      echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} --discard-local needs an interactive confirmation;" >&2
+      echo -e "  ${DIM}refusing to set aside local work non-interactively.${RESET}" >&2
+      return 1
+    fi
+    echo -e "${YELLOW}⚠${RESET} ${BOLD}--discard-local${RESET}: these local changes will NOT be reapplied after the update:"
+    _ug status --short 2>/dev/null | head -20 | sed 's/^/    /'
+    printf "  %bType 'discard' to continue (anything else aborts):%b " "$BOLD" "$RESET"
+    local _reply=""
+    read -r _reply || true
+    if [ "$_reply" != "discard" ]; then
+      echo -e "${YELLOW}⚠${RESET} ${BOLD}Not updated.${RESET} Aborted at your request; nothing was changed."
+      return 1
+    fi
+  fi
+
+  if [ "$dirty" -eq 1 ]; then
+    echo -e "${CYAN}→${RESET} Saving local changes to stash ${BOLD}${YELLOW}${stash_name}${RESET} ${DIM}(including untracked files)${RESET}"
+    if ! _ug stash push -u -m "$stash_name" >/dev/null; then
+      echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Could not stash your local changes, so OSA refuses to" >&2
+      echo -e "  ${DIM}update over them. Inspect with: ${RESET}${CYAN}git -C '$ROOT' status${RESET}" >&2
+      return 1
+    fi
+    case "$(_ug stash list -1 --format='%gs' 2>/dev/null || true)" in
+      *"$stash_name"*)
+        stashed=1
+        _osa_stash_commit="$(_ug rev-parse -q --verify refs/stash 2>/dev/null || true)"
+        ;;
+    esac
+  fi
+
+  # ── Rebase (preserves local commits). On failure: abort, restore, report (c).
+  echo -e "${CYAN}→${RESET} Rebasing onto ${BOLD}${upstream}${RESET}..."
+  if ! _ug rebase "$upstream"; then
+    _ug rebase --abort >/dev/null 2>&1 || true
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Your local commits conflict with ${upstream}." >&2
+    echo -e "  ${DIM}The rebase was aborted; ${ROOT} is exactly as you left it.${RESET}" >&2
+    if [ "$stashed" -eq 1 ]; then
+      if _ug stash apply >/dev/null 2>&1 && _update_stash_is_top; then
+        _ug stash drop >/dev/null 2>&1 || true
+        echo -e "  ${DIM}Your uncommitted changes were restored.${RESET}" >&2
+      else
+        _update_print_stash_recovery "$stash_name"
+      fi
+    fi
+    echo -e "  ${DIM}Resolve manually with ${RESET}${CYAN}git -C '$ROOT' rebase $upstream${RESET}${DIM}, or update without${RESET}" >&2
+    echo -e "  ${DIM}touching this tree at all: ${RESET}${CYAN}osa update --staged${RESET}" >&2
+    return 1
+  fi
+
+  local new_ver new_rev
   new_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo "$old_ver")"
+  new_rev="$(_ug rev-parse --short HEAD 2>/dev/null || echo '?')"
+
+  # ── Restore local work. A conflicting apply NEVER drops the stash.
+  local restored=0 apply_out=""
+  if [ "$stashed" -eq 1 ] && [ "$discard_local" -eq 1 ]; then
+    # Confirmed opt-out: the work stays in the named stash, deliberately not
+    # reapplied. It is set aside, never deleted.
+    :
+  elif [ "$stashed" -eq 1 ]; then
+    echo -e "${CYAN}→${RESET} Reapplying your local changes..."
+    if apply_out="$(_ug stash apply 2>&1)"; then
+      restored=1
+      if _update_stash_is_top; then
+        _ug stash drop >/dev/null 2>&1 || true
+      fi
+    else
+      # (b) Updated, but the user's work needs manual resolution. The tree now
+      # holds conflict markers and the stash is intact — both are recoverable,
+      # and we refuse to build or launch on top of a conflicted tree.
+      echo "" >&2
+      echo -e "${YELLOW}⚠${RESET} ${BOLD}Updated to v${new_ver} (${new_rev}), but your local changes did not reapply cleanly.${RESET}" >&2
+      printf '%s\n' "$apply_out" | sed 's/^/    /' >&2
+      _update_print_stash_recovery "$stash_name"
+      echo -e "  ${DIM}Resolve the conflicts in ${ROOT}, then run ${RESET}${CYAN}osa${RESET}${DIM} again.${RESET}" >&2
+      echo -e "  ${DIM}To take the updated tree WITHOUT your changes (they stay in the stash above):${RESET}" >&2
+      echo -e "    ${CYAN}git -C '$ROOT' checkout -- . && git -C '$ROOT' clean -fd${RESET}" >&2
+      return 1
+    fi
+  fi
+
+  _update_build || return 1
+  _update_verify_tui "$new_ver" || return 1
+  # Disk is now new; make sure MEMORY is too before claiming anything.
+  _update_restart_backend "$new_ver" || return 1
+
+  # ── (a) Honest success report.
   echo ""
   if [ "$old_ver" = "$new_ver" ]; then
-    echo -e "${GREEN}✓${RESET} Already up to date: v${new_ver}"
+    echo -e "${GREEN}✓${RESET} ${BOLD}Updated${RESET} ${DIM}${head_rev} → ${new_rev}${RESET} ${DIM}(version unchanged: v${new_ver})${RESET}"
   else
-    echo -e "${GREEN}✓${RESET} Updated: v${old_ver} -> v${new_ver}"
+    echo -e "${GREEN}✓${RESET} ${BOLD}Updated: v${old_ver} → v${new_ver}${RESET} ${DIM}(${head_rev} → ${new_rev})${RESET}"
+  fi
+  if [ "$restored" -eq 1 ]; then
+    echo -e "${GREEN}✓${RESET} Your local changes were reintegrated cleanly."
+  elif [ "$dirty" -eq 1 ] && [ "$discard_local" -eq 1 ]; then
+    echo -e "${YELLOW}⚠${RESET} Local changes were set aside and NOT reapplied (--discard-local)."
+    _update_print_stash_recovery "$stash_name"
   fi
 
-  # Show the newest release-notes entry from the bundled CHANGELOG resource.
-  print_release_notes
+  # Release notes for the version actually installed — never `[Unreleased]`.
+  print_release_notes "$new_ver"
+  _update_finish
+  return 0
+}
 
+# Shared tail of every successful do_update_source path.
+_update_finish() {
   echo ""
+  echo -e "  ${DIM}Local edits in this checkout are preserved across ${RESET}${CYAN}osa update${RESET}${DIM}: they are stashed,${RESET}"
+  echo -e "  ${DIM}the tree is rebased onto the latest, then they are reapplied. Use ${RESET}${CYAN}--discard-local${RESET}${DIM} for a pristine tree.${RESET}"
   echo -e "  ${DIM}Tip: ${RESET}${CYAN}osa update --staged${RESET}${DIM} stages, builds, and health-checks before switching, with automatic rollback if anything looks wrong.${RESET}"
 
-  # A fresh backend must pick up the new build.
-  stop_daemon >/dev/null 2>&1 || true
+  # NOTE: the daemon restart happens in _update_restart_backend, BEFORE the
+  # success message is printed. It used to be a silent best-effort
+  # `stop_daemon >/dev/null 2>&1 || true` here, which is how a surviving old
+  # daemon got reported as a successful update.
 
   echo ""
   if [ -t 0 ]; then
@@ -434,19 +830,31 @@ do_update_staged() {
   "$updater" update --root "$ROOT" --home "$OSA_HOME" "$@"
 }
 
-# Print the first version section of the bundled CHANGELOG (capped), so an
-# updated user sees what's new without leaving the launcher.
+# Print the CHANGELOG section for the version we actually installed ($1).
+#
+# The old version printed the FIRST `## [` block in the file, which on any
+# working checkout is `## [Unreleased]` — unreleased notes shown as if they were
+# the release the user just got, and shown even when no update happened at all.
+# Now the version is required and matched exactly, so `[Unreleased]` can never
+# be selected; if there is no section for that version we print nothing.
 print_release_notes() {
-  local changelog="$ROOT/priv/CHANGELOG.md"
+  local ver="${1:-}" changelog body
+  [ -n "$ver" ] || return 0
+  changelog="$ROOT/priv/CHANGELOG.md"
   [ -f "$changelog" ] || changelog="$ROOT/docs/operations/changelog.md"
   [ -f "$changelog" ] || return 0
 
+  body="$(awk -v ver="$ver" '
+    BEGIN { want = "## [" ver "]" }
+    index($0, want) == 1 { inblk = 1; print; next }
+    inblk && /^## \[/ { exit }
+    inblk && shown < 24 { print; shown++ }
+  ' "$changelog" 2>/dev/null || true)"
+  [ -n "$body" ] || return 0
+
   echo ""
-  echo -e "  ${BOLD}What's new${RESET}"
-  awk '
-    /^## \[/ { hdr++; if (hdr > 1) exit }
-    hdr >= 1 && shown < 24 { print "    " $0; shown++ }
-  ' "$changelog" 2>/dev/null || true
+  echo -e "  ${BOLD}What's new in v${ver}${RESET}"
+  printf '%s\n' "$body" | sed 's/^/    /'
 }
 
 # ── Version display padding ───────────────────────────────────────
@@ -456,6 +864,17 @@ print_release_notes() {
 # numeric core is returned unchanged. Mirrors the TUI's osa_version_display()
 # so every surface reads the same padded form. Pure awk/printf — no network or
 # destructive tooling involved.
+# Normalize a version for COMPARISON (the inverse of pad_version): drop a
+# leading "v", drop any pre-release/build suffix, and strip the display
+# zero-padding, so the VERSION file (1.0.47) and the TUI's padded `--version`
+# output (1.0.047) compare equal. Mirrors _norm_version in scripts/install.sh.
+_norm_version() {
+  printf '%s' "${1#v}" | awk -F'[-+]' '{print $1}' \
+    | awk -F. '{ if (NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/)
+                   printf "%d.%d.%d", $1, $2, $3
+                 else printf "%s", $0 }'
+}
+
 pad_version() {
   printf '%s' "${1:-}" | awk '
     {
@@ -469,24 +888,70 @@ pad_version() {
     }'
 }
 
-# ── Subcommand pre-translation (verbs → TUI flags, then launch) ───
+# ── Launch-verb pre-translation (verbs → TUI flags, then launch) ───
+#
+# `overdrive` / `continue` / `resume` are launch verbs: they are rewritten to
+# the equivalent TUI flag so the TUI keeps ONE argument parser.
+#
+# The verb is found WHEREVER it sits in argv, not only at $1, so mode flags may
+# come before it as well as after:
+#
+#   osa resume <id> --overdrive
+#   osa --overdrive resume <id>      ← this ordering specifically
+#
+# A flag's VALUE is never a verb: `osa --model resume` selects a model named
+# "resume". Only these three verbs are scanned position-independently; every
+# other subcommand (version/setup/serve/doctor/stop/update/opencomputers/
+# remote/help) keeps its existing `$1`-only dispatch below, untouched.
 OVERDRIVE=0
-case "${1:-}" in
-  overdrive)
-    OVERDRIVE=1; shift; set -- "$@" "--overdrive"
-    ;;
-  continue)
-    shift; set -- "$@" "--continue"
-    ;;
-  resume)
-    shift
-    if [ -n "${1:-}" ] && [ "${1#-}" = "${1:-}" ]; then
-      _rid="$1"; shift; set -- "$@" "--resume" "$_rid"
-    else
-      set -- "$@" "--resume"
+_verb=""
+_skip=0
+for _a in "$@"; do
+  if [ "$_skip" -eq 1 ]; then _skip=0; continue; fi
+  case "$_a" in
+    --) break ;;
+    --profile|--permission-mode|--model|-m|--provider) _skip=1 ;;
+    -*) ;;
+    overdrive|continue|resume) _verb="$_a"; break ;;
+    *) break ;;
+  esac
+done
+
+if [ -n "$_verb" ]; then
+  # Strip the verb (and, for `resume`, the id immediately after it) out of argv,
+  # then append the equivalent flag. Rotating $@ keeps every other flag in place.
+  _n=$#; _i=0; _skip=0; _hit=0; _next=0; _rid=""
+  while [ "$_i" -lt "$_n" ]; do
+    _a="$1"; shift; _i=$((_i + 1))
+    if [ "$_skip" -eq 1 ]; then _skip=0; set -- "$@" "$_a"; continue; fi
+    case "$_a" in
+      --profile|--permission-mode|--model|-m|--provider)
+        _skip=1; set -- "$@" "$_a"; continue ;;
+    esac
+    if [ "$_hit" -eq 0 ] && [ "$_a" = "$_verb" ]; then
+      _hit=1; _next=1; continue
     fi
-    ;;
-esac
+    if [ "$_next" -eq 1 ]; then
+      _next=0
+      if [ "$_verb" = "resume" ] && [ "${_a#-}" = "$_a" ]; then
+        _rid="$_a"; continue
+      fi
+    fi
+    set -- "$@" "$_a"
+  done
+  case "$_verb" in
+    overdrive) OVERDRIVE=1; set -- "$@" "--overdrive" ;;
+    continue)  set -- "$@" "--continue" ;;
+    resume)
+      # Bare `osa resume` → the session picker, populated from recent sessions.
+      if [ -n "$_rid" ]; then
+        set -- "$@" "--resume" "$_rid"
+      else
+        set -- "$@" "--resume"
+      fi
+      ;;
+  esac
+fi
 
 # Any explicit full-auto flag also trips the warning.
 for _a in "$@"; do
@@ -553,7 +1018,9 @@ case "${1:-}" in
         exit 1
       fi
     else
-      do_update_source
+      # Propagate the exit code: a failed in-place update must NOT fall through
+      # to the launch path as if it had succeeded.
+      do_update_source ${_update_args[@]+"${_update_args[@]}"} || exit $?
     fi
     # fall through to the default launch
     ;;
@@ -772,6 +1239,13 @@ done
 # ── Warm the backend daemon (attach instantly if already healthy) ──
 if backend_healthy; then
   echo -e "${DIM}Backend already running on :${PORT} — attaching.${RESET}"
+  # Attaching is the fast path, but it is also how you end up running old code:
+  # the daemon outlives the TUI by design, so one started before a rebuild keeps
+  # serving the previous version (and the TUI shows ITS version, not the tree's).
+  # This catches the `osa update` case AND a plain `cargo build`/`mix compile`
+  # with no update at all. Warn only — attaching to a stale daemon is still a
+  # working session, and silently restarting would kill the user's warm state.
+  _daemon_matches_tree || _warn_stale_daemon
 else
   clear_stale_pid
   start_daemon

@@ -60,6 +60,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(model, opts)
       |> maybe_add_reasoning(model, opts)
+      # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
+      # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
+      |> maybe_add_provider_thinking(model, opts)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
@@ -141,6 +144,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> maybe_add_tools(opts)
     |> maybe_add_max_tokens(model, opts)
     |> maybe_add_reasoning(model, opts)
+    # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
+    # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
+    |> maybe_add_provider_thinking(model, opts)
   end
 
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
@@ -892,11 +898,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # Narrow: ONLY OpenAI o-series (o1/o3/o4). deepseek-reasoner and kimi are
   # reasoning models too (reasoning_model?/1) but DO accept temperature/max_tokens,
   # so they must NOT be swept in here.
+  # Single source of truth: Providers.OpenAIModels. The old `starts_with?` scan
+  # over "o1"/"o3"/"o4" silently missed the GPT-5.x reasoning models — whose
+  # names begin with "gpt" — so OSA kept sending them `temperature` (which they
+  # reject) and never sent `reasoning_effort` (so effort was a no-op on them).
+  # OpenAIModels.reasoning?/1 falls back to the same o-series prefix scan for
+  # ids it doesn't yet know, so a brand-new o5-* still behaves correctly.
   defp openai_reasoning_model?(model) do
-    name = String.downcase(to_string(model))
-
-    String.starts_with?(name, "o1") or String.starts_with?(name, "o3") or
-      String.starts_with?(name, "o4")
+    OptimalSystemAgent.Providers.OpenAIModels.reasoning?(String.downcase(to_string(model)))
   end
 
   # Add reasoning_effort for OpenAI o-series models.
@@ -943,15 +952,55 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
-  @doc "Returns true for models that use chain-of-thought reasoning."
+  @doc """
+  Returns true for models that use chain-of-thought reasoning.
+
+  Used to widen the HTTP timeout to 600s and to default `reasoning_effort`.
+
+  The DeepSeek arm is no longer an id comparison. Under the old API reasoning
+  WAS a different model (`deepseek-reasoner`), so `name == "deepseek-reasoner"`
+  was a correct test. DeepSeek V4 retired that id and moved thinking onto a
+  request parameter, which means every V4 model reasons — so the question
+  "is this a reasoning model?" is now answered by the catalog, not by the name.
+  Left as a literal comparison, this returned false for `deepseek-v4-pro` and
+  silently dropped the long reasoning timeout.
+  """
   def reasoning_model?(model) do
     name = String.downcase(to_string(model))
 
-    String.starts_with?(name, "o3") or
-      String.starts_with?(name, "o4") or
-      String.starts_with?(name, "o1") or
+    OptimalSystemAgent.Providers.OpenAIModels.reasoning?(name) or
+      OptimalSystemAgent.Providers.DeepSeekModels.thinking_model?(name) or
+      OptimalSystemAgent.Providers.XAIModels.reasoning?(name) or
       name == "deepseek-reasoner" or
       String.contains?(name, "kimi")
+  end
+
+  # DeepSeek V4 takes a `thinking` object in the request body (what the OpenAI
+  # SDK calls `extra_body`); OSA builds raw JSON, so it is simply merged in at
+  # top level. No-op for every non-DeepSeek model, so it is safe to call
+  # unconditionally on both the sync and streaming paths.
+  #
+  # This must run even when the caller passes no effort: DeepSeek defaults
+  # `thinking.type` to "enabled", so an OSA "off" effort has to send
+  # `{"type": "disabled"}` explicitly — omitting the object leaves thinking ON.
+  defp maybe_add_provider_thinking(body, model, opts) do
+    effort =
+      Keyword.get(opts, :reasoning_effort) ||
+        Keyword.get(opts, :effort) ||
+        current_effort()
+
+    case OptimalSystemAgent.Providers.DeepSeekModels.thinking_params(model, effort) do
+      params when map_size(params) == 0 -> body
+      params -> Map.merge(body, params)
+    end
+  end
+
+  defp current_effort do
+    OptimalSystemAgent.Agent.Effort.current()
+  rescue
+    _ -> "medium"
+  catch
+    _, _ -> "medium"
   end
 
   defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}),

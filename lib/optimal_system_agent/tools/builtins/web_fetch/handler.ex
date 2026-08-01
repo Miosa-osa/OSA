@@ -78,11 +78,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
     charlist = String.to_charlist(host)
 
     addrs =
-      case :inet.getaddrs(charlist, :inet) do
+      case getaddrs(charlist, :inet) do
         {:ok, v4} -> v4
         _ -> []
       end ++
-        case :inet.getaddrs(charlist, :inet6) do
+        case getaddrs(charlist, :inet6) do
           {:ok, v6} -> v6
           _ -> []
         end
@@ -96,6 +96,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
 
       true ->
         :ok
+    end
+  end
+
+  # `:inet.getaddrs/2`, with a 2-arity override under
+  # `config :optimal_system_agent, :web_fetch_resolver` that must return the
+  # same `{:ok, [:inet.ip_address()]} | {:error, term()}` contract.
+  #
+  # This exists so the permission tests can pin "a public https host is
+  # allowed" without a live DNS server: resolving a real name from a unit test
+  # made that assertion fail intermittently under a full-suite run (the
+  # resolver, not the guard, was what gave out — `{:deny, "Cannot resolve
+  # host: …"}`). Unset in production, so the real resolver — and therefore the
+  # DNS-rebinding protection this function exists for — is unchanged.
+  defp getaddrs(charlist, family) do
+    case Application.get_env(:optimal_system_agent, :web_fetch_resolver) do
+      fun when is_function(fun, 2) -> fun.(charlist, family)
+      _ -> :inet.getaddrs(charlist, family)
     end
   end
 
@@ -128,19 +145,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
     response =
       Req.get(url,
         receive_timeout: 30_000,
-        redirect: false
+        redirect: false,
+        headers: [
+          {"user-agent", Constants.user_agent()},
+          {"accept", Constants.accept()},
+          {"accept-language", "en-US,en;q=0.9"}
+        ]
       )
 
     case response do
       {:ok, %Req.Response{status: status, headers: headers}}
-      when status in [301, 302, 307, 308] ->
-        location = get_location_header(headers)
-
-        case location do
+      when status in [301, 302, 303, 307, 308] ->
+        case get_location_header(headers) do
           nil ->
             {:error, "Redirect response (HTTP #{status}) missing Location header"}
 
-          redirect_url ->
+          location ->
+            # A Location may be relative ("/docs/index.html"); resolve it
+            # against the URL we just requested before validating.
+            redirect_url = url |> URI.merge(location) |> URI.to_string()
+
             case validate_url(redirect_url) do
               {:error, reason} ->
                 {:error, "Blocked redirect to #{redirect_url}: #{reason}"}
@@ -154,10 +178,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
       when status in 200..299 ->
         content_type = extract_content_type(headers)
         formatted = format_body(body, content_type, max_length)
-        {:ok, "#{url}\n#{content_type}\n---\n#{formatted}"}
+
+        case content_failure(formatted, status, url, content_type) do
+          nil -> {:ok, "#{url}\nHTTP #{status} #{content_type}\n---\n#{formatted}"}
+          reason -> {:error, reason}
+        end
 
       {:ok, %Req.Response{status: status}} ->
-        {:error, "HTTP #{status} fetching #{url}"}
+        {:error, http_status_error(status, url)}
 
       {:error, %Req.TransportError{reason: reason}} ->
         {:error, "Network error fetching #{url}: #{inspect(reason)}"}
@@ -167,31 +195,104 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
     end
   end
 
-  defp get_location_header(headers) when is_list(headers) do
-    case List.keyfind(headers, "location", 0) do
-      {_, value} -> value
+  # ── Private: failure classification ───────────────────────────────────
+
+  # An error status is never content. Name the status AND why it happened so
+  # the model can pick a different source instead of hallucinating from an
+  # error page.
+  defp http_status_error(403, url),
+    do:
+      "HTTP 403 Forbidden fetching #{url} — the server refused the request " <>
+        "(bot protection or auth required). No content was retrieved. Try a different source."
+
+  defp http_status_error(401, url),
+    do: "HTTP 401 Unauthorized fetching #{url} — this URL requires authentication. No content was retrieved."
+
+  defp http_status_error(404, url),
+    do: "HTTP 404 Not Found fetching #{url} — no content was retrieved. Check the URL or try a different source."
+
+  defp http_status_error(429, url),
+    do:
+      "HTTP 429 Too Many Requests fetching #{url} — rate limited by the server. " <>
+        "No content was retrieved. Wait or try a different source."
+
+  defp http_status_error(status, url) when status in 500..599,
+    do: "HTTP #{status} fetching #{url} — the server failed. No content was retrieved."
+
+  defp http_status_error(status, url),
+    do: "HTTP #{status} fetching #{url} — no content was retrieved."
+
+  # Markers that identify a challenge/interstitial page served with a 200.
+  @block_markers [
+    "just a moment",
+    "checking your browser",
+    "attention required",
+    "verify you are human",
+    "are you a robot",
+    "unusual traffic",
+    "access to this page has been denied",
+    "enable javascript and cookies"
+  ]
+
+  # A 2xx whose body carries no usable text is a FAILURE, not content. Returns
+  # nil when the body is fine, otherwise the model-facing reason string.
+  defp content_failure(formatted, status, url, content_type) do
+    trimmed = String.trim(formatted)
+    len = String.length(trimmed)
+    down = trimmed |> String.slice(0, 600) |> String.downcase()
+
+    cond do
+      len == 0 ->
+        "HTTP #{status} fetching #{url} returned an EMPTY body (content-type: #{content_type}). " <>
+          "No content was retrieved — likely a redirect stub or a bot-block. Try a different source."
+
+      len < Constants.min_content_chars() ->
+        "HTTP #{status} fetching #{url} returned only #{len} characters of text " <>
+          "(content-type: #{content_type}) — that is a bot-block, a JavaScript-only shell, " <>
+          "or a redirect stub, not the page content. Try a different source. Body: #{inspect(trimmed)}"
+
+      len < 2_000 and String.contains?(down, @block_markers) ->
+        "HTTP #{status} fetching #{url} returned a bot-protection challenge page, not content. " <>
+          "Try a different source. Body starts: #{inspect(String.slice(trimmed, 0, 160))}"
+
+      true ->
+        nil
+    end
+  end
+
+  # ── Private: header access ────────────────────────────────────────────
+
+  # Req normalises response headers to a MAP of lowercase name => LIST of
+  # values (`%{"content-type" => ["text/html; charset=utf-8"]}`). The previous
+  # `Map.get/2` handed that LIST straight to `String.contains?/2`, which has no
+  # clause for a list — so EVERY 2xx fetch raised `FunctionClauseError` and the
+  # model received a 78-byte
+  # `"Error: Tool execution error: no function clause matching in String.contains?/2"`
+  # rendered as a successful "Received 78B" cell. Normalise to a binary here.
+  defp header_value(headers, name) when is_map(headers) do
+    headers |> Map.get(name) |> first_header_value()
+  end
+
+  defp header_value(headers, name) when is_list(headers) do
+    case List.keyfind(headers, name, 0) do
+      {_, value} -> first_header_value(value)
       nil -> nil
     end
   end
 
-  defp get_location_header(headers) when is_map(headers) do
-    Map.get(headers, "location")
+  defp header_value(_headers, _name), do: nil
+
+  defp first_header_value([v | _]), do: first_header_value(v)
+  defp first_header_value([]), do: nil
+  defp first_header_value(v) when is_binary(v), do: v
+  defp first_header_value(nil), do: nil
+  defp first_header_value(v), do: to_string(v)
+
+  defp get_location_header(headers), do: header_value(headers, "location")
+
+  defp extract_content_type(headers) do
+    header_value(headers, "content-type") || "text/plain"
   end
-
-  defp get_location_header(_), do: nil
-
-  defp extract_content_type(headers) when is_list(headers) do
-    case List.keyfind(headers, "content-type", 0) do
-      {_, value} -> value
-      nil -> "text/plain"
-    end
-  end
-
-  defp extract_content_type(headers) when is_map(headers) do
-    Map.get(headers, "content-type", "text/plain")
-  end
-
-  defp extract_content_type(_), do: "text/plain"
 
   defp format_body(body, content_type, max_length) when is_binary(body) do
     cond do

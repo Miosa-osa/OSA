@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   alias OptimalSystemAgent.Agent.Context.Budget
   alias OptimalSystemAgent.Agent.Context.PromptTemplate
+  alias OptimalSystemAgent.Agent.Context.WorldState
   alias OptimalSystemAgent.Agent.ProjectInstructions
   alias OptimalSystemAgent.Agent.Scratchpad
   alias OptimalSystemAgent.Agent.Tasks
@@ -47,6 +48,20 @@ defmodule OptimalSystemAgent.Agent.Context do
   alias OptimalSystemAgent.Soul
 
   @response_reserve 8_192
+
+  # Fraction of the REAL window the response reserve may claim. A flat 8k reserve
+  # is right for a 128k+ cloud window and catastrophic for a 32k local one: with a
+  # ~24k static base, 8k of reserve leaves 964 tokens for ALL dynamic context and
+  # the entire conversation, so `dynamic_budget` pinned to its 1_000 floor and the
+  # world state ate every token before a single per-turn block was fitted. That is
+  # how the runtime block — 57 tokens carrying the session id, the channel and the
+  # model identity — was being dropped on every build. The reserve is an output
+  # allowance, so it scales with the window instead of being a constant sized for
+  # the largest one.
+  @response_reserve_frac 8
+
+  defp response_reserve(max_tok),
+    do: min(@response_reserve, max(div(max_tok, @response_reserve_frac), 512))
 
   defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
@@ -112,19 +127,23 @@ defmodule OptimalSystemAgent.Agent.Context do
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
     # RECALL group (memory/project/skills) is additionally capped to a fraction
     # of the REAL window so trivial turns can't balloon into the free space.
-    dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
-    dynamic_context = assemble_dynamic_context(state, dynamic_budget, max_tok)
+    reserve = response_reserve(max_tok)
+    dynamic_budget = max(max_tok - reserve - conversation_tokens - static_tokens, 1_000)
+    {world_state, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok)
 
-    dynamic_tokens = estimate_tokens(dynamic_context)
-    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
+    ws_tokens = estimate_tokens(world_state)
+    volatile_tokens = estimate_tokens(volatile)
+    dynamic_tokens = ws_tokens + volatile_tokens
+    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve
 
     Logger.debug(
-      "Context.build: static=#{static_tokens} dynamic=#{dynamic_tokens} " <>
-        "conversation=#{conversation_tokens} reserve=#{@response_reserve} " <>
+      "Context.build: static=#{static_tokens} world_state=#{ws_tokens} " <>
+        "volatile=#{volatile_tokens} conversation=#{conversation_tokens} " <>
+        "reserve=#{reserve} " <>
         "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = build_system_message(static_base, dynamic_context, provider)
+    system_msg = build_system_message(static_base, world_state, volatile, provider)
     %{messages: [system_msg | conversation]}
   end
 
@@ -151,18 +170,21 @@ defmodule OptimalSystemAgent.Agent.Context do
         }
       end)
 
-    dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
-    dynamic_context = assemble_dynamic_context(state, dynamic_budget, max_tok)
-    dynamic_tokens = estimate_tokens(dynamic_context)
-    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
+    reserve = response_reserve(max_tok)
+    dynamic_budget = max(max_tok - reserve - conversation_tokens - static_tokens, 1_000)
+    # emit: false — inspecting the budget must never advance the world-state
+    # ledger, or the next real turn would think everything was already sent.
+    {ws, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok, emit: false)
+    dynamic_tokens = estimate_tokens(ws) + estimate_tokens(volatile)
+    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve
 
     %{
       max_tokens: max_tok,
-      response_reserve: @response_reserve,
+      response_reserve: reserve,
       conversation_tokens: conversation_tokens,
       static_base_tokens: static_tokens,
       dynamic_context_tokens: dynamic_tokens,
-      system_prompt_budget: max_tok - @response_reserve - conversation_tokens,
+      system_prompt_budget: max_tok - reserve - conversation_tokens,
       system_prompt_actual: static_tokens + dynamic_tokens,
       total_tokens: total_tokens,
       utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
@@ -175,25 +197,36 @@ defmodule OptimalSystemAgent.Agent.Context do
   # System message construction
   # ---------------------------------------------------------------------------
 
-  defp build_system_message(static_base, dynamic_context, provider) do
-    if provider == :anthropic and dynamic_context != "" do
-      # Anthropic cache hint: split into 2 content blocks.
-      # The static base gets cache_control for ~90% input token savings after first call.
-      %{
-        role: "system",
-        content: [
+  # Anthropic cache hints: up to THREE content blocks with two breakpoints.
+  #
+  #   1. static base   — cached (never changes within a session)
+  #   2. world state   — cached (diffed; byte-identical unless a section changed)
+  #   3. volatile      — uncached (clock, turn count, working tree, recall)
+  #
+  # The second breakpoint is the payoff for the world-state diff: before it,
+  # every dynamic token was re-prefilled on every single turn because one live
+  # timestamp sat in the same uncached block as the tool doctrine and AGENTS.md.
+  defp build_system_message(static_base, world_state, volatile, provider) do
+    if provider == :anthropic and (world_state != "" or volatile != "") do
+      blocks =
+        [
           %{type: "text", text: static_base, cache_control: %{type: "ephemeral"}},
-          %{type: "text", text: dynamic_context}
+          if(world_state != "",
+            do: %{type: "text", text: world_state, cache_control: %{type: "ephemeral"}}
+          ),
+          if(volatile != "", do: %{type: "text", text: volatile})
         ]
-      }
+        |> Enum.reject(&is_nil/1)
+
+      %{role: "system", content: blocks}
     else
-      # All other providers: single concatenated string
+      # All other providers: single concatenated string. Ordering still matters —
+      # static, then stable world state, then volatile — so the shared prefix a
+      # local runtime's KV cache can reuse is as long as possible.
       full_prompt =
-        if dynamic_context == "" do
-          static_base
-        else
-          static_base <> "\n\n" <> dynamic_context
-        end
+        [static_base, world_state, volatile]
+        |> Enum.reject(&(&1 == "" or is_nil(&1)))
+        |> Enum.join("\n\n")
 
       %{role: "system", content: full_prompt}
     end
@@ -203,48 +236,173 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Dynamic context assembly
   # ---------------------------------------------------------------------------
 
-  # ESSENTIAL blocks are small, always-relevant operating state — fitted first
-  # from the full dynamic budget. Everything else (memory, episodic, project
-  # context, skills, learned skills, agent roles) is RECALL and competes within
-  # a bounded sub-budget capped to a fraction of the REAL window.
-  @essential_labels ~w(bootstrap personality task_brief tool_process runtime environment plan_mode task_state workflow scratchpad project_instructions)
+  # ESSENTIAL blocks are the small, always-relevant VOLATILE operating state —
+  # the per-turn facts (clock, turn count, working-tree state, task list) that
+  # genuinely change every turn and therefore cannot live in the diffed world
+  # state. Everything else (memory, episodic, skills, learned skills) is RECALL
+  # and competes within a bounded sub-budget capped to a fraction of the REAL
+  # window. Labels owned by `WorldState.managed_labels/0` never reach this split.
+  @essential_labels ~w(task_brief runtime git_state task_state workflow)
 
-  defp assemble_dynamic_context(state, budget, effective_window) do
+  defp assemble_dynamic_context(state, budget, effective_window, opts \\ []) do
     blocks = gather_dynamic_blocks(state)
+    session_id = Map.get(state, :session_id, "default")
+    emit? = Keyword.get(opts, :emit, true)
 
+    # Evictions are per-build, not cumulative: a block that fit this turn must
+    # not still look evicted from three turns ago.
+    if emit?, do: clear_evictions(session_id)
+
+    # ── Tier 2a: WORLD STATE (diffed, Codex `world_state.rs`) ────────────────
+    #
+    # Sections that are stable across a session (tool-usage doctrine, AGENTS.md,
+    # environment, the slash-command catalog, the subagent roster, the active
+    # collaboration mode) are NOT re-concatenated every turn. They are diffed
+    # against the previous turn and only re-emitted when they actually changed;
+    # unchanged sections are replayed byte-for-byte from the ledger so the
+    # prompt prefix stays stable and the provider's prefix/KV cache stays warm.
+    managed = WorldState.managed_labels()
+
+    {ws_blocks, rest} =
+      Enum.split_with(blocks, fn {_content, _priority, label} -> label in managed end)
+
+    {ws_sections, _summary} = WorldState.assemble(session_id, ws_blocks, emit: emit?)
+
+    # ── Tier 2b: VOLATILE per-turn blocks ────────────────────────────────────
     {essential, recall} =
-      Enum.split_with(blocks, fn {_content, _priority, label} ->
+      Enum.split_with(rest, fn {_content, _priority, label} ->
         label in @essential_labels
       end)
 
-    # Fit essentials by PRIORITY, not by listing order. `fit_blocks/3` spends the
+    # World state is fitted FIRST — it carries the operating mode and the tool
+    # doctrine, so it outranks every per-turn block. Sections are fitted
+    # INDIVIDUALLY and are all-or-nothing: severing one mid-sentence to save a
+    # few tokens produces a prompt that reads as a corrupted instruction, which
+    # is worse than not having it. Anything dropped is invalidated in the ledger
+    # so it is re-emitted next turn rather than being silently lost forever.
+    #
+    # "Outranks" is NOT "may starve". The essentials are withheld from the
+    # world-state fitter before it starts, because outranking is a tiebreak for
+    # the contested tail of the budget, not a licence for a 1300-token tool
+    # catalog to consume a 57-token block carrying the session id, the channel
+    # and the model identity. Losing that block is why OSA could not answer
+    # "what model are you". The reservation is capped so the reverse failure —
+    # one pathological essential (a large git diff) pushing the doctrine out —
+    # cannot happen either.
+    reserved = essential_reserve(essential, budget)
+
+    {ws_parts, ws_used, ws_dropped} =
+      fit_world_state(ws_sections, max(budget - reserved, 0), session_id)
+
+    if emit? and ws_dropped != [], do: WorldState.invalidate(session_id, ws_dropped)
+
+    # Clamped: a fitter that overshot its budget must not hand the next group a
+    # NEGATIVE one, which `fit_blocks/4` reads as "drop every block".
+    remaining = max(budget - ws_used, 0)
+
+    # Fit essentials by PRIORITY, not by listing order. `fit_blocks/4` spends the
     # budget in the order it is handed the blocks, so with a tight dynamic budget
     # (a small local window plus a large static base) the first long block in the
-    # list — tool_process — could swallow everything and silently drop every
-    # essential after it, including the active operating mode (plan_mode). A
-    # dropped mode directive is a capability regression, not a truncation: the
-    # model stops being told it is planning at all. Priority 0 blocks therefore
-    # get the budget first; sort_by is stable, so blocks of equal priority keep
-    # their listed order and the assembled text stays otherwise unchanged.
+    # list could swallow everything and silently drop every essential after it.
+    # A dropped essential is a capability regression, not a truncation. Priority 0
+    # blocks therefore get the budget first; sort_by is stable, so blocks of equal
+    # priority keep their listed order and the assembled text stays otherwise
+    # unchanged.
     {essential_parts, essential_used} =
       essential
       |> Enum.sort_by(fn {_content, priority, _label} -> priority end)
-      |> fit_blocks(budget)
+      |> fit_blocks(remaining, nil, session_id: session_id, group: :essential)
 
     # RECALL group: capped to ~dynamic_recall_budget_frac of the REAL window
     # (with a small floor), never the full leftover slack.
-    leftover = budget - essential_used
+    leftover = remaining - essential_used
     recall_budget = Budget.recall_budget(effective_window, leftover)
 
     # Most query-relevant recall blocks first, so they win the budget.
     recall_ordered = order_by_query_relevance(recall, state)
 
     {recall_parts, _recall_used} =
-      fit_blocks(recall_ordered, recall_budget, Budget.memory_context_token_cap())
+      fit_blocks(recall_ordered, recall_budget, Budget.memory_context_token_cap(),
+        session_id: session_id,
+        group: :recall
+      )
 
-    (essential_parts ++ recall_parts)
+    # Returned SPLIT, not joined: the world-state half is byte-stable turn over
+    # turn, so it can carry its own provider cache breakpoint. The volatile half
+    # (clock, turn count, working tree, recall) changes every turn and must stay
+    # outside any cached region.
+    {join(ws_parts), join(essential_parts ++ recall_parts)}
+  end
+
+  # Ceiling on how much of the dynamic budget the ESSENTIAL group may withhold
+  # from the world state. Essentials are small and load-bearing (identity, task
+  # brief, working-tree state); world state is large and directive. Half is the
+  # point where neither group can silently erase the other.
+  @essential_reserve_frac 0.5
+
+  # Withhold only what the essentials will actually SPEND — reserving a flat
+  # fraction would hand budget back to nobody on a turn with no task brief and
+  # no git state.
+  defp essential_reserve(essential, budget) do
+    wanted =
+      Enum.reduce(essential, 0, fn {content, _priority, _label}, acc ->
+        acc + estimate_tokens(content)
+      end)
+
+    min(wanted, floor(budget * @essential_reserve_frac))
+  end
+
+  defp join(parts) do
+    parts
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n---\n\n")
+  end
+
+  # Fraction of a world-state section that must survive for a truncated copy to
+  # be worth sending. Above it, most of the directive still reaches the model and
+  # a partial copy beats nothing. Below it, what is left is a stub that reads as
+  # a corrupted instruction — drop the section whole and say so.
+  @ws_truncation_floor 0.6
+
+  # Fitting for world-state sections.
+  #
+  # Sections compete for the budget in RANK order (operating mode and tool
+  # doctrine before catalogs) but are rendered back in REGISTRY order, so who
+  # wins under pressure is a deliberate decision while the emitted prefix stays
+  # byte-stable.
+  #
+  # Returns {kept_chunks_in_registry_order, tokens_used, dropped_section_ids}.
+  # Only WHOLLY dropped ids are returned — a truncated section largely reached
+  # the model, so re-emitting it from scratch next turn would just churn the
+  # ledger.
+  defp fit_world_state(sections, budget, session_id) do
+    {kept, used, dropped} =
+      sections
+      |> Enum.with_index()
+      |> Enum.sort_by(fn {{id, _chunk}, idx} -> {WorldState.rank(id), idx} end)
+      |> Enum.reduce({[], 0, []}, fn {{id, chunk}, idx}, {acc, used, dropped} ->
+        cost = estimate_tokens(chunk)
+        available = budget - used
+        opts = [session_id: session_id, group: :essential]
+
+        cond do
+          cost <= available ->
+            {[{idx, chunk} | acc], used + cost, dropped}
+
+          available >= @ws_truncation_floor * cost ->
+            truncated = truncate_to_tokens(chunk, available)
+            kept_tokens = estimate_tokens(truncated)
+            record_eviction(opts, "ws:#{id}", :truncated, cost, kept_tokens)
+            {[{idx, truncated} | acc], used + kept_tokens, dropped}
+
+          true ->
+            record_eviction(opts, "ws:#{id}", :dropped, cost, 0)
+            {acc, used, [id | dropped]}
+        end
+      end)
+
+    chunks = kept |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
+    {chunks, used, dropped |> Enum.reverse() |> Enum.uniq()}
   end
 
   # Order the RECALL group by keyword overlap with the latest user message.
@@ -282,8 +440,16 @@ defmodule OptimalSystemAgent.Agent.Context do
       {personality_block(), 0, "personality"},
       {task_brief_block(state), 0, "task_brief"},
       {tool_process_block(state), 1, "tool_process"},
-      {runtime_block(state), 1, "runtime"},
+      # Priority 0: tiny and load-bearing. It carries the session id, the channel
+      # and the resolved model identity — the same resolver /health and the TUI
+      # status bar read, so the bar and the prompt can never disagree. At ~57
+      # tokens it must never lose a budget race to a longer advisory block.
+      {runtime_block(state), 0, "runtime"},
       {environment_block(state), 1, "environment"},
+      # Git working-tree state changes as the agent edits files, so it is
+      # deliberately NOT part of the diffed world state — it would append a new
+      # world-state payload on almost every turn. It stays a small per-turn block.
+      {git_state_block(state), 1, "git_state"},
       {commands_block(state), 2, "commands"},
       {project_context_block(state), 1, "project_context"},
       {project_instructions_block(state), 1, "project_instructions"},
@@ -479,13 +645,26 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   # per_block_cap (when given) bounds any SINGLE block so one oversized block
   # cannot consume the entire group budget even when slack would allow it.
-  defp fit_blocks(blocks, budget, per_block_cap \\ nil)
+  #
+  # Eviction is NEVER silent. This function used to drop or truncate blocks with
+  # no error and no log — a capability could vanish from the prompt (plan mode
+  # did, once, when a 13KB prompt growth pushed it past the budget on 32k models)
+  # and nothing anywhere said so. Every drop and every truncation now logs at
+  # `warning` for essential groups, emits `[:osa, :context, :eviction]` telemetry,
+  # and is recorded for `evictions/1` so it is observable after the fact.
+  defp fit_blocks(blocks, budget, per_block_cap, opts)
 
-  defp fit_blocks(_blocks, budget, _per_block_cap) when budget <= 0, do: {[], 0}
+  defp fit_blocks(blocks, budget, _per_block_cap, opts) when budget <= 0 do
+    for {content, _p, label} <- blocks, not (is_nil(content) or content == "") do
+      record_eviction(opts, label, :dropped, estimate_tokens(content), 0)
+    end
 
-  defp fit_blocks(blocks, budget, per_block_cap) do
+    {[], 0}
+  end
+
+  defp fit_blocks(blocks, budget, per_block_cap, opts) do
     {parts, used} =
-      Enum.reduce(blocks, {[], 0}, fn {content, _priority, _label}, {acc, tokens_used} ->
+      Enum.reduce(blocks, {[], 0}, fn {content, _priority, label}, {acc, tokens_used} ->
         block_tokens = estimate_tokens(content)
 
         available =
@@ -496,6 +675,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
         cond do
           available <= 0 ->
+            record_eviction(opts, label, :dropped, block_tokens, 0)
             {acc, tokens_used}
 
           block_tokens <= available ->
@@ -504,11 +684,126 @@ defmodule OptimalSystemAgent.Agent.Context do
           true ->
             truncated = truncate_to_tokens(content, available)
             truncated_tokens = estimate_tokens(truncated)
+
+            # `truncate_to_tokens/2` works in words, so it can come back at (or
+            # even above) the estimate without having cut anything. Only report a
+            # truncation when text was actually lost.
+            if truncated != content do
+              record_eviction(opts, label, :truncated, block_tokens, truncated_tokens)
+            end
+
             {acc ++ [truncated], tokens_used + truncated_tokens}
         end
       end)
 
     {parts, used}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Eviction observability
+  # ---------------------------------------------------------------------------
+
+  @evictions_table :osa_context_evictions
+
+  @doc """
+  Returns the blocks evicted (dropped or truncated) on this session's most
+  recent `build/1`.
+
+  Each entry is `%{label: String.t(), kind: :dropped | :truncated, wanted: n,
+  kept: n, group: :essential | :recall, at: DateTime.t()}`. Empty list means
+  everything fit.
+
+  Silent eviction is the failure mode this exists to prevent: a capability can
+  disappear from the prompt because a budget got tight, and without this there
+  is no signal at all — the agent simply stops being told it can do something.
+  """
+  @spec evictions(String.t() | nil) :: [map()]
+  def evictions(nil), do: []
+
+  def evictions(session_id) when is_binary(session_id) do
+    ensure_evictions_table()
+
+    case :ets.lookup(@evictions_table, session_id) do
+      [{^session_id, list}] -> list
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc "Clears the recorded evictions for a session."
+  @spec clear_evictions(String.t() | nil) :: :ok
+  def clear_evictions(nil), do: :ok
+
+  def clear_evictions(session_id) do
+    ensure_evictions_table()
+    :ets.delete(@evictions_table, session_id)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp record_eviction(opts, label, kind, wanted, kept) do
+    group = Keyword.get(opts, :group, :recall)
+    session_id = Keyword.get(opts, :session_id, "default")
+
+    entry = %{
+      label: label,
+      kind: kind,
+      wanted: wanted,
+      kept: kept,
+      group: group,
+      session: session_id,
+      at: DateTime.utc_now()
+    }
+
+    if group == :essential do
+      Logger.warning(
+        "[Context] ESSENTIAL context block #{kind}: label=#{label} session=#{session_id} " <>
+          "wanted=#{wanted}tok kept=#{kept}tok — the model will NOT see " <>
+          "#{if kind == :dropped, do: "this block at all", else: "all of this block"}. " <>
+          "The dynamic budget is too small; reduce the static base or raise the context window."
+      )
+    else
+      Logger.debug(
+        "[Context] recall block #{kind}: label=#{label} wanted=#{wanted}tok kept=#{kept}tok"
+      )
+    end
+
+    safe_telemetry(entry)
+    append_eviction(session_id, entry)
+    :ok
+  end
+
+  defp safe_telemetry(entry) do
+    :telemetry.execute(
+      [:osa, :context, :eviction],
+      %{wanted: entry.wanted, kept: entry.kept},
+      %{label: entry.label, kind: entry.kind, group: entry.group, session: entry.session}
+    )
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp append_eviction(session_id, entry) do
+    ensure_evictions_table()
+    existing = evictions(session_id)
+    # Keep only this turn's worth; a build starts by resetting via turn marker.
+    :ets.insert(@evictions_table, {session_id, Enum.take(existing ++ [entry], 32)})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp ensure_evictions_table do
+    case :ets.whereis(@evictions_table) do
+      :undefined -> :ets.new(@evictions_table, [:named_table, :public, :set])
+      ref -> ref
+    end
+  rescue
+    ArgumentError -> @evictions_table
   end
 
   # ---------------------------------------------------------------------------
@@ -573,21 +868,46 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Truncation
   # ---------------------------------------------------------------------------
 
+  @truncation_marker "\n\n[...truncated...]"
+
   defp truncate_to_tokens(_text, target_tokens) when target_tokens <= 0, do: ""
 
+  # Cut `text` down to AT MOST `target_tokens`, measured by the same estimator the
+  # budget is spent in.
+  #
+  # The old implementation trusted a fixed 1.3 tokens-per-word ratio and never
+  # re-measured, so it routinely came back ~13% OVER target (a 1000-token target
+  # returned ~1134 tokens). Every caller subtracts the result from its remaining
+  # budget, so an overshoot drove `budget - used` NEGATIVE — and `fit_blocks/4`
+  # treats a non-positive budget as "drop everything". One over-long world-state
+  # section therefore silently evicted every per-turn block behind it, including
+  # the runtime block. Overshooting a token budget is never a rounding detail:
+  # it is the difference between truncating one block and losing all the others.
   defp truncate_to_tokens(text, target_tokens) do
-    words = String.split(text, ~r/\s+/, trim: true)
-    max_words = max(round(target_tokens / 1.3), 1)
-
-    if length(words) <= max_words do
+    if estimate_tokens(text) <= target_tokens do
       text
     else
-      truncated =
-        words
-        |> Enum.take(max_words)
-        |> Enum.join(" ")
+      words = String.split(text, ~r/\s+/, trim: true)
+      guess = min(length(words), max(round(target_tokens / 1.3), 1))
+      shrink_to_fit(words, guess, target_tokens)
+    end
+  end
 
-      truncated <> "\n\n[...truncated...]"
+  # Shrink until the rendered result (marker included) actually measures within
+  # target. Each step strictly decreases `n`, so this terminates.
+  defp shrink_to_fit(_words, n, _target) when n < 1, do: ""
+
+  defp shrink_to_fit(words, n, target) do
+    candidate = words |> Enum.take(n) |> Enum.join(" ")
+    rendered = candidate <> @truncation_marker
+    cost = estimate_tokens(rendered)
+
+    if cost <= target do
+      rendered
+    else
+      # Scale down by how far over we are, but always drop at least one word.
+      scaled = floor(n * target / max(cost, 1))
+      shrink_to_fit(words, min(n - 1, max(scaled, 0)), target)
     end
   end
 
@@ -942,9 +1262,9 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     template = """
     ## Act — don't just chat
-    You are OSA, an agent, not a chatbot. When the user asks for anything that touches this machine or its code — read, find, write, edit, run, check, fix, verify — DO IT with your tools in THIS turn. Do not describe what you would do, do not ask permission to begin, do not hand back a plan when action was requested. Investigate by reading real files and running real commands instead of guessing or answering from memory. Interpret unclear or generic instructions in the context of the current working directory and the task at hand: if the user says rename `methodName` to snake_case, don't just reply `method_name` — find it in the code and change it. The user's UI shows every tool call, so narration is noise: fire the tools, then report the result.
+    You are OSA, an agent, not a chatbot. When the user asks for anything that touches this machine or its code — read, find, write, edit, run, check, fix, verify — DO IT with your tools in THIS turn. Do not describe what you would do, do not ask permission to begin, do not hand back a plan when action was requested. Interpret unclear or generic instructions in the context of the current working directory and the task at hand: if the user says rename `methodName` to snake_case, don't just reply `method_name` — find it in the code and change it. The user's UI shows every tool call, so call-by-call narration is noise — but before a GROUP of related calls, send ONE short preamble (1-2 sentences) saying what you're about to do and why, building on what you just learned. Skip it for a trivial single read; when a result changes the plan, say so in one line. Then fire the tools and report the result.
 
-    When to just answer (no tools): greetings, opinions, and questions you can fully answer from knowledge already in context. When to ACT: anything that depends on real files, real state, or real command output — default to acting. You are highly capable; take on ambitious multi-step work rather than pushing it back to the user. When genuinely blocked after investigating — ambiguous requirements or a decision only the user can make — ask ONE crisp question with ${{ tools.ask_user }}. If an approach fails, diagnose why before switching tactics: read the error, check your assumptions, try a focused fix. Don't retry the identical failing action blindly, and don't abandon a viable approach after one failure. Every response either makes progress with tool calls or delivers the finished result — never a bare description of intent.
+    When to just answer (no tools): greetings, opinions, and questions you can fully answer from knowledge already in context. When to ACT: anything that depends on real files, real state, or real command output — default to acting. You are highly capable; take on ambitious multi-step work rather than pushing it back to the user. When genuinely blocked after investigating — ambiguous requirements or a decision only the user can make — ask ONE crisp question with ${{ tools.ask_user }}. If an approach fails, diagnose why before switching tactics: read the error, check your assumptions, try a focused fix. Don't retry the identical failing action blindly, and don't abandon a viable approach after one failure.
 
     ## Act with care — reversibility and blast radius
     Local, reversible actions (reading files, editing code, running tests/builds/lints) — just do them, no permission needed. But before actions that are hard to reverse, affect shared state beyond this machine, or could destroy work, stop and confirm with the user first: deleting files/branches, `rm -rf`, dropping DB tables, force-pushing, `git reset --hard`, removing dependencies, pushing code, opening/commenting on PRs, sending messages, or posting to external services. A user approving such an action once does not authorize it in all future contexts. When you hit an obstacle, never use a destructive shortcut (e.g. `--no-verify`) to make it go away — find the root cause. Investigate unfamiliar files/branches/locks before overwriting; they may be the user's in-progress work. Measure twice, cut once.${%- if tools.task_write %}
@@ -953,7 +1273,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     For any task with more than a couple of steps, use ${{ tools.task_write }} to lay out the plan up front, then mark each item complete the moment it's done — do not batch completions. This keeps you focused and shows the user real progress. Stay on the listed tasks; don't wander.${%- endif %}
 
     ## Verify, then report faithfully
-    Before claiming a task is done, prove it works: run the test, execute the script, run the build/lint, check the output. Minimum effort means no gold-plating, not skipping the finish line. If you cannot verify (no test exists, can't run it), say so explicitly rather than implying success. Report outcomes honestly: if tests fail, say so with the relevant output; never claim "all tests pass" when they don't, never quietly weaken a failing check to manufacture green. Equally, when a check did pass, state it plainly without hollow disclaimers or re-verifying what you already confirmed. The goal is an accurate report, not a defensive one.
+    Before claiming a task is done, prove it works: run the test, execute the script, run the build/lint, check the output. If you cannot verify (no test exists, can't run it), say so explicitly rather than implying success. Report outcomes honestly: if tests fail, say so with the relevant output; never claim "all tests pass" when they don't, never quietly weaken a failing check to manufacture green. Equally, when a check did pass, state it plainly without hollow disclaimers or re-verifying what you already confirmed. The goal is an accurate report, not a defensive one.
 
     ## Tools
     CRITICAL: When asked to create or write code, ALWAYS use ${{ tools.file_write }} to create actual files. NEVER output code in markdown code blocks — use the tool instead. This is your most important rule.
@@ -1045,8 +1365,20 @@ defmodule OptimalSystemAgent.Agent.Context do
     - Platform: #{platform}
     - Today's date: #{date}
     - You are OSA, powered by the model `#{model}` running on the `#{provider}` provider.
-    #{git_info}
     """
+  rescue
+    _ -> nil
+  end
+
+  # Volatile half of the old environment block: branch / dirty files / recent
+  # commits. Split out so the STABLE environment facts can live in the diffed
+  # world state (emitted once) while the working-tree state, which the agent
+  # itself mutates, stays a cheap per-turn block.
+  defp git_state_block(_state) do
+    case cached_git_info() do
+      "" -> nil
+      info -> "## Git State\n#{info}"
+    end
   rescue
     _ -> nil
   end
@@ -1139,6 +1471,10 @@ defmodule OptimalSystemAgent.Agent.Context do
     lines = [
       "## Runtime Context",
       "- Timestamp: #{DateTime.utc_now() |> DateTime.to_iso8601()}",
+      # Identity is KNOWN, not discoverable: same resolver /health feeds the TUI
+      # status bar from, so this line and the bar can never disagree. Without it
+      # "what model are you" costs three tool calls and two wrong guesses.
+      OptimalSystemAgent.Runtime.Identity.context_line(state),
       "- Channel: #{state.channel}",
       "- Session: #{session_id}",
       "- Effort: #{effort} (#{effort_config.description})",

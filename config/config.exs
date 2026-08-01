@@ -21,15 +21,18 @@ config :optimal_system_agent,
   ollama_num_ctx: 32_768,
 
   # Anthropic settings (set ANTHROPIC_API_KEY env var)
-  anthropic_model: "claude-sonnet-4-6",
+  anthropic_model: "claude-opus-5",
 
   # OpenAI-compatible settings (set OPENAI_API_KEY env var)
   openai_url: "https://api.openai.com/v1",
-  openai_model: "gpt-4o",
+  openai_model: "gpt-5.6-terra",
 
   # OpenRouter settings (set OPENROUTER_API_KEY env var)
   openrouter_url: "https://openrouter.ai/api/v1",
-  openrouter_model: "meta-llama/llama-3.3-70b-instruct",
+  # `meta-llama/llama-3.3-70b-instruct` does still exist on OpenRouter, but a
+  # two-year-old 70B is a poor default for an agent. Matches the provider
+  # config's default; verified present in the live GET /api/v1/models catalog.
+  openrouter_model: "anthropic/claude-opus-5",
 
   # Agent configuration
   max_iterations: 200,
@@ -57,6 +60,14 @@ config :optimal_system_agent,
   # Iteration count past which a single turn is treated as long-running and
   # goal verification auto-activates (even in ask mode) under `:auto`.
   goal_verifier_activate_after_iterations: 12,
+
+  # Per-skeptic wall-clock bound for one goal-verification round. A skeptic is a
+  # cheap, read-only vote (<= 6 iterations, no writes) that BLOCKS the user's
+  # turn while the panel is joined, so it must not inherit the generic
+  # `:subagent_await_timeout_ms` backstop (2 hours) meant for long delegated
+  # work. A skeptic past this bound is reaped and counted as a fail-closed
+  # refute, exactly like a crash.
+  goal_verifier_skeptic_timeout_ms: 120_000,
 
   # Doom loop hard cap — absolute total tool calls per session before forced halt.
   # This is a secondary safety net independent of the sliding-window signature check.
@@ -134,6 +145,35 @@ config :optimal_system_agent,
 
   # MCP servers config
   mcp_config_path: Path.expand("~/.osa/mcp.json"),
+
+  # ---------------------------------------------------------------------------
+  # MCP — foreign-config import (OPT-IN)
+  # ---------------------------------------------------------------------------
+  # OSA can read the MCP servers you configured in OTHER tools (Claude Code,
+  # Claude Desktop, Cursor, Codex) and run them itself. That is convenient but
+  # it is also an unrequested grant: those entries spawn subprocesses and inject
+  # tool definitions OSA's operator never chose, with no way to tell where they
+  # came from. It is therefore OFF by default — OSA runs the servers you gave
+  # OSA (`~/.osa/mcp.json`, the workspace `.mcp.json`, `.osa/mcp.local.json`)
+  # and nothing else.
+  #
+  # Turn it on with either:
+  #   config :optimal_system_agent, mcp_import_foreign: true
+  #   ~/.osa/settings.json  →  {"mcp_import_foreign": true}
+  mcp_import_foreign: false,
+
+  # Which foreign tools are read when the import above is enabled. Trim this to
+  # inherit from some tools but not others, e.g. `[:codex]`.
+  mcp_import_sources: [:codex, :claude_code, :claude_desktop, :cursor],
+
+  # Per-server deny list, honoured for EVERY source (OSA's own config, the
+  # project `.mcp.json`, and any imported foreign config). Names are matched
+  # after the usual `[a-z0-9_]` sanitization, so "task-master-ai" and
+  # "task_master_ai" both match. Lets you kill one noisy server without
+  # disabling a whole source:
+  #   config :optimal_system_agent, mcp_exclude: ["serena"]
+  #   ~/.osa/settings.json  →  {"mcp_exclude": ["serena"]}
+  mcp_exclude: [],
 
   # Bootstrap files directory (IDENTITY.md, SOUL.md, USER.md)
   bootstrap_dir: Path.expand("~/.osa"),

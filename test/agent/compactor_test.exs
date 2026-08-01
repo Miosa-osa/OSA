@@ -25,6 +25,12 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Compactor
+  alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
+
+  # The compactor has NO hardcoded context-window default any more; tests
+  # that assert a utilization number must state the window it is measured
+  # against.
+  @cw 128_000
 
   # The cold-zone summarizer persists its last structured summary in the GLOBAL
   # `:osa_compactor_state` ETS table (created at app boot, :public/:named_table).
@@ -184,30 +190,63 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
   # utilization/1
   # ---------------------------------------------------------------------------
 
-  describe "utilization/1" do
+  describe "utilization_percent/2" do
     test "returns 0.0 for empty message list" do
-      assert Compactor.utilization([]) == 0.0
+      assert Compactor.utilization_percent([], @cw) == 0.0
     end
 
     test "returns a float between 0 and 100" do
       messages = build_conversation(5)
-      util = Compactor.utilization(messages)
+      util = Compactor.utilization_percent(messages, @cw)
       assert is_float(util)
       assert util >= 0.0
       assert util <= 100.0
     end
 
     test "larger conversation produces higher utilization" do
-      small = Compactor.utilization(build_conversation(2))
-      large = Compactor.utilization(build_conversation(20))
+      small = Compactor.utilization_percent(build_conversation(2), @cw)
+      large = Compactor.utilization_percent(build_conversation(20), @cw)
       assert large > small
     end
 
     test "result is rounded to 1 decimal place" do
       messages = build_conversation(5)
-      util = Compactor.utilization(messages)
+      util = Compactor.utilization_percent(messages, @cw)
       # Float.round/2 to 1dp — check it's not excessively precise
       assert util == Float.round(util, 1)
+    end
+
+    # ── UNIT PIN ────────────────────────────────────────────────────────────
+    # The scale is PERCENT (0.0-100.0), never a 0.0-1.0 fraction. An off-by-100
+    # here means OSA either never compacts or compacts constantly, and the old
+    # `utilization/1` name did not say which unit it returned. Pin it against a
+    # hand-computed value so a silent unit change cannot pass.
+    test "the unit is PERCENT (0.0-100.0), not a 0.0-1.0 fraction" do
+      # Denominator is the EFFECTIVE window (window - output reserve), matching
+      # the status bar and CompactionThresholds.used_percent/2.
+      cw = 100_000
+      effective = CompactionThresholds.effective_window(cw)
+      messages = build_conversation(40)
+      tokens = Compactor.estimate_tokens(messages)
+
+      expected = Float.round(tokens / effective * 100, 1)
+      actual = Compactor.utilization_percent(messages, cw)
+
+      assert actual == expected
+      # A fraction-scaled implementation would land ~100x lower.
+      assert actual > 1.0, "expected a percent (got #{actual}) — this looks like a 0.0-1.0 fraction"
+      assert_in_delta actual, expected, 0.05
+    end
+
+    test "an unresolvable window returns :unknown rather than a fabricated percentage" do
+      Application.delete_env(:optimal_system_agent, :max_context_tokens)
+      assert Compactor.utilization_percent(build_conversation(5), :unknown) == :unknown
+      assert Compactor.utilization_percent(build_conversation(5), nil) == :unknown
+    end
+
+    test "clamps at 100.0 rather than reporting above-full" do
+      messages = build_conversation(200, 50)
+      assert Compactor.utilization_percent(messages, 1_000) == 100.0
     end
   end
 

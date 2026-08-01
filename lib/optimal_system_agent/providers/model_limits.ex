@@ -22,44 +22,103 @@ defmodule OptimalSystemAgent.Providers.ModelLimits do
   # a local model the catalog doesn't track). Values are the vendors' published
   # max output tokens. A prefix match applies when there's no exact key.
   @static_max_output %{
-    # Anthropic
-    "claude-opus-4-6" => 64_000,
-    "claude-sonnet-4-6" => 64_000,
-    "claude-haiku-4-5" => 32_000,
+    # Anthropic / OpenAI current models are NOT listed here — they are merged in
+    # below from Providers.AnthropicModels / Providers.OpenAIModels, which are
+    # the single source of truth. Only older ids those catalogs no longer carry
+    # are kept here.
     "claude-3-5-sonnet" => 8_192,
     "claude-3-5-haiku" => 8_192,
     "claude-3-opus" => 4_096,
-    # OpenAI
     "gpt-4.1" => 32_768,
-    "gpt-4o" => 16_384,
-    "o3" => 100_000,
     "o4-mini" => 100_000,
     "o1" => 100_000,
-    # Google
-    "gemini-2.5-pro" => 65_536,
-    "gemini-2.5-flash" => 65_536,
-    "gemini-2.0-flash" => 8_192,
-    # DeepSeek
+    # Google, DeepSeek, xAI and Mistral are NOT listed here — they come from
+    # their source-of-truth modules, merged in below.
+    #
+    # `deepseek-chat` / `deepseek-reasoner` (retired 2026-07-24) keep a row only
+    # so an existing pinned config still clamps sanely while the user migrates.
     "deepseek-chat" => 8_192,
     "deepseek-reasoner" => 8_192,
-    # Groq / Llama
+    # Groq. Groq documents llama-3.1-8b-instant at 131,072 max completion
+    # tokens, not the 8,192 recorded here previously.
+    "openai/gpt-oss-120b" => 65_536,
+    "openai/gpt-oss-20b" => 65_536,
     "llama-3.3-70b-versatile" => 32_768,
-    "llama-3.1-8b-instant" => 8_192,
-    # Mistral
-    "mistral-large-latest" => 8_192,
+    "llama-3.1-8b-instant" => 131_072,
+    # Cohere
+    "command-a-plus-05-2026" => 64_000,
+    "command-a-03-2025" => 8_000,
+    "command-r-plus-08-2024" => 4_000,
+    "command-r-08-2024" => 4_000,
+    # Mistral has NO row. The 8_192 that used to sit here was never a Mistral
+    # number — Mistral publishes no max output for any model, stating only that
+    # prompt + max_tokens must fit the context window. A fabricated ceiling
+    # silently truncated long answers, so the correct value is "unknown".
+    # xAI likewise publishes no max output; its 128,000 `max_completion_tokens`
+    # is a request DEFAULT, not a ceiling, and is not recorded as one.
     # zhipu / GLM
     "glm-5.2" => 128_000,
     "glm-4.6" => 128_000,
     "glm-4.5" => 96_000
   }
 
-  @doc "Max output tokens for `model`, from the Catalog then a static table, or nil."
+  @doc """
+  Max output tokens for `model`, or `nil` when genuinely unknown.
+
+  `nil` means "unknown — apply your own fallback", and callers such as
+  `OpenAICompat.cap_max_output/2` treat it as "do not clamp". That is a real
+  answer, not a failure: for xAI and Mistral it is the *correct* one.
+  """
   @spec max_output(String.t() | nil) :: pos_integer() | nil
   def max_output(model) when is_binary(model) do
-    catalog_max_output(model) || static_max_output(model)
+    cond do
+      # Vendors that publish NO output ceiling at all. This must short-circuit
+      # BEFORE the catalog: models.dev carries invented figures for both (the
+      # 8,192 Mistral number OSA used to ship came from exactly that kind of
+      # third-party guess), and a fabricated ceiling silently truncates long
+      # answers. "Unknown" is the honest and safer result.
+      unpublished_ceiling?(model) ->
+        nil
+
+      # The provider catalogs are the SINGLE SOURCE OF TRUTH for their own
+      # models, so they are consulted BEFORE the bundled snapshot. That
+      # snapshot is third-party data that lags: it still lists Haiku 4.5 at 32k
+      # output when the published cap is 64k, and knows nothing about the
+      # Claude 5 or GPT-5.6 families at all. Letting it win would silently
+      # halve the output ceiling of a model we ship in the picker.
+      true ->
+        ssot_max_output(model) || catalog_max_output(model) || static_max_output(model)
+    end
   end
 
   def max_output(_), do: nil
+
+  defp unpublished_ceiling?(model) do
+    OptimalSystemAgent.Providers.XAIModels.resolve(model) != nil or
+      OptimalSystemAgent.Providers.MistralModels.resolve(model) != nil
+  end
+
+  # Every provider catalog that owns its own models, consulted before the
+  # third-party snapshot. `Enum.find_value` stops at the first module that both
+  # resolves the id AND carries an integer ceiling — so xAI and Mistral, whose
+  # models resolve but whose `max_output` is deliberately nil (neither vendor
+  # publishes one), correctly fall through to "unknown" rather than to a stale
+  # catalog guess.
+  @ssot_modules [
+    OptimalSystemAgent.Providers.AnthropicModels,
+    OptimalSystemAgent.Providers.OpenAIModels,
+    OptimalSystemAgent.Providers.GoogleModels,
+    OptimalSystemAgent.Providers.DeepSeekModels
+  ]
+
+  defp ssot_max_output(model) do
+    Enum.find_value(@ssot_modules, fn mod ->
+      case mod.resolve(model) do
+        %{max_output: n} when is_integer(n) and n > 0 -> n
+        _ -> nil
+      end
+    end)
+  end
 
   defp catalog_max_output(model) do
     case safe(fn -> Catalog.max_output(model) end) do

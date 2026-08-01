@@ -69,7 +69,11 @@ defmodule OptimalSystemAgent.Settings do
   live by `Settings.Watcher` whenever a settings file changes on disk.
   """
   def apply_env_settings do
-    case Map.get(merged(), "env") do
+    # Trust-gated: `env` from a checked-in `.osa/settings.json` is
+    # workspace-supplied executable config (PATH, loader vars). An untrusted
+    # clone must not be able to set it — same gate as project hooks and
+    # permission rules.
+    case Map.get(merged_trusted(), "env") do
       env when is_map(env) ->
         Enum.each(env, fn
           {k, v} when is_binary(k) and is_binary(v) ->
@@ -154,6 +158,86 @@ defmodule OptimalSystemAgent.Settings do
   @doc "Get all settings merged (for /settings API endpoint)."
   def all, do: merged()
 
+  @doc """
+  Like `layer/1`, but the PROJECT layer is gated behind workspace trust.
+
+  `.osa/settings.json` is checked into the repo, so it is workspace-supplied
+  config: cloning a hostile repository must not hand it permission rules or a
+  `permission_mode` before the user has been asked whether they trust the
+  workspace. Every security-relevant read of the cascade goes through here
+  (and `get_trusted/2` / `merged_trusted/0`) rather than `layer/1`.
+
+  This is the SAME `project_trusted?/0` gate `get_merged_hooks/0` already
+  applies to project hooks — one trust concept, two consumers. User, local,
+  flag and session layers are authored on this machine and always apply.
+  """
+  @spec trusted_layer(atom()) :: map()
+  def trusted_layer(:project) do
+    if project_trusted?() do
+      layer(:project)
+    else
+      case layer(:project) do
+        empty when empty == %{} -> %{}
+        _ -> warn_project_withheld()
+      end
+    end
+  end
+
+  def trusted_layer(source), do: layer(source)
+
+  @doc """
+  `merged/0` with the project layer gated behind workspace trust.
+  Use for any security-relevant setting; `merged/0` stays as-is for display.
+  """
+  def merged_trusted do
+    [layer(:user), trusted_layer(:project), layer(:local), layer(:flag)]
+    |> Enum.reduce(%{}, &deep_merge(&2, &1))
+    |> deep_merge(get_all_session())
+  end
+
+  @doc "`get/2` resolved through `merged_trusted/0`."
+  def get_trusted(key, default \\ nil) do
+    case Map.fetch(merged_trusted(), to_string(key)) do
+      {:ok, value} -> value
+      :error -> default
+    end
+  end
+
+  @doc """
+  True when the current working directory has accepted workspace trust.
+
+  Fails CLOSED (false — project-supplied config stays inert) on any Trust
+  error so a crash can never widen the executable-config surface.
+  """
+  @spec project_trusted?() :: boolean()
+  def project_trusted? do
+    OptimalSystemAgent.Workspace.Trust.trusted?(OptimalSystemAgent.Workspace.Cwd.get())
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # A silently ignored config file is its own bug: say plainly that the rules
+  # exist and are being WITHHELD pending trust, not that they are broken.
+  # Once per {cwd, mtime} so it is visible without spamming every tool call.
+  defp warn_project_withheld do
+    path = project_settings_path()
+    key = {:project_settings_withheld, path, file_sig(path)}
+
+    if :ets.insert_new(@cache_table, {key, :withheld, true}) do
+      Logger.warning(
+        "[settings] WITHHOLDING project settings in #{path} (permission rules, permission_mode, " <>
+          "env) — this workspace has not been trusted yet. They are ignored, not broken: run " <>
+          "`/trust accept` (or accept the trust dialog) to apply them."
+      )
+    end
+
+    %{}
+  rescue
+    _ -> %{}
+  end
+
   @doc "Get settings from a specific layer."
   def layer(:user), do: load_json(user_settings())
   def layer(:project), do: load_json(project_settings_path())
@@ -202,17 +286,6 @@ defmodule OptimalSystemAgent.Settings do
     rescue
       _ -> %{}
     end
-  end
-
-  # True when the current working directory has accepted workspace trust.
-  # Fails CLOSED (false — project hooks stay inert) on any Trust error so a
-  # crash can never widen the executable-config surface.
-  defp project_trusted? do
-    OptimalSystemAgent.Workspace.Trust.trusted?(OptimalSystemAgent.Workspace.Cwd.get())
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
   end
 
   defp layer_hooks(layer) when is_map(layer) do

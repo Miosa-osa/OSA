@@ -1,3 +1,5 @@
+pub mod alt_screen;
+pub mod assistant_stream;
 pub mod attachment;
 pub mod commands;
 pub mod event_loop;
@@ -7,6 +9,7 @@ mod handle_backend;
 mod handle_dialogs;
 pub mod key_normalize;
 mod keymap_dispatch;
+pub mod resume;
 pub mod self_update;
 pub mod keys;
 pub mod layout;
@@ -157,6 +160,17 @@ pub struct App {
     /// `--resume [id]`: Some(Some(id)) load that id; Some(None) open the session
     /// browser at startup; None = not requested. Consumed once at resolution.
     pub startup_resume: Option<Option<String>>,
+    /// The mode flags this process was launched with, replayed verbatim into the
+    /// `Resume this session with: …` line printed on exit so copy-pasting it
+    /// returns the user to the SAME mode (notably overdrive) rather than
+    /// silently dropping them back to prompting.
+    pub launch_mode: self::resume::LaunchMode,
+    /// Set when a launch-time resume could not be honoured (unknown / ambiguous
+    /// session id). The event loop quits on it and `main` prints it to stderr
+    /// with exit code 2. Failing loudly here is the whole point: the old path
+    /// switched to the bad id, got an empty transcript back, and looked like a
+    /// perfectly normal fresh session.
+    pub fatal_exit: Option<String>,
     /// `--model <name>` / `--provider <name>`: a one-shot, SESSION-SCOPED model
     /// override applied the moment the launch session id is known.
     ///
@@ -206,7 +220,12 @@ pub struct App {
     pub event_rx: mpsc::UnboundedReceiver<Event>,
 
     // Processing state
-    pub stream_buf: String,
+    /// Owner of the assistant text for the turn: which message the streamed
+    /// deltas belong to, and whether that message has already been finalized.
+    /// See `app::assistant_stream` — a bare `String` here could not tell one
+    /// generation from the next, so a nudged/re-generated answer rendered
+    /// concatenated onto the answer it replaced.
+    pub assistant_stream: assistant_stream::AssistantStream,
     pub thinking_buf: String,
     pub processing_start: Option<Instant>,
     /// Spinner-clock elapsed captured at the agent_response turn-end edge (just
@@ -410,12 +429,6 @@ pub struct App {
     pub kill_agents_armed: Option<Instant>,
     // Ctrl+T (chat:todosToggle) — hide/show the floating task checklist.
     pub task_checklist_hidden: bool,
-    /// Ticks remaining before an "Updated plan" snapshot is flushed to
-    /// scrollback. Task events arrive in bursts (the backend emits one
-    /// task_created per item when a whole plan is set), so we debounce the
-    /// snapshot: each task event re-arms this counter, and the snapshot fires
-    /// once it settles, coalescing the burst into a single history cell. 0 = idle.
-    pub plan_snapshot_debounce: u8,
 }
 
 impl App {
@@ -552,6 +565,8 @@ impl App {
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,
             startup_resume: cli.resume.clone(),
+            launch_mode: self::resume::LaunchMode::from_cli(&cli),
+            fatal_exit: None,
             // `--provider` alone (no `--model`) still needs a model to swap to;
             // the backend resolves the provider's default when model is "".
             startup_model: match (cli.model.clone(), cli.provider.clone()) {
@@ -581,7 +596,7 @@ impl App {
             event_tx,
             event_rx,
 
-            stream_buf: String::new(),
+            assistant_stream: assistant_stream::AssistantStream::new(),
             thinking_buf: String::new(),
             processing_start: None,
             last_turn_client_elapsed_secs: None,
@@ -642,7 +657,6 @@ impl App {
             chord_pending: None,
             kill_agents_armed: None,
             task_checklist_hidden: false,
-            plan_snapshot_debounce: 0,
         })
     }
 
@@ -757,7 +771,9 @@ impl App {
         // streaming text deliberately.
         self.chat.flush_pending_tools();
         self.flush_collapse();
-        self.stream_buf.clear();
+        // The turn is over — drop the partial text AND this turn's finalization
+        // history, so the next turn is not mistaken for a repeat of this one.
+        self.assistant_stream.reset();
         self.thinking_buf.clear();
         self.agent_header_sent = false;
         self.activity.stop();
@@ -869,6 +885,20 @@ impl App {
         // · <elapsed>" chip every frame from the live goal state (cheap; the
         // writer only re-renders on change).
         self.sync_goal_indicator();
+
+        // Inline ask_user band header chip: `[turn: 7s, ↓53.6k]`. Read the live
+        // turn clock / token counter FIRST so the borrow of `self.survey` below
+        // does not overlap the shared borrows of `status`/`processing_start`.
+        if self.survey.is_some() {
+            let elapsed = self
+                .processing_start
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let tokens = self.status.output_tokens();
+            if let Some(ref mut s) = self.survey {
+                s.set_turn_meta(elapsed, tokens);
+            }
+        }
 
         // U-T28 — feed the compact sub-agent footer cue (count + est. cost) from
         // the agents panel while sub-agents are active; clear it otherwise.

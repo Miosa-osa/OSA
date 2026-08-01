@@ -30,9 +30,16 @@ defmodule OptimalSystemAgent.Utils.BrowserTest do
     end
   end
 
-  describe "open/1" do
-    test "returns :ok on a normal host where the opener binary exists" do
-      assert Browser.open("https://example.invalid/oauth/callback?state=test") == :ok
+  describe "open/1 — the suite must never launch a real browser" do
+    test "is disabled in the test env, so nothing is ever spawned" do
+      # THE REGRESSION. This test previously called Browser.open/1 with a
+      # placeholder OAuth URL under the real PATH, which on a desktop machine
+      # (real $DISPLAY) made `xdg-open` genuinely open a browser tab to
+      # `https://example.invalid/oauth/callback?state=test` on EVERY suite run.
+      # The user experienced that as OSA repeatedly demanding OAuth against an
+      # RFC-2606 reserved domain that can never resolve.
+      refute Browser.enabled?()
+      assert Browser.open("https://osa.test/never-opened") == :ok
     end
 
     test "returns :ok (never raises) when the opener binary is entirely absent from PATH" do
@@ -40,14 +47,59 @@ defmodule OptimalSystemAgent.Utils.BrowserTest do
       # a headless box (SSH session, container, minimal WSL) with no
       # xdg-open/open on PATH at all. Emptying PATH forces System.cmd/2 to
       # hit :enoent for every opener, proving the rescue/catch in open/1
-      # actually catches it end-to-end rather than just in theory.
+      # actually catches it end-to-end rather than just in theory. The gate is
+      # enabled here so the real System.cmd/2 path is genuinely exercised.
       original_path = System.get_env("PATH")
 
-      try do
-        System.put_env("PATH", "")
-        assert Browser.open("https://example.invalid/oauth/callback") == :ok
-      after
+      with_browser_enabled(fn ->
+        try do
+          System.put_env("PATH", "")
+          assert Browser.open("https://osa.test/headless") == :ok
+        after
+          if original_path, do: System.put_env("PATH", original_path)
+        end
+      end)
+    end
+
+    test "returns :ok when an opener DOES exist, without opening anything real" do
+      # PATH is pointed at a temp dir holding no-op stubs named after every
+      # opener, so the System.cmd/2 success path runs for real while nothing
+      # is displayed to the developer.
+      stub_dir =
+        Path.join(System.tmp_dir!(), "osa-browser-stub-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(stub_dir)
+
+      for name <- ["xdg-open", "open", "cmd", "true"] do
+        path = Path.join(stub_dir, name)
+        File.write!(path, "#!/bin/sh\nexit 0\n")
+        File.chmod!(path, 0o755)
+      end
+
+      original_path = System.get_env("PATH")
+
+      on_exit(fn ->
+        File.rm_rf(stub_dir)
         if original_path, do: System.put_env("PATH", original_path)
+      end)
+
+      with_browser_enabled(fn ->
+        System.put_env("PATH", stub_dir)
+        assert Browser.open("https://osa.test/stubbed") == :ok
+      end)
+    end
+  end
+
+  defp with_browser_enabled(fun) do
+    prev = Application.get_env(:optimal_system_agent, :browser_open_enabled)
+    Application.put_env(:optimal_system_agent, :browser_open_enabled, true)
+
+    try do
+      fun.()
+    after
+      case prev do
+        nil -> Application.delete_env(:optimal_system_agent, :browser_open_enabled)
+        v -> Application.put_env(:optimal_system_agent, :browser_open_enabled, v)
       end
     end
   end

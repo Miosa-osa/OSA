@@ -11,8 +11,23 @@ defmodule OptimalSystemAgent.Providers.Replicate do
 
   Config keys:
     :replicate_api_key — required (REPLICATE_API_KEY)
-    :replicate_model   — (default: meta/llama-3.3-70b-instruct)
+    :replicate_model   — (default: openai/gpt-oss-120b)
     :replicate_url     — override base URL
+
+  ## Replicate publishes no context windows
+
+  Unlike every other provider OSA supports, Replicate exposes **no
+  machine-readable context window** anywhere: the model object's
+  `openapi_schema` describes *input parameters* only (`prompt`, `max_tokens`,
+  `seed`), and the model pages state context only as marketing prose inside
+  benchmark blurbs. So `Catalog`/`ModelLimits` can never learn a Replicate
+  window from Replicate.
+
+  The consequence is deliberate and documented in `available_models/0`: OSA
+  offers only slugs whose window is published by the model's ORIGINAL vendor
+  (OpenAI for `gpt-oss-*`, Anthropic for `anthropic/*`), and takes the number
+  from there. A slug whose window exists nowhere authoritative is not offered
+  at all rather than budgeted with a guess.
   """
 
   @behaviour OptimalSystemAgent.Providers.Behaviour
@@ -26,8 +41,38 @@ defmodule OptimalSystemAgent.Providers.Replicate do
   @impl true
   def name, do: :replicate
 
+  # `meta/llama-3.3-70b-instruct` was the default AND all three tier entries,
+  # and it **does not exist on Replicate** — https://replicate.com/meta/llama-3.3-70b-instruct
+  # returns a hard 404 (verified 2026-08-01). Replicate skipped Llama 3.3 on
+  # the official `meta/*` account entirely: it went Llama 3 → Llama 4. Every
+  # Replicate request OSA made failed at model resolution.
+  #
+  # Note the naming trap that helped hide this: Llama 3 slugs carry a DOUBLED
+  # prefix (`meta/meta-llama-3-70b-instruct`) while Llama 4 does not
+  # (`meta/llama-4-scout-instruct`), so neither convention predicts the other.
+  #
+  # The replacement is `openai/gpt-oss-120b` — verified 200 on Replicate, and
+  # its 131,072 window is published by OpenAI for the open-weight model itself
+  # (and independently agreed by Groq, Cerebras and Fireworks), so OSA can
+  # budget it honestly despite Replicate publishing nothing.
   @impl true
-  def default_model, do: "meta/llama-3.3-70b-instruct"
+  def default_model, do: "openai/gpt-oss-120b"
+
+  @doc """
+  Slugs OSA offers on Replicate.
+
+  Every entry is verified to resolve (HTTP 200 on its model page) AND to have a
+  context window published by the model's original vendor — see the moduledoc
+  for why that second condition is non-negotiable here.
+  """
+  @impl true
+  def available_models do
+    [
+      "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b",
+      "anthropic/claude-opus-4.6"
+    ]
+  end
 
   @impl true
   def chat(messages, opts \\ []) do

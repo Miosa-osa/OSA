@@ -52,6 +52,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
   alias OptimalSystemAgent.Agent.Loop.DurableLog
+  alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Loop.Steer
@@ -1095,11 +1096,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call(:compact, _from, state) do
+    # The window MUST come from the registry's honest per-model resolver — the
+    # compactor no longer has (and must never regrow) a hardcoded default.
     compacted =
       OptimalSystemAgent.Agent.Compactor.maybe_compact(
         state.messages,
         Map.get(state, :last_input_tokens, 0),
-        state.session_id
+        state.session_id,
+        context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state)
       )
 
     {:reply, :ok, %{state | messages: compacted}}
@@ -1189,6 +1193,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:get_strategy, _from, state) do
     {:reply, {:ok, :none, %{}}, state}
+  end
+
+  # Durable session save, serialized by THIS process' mailbox.
+  #
+  # `SessionPersistence.auto_save/1` (the :post_response hook) used to reach in
+  # with `:sys.get_state/1` from the hook process; a busy loop made that call
+  # time out and the entire save was silently dropped. A cast is queued instead,
+  # so a busy loop DEFERS the save rather than losing it, and the state written
+  # is the loop's own — never a scraped snapshot.
+  @impl true
+  def handle_cast({:persist_session, session_id}, state) do
+    _ = OptimalSystemAgent.Agent.SessionPersistence.save_from_state(session_id, state)
+    {:noreply, state}
   end
 
   @impl true
@@ -1473,6 +1490,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       :exit, _ -> :ok
     end
 
+    # `message_id` identifies WHICH assistant message this finalizes: the last
+    # generation of the turn (`LLMClient.current_message_id/0`, minted per LLM
+    # round-trip in this same process). The client uses it to replace exactly
+    # that generation's streamed accumulation — and to drop a repeat delivery
+    # of the same finalization instead of appending it a second time.
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:session:#{state.session_id}",
@@ -1480,6 +1502,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
        %{
          type: :agent_response,
          session_id: state.session_id,
+         message_id: LLMClient.current_message_id(),
          response: response,
          response_type: "agent"
        }}

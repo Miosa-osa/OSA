@@ -50,6 +50,22 @@ defmodule OptimalSystemAgent.Memory.Store do
   alias OptimalSystemAgent.Agent.Memory.SQLiteBridge
   import Ecto.Query
 
+  # Both tables are 1:1 MIRRORS of the durable `memories` SQLite table, not
+  # independent caches: `@entries_table` holds one row per memory entry and
+  # `@index_table` one row per keyword pointing at those ids. Their size is
+  # therefore bounded by whatever bounds the `memories` table itself — they
+  # cannot grow past it — which is why they are deliberately NOT capped the way
+  # `Memory.Search`'s `:osa_memory_vectors` cache is. Evicting from a mirror
+  # would silently desync it from its source of truth; evicting from a cache
+  # (Search) just costs a disk read. Rows leave on explicit removal
+  # (`remove_from_cache/1`, `remove_from_ets_index/1`), and `rebuild_ets_index/0`
+  # below does a full clear-and-reload — that `delete_all_objects` is a REBUILD,
+  # not a bound, and must not be read as one.
+  #
+  # Note also that `Memory.Consolidator` does not prune either of these. It is
+  # a plain module called only from `Memory.Learning.run_consolidation/2`, and
+  # it dedupes *patterns* in `Store.Pattern` via `Repo.delete_all`. It touches
+  # no ETS table anywhere.
   @index_table :osa_memory_index
   @entries_table :osa_memory_entries
 

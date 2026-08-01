@@ -290,6 +290,28 @@ pub fn ellipsize_path_middle(path: &str, max_cols: usize) -> String {
     format!("{}\u{2026}{}", kept, file)
 }
 
+/// Fit a URL into `max_cols` display columns while keeping the parts that
+/// IDENTIFY it: the host and the tail of the path.
+///
+/// The scheme carries no information for the operator, so it is dropped first
+/// (`https://docs.rs/x` -> `docs.rs/x`); a trailing `/` goes too. If the result
+/// still doesn't fit, the MIDDLE of the path is elided so both the host at the
+/// head and the last segment at the tail survive — a plain head-truncation
+/// would leave `https://gith…`, which names neither the site nor the page.
+/// When even the host doesn't fit, the tail wins (`…/servers`).
+pub fn ellipsize_url(url: &str, max_cols: usize) -> String {
+    let stripped = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    // A bare host keeps its trailing slash off: "bestmcp.dev/" -> "bestmcp.dev".
+    let stripped = stripped.strip_suffix('/').unwrap_or(stripped);
+    if cols(stripped) <= max_cols {
+        return stripped.to_string();
+    }
+    ellipsize_path_middle(stripped, max_cols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +326,20 @@ mod tests {
             assert!(out.len() <= limit.min(s.len()));
             // Result is always valid UTF-8 (guaranteed by &str), and a prefix.
         }
+    }
+
+    #[test]
+    fn ellipsize_url_drops_the_scheme_and_keeps_host_plus_tail() {
+        assert_eq!(ellipsize_url("https://bestmcp.dev/", 40), "bestmcp.dev");
+        assert_eq!(
+            ellipsize_url("https://github.com/modelcontextprotocol/servers", 60),
+            "github.com/modelcontextprotocol/servers"
+        );
+        let long = "https://example.com/a/very/deeply/nested/path/final-page.html";
+        let out = ellipsize_url(long, 30);
+        assert!(cols(&out) <= 30, "over budget: {out}");
+        assert!(out.starts_with("example.com"), "host lost: {out}");
+        assert!(out.ends_with("final-page.html"), "tail lost: {out}");
     }
 
     #[test]

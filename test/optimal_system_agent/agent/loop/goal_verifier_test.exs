@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
   """
   use ExUnit.Case, async: false
 
+  alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
 
@@ -110,6 +111,32 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       state = base_state(sid) |> Map.put(:goal_verifier_stall_count, 2)
       refute GoalVerifier.needs_verification?(state)
+    end
+  end
+
+  # ── TUI-facing labels ────────────────────────────────────────────────────
+
+  describe "skeptic display labels" do
+    # The roster read
+    #   ├─ ○ goal-verifier-skeptic  You are an ADVERSARIAL, INDEPENDENT reviewer…
+    # because the orchestrator falls back to the first 80 chars of `:task` when a
+    # config carries no `:description` — and a skeptic's "task" IS its system
+    # prompt. Each skeptic must name itself instead.
+    test "every skeptic config carries a short human description, not its prompt",
+         %{session_id: sid} do
+      {configs, _result} = capture_prompts(sid, [false, false, false])
+
+      for config <- configs do
+        desc = config[:description]
+        assert is_binary(desc) and desc != "", "skeptic config has no :description"
+        assert String.length(desc) <= 40, "description is not a label: #{inspect(desc)}"
+        assert desc =~ ~r/^skeptic #\d+ · \w+$/u, "unexpected label: #{inspect(desc)}"
+        refute desc =~ "ADVERSARIAL", "prompt body leaked into the label"
+      end
+
+      # Each panel member is distinguishable in the roster.
+      descs = Enum.map(configs, & &1[:description])
+      assert length(Enum.uniq(descs)) == length(descs)
     end
   end
 
@@ -704,5 +731,501 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert_receive {:goal_verifier_event, %{phase: :start}}, 2000
       assert_receive {:goal_verifier_event, %{phase: :done, verdict: :complete, gaps: []}}, 2000
     end
+
+    test "an unparseable skeptic response never reaches the status-bar gap summary",
+         %{session_id: sid} do
+      capture_goal_verifier_events(sid)
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [
+          {:ok, "I am afraid I cannot comply with that request."},
+          {:ok, "<<<%%% garbage %%%>>>"},
+          {:error, :timeout}
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      # Still fail-closed on the VOTE — nothing vouched for completion.
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 3
+
+      assert_receive {:goal_verifier_event, %{phase: :start}}, 2000
+      assert_receive {:goal_verifier_event, %{phase: :done} = done}, 2000
+
+      # …but the user-facing summary carries NO harness diagnostics.
+      assert done.gaps == []
+
+      refute Enum.any?(done.gaps, &String.contains?(&1, "unparsable"))
+      refute Enum.any?(done.gaps, &String.contains?(&1, "skeptic failed"))
+    end
   end
+
+  # ── Lenient three-tier parsing ────────────────────────────────────────────
+
+  describe "lenient skeptic-response parsing" do
+    test "tier 1: a bare JSON verdict parses strictly", %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [
+          {:ok, ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
+          {:ok, ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
+          {:ok, ~s({"refuted": false, "off_track": false, "reason": "looks right"})}
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 2
+      assert Enum.any?(result.gaps, &String.contains?(&1, "goal asked for JSON"))
+    end
+
+    test "tier 2: JSON wrapped in prose and in a ```json fence parses via brace-slice",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      prose = """
+      Let me think about this. I read lib/exporter.ex and the goal.
+
+      {"refuted": true, "off_track": false, "reason": "the header row is dropped in lib/exporter.ex"}
+
+      That is my verdict.
+      """
+
+      fenced = """
+      ```json
+      {"refuted": true, "off_track": false, "reason": "no test covers the empty-input path"}
+      ```
+      """
+
+      stub_runner(fn _sid, _configs ->
+        [{:ok, prose}, {:ok, fenced}, {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 2
+      assert Enum.any?(result.gaps, &String.contains?(&1, "header row is dropped"))
+      assert Enum.any?(result.gaps, &String.contains?(&1, "empty-input path"))
+      # The raw fence/prose wrapper must NOT survive into the gap text.
+      refute Enum.any?(result.gaps, &String.contains?(&1, "```"))
+      refute Enum.any?(result.gaps, &String.contains?(&1, "Let me think"))
+    end
+
+    test "tier 2: a nested JSON object still parses (the old flat regex could not)",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      nested =
+        ~s({"refuted": true, "off_track": false, "reason": "missing migration", "evidence": {"file": "lib/repo.ex", "line": 12}})
+
+      stub_runner(fn _sid, _configs ->
+        [{:ok, nested}, {:ok, nested}, {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert Enum.any?(result.gaps, &String.contains?(&1, "missing migration"))
+    end
+
+    test "tier 2: a stringly-typed boolean is coerced rather than rejected",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [
+          {:ok, ~s({"refuted": "true", "off_track": "false", "reason": "the export step is stubbed"})},
+          {:ok, ~s({"refuted": "yes", "off_track": "no", "reason": "the export step is stubbed"})},
+          {:ok, ~s({"refuted": "false", "off_track": "false", "reason": "fine"})}
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 2
+      assert Enum.any?(result.gaps, &String.contains?(&1, "export step is stubbed"))
+    end
+
+    test "tier 3: pure garbage degrades to a low-confidence result, never an error",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      garbage = "!!! ###  %%%  \n\n  ??? "
+
+      stub_runner(fn _sid, _configs -> [{:ok, garbage}, {:ok, garbage}, {:ok, garbage}] end)
+
+      # The whole point: this must not raise, and must still produce a verdict.
+      {result, state} = GoalVerifier.verify(base_state(sid))
+
+      assert %GoalVerifier.Result{} = result
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 3
+      assert result.total == 3
+      assert state.goal_verifier_runs == 1
+
+      # The raw text is kept as information, honestly labelled — and the
+      # fabricated "unparsable skeptic response (fail-closed)" string is gone.
+      refute Enum.any?(result.gaps, &String.contains?(&1, "unparsable"))
+      assert Enum.all?(result.gaps, &String.contains?(&1, "unstructured review"))
+    end
+
+    test "tier 3: an empty skeptic response is handled without raising", %{session_id: sid} do
+      mark_write(sid)
+      stub_runner(fn _sid, _configs -> [{:ok, ""}, {:ok, "   "}, {:ok, ""}] end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert result.total == 3
+      refute Enum.any?(result.gaps, &String.contains?(&1, "unparsable"))
+    end
+
+    test "harness diagnostics never become model-facing gaps either", %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [{:error, :timeout}, {:error, {:crashed, :badarg}}, {:error, :timeout}]
+      end)
+
+      {result, state} = GoalVerifier.verify(base_state(sid))
+      assert result.verdict == :incomplete
+      assert result.gaps == []
+
+      # With no actionable gap the directive falls back to the honest
+      # "no structured findings" phrasing rather than echoing ":timeout".
+      {directive, _state} = GoalVerifier.build_directive(result, state)
+      refute directive.content =~ "timeout"
+      refute directive.content =~ "skeptic failed"
+      assert directive.content =~ "no structured findings"
+    end
+  end
+
+  # ── Per-skeptic timeout bound ─────────────────────────────────────────────
+
+  describe "skeptic timeout bound" do
+    test "the panel is joined with the goal-verifier bound, not the 2h subagent backstop",
+         %{session_id: sid} do
+      mark_write(sid)
+      Application.delete_env(:optimal_system_agent, :goal_verifier_panel_runner)
+
+      timeout =
+        Application.get_env(:optimal_system_agent, :goal_verifier_skeptic_timeout_ms, 120_000)
+
+      generic =
+        Application.get_env(:optimal_system_agent, :subagent_await_timeout_ms, 2 * 60 * 60 * 1000)
+
+      assert is_integer(timeout)
+      assert timeout > 0
+      assert timeout < generic, "a read-only skeptic vote must be bounded far tighter than a delegated workstream"
+    end
+  end
+
+  # ── Prompt output contract ────────────────────────────────────────────────
+
+  describe "skeptic prompt output contract" do
+    test "spells out a strict JSON shape with all three required fields", %{session_id: sid} do
+      mark_write(sid)
+      {configs, _result} = capture_prompts(sid, [false, false, false])
+
+      task = hd(configs).task
+      assert task =~ "Output contract"
+      assert task =~ ~s("refuted")
+      assert task =~ ~s("off_track")
+      assert task =~ ~s("reason")
+      assert task =~ "no markdown code fence"
+      # Concrete examples make the shape far more reliably reproduced.
+      assert task =~ ~s({"refuted": false, "off_track": false, "reason":)
+    end
+  end
+
+  # ── Triage gate (grok goal_evaluator.rs parity) ──────────────────────────
+  #
+  # The expensive panel must be UNREACHABLE except through a cheap triage call
+  # that returned `candidate_complete`. These tests assert the gate, not the
+  # panel: the panel runner is stubbed to record whether it was reached at all.
+
+  describe "triage gate" do
+    setup %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, true)
+      test_pid = self()
+
+      stub_runner(fn _sid, configs ->
+        send(test_pid, :panel_ran)
+        Enum.map(configs, fn _ -> json_result(false) end)
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :goal_verifier_triage_runner)
+        Application.delete_env(:optimal_system_agent, :goal_verifier_trivial_max_writes)
+        Application.delete_env(:optimal_system_agent, :goal_verifier_trivial_max_iterations)
+        Application.delete_env(:optimal_system_agent, :goal_verifier_blocker_streak_threshold)
+        GoalTracker.reset(sid)
+      end)
+
+      :ok
+    end
+
+    defp stub_triage(fun), do: Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fun)
+
+    defp triage_json(status, opts \\ []) do
+      key = Keyword.get(opts, :blocker_key, "")
+      reason = Keyword.get(opts, :reason, "because")
+
+      {:ok,
+       ~s({"status": "#{status}", "reason": #{Jason.encode!(reason)}, "blocker_key": #{Jason.encode!(key)}})}
+    end
+
+    # A turn big enough that only the TRIAGE verdict decides the outcome:
+    # anchored goal (so `trivial_turn?` is false), several distinct writes.
+    defp complex_state(sid) do
+      GoalTracker.start(sid, "ship the widget exporter end to end")
+      mark_write(sid, "lib/widget/exporter.ex")
+      mark_write(sid, "lib/widget/router.ex")
+      mark_write(sid, "test/widget/exporter_test.exs")
+
+      sid
+      |> base_state()
+      |> Map.put(:iteration, 8)
+      |> Map.put(:working_dir, isolated_clean_repo())
+    end
+
+    test "a trivial turn (one write) never reaches triage OR the panel", %{session_id: sid} do
+      GoalTracker.start(sid, "install the MCP server")
+      mark_write(sid, ".osa/mcp.json")
+
+      stub_triage(fn _state -> flunk("triage must not be called for a trivial turn") end)
+
+      state =
+        sid |> base_state() |> Map.put(:iteration, 6) |> Map.put(:working_dir, isolated_clean_repo())
+
+      assert GoalVerifier.trivial_turn?(state)
+      assert GoalVerifier.skip_reason(state) == :trivial
+
+      out = GoalVerifier.maybe_gate(state)
+
+      refute_received :panel_ran
+      assert out.messages == state.messages, "a skipped boundary must inject no directive"
+    end
+
+    test "a one-round question turn is trivial by iteration count", %{session_id: sid} do
+      GoalTracker.start(sid, "what does this module do?")
+      mark_write(sid, "a.ex")
+      mark_write(sid, "b.ex")
+      mark_write(sid, "c.ex")
+
+      state = sid |> base_state() |> Map.put(:iteration, 1)
+      assert GoalVerifier.trivial_turn?(state)
+      assert GoalVerifier.skip_reason(state) == :trivial
+    end
+
+    test "no goal anywhere skips before triage", %{session_id: sid} do
+      mark_write(sid, "a.ex")
+      mark_write(sid, "b.ex")
+      mark_write(sid, "c.ex")
+
+      state = sid |> base_state() |> Map.put(:iteration, 8)
+      assert GoalVerifier.skip_reason(state) == :no_goal
+    end
+
+    test "a complex turn is NOT trivial and does reach triage", %{session_id: sid} do
+      state = complex_state(sid)
+      refute GoalVerifier.trivial_turn?(state)
+      assert GoalVerifier.skip_reason(state) == nil
+    end
+
+    test "triage=continue stops before the panel", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("continue") end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      refute_received :panel_ran
+      assert out.messages == state.messages
+      assert Map.get(out, :goal_verifier_runs, 0) == 0
+    end
+
+    test "triage=candidate_complete DOES run the panel", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("candidate_complete") end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      assert_received :panel_ran
+      assert out.goal_verifier_runs == 1
+    end
+
+    test "a refuting panel injects exactly one directive and does not re-enter", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("candidate_complete") end)
+
+      stub_runner(fn _sid, configs ->
+        Enum.map(configs, fn _ -> json_result(true, reason: "lib/widget/exporter.ex writes CSV not JSON") end)
+      end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      injected = out.messages -- state.messages
+      assert length(injected) == 1
+      assert hd(injected).role == "system"
+      assert hd(injected).content =~ "GOAL VERIFIER"
+    end
+
+    # ── blocker_key streak ─────────────────────────────────────────────────
+
+    test "the same blocker three rounds running auto-pauses", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key", reason: "no ANTHROPIC_API_KEY") end)
+
+      s1 = GoalVerifier.maybe_gate(state)
+      assert s1.goal_verifier_blocker_streak == 1
+      refute s1.goal_verifier_paused
+      assert s1.messages == state.messages
+
+      s2 = GoalVerifier.maybe_gate(s1)
+      assert s2.goal_verifier_blocker_streak == 2
+      refute s2.goal_verifier_paused
+      assert s2.messages == state.messages
+
+      s3 = GoalVerifier.maybe_gate(s2)
+      assert s3.goal_verifier_blocker_streak == 3
+      assert s3.goal_verifier_paused
+      pause = List.last(s3.messages)
+      assert pause.content =~ "AUTO-PAUSE"
+      assert pause.content =~ "missing_api_key"
+
+      # And the latch holds: a further boundary is a no-op, not a second pause.
+      s4 = GoalVerifier.maybe_gate(s3)
+      assert s4.messages == s3.messages
+
+      refute_received :panel_ran
+    end
+
+    test "a DIFFERENT blocker resets the streak", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      s1 = GoalVerifier.maybe_gate(state)
+      s2 = GoalVerifier.maybe_gate(s1)
+      assert s2.goal_verifier_blocker_streak == 2
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "port_in_use") end)
+      s3 = GoalVerifier.maybe_gate(s2)
+      assert s3.goal_verifier_blocker_streak == 1
+      refute s3.goal_verifier_paused
+    end
+
+    test "blocker keys are normalized so rewording does not reset the streak", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "Missing API Key") end)
+      s1 = GoalVerifier.maybe_gate(state)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      s2 = GoalVerifier.maybe_gate(s1)
+
+      assert s2.goal_verifier_blocker_streak == 2
+    end
+
+    test "a non-blocked triage clears an in-flight blocker streak", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      s1 = GoalVerifier.maybe_gate(state)
+      assert s1.goal_verifier_blocker_streak == 1
+
+      stub_triage(fn _ -> triage_json("continue") end)
+      s2 = GoalVerifier.maybe_gate(s1)
+      assert s2.goal_verifier_blocker_streak == 0
+      assert s2.goal_verifier_blocker_key == nil
+    end
+
+    # ── Triage failure — FAIL-OPEN (defer), never fail-closed (panel) ───────
+    #
+    # A triage that cannot run means the provider that just drove the turn is
+    # unhealthy — every skeptic would fail too, and a panel of failures is a
+    # synthetic majority-refute: an `:incomplete` gate that loops the agent at
+    # 3x the cost for zero information. So the gate DEFERS. It never asserts
+    # completion (GoalTracker is untouched, so `reverify_due?/1` fires again at
+    # the next boundary) and the panel's own fail-closed vote is unchanged
+    # wherever the panel actually runs.
+
+    test "a triage error skips the panel rather than running it", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> {:error, :provider_down} end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      refute_received :panel_ran
+      assert out.messages == state.messages
+      assert Map.get(out, :goal_verifier_runs, 0) == 0
+    end
+
+    test "a triage that raises is caught and skips", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> raise "boom" end)
+
+      assert GoalVerifier.maybe_gate(state).messages == state.messages
+      refute_received :panel_ran
+    end
+
+    test "a triage that hangs is bounded and skips", %{session_id: sid} do
+      state = complex_state(sid)
+      Application.put_env(:optimal_system_agent, :goal_verifier_triage_timeout_ms, 80)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :goal_verifier_triage_timeout_ms) end)
+
+      stub_triage(fn _ -> Process.sleep(5_000) end)
+
+      assert GoalVerifier.maybe_gate(state).messages == state.messages
+      refute_received :panel_ran
+    end
+
+    test "unparsable triage output skips rather than guessing candidate_complete", %{session_id: sid} do
+      state = complex_state(sid)
+      stub_triage(fn _ -> {:ok, "I'm sorry, I can't help with that."} end)
+
+      assert GoalVerifier.maybe_gate(state).messages == state.messages
+      refute_received :panel_ran
+    end
+
+    test "triage output wrapped in prose/fences is still read", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ ->
+        {:ok, "Here you go:\n```json\n{\"status\":\"candidate_complete\",\"reason\":\"looks done\",\"blocker_key\":\"\"}\n```\nHope that helps."}
+      end)
+
+      GoalVerifier.maybe_gate(state)
+      assert_received :panel_ran
+    end
+
+    # ── Cost shape ─────────────────────────────────────────────────────────
+
+    test "the triage prompt is compact and carries no diff", %{session_id: sid} do
+      state = complex_state(sid)
+      messages = GoalVerifier.triage_messages(state)
+
+      text = Enum.map_join(messages, "\n", & &1.content)
+
+      # The panel gets the diff; triage must not — that is the cost difference.
+      refute text =~ "```diff"
+      refute text =~ "Accumulated diff"
+
+      assert text =~ "candidate_complete"
+      assert text =~ "blocker_key"
+      assert text =~ "## Goal"
+
+      # Hard cost ceiling. The skeptic panel's prompts run ~850 tokens EACH
+      # (×3 subagent sessions); triage must stay an order of magnitude below one
+      # of them or it is just a second tax.
+      assert div(byte_size(text), 4) < 1_200,
+             "triage prompt is #{div(byte_size(text), 4)} est. tokens — no longer cheap"
+    end
+  end
+
 end

@@ -21,9 +21,15 @@ defmodule OptimalSystemAgent.Peer.Review do
   `{artifact_id, review_record}`.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   require Logger
 
   @reviews_table :osa_peer_reviews
+
+  # Row cap — a delivered verdict is history and was never deleted. See
+  # Infra.BoundedTable.
+  @max_rows 1_000
 
   # ---------------------------------------------------------------------------
   # Structs
@@ -103,7 +109,7 @@ defmodule OptimalSystemAgent.Peer.Review do
       requested_at: DateTime.utc_now()
     }
 
-    :ets.insert(@reviews_table, {artifact_id, review})
+    BoundedTable.insert(@reviews_table, artifact_id, review, max: @max_rows)
 
     # Notify the reviewer via PubSub
     Phoenix.PubSub.broadcast(
@@ -160,7 +166,7 @@ defmodule OptimalSystemAgent.Peer.Review do
             summary: Map.get(review_attrs, :summary)
         }
 
-        :ets.insert(@reviews_table, {artifact_id, updated})
+        BoundedTable.insert(@reviews_table, artifact_id, updated, max: @max_rows)
 
         # Notify the requesting agent of the verdict
         Phoenix.PubSub.broadcast(

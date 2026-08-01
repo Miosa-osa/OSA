@@ -1,3 +1,4 @@
+use crate::app::assistant_stream::Finalize;
 use crate::app::state::AppState;
 use crate::event::backend::BackendEvent;
 use crate::event::Event;
@@ -177,20 +178,23 @@ impl App {
         });
     }
 
+    /// Apply the turn's terminal `agent_response`.
+    ///
+    /// `message_id` identifies which assistant message this finalizes (see
+    /// `app::assistant_stream`). Two rules the old code got wrong:
+    ///
+    /// * the backend's text REPLACES that message's streamed accumulation —
+    ///   it is the authoritative, post-processed version and was previously
+    ///   discarded in favour of the raw deltas;
+    /// * finalizing the same message twice renders nothing the second time,
+    ///   so an SSE replay or a second code path ending the same turn cannot
+    ///   append the answer a second time.
     pub(super) fn handle_agent_response(
         &mut self,
         response: String,
         signal: Option<crate::client::types::Signal>,
+        message_id: Option<String>,
     ) {
-        // If nothing is in the foreground (state is Idle) yet a background turn
-        // is still running, this response belongs to that backgrounded turn —
-        // its output is about to land in scrollback, so retire the handle and
-        // update the running count. (Foregrounded turns were already removed
-        // from `bg_tasks` by `foreground_task`, so this can't double-count.)
-        if !self.state.is_processing() && self.bg_running_count() > 0 {
-            self.complete_background_task();
-        }
-
         // Truncate if too long
         let display_response = if response.len() > super::MAX_MESSAGE_SIZE {
             let truncated = truncate_str(&response, super::MAX_MESSAGE_SIZE);
@@ -202,6 +206,43 @@ impl App {
         } else {
             response
         };
+
+        // An interrupt marker is a synthetic control string, not assistant
+        // prose — it never finalizes a message, so it bypasses the buffer
+        // handover below and only drains whatever had streamed.
+        let interrupted = is_interrupt_marker(&display_response);
+
+        // Hand the buffer over to the backend's text. This is the ONE place a
+        // streamed assistant message becomes final, and it happens BEFORE any
+        // other state is touched so a repeat delivery is a true no-op — it must
+        // not re-run turn teardown, re-fire /goal continuation or re-drain the
+        // message queue either.
+        let finalized = if interrupted {
+            None
+        } else {
+            match self
+                .assistant_stream
+                .finalize(message_id.as_deref(), display_response.clone())
+            {
+                Finalize::Duplicate => {
+                    debug!(
+                        "Ignoring repeat agent_response for message {:?}",
+                        message_id
+                    );
+                    return;
+                }
+                Finalize::Emit(text) => Some(text),
+            }
+        };
+
+        // If nothing is in the foreground (state is Idle) yet a background turn
+        // is still running, this response belongs to that backgrounded turn —
+        // its output is about to land in scrollback, so retire the handle and
+        // update the running count. (Foregrounded turns were already removed
+        // from `bg_tasks` by `foreground_task`, so this can't double-count.)
+        if !self.state.is_processing() && self.bg_running_count() > 0 {
+            self.complete_background_task();
+        }
 
         self.chat.clear_streaming();
         // Ensure any completed tool call is committed to scrollback before the
@@ -216,8 +257,8 @@ impl App {
         // it as a styled dim line instead of raw agent text — and when the
         // turn produced NO output at all, restore the interrupted prompt into
         // the composer for editing (CC auto-restore on user-cancel).
-        if is_interrupt_marker(&display_response) {
-            let remaining = std::mem::take(&mut self.stream_buf);
+        if interrupted {
+            let remaining = self.assistant_stream.take();
             let had_output = self.agent_header_sent || !remaining.trim().is_empty();
             if !remaining.trim().is_empty() {
                 if self.agent_header_sent {
@@ -236,41 +277,25 @@ impl App {
                     self.input.insert_str(&prev);
                 }
             }
-        } else if self.agent_header_sent {
-            // The header was already emitted earlier this turn (either by a
-            // ToolCallStart flush or by marking the first tool call). Flush
-            // any remaining buffered streaming text as a header-less
-            // continuation so we never repeat the "◈ OSA" header.
+        } else if let Some(final_text) = finalized {
+            // `final_text` is the backend's message, which has already REPLACED
+            // the streamed accumulation (falling back to it only when the final
+            // carried no text). It is never the two concatenated: appending the
+            // final onto the deltas is exactly what welded a superseded answer
+            // to its replacement.
             //
-            // If stream_buf is empty (the LLM produced no trailing text after
-            // the last tool call) but display_response has content, use
-            // display_response as the continuation rather than silently
-            // dropping the final answer.
-            let remaining = std::mem::take(&mut self.stream_buf);
-            let final_text = if !remaining.is_empty() {
-                remaining
-            } else if !display_response.trim().is_empty() {
-                display_response
-            } else {
-                String::new()
-            };
-            if !final_text.is_empty() {
-                self.chat.add_agent_continuation(&final_text);
-            }
-            // Do NOT reset agent_header_sent here. It is reset only when the user
-            // submits a new prompt (submit_prompt). Resetting it per response
-            // meant a turn that produced more than one agent_response event
-            // (e.g. text → subagent/tool → more text) emitted a second "◈ OSA"
-            // header, visually splitting one answer into chunks. Keeping it set
-            // makes the rest of the turn render as header-less continuations.
-        } else {
-            // First agent output of this turn — show it under the "◈ OSA"
-            // header, then mark the header as sent so any further output this
-            // turn (continued text after a tool/subagent) flows underneath the
-            // same header instead of starting a new block.
-            self.chat
-                .add_agent_message(&display_response, signal.as_ref());
-            self.agent_header_sent = true;
+            // `agent_header_sent` is deliberately NOT reset afterwards: it is
+            // reset only when the user submits a new prompt (submit_prompt).
+            // Resetting it per response meant a turn that produced more than one
+            // agent_response event (e.g. text → subagent/tool → more text)
+            // emitted a second "◈ OSA" header, visually splitting one answer
+            // into chunks.
+            crate::app::assistant_stream::commit_assistant_block(
+                &mut self.chat,
+                &mut self.agent_header_sent,
+                &final_text,
+                signal.as_ref(),
+            );
         }
 
         // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it
@@ -282,30 +307,38 @@ impl App {
         // visibly jump backwards.
         self.last_turn_client_elapsed_secs = self.activity.elapsed_secs();
 
-        // Clear streaming state
-        self.stream_buf.clear();
+        // Clear streaming state. `clear_buf`, NOT `reset`: this turn's
+        // finalization must stay on record so a duplicate agent_response
+        // arriving after it (SSE replay, a second terminal code path) is still
+        // recognised as a repeat. The record is dropped when the next turn
+        // opens (`submit_prompt` / `finalize_turn_state`).
+        self.assistant_stream.clear_buf();
         self.thinking_buf.clear();
         self.thinking_box.clear();
         self.activity.stop();
         self.status.set_active(false);
         self.cancelled = false;
 
-        // Flush any still-pending plan snapshot to scrollback, then retire the live
-        // checklist for this turn.
+        // Freeze the plan into scrollback, then retire the live checklist for this
+        // turn. This is the ONE AND ONLY place a plan cell is pushed to history:
+        // one frozen copy per turn, showing the plan's FINAL state.
         //
-        // Two bugs this closes: (1) the snapshot is emitted from a ~400ms tick
-        // debounce, so a plan updated near the end of a turn could land in history
-        // AFTER the "Worked for Ns" recap — flushing synchronously here makes the
-        // ordering deterministic; (2) the checklist was never cleared at turn end,
-        // and since it draws into the streaming band (which collapses to 0 rows when
-        // idle) it silently reappeared and painted over the NEXT turn's reply the
-        // moment that band reopened.
+        // It used to also flush from a settled ~400ms tick debounce after every
+        // task mutation. `snapshot_if_changed` deduped identical states, but a
+        // 3-step plan legitimately passes through 7 distinct states (create, then
+        // start+complete per step) — so the transcript got 7-8 near-identical
+        // cells for three tasks, alternating "Plan n/3" / "Updated plan n/3" as
+        // the header tracked whether a step happened to be running. The live
+        // checklist band shows progress in real time; history only needs the
+        // outcome.
+        //
+        // Clearing here also closes an older bug: the checklist was never retired
+        // at turn end, so it silently reappeared over the NEXT turn's reply.
         let snap_w = self.width.saturating_sub(2).max(20);
         if let Some((body, plain)) = self.task_checklist.snapshot_if_changed(snap_w) {
             self.chat.add_plan_snapshot(body, plain);
         }
         self.task_checklist.clear();
-        self.plan_snapshot_debounce = 0;
 
         // Transition back to idle
         if self.state.is_processing() {
@@ -586,7 +619,9 @@ impl App {
         // never bleed into unrelated work (transient, scoped to the fan-out).
         self.agents.clear_scratchpad();
         self.processing_start = Some(std::time::Instant::now());
-        self.stream_buf.clear();
+        // Fresh turn — drop the partial text AND the previous turn's
+        // finalization record, so an identical answer this turn still renders.
+        self.assistant_stream.reset();
         self.thinking_buf.clear();
         self.agent_header_sent = false;
         // Fresh turn — no foreground shell in flight yet. Guards against a stale
@@ -1061,6 +1096,27 @@ impl App {
         });
     }
 
+    /// Resolve a launch-time `osa resume <ref>` before switching to it.
+    ///
+    /// `switch_session` takes whatever id it is handed on faith, and
+    /// `GET /:id/messages` answers 200 + `[]` for an id that was never a
+    /// session — so resuming a typo used to be indistinguishable from resuming
+    /// an empty conversation. Going through `/sessions/resolve` first turns
+    /// "unknown id" and "ambiguous prefix" into explicit errors, and buys
+    /// git-style short-prefix resume for free.
+    pub(crate) fn resolve_and_switch_session(&mut self, session_ref: &str) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let session_ref = session_ref.to_string();
+        tokio::spawn(async move {
+            let event = match client.resolve_session(&session_ref).await {
+                Ok(id) => BackendEvent::SessionResolved(Ok(id)),
+                Err(e) => BackendEvent::SessionResolved(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
     /// Directory-scoped resume for the current working folder (used by /continue):
     /// POST /api/v1/sessions with { working_dir }, then switch to the returned
     /// session and pull its transcript back in via the SessionCreated handler.
@@ -1243,7 +1299,7 @@ impl App {
         self.session_id = session_id.to_string();
         self.chat.clear();
         self.tasks.clear();
-        self.stream_buf.clear();
+        self.assistant_stream.reset();
         self.thinking_buf.clear();
         self.pending_tool_args.clear();
         self.agent_header_sent = false;

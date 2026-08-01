@@ -62,20 +62,31 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     # Live in-registry sessions that haven't persisted any turns yet still need
     # to appear so the TUI can select them. created_at is kept as a non-null
     # string to satisfy the client's SessionInfo contract.
+    # Ordered NEWEST FIRST. `known_runtime_ids` comes from a Registry select and
+    # an `:ets.tab2list/1`, both of which return arbitrary order — so without an
+    # explicit sort, page 1 of this listing was arbitrary too and a session
+    # created a moment ago could sort behind every older live session and not
+    # appear on the first page of its own listing. `track_session/2` records an
+    # ISO8601 `:created_at`, which sorts lexicographically, so use it; ids with
+    # no tracked metadata sort last rather than being dropped.
     live_only =
       known_runtime_ids
       |> Enum.reject(&MapSet.member?(known_ids, &1))
       |> Enum.map(fn sid ->
+        meta = SessionManager.tracked_session_meta(sid) || %{}
+        created_at = Map.get(meta, :created_at) || ""
+
         %{
           id: sid,
           title: "",
           message_count: 0,
-          created_at: "",
+          created_at: created_at,
           last_active: "",
-          working_dir: nil,
+          working_dir: Map.get(meta, :working_dir),
           alive: sid in live_ids
         }
       end)
+      |> Enum.sort_by(& &1.created_at, :desc)
 
     sessions = live_only ++ rich_sessions
 
@@ -164,6 +175,51 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     limit = parse_int(conn.params["limit"], 50)
     sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
     json(conn, 200, %{sessions: sessions})
+  end
+
+  # ── GET /sessions/resolve?id=<ref> ─────────────────────────────────
+  #
+  # Resolve a user-typed session reference (a full id, or an unambiguous
+  # PREFIX of one, git-short-SHA style) to exactly one real session id.
+  #
+  # This exists so `osa resume <id>` can FAIL LOUDLY. GET /:id/messages answers
+  # 200 with an empty list for an id that was never a session, so resuming a
+  # typo used to look identical to resuming an empty conversation. Every failure
+  # mode here is an explicit non-2xx the client must handle:
+  #
+  #   200 {id}                         exactly one match
+  #   404 session_not_found            nothing matched
+  #   409 session_ref_ambiguous        a prefix matching several sessions
+  #
+  # Declared ABOVE the `/:id/*` routes: Plug matches in source order, so
+  # "resolve" would otherwise be swallowed as an `:id`.
+  get "/resolve" do
+    ref = conn.params["id"] || ""
+
+    case OptimalSystemAgent.Runtime.SessionResolver.resolve(ref) do
+      {:ok, id} ->
+        json(conn, 200, %{id: id, ref: ref})
+
+      {:error, :not_found} ->
+        json_error(
+          conn,
+          404,
+          "session_not_found",
+          OptimalSystemAgent.Runtime.SessionResolver.explain(ref, :not_found)
+        )
+
+      {:error, {:ambiguous, candidates} = reason} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(
+          409,
+          Jason.encode!(%{
+            error: "session_ref_ambiguous",
+            details: OptimalSystemAgent.Runtime.SessionResolver.explain(ref, reason),
+            candidates: candidates
+          })
+        )
+    end
   end
 
   get "/:id/export" do

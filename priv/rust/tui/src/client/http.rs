@@ -14,6 +14,48 @@ use super::types::*;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Pull the backend's human-readable `details` out of an API error string.
+///
+/// `ApiClient::get` formats non-2xx as `HTTP 404 Not Found from /path: {json}`,
+/// which is the right thing for a log line and the wrong thing to put in front
+/// of a user. When the embedded body carries a `details` (or `message`) field,
+/// that sentence is returned on its own; otherwise the original string is
+/// passed through unchanged so nothing is ever lost.
+pub(crate) fn extract_error_details(raw: &str) -> String {
+    let Some(start) = raw.find('{') else {
+        return raw.to_string();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[start..]) else {
+        return raw.to_string();
+    };
+    json.get("details")
+        .or_else(|| json.get("message"))
+        .and_then(|d| d.as_str())
+        .filter(|d| !d.is_empty())
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// Percent-encode a value for use in a query string.
+///
+/// Hand-rolled rather than pulling in a crate: the only caller is the session
+/// resolver, whose input is a user-typed session reference. Unreserved
+/// characters (RFC 3986 §2.3) pass through, everything else — including the
+/// `&`/`=`/`#`/space that would otherwise let a typo restructure the URL — is
+/// escaped.
+pub(crate) fn percent_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{:02X}", other)),
+        }
+    }
+    out
+}
+
 pub struct ApiClient {
     http: HttpClient,
     base_url: String,
@@ -427,6 +469,39 @@ impl ApiClient {
     }
 
     /// GET /api/v1/sessions/:id/messages
+    /// GET /api/v1/sessions/resolve?id=<ref> — turn a user-typed session
+    /// reference (full id, or an unambiguous PREFIX of one) into the one real
+    /// session id it names.
+    ///
+    /// Deliberately surfaces non-2xx as an `Err` carrying the backend's own
+    /// explanation. `get_session_messages` answers 200 + `[]` for an id that
+    /// never existed, so resolving through THIS call is what makes a bad
+    /// `osa resume <id>` fail loudly instead of opening a blank conversation
+    /// that looks exactly like a healthy one.
+    pub async fn resolve_session(&self, session_ref: &str) -> Result<String> {
+        let resp = match self
+            .get(&format!(
+                "/api/v1/sessions/resolve?id={}",
+                percent_encode_query(session_ref)
+            ))
+            .await
+        {
+            Ok(resp) => resp,
+            // `get` turns any non-2xx into `HTTP <status> from <path>: <body>`.
+            // That is the right default everywhere else, but this message is
+            // shown to the USER on a failed `osa resume`, so unwrap the
+            // backend's own explanation out of it.
+            Err(e) => anyhow::bail!("{}", extract_error_details(&e.to_string())),
+        };
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        match body.get("id").and_then(|i| i.as_str()) {
+            Some(id) if !id.is_empty() => Ok(id.to_string()),
+            // A 200 with no id would be a backend contract break; treat it as a
+            // failure rather than switching to an empty string session.
+            _ => anyhow::bail!("session resolve returned no id for {:?}", session_ref),
+        }
+    }
+
     pub async fn get_session_messages(&self, id: &str) -> Result<Vec<SessionMessage>> {
         let resp = self.get(&format!("/api/v1/sessions/{}/messages", id)).await?;
         let wrapper: serde_json::Value = resp.json().await?;
@@ -1575,5 +1650,112 @@ mod health_check_retry_tests {
             request_line, "POST /api/v1/sessions/session-abc-123/provider HTTP/1.1",
             "switch_session_model must hit the session-scoped route, not the global /models/switch"
         );
+    }
+
+    /// Serve one request with an arbitrary status + JSON body, reporting the
+    /// request line the client actually sent.
+    async fn serve_once(status_line: &'static str, body: &'static str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+        let (line_tx, line_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = line_tx.send(request.lines().next().unwrap_or("").to_string());
+                let resp = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (base_url, line_rx)
+    }
+
+    // === `osa resume <id>` resolution ===
+
+    #[tokio::test]
+    async fn resolve_session_returns_the_full_id_and_hits_the_resolve_route() {
+        let (base_url, line_rx) =
+            serve_once("200 OK", "{\"id\":\"session-1785-abcdef\",\"ref\":\"session-1785\"}").await;
+        let client = make_client(base_url);
+
+        let resolved = client.resolve_session("session-1785").await;
+        assert_eq!(resolved.unwrap(), "session-1785-abcdef");
+
+        let line = line_rx.await.expect("server observed a request");
+        assert_eq!(line, "GET /api/v1/sessions/resolve?id=session-1785 HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_fails_loudly_on_an_unknown_id() {
+        // THE regression this endpoint exists for: a 404 must surface as an
+        // Err carrying the backend's explanation, never as an empty session.
+        let (base_url, _rx) = serve_once(
+            "404 Not Found",
+            "{\"error\":\"session_not_found\",\"details\":\"No session matches \\\"nope\\\".\"}",
+        )
+        .await;
+        let client = make_client(base_url);
+
+        let err = client.resolve_session("nope").await.unwrap_err();
+        assert!(err.to_string().contains("No session matches"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_session_fails_loudly_on_an_ambiguous_prefix() {
+        let (base_url, _rx) = serve_once(
+            "409 Conflict",
+            "{\"error\":\"session_ref_ambiguous\",\"details\":\"matches 2 sessions. Use more characters.\",\"candidates\":[\"a\",\"b\"]}",
+        )
+        .await;
+        let client = make_client(base_url);
+
+        let err = client.resolve_session("ses").await.unwrap_err();
+        assert!(err.to_string().contains("Use more characters"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_session_rejects_a_200_with_no_id() {
+        // A contract break must not degrade into switching to an empty-string
+        // session id, which would look exactly like a fresh conversation.
+        let (base_url, _rx) = serve_once("200 OK", "{\"ref\":\"x\"}").await;
+        let client = make_client(base_url);
+        assert!(client.resolve_session("x").await.is_err());
+    }
+
+    #[test]
+    fn error_details_are_unwrapped_for_the_user() {
+        assert_eq!(
+            extract_error_details(
+                r#"HTTP 404 Not Found from /api/v1/sessions/resolve?id=x: {"error":"session_not_found","details":"No session matches \"x\"."}"#
+            ),
+            r#"No session matches "x"."#
+        );
+    }
+
+    #[test]
+    fn error_details_pass_through_when_there_is_nothing_to_unwrap() {
+        assert_eq!(extract_error_details("connection refused"), "connection refused");
+        // Valid JSON with no details field: keep the full context.
+        let raw = r#"HTTP 500 from /x: {"error":"boom"}"#;
+        assert_eq!(extract_error_details(raw), raw);
+        // Not JSON at all after the brace: keep the full context.
+        let raw = "HTTP 502 from /x: {not json";
+        assert_eq!(extract_error_details(raw), raw);
+    }
+
+    #[test]
+    fn query_encoding_escapes_everything_that_could_restructure_the_url() {
+        assert_eq!(percent_encode_query("session-1785_abc.def~x"), "session-1785_abc.def~x");
+        assert_eq!(percent_encode_query("a&b=c"), "a%26b%3Dc");
+        assert_eq!(percent_encode_query("a b"), "a%20b");
+        assert_eq!(percent_encode_query("a#b"), "a%23b");
     }
 }

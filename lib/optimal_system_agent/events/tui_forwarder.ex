@@ -110,6 +110,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
        questions: [
          %{
            text: question,
+           header: get(data, :header),
            multi_select: false,
            options: Enum.map(List.wrap(options), &survey_option/1),
            skippable: true

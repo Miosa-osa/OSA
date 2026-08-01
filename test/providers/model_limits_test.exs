@@ -5,8 +5,17 @@ defmodule OptimalSystemAgent.Providers.ModelLimitsTest do
 
   describe "max_output/1" do
     test "reads the catalog output limit for a known model" do
-      assert ModelLimits.max_output("claude-sonnet-4-6") == 64_000
+      # Sonnet 4.6's published max output is 128k. The bundled models.dev
+      # snapshot says 64k, and it used to win — halving the ceiling of every
+      # response. Providers.AnthropicModels is now consulted first.
+      assert ModelLimits.max_output("claude-sonnet-4-6") == 128_000
       assert ModelLimits.max_output("gpt-4o") == 16_384
+    end
+
+    test "the vendor catalog modules win over the bundled models.dev snapshot" do
+      assert ModelLimits.max_output("claude-opus-5") == 128_000
+      assert ModelLimits.max_output("claude-haiku-4-5") == 64_000
+      assert ModelLimits.max_output("gpt-5.6-terra") == 128_000
     end
 
     test "returns nil for an unknown model with no static fallback" do

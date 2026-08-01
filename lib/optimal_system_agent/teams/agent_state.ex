@@ -66,41 +66,54 @@ defmodule OptimalSystemAgent.Teams.AgentState do
   # Persistence — ETS helpers
   # ---------------------------------------------------------------------------
 
-  @doc "Write an AgentState into the team's agents ETS table."
+  # NOTE: these all address the ONE shared `:osa_team_agents` table with a
+  # `{team_id, agent_id}` composite key. It used to be a per-team named table
+  # whose name was minted from the team id — one permanently un-collectable atom
+  # per team. See `TableRegistry`'s moduledoc.
+
+  @doc "Write an AgentState into the shared agents ETS table."
   @spec put(String.t(), t()) :: :ok
   def put(team_id, %__MODULE__{agent_id: agent_id} = state) do
-    :ets.insert(TableRegistry.agents_table(team_id), {agent_id, state})
+    TableRegistry.ensure_tables(team_id)
+    :ets.insert(TableRegistry.agents_table(), {TableRegistry.agent_key(team_id, agent_id), state})
     :ok
   rescue
     _ -> :ok
   end
 
-  @doc "Fetch an AgentState from the team's agents ETS table."
+  @doc "Fetch an AgentState from the shared agents ETS table."
   @spec get(String.t(), String.t()) :: t() | nil
   def get(team_id, agent_id) do
-    case :ets.lookup(TableRegistry.agents_table(team_id), agent_id) do
-      [{^agent_id, state}] -> state
-      [] -> nil
+    key = TableRegistry.agent_key(team_id, agent_id)
+
+    case :ets.lookup(TableRegistry.agents_table(), key) do
+      [{^key, state}] -> state
+      _ -> nil
     end
   rescue
     _ -> nil
   end
 
-  @doc "Delete an AgentState from the team's agents ETS table."
+  @doc "Delete an AgentState from the shared agents ETS table."
   @spec delete(String.t(), String.t()) :: :ok
   def delete(team_id, agent_id) do
-    :ets.delete(TableRegistry.agents_table(team_id), agent_id)
+    :ets.delete(TableRegistry.agents_table(), TableRegistry.agent_key(team_id, agent_id))
     :ok
   rescue
     _ -> :ok
   end
 
-  @doc "List all AgentState records for the given team."
+  @doc """
+  List all AgentState records for the given team.
+
+  Selects on the key's team half rather than dumping the table, so one team's
+  listing never sees another's rows now that storage is shared.
+  """
   @spec list(String.t()) :: [t()]
   def list(team_id) do
-    TableRegistry.agents_table(team_id)
-    |> :ets.tab2list()
-    |> Enum.map(fn {_id, state} -> state end)
+    TableRegistry.agents_table()
+    |> :ets.match({{team_id, :_}, :"$1"})
+    |> Enum.map(fn [state] -> state end)
   rescue
     _ -> []
   end

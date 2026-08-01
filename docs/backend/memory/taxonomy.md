@@ -89,7 +89,7 @@ The `injection_context` struct carries the current session state used to filter 
 # MiosaMemory.Injector.injection_context()
 %{
   session_id:   "sess-abc123",
-  working_dir:  "/Users/rhl/projects/OptimalSystemAgent",
+  working_dir:  "/home/user/projects/OptimalSystemAgent",
   current_query: "How do I configure the connection pool?",
   token_budget: 2000
 }

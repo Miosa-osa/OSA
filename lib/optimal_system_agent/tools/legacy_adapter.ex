@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Tools.LegacyAdapter do
 
   require Logger
 
+  alias OptimalSystemAgent.Permissions.AskFlow
   alias OptimalSystemAgent.Tools.UseContext
 
   @warn_once_table :osa_legacy_adapter_warned
@@ -176,11 +177,25 @@ defmodule OptimalSystemAgent.Tools.LegacyAdapter do
       {:deny, reason} ->
         {:error, "Permission denied: #{reason}"}
 
-      {:ask, _prompt} ->
-        # Phase 4 will wire the interactive ask flow (Tool.ts requestPrompt).
-        {:error, "Permission ask flow not yet wired"}
+      # The MIDDLE safety tier (`curl | sh`, `git push --force`, a write under
+      # /etc). Park on the same PermissionBroker round-trip the agent loop
+      # uses; a decline comes back as a NON-FATAL, model-readable refusal
+      # (`ToolError.user_decision?/1` recognises the wording) so the turn
+      # continues instead of dying on an internal error string. The VALIDATED
+      # input is what runs on approval — the same value the `{:allow, _}`
+      # branch would have executed.
+      {:ask, prompt, valid_input} ->
+        case AskFlow.request(mod_name(mod), valid_input, ctx, ask_reason(prompt)) do
+          :allow -> mod.execute(valid_input, ctx)
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
+
+  defp ask_reason(prompt) when is_binary(prompt), do: prompt
+  defp ask_reason(_), do: nil
+
+  defp mod_name(mod), do: safe_call(mod, :name, 0, inspect(mod))
 
   defp validate_then_check(mod, input, ctx) do
     validate_fn =
@@ -194,9 +209,19 @@ defmodule OptimalSystemAgent.Tools.LegacyAdapter do
         else: fn i, _c -> {:allow, i} end
 
     case validate_fn.(input, ctx) do
-      {:ok, valid} -> check_fn.(valid, ctx)
-      {:error, msg, code} -> {:error, msg, code}
-      other -> other
+      {:ok, valid} ->
+        # Carry the validated input out with an `:ask` so the approval path
+        # executes exactly what was checked, not the raw arguments.
+        case check_fn.(valid, ctx) do
+          {:ask, prompt} -> {:ask, prompt, valid}
+          other -> other
+        end
+
+      {:error, msg, code} ->
+        {:error, msg, code}
+
+      other ->
+        other
     end
   end
 

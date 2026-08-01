@@ -31,7 +31,12 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       # tool_use_id => {tool_msg, result_str}
       completed: %{},
       # tool_use_ids in order received
-      order: []
+      order: [],
+      # tool_use_id => the tool_call map that was fired. Kept so an ERROR path
+      # (idle timeout, dropped connection) can rebuild the assistant message
+      # that owns these tool_use ids — without it, already-executed tool results
+      # cannot be committed to history as a valid assistant/tool pair.
+      calls: %{}
     }
   end
 
@@ -40,18 +45,21 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   Immediately fires the tool execution in a supervised Task.
   """
   def tool_block_complete(ctx, tool_call, state) do
+    executor = executor_for(state)
+
     task =
       Task.Supervisor.async_nolink(
         OptimalSystemAgent.TaskSupervisor,
         fn ->
-          ToolExecutor.execute_tool_call(tool_call, state)
+          executor.execute_tool_call(tool_call, state)
         end
       )
 
     %{
       ctx
       | in_flight: Map.put(ctx.in_flight, tool_call.id, task),
-        order: ctx.order ++ [tool_call.id]
+        order: ctx.order ++ [tool_call.id],
+        calls: Map.put(Map.get(ctx, :calls, %{}), tool_call.id, tool_call)
     }
   end
 
@@ -90,6 +98,13 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
     |> Enum.reject(&is_nil/1)
   end
 
+  # Executor seam, mirroring `ToolOrchestrator`'s `:executor` option: the loop
+  # state may name the module that runs a tool call. Production never sets it
+  # (so `ToolExecutor` is used); tests set it to count executions and prove a
+  # drained tool is never run a second time.
+  defp executor_for(state) when is_map(state), do: Map.get(state, :tool_executor) || ToolExecutor
+  defp executor_for(_), do: ToolExecutor
+
   defp failure(tool_id, reason) do
     body = ToolError.model_text(reason)
     {%{role: "tool", tool_call_id: tool_id, content: body}, body}
@@ -110,6 +125,82 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Task.shutdown(task, :brutal_kill)
     end)
 
-    %{ctx | in_flight: %{}, completed: %{}, order: []}
+    %{ctx | in_flight: %{}, completed: %{}, order: [], calls: %{}}
+  end
+
+  @doc """
+  Drain an executor context into messages ready to append to conversation
+  history: `{:ok, [assistant_msg | tool_msgs], executed_names}`, or `:none`
+  when no tool ever started.
+
+  This is the ERROR-path counterpart to the success path in `ReactLoop`.
+  Tool_use blocks are executed EAGERLY as they stream, so by the time the
+  connection goes idle the side effects have ALREADY happened (files written,
+  commands run). Historically those results lived only in the process
+  dictionary, which the error path never drained — so the work vanished and a
+  retry would re-execute it (re-running a `git push`, rewriting a file).
+
+  Committing them to history BEFORE the turn errors or retries is what makes a
+  retry RESUME rather than replay: the rebuilt history already contains the
+  assistant's tool_use blocks and their results, so the model never re-issues
+  them.
+
+  `partial_content` is whatever assistant text streamed before the failure; it
+  becomes the content of the synthesized assistant message so the tool_use ids
+  are owned by a real message and the API history stays valid.
+  """
+  @spec drain_to_messages(map() | nil, String.t() | nil) ::
+          {:ok, [map()], [String.t()]} | :none
+  def drain_to_messages(ctx, partial_content \\ "")
+
+  def drain_to_messages(nil, _partial), do: :none
+
+  def drain_to_messages(ctx, partial_content) do
+    case Map.get(ctx, :order, []) do
+      [] ->
+        :none
+
+      order ->
+        results_by_id =
+          ctx
+          |> collect_results()
+          |> Map.new(fn result ->
+            tool_msg = elem(result, 0)
+            {tool_msg[:tool_call_id] || tool_msg["tool_call_id"], tool_msg}
+          end)
+
+        calls = Map.get(ctx, :calls, %{})
+
+        # Only ids we can attribute to a real tool_call are committed — a
+        # tool result with no owning tool_use block would corrupt history.
+        committed_ids = Enum.filter(order, &Map.has_key?(calls, &1))
+
+        if committed_ids == [] do
+          :none
+        else
+          tool_calls = Enum.map(committed_ids, &Map.fetch!(calls, &1))
+
+          tool_msgs =
+            Enum.map(committed_ids, fn id ->
+              Map.get(results_by_id, id) ||
+                %{role: "tool", tool_call_id: id, content: ToolError.model_text("tool result lost")}
+            end)
+
+          content = if is_binary(partial_content), do: partial_content, else: ""
+
+          assistant = %{role: "assistant", content: content, tool_calls: tool_calls}
+          names = Enum.map(tool_calls, fn tc -> Map.get(tc, :name) || Map.get(tc, "name") end)
+
+          {:ok, [assistant | tool_msgs], Enum.reject(names, &is_nil/1)}
+        end
+    end
+  rescue
+    e ->
+      Logger.warning("[streaming_tools] drain failed: #{Exception.message(e)}")
+      :none
+  catch
+    :exit, reason ->
+      Logger.warning("[streaming_tools] drain exited: #{inspect(reason)}")
+      :none
   end
 end

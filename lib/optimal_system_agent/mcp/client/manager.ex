@@ -126,6 +126,10 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
           enabled: server.enabled,
           status: server_status(server),
           source: Map.get(server, :source, :osa),
+          # Attribution: `source` says WHICH TOOL's config the server came from
+          # (`:osa` = one of OSA's own files), `scope` says which OSA file.
+          # Together they answer "why is this server here?" in `/mcp list`.
+          scope: Map.get(server, :scope, :user),
           tool_count: state.tools_by_server |> Map.get(name, []) |> length()
         }
       end)

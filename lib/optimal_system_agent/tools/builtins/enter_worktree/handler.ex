@@ -100,16 +100,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterWorktree.Handler do
       {_output, 0} ->
         Logger.info("[enter_worktree] Created worktree at #{path} on branch #{branch}")
 
-        run_hooks_async(:worktree_create, %{path: path, branch: branch, repo_dir: repo_dir})
-
-        result =
-          "Worktree created.\n" <>
-            "  path:   #{path}\n" <>
-            "  branch: #{branch}\n\n" <>
-            "Use this path as the working directory for subsequent operations. " <>
-            "Call exit_worktree(path: \"#{path}\") when done."
-
-        {:ok, result}
+        # `git worktree add` checks out NOTHING inside a gitlink path — a
+        # submodule or embedded independent repo lands as an empty directory, so
+        # the model would be handed a worktree with whole components missing and
+        # no indication of it. Fill exactly those paths; report if we can't.
+        case OptimalSystemAgent.Workspace.FastWorktree.Populate.fill_hidden_subtrees(
+               repo_dir,
+               path
+             ) do
+          :ok -> worktree_created_ok(path, branch, repo_dir)
+          {:error, reason} -> {:error, "worktree subtree population failed: #{inspect(reason)}"}
+        end
 
       {output, _code} ->
         trimmed = String.trim(output)
@@ -128,6 +129,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterWorktree.Handler do
             {:error, "git worktree add failed: #{trimmed}"}
         end
     end
+  end
+
+  defp worktree_created_ok(path, branch, repo_dir) do
+    run_hooks_async(:worktree_create, %{path: path, branch: branch, repo_dir: repo_dir})
+
+    result =
+      "Worktree created.\n" <>
+        "  path:   #{path}\n" <>
+        "  branch: #{branch}\n\n" <>
+        "Use this path as the working directory for subsequent operations. " <>
+        "Call exit_worktree(path: \"#{path}\") when done."
+
+    {:ok, result}
   end
 
   defp inside_git_repo?(dir) do

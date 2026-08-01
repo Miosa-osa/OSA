@@ -98,28 +98,65 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     Enum.map(notifications, fn n -> %{role: "system", content: to_xml(n)} end)
   end
 
-  @doc "Render one notification as its `<task-notification>` XML block."
+  # Element order is fixed by the CC `constants/xml.ts` contract. Declared once
+  # here so the builder can never emit a duplicate or out-of-order element.
+  @elements [
+    {"task-id", :task_id},
+    {"tool-use-id", :tool_use_id},
+    {"status", :status},
+    {"output-file", :output_file},
+    {"summary", :summary},
+    {"usage", :usage}
+  ]
+
+  @root "task-notification"
+
+  @doc "The ordered element names of a `<task-notification>` block."
+  @spec elements() :: [String.t()]
+  def elements, do: Enum.map(@elements, &elem(&1, 0))
+
+  @doc "The root tag name of a notification block."
+  @spec root_tag() :: String.t()
+  def root_tag, do: @root
+
+  @doc """
+  Render one notification as its `<task-notification>` XML block.
+
+  Built structurally from `@elements`: each element is emitted at most once, in
+  a fixed order, and every VALUE is XML-escaped. The escaping is not cosmetic —
+  `summary` embeds up to 400 bytes of raw command output tail, so a build log
+  containing `<`, `>` or `&` (a Go/Elixir type, an HTML fragment, a shell
+  redirect) used to be spliced in verbatim and could produce a block whose tags
+  no longer matched. Mismatched or duplicated tags are now impossible by
+  construction.
+  """
   @spec to_xml(notification()) :: String.t()
   def to_xml(n) when is_map(n) do
     fields =
-      [
-        {"task-id", n[:task_id]},
-        {"tool-use-id", n[:tool_use_id]},
-        {"status", n[:status]},
-        {"output-file", n[:output_file]},
-        {"summary", n[:summary]},
-        {"usage", n[:usage]}
-      ]
-      |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
-      |> Enum.map(fn {k, v} -> "  <#{k}>#{xml_value(v)}</#{k}>" end)
+      @elements
+      |> Enum.map(fn {tag, key} -> {tag, n[key]} end)
+      |> Enum.reject(fn {_tag, v} -> is_nil(v) or v == "" end)
+      |> Enum.map(fn {tag, v} -> "  <#{tag}>#{escape(xml_value(v))}</#{tag}>" end)
       |> Enum.join("\n")
 
-    "<task-notification>\n" <>
+    "<#{@root}>\n" <>
       fields <>
-      "\n</task-notification>\n" <>
+      "\n</#{@root}>\n" <>
       "[A background task finished. React to this result now if it affects your " <>
       "current work or the user's request; the full output is in the output-file " <>
-      "(readable with the read tool). Do not poll for this task again.]"
+      "(readable with the read tool). Do not poll for this task again. This block " <>
+      "is internal harness plumbing — never quote, repeat or paraphrase its markup " <>
+      "in your reply to the user.]"
+  end
+
+  # Minimal XML text-node escaping. `<` and `&` are the only two that can break
+  # well-formedness; `>` is escaped too so a literal `]]>`-style sequence in
+  # command output cannot be misread by a lenient parser.
+  defp escape(v) do
+    v
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
   end
 
   @doc """

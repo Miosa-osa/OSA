@@ -264,6 +264,17 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     end
   end
 
+  # Local, keyless servers (LM Studio, llama.cpp) must never be asked for an
+  # API key — there is no key to give, so the prompt is a dead end. Driven off
+  # the catalog's `requires_key: false` rather than a hardcoded id list, so a
+  # future keyless provider is handled automatically.
+  defp collect_credentials(provider_id, _detected)
+       when provider_id in ["lmstudio", "llamacpp"] do
+    entry = catalog_entry(provider_id)
+    Prompt.completed("Credentials", "no key required")
+    {nil, entry && entry.base_url}
+  end
+
   defp collect_credentials(provider_id, detected) do
     env_var = provider_env_var(provider_id)
     existing_key = find_detected_key(provider_id, detected) || System.get_env(env_var)
@@ -592,22 +603,33 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   defp format_ctx(ctx) when ctx > 0, do: "#{div(ctx, 1024)}K ctx"
   defp format_ctx(_), do: ""
 
-  defp provider_label("miosa"), do: "MIOSA"
-  defp provider_label("ollama_cloud"), do: "Ollama Cloud"
-  defp provider_label("ollama_local"), do: "Ollama Local"
-  defp provider_label("openrouter"), do: "OpenRouter"
-  defp provider_label("anthropic"), do: "Anthropic"
-  defp provider_label("openai"), do: "OpenAI"
-  defp provider_label("custom"), do: "Custom Endpoint"
-  defp provider_label(id), do: id
+  # Label / env var / default model / signup URL all come from the ONE
+  # onboarding catalog (`Onboarding.providers_list/0`). They used to be four
+  # hand-written tables here that listed seven providers — so every other
+  # routable provider fell through to the literal env var "API_KEY", a label
+  # that was its raw slug, and no default model. Deriving them means adding a
+  # provider to the catalog is enough to make it fully usable in this wizard.
+  @doc false
+  @spec catalog_entry(String.t()) :: map() | nil
+  def catalog_entry(provider_id),
+    do: Enum.find(Onboarding.providers_list(), &(&1.id == provider_id))
 
-  defp provider_env_var("miosa"), do: "MIOSA_API_KEY"
-  defp provider_env_var("ollama_cloud"), do: "OLLAMA_API_KEY"
-  defp provider_env_var("openrouter"), do: "OPENROUTER_API_KEY"
-  defp provider_env_var("anthropic"), do: "ANTHROPIC_API_KEY"
-  defp provider_env_var("openai"), do: "OPENAI_API_KEY"
-  defp provider_env_var("custom"), do: "OPENAI_API_KEY"
-  defp provider_env_var(_), do: "API_KEY"
+  defp provider_label(id) do
+    case catalog_entry(id) do
+      %{name: name} when is_binary(name) -> name
+      _ -> id
+    end
+  end
+
+  defp provider_env_var(id) do
+    case catalog_entry(id) do
+      %{env_var: env_var} when is_binary(env_var) -> env_var
+      # A provider with no declared env var still needs SOMETHING to prompt
+      # with; the `<PROVIDER>_API_KEY` convention matches what
+      # `Onboarding.provider_env_pairs/4` will actually write.
+      _ -> String.upcase(id) <> "_API_KEY"
+    end
+  end
 
   # m6 fix: ollama_cloud's default model must match the catalog
   # (onboarding.ex ~L180) and docs — glm-5.2:cloud, not the stale
@@ -620,19 +642,19 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   # `nil` explicitly rather than writing it straight into the config.
   @doc false
   @spec provider_default_model(String.t()) :: String.t() | nil
-  def provider_default_model("miosa"), do: "nemotron-3-miosa"
-  def provider_default_model("ollama_cloud"), do: "glm-5.2:cloud"
-  def provider_default_model("openrouter"), do: "anthropic/claude-sonnet-4-6"
-  def provider_default_model("anthropic"), do: "claude-sonnet-4-6-20260316"
-  def provider_default_model("openai"), do: "gpt-5.4-pro"
-  def provider_default_model(_), do: nil
+  def provider_default_model(provider_id) do
+    case catalog_entry(provider_id) do
+      %{default_model: model} when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  end
 
-  defp provider_signup_url("miosa"), do: "https://miosa.ai/settings/keys"
-  defp provider_signup_url("ollama_cloud"), do: "https://ollama.com/account/keys"
-  defp provider_signup_url("openrouter"), do: "https://openrouter.ai/keys"
-  defp provider_signup_url("anthropic"), do: "https://console.anthropic.com/account/keys"
-  defp provider_signup_url("openai"), do: "https://platform.openai.com/api-keys"
-  defp provider_signup_url(_), do: nil
+  defp provider_signup_url(provider_id) do
+    case catalog_entry(provider_id) do
+      %{signup_url: url} when is_binary(url) and url != "" -> url
+      _ -> nil
+    end
+  end
 
   defp channel_instructions("telegram"),
     do: "1) Open @BotFather  2) /newbot  3) Copy token"

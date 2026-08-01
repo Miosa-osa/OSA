@@ -507,6 +507,23 @@ impl Chat {
         self.last_agent_text.clone()
     }
 
+    /// Every assistant block committed to scrollback, in order — the text the
+    /// user actually ends up reading. Lets a test assert what was rendered
+    /// rather than what some intermediate buffer happened to hold.
+    #[cfg(test)]
+    pub(crate) fn agent_blocks(&self) -> Vec<String> {
+        self.scrollback
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.msg_type,
+                    MessageType::Agent | MessageType::AgentContinuation
+                )
+            })
+            .map(|m| m.content.clone())
+            .collect()
+    }
+
     pub fn last_user_message(&self) -> Option<String> {
         self.last_user_text.clone()
     }

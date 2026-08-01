@@ -256,12 +256,17 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Clipboard do
     # port reference before the :exit_status message arrives, causing a timeout.
     tmp = Path.join(System.tmp_dir!(), "osa_clip_#{System.unique_integer([:positive])}")
 
-    with :ok <- File.write(tmp, content) do
-      exe = find_executable(tool)
-      arg_str = Enum.map_join(args, " ", &"'#{String.replace(&1, "'", "'\\''")}'")
-      cmd = "#{exe} #{arg_str} < #{tmp}"
+    # The temp file MUST be removed on EVERY exit path. The previous shape only
+    # called File.rm/1 on the happy `with` branch, so a raising/exiting
+    # System.cmd (rescued below), a killed task, or a non-matching File.write
+    # result orphaned the file — 329 stale `osa_clip_*` files were found on one
+    # long-running host. `try/after` covers the raise and normal paths alike.
+    try do
+      with :ok <- File.write(tmp, content) do
+        exe = find_executable(tool)
+        arg_str = Enum.map_join(args, " ", &"'#{String.replace(&1, "'", "'\\''")}'")
+        cmd = "#{exe} #{arg_str} < #{tmp}"
 
-      result =
         case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
           {_out, 0} ->
             :ok
@@ -270,13 +275,16 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Clipboard do
             Logger.debug("[Clipboard] #{tool} exited #{code}: #{out}")
             {:error, :permission_denied}
         end
-
+      else
+        {:error, reason} ->
+          Logger.debug("[Clipboard] temp write failed: #{inspect(reason)}")
+          {:error, :no_clipboard_tool}
+      end
+    rescue
+      _ -> {:error, :no_clipboard_tool}
+    after
       File.rm(tmp)
-      result
     end
-  rescue
-    _ ->
-      {:error, :no_clipboard_tool}
   end
 
   # Read stdout from a tool

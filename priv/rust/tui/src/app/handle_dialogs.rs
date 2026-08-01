@@ -696,7 +696,7 @@ impl App {
                         if matches!(scope, RewindScope::Conversation | RewindScope::Both) {
                             self.chat.clear();
                             self.tasks.clear();
-                            self.stream_buf.clear();
+                            self.assistant_stream.reset();
                             self.thinking_buf.clear();
                             self.agent_header_sent = false;
                             self.chat.add_system_message(
@@ -956,8 +956,25 @@ impl App {
         }
     }
 
+    /// Route a key to the inline `ask_user` band.
+    ///
+    /// The band OWNS the keyboard while it is up (arrows, Enter, digits, `z`,
+    /// `x`, Esc and — in the free-text row — every printable character), so the
+    /// composer can never steal the operator's typing. Two escapes survive:
+    /// Esc/`x` decline (the tool resolves with the non-fatal "No answer — you
+    /// declined…" result) and Ctrl+C, which declines AND interrupts the turn so
+    /// the blocking question can never wedge the session.
     pub(super) fn handle_survey_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         use crate::dialogs::survey::SurveyAction;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Ctrl+C: decline the question first (so the blocked tool is released
+        // with a real answer rather than being abandoned), then fall through to
+        // the normal interrupt path.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.decline_survey();
+            return self.handle_processing_key(key);
+        }
 
         if let Some(ref mut survey) = self.survey {
             if let Some(action) = survey.handle_key(key) {
@@ -980,8 +997,7 @@ impl App {
                         tokio::spawn(async move {
                             let _ = client.submit_survey_answer(&session_id, request).await;
                         });
-                        self.survey = None;
-                        self.exit_overlay();
+                        self.close_survey();
                     }
                     SurveyAction::Skip => {
                         let session_id = self.session_id.clone();
@@ -990,13 +1006,41 @@ impl App {
                         tokio::spawn(async move {
                             let _ = client.skip_survey(&session_id, &survey_id).await;
                         });
-                        self.survey = None;
-                        self.exit_overlay();
+                        self.close_survey();
                     }
                 }
             }
         }
         false
+    }
+
+    /// Decline the pending question without submitting an answer. Idempotent —
+    /// safe to call from the Ctrl+C path even when no survey is open.
+    pub(crate) fn decline_survey(&mut self) {
+        let Some(ref survey) = self.survey else {
+            return;
+        };
+        let session_id = self.session_id.clone();
+        let client = self.client.clone();
+        let survey_id = survey.survey_id.clone();
+        tokio::spawn(async move {
+            let _ = client.skip_survey(&session_id, &survey_id).await;
+        });
+        self.close_survey();
+    }
+
+    /// Tear down the inline question band: drop the dialog, clear the
+    /// "waiting on the user" pulse, return to whichever state opened it, and
+    /// RESIZE the inline viewport. The resize is load-bearing — the band's rows
+    /// are reserved by `survey_slot`, so leaving them reserved after the dialog
+    /// is gone strands dead rows above the composer.
+    fn close_survey(&mut self) {
+        self.survey = None;
+        self.activity.set_pending_user(false);
+        if self.state == crate::app::state::AppState::Survey {
+            self.exit_overlay();
+        }
+        self.recompute_layout();
     }
 
     /// Build the background-terminal rows shown in the dashboard from the live

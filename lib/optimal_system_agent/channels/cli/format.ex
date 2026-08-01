@@ -58,7 +58,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Format do
 
   @doc "Get the current model name for a provider."
   def get_model_name(:anthropic) do
-    Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+    Application.get_env(:optimal_system_agent, :anthropic_model, OptimalSystemAgent.Providers.AnthropicModels.default_model())
   end
 
   def get_model_name(:ollama) do
@@ -66,7 +66,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Format do
   end
 
   def get_model_name(:openai) do
-    Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+    Application.get_env(:optimal_system_agent, :openai_model, OptimalSystemAgent.Providers.OpenAIModels.default_model())
   end
 
   def get_model_name(provider) do

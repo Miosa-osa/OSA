@@ -44,6 +44,26 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
     GenServer.cast(__MODULE__, {:rate_limited, provider, key})
   end
 
+  @doc """
+  Re-read every pool from the current environment.
+
+  The pools are snapshotted once in `init/1`, and `get_key/1` takes priority
+  over `Application.get_env/2` in the providers. So when a user replaced their
+  key at runtime (the in-UI key screen, `osa setup` in the same node), the
+  pool kept handing back the key captured at boot and the new one never took
+  effect — the user saw their *old*, possibly revoked, key rejected no matter
+  how many times they re-entered the right one. Call this after any write that
+  changes a `*_API_KEY` env var.
+  """
+  @spec reload() :: :ok
+  def reload do
+    GenServer.call(__MODULE__, :reload)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   @doc "Get pool stats for a provider."
   def stats(provider) do
     GenServer.call(__MODULE__, {:stats, provider})
@@ -89,6 +109,13 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
       _ ->
         {:reply, fallback_key(provider), state}
     end
+  end
+
+  @impl true
+  def handle_call(:reload, _from, state) do
+    # Counters are reset alongside the pools: they index into the key list, and
+    # a stale offset against a re-read list would skip keys arbitrarily.
+    {:reply, :ok, %{state | pools: load_all_pools(), counters: %{}}}
   end
 
   @impl true

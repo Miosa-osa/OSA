@@ -64,21 +64,56 @@ pub trait ToolRenderer {
 /// An unterminated opening tag truncates the rest of the result, which is the
 /// safe direction: better to show less than to leak internal text.
 pub fn strip_system_reminders(result: &str) -> String {
-    const OPEN: &str = "<system-reminder>";
-    const CLOSE: &str = "</system-reminder>";
+    strip_tag_blocks(result, "system-reminder")
+}
 
-    if !result.contains(OPEN) {
-        return result.to_string();
+/// Every tag the backend uses to carry INTERNAL control plumbing in text the
+/// model can see. None of it may ever reach the user's screen.
+///
+/// `task-notification` is here because background completions re-enter the
+/// agent's context as a `<task-notification>` XML block (see
+/// `Agent.TaskNotifications`). For the Anthropic provider those blocks are
+/// hoisted into the system prompt, and models demonstrably echo them back into
+/// their own reply — the observed leak was an assistant message whose body was
+/// a mangled re-typing of the notification (duplicated `<output-file>`,
+/// `</status>` closing an `<output-file>`). A re-typed block is exactly what
+/// this must survive, so stripping is tag-scoped and tolerant of malformed
+/// innards: everything between the opening and closing root tag goes,
+/// whatever it contains.
+pub const CONTROL_TAGS: [&str; 2] = ["system-reminder", "task-notification"];
+
+/// Strip every internal control block (see [`CONTROL_TAGS`]) from `text`.
+pub fn strip_control_markup(text: &str) -> String {
+    if !CONTROL_TAGS.iter().any(|t| text.contains(&format!("<{t}>"))) {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for tag in CONTROL_TAGS {
+        out = strip_tag_blocks(&out, tag);
+    }
+    out
+}
+
+/// Remove every `<tag>…</tag>` block from `text`.
+///
+/// An unterminated opening tag truncates the rest of the text, which is the
+/// safe direction: better to show less than to leak internal text.
+fn strip_tag_blocks(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+
+    if !text.contains(&open) {
+        return text.to_string();
     }
 
-    let mut out = String::with_capacity(result.len());
-    let mut rest = result;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
 
-    while let Some(start) = rest.find(OPEN) {
+    while let Some(start) = rest.find(&open) {
         out.push_str(&rest[..start]);
-        let after_open = &rest[start + OPEN.len()..];
-        match after_open.find(CLOSE) {
-            Some(end) => rest = &after_open[end + CLOSE.len()..],
+        let after_open = &rest[start + open.len()..];
+        match after_open.find(&close) {
+            Some(end) => rest = &after_open[end + close.len()..],
             // Unterminated: drop everything from the opening tag on.
             None => {
                 rest = "";
@@ -91,11 +126,12 @@ pub fn strip_system_reminders(result: &str) -> String {
 }
 
 pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
-    // Internal <system-reminder> steering is model-facing only — never render it
-    // as tool output. Done once here so every renderer below is covered.
+    // Internal control markup (<system-reminder>, <task-notification>) is
+    // model-facing only — never render it as tool output. Done once here so
+    // every renderer below is covered.
     let stripped;
-    let result: &str = if result.contains("<system-reminder>") {
-        stripped = strip_system_reminders(result);
+    let result: &str = if CONTROL_TAGS.iter().any(|t| result.contains(&format!("<{t}>"))) {
+        stripped = strip_control_markup(result);
         &stripped
     } else {
         result
@@ -150,11 +186,14 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
             search::LsRenderer.render(name, args, result, opts)
         }
 
-        // Web
-        "web_fetch" | "webfetch" | "fetch" => {
+        // Web. `fetch_url` / `search_web` / `search` are OSA's own registered
+        // ALIASES for these tools (see the `aliases/0` callbacks); a call made
+        // under an alias arrives here under that name and used to fall through
+        // to the generic renderer, losing the url / query.
+        "web_fetch" | "webfetch" | "fetch" | "fetch_url" => {
             web::WebFetchRenderer.render(name, args, result, opts)
         }
-        "web_search" | "websearch" => {
+        "web_search" | "websearch" | "search_web" | "search" => {
             web::WebSearchRenderer.render(name, args, result, opts)
         }
 
@@ -604,7 +643,9 @@ pub(crate) fn make_result_line(
 mod system_reminder_tests {
     use super::*;
 
-    const REMINDER: &str = "<system-reminder>\nA skill \"writing-great-skills\" is available near a path you just accessed.\nIts definition is at /Users/rhl/.claude/skills/writing-great-skills/SKILL.md\n</system-reminder>";
+    // Shape-accurate but fully generic: the point of the fixture is that a
+    // third-party `.claude/skills` path never reaches rendered tool output.
+    const REMINDER: &str = "<system-reminder>\nA skill \"example-skill\" is available near a path you just accessed.\nIts definition is at /home/user/.claude/skills/example-skill/SKILL.md\n</system-reminder>";
 
     #[test]
     fn strips_a_trailing_reminder_block() {
@@ -671,6 +712,90 @@ mod system_reminder_tests {
             assert!(
                 !text.contains(".claude/skills"),
                 "{tool} leaked a foreign skills path: {text}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal <task-notification> control markup must never reach the screen —
+// including the MANGLED copies a model produces when it echoes the block back
+// out of its own context (duplicated elements, mismatched closing tags).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod task_notification_tests {
+    use super::*;
+
+    /// A well-formed block, exactly as `Agent.TaskNotifications.to_xml/1` builds it.
+    const NOTIF: &str = "<task-notification>\n  <task-id>bg_5g5byuj8</task-id>\n  <status>done</status>\n  <output-file>/tmp/osa/session-a/tasks/bg_5g5byuj8.out</output-file>\n  <summary>Background command 'mix compile' completed (exit code 0)</summary>\n</task-notification>";
+
+    /// The observed leak: the model re-typed the block, closing `<output-file>`
+    /// with `</status>` and emitting `<output-file>` twice.
+    const MANGLED: &str = "<task-notification> <task-id>bg_5g5byuj8</task-id> <status>done</status>\n<output-file>/var/var/folders/x/T/osa/s/tasks/bg_5g5byuj8.out</status> <output-file>dup</output-file> <summary>Background command 'mix compile' completed</summary>\n</task-notification>";
+
+    #[test]
+    fn strips_a_well_formed_notification() {
+        let raw = format!("Compiling now.\n\n{NOTIF}");
+        let out = strip_control_markup(&raw);
+        assert_eq!(out, "Compiling now.");
+        assert!(!out.contains("task-notification"));
+    }
+
+    #[test]
+    fn strips_a_mangled_echoed_notification() {
+        let raw = format!("Here is what happened.\n{MANGLED}\nMoving on.");
+        let out = strip_control_markup(&raw);
+        assert!(out.starts_with("Here is what happened."));
+        assert!(out.ends_with("Moving on."));
+        for needle in ["task-notification", "task-id", "output-file", "bg_5g5byuj8"] {
+            assert!(!out.contains(needle), "leaked {needle}: {out}");
+        }
+    }
+
+    #[test]
+    fn unterminated_notification_drops_the_remainder() {
+        let raw = "Working.\n<task-notification>\n  <task-id>bg_1</task-id>";
+        assert_eq!(strip_control_markup(raw), "Working.");
+    }
+
+    #[test]
+    fn strips_both_control_tags_in_one_pass() {
+        let raw = format!("a\n<system-reminder>r</system-reminder>\nb\n{NOTIF}\nc");
+        let out = strip_control_markup(&raw);
+        assert!(!out.contains("system-reminder"));
+        assert!(!out.contains("task-notification"));
+        assert!(out.contains('a') && out.contains('b') && out.contains('c'));
+    }
+
+    #[test]
+    fn leaves_ordinary_prose_untouched() {
+        let raw = "The task finished; the notification told me the exit code was 0.";
+        assert_eq!(strip_control_markup(raw), raw);
+    }
+
+    #[test]
+    fn render_tool_never_shows_notification_text() {
+        let raw = format!("done\n\n{NOTIF}");
+        let opts = RenderOpts {
+            status: ToolStatus::Success,
+            width: 100,
+            expanded: true,
+            compact: false,
+            spinner_frame: None,
+            duration_ms: 0,
+            truncated: false,
+        };
+
+        for tool in ["shell_execute", "bash_output", "file_read", "some_unknown_tool"] {
+            let lines = render_tool(tool, "{}", &raw, &opts);
+            let text: String = lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !text.contains("task-notification"),
+                "{tool} leaked the notification tag: {text}"
             );
         }
     }

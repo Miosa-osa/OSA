@@ -115,6 +115,17 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       truncated: bytes >= max_bytes
     }
 
+    # WS6: the advertised <output-file> must EXIST from the moment the task
+    # does — a notification pointing at a missing file is worse than none.
+    OptimalSystemAgent.Shell.TaskOutput.ensure(session_id, id)
+
+    # Bound the per-session output dir on GROWTH: evict oldest-first past the
+    # cap. Enforcing here (rather than only on :retire) means a crash, a
+    # :brutal_kill shutdown, or a skipped retirement timer can never let the
+    # file count run away. Files younger than the eviction floor are skipped, so
+    # this can't remove a live task's output.
+    OptimalSystemAgent.Shell.TaskOutput.sweep_session(session_id)
+
     # WS6: seed the on-disk output file with what the foreground run captured
     # before the Ctrl+B hand-off, so the file holds the FULL stream.
     if is_binary(initial) and initial != "" do
@@ -151,6 +162,18 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
         {:os_pid, pid} -> pid
         _ -> nil
       end
+
+    # WS6: create the advertised <output-file> up front. It used to be created
+    # lazily by the first `{:data, _}` chunk, so a silent command (or one that
+    # had not printed yet) handed the model a path that did not exist.
+    OptimalSystemAgent.Shell.TaskOutput.ensure(session_id, id)
+
+    # Bound the per-session output dir on GROWTH: evict oldest-first past the
+    # cap. Enforcing here (rather than only on :retire) means a crash, a
+    # :brutal_kill shutdown, or a skipped retirement timer can never let the
+    # file count run away. Files younger than the eviction floor are skipped, so
+    # this can't remove a live task's output.
+    OptimalSystemAgent.Shell.TaskOutput.sweep_session(session_id)
 
     state = %__MODULE__{
       id: id,
@@ -198,7 +221,14 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     {:noreply, state}
   end
 
-  def handle_info(:retire, state), do: {:stop, :normal, state}
+  def handle_info(:retire, state) do
+    # Retire the on-disk output alongside the worker. This is deliberately tied
+    # to the retention timer, not to completion: the <task-notification> hands
+    # the model this exact path, so deleting at exit would race the consumer.
+    # By the time :retire fires the task has been pollable for retain_ms (1 h).
+    OptimalSystemAgent.Shell.TaskOutput.delete(state.session_id, state.id)
+    {:stop, :normal, state}
+  end
 
   def handle_info(_msg, state), do: {:noreply, state}
 

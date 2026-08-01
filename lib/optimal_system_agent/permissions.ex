@@ -80,6 +80,57 @@ defmodule OptimalSystemAgent.Permissions do
   # (`npm test:*` rather than `npm:*`).
   @two_word_prefixes ~w(npm pnpm yarn bun cargo go git mix make docker kubectl gh)
 
+  # ── Banned "always allow" prefix suggestions ─────────────────────────
+  #
+  # Codex parity (`codex-rs/.../exec_policy.rs` `BANNED_PREFIX_SUGGESTIONS`).
+  #
+  # A prefix rule only constrains the FIRST token(s) of a command. For a
+  # general-purpose interpreter, shell, or command wrapper that is no
+  # constraint at all: `shell_execute(bash:*)` pre-approves `bash -lc 'rm -rf
+  # /'` and every other shell command routed through bash, permanently
+  # disabling the dangerous-command classifier. The operator cannot reasonably
+  # infer that from a prompt that says "always allow bash".
+  #
+  # These programs therefore NEVER get an "always" suggestion. A one-time
+  # allow is always still available; we never silently downgrade to a narrower
+  # looking rule that is not actually narrower.
+  @banned_prefix_suggestions ~w(
+    bash sh zsh fish dash ksh csh tcsh ash busybox
+    python python2 python3 py node nodejs deno bun ruby irb perl php
+    lua luajit Rscript julia
+    env xargs eval exec source su sudo doas runuser
+    ssh scp sftp telnet
+    nohup setsid nice time timeout stdbuf script watch chroot unshare
+    awk gawk mawk sed find
+    osascript powershell pwsh cmd
+    rm
+  )
+
+  # Two-word prefixes whose SECOND word re-opens arbitrary code execution —
+  # `docker run:*` is every container with every mount, `go run:*` is any Go
+  # file, `mix run -e '<code>'` is any Elixir. Same reasoning as above: refuse
+  # the suggestion outright rather than persist something that looks scoped
+  # and is not.
+  #
+  # Deliberately NOT here: `npm run` / `cargo run` and friends. Their argument
+  # space is bounded by the checked-in manifest (package.json scripts, the
+  # current crate), not by arbitrary code typed on the command line, so
+  # `npm run:*` is a real — if broad — scope. `npm exec` / `pnpm dlx` / `npx`
+  # fetch and run arbitrary packages and ARE banned.
+  @banned_two_word_seconds %{
+    "npm" => ~w(exec x create init),
+    "pnpm" => ~w(exec dlx x create init),
+    "yarn" => ~w(exec dlx create init),
+    "cargo" => ~w(install),
+    "go" => ~w(run generate install),
+    "mix" => ~w(run cmd escript.install archive.install local.rebar),
+    "docker" => ~w(run exec),
+    "kubectl" => ~w(exec run attach)
+  }
+
+  # Warn-once table for banned rules found already persisted on disk.
+  @banned_rule_warned :osa_permissions_banned_rule_warned
+
   # Resolved at call time (not compile time) so tests can redirect the legacy
   # rule store to a tmp path via `config :optimal_system_agent, :permissions_file`.
   defp permissions_file do
@@ -132,7 +183,63 @@ defmodule OptimalSystemAgent.Permissions do
   Order: session → flag → local → project → user → legacy.
   """
   def rules do
-    settings_rules() ++ legacy_rules()
+    (settings_rules() ++ legacy_rules())
+    |> Enum.reject(&banned_persisted_rule?/1)
+  end
+
+  # LOAD-TIME guard. A banned-shape allow rule may already be on disk from
+  # before the suggestion deny-list existed (or be hand-written into a
+  # settings file). Guarding only new rules would leave those installs
+  # exposed, so refuse to apply them here too — and say so once, naming the
+  # rule and the file it came from.
+  defp banned_persisted_rule?(%{behavior: :allow, rule: rule, source: source}) do
+    if banned_allow_rule?(rule) do
+      warn_banned_rule_once(rule, source)
+      true
+    else
+      false
+    end
+  end
+
+  defp banned_persisted_rule?(_), do: false
+
+  defp warn_banned_rule_once(rule, source) do
+    ensure_warn_table()
+
+    if :ets.insert_new(@banned_rule_warned, {{rule, source}, true}) do
+      require Logger
+
+      Logger.warning(
+        "[permissions] IGNORING persisted allow rule #{inspect(rule)} from #{source_file(source)} " <>
+          "— a shell/interpreter prefix allow pre-approves every command run through it and " <>
+          "disables the dangerous-command classifier. Remove it, or replace it with an exact " <>
+          "command rule."
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp source_file(:legacy), do: permissions_file()
+  defp source_file(:local), do: ".osa/settings.local.json"
+  defp source_file(:project), do: ".osa/settings.json"
+  defp source_file(:user), do: Path.join(ConfigFile.config_dir(), "settings.json")
+  defp source_file(:flag), do: "--settings / OSA_SETTINGS file"
+  defp source_file(other), do: "#{other} settings"
+
+  defp ensure_warn_table do
+    case :ets.whereis(@banned_rule_warned) do
+      :undefined ->
+        :ets.new(@banned_rule_warned, [:named_table, :public, :set])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
   end
 
   # ── Rule persistence (legacy store — interactive "Always" decisions) ──
@@ -142,10 +249,13 @@ defmodule OptimalSystemAgent.Permissions do
 
   `rule` may be a bare tool name (`"shell_execute"`) or a full rule string
   (`"shell_execute(npm test:*)"`). Decision is `:allow_always | :deny_always`.
+
+  A `nil` rule (no honest suggestion — see `suggested_rule/2`) and an ALLOW
+  rule of banned shape (see `banned_allow_rule?/1`) are refused: persisting
+  `shell_execute(bash:*)` would permanently disable the dangerous-command
+  classifier. Deny rules are never refused.
   """
   def save_rule(rule, decision) do
-    rules = load_legacy()
-
     action =
       case decision do
         :allow_always -> "allow"
@@ -153,8 +263,26 @@ defmodule OptimalSystemAgent.Permissions do
         _ -> nil
       end
 
-    if action do
-      write_legacy(Map.put(rules, rule, action))
+    cond do
+      action == nil ->
+        :ok
+
+      not is_binary(rule) ->
+        :ok
+
+      action == "allow" and banned_allow_rule?(rule) ->
+        require Logger
+
+        Logger.warning(
+          "[permissions] refusing to save allow rule #{inspect(rule)} — a shell/interpreter " <>
+            "prefix rule pre-approves every command run through it and would disable the " <>
+            "dangerous-command classifier. Not written to #{permissions_file()}."
+        )
+
+        :ok
+
+      true ->
+        write_legacy(Map.put(load_legacy(), rule, action))
     end
   end
 
@@ -174,6 +302,11 @@ defmodule OptimalSystemAgent.Permissions do
   Shell tools get a prefix rule built from the command (`npm test` →
   `shell_execute(npm test:*)`, CC suggestion semantics); every other tool gets
   a tool-level rule.
+
+  Returns `nil` when no honest "always" rule can be offered for a shell
+  command — a general-purpose interpreter/shell/wrapper prefix, a bare `rm`, a
+  heredoc, a command substitution, or a compound command. Callers MUST treat
+  `nil` as "offer no always option"; a one-time allow is still available.
   """
   def suggested_rule(tool_name, args \\ %{}) do
     cmd = if shell_tool?(tool_name), do: command_of(args), else: nil
@@ -181,8 +314,14 @@ defmodule OptimalSystemAgent.Permissions do
     case cmd do
       c when is_binary(c) ->
         case String.trim(c) do
-          "" -> tool_name
-          trimmed -> rule_to_string(tool_name, suggested_prefix(trimmed) <> ":*")
+          "" ->
+            tool_name
+
+          trimmed ->
+            case suggested_prefix(trimmed) do
+              nil -> nil
+              prefix -> rule_to_string(tool_name, prefix <> ":*")
+            end
         end
 
       _ ->
@@ -190,12 +329,103 @@ defmodule OptimalSystemAgent.Permissions do
     end
   end
 
-  @doc false
-  def suggested_prefix(command) do
-    case String.split(command, ~r/\s+/, trim: true) do
-      [a, b | _] when a in @two_word_prefixes -> a <> " " <> b
-      [a | _] -> a
-      [] -> command
+  @doc """
+  The command prefix an "always allow" suggestion should use, or `nil` when
+  none is safe to offer.
+
+  NEVER returns a general-purpose interpreter/shell/wrapper (`bash`, `sh`,
+  `python3`, `node`, `env`, `xargs`, `sudo`, …), a bare `rm`, or a prefix
+  derived from a command whose remainder the prefix cannot constrain
+  (heredocs, command substitution, compound commands).
+  """
+  @spec suggested_prefix(String.t()) :: String.t() | nil
+  def suggested_prefix(command) when is_binary(command) do
+    trimmed = String.trim(command)
+
+    if unconstrainable_command?(trimmed) do
+      nil
+    else
+      case String.split(trimmed, ~r/\s+/, trim: true) do
+        [a, b | _] ->
+          head = program_token(a)
+
+          cond do
+            head in @banned_prefix_suggestions -> nil
+            banned_second_word?(head, b) -> nil
+            head in @two_word_prefixes -> a <> " " <> b
+            true -> a
+          end
+
+        [a] ->
+          if program_token(a) in @banned_prefix_suggestions, do: nil, else: a
+
+        [] ->
+          nil
+      end
+    end
+  end
+
+  def suggested_prefix(_), do: nil
+
+  # A prefix rule cannot constrain what follows these constructs, so no
+  # "always" rule built from such a command is honest.
+  defp unconstrainable_command?(command) do
+    String.contains?(command, ["<<", "$(", "`"]) or split_compound(command) |> length() > 1
+  end
+
+  # `/usr/bin/env`, `./bash`, `\bash` → the bare program name, so a banned
+  # interpreter cannot be smuggled in behind a path.
+  defp program_token(token) do
+    token
+    |> String.trim_leading("\\")
+    |> Path.basename()
+  end
+
+  defp banned_second_word?(head, second) do
+    second in Map.get(@banned_two_word_seconds, head, [])
+  end
+
+  @doc """
+  True when `rule` is an ALLOW rule that must never be honoured: a shell rule
+  whose prefix/wildcard head is a banned interpreter, shell, wrapper, or bare
+  `rm` (see `suggested_prefix/1`).
+
+  Applies to allow rules only. A DENY (or ASK) rule with the same shape is
+  strictly protective and is always honoured.
+  """
+  @spec banned_allow_rule?(String.t()) :: boolean()
+  def banned_allow_rule?(rule) when is_binary(rule) do
+    case parse_rule(rule) do
+      %{content: nil} ->
+        false
+
+      %{tool: tool, content: content} ->
+        shell_tool?(tool) and banned_rule_content?(content)
+    end
+  rescue
+    _ -> false
+  end
+
+  def banned_allow_rule?(_), do: false
+
+  defp banned_rule_content?(content) do
+    head =
+      case classify_content(content) do
+        {:prefix, prefix} -> prefix
+        {:wildcard, pattern} -> pattern |> String.split("*", parts: 2) |> List.first()
+        # A fully-spelled-out exact command IS the thing the operator approved.
+        {:exact, _} -> nil
+      end
+
+    case head do
+      nil ->
+        false
+
+      head ->
+        case head |> String.trim() |> String.split(~r/\s+/, trim: true) do
+          [] -> false
+          [a | _] -> program_token(a) in @banned_prefix_suggestions
+        end
     end
   end
 
@@ -402,7 +632,7 @@ defmodule OptimalSystemAgent.Permissions do
   `Loop.init` read only the legacy key).
   """
   def default_mode do
-    case Settings.get("permissions") do
+    case Settings.get_trusted("permissions") do
       %{"defaultMode" => mode} when is_binary(mode) ->
         Map.get(@default_mode_map, mode, :ask)
 
@@ -415,7 +645,7 @@ defmodule OptimalSystemAgent.Permissions do
 
   # Fallback to the pre-parity top-level `permission_mode` string enum.
   defp legacy_default_mode do
-    case Settings.get("permission_mode") do
+    case Settings.get_trusted("permission_mode") do
       mode when is_binary(mode) -> Map.get(@legacy_mode_map, mode, :ask)
       _ -> :ask
     end
@@ -425,7 +655,7 @@ defmodule OptimalSystemAgent.Permissions do
 
   @doc "Extra directories (beyond cwd/tmp) writes are scoped to — settings `permissions.additionalDirectories`."
   def additional_directories do
-    case Settings.get("permissions") do
+    case Settings.get_trusted("permissions") do
       %{"additionalDirectories" => dirs} when is_list(dirs) ->
         Enum.filter(dirs, &is_binary/1)
 
@@ -533,8 +763,15 @@ defmodule OptimalSystemAgent.Permissions do
     end
   end
 
+  # `trusted_layer/1` (not `layer/1`): the PROJECT layer is checked into the
+  # repo, so a hostile clone must not be able to grant itself allow rules — or
+  # any rules — before the user has accepted workspace trust. The whole
+  # `permissions` block from an untrusted project is withheld (allow, deny,
+  # ask and additionalDirectories alike): a partial suppression is harder to
+  # reason about, and the built-in classifier + default-`:ask` already provide
+  # the protection an untrusted repo's `deny` list would have added.
   defp layer_rule_list(source, key) do
-    case Settings.layer(source) do
+    case Settings.trusted_layer(source) do
       %{"permissions" => perms} when is_map(perms) ->
         perms |> Map.get(key) |> List.wrap() |> Enum.filter(&is_binary/1)
 

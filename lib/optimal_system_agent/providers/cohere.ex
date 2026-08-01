@@ -8,7 +8,8 @@ defmodule OptimalSystemAgent.Providers.Cohere do
 
   Config keys:
     :cohere_api_key — required (COHERE_API_KEY)
-    :cohere_model   — (default: command-r-plus)
+    :cohere_model   — (default: command-a-plus-05-2026; the undated
+                      `command-r-plus` alias was shut down 2025-09-15)
     :cohere_url     — override base URL
   """
 
@@ -21,8 +22,16 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   @impl true
   def name, do: :cohere
 
+  # `command-r-plus` was the default until 2026-08-01. Cohere deprecated AND
+  # shut down the undated `command-r-plus` / `command-r` aliases on the same
+  # day — 2025-09-15, with no grace period — so this default had been dead for
+  # ten months. `command-a-plus-05-2026` is the current flagship (128k context
+  # / 64k max output).
+  #
+  # Source: https://docs.cohere.com/docs/models and
+  # https://docs.cohere.com/docs/deprecations (checked 2026-08-01).
   @impl true
-  def default_model, do: "command-r-plus"
+  def default_model, do: "command-a-plus-05-2026"
 
   @impl true
   def chat(messages, opts \\ []) do

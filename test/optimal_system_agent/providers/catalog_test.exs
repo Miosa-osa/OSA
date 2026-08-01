@@ -63,8 +63,13 @@ defmodule OptimalSystemAgent.Providers.CatalogTest do
 
     test "context_window/1 resolves across providers" do
       assert Catalog.context_window("gpt-4o") == 128_000
-      # grok-4 exists only in the catalog (not the registry's static table).
-      assert Catalog.context_window("grok-4") == 256_000
+      # An xAI model resolves through the catalog without the registry's static
+      # table knowing it by name. This used to assert on `grok-4` from the
+      # bundled models.dev snapshot; the SOT overlay now makes `XAIModels` the
+      # authority for the whole xai provider, so the snapshot's older ids are
+      # deliberately gone — the same way the retired `claude-3-5-sonnet` is.
+      # Assert on a model the source of truth actually ships.
+      assert Catalog.context_window("grok-4.5") == 500_000
     end
 
     test "context_window returns nil for unknown models" do
@@ -230,7 +235,14 @@ defmodule OptimalSystemAgent.Providers.CatalogTest do
 
       norm = Catalog.normalize(raw)
       # Baked snapshot always covers the glm/anthropic/openai/ollama families.
-      assert %Model{ctx: 200_000} = norm["anthropic"]["claude-sonnet-4-6"]
+      # The Anthropic/OpenAI blocks are derived from Providers.AnthropicModels /
+      # Providers.OpenAIModels, so these are the real published windows — the
+      # hand-written snapshot used to claim 200_000 here, and because the
+      # Catalog is consulted before Registry's static table that stale number
+      # won and every Sonnet 4.6 turn was budgeted at a fifth of its window.
+      assert %Model{ctx: 1_000_000} = norm["anthropic"]["claude-sonnet-4-6"]
+      assert %Model{ctx: 1_000_000} = norm["anthropic"]["claude-opus-5"]
+      assert %Model{ctx: 1_050_000} = norm["openai"]["gpt-5.6-terra"]
       assert Map.has_key?(norm, "zhipuai")
       assert Map.has_key?(norm, "ollama")
     end

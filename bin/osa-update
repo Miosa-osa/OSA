@@ -241,6 +241,16 @@ atomic_symlink() {
   fi
 }
 
+# True when $1 names a MOVING remote-tracking ref (origin/main, refs/remotes/…)
+# whose value only becomes trustworthy after a successful fetch — as opposed to
+# a pinned commit sha or tag, which means the same thing offline.
+ref_is_remote_tracking() {
+  case "$1" in
+    origin/*|refs/remotes/*) return 0 ;;
+  esac
+  git -C "$ROOT" rev-parse --verify --quiet "refs/remotes/$1" >/dev/null 2>&1
+}
+
 read_version() {
   local dir="$1"
   if [ -f "$dir/VERSION" ]; then
@@ -383,14 +393,29 @@ cmd_update() {
   info "Current: v${cur_ver} (${cur_rev})"
 
   info "Fetching latest ($REF)..."
+  local fetch_ok=1
   git -C "$ROOT" fetch --quiet --tags origin >/dev/null 2>&1 \
-    || warn "fetch failed (offline or remote unreachable), resolving '$REF' from local refs"
+    || { fetch_ok=0; warn "fetch failed (offline or remote unreachable), resolving '$REF' from local refs"; }
 
   local target_rev
   target_rev="$(git -C "$ROOT" rev-parse --short=12 "$REF" 2>/dev/null)" \
     || abort "could not resolve ref '$REF' in '$ROOT'. Check the ref name and that '$ROOT' has fetched it."
 
   if [ "$target_rev" = "$cur_rev" ]; then
+    # Same hole as the in-place path used to have: if the fetch failed we are
+    # comparing against a STALE local ref, so "already up to date" would be an
+    # assertion we cannot back up. Fail loudly instead of printing a green tick.
+    #
+    # Only MOVING refs are affected. `--ref <sha>` (or a tag) is pinned: its
+    # meaning does not depend on the fetch, so "up to date with that exact
+    # commit" stays a true statement offline. Restricting this to
+    # remote-tracking refs keeps offline pinned updates working.
+    if [ "$fetch_ok" != 1 ] && ref_is_remote_tracking "$REF"; then
+      err "Cannot confirm you are up to date: the fetch from origin failed, so '$REF' is a stale local ref."
+      warn "You are on v${cur_ver} (${target_rev}); there may be newer commits on origin."
+      warn "Check your network, then retry: git -C '$ROOT' fetch origin"
+      exit 1
+    fi
     ok "Already up to date: v${cur_ver} (${target_rev})"
     exit 0
   fi

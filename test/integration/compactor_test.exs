@@ -3,6 +3,12 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
 
   alias OptimalSystemAgent.Agent.Compactor
 
+  # Explicit context window. The compactor has NO hardcoded default any more:
+  # a window it cannot resolve is `:unknown` and compaction is DEFERRED, so
+  # every test that asserts a compaction decision must state the window it is
+  # deciding against.
+  @cw 128_000
+
   # ---------------------------------------------------------------------------
   # Token estimation — strings
   # ---------------------------------------------------------------------------
@@ -124,37 +130,38 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
 
   describe "utilization" do
     test "empty message list has 0.0% utilization" do
-      assert Compactor.utilization([]) == 0.0
+      assert Compactor.utilization_percent([], @cw) == 0.0
     end
 
     test "utilization is a float" do
-      util = Compactor.utilization([%{role: "user", content: "hello"}])
+      util = Compactor.utilization_percent([%{role: "user", content: "hello"}], @cw)
       assert is_float(util)
     end
 
     test "utilization is between 0.0 and 100.0" do
       messages = [%{role: "user", content: "short message"}]
-      util = Compactor.utilization(messages)
+      util = Compactor.utilization_percent(messages, @cw)
 
       assert util >= 0.0
       assert util <= 100.0
     end
 
     test "utilization increases with more content" do
-      small = Compactor.utilization([%{role: "user", content: "hi"}])
+      small = Compactor.utilization_percent([%{role: "user", content: "hi"}], @cw)
 
       large =
-        Compactor.utilization(
+        Compactor.utilization_percent(
           for i <- 1..50 do
             %{role: "user", content: String.duplicate("word ", 100) <> "#{i}"}
-          end
+          end,
+          @cw
         )
 
       assert large > small
     end
 
     test "utilization for a single short message is less than 1%" do
-      util = Compactor.utilization([%{role: "user", content: "short message"}])
+      util = Compactor.utilization_percent([%{role: "user", content: "short message"}], @cw)
       assert util < 1.0
     end
 
@@ -168,7 +175,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      util = Compactor.utilization(messages)
+      util = Compactor.utilization_percent(messages, @cw)
       assert util > 50.0
     end
   end
@@ -192,7 +199,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
         %{role: "assistant", content: "Hi there! How can I help you today?"}
       ]
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
       assert length(result) == length(messages)
     end
 
@@ -202,7 +209,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
             [%{role: "user", content: "x"}],
             [%{role: "user", content: "hello"}, %{role: "assistant", content: "world"}]
           ] do
-        result = Compactor.maybe_compact(messages)
+        result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
         assert is_list(result), "Expected list for #{inspect(messages)}"
       end
     end
@@ -215,7 +222,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
 
       assert length(result) < length(messages),
              "Expected fewer messages after compaction, got #{length(result)}"
@@ -228,7 +235,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
       assert length(result) > 0
     end
 
@@ -239,7 +246,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
 
       Enum.each(result, fn msg ->
         assert is_map(msg), "Expected map, got #{inspect(msg)}"
@@ -263,7 +270,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           end
         end
 
-      result = Compactor.maybe_compact(messages)
+      result = Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
       assert is_list(result)
     end
   end
@@ -327,7 +334,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
           %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
-      Compactor.maybe_compact(messages)
+      Compactor.maybe_compact(messages, nil, nil, context_window: @cw)
 
       # Give the async GenServer.cast time to record the compaction metrics
       Process.sleep(300)

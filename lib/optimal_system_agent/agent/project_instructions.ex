@@ -91,7 +91,7 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
     working_dir = opts[:working_dir]
 
     root =
-      (opts[:root] || (working_dir && git_root(working_dir)) || working_dir)
+      (opts[:root] || (working_dir && outermost_root(working_dir)) || working_dir)
       |> normalize_dir()
 
     candidates = opts[:instruction_files] || @instruction_files
@@ -285,6 +285,19 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
   end
 
   # ── path helpers ─────────────────────────────────────────────────────────
+
+  # The upward walk's boundary. `git rev-parse --show-toplevel` is the wrong
+  # boundary in a constellation: inside a **nested independent repo** (or a
+  # submodule) git answers with the inner repo, so every instruction file
+  # between the inner repo and the real monorepo root is silently skipped.
+  # `Topology.workspace_root/1` keeps climbing past inner `.git` boundaries to
+  # the outermost enclosing workspace, and falls back to the git root when there
+  # is nothing above it.
+  defp outermost_root(dir) do
+    OptimalSystemAgent.Workspace.Topology.workspace_root(dir) || git_root(dir)
+  rescue
+    _ -> git_root(dir)
+  end
 
   defp git_root(nil), do: nil
 

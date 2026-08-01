@@ -38,6 +38,8 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   after the session concludes.
   """
 
+  alias OptimalSystemAgent.Infra.BoundedTable
+
   use GenServer
   require Logger
 
@@ -47,6 +49,11 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   alias OptimalSystemAgent.Events.Bus
 
   @table :osa_healing_sessions
+
+  # Row cap. A healing session is history the moment it terminates, and nothing
+  # ever deleted one — this table grew for the life of the daemon. Oldest-first
+  # eviction; see Infra.BoundedTable.
+  @max_rows 500
 
   # -- Child spec --
 
@@ -140,7 +147,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       |> Map.put(:attempt_count, 0)
 
     session = %{session | attempt_count: 1}
-    :ets.insert(@table, {session.id, session})
+    BoundedTable.insert(@table, session.id, session, max: @max_rows)
 
     Logger.info(
       "[Healing.Orchestrator] Session #{session.id} created for agent #{agent_id} " <>
@@ -288,7 +295,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   defp start_diagnosis(session, context, state) do
     {:ok, session} = Session.transition(session, :diagnosing)
     session = arm_session_timer(session)
-    :ets.insert(@table, {session.id, session})
+    BoundedTable.insert(@table, session.id, session, max: @max_rows)
 
     budget = Session.diagnosis_budget(session)
 
@@ -305,7 +312,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       {:ok, pid} ->
         mon_ref = Process.monitor(pid)
         session_updated = %{session | diagnostician_pid: pid}
-        :ets.insert(@table, {session.id, session_updated})
+        BoundedTable.insert(@table, session.id, session_updated, max: @max_rows)
 
         monitors = Map.put(state.monitors, mon_ref, {session.id, :diagnostician})
         pid_to_session = Map.put(state.pid_to_session, pid, session.id)
@@ -325,7 +332,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   defp start_fixing(session, diagnosis, context, state) do
     {:ok, session} = Session.transition(session, :fixing)
     session = %{session | diagnosis: diagnosis}
-    :ets.insert(@table, {session.id, session})
+    BoundedTable.insert(@table, session.id, session, max: @max_rows)
 
     broadcast(:system_event, session, %{
       event: :healing_diagnosis_complete,
@@ -350,7 +357,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       {:ok, pid} ->
         mon_ref = Process.monitor(pid)
         session_updated = %{session | fixer_pid: pid}
-        :ets.insert(@table, {session.id, session_updated})
+        BoundedTable.insert(@table, session.id, session_updated, max: @max_rows)
 
         monitors = Map.put(state.monitors, mon_ref, {session.id, :fixer})
         pid_to_session = Map.put(state.pid_to_session, pid, session.id)
@@ -379,7 +386,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
     {:ok, session} = Session.transition(session, :completed)
     session = %{session | fix_result: fix_result}
     cancel_session_timer(session)
-    :ets.insert(@table, {session.id, session})
+    BoundedTable.insert(@table, session.id, session, max: @max_rows)
 
     summary = %{
       session_id: session.id,
@@ -437,7 +444,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
           fixer_pid: nil
       }
 
-      :ets.insert(@table, {retry_session.id, retry_session})
+      BoundedTable.insert(@table, retry_session.id, retry_session, max: @max_rows)
 
       state = start_diagnosis(retry_session, retry_context, state)
       {:noreply, state}
@@ -468,7 +475,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
     {:ok, session} = Session.transition(session, :escalated)
     session = %{session | error: reason}
     cancel_session_timer(session)
-    :ets.insert(@table, {session.id, session})
+    BoundedTable.insert(@table, session.id, session, max: @max_rows)
 
     broadcast(:system_event, session, %{
       event: :healing_session_failed,

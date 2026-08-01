@@ -135,6 +135,93 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
     _ -> []
   end
 
+  @default_retention_days 30
+  @default_max_rows 200_000
+
+  @doc """
+  Apply the retention policy (see the moduledoc) and return
+  `{:ok, %{by_age: n, by_cap: n}}` — the row counts removed by each half.
+
+  Best-effort and never raises: a retention sweep must never be able to stop the
+  daemon booting. Options (`:days`, `:max_rows`) exist for tests; production
+  callers pass nothing and get the configured/default policy.
+  """
+  @spec purge_expired(keyword()) :: {:ok, %{by_age: non_neg_integer(), by_cap: non_neg_integer()}}
+  def purge_expired(opts \\ []) do
+    days = Keyword.get_lazy(opts, :days, fn -> setting("transcriptRetentionDays", @default_retention_days) end)
+    max_rows = Keyword.get_lazy(opts, :max_rows, fn -> setting("transcriptMaxRows", @default_max_rows) end)
+
+    by_age = purge_by_age(days)
+    by_cap = purge_by_cap(max_rows)
+
+    if by_age + by_cap > 0 do
+      Logger.info(
+        "[transcript] retention: removed #{by_age} row(s) older than #{days}d, " <>
+          "#{by_cap} row(s) over the #{max_rows}-row cap"
+      )
+    end
+
+    {:ok, %{by_age: by_age, by_cap: by_cap}}
+  rescue
+    e ->
+      Logger.warning("[transcript] retention sweep failed: #{Exception.message(e)}")
+      {:ok, %{by_age: 0, by_cap: 0}}
+  end
+
+  # 0 disables the age half of the policy (keep everything, rely on the cap).
+  defp purge_by_age(days) when not is_integer(days) or days <= 0, do: 0
+
+  defp purge_by_age(days) do
+    cutoff = DateTime.utc_now() |> DateTime.add(-days * 86_400, :second) |> DateTime.to_naive()
+
+    {count, _} =
+      from(t in __MODULE__, where: t.inserted_at < ^cutoff)
+      |> Repo.delete_all()
+
+    count
+  rescue
+    _ -> 0
+  end
+
+  # 0 disables the cap half. Deletes oldest-first by id (monotonic rowid — a
+  # stabler ordering than inserted_at, whose second resolution ties within a
+  # burst of turns).
+  defp purge_by_cap(max_rows) when not is_integer(max_rows) or max_rows <= 0, do: 0
+
+  defp purge_by_cap(max_rows) do
+    total = Repo.aggregate(__MODULE__, :count, :id)
+
+    if total > max_rows do
+      excess = total - max_rows
+
+      # Sub-select the ids to drop so the cap is applied in a single statement
+      # and the FTS delete trigger fires for each row.
+      doomed =
+        from(t in __MODULE__, order_by: [asc: t.id], limit: ^excess, select: t.id)
+        |> Repo.all()
+
+      {count, _} = from(t in __MODULE__, where: t.id in ^doomed) |> Repo.delete_all()
+      count
+    else
+      0
+    end
+  rescue
+    _ -> 0
+  end
+
+  defp setting(key, default) do
+    case OptimalSystemAgent.Settings.get(key, default) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> default
+    end
+  rescue
+    _ -> default
+  end
+
+  @doc "Current row count — used by retention tests and diagnostics."
+  @spec count() :: non_neg_integer()
+  def count, do: Repo.aggregate(__MODULE__, :count, :id)
+
   # The :content column is :string. Structured messages (vision turns carry
   # a list of content blocks — see MessageHandler.build_messages/3) would
   # fail the Ecto cast and be silently dropped; flatten block lists to text

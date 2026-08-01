@@ -77,6 +77,33 @@ impl TaskChecklist {
             .and_then(|i| i.active_form.clone())
     }
 
+    /// The human-readable subject of a task, looked up by the id the backend puts
+    /// in a `task_write` argument hint (`"complete 171c8358"`).
+    ///
+    /// Tolerant of prefix ids in EITHER direction: the model and the tool layer
+    /// routinely pass a shortened id while the checklist holds the full one (or
+    /// the reverse). A prefix only matches when it is UNAMBIGUOUS — two tasks
+    /// sharing the prefix means we cannot say which was meant, so we say nothing
+    /// and the caller falls back to showing the raw id.
+    pub fn subject_for(&self, id: &str) -> Option<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        if let Some(item) = self.items.iter().find(|i| i.id == id) {
+            return Some(item.subject.clone());
+        }
+        let mut matches = self
+            .items
+            .iter()
+            .filter(|i| i.id.starts_with(id) || id.starts_with(i.id.as_str()));
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None; // ambiguous prefix — don't guess
+        }
+        Some(first.subject.clone())
+    }
+
     pub fn show(&mut self) {
         self.visible = true;
     }
@@ -124,15 +151,16 @@ impl TaskChecklist {
         }
     }
 
-    /// Dim header line: `Updated plan` while a step is running, `Plan` otherwise,
-    /// followed by a compact `done/total` count. Both spans are faint so the
-    /// header stays quiet.
+    /// Dim header line: `Plan` plus a compact `done/total` count. Both spans are
+    /// faint so the header stays quiet.
+    ///
+    /// The title used to flip to `Updated plan` whenever a step was in progress.
+    /// That is what made the transcript alternate `Plan 1/3` / `Updated plan 1/3`
+    /// down the page — the header was reporting "is a step running right now",
+    /// which is a property of the live panel, not a name for the block. One
+    /// stable title; the `n/m` count carries the progress.
     fn header_line(&self, theme: &crate::style::Theme) -> Line<'static> {
-        let in_progress = self
-            .items
-            .iter()
-            .any(|i| i.status == ChecklistStatus::InProgress);
-        let title = if in_progress { "Updated plan" } else { "Plan" };
+        let title = "Plan";
         let completed = self
             .items
             .iter()
@@ -173,7 +201,7 @@ impl TaskChecklist {
     }
 
     /// A frozen, full-width snapshot of the current checklist as styled text,
-    /// used for the `Updated plan` scrollback cell.
+    /// used for the `Plan` scrollback cell.
     fn snapshot_text(&self, theme: &crate::style::Theme, width: u16) -> Text<'static> {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.items.len() + 1);
         lines.push(self.header_line(theme));
@@ -188,11 +216,7 @@ impl TaskChecklist {
     /// Plain-text form of the snapshot, stored on the scrollback cell so the
     /// transcript log has readable text (the styled `Text` is display-only).
     fn snapshot_plain(&self) -> String {
-        let in_progress = self
-            .items
-            .iter()
-            .any(|i| i.status == ChecklistStatus::InProgress);
-        let mut out = String::from(if in_progress { "Updated plan" } else { "Plan" });
+        let mut out = String::from("Plan");
         for item in &self.items {
             let mark = match item.status {
                 ChecklistStatus::Completed => "[x]",
@@ -319,15 +343,27 @@ mod tests {
             .collect()
     }
 
+    /// The header title is STABLE. It used to flip to "Updated plan" whenever any
+    /// step was in progress, which is what made a transcript of one plan read as
+    /// alternating "Plan 1/3" / "Updated plan 1/3" blocks.
     #[test]
-    fn header_says_updated_plan_while_running_else_plan() {
+    fn header_title_is_stable_regardless_of_progress() {
         let theme = crate::style::theme();
-        let running = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
-        let idle = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
-        let h_running: String = running.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
-        let h_idle: String = idle.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(h_running.starts_with("Updated plan"), "got {h_running:?}");
-        assert!(h_idle.starts_with("Plan"), "got {h_idle:?}");
+        let cases = [
+            ChecklistStatus::Pending,
+            ChecklistStatus::InProgress,
+            ChecklistStatus::Completed,
+            ChecklistStatus::Failed,
+        ];
+        for status in cases {
+            let c = checklist(vec![item("1", "a", status)]);
+            let h: String = c.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(h.starts_with("Plan"), "got {h:?}");
+            assert!(!h.contains("Updated"), "header must not flip variants: {h:?}");
+        }
+        // The plain-text form (transcript log) matches.
+        let c = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
+        assert!(c.snapshot_plain().starts_with("Plan\n"), "{:?}", c.snapshot_plain());
     }
 
     #[test]
@@ -372,7 +408,7 @@ mod tests {
         ]);
         let lines = flat(&c.snapshot_text(&theme, 80));
         assert_eq!(lines.len(), 3); // header + 2 items
-        assert!(lines[0].starts_with("Updated plan"));
+        assert!(lines[0].starts_with("Plan"));
         assert!(lines[1].contains("first"));
         assert!(lines[2].contains("second"));
     }
@@ -401,6 +437,33 @@ mod tests {
     }
 
     #[test]
+    fn subject_for_resolves_exact_and_unambiguous_prefix_ids() {
+        let c = checklist(vec![
+            item("171c8358aa", "Fix invisible tasks", ChecklistStatus::Pending),
+            item("fd164248bb", "Fix discarded delegation", ChecklistStatus::Pending),
+        ]);
+        // Exact.
+        assert_eq!(c.subject_for("171c8358aa").as_deref(), Some("Fix invisible tasks"));
+        // Checklist holds the full id, the hint carries a prefix.
+        assert_eq!(c.subject_for("171c8358").as_deref(), Some("Fix invisible tasks"));
+        // …and the reverse.
+        assert_eq!(c.subject_for("171c8358aa-extra").as_deref(), Some("Fix invisible tasks"));
+        // Unknown / empty resolve to nothing (caller keeps the raw id).
+        assert_eq!(c.subject_for("deadbeef"), None);
+        assert_eq!(c.subject_for("   "), None);
+    }
+
+    #[test]
+    fn subject_for_refuses_to_guess_on_an_ambiguous_prefix() {
+        let c = checklist(vec![
+            item("abc1", "first", ChecklistStatus::Pending),
+            item("abc2", "second", ChecklistStatus::Pending),
+        ]);
+        assert_eq!(c.subject_for("abc"), None);
+        assert_eq!(c.subject_for("abc1").as_deref(), Some("first"));
+    }
+
+    #[test]
     fn empty_checklist_never_snapshots() {
         let mut c = checklist(vec![]);
         assert!(c.snapshot_if_changed(80).is_none());
@@ -425,7 +488,7 @@ mod tests {
             assert!(!text.contains(border), "no border glyph {border:?}");
         }
         // Header and content are present.
-        assert!(text.contains("Updated plan"));
+        assert!(text.contains("Plan"));
         assert!(text.contains("alpha"));
     }
 
