@@ -57,13 +57,18 @@ defmodule OptimalSystemAgent.Store.TranscriptPersistenceTest do
       sid = unique_sid("stream")
       streamed = "line one\nline two — final accumulated text"
 
-      assert {:ok, _} = Handlers.save_transcript(%{session_id: sid, input: "q", response: streamed})
+      assert {:ok, _} =
+               Handlers.save_transcript(%{session_id: sid, input: "q", response: streamed})
+
       assert roles_contents(sid) == [{"assistant", streamed}]
     end
 
     test "skips empty assistant response and never writes a user row" do
       sid = unique_sid("empty")
-      assert {:ok, _} = Handlers.save_transcript(%{session_id: sid, input: "question", response: ""})
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{session_id: sid, input: "question", response: ""})
+
       assert roles_contents(sid) == []
     end
   end
@@ -80,6 +85,53 @@ defmodule OptimalSystemAgent.Store.TranscriptPersistenceTest do
       assert :ok = TurnPipeline.persist_user_turn(sid, "")
       assert :ok = TurnPipeline.persist_user_turn(sid, nil)
       assert roles_contents(sid) == []
+    end
+  end
+
+  describe "save_transcript token attribution" do
+    test "persists per-turn token delta when turn_input_tokens/turn_output_tokens are present" do
+      sid = unique_sid("tok")
+
+      payload = %{
+        session_id: sid,
+        input: "question",
+        response: "answer",
+        turn_input_tokens: 1200,
+        turn_output_tokens: 350
+      }
+
+      assert {:ok, _} = Handlers.save_transcript(payload)
+
+      [transcript] = SessionTranscript.get_transcript(sid)
+      assert transcript.role == "assistant"
+      assert transcript.tokens == 1550
+    end
+
+    test "defaults to zero tokens when token fields are absent (backward compat)" do
+      sid = unique_sid("tok-nil")
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{session_id: sid, input: "q", response: "a"})
+
+      [transcript] = SessionTranscript.get_transcript(sid)
+      assert transcript.tokens == 0
+    end
+
+    test "handles nil token values gracefully" do
+      sid = unique_sid("tok-nil-vals")
+
+      payload = %{
+        session_id: sid,
+        input: "q",
+        response: "a",
+        turn_input_tokens: nil,
+        turn_output_tokens: nil
+      }
+
+      assert {:ok, _} = Handlers.save_transcript(payload)
+
+      [transcript] = SessionTranscript.get_transcript(sid)
+      assert transcript.tokens == 0
     end
   end
 

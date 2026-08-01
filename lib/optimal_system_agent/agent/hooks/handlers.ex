@@ -41,58 +41,163 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   def builtins do
     [
       # ── Session lifecycle ──────────────────────────────────────────
-      %{name: "session_announce", event: :session_start, priority: 10,
-        handler: &session_announce/1, opts: []},
-      %{name: "session_cleanup", event: :session_end, priority: 90,
-        handler: &session_cleanup/1, opts: []},
-      %{name: "memory_consolidate", event: :session_end, priority: 80,
-        handler: &memory_consolidate/1, opts: []},
+      %{
+        name: "session_announce",
+        event: :session_start,
+        priority: 10,
+        handler: &session_announce/1,
+        opts: []
+      },
+      %{
+        name: "session_cleanup",
+        event: :session_end,
+        priority: 90,
+        handler: &session_cleanup/1,
+        opts: []
+      },
+      %{
+        name: "memory_consolidate",
+        event: :session_end,
+        priority: 80,
+        handler: &memory_consolidate/1,
+        opts: []
+      },
 
       # ── pre_tool_use ───────────────────────────────────────────────
-      %{name: "spend_guard", event: :pre_tool_use, priority: 8,
-        handler: &spend_guard/1, opts: []},
-      %{name: "security_check", event: :pre_tool_use, priority: 10,
-        handler: &security_check/1, opts: []},
-      %{name: "read_before_write", event: :pre_tool_use, priority: 12,
-        handler: &read_before_write/1, opts: []},
-      %{name: "mcp_cache", event: :pre_tool_use, priority: 15,
-        handler: &mcp_cache_pre/1, opts: []},
+      %{
+        name: "spend_guard",
+        event: :pre_tool_use,
+        priority: 8,
+        handler: &spend_guard/1,
+        opts: []
+      },
+      %{
+        name: "security_check",
+        event: :pre_tool_use,
+        priority: 10,
+        handler: &security_check/1,
+        opts: []
+      },
+      %{
+        name: "read_before_write",
+        event: :pre_tool_use,
+        priority: 12,
+        handler: &read_before_write/1,
+        opts: []
+      },
+      %{
+        name: "mcp_cache",
+        event: :pre_tool_use,
+        priority: 15,
+        handler: &mcp_cache_pre/1,
+        opts: []
+      },
 
       # ── post_tool_use ──────────────────────────────────────────────
-      %{name: "track_files_read", event: :post_tool_use, priority: 5,
-        handler: &track_files_read/1, opts: []},
-      %{name: "mcp_cache_post", event: :post_tool_use, priority: 15,
-        handler: &mcp_cache_post/1, opts: []},
-      %{name: "cost_tracker", event: :post_tool_use, priority: 25,
-        handler: &cost_tracker/1, opts: []},
-      %{name: "vault_auto_checkpoint", event: :post_tool_use, priority: 80,
-        handler: &vault_auto_checkpoint/1, opts: []},
-      %{name: "telemetry", event: :post_tool_use, priority: 90,
-        handler: &telemetry_hook/1, opts: []},
-      %{name: "episodic_recorder", event: :post_tool_use, priority: 90,
-        handler: &episodic_recorder/1, opts: []},
-      %{name: "learning_observer", event: :post_tool_use, priority: 95,
-        handler: &learning_observer/1, opts: []},
+      %{
+        name: "track_files_read",
+        event: :post_tool_use,
+        priority: 5,
+        handler: &track_files_read/1,
+        opts: []
+      },
+      %{
+        name: "mcp_cache_post",
+        event: :post_tool_use,
+        priority: 15,
+        handler: &mcp_cache_post/1,
+        opts: []
+      },
+      %{
+        name: "cost_tracker",
+        event: :post_tool_use,
+        priority: 25,
+        handler: &cost_tracker/1,
+        opts: []
+      },
+      %{
+        name: "vault_auto_checkpoint",
+        event: :post_tool_use,
+        priority: 80,
+        handler: &vault_auto_checkpoint/1,
+        opts: []
+      },
+      %{
+        name: "telemetry",
+        event: :post_tool_use,
+        priority: 90,
+        handler: &telemetry_hook/1,
+        opts: []
+      },
+      %{
+        name: "episodic_recorder",
+        event: :post_tool_use,
+        priority: 90,
+        handler: &episodic_recorder/1,
+        opts: []
+      },
+      %{
+        name: "learning_observer",
+        event: :post_tool_use,
+        priority: 95,
+        handler: &learning_observer/1,
+        opts: []
+      },
 
       # ── post_tool_use_failure ──────────────────────────────────────
-      %{name: "failure_learning_observer", event: :post_tool_use_failure, priority: 95,
-        handler: &learning_observer/1, opts: []},
+      %{
+        name: "failure_learning_observer",
+        event: :post_tool_use_failure,
+        priority: 95,
+        handler: &learning_observer/1,
+        opts: []
+      },
 
       # ── compaction ─────────────────────────────────────────────────
-      %{name: "compact_observer_pre", event: :pre_compact, priority: 50,
-        handler: &compact_observer/1, opts: []},
-      %{name: "compact_observer_post", event: :post_compact, priority: 50,
-        handler: &compact_observer/1, opts: []},
+      %{
+        name: "compact_observer_pre",
+        event: :pre_compact,
+        priority: 50,
+        handler: &compact_observer/1,
+        opts: []
+      },
+      %{
+        name: "compact_observer_post",
+        event: :post_compact,
+        priority: 50,
+        handler: &compact_observer/1,
+        opts: []
+      },
 
       # ── post_response ──────────────────────────────────────────────
-      %{name: "save_transcript", event: :post_response, priority: 85,
-        handler: &save_transcript/1, opts: []},
-      %{name: "auto_save_session", event: :post_response, priority: 95,
-        handler: &auto_save_session/1, opts: []},
-      %{name: "auto_skill_creator", event: :post_response, priority: 96,
-        handler: &auto_skill_creator/1, opts: []},
-      %{name: "episodic_turn_recorder", event: :post_response, priority: 88,
-        handler: &episodic_turn_recorder/1, opts: []}
+      %{
+        name: "save_transcript",
+        event: :post_response,
+        priority: 85,
+        handler: &save_transcript/1,
+        opts: []
+      },
+      %{
+        name: "auto_save_session",
+        event: :post_response,
+        priority: 95,
+        handler: &auto_save_session/1,
+        opts: []
+      },
+      %{
+        name: "auto_skill_creator",
+        event: :post_response,
+        priority: 96,
+        handler: &auto_skill_creator/1,
+        opts: []
+      },
+      %{
+        name: "episodic_turn_recorder",
+        event: :post_response,
+        priority: 88,
+        handler: &episodic_turn_recorder/1,
+        opts: []
+      }
     ]
   end
 
@@ -406,7 +511,14 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
     failure? =
       Enum.any?(
-        ["i hit an error", "i couldn't", "i could not", "failed to", "unable to", "i wasn't able"],
+        [
+          "i hit an error",
+          "i couldn't",
+          "i could not",
+          "failed to",
+          "unable to",
+          "i wasn't able"
+        ],
         &String.contains?(down, &1)
       )
 
@@ -416,9 +528,14 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
     reflection =
       cond do
-        failure? -> "Turn reported a problem; response: " <> String.slice(response, 0, 140)
-        tool_count > 0 -> "Completed using #{tool_count} tool type(s); " <> String.slice(response, 0, 120)
-        true -> "Answered directly: " <> String.slice(response, 0, 140)
+        failure? ->
+          "Turn reported a problem; response: " <> String.slice(response, 0, 140)
+
+        tool_count > 0 ->
+          "Completed using #{tool_count} tool type(s); " <> String.slice(response, 0, 120)
+
+        true ->
+          "Answered directly: " <> String.slice(response, 0, 140)
       end
 
     {outcome, reflection}
@@ -514,13 +631,21 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   # under role "user" because :input was mis-derived from the merged
   # message list. Memory auto-extraction moved to ingestion with it.
   # `response` is the fully accumulated streamed final text from ReactLoop.
+  # `turn_input_tokens` / `turn_output_tokens` carry the per-turn token
+  # delta computed in Loop.run_and_reply/1 from the pre/post ReactLoop
+  # session totals — persisted here so /cost, /status, and transcript
+  # queries can show real per-turn token usage instead of always 0.
   def save_transcript(%{session_id: sid, response: response} = payload)
       when is_binary(sid) do
     alias OptimalSystemAgent.Store.SessionTranscript
 
+    turn_tokens =
+      (Map.get(payload, :turn_input_tokens, 0) || 0) +
+        (Map.get(payload, :turn_output_tokens, 0) || 0)
+
     try do
       if is_binary(response) and response != "" do
-        SessionTranscript.save_turn(sid, "assistant", response)
+        SessionTranscript.save_turn(sid, "assistant", response, tokens: turn_tokens)
       end
     rescue
       _ -> :ok

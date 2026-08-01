@@ -1380,6 +1380,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # any earlier turn ever used.
     msg_len_before = length(state.messages)
     tool_calls_before = Map.get(state, :total_tool_calls, 0)
+    # Snapshot per-session token totals for per-turn delta attribution.
+    # `session_input_tokens` / `session_output_tokens` accumulate across the
+    # whole session via Loop.Accounting.record/2; diffing against these
+    # baselines yields the token cost of THIS turn's LLM round-trip(s).
+    input_tokens_before = Map.get(state, :session_input_tokens, 0)
+    output_tokens_before = Map.get(state, :session_output_tokens, 0)
 
     {response, state} =
       try do
@@ -1457,6 +1463,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
     )
 
     # Fire post_response hooks (async, non-blocking)
+    # Per-turn token delta: difference between the post-ReactLoop session
+    # totals and the pre-turn snapshot taken above. This is the real token
+    # cost of this turn's LLM round-trip(s), threaded into the transcript
+    # via the save_transcript hook so /cost and /status can show real usage.
+    turn_input_tokens = Map.get(state, :session_input_tokens, 0) - input_tokens_before
+    turn_output_tokens = Map.get(state, :session_output_tokens, 0) - output_tokens_before
+
     try do
       Hooks.run_async(:post_response, %{
         session_id: state.session_id,
@@ -1465,7 +1478,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
         turn_count: state.turn_count,
         iteration: state.iteration,
         tools_used: Map.get(state.last_meta, :tools_used, []),
-        total_tool_calls: state.total_tool_calls
+        total_tool_calls: state.total_tool_calls,
+        turn_input_tokens: turn_input_tokens,
+        turn_output_tokens: turn_output_tokens
       })
     rescue
       _ -> :ok
