@@ -67,14 +67,86 @@ pub struct VT100Backend {
 impl VT100Backend {
     /// Create a backend whose emulated screen is `width` x `height` cells.
     pub fn new(width: u16, height: u16) -> Self {
+        Self::with_scrollback(width, height, 0)
+    }
+
+    /// As [`Self::new`], but the emulator also retains up to `scrollback` rows of
+    /// scroll history — the only way to assert on what a commit to the terminal's
+    /// NATIVE scrollback actually deposited.
+    ///
+    /// `vt100` grows the history exactly where a real terminal does: in
+    /// `scroll_up`, i.e. whenever rows fall off the top of the screen. That is
+    /// precisely the path `Terminal::insert_before` takes (it drives the backend's
+    /// `append_lines`), so a test can count how many times a committed block
+    /// reached history and catch a re-commit.
+    ///
+    /// Note what this deliberately does NOT model: `vt100` treats ED2 (`ESC[2J`)
+    /// as a pure erase, whereas the VTE family scrolls the screen into history
+    /// instead. A scrollback assertion here is therefore a LOWER bound on what a
+    /// VTE user sees, which is why the ED2 ban is asserted separately, against the
+    /// emitted bytes — see `resize_clear_never_emits_ed2`.
+    pub fn with_scrollback(width: u16, height: u16, scrollback: usize) -> Self {
         // Colour is normally suppressed when stdout is not a tty (which it is not
         // under `cargo test`); force it so style regressions are observable.
         crossterm::style::force_color_output(true);
-        let parser = Rc::new(RefCell::new(vt100::Parser::new(height, width, 0)));
+        let parser = Rc::new(RefCell::new(vt100::Parser::new(height, width, scrollback)));
         Self {
             crossterm_backend: CrosstermBackend::new(SharedParser(Rc::clone(&parser))),
             parser,
         }
+    }
+
+    /// A second backend driving the SAME emulated terminal.
+    ///
+    /// The inline path rebuilds its `Terminal` (rather than resizing in place)
+    /// on every real resize, which consumes the old backend. Forking lets a test
+    /// do the same against one continuous emulator, so screen and scroll history
+    /// survive the rebuild exactly as they do on a real terminal.
+    pub fn fork(&self) -> Self {
+        Self {
+            crossterm_backend: CrosstermBackend::new(SharedParser(Rc::clone(&self.parser))),
+            parser: Rc::clone(&self.parser),
+        }
+    }
+
+    /// Resize the emulated terminal, exactly as a window drag would.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.parser.borrow_mut().set_size(height, width);
+    }
+
+    /// Every retained scroll-history row, oldest first, trailing blanks stripped.
+    ///
+    /// Reads the history by scrolling the emulated viewport back to its oldest
+    /// row and walking forward, so it reflects what a user scrolling up would
+    /// actually see. The viewport is restored before returning.
+    pub fn scrollback_lines(&self) -> Vec<String> {
+        let mut parser = self.parser.borrow_mut();
+        let (rows, _) = parser.screen().size();
+        let depth = {
+            // Walk back as far as the emulator will go: `set_scrollback` clamps
+            // to the retained length, so asking for more than exists is safe and
+            // reports the true depth.
+            parser.set_scrollback(usize::MAX);
+            parser.screen().scrollback()
+        };
+        let mut out: Vec<String> = Vec::new();
+        // Page forward one screen at a time from the oldest row, collecting only
+        // the rows that were genuinely history (never the live screen).
+        let mut remaining = depth;
+        while remaining > 0 {
+            parser.set_scrollback(remaining);
+            let page: Vec<String> = parser
+                .screen()
+                .contents()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            let take = (remaining).min(rows as usize);
+            out.extend(page.into_iter().take(take));
+            remaining -= take;
+        }
+        parser.set_scrollback(0);
+        out
     }
 
     /// The terminal emulator behind this backend. Bind the returned `Ref` to a

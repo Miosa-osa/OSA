@@ -4524,3 +4524,350 @@ That is the whole change.";
     }
 }
 
+
+// ─────────────────── resize / reflow invariants ───────────────────
+//
+// Resize has been OSA's most repeatedly-regressed surface: the composer
+// duplicating down the screen, a DSR crash on a width-only resize, a full wipe
+// firing on every height change, and — the one that motivated this module — a
+// cascade of markdown-table rules deposited into scrollback, one per step of a
+// window drag.
+//
+// Those were four local fixes to one structural problem: a resize is the only
+// path that touches the terminal OUTSIDE the region OSA owns, and nothing
+// asserted what it was allowed to touch. The invariants below state the rules
+// directly.
+//
+// The load-bearing one is the ED2 ban. `Clear(ClearType::All)` and
+// `MoveTo(0,0) + Clear(FromCursorDown)` are visually identical and only one of
+// them is an erase: the VTE family (GNOME Terminal and every other libvte
+// embedder) implements ED2 by SCROLLING the screen into scrollback, so emitting
+// it once per resize step permanently deposits one snapshot of the live region
+// per step. `vt100` — like xterm — models ED2 as a pure erase, so no
+// screen-level assertion can see this. The only place the difference is visible
+// is the emitted byte stream, which is where it is asserted.
+#[cfg(test)]
+mod resize_invariants {
+    use ratatui::layout::Rect;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    use crate::app::assistant_stream::{commit_assistant_chunk, AssistantStream};
+    use crate::app::event_loop::{clear_screen_for_resize, purge_scrollback_into};
+    use crate::components::chat::message::{Message, MessageType};
+    use crate::components::chat::Chat;
+    use crate::test_backend::VT100Backend;
+
+    /// ED2. Never legal on the inline path.
+    const ED2: &str = "\u{1b}[2J";
+    /// ED0 in both the explicit and defaulted forms crossterm may emit.
+    const ED0: [&str; 2] = ["\u{1b}[J", "\u{1b}[0J"];
+    /// ED3 (erase saved lines) — the only sequence allowed to touch history,
+    /// and only for `/clear`.
+    const ED3: &str = "\u{1b}[3J";
+
+    fn emitted(f: impl FnOnce(&mut Vec<u8>)) -> String {
+        let mut out: Vec<u8> = Vec::new();
+        f(&mut out);
+        String::from_utf8(out).expect("escape sequences are ASCII")
+    }
+
+    /// A reply of exactly the shape that produced the cascade: prose, a bordered
+    /// markdown table, a thematic break, more prose.
+    const TABLE_REPLY: &str = "\
+Here are the three options.
+
+| Option | Cost | Notes |
+|---|---|---|
+| Alpha | 1 | cheapest |
+| Beta | 2 | balanced |
+| Gamma | 3 | fastest |
+
+---
+
+Beta is the one I would pick.
+";
+
+    /// Glyphs unique to one committed block, used to count copies. `┌` appears
+    /// exactly once per rendered table (its top-left frame corner).
+    const TABLE_CORNER: char = '\u{250c}';
+
+    /// How many rows anywhere the user can still reach — scroll history plus the
+    /// live screen — contain `needle`.
+    fn copies_reachable(backend: &VT100Backend, needle: char) -> usize {
+        backend
+            .scrollback_lines()
+            .iter()
+            .map(String::as_str)
+            .chain(backend.contents().lines())
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
+    /// The event loop's resize step, end to end: the emulator reflows, the
+    /// screen is erased, the inline viewport is rebuilt fresh at the new size.
+    fn resize_step(term: Terminal<VT100Backend>, w: u16, h: u16, inline_h: u16) -> Terminal<VT100Backend> {
+        let mut backend = term.backend().fork();
+        drop(term);
+        backend.resize(w, h);
+        clear_screen_for_resize(&mut backend).unwrap();
+        Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_h.min(h.saturating_sub(1)).max(1)),
+            },
+        )
+        .unwrap()
+    }
+
+    /// The event loop's step 2: drain queued blocks into native scrollback in
+    /// one batched `insert_before`, rendered at the CURRENT width.
+    fn commit_all(term: &mut Terminal<VT100Backend>, msgs: Vec<Message>) {
+        let w = term.get_frame().area().width;
+        let sized: Vec<(Message, u16)> = msgs
+            .into_iter()
+            .map(|m| {
+                let h = m.height(w);
+                (m, h)
+            })
+            .filter(|(_, h)| *h > 0)
+            .collect();
+        let total: u16 = sized.iter().map(|(_, h)| *h).sum();
+        if total == 0 {
+            return;
+        }
+        term.insert_before(total, |buf| {
+            let mut y = 0u16;
+            for (m, h) in sized.iter() {
+                m.render_to_buffer(Rect::new(0, y, w, *h), buf, 0);
+                y = y.saturating_add(*h);
+            }
+        })
+        .unwrap();
+    }
+
+    // ── the ban itself ──────────────────────────────────────────────
+
+    /// **The regression.** A resize may erase the screen; it may not push it
+    /// into scroll history. On VTE that distinction is the whole bug.
+    #[test]
+    fn resize_clear_erases_in_place_and_never_scrolls_into_history() {
+        let seq = emitted(|out| clear_screen_for_resize(out).unwrap());
+        assert!(
+            !seq.contains(ED2),
+            "the resize clear emitted ED2 (ESC[2J). On the VTE family that \
+             SCROLLS the live region into scrollback instead of erasing it, so \
+             a window drag leaves one unreflowable snapshot per step — the \
+             table-rule cascade. Use MoveTo(0,0) + ClearType::FromCursorDown. \
+             Emitted: {seq:?}"
+        );
+        assert!(
+            ED0.iter().any(|e| seq.contains(e)),
+            "the resize clear must still erase the whole screen (ED0 from \
+             home); emitted {seq:?}"
+        );
+        assert!(
+            !seq.contains(ED3),
+            "a resize must never purge the user's scroll history; that is \
+             /clear's job alone. Emitted: {seq:?}"
+        );
+    }
+
+    /// `/clear` is the ONLY caller allowed to destroy history — and it has the
+    /// same ED2 hazard in reverse: purging and then emitting ED2 hands one
+    /// final screenful back to the scrollback it just emptied.
+    #[test]
+    fn clear_command_erases_the_screen_before_purging_and_never_uses_ed2() {
+        let seq = emitted(|out| purge_scrollback_into(out).unwrap());
+        assert!(
+            !seq.contains(ED2),
+            "/clear emitted ED2 after ED3; on VTE that re-deposits the visible \
+             screen into the history it just purged. Emitted: {seq:?}"
+        );
+        assert!(ed3_follows_an_erase(&seq), "the visible screen must be erased BEFORE the purge; emitted {seq:?}");
+    }
+
+    fn ed3_follows_an_erase(seq: &str) -> bool {
+        let purge = match seq.find(ED3) {
+            Some(i) => i,
+            None => return false,
+        };
+        ED0.iter()
+            .filter_map(|e| seq.find(e))
+            .any(|i| i < purge)
+    }
+
+    // ── committed blocks are committed once ─────────────────────────
+
+    /// **The invariant the cascade violated**, stated positively and swept: a
+    /// block that has reached native scrollback stays there exactly once, no
+    /// matter how the terminal is subsequently resized.
+    ///
+    /// The sweep covers every shape of resize the loop distinguishes — shrink,
+    /// grow, width-only, height-only, and rapid alternation — because each took
+    /// a different branch in the code that regressed.
+    #[test]
+    fn a_committed_block_survives_a_resize_sweep_exactly_once() {
+        // Small screen + a tall reply, so the commit genuinely scrolls into the
+        // emulator's history rather than merely landing on screen.
+        let (w0, h0) = (72u16, 10u16);
+        let mut term = Terminal::with_options(
+            VT100Backend::with_scrollback(w0, h0, 4000),
+            TerminalOptions { viewport: Viewport::Inline(4) },
+        )
+        .unwrap();
+
+        commit_all(
+            &mut term,
+            vec![Message::new(MessageType::Agent, TABLE_REPLY.to_string(), None)],
+        );
+        assert_eq!(
+            copies_reachable(term.backend(), TABLE_CORNER),
+            1,
+            "sanity: the table must be committed exactly once to begin with"
+        );
+
+        // width-only ↓, width-only ↑, height-only, both, and a rapid drag.
+        let sweep: Vec<(u16, u16)> = vec![
+            (71, 10), (70, 10), (69, 10), (68, 10),      // the drag that regressed
+            (68, 14), (68, 9),                            // height-only
+            (100, 9), (40, 9),                            // width jumps
+            (40, 24), (120, 30), (60, 12),                // both
+            (61, 12), (60, 12), (61, 12), (60, 12),       // alternation
+        ];
+        for (w, h) in sweep {
+            term = resize_step(term, w, h, 4);
+            term.draw(|f| {
+                let a = f.area();
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new("> "),
+                    Rect::new(a.x, a.y, a.width, 1.min(a.height)),
+                );
+            })
+            .unwrap();
+            let n = copies_reachable(term.backend(), TABLE_CORNER);
+            assert_eq!(
+                n, 1,
+                "after resizing to {w}x{h} the committed table is reachable \
+                 {n} times, not once. >1 means the resize re-emitted content \
+                 the user had already been given (the cascade); 0 means it \
+                 destroyed history it does not own."
+            );
+        }
+    }
+
+    /// Same invariant for a reply that is still STREAMING when the resize
+    /// lands: blocks that settled early are already immutable history, and the
+    /// unsettled tail must not be committed by the resize at all.
+    #[test]
+    fn a_resize_mid_stream_neither_duplicates_settled_blocks_nor_commits_the_tail() {
+        let mut term = Terminal::with_options(
+            VT100Backend::with_scrollback(72, 10, 4000),
+            TerminalOptions { viewport: Viewport::Inline(4) },
+        )
+        .unwrap();
+
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        // Stream up to (but not past) the closing paragraph. A table only
+        // freezes once a following block proves it finished growing, so the
+        // trailing `---` has to be in the buffer for the table to settle — and
+        // the final paragraph is then the part still in flight.
+        let cut = TABLE_REPLY.find("Beta is").unwrap();
+        for byte in TABLE_REPLY[..cut].as_bytes().chunks(1) {
+            stream.push(Some("m1"), std::str::from_utf8(byte).unwrap());
+            while let Some(b) = stream.settle() {
+                commit_assistant_chunk(&mut chat, &mut header, &b, None);
+            }
+        }
+        commit_all(&mut term, chat.drain_scrollback());
+        assert_eq!(
+            copies_reachable(term.backend(), TABLE_CORNER),
+            1,
+            "sanity: the settled table must be in history exactly once"
+        );
+
+        for (w, h) in [(71u16, 10u16), (68, 10), (68, 20), (44, 20), (90, 8)] {
+            term = resize_step(term, w, h, 4);
+            // A resize must not make the stream hand anything back: `settle`
+            // has no width input, and re-settling after a resize is exactly the
+            // re-commit that produced the cascade.
+            assert!(
+                stream.settle().is_none(),
+                "resizing to {w}x{h} caused the in-flight stream to re-settle \
+                 bytes it had already committed"
+            );
+            assert!(
+                !chat.has_pending_scrollback(),
+                "resizing to {w}x{h} queued a block for scrollback; a resize is \
+                 not a commit point"
+            );
+            term.draw(|f| {
+                f.render_widget(ratatui::widgets::Paragraph::new("> "), f.area());
+            })
+            .unwrap();
+            let n = copies_reachable(term.backend(), TABLE_CORNER);
+            assert_eq!(
+                n, 1,
+                "after a mid-stream resize to {w}x{h} the settled table is \
+                 reachable {n} times, not once"
+            );
+        }
+    }
+
+    /// The commit queue itself must be width-independent: draining is what
+    /// commits, and no amount of re-laying-out may put a drained block back.
+    ///
+    /// This is the cheap, total version of the invariant above — it holds for
+    /// every block kind at once, without a terminal.
+    #[test]
+    fn a_width_sweep_never_re_queues_an_already_drained_block() {
+        let mut chat = Chat::new();
+        chat.add_user_message("compare the options");
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+        stream.push(Some("m1"), TABLE_REPLY);
+        while let Some(b) = stream.settle() {
+            commit_assistant_chunk(&mut chat, &mut header, &b, None);
+        }
+
+        let drained = chat.drain_scrollback();
+        assert!(!drained.is_empty(), "sanity: something must have been queued");
+        assert!(!chat.has_pending_scrollback());
+
+        for w in (20u16..=200).step_by(3) {
+            chat.set_size(w, 24);
+            chat.invalidate_width_caches();
+            assert!(
+                !chat.has_pending_scrollback(),
+                "re-laying out at width {w} re-queued an already-committed \
+                 block; commits must be idempotent per block across resize"
+            );
+            assert!(chat.drain_scrollback().is_empty(), "width {w}");
+        }
+    }
+
+    /// A block's committed height must match the rows it actually paints at the
+    /// width it was committed at — for every width in the sweep. A disagreement
+    /// here is how a resize leaves half a table stranded above the viewport.
+    #[test]
+    fn reserved_equals_drawn_for_a_committed_table_at_every_width() {
+        for w in 20u16..=200 {
+            let msg = Message::new(MessageType::Agent, TABLE_REPLY.to_string(), None);
+            let h = msg.height(w);
+            assert!(h > 0, "width {w}: a non-empty reply must reserve rows");
+            let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w, h + 4));
+            msg.render_to_buffer(Rect::new(0, 0, w, h), &mut buf, 0);
+            for y in h..h + 4 {
+                for x in 0..w {
+                    assert_eq!(
+                        buf[(x, y)].symbol().trim(),
+                        "",
+                        "width {w}: reserved {h} rows but painted ink on row {y}"
+                    );
+                }
+            }
+        }
+    }
+}

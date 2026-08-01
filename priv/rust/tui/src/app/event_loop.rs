@@ -612,11 +612,30 @@ impl App {
                         // screen and rebuild. Cost: the on-screen transcript is cleared
                         // on resize (still in scrollback history + the transcript
                         // viewer). This ONLY runs on a real resize.
-                        let _ = execute!(
-                            std::io::stdout(),
-                            crossterm::cursor::MoveTo(0, 0),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                        );
+                        //
+                        // The erase is ED0-from-home (`ESC[H` + `ESC[J`), NOT ED2
+                        // (`ESC[2J`). Visually the two are identical — both leave a
+                        // blank screen with the cursor at (0, 0) — but ED2 is NOT a
+                        // pure erase on the VTE family (GNOME Terminal, Tilix,
+                        // Terminator, and every other libvte embedder): VTE
+                        // implements it by SCROLLING the current screen into the
+                        // scrollback buffer, which is why `clear(1)` there leaves the
+                        // old screen readable above. Emitting it once per resize step
+                        // therefore deposited a full snapshot of the live region —
+                        // composer, status bar, and whatever markdown was mid-render
+                        // — into unreflowable scrollback on EVERY step of a window
+                        // drag. A drag through 15 columns left 15 stacked copies, each
+                        // one column narrower than the last: the "cascade of
+                        // horizontal rules" a bordered markdown table produced, and
+                        // the same mechanism behind the older "composer duplicates
+                        // down the screen on resize" reports.
+                        //
+                        // ED0 (erase from cursor to end of screen) is specified as an
+                        // in-place erase and is implemented as one by VTE, xterm,
+                        // kitty and Alacritty alike, so it wipes the screen without
+                        // touching scroll history. Every other inline clear in this
+                        // file already uses it; this was the one hole.
+                        let _ = clear_screen_for_resize(&mut std::io::stdout());
                     } else if let Some(top) = last_inline_top {
                         // Pure HEIGHT change (composer grew/shrank, a transient notice
                         // appeared) — NOT a resize. The terminal did NOT reflow, so the
@@ -910,6 +929,26 @@ impl App {
         // for every non-focus event.
         if let Event::Terminal(ref ev) = event {
             crate::notification::focus::note_event(ev);
+            // Regaining focus forces one full repaint of the live region.
+            //
+            // An outer layer can repaint OSA's pane out of band with no PTY
+            // resize at all — tmux redrawing a pane after a layout change,
+            // nvim's `:terminal` restoring a window, a multiplexer client
+            // re-attaching. ratatui only rewrites cells whose own model
+            // changed, so rows it does not know were damaged stay damaged
+            // (stranded, doubled or half-erased chrome) until something else
+            // happens to repaint them. There is no event that reports the
+            // damage, but focus is regained on essentially every path that
+            // causes it, which makes `FocusGained` a cheap and reliable heal.
+            //
+            // `force_redraw` clears only the inline viewport (ratatui's inline
+            // `clear` is viewport-top + ED0) and repaints it, so it can never
+            // reach the transcript above — a repaint, not a wipe. Borrowed from
+            // grok-build, which pins the same behaviour with a PTY test that
+            // injects a stranded row and asserts `ESC[I` removes it.
+            if matches!(ev, CrosstermEvent::FocusGained) {
+                self.force_redraw = true;
+            }
         }
         if let Event::Terminal(CrosstermEvent::Key(key)) = &event {
             if key.kind == KeyEventKind::Press {
@@ -1952,20 +1991,60 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
 /// via `insert_before` (step 2 of the run loop) — it never lived in a ratatui
 /// buffer, so `terminal.clear()` (which only resets ratatui's own diff state
 /// and the live viewport region) cannot touch it, and neither can wiping
-/// `self.chat` / `self.transcript_log`. `ClearType::Purge` is `ESC[3J`
-/// (erase saved lines — supported by every xterm-compatible terminal in
-/// mainstream use; emulators without it simply ignore the private sequence
-/// and only the visible screen clears, which is still a correct, if smaller,
-/// clear). `ClearType::All` (`ESC[2J`) then erases the now-scrollback-free
-/// visible screen, and homing the cursor to (0, 0) means the caller's
-/// following `Viewport::Inline` rebuild anchors fresh at the very top instead
-/// of wherever the old composer happened to leave the cursor.
+/// `self.chat` / `self.transcript_log`.
+///
+/// Order matters, and it is the opposite of the obvious one. The visible screen
+/// is erased FIRST, with ED0-from-home (`ESC[H` + `ESC[J`) rather than ED2
+/// (`ESC[2J`): on the VTE family ED2 scrolls the screen into scrollback instead
+/// of erasing it, so the old `Purge`-then-`All` sequence emptied the scroll
+/// history and then immediately pushed one final screenful back into it — a
+/// `/clear` that visibly left the last screen scrollable. ED0 erases in place on
+/// every emulator, so nothing is deposited.
+///
+/// `ClearType::Purge` (`ESC[3J`, erase saved lines) then drops the real scroll
+/// history. It is supported by every xterm-compatible terminal in mainstream
+/// use; emulators without it simply ignore the private sequence and only the
+/// visible screen clears, which is still a correct, if smaller, clear.
+///
+/// Homing the cursor to (0, 0) means the caller's following `Viewport::Inline`
+/// rebuild anchors fresh at the very top instead of wherever the old composer
+/// happened to leave the cursor.
 fn purge_scrollback() -> Result<()> {
+    purge_scrollback_into(&mut std::io::stdout())
+}
+
+/// [`purge_scrollback`] against an arbitrary sink, so the byte sequence itself is
+/// assertable in tests.
+pub(crate) fn purge_scrollback_into(out: &mut impl std::io::Write) -> Result<()> {
     execute!(
-        std::io::stdout(),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        out,
         crossterm::cursor::MoveTo(0, 0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+        crossterm::cursor::MoveTo(0, 0),
+    )?;
+    Ok(())
+}
+
+/// Erase the whole visible screen for a REAL terminal resize, without depositing
+/// a copy of it in the terminal's scroll history.
+///
+/// This is the one clear in the inline path that has to be unanchored: an actual
+/// resize reflows the emulator's screen, so the old chrome's row is genuinely
+/// unknowable and no surgical `FromCursorDown` from a remembered top can find
+/// it. Homing first and erasing forward covers the same ground as a full-screen
+/// clear while staying an ERASE.
+///
+/// It must never become `ClearType::All` (`ESC[2J`). ED2 looks identical but is
+/// not an erase on the VTE family (GNOME Terminal and every other libvte
+/// embedder), which implements it by scrolling the screen into scrollback — one
+/// permanent, unreflowable snapshot of the live region per resize step. See
+/// `resize_clear_erases_in_place_and_never_scrolls_into_history`.
+pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<()> {
+    execute!(
+        out,
+        crossterm::cursor::MoveTo(0, 0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
     )?;
     Ok(())
 }

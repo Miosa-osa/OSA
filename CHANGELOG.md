@@ -9,6 +9,38 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.55] — displays as `v1.0.055`
+
+### Fixed — resizing the terminal left permanent duplicate copies of the screen in scrollback
+
+- **Every resize deposited a full snapshot of the screen into your scroll history.**
+  Dragging a window edge through fifteen columns left fifteen stacked copies above
+  the session, each one column narrower than the last — most visibly as a cascade of
+  a table's horizontal rules, and it is the same mechanism behind the older reports
+  of the composer duplicating down the screen. The copies were permanent and did not
+  reflow. The cause: the resize path erased the screen with `ESC[2J`, which looks
+  identical to an erase — blank screen, cursor home — but on the VTE family (GNOME
+  Terminal and every other libvte embedder) is implemented by *scrolling* the screen
+  into the scrollback buffer rather than wiping it. **The resize clear now homes the
+  cursor and erases forward**, which clears the same ground without touching scroll
+  history.
+
+- **`/clear` handed one last screenful back to the history it had just emptied.** It
+  purged the scroll history first and only then emitted the same `ESC[2J`, so the
+  final visible screen was scrolled straight back into the buffer that was meant to
+  be empty. The screen is now erased before the history is purged, so a `/clear`
+  leaves nothing scrollable behind it.
+
+- **Regaining focus now forces a repaint.** An outer layer can repaint OSA's pane
+  with no terminal resize at all — tmux redrawing a pane, an nvim `:terminal`
+  restoring a window, a multiplexer client re-attaching. Only changed cells are
+  rewritten, so rows damaged that way stayed damaged until something else happened
+  to move them; focus is regained on essentially every path that causes such damage,
+  so it is now taken as the cue to repaint the live region. It repaints only that
+  region and can never reach the transcript above it.
+
+---
+
 ## [1.0.54] — displays as `v1.0.054`
 
 ### Fixed — on Google and Replicate, OSA stopped listening to itself mid-turn
