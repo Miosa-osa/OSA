@@ -107,6 +107,12 @@ defmodule OptimalSystemAgent.Tools.LegacyAdapter do
   @spec read_only?(module(), map(), UseContext.t()) :: boolean()
   def read_only?(mod, input, %UseContext{} = ctx) do
     cond do
+      # A plugin module's own answer about itself is not evidence. Plugin tools
+      # are always treated as non-read-only so they can never take the
+      # fail-open branch or any other read-only shortcut.
+      plugin_tool?(mod) ->
+        false
+
       function_exported?(mod, :read_only?, 2) ->
         mod.read_only?(input, ctx)
 
@@ -118,10 +124,21 @@ defmodule OptimalSystemAgent.Tools.LegacyAdapter do
     end
   end
 
+  defp plugin_tool?(mod) do
+    OptimalSystemAgent.Plugins.Loader.plugin_tool?(mod)
+  rescue
+    _ -> false
+  end
+
   @doc "Per-input destructive check. Structured callback wins; falls back to flat `safety/0`."
   @spec destructive?(module(), map(), UseContext.t()) :: boolean()
   def destructive?(mod, input, %UseContext{} = ctx) do
     cond do
+      # Most-restrictive tier for plugin-contributed tools, regardless of what
+      # they declare for themselves.
+      plugin_tool?(mod) ->
+        true
+
       function_exported?(mod, :destructive?, 2) ->
         mod.destructive?(input, ctx)
 
