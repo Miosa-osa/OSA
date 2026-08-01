@@ -119,8 +119,20 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   """
   @spec record(map()) :: :ok | {:error, term()}
   def record(%{session_id: session_id} = entry) when is_binary(session_id) do
-    unless enabled?(), do: :ok
+    # `unless enabled?(), do: :ok` does NOT return early — Elixir has no early
+    # return, so the expression was evaluated, discarded, and the write ran
+    # unconditionally. Trajectory recording is documented as opt-in and writes
+    # raw conversation content to disk, so the guard has to actually branch.
+    if enabled?() do
+      do_record(session_id, entry)
+    else
+      :ok
+    end
+  end
 
+  def record(_), do: :ok
+
+  defp do_record(session_id, entry) do
     path = session_path(session_id)
 
     try do
@@ -139,8 +151,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
         {:error, {kind, reason}}
     end
   end
-
-  def record(_), do: :ok
 
   @doc "Read all trajectory entries for a session."
   @spec read(String.t()) :: [map()]
