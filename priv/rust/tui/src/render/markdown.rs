@@ -562,6 +562,9 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     }
 
     let muted = theme.faint();
+    // The box-drawing grid. Theme-driven (`border`), never a literal colour, so
+    // it tracks the active theme and the light/dark toggle.
+    let rule = theme.table_rule();
 
     // Natural column widths: each column's WIDEST cell measured after inline
     // markdown markup is stripped (so `**bold**` measures as `bold`).
@@ -604,47 +607,96 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 
     let col_widths = allocate_col_widths(&natural, (width as usize) - chrome);
 
-    // Header row (first row, bold + primary).
+    // `true` as soon as any cell's tail had to be dropped, which is the ONLY
+    // condition under which the `▼` continues-below marker is drawn.
+    let mut elided = false;
+
+    // Top frame.
+    result.push(Line::from(Span::styled(
+        table_rule_line('┌', '┬', '┐', &col_widths),
+        rule,
+    )));
+
+    // Header row (first row, accent + bold).
     if let Some(header) = parsed.first() {
-        let header_base = Style::default()
-            .fg(theme.colors.primary)
-            .add_modifier(Modifier::BOLD);
         result.extend(render_row_lines(
             header,
             &col_widths,
             &alignments,
-            header_base,
-            muted,
+            theme.table_header(),
+            rule,
             theme,
+            &mut elided,
         ));
     }
 
-    // Separator line.
-    {
-        let mut sep = String::from("├─");
-        for (i, w) in col_widths.iter().enumerate() {
-            sep.push_str(&"─".repeat(*w));
-            if i < col_widths.len() - 1 {
-                sep.push_str("─┼─");
-            }
-        }
-        sep.push_str("─┤");
-        result.push(Line::from(Span::styled(sep, muted)));
-    }
-
-    // Data rows (skip header).
+    // Rule under the header, then a rule between EVERY pair of data rows, so
+    // the table reads as a full grid rather than a header underline. A wrapped
+    // multi-line row is otherwise indistinguishable from two separate rows.
     for row in parsed.iter().skip(1) {
+        result.push(Line::from(Span::styled(
+            table_rule_line('├', '┼', '┤', &col_widths),
+            rule,
+        )));
         result.extend(render_row_lines(
             row,
             &col_widths,
             &alignments,
             Style::default(),
-            muted,
+            rule,
             theme,
+            &mut elided,
         ));
+    }
+    if parsed.len() == 1 {
+        // Header-only table: still close it off under the header.
+        result.push(Line::from(Span::styled(
+            table_rule_line('├', '┼', '┤', &col_widths),
+            rule,
+        )));
+    }
+
+    // Bottom frame.
+    result.push(Line::from(Span::styled(
+        table_rule_line('└', '┴', '┘', &col_widths),
+        rule,
+    )));
+
+    // Continues-below marker. Deliberately conditional: it is drawn only when
+    // the renderer actually cut content off (a cell taller than
+    // `MAX_CELL_LINES`), never unconditionally — an always-on arrow would
+    // claim there is more to see under every table that fits perfectly.
+    if elided {
+        let total: usize = chrome + col_widths.iter().sum::<usize>();
+        let pad = total.saturating_sub(1) / 2;
+        result.push(Line::from(Span::styled(
+            format!("{}\u{25bc}", " ".repeat(pad)),
+            theme.table_overflow(),
+        )));
     }
 
     result
+}
+
+/// One horizontal grid line: `left`, a `─` run per column (plus the one column
+/// of cell padding on each side), `mid` at every column join, `right` at the
+/// end. Shared by the top frame, the row rules, and the bottom frame so all of
+/// them are guaranteed to have their joins in the same places.
+fn table_rule_line(left: char, mid: char, right: char, col_widths: &[usize]) -> String {
+    let mut s = String::new();
+    s.push(left);
+    s.push('─');
+    for (i, w) in col_widths.iter().enumerate() {
+        s.push_str(&"─".repeat(*w));
+        if i + 1 < col_widths.len() {
+            s.push('─');
+            s.push(mid);
+            s.push('─');
+        }
+    }
+    s.push('─');
+    s.push(right);
+    s
 }
 
 /// Narrowest a table column may shrink to before the whole table degrades to
@@ -734,13 +786,14 @@ fn render_row_lines(
     base: Style,
     muted: Style,
     theme: &crate::style::Theme,
+    elided: &mut bool,
 ) -> Vec<Line<'static>> {
     let n = col_widths.len();
     let per_cell: Vec<Vec<Vec<Span<'static>>>> = (0..n)
         .map(|i| {
             let cell = cells.get(i).map(String::as_str).unwrap_or("");
             let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
-            cell_lines(cell, col_widths[i], align, base, theme)
+            cell_lines(cell, col_widths[i], align, base, theme, elided)
         })
         .collect();
     let height = per_cell.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -791,6 +844,7 @@ fn cell_lines(
     align: ColAlign,
     base: Style,
     theme: &crate::style::Theme,
+    elided: &mut bool,
 ) -> Vec<Vec<Span<'static>>> {
     if w == 0 {
         return vec![Vec::new()];
@@ -813,6 +867,7 @@ fn cell_lines(
         wrapped.push(String::new());
     }
     if wrapped.len() > MAX_CELL_LINES {
+        *elided = true;
         wrapped.truncate(MAX_CELL_LINES);
         if let Some(last) = wrapped.last_mut() {
             *last = elide_cols(last, w);
@@ -1597,7 +1652,11 @@ mod tests {
             "| x |".to_string(),
         ];
         let lines = super::render_table(&rows, 80, &theme);
-        let data_row: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        let data_row: String = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .find(|l: &String| l.contains('x'))
+            .expect("data row");
         assert!(data_row.contains("  x"), "{:?}", data_row);
     }
 
@@ -1807,6 +1866,7 @@ mod tests {
             super::ColAlign::Left,
             Style::default(),
             &theme,
+            &mut false,
         );
         assert!(out.len() > 1, "expected the cell to wrap: {out:?}");
         let joined: String = out
@@ -1831,8 +1891,11 @@ mod tests {
     fn table_cell_wrapping_is_capped() {
         let theme = crate::style::theme();
         let cell = "lorem ipsum dolor sit amet ".repeat(40);
-        let out = super::cell_lines(&cell, 6, super::ColAlign::Left, Style::default(), &theme);
+        let mut elided = false;
+        let out =
+            super::cell_lines(&cell, 6, super::ColAlign::Left, Style::default(), &theme, &mut elided);
         assert_eq!(out.len(), super::MAX_CELL_LINES);
+        assert!(elided, "the cap must report that content was dropped");
         let last: String = out[out.len() - 1]
             .iter()
             .map(|s| s.content.as_ref())
@@ -1847,7 +1910,8 @@ mod tests {
         let theme = crate::style::theme();
         for cell in ["模型", "ｶﾞｶﾞ", "abc", "日本語のテキストがここに入ります"] {
             for w in 3usize..=20 {
-                for line in super::cell_lines(cell, w, super::ColAlign::Left, Style::default(), &theme)
+                for line in
+                    super::cell_lines(cell, w, super::ColAlign::Left, Style::default(), &theme, &mut false)
                 {
                     let got: usize =
                         line.iter().map(|s| crate::util::cols(s.content.as_ref())).sum();

@@ -9,6 +9,51 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.51] — displays as `v1.0.051`
+
+### Changed — tables now render as a proper bordered grid
+
+- **A markdown table had no frame and no separation between its rows.** OSA already
+  sized each column to its content, wrapped long values inside the cell rather than
+  cutting them off, grew a row to the height of its tallest cell, and accented the
+  header — everything except the thing that makes a table read as a table. There was
+  no top or bottom border at all, and a single rule under the header was the only
+  horizontal line in the whole table, so once a row wrapped onto a second line you
+  could no longer tell where one row ended and the next began. **Tables are now drawn
+  as a closed grid**: a full outer frame, and a rule between every pair of data rows,
+  so wrapped cells stay visually bound to the row they belong to.
+
+- **The grid follows your theme instead of picking its own colours.** The frame and
+  rules use the theme's neutral border colour, the header its accent, and the
+  "there's more" marker its muted tone — nothing is hardcoded, so a table reads
+  correctly in every theme and in both light and dark terminals. The `▼` beneath a
+  table now appears only when content was genuinely cut short, rather than as
+  decoration, and it is centred under the table it belongs to.
+
+- **Narrow terminals are unaffected.** The borders occupy the space between columns
+  that was already reserved, so they cost no horizontal room, and the existing
+  fallback ladder for widths too small to hold a table is unchanged.
+
+### Fixed — a finished answer now settles cleanly instead of rendering twice
+
+- **The streaming preview was stuck in a small fixed window no matter how tall your
+  terminal was.** A reply in progress was shown through a permanent ten-row
+  letterbox, so on any normal-sized screen most of the terminal sat empty while the
+  answer scrolled past inside a slot a fraction of its size. **The preview now grows
+  with the reply**, in steps, up to half the screen, and only ever grows within a
+  turn — so it opens up for a long answer without flickering between sizes as the
+  text arrives.
+
+- **The working chrome outlived the answer it belonged to.** The spinner, the tool
+  feed, the reasoning box and the agent roster all stayed on screen for several ticks
+  after the reply had already landed, so the finished answer appeared with the
+  machinery of producing it still running underneath — and the roster of active
+  agents was never cleared on the normal completion path at all, only when a turn
+  ended some other way. **Teardown now happens as the answer lands**: the chrome is
+  retired, the viewport shrinks back and the finished reply is committed to
+  scrollback together, in one pass, so a completed turn resolves once instead of
+  visibly redrawing itself.
+
 ## [1.0.50] — displays as `v1.0.050`
 
 ### Fixed — turns died outright on the Claude 5 models

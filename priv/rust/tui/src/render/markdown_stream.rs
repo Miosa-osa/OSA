@@ -498,6 +498,52 @@ Wrap up.";
         );
     }
 
+    /// A FULL-GRID table (outer frame + a rule between every row + wrapped
+    /// multi-line cells) streamed one byte at a time. Two things are pinned:
+    /// the incremental view is identical to a batch render at every single
+    /// prefix, and no prefix ever leaves a half-drawn box — every `┌` that has
+    /// been emitted is closed by a `└` in the same render, so a partially
+    /// received table never shows a frame it then has to take back.
+    #[test]
+    fn full_grid_table_streams_byte_by_byte_without_a_half_drawn_border() {
+        let doc = "\
+Intro line.
+
+| Pattern | Keys |
+|---|---|
+| BYOK multi-provider | Keys, provider billing |
+| Managed | OSA billing, one key |
+
+Done.
+";
+        let mut r = StreamingRenderer::new(W);
+        for end in 0..=doc.len() {
+            if !doc.is_char_boundary(end) {
+                continue;
+            }
+            r.update(&doc[..end]);
+            let streamed = flat(&r.body_with_cursor());
+            assert_eq!(
+                streamed,
+                full_with_cursor(&doc[..end]),
+                "streaming vs full mismatch at prefix len {end}: {:?}",
+                &doc[..end]
+            );
+            let opens = streamed.iter().filter(|l| l.starts_with('┌')).count();
+            let closes = streamed.iter().filter(|l| l.starts_with('└')).count();
+            assert_eq!(
+                opens, closes,
+                "prefix len {end}: {opens} open frames vs {closes} closed — the table is drawn \
+                 half-open\n{}",
+                streamed.join("\n")
+            );
+        }
+        // And the settled render really is the full grid.
+        let settled = flat(&r.body());
+        assert!(settled.iter().any(|l| l.starts_with('┌')));
+        assert_eq!(settled.iter().filter(|l| l.starts_with('├')).count(), 2);
+    }
+
     #[test]
     fn multiple_blank_lines_match_full() {
         assert_stream_matches_full("Para one\n\n\n\nPara two\n\n", &[8, 12, 20, 24]);

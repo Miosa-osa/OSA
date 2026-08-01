@@ -411,6 +411,20 @@ pub struct App {
     // always reflects the FINAL size.
     pub resize_dirty: bool,
 
+    // High-water mark of the streaming preview slot for the CURRENT turn, in
+    // rows (0 when no reply is streaming). The preview grows with a long reply in
+    // whole `STREAM_PREVIEW_STEP` jumps; this makes that growth MONOTONIC, so a
+    // reply whose rendered height dips (a fenced block closing, a table
+    // collapsing) can never shrink the slot back and start a grow/shrink
+    // oscillation — every height change rebuilds the inline viewport, and
+    // mid-turn rebuilds are the stacked-chrome class of bug.
+    //
+    // A `Cell` because `desired_inline_height` is `&self`: keeping the mark
+    // inside the one function that computes the slot means the sizing and the
+    // memory of it cannot drift, and every turn-ending path releases it for free
+    // (the "nothing is streaming" branch resets it).
+    pub(crate) stream_preview_hw: std::cell::Cell<u16>,
+
     // One-shot "/clear was run" request. The terminal (and thus the real
     // scrollback the finalized transcript lives in when inline) is owned by
     // the event loop, not `App`, so `/clear` can only clear the in-memory
@@ -652,6 +666,7 @@ impl App {
             esc_tracker: EscTracker::default(),
             force_redraw: false,
             resize_dirty: false,
+            stream_preview_hw: std::cell::Cell::new(0),
             pending_clear: false,
             keymap,
             chord_pending: None,
@@ -779,6 +794,51 @@ impl App {
         self.activity.stop();
         self.status.set_active(false);
         self.agents.task_completed();
+    }
+
+    /// Settle the working chrome at the TURN-end edge, so what the user is left
+    /// looking at is the OUTPUT rather than the remains of the machinery that
+    /// produced it.
+    ///
+    /// Driven from the run loop's `Processing → Idle` edge, which is the single
+    /// true turn boundary: one turn can contain SEVERAL assistant generations
+    /// (the ReAct loop re-enters on the auto-continue nudge, the coding nudge,
+    /// the verification gate, the goal verifier…), each finalizing its own
+    /// message, so hanging teardown on `agent_response` would retire the chrome
+    /// in the middle of a turn that is still running. Driving it off the state
+    /// edge also covers the paths that never see an `agent_response` at all —
+    /// interrupt, cancel-timeout, backend disconnect — with one implementation.
+    ///
+    /// Everything here is idempotent, and everything here is *transient*:
+    ///
+    /// * the live preview remnant (`clear_streaming`) — its content has already
+    ///   been committed by `handle_agent_response`, so what is dropped is a
+    ///   duplicate of the block the user is about to read;
+    /// * completed-but-unflushed tool cells and the collapsed tool run, pushed
+    ///   into scrollback so they are SETTLED history above the answer instead of
+    ///   mid-flight rows beside it;
+    /// * the spinner / tool-progress feed, the frozen reasoning box, and the
+    ///   multi-agent roster ([`settle_working_chrome`]).
+    ///
+    /// The frozen plan snapshot and the background-terminals summary are
+    /// deliberately NOT touched: the first is committed history the user may want
+    /// to scroll back to, and the second reports jobs that really are still
+    /// running.
+    pub(crate) fn settle_turn_chrome(&mut self) {
+        // Release the preview's per-turn growth. `desired_inline_height` also
+        // releases it on its "nothing is streaming" branch, but that branch is
+        // short-circuited by an open permission prompt or plan-review panel — so
+        // a turn that ended under one of those would otherwise carry its
+        // high-water mark into the next turn and start it pre-grown.
+        self.stream_preview_hw.set(0);
+        self.chat.clear_streaming();
+        self.chat.flush_pending_tools();
+        self.flush_collapse();
+        crate::app::event_loop::settle_working_chrome(
+            &mut self.activity,
+            &mut self.agents,
+            &mut self.thinking_box,
+        );
     }
 
     /// End the in-flight turn after a passive backend disconnect: finalize the

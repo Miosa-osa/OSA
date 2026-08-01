@@ -560,6 +560,31 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    // === GFM tables ===
+
+    /// The box-drawing grid of a rendered markdown table (outer frame, the
+    /// vertical rules between columns, and the horizontal rule under every
+    /// row). Uses the theme's neutral `border` so the grid reads as thin
+    /// light-grey chrome in every theme and in both light and dark modes —
+    /// never a hardcoded colour.
+    pub fn table_rule(&self) -> Style {
+        Style::default().fg(self.colors.border)
+    }
+
+    /// The header row of a markdown table: the theme accent, bold, so the
+    /// first row is visually distinct from the data rows.
+    pub fn table_header(&self) -> Style {
+        Style::default()
+            .fg(self.colors.primary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// The centred `▼` drawn under a table whose content the renderer had to
+    /// cut short — the "there is more below" affordance.
+    pub fn table_overflow(&self) -> Style {
+        Style::default().fg(self.colors.muted)
+    }
+
     // === Claude-Code-style chrome (input box, status line, ctx hint) ===
 
     /// Full-width `─` rule framing the input box (top & bottom dividers).

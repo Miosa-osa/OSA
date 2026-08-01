@@ -709,6 +709,7 @@ mod panel_invariants {
                 agents_h,
                 want_checklist,
                 0,
+                STREAM_PREVIEW_ROWS,
                 hi,
             );
             let area = Rect::new(0, 0, W, area_h);
@@ -756,6 +757,7 @@ mod panel_invariants {
             agents_h,
             want_checklist,
             0,
+            crate::app::event_loop::STREAM_PREVIEW_ROWS,
             59,
         );
         let checklist_h =
@@ -1692,7 +1694,7 @@ mod table_invariants {
             let rendered = lines_at(CJK_TABLE, w);
             let table: Vec<&String> = rendered
                 .iter()
-                .filter(|l| l.starts_with('│') || l.starts_with('├'))
+                .filter(|l| l.starts_with(['│', '├', '┌', '└']))
                 .collect();
             assert!(!table.is_empty(), "w={w}: no table rendered");
             let first = cols(table[0]);
@@ -1804,8 +1806,172 @@ mod table_invariants {
             }
         }
     }
-}
 
+    // ─────────── full-grid borders, header styling, overflow marker ───────────
+    //
+    // The reference the operator supplied draws a CLOSED grid: an outer frame,
+    // a vertical rule between every pair of columns, and a horizontal rule
+    // between every pair of rows — with cell content wrapping inside its column
+    // and the row growing to the tallest cell. The renderer already had
+    // content-sized columns, wrapping, top-aligned cells and a bold accent
+    // header; it drew only ONE horizontal rule (under the header) and had no
+    // outer frame, so a wrapped two-line row was indistinguishable from two
+    // separate rows. These tests pin the grid that replaced it.
+
+    /// Glyphs that may carry the grid.
+    const FRAME: [char; 10] = ['┌', '┬', '┐', '├', '┼', '┤', '└', '┴', '┘', '│'];
+
+    fn is_grid_line(l: &str) -> bool {
+        l.starts_with(['┌', '├', '└', '│'])
+    }
+
+    /// DISPLAY-COLUMN offsets of every grid glyph on a line. Grapheme-based, so
+    /// a CJK or emoji cell shifts the offsets by its true advance rather than
+    /// by a char count.
+    fn grid_cols(line: &str) -> Vec<usize> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        for g in UnicodeSegmentation::graphemes(line, true) {
+            if g.chars().count() == 1 && FRAME.contains(&g.chars().next().unwrap()) {
+                out.push(at);
+            }
+            at += cols(g);
+        }
+        out
+    }
+
+    /// Every line of a table — frame, rules, single-line rows and each visual
+    /// row of a WRAPPED cell — must put its grid glyphs at exactly the same
+    /// display columns. The failure mode this catches is a wrapped continuation
+    /// line escaping its column and pushing the right-hand border out of true.
+    #[test]
+    fn table_grid_joins_align_at_every_width() {
+        for src in [DEFECT_TABLE, CJK_TABLE, WRAPPING_TABLE] {
+            for w in 1u16..=200 {
+                let rendered = lines_at(src, w);
+                let grid: Vec<&String> = rendered.iter().filter(|l| is_grid_line(l)).collect();
+                if grid.is_empty() {
+                    continue; // below the bordered-table threshold: plain fallback
+                }
+                let want = grid_cols(grid[0]);
+                assert!(want.len() >= 2, "w={w}: {:?} has no frame", grid[0]);
+                for line in &grid {
+                    assert_eq!(
+                        grid_cols(line),
+                        want,
+                        "w={w}: {line:?} breaks the column boundaries\n{}",
+                        rendered.join("\n")
+                    );
+                }
+            }
+        }
+    }
+
+    /// The grid is CLOSED and ruled per row: a top frame, a rule before every
+    /// data row (so `rows` rules for `rows` data rows counting the header
+    /// underline), and a bottom frame.
+    #[test]
+    fn table_is_a_closed_grid_with_a_rule_between_every_row() {
+        let rendered = lines_at(DEFECT_TABLE, 100);
+        let grid: Vec<&String> = rendered.iter().filter(|l| is_grid_line(l)).collect();
+        assert!(grid[0].starts_with('┌') && grid[0].ends_with('┐'), "{:?}", grid[0]);
+        let last = grid[grid.len() - 1];
+        assert!(last.starts_with('└') && last.ends_with('┘'), "{last:?}");
+        // DEFECT_TABLE: 1 header + 5 data rows → 5 interior rules.
+        let rules = grid.iter().filter(|l| l.starts_with('├')).count();
+        assert_eq!(rules, 5, "want a rule under the header and between every data row\n{}",
+            rendered.join("\n"));
+    }
+
+    /// The header row is the accent colour and bold; NO data row is. (The old
+    /// renderer got this right and it must not regress when the styling moved
+    /// behind `Theme::table_header`.)
+    #[test]
+    fn header_styling_applies_to_the_header_row_only() {
+        use ratatui::style::Modifier;
+        let theme = crate::style::theme();
+        let text = render_markdown(WRAPPING_TABLE, 60);
+        let mut saw_header = false;
+        let mut saw_data = false;
+        for line in &text.lines {
+            let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let content_spans = || {
+                line.spans
+                    .iter()
+                    .filter(|s| !s.content.chars().all(|c| FRAME.contains(&c) || c == ' '))
+            };
+            if flat.contains("Pattern") {
+                saw_header = true;
+                for s in content_spans() {
+                    assert!(
+                        s.style.add_modifier.contains(Modifier::BOLD)
+                            && s.style.fg == Some(theme.colors.primary),
+                        "header span {:?} is not accent-bold: {:?}",
+                        s.content,
+                        s.style
+                    );
+                }
+            } else if flat.contains("BYOK") || flat.contains("Managed") {
+                saw_data = true;
+                for s in content_spans() {
+                    assert!(
+                        !s.style.add_modifier.contains(Modifier::BOLD),
+                        "data span {:?} picked up the header's bold",
+                        s.content
+                    );
+                }
+            }
+        }
+        assert!(saw_header && saw_data, "fixture did not produce both row kinds");
+    }
+
+    /// The `▼` continues-below marker is TRUTHFUL: absent whenever the whole
+    /// table is on screen, present only when the renderer actually cut a cell's
+    /// tail off (`MAX_CELL_LINES`).
+    #[test]
+    fn overflow_marker_appears_only_when_content_is_clipped() {
+        // Across the whole width sweep the marker must track the ONE thing that
+        // actually drops content — a cell capped at `MAX_CELL_LINES`, which
+        // leaves a `…` behind. Never present without it (a lie), never absent
+        // with it (a silent truncation).
+        for w in 1u16..=200 {
+            for src in [DEFECT_TABLE, CJK_TABLE, WRAPPING_TABLE] {
+                let flat = lines_at(src, w).join("\n");
+                assert_eq!(
+                    flat.contains('\u{25bc}'),
+                    flat.contains('\u{2026}'),
+                    "w={w}: the ▼ marker and the actual truncation disagree\n{flat}"
+                );
+            }
+        }
+        // At a comfortable width nothing is dropped, so neither appears.
+        for src in [DEFECT_TABLE, WRAPPING_TABLE] {
+            let flat = lines_at(src, 120).join("\n");
+            assert!(!flat.contains('\u{25bc}'), "w=120: nothing was clipped\n{flat}");
+        }
+        // A cell far taller than the per-cell cap: content IS being dropped.
+        let runaway = format!("| A | B |\n|---|---|\n| {} | y |\n", "word ".repeat(80));
+        let rendered = lines_at(&runaway, 30);
+        let marker = rendered
+            .iter()
+            .find(|l| l.contains('\u{25bc}'))
+            .unwrap_or_else(|| panic!("no ▼ under a clipped table\n{}", rendered.join("\n")));
+        assert!(
+            marker.trim() == "\u{25bc}" && marker.starts_with(' '),
+            "the marker must be centred on its own line: {marker:?}"
+        );
+    }
+
+    /// A table whose cells wrap: two columns, both of which need more than one
+    /// visual line at the widths under test.
+    const WRAPPING_TABLE: &str = "\
+| Pattern | Keys |
+|---|---|
+| BYOK multi-provider | Keys, provider billing |
+| Managed | OSA billing, one key |
+";
+}
 
 // ─────────────── ask_user survey band (INLINE, never an overlay) ───────────────
 //
@@ -2563,3 +2729,418 @@ mod survey_invariants {
     }
 }
 
+
+/// **Turn-completion invariants.**
+///
+/// The reported defect: "the output renders in a small window and then when it's
+/// done it shows the whole thing — it's weird." Two causes, pinned here.
+///
+/// 1. The streaming preview was a permanently 10-row letterbox, so a long reply
+///    was only ever legible after it landed in scrollback. It now grows — but on
+///    a coarse lattice with a hard ceiling, because every height change rebuilds
+///    the inline viewport and mid-turn rebuilds are the stacked-chrome bug class.
+/// 2. At completion the working chrome (spinner, tool feed, reasoning box, agent
+///    roster) kept its reserved rows through the shrink debounce, so the finished
+///    answer arrived with a tall band of dead machinery underneath it.
+#[cfg(test)]
+mod turn_completion_invariants {
+    use super::*;
+    use crate::app::assistant_stream::{commit_assistant_block, AssistantStream, Finalize};
+    use crate::app::event_loop::{
+        checklist_band_height, inline_split, settle_working_chrome, stream_preview_ceiling,
+        stream_preview_rows, streaming_inline_height, survey_band_height, ROW_AGENTS,
+        ROW_CHECKLIST, ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, STREAM_PREVIEW_MAX,
+        STREAM_PREVIEW_ROWS, STREAM_PREVIEW_STEP,
+    };
+    use crate::components::chat::Chat;
+    use crate::components::task_checklist::TaskChecklist;
+    use ratatui::layout::Rect;
+
+    const W: u16 = 100;
+
+    // ── (3) The preview may grow, but only in bounded steps ───────────────
+
+    /// Growth is quantized, monotonic and capped — the three properties that make
+    /// it impossible for a growing reply to churn the inline viewport.
+    ///
+    /// A per-delta-sized preview would rebuild the viewport (and issue a DSR
+    /// cursor query tmux/SSH can drop) on every token. This sweeps a reply
+    /// growing row by row past the ceiling and asserts the reserved slot changes
+    /// only a handful of times for the WHOLE turn.
+    #[test]
+    fn the_preview_grows_in_bounded_steps_and_never_shrinks_mid_turn() {
+        for term_rows in [24u16, 30, 40, 60, 120] {
+            let ceiling = stream_preview_ceiling(term_rows);
+            let mut hw = 0u16;
+            let mut heights = Vec::new();
+            // A reply rendering to 1…200 rows, then DIPPING back (a fenced block
+            // closing / a table collapsing) — the shape that would oscillate a
+            // naively content-sized slot.
+            let progress = (1u16..=200).chain((1u16..=200).rev());
+            for content_h in progress {
+                let rows = stream_preview_rows(content_h, hw, ceiling);
+                assert!(
+                    rows >= hw,
+                    "term_rows={term_rows} content={content_h}: the preview SHRANK \
+                     mid-turn ({hw} → {rows}); a shrink/grow pair rebuilds the \
+                     viewport twice"
+                );
+                assert!(
+                    (STREAM_PREVIEW_ROWS..=ceiling).contains(&rows),
+                    "term_rows={term_rows} content={content_h}: {rows} rows is \
+                     outside [{STREAM_PREVIEW_ROWS}, {ceiling}]"
+                );
+                assert!(
+                    rows == ceiling
+                        || (rows - STREAM_PREVIEW_ROWS) % STREAM_PREVIEW_STEP == 0,
+                    "term_rows={term_rows} content={content_h}: {rows} is off the \
+                     ROWS + k*STEP lattice — growth is not quantized"
+                );
+                hw = rows;
+                heights.push(rows);
+            }
+            heights.dedup();
+            let max_steps = (STREAM_PREVIEW_MAX - STREAM_PREVIEW_ROWS)
+                .div_ceil(STREAM_PREVIEW_STEP) as usize
+                + 1;
+            assert!(
+                heights.len() <= max_steps,
+                "term_rows={term_rows}: the preview changed height {} times in one \
+                 turn ({heights:?}); at most {max_steps} viewport rebuilds are allowed",
+                heights.len()
+            );
+        }
+    }
+
+    /// The live region is not allowed to eat the scrollback the user is reading:
+    /// the preview ceiling never exceeds half the terminal, and never the hard cap.
+    #[test]
+    fn the_preview_ceiling_never_takes_more_than_half_the_terminal() {
+        for term_rows in 4u16..=300 {
+            let c = stream_preview_ceiling(term_rows);
+            assert!(c <= STREAM_PREVIEW_MAX, "term_rows={term_rows}: ceiling {c} > cap");
+            assert!(
+                c <= (term_rows / 2).max(STREAM_PREVIEW_ROWS),
+                "term_rows={term_rows}: ceiling {c} takes more than half the screen"
+            );
+            assert!(c >= STREAM_PREVIEW_ROWS, "term_rows={term_rows}: ceiling {c} below floor");
+        }
+    }
+
+    /// **Drawn ≤ reserved, with a GROWN preview and both bands present.**
+    ///
+    /// The bug this guards is the one that already shipped once in the other
+    /// direction: `streaming_inline_height` must count every band in BOTH its
+    /// `base` and its `want`, or the extra rows the preview grew by get taken out
+    /// of the checklist / survey / composer instead of being added to the
+    /// viewport. Swept over every preview step with a plan AND an inline question
+    /// on screen.
+    #[test]
+    fn a_grown_preview_never_starves_the_bands_or_the_composer() {
+        let term_rows = 60u16;
+        let hi = term_rows - 1;
+        let (think_h, agents_h, input_h) = (1u16, 0u16, 3u16);
+        let overhead = think_h + 1 + 2;
+        let ceiling = stream_preview_ceiling(term_rows);
+
+        let mut preview = STREAM_PREVIEW_ROWS;
+        while preview <= ceiling {
+            for n_tasks in 0usize..=8 {
+                for survey_want in [0u16, 5, 9] {
+                    let mut cl = TaskChecklist::new();
+                    for i in 0..n_tasks {
+                        cl.add(format!("t{i}"), format!("step {i}"), None);
+                    }
+                    let want_checklist = if n_tasks == 0 { 0 } else { cl.height().min(12) };
+                    let bands = want_checklist.saturating_add(survey_want);
+
+                    let area_h = streaming_inline_height(
+                        crate::LIVE_H_BASE.saturating_add(bands),
+                        overhead,
+                        input_h,
+                        agents_h,
+                        bands,
+                        0,
+                        preview,
+                        hi,
+                    );
+                    let area = Rect::new(0, 0, W, area_h);
+                    let checklist_h = checklist_band_height(
+                        want_checklist,
+                        area_h,
+                        think_h + agents_h + 1 + 2 + 2,
+                    );
+                    let survey_h = survey_band_height(
+                        survey_want,
+                        area_h,
+                        think_h + agents_h + checklist_h + 1 + 2 + 2,
+                    );
+                    let rows =
+                        inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+
+                    let ctx = format!(
+                        "preview={preview} tasks={n_tasks} survey={survey_want} area_h={area_h}"
+                    );
+                    assert_eq!(
+                        checklist_h, want_checklist,
+                        "{ctx}: the grown preview squeezed the plan band"
+                    );
+                    assert_eq!(
+                        survey_h, survey_want,
+                        "{ctx}: the grown preview squeezed the survey band"
+                    );
+                    assert!(
+                        rows[ROW_STREAM].height >= preview,
+                        "{ctx}: the reply got {} rows, not the {preview} reserved",
+                        rows[ROW_STREAM].height
+                    );
+                    assert!(rows[ROW_INPUT].height >= 1, "{ctx}: composer starved to 0 rows");
+                    // No two components share a row — the invariant a growing
+                    // stream band must not be allowed to break.
+                    let bands_rects = [
+                        rows[ROW_CHECKLIST],
+                        rows[ROW_THINK],
+                        rows[ROW_AGENTS],
+                        rows[ROW_SURVEY],
+                        rows[ROW_INPUT],
+                    ];
+                    for (i, a) in bands_rects.iter().enumerate() {
+                        assert_eq!(
+                            rows[ROW_STREAM].intersection(*a).height,
+                            0,
+                            "{ctx}: stream band overlaps band {i}"
+                        );
+                        for b in bands_rects.iter().skip(i + 1) {
+                            assert_eq!(
+                                a.intersection(*b).height,
+                                0,
+                                "{ctx}: two reserved bands share a row: {a:?} / {b:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            if preview == ceiling {
+                break;
+            }
+            preview = (preview + STREAM_PREVIEW_STEP).min(ceiling);
+        }
+    }
+
+    // ── (1) The working chrome is gone at turn end ────────────────────────
+
+    /// After the turn-end edge, none of the working chrome reserves a row.
+    ///
+    /// The spinner row, the live tool feed, the frozen reasoning box and the
+    /// multi-agent roster are all machinery. `settle_working_chrome` is the single
+    /// place they are retired, driven off the `Processing → Idle` edge (a TURN
+    /// boundary, not a message boundary — one turn contains several generations).
+    #[test]
+    fn settling_the_turn_retires_every_working_chrome_row() {
+        use crate::components::activity::Activity;
+        use crate::components::agents::Agents;
+        use crate::components::chat::thinking_box::ThinkingBox;
+
+        let mut act = Activity::new();
+        act.start();
+        act.set_active_verb(Some("shell_execute: cargo build".to_string()));
+        act.tool_start_with_id("file_read", "src/main.rs", Some("tc1"));
+        act.tool_start_with_id("shell_execute", "cargo build", Some("tc2"));
+
+        let mut agents = Agents::new();
+        agents.task_started("task-1");
+        agents.agent_started("explorer", "research", "glm", "map the tree", None);
+        agents.agent_started("reviewer", "review", "glm", "review the diff", None);
+
+        let mut tb = ThinkingBox::new();
+        tb.update("weighing two approaches to the parser rewrite");
+
+        assert!(act.height() > 0 && agents.height() > 0 && !tb.is_empty());
+
+        settle_working_chrome(&mut act, &mut agents, &mut tb);
+
+        assert_eq!(act.height(), 0, "the spinner / tool feed still reserves rows");
+        assert_eq!(act.max_height(), 0, "the activity slot is still reserved");
+        assert_eq!(agents.height(), 0, "the agent roster still reserves rows");
+        assert!(tb.is_empty(), "the reasoning box still reserves rows");
+
+        // Idempotent: the edge can be re-entered (a late duplicate finalization,
+        // a reconnect replay) without doing anything different.
+        settle_working_chrome(&mut act, &mut agents, &mut tb);
+        assert_eq!(act.height() + agents.height(), 0);
+    }
+
+    /// A background terminal is NOT working chrome — it is a job that really is
+    /// still running, so its summary row legitimately survives the turn.
+    #[test]
+    fn settling_the_turn_keeps_the_background_terminals_summary() {
+        use crate::components::activity::Activity;
+        use crate::components::agents::Agents;
+        use crate::components::chat::thinking_box::ThinkingBox;
+
+        let mut act = Activity::new();
+        act.start();
+        let mut agents = Agents::new();
+        agents.set_bg_summary(2);
+        let mut tb = ThinkingBox::new();
+
+        settle_working_chrome(&mut act, &mut agents, &mut tb);
+
+        assert_eq!(
+            agents.height(),
+            1,
+            "the background-terminals summary was retired with the working chrome"
+        );
+    }
+
+    // ── (2) No visible double-render ──────────────────────────────────────
+
+    /// The completed answer appears EXACTLY ONCE.
+    ///
+    /// `insert_before` writes into the terminal's native scrollback and cannot be
+    /// mutated afterwards, so the commit-on-complete step is load-bearing. What
+    /// must not happen is the preview surviving beside the committed block — the
+    /// user would read the tail of the answer twice, in two places. The preview
+    /// is therefore dropped in the same event that commits.
+    #[test]
+    fn the_final_answer_is_committed_once_and_the_preview_is_gone() {
+        let answer = "Here is the fix.\n\n1. The parser drops the escape.\n2. The \
+                      writer re-adds it.\n\nBoth paths now go through `unescape`.";
+
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        // Stream it in deltas, as `StreamingToken` does.
+        for chunk in answer.as_bytes().chunks(11) {
+            let part = std::str::from_utf8(chunk).unwrap();
+            assert!(stream.push(Some("m1"), part).is_none());
+            chat.update_streaming(stream.text());
+        }
+        assert!(
+            chat.streaming_height(W) > 0,
+            "nothing was previewing before completion"
+        );
+
+        // …then complete it, as `handle_agent_response` does.
+        chat.clear_streaming();
+        match stream.finalize(Some("m1"), answer.to_string()) {
+            Finalize::Emit(text) => {
+                commit_assistant_block(&mut chat, &mut header, &text, None)
+            }
+            Finalize::Duplicate => panic!("the first finalization must render"),
+        }
+
+        // The working chrome's last remnant — the live preview — is gone…
+        assert_eq!(
+            chat.streaming_height(W),
+            0,
+            "the live preview survived beside the committed block: the user reads \
+             the tail of the answer twice"
+        );
+        // …and the answer is in scrollback exactly once, byte-identical to what
+        // streamed.
+        let blocks = chat.agent_blocks();
+        assert_eq!(blocks, vec![answer.to_string()], "committed text is not verbatim");
+        assert_eq!(
+            blocks.join("\n").matches("Both paths now go through").count(),
+            1,
+            "the answer was rendered more than once"
+        );
+    }
+
+    /// One turn, SEVERAL generations. Teardown hangs on the turn, not the message:
+    /// a superseded generation still commits as its own block, the survivor is not
+    /// welded onto it, and the preview is empty only at the end.
+    #[test]
+    fn several_generations_in_one_turn_each_commit_once() {
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        for (id, text) in [("m1", "First pass at the answer."), ("m2", "Second, better pass.")] {
+            if let Some(superseded) = stream.push(Some(id), text) {
+                chat.clear_streaming();
+                commit_assistant_block(&mut chat, &mut header, &superseded, None);
+            }
+            chat.update_streaming(stream.text());
+            // Mid-turn the preview is live — teardown must NOT have fired here.
+            assert!(chat.streaming_height(W) > 0, "the preview died mid-turn at {id}");
+        }
+
+        chat.clear_streaming();
+        match stream.finalize(Some("m2"), "Second, better pass.".to_string()) {
+            Finalize::Emit(t) => commit_assistant_block(&mut chat, &mut header, &t, None),
+            Finalize::Duplicate => panic!("m2 must render"),
+        }
+
+        assert_eq!(
+            chat.agent_blocks(),
+            vec![
+                "First pass at the answer.".to_string(),
+                "Second, better pass.".to_string(),
+            ]
+        );
+        assert_eq!(chat.streaming_height(W), 0, "the preview outlived the turn");
+    }
+
+    /// **Ink proof.** Render the committed final block into the stream band while
+    /// BOTH bands are on screen with a grown preview: every row of the answer must
+    /// survive verbatim. This is the committed-scrollback invariant, extended to
+    /// the taller stream band.
+    #[test]
+    fn a_committed_block_survives_a_grown_preview_beside_both_bands() {
+        use ratatui::widgets::Paragraph;
+
+        let mut cl = TaskChecklist::new();
+        for i in 0..4 {
+            cl.add(format!("t{i}"), format!("plan step {i}"), None);
+        }
+        let (think_h, agents_h, input_h) = (1u16, 0u16, 3u16);
+        let want_checklist = cl.height().min(12);
+        let survey_want = 6u16;
+        let bands = want_checklist + survey_want;
+        let preview = stream_preview_ceiling(60);
+        let area_h = streaming_inline_height(
+            crate::LIVE_H_BASE + bands,
+            think_h + 1 + 2,
+            input_h,
+            agents_h,
+            bands,
+            0,
+            preview,
+            59,
+        );
+        let checklist_h =
+            checklist_band_height(want_checklist, area_h, think_h + agents_h + 1 + 2 + 2);
+        let survey_h = survey_band_height(
+            survey_want,
+            area_h,
+            think_h + agents_h + checklist_h + 1 + 2 + 2,
+        );
+        let area = Rect::new(0, 0, W, area_h);
+        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        assert!(rows[ROW_STREAM].height >= preview);
+
+        const LINE: &str = "the committed answer, row for row";
+        let buf = render_to_buffer(
+            |f| {
+                let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from(LINE))
+                    .collect();
+                f.render_widget(Paragraph::new(lines), rows[ROW_STREAM]);
+                cl.draw(f, rows[ROW_CHECKLIST]);
+            },
+            W,
+            area_h,
+        );
+        for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+            assert_eq!(
+                buffer_row_text(&buf, y),
+                LINE,
+                "row {y} of the committed block was overpainted:\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+}
