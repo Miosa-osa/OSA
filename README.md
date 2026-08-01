@@ -13,11 +13,11 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.020-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.053-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
-[![Tools](https://img.shields.io/badge/Tools-60-blue.svg)](#built-in-tools)
-[![Agents](https://img.shields.io/badge/Agents-14_roles-green.svg)](#autonomous-task-orchestration)
+[![Tools](https://img.shields.io/badge/Tools-82-blue.svg)](#built-in-tools)
+[![Agents](https://img.shields.io/badge/Agents-18_roles-green.svg)](#autonomous-task-orchestration)
 
 </div>
 
@@ -48,27 +48,18 @@ setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.020` (`$env:OSA_VERSION = "v1.0.020"` on
-Windows).
+specific release with `OSA_VERSION=v1.0.053` (`$env:OSA_VERSION = "v1.0.053"` on
+Windows). On any other platform (macOS Intel, Linux arm64) the installer stops
+and points you at the from-source script below.
 
 ```
-✓ Backend boots in ~2s          ✓ Cross-session memory + learning
-✓ Full chat TUI                 ✓ 60 built-in tools, deferred-loaded
-✓ 7 providers + fallback        ✓ Nothing leaves your machine unless you say so
+✓ Warm background backend       ✓ Cross-session memory + learning
+✓ Full chat TUI                 ✓ 82 built-in tools, deferred-loaded
+✓ 27 providers + fallback       ✓ Nothing leaves your machine unless you say so
 ```
 
 <details>
 <summary><b>Other ways to install</b></summary>
-
-**Homebrew:**
-
-```bash
-brew tap miosa-osa/tap
-brew install osa
-osa doctor
-```
-
-The Homebrew package also installs `osagent` and `miosa` command aliases.
 
 **Already cloned the repo?** From the repo root:
 
@@ -129,7 +120,9 @@ happen.
 The single `osa` command ties them together. The first launch starts the engine
 as a **warm background daemon** and attaches the TUI to it. That daemon
 **outlives the TUI**, so every `osa` after the first attaches instantly, no
-cold start. `osa stop` shuts it down.
+cold start. It idles down when unused, and the launcher notices on its own when
+a running daemon is older than what is installed on disk and restarts it for
+you.
 
 **The life of a turn:**
 
@@ -159,7 +152,6 @@ guardrails) see [Architecture](#architecture) below.
 `osa` is the one command you run. The first launch warms the backend as a
 background daemon and drops you straight into the TUI; that daemon **survives
 TUI exit**, so every `osa` after that attaches instantly with no cold start.
-Stop it any time with `osa stop`.
 
 ### Overdrive and permission modes
 
@@ -172,16 +164,35 @@ much rope it gets:
 | **auto-edit** | File edits run automatically; commands still prompt |
 | **plan** | OSA proposes a plan and waits, no writes until you approve |
 | **overdrive (full auto)** | No prompts, OSA runs end to end |
+| **auto** | Safety-guardian mode: OSA classifies each call and only stops for the risky ones. Set with `/auto`, not in the Shift+Tab cycle |
 
-Cycle modes live with **Shift+Tab**, even mid-turn. Launch straight into full
-auto with `osa overdrive` (or `--overdrive`). Overdrive shows a red warning and
-a one-time confirmation the first time; only use it in a directory you trust.
+**Shift+Tab** cycles ask → auto-edit → plan → overdrive, even mid-turn. Seed the
+mode at launch with `--permission-mode <mode>`, or go straight to full auto with
+`osa overdrive` (`--overdrive`, `--yolo`). Overdrive shows a red warning and a
+one-time confirmation the first time; only use it in a directory you trust.
+
+### Workspace trust
+
+A directory you have never used OSA in is **untrusted**, and an untrusted
+project's config is withheld rather than obeyed: `.osa/settings.json` (and the
+project hooks, permission rules, and MCP settings it carries) is ignored until
+you accept trust for that directory, so cloning a hostile repo cannot hand
+itself permissions by shipping a settings file. OSA logs which file it withheld
+instead of silently dropping it. Run **`/trust`** to see the directory's status
+and the specific risks its config would introduce, and `/trust accept` to accept.
+Trust is remembered per directory in `~/.osa/trusted_workspaces.json` and is
+inherited by subdirectories; your home directory and `/` are only ever trusted
+for the current session, never persisted.
 
 ### Warm single-command startup
 
 The backend runs as a warm daemon that outlives the TUI, so a second `osa`
-attaches with no cold start. It idles down when unused, and `osa stop` shuts it
-down on demand.
+attaches with no cold start, and it idles down when unused. You are never asked
+to restart it by hand: on every launch the launcher compares the running
+daemon's version against what is installed and stops a stale one first, so a
+freshly updated OSA is what actually serves your next turn. (If that daemon is
+busy — another TUI is attached — OSA asks before restarting rather than yanking
+it out from under you.)
 
 | Command | What it does |
 |---|---|
@@ -189,56 +200,124 @@ down on demand.
 | `osa overdrive` | Launch in overdrive (full auto), skips approval prompts |
 | `osa continue` | Resume the newest session in this directory |
 | `osa resume [id]` | Resume a specific session (or pick one) |
-| `osa stop` | Stop the background backend daemon |
 | `osa setup` | Re-run the setup wizard (switch provider, change key) |
 | `osa update` | Update in place, show what's new, then relaunch |
 | `osa doctor` | Health checks |
 | `osa serve` | Backend only, no TUI (HTTP API on :9089) |
-| `osa version` | Print version |
+| `osa version` | Print version (backend, TUI, and the installed release stamp) |
+| `osa stop` | Stop the background backend daemon (rarely needed) |
 | `osa help` | Full command + flag reference |
+
+**Launch flags** (`osa --help` prints the authoritative list; an unrecognised
+flag is now a hard error with usage, never silently ignored):
+
+| Flag | What it does |
+|---|---|
+| `--model <name>`, `-m` | Run **this session** on `<name>`, overriding the saved default |
+| `--provider <name>` | Provider for `--model` (inferred from the model when omitted) |
+| `--permission-mode <mode>` | Seed the mode: `ask` · `auto-edit` · `plan` · `auto` · `overdrive` |
+| `-c`, `--continue` | Resume this folder's newest session |
+| `--resume [id]` | Resume a session; bare `--resume` opens the picker |
+| `--overdrive`, `--yolo` | Full auto |
+| `--profile <name>` | Use the `~/.osa/profiles/<name>` profile |
+| `--setup` · `--dev` · `--no-color` · `-V` · `-h` | Wizard · dev mode · plain output · version · help |
+
+### Resuming where you left off
+
+On exit OSA prints the exact command to pick this conversation back up,
+including the mode you were in:
+
+```
+Resume this session with:
+  osa resume cli_a1b2c3d4
+```
+
+The id accepts a **prefix**, git-short-SHA style, so `osa resume cli_a1b` works
+and an ambiguous prefix lists the candidates rather than guessing. `osa continue`
+skips the id entirely and takes the newest session in the current directory, and
+bare `osa resume` opens a picker.
+
+### Updating
 
 `osa update` downloads the latest prebuilt release + TUI, verifies its checksum,
 swaps them in atomically under `~/.osa`, prints the version delta and release
-notes, and relaunches. The swap is **rollback-safe**: a fresh version is staged
-and built, boot-probed against `/health`, and only then atomically repointed,
-`osa update --staged --rollback` reverts to the previous version if a new one
-misbehaves, and `--dry-run` prints the plan without touching anything.
-`osa doctor` runs real health checks: provider reachability, port binding,
-config sanity, workspace layout. `osa help` prints the complete command and
-flag reference.
+notes, restarts the backend if the running one is now stale, and relaunches.
+**You never need to run `osa stop` as part of updating** — an update that left an
+old daemon serving from memory is treated as a failed update, not a success.
+The swap is **rollback-safe**: a fresh version is staged and built, boot-probed
+against `/health`, and only then atomically repointed. `osa update --staged
+--rollback` reverts to the previous version if a new one misbehaves, and
+`--dry-run` prints the plan without touching anything. `osa doctor` runs real
+health checks: provider reachability, port binding, config sanity, workspace
+layout.
 
 ### Slash commands
 
-Type `/` in the TUI for the full palette. The command set:
+Type `/` in the TUI for the full palette — around 70 commands, completed as you
+type. The ones worth knowing:
 
 ```
-/help      /clear     /compact   /model     /status    /cost      /context
-/memory    /tools     /skills    /agents    /sessions  /tasks     /plan
-/doctor    /export    /version   /coordinator          /effort    /fast
-/permissions          /hooks     /metrics   /setup     /login     /logout
-/channels  /exit
+session    /new      /clear    /resume   /continue /session  /fork     /rename
+           /tag      /sessions /recap    /rewind   /undo     /retry    /export
+model      /model    /models   /reasoning /effort  /fast     /coordinator
+context    /context  /usage    /compact  /cost     /files    /memory
+work       /plan     /goal     /steer    /bg       /fg       /agents   /tasks
+project    /map      /init     /trust    /add-dir  /skills   /tools
+config     /setup    /config   /permissions /hooks /mcp      /sandbox  /channels
+           /theme    /keybindings /verbose /a11y   /persona  /customize
+system     /doctor   /status   /metrics  /version  /update   /release-notes
+           /login    /logout   /help     /exit
 ```
+
+Some commands are served by the engine and some by the TUI; the palette merges
+both, so everything above is reachable from the same prompt.
+
+### `/map` — see the whole repo, not just the checkout
+
+`/map` renders the structure of the workspace you are in: its components, the
+language and role of each, and — the part `git ls-files` hides — **git
+submodules and nested repositories**, which normally collapse to a single
+gitlink entry and become invisible to the agent. It resolves the *outermost*
+enclosing workspace rather than just your current directory, understands Elixir
+umbrella / Cargo / pnpm / npm / yarn / Go workspace members, and caches per root
+with invalidation when the manifests change. `/map [path] [--depth N] [--refresh]`.
+The agent has the same view through its `workspace_map` tool.
 
 ### Keyboard
 
 | Key | Action |
 |---|---|
 | **Enter** | Send message |
-| **Shift+Tab** | Cycle permission mode (ask → auto-edit → overdrive …) |
+| **Shift+Tab** | Cycle permission mode (ask → auto-edit → plan → overdrive) |
 | **Esc** | Clear the composer |
 | **Esc Esc** | Rewind, jump back to edit a previous message |
 | **Ctrl+C** | Cancel the running turn (quit when the composer is empty) |
 | **Ctrl+D** | Exit |
 | **Ctrl+N** | New session |
-| **Ctrl+R** | Expand the last tool result inline (reverse-search with text) |
+| **Ctrl+R** | Reverse-search your history |
 | **Ctrl+K** | Command palette (kill-to-end-of-line with text) |
-| **Ctrl+O** | Toggle the agent tree / expand the last tool |
-| **Ctrl+L** | Toggle the sidebar |
+| **Ctrl+O** | Expand the last tool result inline |
+| **Ctrl+T** | Toggle the todo/task list |
+| **Ctrl+B** | Send the running turn to the background |
+| **Ctrl+G** / **Alt+V** | Voice input |
+| **Ctrl+Z** | Suspend |
+| **Ctrl+L** | Redraw the screen |
+| **Ctrl+Shift+L** | Toggle the sidebar |
+| **Ctrl+X Ctrl+K** | Stop all running agents |
+| **Alt+P** | Model picker |
+| **Alt+T** | Toggle the thinking view |
+| **Alt+R** | Toggle raw markdown |
 | **Ctrl+V** | Paste, images become `[Image #N]`, file paths attach |
+| **←** | Move focus into the fleet roster |
 | **`/`** | Slash-command completions |
 | **`!`** | Shell mode, run the line as a shell command |
 | **`@`** | Mention a file or directory (fuzzy picker) |
-| **`?`** / **F1** | Help |
+| **F1** | Help |
+
+Every one of these is rebindable: drop a `~/.osa/keybindings.json` listing
+`{context, bindings}` blocks (contexts are `global`, `idle`, `processing`;
+chords may be multi-step, e.g. `"ctrl+x ctrl+k"`). `Ctrl+C`, `Ctrl+D` and
+`Ctrl+M` are reserved. `/keybindings` prints the live map and the config path.
 
 ### `!` shell and `@` file mentions
 
@@ -254,6 +333,28 @@ and its tools show up alongside the built-ins, discoverable and callable in the
 same loop. Expose OSA's own tools to other MCP-aware apps by running it as a
 server. Full JSON-RPC protocol, multiple transports, tool discovery, and result
 caching are built in.
+
+Servers you give OSA live in three scopes, and always load:
+
+| Scope | File |
+|---|---|
+| user | `~/.osa/mcp.json` |
+| project | `./.mcp.json` (shared, and requires approval before it starts) |
+| local | `./.osa/mcp.local.json` (yours, untracked) |
+
+**Other tools' MCP configs are opt-in, not inherited.** OSA can read the servers
+you configured in Claude Code, Claude Desktop, Codex, and Cursor — but importing
+one means spawning a subprocess you never authorised for OSA and adding tools you
+never chose, so it is **off by default**. `/mcp list` tells you what is out there
+without running any of it ("*N servers available in other tools' configs — NOT
+imported*") and labels every loaded server with where it came from, so an
+inherited server never masquerades as one of yours. Opt in by setting
+`"mcp_import_foreign": true` in `~/.osa/settings.json`. Native servers always win
+a name collision against a discovered one.
+
+`/mcp` manages the rest: `add`, `remove`, `get`, and `exclude <name>` /
+`unexclude <name>` — a deny list that keeps a server from loading **from any
+source**, native or inherited.
 
 ### Sandboxes
 
@@ -330,7 +431,15 @@ echo "Build an API" | mix osa.run --format stream-json  # streaming NDJSON
 
 ```bash
 osa continue              # newest session in this directory
-osa resume cli_abc123     # a specific session
+osa resume cli_abc123     # a specific session (a unique prefix is enough)
+osa resume                # pick from a list
+```
+
+**Pick a model for one run:**
+
+```bash
+osa --model claude-opus-5 --provider anthropic
+osa -m glm-5.2:cloud continue
 ```
 
 ---
@@ -340,21 +449,26 @@ osa resume cli_abc123     # a specific session
 All runtime config lives in `~/.osa/.env`, generated by the setup wizard:
 
 ```bash
-OSA_DEFAULT_PROVIDER=ollama
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=nemotron-3-super
-OSA_USER_NAME=Roberto
+OSA_DEFAULT_PROVIDER=ollama_cloud
+OLLAMA_URL=https://ollama.com
+OLLAMA_MODEL=glm-5.2:cloud
+OSA_USER_NAME=Ada
 OSA_AGENT_NAME=OSA
-OSA_HTTP_PORT=9089
 ```
+
+Anything already exported in your shell wins over this file, so
+`OLLAMA_MODEL=x osa` is a one-off override rather than a silent no-op.
 
 **Workspace:** everything OSA keeps lives under `~/.osa/`:
 
 ```
 ~/.osa/
 ├── .env              # Provider config (generated by the wizard)
-├── settings.json     # User settings (effort, permissions, hooks)
+├── settings.json     # User settings (effort, permissions, hooks, MCP switches)
 ├── permissions.json  # Tool permission rules (allow/deny with glob patterns)
+├── keybindings.json  # Optional TUI key remapping
+├── mcp.json          # Your MCP servers (user scope)
+├── trusted_workspaces.json  # Directories you have granted trust
 ├── oauth.json        # OAuth credentials (auto-refreshed)
 ├── version           # Installed release, used by `osa update`
 ├── IDENTITY.md       # Agent personality
@@ -371,9 +485,11 @@ OSA_HTTP_PORT=9089
 └── prompts/          # System prompt overrides
 ```
 
-**Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session.
+**Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session. The two project layers only apply once you have granted the directory trust — see [Workspace trust](#workspace-trust).
 
-Override the HTTP port with `OSA_HTTP_PORT=<n>` in `~/.osa/.env` (default 9089).
+**Port.** The default is 9089. To move it, set **both** `OSA_PORT` (which the
+`osa` launcher uses to find and health-check the backend) and `OSA_HTTP_PORT`
+(which the backend binds to) to the same value.
 
 ---
 
@@ -464,16 +580,17 @@ User Input
 ├──────────┬──────────┬───────────┬──────────┬────────────────────────┤
 │  Agent   │ Orchest- │  Swarm    │ Scheduler│  Healing Orchestrator  │
 │  Loop    │ rator    │  (4 modes)│ (cron)   │  (self-repair)         │
-│  (ReAct) │ (14 roles│           │          │                        │
+│  (ReAct) │ (18 roles│           │          │                        │
 │          │  bg/fork/│  Teams +  │          │  Speculative Executor  │
 │          │  worktree│  NervSys  │          │                        │
 ├──────────┴──────────┴───────────┴──────────┴────────────────────────┤
 │  Context │ Compactor │ Memory  │ Settings │ Hooks   │ Permissions   │
 │  Builder │ (6-step)  │ (SQLite │ Cascade  │ (25     │ (pattern      │
-│          │           │  +ETS   │ (4-layer)│  events,│  rules,       │
-│          │           │  +FTS5) │          │  4 types│  interactive) │
+│          │           │  +ETS   │ (4-layer,│  events,│  rules,       │
+│          │           │  +FTS5) │  trust-  │  4 types│  interactive) │
+│          │           │         │  gated)  │         │               │
 ├──────────┴───────────┴─────────┴──────────┴─────────┴───────────────┤
-│  7 Providers  │  60 Tools  │  Telemetry  │  Credential Pool  │ Soul│
+│  27 Providers │  82 Tools  │  Telemetry  │  Credential Pool  │ Soul│
 │  + Fallback   │  (deferred)│  (per-tool) │  (key rotation)   │     │
 └───────────────┴────────────┴─────────────┴───────────────────┴─────┘
 ```
@@ -504,7 +621,7 @@ possible.
 
 ### Multi-Provider LLM Routing
 
-7 providers, 3 tiers, weight-based dispatch:
+27 providers offered in the setup wizard, 3 tiers, weight-based dispatch:
 
 | Weight Range | Tier | Use Case |
 |---|---|---|
@@ -514,26 +631,56 @@ possible.
 
 | Provider | Notes |
 |---|---|
+| **Ollama Cloud** | Fast cloud inference, no GPU required — the recommended start |
 | **Ollama Local** | Runs on your machine, fully private, no API cost |
-| **Ollama Cloud** | Fast cloud inference, no GPU required |
-| **Anthropic** | Claude Opus, Sonnet, Haiku |
-| **OpenAI** | GPT-4o, GPT-4o-mini, o-series |
+| **Anthropic** | Claude Opus 5, Sonnet 5, Opus 4.x, Sonnet 4.6, Haiku 4.5 |
+| **OpenAI** | GPT-5.6 (`-terra`, `-sol`, `-luna`) |
+| **Google** | Gemini 3.6 Flash, 3.5 Flash / Flash-Lite, 3.1 Pro |
+| **xAI** | Grok 4.5, 4.3, Grok Build |
+| **DeepSeek** | DeepSeek V4 Pro / V4 Flash, Reasoner |
+| **Mistral** | Mistral Large / Medium / Small, Codestral |
 | **OpenRouter** | 200+ models behind a single API key |
-| **MIOSA** | Fully managed Optimal agent endpoint |
-| **Custom** | Any OpenAI-compatible endpoint |
+| **MIOSA** | Managed Optimal endpoint (limited access) |
+| **Custom / local** | Any OpenAI-compatible endpoint, plus LM Studio and llama.cpp |
+
+Also routed and offered in the wizard: Groq, Cohere, Cerebras, Fireworks,
+Together, Perplexity, Replicate, SambaNova, Hyperbolic, Qwen, Moonshot (Kimi),
+Zhipu (GLM), Volcengine (Doubao), Baichuan.
+
+**Keys are checked against the real API, at setup.** When you paste a key the
+wizard makes an actual minimal call to *that provider's own* endpoint — Anthropic
+`/v1/messages`, Google `generateContent`, OpenRouter `/api/v1/key`, DeepSeek's
+balance endpoint, an OpenAI-compatible `/chat/completions` at the provider's own
+base URL for the rest — and reports one of three answers: verified, key rejected
+(401/402/403, and it lets you re-enter), or unverified because the network call
+itself failed. It never silently accepts a dead key, and never falls back to
+probing a different vendor's endpoint.
 
 **Recommended default:** Ollama Cloud with `glm-5.2:cloud` (no GPU, 1,000,000 token
 context) is the easy starting point the setup wizard marks recommended. Other
-no-GPU cloud models include `glm-5.1:cloud`, `kimi-k2.7-code:cloud`, and
-`minimax-m3:cloud`. See the [Getting Started guide](docs/GETTING_STARTED.md) for
-the full provider and model list.
+no-GPU cloud models include `glm-5.1:cloud`, `kimi-k3:cloud`,
+`kimi-k2.7-code:cloud`, `minimax-m3:cloud`, `qwen3.5:cloud`,
+`deepseek-v4-pro:cloud`, and `gpt-oss:120b-cloud`. See the
+[Getting Started guide](docs/GETTING_STARTED.md) for the full provider and model
+list.
+
+Switch model mid-conversation with **`/model`** (or `/models` for the picker, or
+**Alt+P**). The switch is **session-scoped** — it changes the conversation you are
+in, not your global default — so you can start a turn on a cheap model and move
+to a stronger one without touching your config. `--model` / `--provider` do the
+same thing at launch. Retired model ids are tracked and rejected up front rather
+than 404-ing mid-turn.
 
 When a call rate-limits or fails, OSA walks a configurable fallback chain and
 reconnects mid-stream, the turn keeps going.
 
 ### Autonomous Task Orchestration
 
-14 specialized agent roles. Explore → Plan → Execute protocol:
+18 specialized agent roles ship built in (architect, backend, frontend, devops,
+explorer, planner, debugger, tester, code-reviewer, security-auditor,
+performance, refactorer, researcher, doc-writer, general-purpose and friends),
+and you can add your own as `AGENT.md` files under `~/.osa/agents/`.
+Explore → Plan → Execute protocol:
 
 ```
 User: "Build a REST API with auth, tests, and docs"
@@ -620,21 +767,22 @@ workflows.
 
 ### Built-in Tools
 
-60 tools, all schema-validated, most deferred-loaded (excluded from the prompt
+82 tools, all schema-validated, most deferred-loaded (excluded from the prompt
 until needed, discoverable via `tool_search`):
 
 | Category | Tools |
 |---|---|
-| **File** | `file_read`, `file_write`, `file_edit`, `multi_file_edit`, `file_glob`, `file_grep`, `dir_list`, `notebook_edit` |
-| **System** | `shell_execute`, `git`, `github`, `download`, `repl` (Python/Elixir/Node), `code_sandbox`, `bash_output` |
+| **File** | `file_read`, `file_write`, `file_edit`, `multi_file_edit`, `file_glob`, `file_grep`, `dir_list`, `notebook_edit`, `diff` |
+| **System** | `shell_execute`, `git`, `github`, `download`, `repl` (Python/Elixir/Node), `code_sandbox`, `bash_output`, `pty_start`, `pty_send`, `pty_read`, `pty_wait`, `pty_stop` |
 | **Web** | `web_search`, `web_fetch`, `browser` |
-| **Code** | `code_symbols`, `codebase_explore`, `semantic_search`, `computer_use` (macOS/Linux/Docker/SSH) |
-| **Memory** | `memory_save`, `memory_recall`, `session_search`, `knowledge` |
-| **Vault** | `vault_remember`, `vault_context`, `vault_inject`, `vault_checkpoint`, `vault_sleep`, `vault_wake` |
-| **Agents** | `delegate`, `orchestrate`, `create_agent`, `list_agents`, `send_message`, `message_agent`, `team_tasks`, `task_write`, `task_output`, `task_stop` |
+| **Code** | `code_symbols`, `codebase_explore`, `semantic_search`, `workspace_map`, `computer_use` (macOS/Linux/Docker/SSH) |
+| **Memory** | `memory_save`, `memory_recall`, `session_search`, `knowledge`, `scratchpad` |
+| **Agents** | `delegate`, `fleet`, `orchestrate`, `create_agent`, `list_agents`, `send_message`, `message_agent`, `team_create`, `team_delete`, `team_tasks`, `task_write`, `task_output`, `task_stop`, `task_wait`, `task_resume`, `spawn_conversation` |
 | **Multi-agent** | `mixture_of_agents`, `peer_review`, `peer_negotiate_task`, `peer_claim_region`, `cross_team_query` |
-| **Skills** | `create_skill`, `save_skill`, `use_skill`, `find_skill`, `list_skills`, `skill_manager` |
-| **Config / meta** | `config`, `cron`, `tool_search`, `budget_status`, `wallet_ops`, `ask_user` |
+| **Plan / worktree** | `enter_plan_mode`, `exit_plan_mode`, `enter_worktree`, `exit_worktree`, `rollback`, `verify_loop`, `start_speculative` |
+| **Skills** | `create_skill`, `save_skill`, `use_skill`, `find_skill`, `list_skills`, `skill_manager`, `use_tool` |
+| **Reporting** | `brief`, `progress_note`, `monitor`, `push_notification`, `send_user_file`, `subscribe_pr`, `remote_trigger` |
+| **Config / meta** | `config`, `cron`, `sleep`, `tool_search`, `budget_status`, `ask_user` |
 
 Large tool results are auto-persisted to disk and referenced by handle, so a
 big grep never blows the context window. `file_edit` carries a second,
@@ -708,6 +856,7 @@ interact with any GUI application.
 | **Telegram** | Long-polling, typing indicators, markdown conversion |
 | **Discord** | Webhook mode, token validation |
 | **Slack** | Webhook + HMAC-SHA256 request verification |
+| **Also shipped** | WhatsApp, Matrix, Signal, email, LINE, Feishu, WeCom, DingTalk |
 
 ### Hooks System
 
@@ -821,7 +970,8 @@ OSA/
 │   │   └── telegram.ex, slack.ex, discord.ex, whatsapp.ex, matrix.ex …  # optional messaging channels
 │   ├── providers/                   #   LLM providers (Ollama, Anthropic, OpenAI…) + fallback chain,
 │   │                                #   credential pool, health checks, resilience
-│   ├── tools/builtins/              #   the 60 built-in tools: file, shell, search, web, delegate…
+│   ├── tools/builtins/              #   the 82 built-in tools: file, shell, search, web, delegate…
+│   ├── workspace/                   #   workspace topology (/map) + per-directory trust
 │   ├── signal/                      #   signal classifier, routes each message by intent + complexity
 │   ├── memory/                      #   long-term memory, learning, skill generation (SICA / VIGIL)
 │   ├── store/                       #   Ecto schemas + repo (SQLite): sessions, messages, patterns, skills

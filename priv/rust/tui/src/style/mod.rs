@@ -58,6 +58,28 @@ impl Theme {
         Style::default().fg(self.colors.muted)
     }
 
+    /// The QUIETEST text tier — one step below [`Self::faint`].
+    ///
+    /// The live region had only two weights (accent and `faint`), so a plan
+    /// checklist, an activity line, an executing feed, a roster header and a
+    /// roster tree all arrived on screen at the same visual weight and the eye
+    /// had nothing to land on first. `recede` is the third rung of the ladder:
+    /// structure that must be present but must never compete — tree connectors,
+    /// "+N earlier" counts, elided path prefixes, section rules.
+    ///
+    /// Backed by `colors.dim`, which every shipped theme already defines
+    /// separately from `colors.muted` ("hints, pending bullet, faint rules"), so
+    /// this holds in light as well as dark without hardcoding a colour.
+    pub fn recede(&self) -> Style {
+        Style::default().fg(self.colors.dim)
+    }
+
+    /// A horizontal rule / section separator. Quietest tier, by definition: a
+    /// rule that is as bright as the content it separates is just more content.
+    pub fn rule(&self) -> Style {
+        Style::default().fg(self.colors.dim)
+    }
+
     pub fn error_text(&self) -> Style {
         Style::default()
             .fg(self.colors.error)

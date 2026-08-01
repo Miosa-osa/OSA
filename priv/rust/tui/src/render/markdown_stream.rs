@@ -202,7 +202,7 @@ impl StreamingRenderer {
 /// A blank line inside an open ```` ``` ```` fence is deliberately ignored, so a
 /// still-open code block (and anything nested that hasn't closed with a blank
 /// separator) stays in the tail.
-fn find_frozen_boundary(src: &str) -> usize {
+pub(crate) fn find_frozen_boundary(src: &str) -> usize {
     let bytes = src.as_bytes();
     let mut in_code = false;
     let mut boundary = 0usize;

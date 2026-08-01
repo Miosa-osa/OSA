@@ -1930,10 +1930,27 @@ impl Component for Activity {
             // is exactly 10 chars, so the pad emitted NOTHING and the detail was
             // glued straight onto it. The trailing space is unconditional so every
             // verb — short or exactly-at-the-pad — is separated from its detail.
+            // WEIGHT ENCODES STATE, not category.
+            //
+            // Every feed row painted its verb in the same bold accent, so four
+            // finished calls shouted exactly as loudly as the one still running —
+            // and the feed as a whole shouted as loudly as the spinner verb
+            // directly above it. Colour is rationed to state (all three reference
+            // TUIs converge on this): the RUNNING call keeps the accent, finished
+            // ones recede to the meta tier, and their outcome is already carried
+            // by the duration span's colour at the end of the row.
+            //
+            // The gutter is chrome and therefore always the quietest tier.
+            let running = entry.duration_ms.is_none();
+            let verb_style = if running {
+                theme.prefix_active()
+            } else {
+                theme.faint()
+            };
             let mut spans: Vec<Span<'_>> = vec![
-                Span::styled("\u{2506} ", theme.faint()),
+                Span::styled("\u{2506} ", theme.recede()),
                 Span::raw(format!("{} ", entry.emoji)),
-                Span::styled(format!("{:<10} ", entry.verb), theme.prefix_active()),
+                Span::styled(format!("{:<10} ", entry.verb), verb_style),
             ];
 
             if !entry.detail.is_empty() && self.verbosity != Verbosity::New {
@@ -2004,7 +2021,9 @@ impl Component for Activity {
             let avail = content.width.saturating_sub(2) as usize;
             let body = sanitize_live_line(text, avail);
             let line = Line::from(vec![
-                Span::styled("\u{2506} ", theme.faint()),
+                // Gutter is chrome: quietest tier, same as the feed above it, so
+                // the two blocks read as one column rather than two.
+                Span::styled("\u{2506} ", theme.recede()),
                 Span::styled(body, theme.faint()),
             ]);
             frame.render_widget(

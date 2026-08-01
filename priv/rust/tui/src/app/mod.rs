@@ -11,6 +11,7 @@ pub mod key_normalize;
 mod keymap_dispatch;
 pub mod resume;
 pub mod self_update;
+pub mod settle_guard;
 pub mod keys;
 pub mod layout;
 pub mod state;
@@ -543,7 +544,14 @@ impl App {
             thinking_box: ThinkingBox::new(),
             tasks: Tasks::new(),
             task_checklist: TaskChecklist::new(),
-            agents: Agents::new(),
+            agents: {
+                // Tell the roster where "here" is so its trail rows can print
+                // paths workspace-relative instead of fully qualified. Purely a
+                // display concern; borrowed before `working_dir` moves below.
+                let mut a = Agents::new();
+                a.set_workspace_root(&working_dir);
+                a
+            },
             toasts: Toasts::new(),
 
             quit_dialog: QuitConfirm::new(),

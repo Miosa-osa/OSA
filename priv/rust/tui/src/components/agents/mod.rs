@@ -55,6 +55,13 @@ pub struct Agents {
     /// the roster header's `<running>/<cap> agents` gauge + "large fleet" hint;
     /// `None` until the backend reports, in which case the header omits it.
     fleet: Option<FleetCounts>,
+    /// The session's working directory and the user's home, used ONLY to shorten
+    /// paths for display (see [`crate::util::display_path`]). Trail rows were
+    /// spending ~40 columns per line on a fully-qualified prefix that is identical
+    /// on every sibling row and identifies nothing. Set once by `App` at startup;
+    /// `None` degrades to printing the path as-is, never to a wrong path.
+    workspace_root: Option<String>,
+    home: Option<String>,
 }
 
 /// Fleet-wide live counts for the roster header gauge (`14/16 agents`).
@@ -182,6 +189,17 @@ pub fn action_has_detail(action: &str) -> bool {
 /// segments that are actual words (`team`, `alpha`, `background`) and drop every
 /// id-shaped one (`session-…`, hex blobs, bare numbers); when nothing survives,
 /// the ordinal alone is the honest label.
+/// Words that name the CONTAINER rather than its contents.
+///
+/// A section rule has to earn its row, and the only thing that justifies one is a
+/// label that tells the reader something the heading did not. `Batch 1: batch`
+/// is the degenerate case the capture caught: `short_batch_label` stripped the
+/// session id and the ordinal out of `batch:session-…:207491`, and the one
+/// surviving word was the noun the header already says. `Batch 1: team` and
+/// `Batch 1: run` are the same failure with a different routing key.
+const BATCH_NOISE_WORDS: &[&str] = &[
+    "batch", "team", "group", "run", "task", "session", "agent", "agents", "fleet", "job", "work",
+];
 pub fn short_batch_label(batch_id: &str) -> Option<String> {
     fn id_shaped(seg: &str) -> bool {
         let s = seg.trim();
@@ -206,6 +224,10 @@ pub fn short_batch_label(batch_id: &str) -> Option<String> {
         .split(':')
         .map(str::trim)
         .filter(|s| !s.is_empty() && !id_shaped(s))
+        // A label that only restates the heading adds nothing but width. Dropping
+        // the noise word here (rather than at the call site) means every caller
+        // gets `None` — "render the ordinal alone" — for free.
+        .filter(|s| !BATCH_NOISE_WORDS.contains(&s.to_ascii_lowercase().as_str()))
         .collect();
     if kept.is_empty() {
         return None;
@@ -267,7 +289,57 @@ impl Agents {
             main_row: None,
             roster_selected: None,
             fleet: None,
+            workspace_root: None,
+            home: std::env::var("HOME").ok().filter(|h| !h.trim().is_empty()),
         }
+    }
+
+    /// Rewrite the path inside one trail row relative to the workspace (or `~`).
+    ///
+    /// Display-only, and it refuses rather than guesses: a row that is not
+    /// `verb: value` shaped, or whose value is not under any known root, comes
+    /// back untouched.
+    ///
+    /// Sibling-prefix elision is deliberately NOT done here — it is a function of
+    /// the row ABOVE, so the caller folds it over the shortened sequence (see
+    /// `trail_display_rows`).
+    pub(super) fn trail_shorten(&self, action: &str) -> String {
+        match action.split_once(':') {
+            // Only the value is a path; the verb must survive intact or the row
+            // stops saying which tool ran.
+            Some((verb, arg)) if !verb.trim().is_empty() && !arg.trim().is_empty() => format!(
+                "{}: {}",
+                verb.trim(),
+                crate::util::display_path(
+                    arg.trim(),
+                    self.workspace_root.as_deref(),
+                    self.home.as_deref(),
+                )
+            ),
+            _ => action.trim().to_string(),
+        }
+    }
+
+    /// The trail of one running agent as it will be DRAWN: shortened, then with
+    /// each row's shared directory head collapsed against the row above it.
+    ///
+    /// Elision compares full shortened forms, never already-elided ones, so a run
+    /// of three siblings yields `…/b`, `…/c` and not `…//c`.
+    ///
+    /// Row COUNT is unchanged by this function — it only rewrites text — so
+    /// `entry_rows` stays authoritative for the reservation.
+    pub(super) fn trail_display_rows(&self, entry: &AgentEntry) -> Vec<String> {
+        let mut prev: Option<String> = None;
+        let mut out = Vec::new();
+        for a in trail_actions(entry) {
+            let shortened = self.trail_shorten(&a);
+            out.push(match prev {
+                Some(ref p) => crate::util::elide_shared_prefix(p, &shortened),
+                None => shortened.clone(),
+            });
+            prev = Some(shortened);
+        }
+        out
     }
 
     /// Record fleet-wide live counters from a `fleet_summary` frame. Drives the
@@ -287,6 +359,15 @@ impl Agents {
     /// action, turn elapsed, session output tokens). Rendered as roster index 0.
     pub fn set_main_row(&mut self, activity: impl Into<String>, elapsed_secs: u64, tokens: u32) {
         self.main_row = Some(MainRow { activity: activity.into(), elapsed_secs, tokens });
+    }
+
+    /// Tell the panel where "here" is, so trail rows can print paths the way the
+    /// user would type them instead of fully qualified. Display-only: it never
+    /// affects which agent, tool or path anything actually refers to.
+    pub fn set_workspace_root(&mut self, cwd: &str) {
+        let cwd = cwd.trim();
+        self.workspace_root = (!cwd.is_empty()).then(|| cwd.to_string());
+        self.home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
     }
 
     /// Enter/update inline roster focus with the selection cursor in ROSTER
@@ -419,6 +500,45 @@ impl Agents {
             .unwrap_or(false)
     }
 
+    /// Whether the synthetic `main` root row has enough of its own to justify a
+    /// full row, or should fold into the roster header directly above it.
+    ///
+    /// `main` had already been stripped down to defend the one-timer rule: no
+    /// elapsed (that is the turn clock the activity line owns) and no fallback
+    /// verb (that merely restated "Running N agents…"). What the capture showed
+    /// was the end state of that stripping — a whole row reading `● main` and a
+    /// token count, wedged between a header and a tree rule that both said more
+    /// than it did.
+    ///
+    /// So it earns its row on exactly two conditions:
+    ///   * it carries the GOAL (`activity`) — a fact no other live surface
+    ///     states; or
+    ///   * it is the current roster selection, and therefore the visible target
+    ///     of the Enter-to-detach affordance. A selection you cannot see is a
+    ///     worse bug than a crowded panel.
+    ///
+    /// Otherwise the only thing it held — session tokens — moves into the header,
+    /// which is the "N=1 inlines, N>1 promotes to rows" rule Codex applies to
+    /// delegation targets.
+    ///
+    /// MUST be consulted by both `height()` and `draw_tree`.
+    pub(super) fn main_row_earns_a_row(&self) -> bool {
+        match self.main_row {
+            None => false,
+            Some(ref m) => self.roster_selected == Some(0) || !m.activity.trim().is_empty(),
+        }
+    }
+
+    /// The session-token meta the `main` row would have carried, for the header
+    /// to absorb when [`Self::main_row_earns_a_row`] is false. `None` when the
+    /// row is being drawn (the fact belongs to exactly one surface at a time).
+    pub(super) fn folded_main_tokens(&self) -> Option<u32> {
+        match self.main_row {
+            Some(ref m) if !self.main_row_earns_a_row() => Some(m.tokens),
+            _ => None,
+        }
+    }
+
     /// Total render height: 0 when inactive, else header + 2*agents + batch headers + optional synth + swarm.
     /// Capped at 30 to prevent degenerate cases.
     pub fn height(&self) -> u16 {
@@ -442,8 +562,9 @@ impl Agents {
         let more_line = u16::from(self.entries.len() > INLINE_ROSTER_MAX_AGENTS);
         let batch_header_lines = {
             let groups = self.grouped_entries();
-            // Only show batch headers if any entry has a batch_id
-            let has_batches = groups.iter().any(|g| g.batch_id.is_some());
+            // MUST mirror `draw_tree`'s `has_batches` exactly: a rule only exists
+            // once there are two groups to separate (see the note there).
+            let has_batches = groups.len() > 1 && groups.iter().any(|g| g.batch_id.is_some());
             if has_batches { groups.len() as u16 } else { 0 }
         };
         let synth_lines = if matches!(self.synthesis, SynthesisState::Synthesizing { .. }) {
@@ -458,9 +579,9 @@ impl Agents {
         } else {
             1 + self.scratchpad.len() as u16
         };
-        // Synthetic `main` root row (CC FleetView) renders as a single line
-        // between the header and the agent rows when populated.
-        let main_line = u16::from(self.main_row.is_some());
+        // Synthetic `main` root row (CC FleetView). Only drawn when it has
+        // something to say — see `main_row_earns_a_row`.
+        let main_line = u16::from(self.main_row_earns_a_row());
         // summary + 1 header + main + batch headers + agents + synth + swarm + scratchpad
         let total = summary_line
             + 1
@@ -475,17 +596,24 @@ impl Agents {
     }
 
     /// Rows the tree needs for one agent: 1 subject row + the action trail.
+    ///
     /// Running agents show the de-duplicated recent actions ([`trail_actions`],
-    /// at most [`TRAIL_MAX_ACTIONS`]) plus a "+N more tool uses" counter line,
-    /// the whole child list capped at [`TRAIL_MAX_ROWS`]; terminal agents keep
-    /// the compact 2-row layout. MUST stay in lockstep with the trail built in
-    /// `draw_tree` or the layout desyncs — both call `trail_actions`.
+    /// at most [`TRAIL_MAX_ACTIONS`]), the whole child list capped at
+    /// [`TRAIL_MAX_ROWS`]; terminal agents keep the compact 2-row layout.
+    ///
+    /// The "+N earlier" counter costs NO row: it is a prefix on the oldest
+    /// visible trail row (see `draw_tree`). It only claims a row of its own in
+    /// the degenerate case where there is no visible row to prefix — which is the
+    /// same row the `Starting…` fallback would have taken, so the `.max(1)`
+    /// covers both and the count is unchanged either way.
+    ///
+    /// MUST stay in lockstep with the trail built in `draw_tree` or the layout
+    /// desyncs — both go through [`trail_actions`].
     pub(super) fn entry_rows(entry: &AgentEntry) -> u16 {
         match entry.status {
             AgentStatus::Running | AgentStatus::Spawning => {
                 let shown = trail_actions(entry).len();
-                let more = usize::from(entry.tool_uses as usize > shown);
-                1 + (shown + more).max(1).min(TRAIL_MAX_ROWS) as u16
+                1 + shown.max(1).min(TRAIL_MAX_ROWS) as u16
             }
             // Terminal rows: 1 subject + 1 Done/Failed trail + an optional dim
             // `⎿ <summary>` line when the backend delivered a result preview.

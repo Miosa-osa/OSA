@@ -1084,12 +1084,44 @@ mod panel_invariants {
         a
     }
 
+    /// A fleet split across SEVERAL backend batches — the only case in which a
+    /// separator rule has anything to separate.
+    fn multi_batch_fleet(batches: &[&str]) -> Agents {
+        let mut a = Agents::new();
+        a.set_main_row("shipping the fleet view", 40, 678);
+        for (b, batch) in batches.iter().enumerate() {
+            for i in 0..2 {
+                let name = format!("agent:session-1785550977551-3f4a8179a573:osa-verifier-{b}-{i}");
+                a.agent_started(
+                    &name,
+                    "goal-verifier-skeptic",
+                    "",
+                    "verify the goal",
+                    Some((*batch).to_string()),
+                );
+            }
+        }
+        a
+    }
+
+    /// Rows that are a full-width batch separator rule.
+    fn batch_rules(screen: &str) -> Vec<String> {
+        screen
+            .lines()
+            .filter(|l| l.trim_start().starts_with("\u{2500}\u{2500}\u{2500}"))
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    }
+
     /// **DEFECT 1.** The batch header may never print a session id. It is the
     /// widest single string the panel handles and it consumes the whole
     /// separator row to say nothing a reader can act on.
     #[test]
     fn fleet_view_batch_header_never_shows_a_session_id() {
-        let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
+        let a = multi_batch_fleet(&[
+            "team:session-1785550977551-3f4a8179a573:207491",
+            "team:session-1785550977551-3f4a8179a573:207492",
+        ]);
         let screen = snapshot_buffer(&render_to_buffer(
             |f| a.draw(f, f.area()),
             W,
@@ -1107,11 +1139,63 @@ mod panel_invariants {
         }
     }
 
-    /// A batch id that IS a word keeps it — only the machine-shaped segments are
-    /// dropped, so a meaningful team name still labels its section.
+    /// **DEFECT 1, the degenerate case the capture caught.** After the routing
+    /// key's id-shaped segments are stripped, the only survivor is often the
+    /// generic noun the heading already says — `Batch 1: batch`. A label that
+    /// restates its own heading is pure width, so the ordinal must stand alone.
     #[test]
-    fn fleet_view_batch_header_keeps_a_human_label() {
-        let a = batched_fleet("alpha");
+    fn fleet_view_batch_header_drops_a_label_that_only_restates_the_heading() {
+        for noise in ["batch", "team", "group", "run", "task", "session", "Batch", "TEAM"] {
+            let id = format!("{noise}:session-1785550977551-3f4a8179a573:207491");
+            let a = multi_batch_fleet(&[&id, "alpha"]);
+            let screen = snapshot_buffer(&render_to_buffer(
+                |f| a.draw(f, f.area()),
+                W,
+                a.height().max(1),
+            ));
+            let rules = batch_rules(&screen);
+            assert!(!rules.is_empty(), "{noise}: no batch rule drawn:\n{screen}");
+            assert!(
+                !rules[0].contains(':'),
+                "{noise}: a noise-word label survived onto the rule: {:?}\n{screen}",
+                rules[0]
+            );
+            assert!(
+                rules[0].contains("Batch 1"),
+                "{noise}: the ordinal must survive alone: {:?}\n{screen}",
+                rules[0]
+            );
+        }
+    }
+
+    /// **DEFECT 1, structural.** A separator rule must have something to
+    /// separate. With every agent in ONE batch the rule was drawing a full-width
+    /// line directly under the roster header whose only content restated that
+    /// header — a whole scarce row spent on decoration.
+    #[test]
+    fn fleet_view_draws_no_batch_rule_for_a_single_group() {
+        let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
+        let reserved = a.height().max(1);
+        let screen = snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, reserved));
+        assert!(
+            batch_rules(&screen).is_empty(),
+            "a single group must not draw a separator rule:\n{screen}"
+        );
+        // …and the reservation must agree, or the panel leaves a dead row.
+        assert_eq!(
+            drawn_row_extent(|f| a.draw(f, f.area()), W, reserved),
+            reserved,
+            "reserved {reserved} rows but the drawn extent disagrees:\n{screen}"
+        );
+    }
+
+    /// A batch id that IS a word keeps it — only the machine-shaped segments and
+    /// the generic nouns are dropped, so a meaningful team name still labels its
+    /// section. The rule also carries the group's size, which is what earns it a
+    /// row at all.
+    #[test]
+    fn fleet_view_batch_header_keeps_a_human_label_and_a_count() {
+        let a = multi_batch_fleet(&["alpha", "beta"]);
         let screen = snapshot_buffer(&render_to_buffer(
             |f| a.draw(f, f.area()),
             W,
@@ -1120,6 +1204,10 @@ mod panel_invariants {
         assert!(
             screen.contains("Batch 1: alpha"),
             "a human batch name must survive:\n{screen}"
+        );
+        assert!(
+            screen.contains("2 agents"),
+            "the rule must carry the group size, or it is decoration:\n{screen}"
         );
     }
 
@@ -1162,9 +1250,15 @@ mod panel_invariants {
 
     /// **DEFECT 4.** The overflow counter stands for the calls that happened
     /// BEFORE the visible entries (the trail is drawn oldest → newest), so it
-    /// sits at the top of the block — and it must SAY so. The old wording,
-    /// "+N more tool uses", read as a trailing overflow indicator printed above
-    /// the very items it summarized.
+    /// belongs at the top of the block — and it must SAY so ("earlier", not the
+    /// old "+N more tool uses", which read as a trailing overflow indicator
+    /// printed above the very items it summarized).
+    ///
+    /// It no longer takes a ROW, though: a bookkeeping number rendered at the
+    /// same weight as the work itself read as a peer of that work, and cost one
+    /// row per agent in the scarcest region of the screen. It is now a quiet
+    /// prefix on the oldest visible trail row — same chronological position,
+    /// zero rows.
     #[test]
     fn fleet_view_overflow_counter_is_framed_as_earlier_work() {
         let a = batched_fleet("team:session-1785550977551-3f4a8179a573:207491");
@@ -1176,12 +1270,17 @@ mod panel_invariants {
         let trail = trail_texts(&screen);
         let counter = trail
             .iter()
-            .position(|t| t.contains("tool uses"))
-            .expect(&format!("no overflow counter drawn:\n{screen}"));
+            .position(|t| t.contains("earlier"))
+            .unwrap_or_else(|| panic!("no overflow counter drawn:\n{screen}"));
+        // It rides the FIRST (oldest) visible row, not a row of its own.
+        assert_eq!(
+            counter, 0,
+            "the counter must prefix the oldest visible entry, got {trail:?}:\n{screen}"
+        );
         assert!(
-            trail[counter].contains("earlier tool uses"),
-            "counter must be framed as earlier work, got {:?}:\n{screen}",
-            trail[counter]
+            trail[0].contains('\u{00b7}') && trail[0].len() > "+8 earlier \u{00b7} ".len(),
+            "the counter must be a PREFIX on a real action row, got {:?}:\n{screen}",
+            trail[0]
         );
         assert!(
             !screen.contains("more tool uses"),
@@ -1195,6 +1294,217 @@ mod panel_invariants {
                 .unwrap_or(false),
             "the counter must be followed by the actions it precedes:\n{screen}"
         );
+    }
+
+    // ─────────────────── the captured scene (v1.0.052) ────────────────────
+    //
+    // The user's screenshot, reproduced exactly: two sub-agents under one batch,
+    // each walking sibling directories deep inside the agent sandbox, `main`
+    // carrying nothing but a token count. Every assertion below is a defect that
+    // capture showed.
+
+    /// Two explorers listing three sibling directories under
+    /// `~/.osa/workspace/codex/codex-rs/` — the exact trail from the capture.
+    fn captured_scene() -> Agents {
+        let mut a = Agents::new();
+        a.set_workspace_root("/Users/rhl/projects/osa");
+        // `display_path`'s home tier is what fires for the sandbox, so the
+        // fixture must pin HOME rather than inherit the test runner's.
+        unsafe { std::env::set_var("HOME", "/Users/rhl") };
+        a.set_workspace_root("/Users/rhl/projects/osa");
+        // No goal → `main` has nothing of its own to say.
+        a.set_main_row("", 231, 2_800);
+        for i in 0..2 {
+            let name = format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}");
+            a.agent_started(&name, "explorer", "", "compare the two agents", Some("batch:207491".into()));
+            a.agent_progress(
+                &name,
+                "dir_list",
+                11,
+                0,
+                "",
+                vec![
+                    "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/exec-server".into(),
+                    "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/sandboxing".into(),
+                    "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/hooks".into(),
+                ],
+            );
+        }
+        a
+    }
+
+    /// **DEFECT 2.** Absolute paths under a known root are rewritten to the form
+    /// the user would type, and the directory head a row shares with the row
+    /// above it collapses to `…/` — so the differing tail, the only part that
+    /// carries information, lands at a shallow fixed column instead of past
+    /// column 40 on every line.
+    #[test]
+    fn fleet_view_trail_paths_are_workspace_relative_and_elide_shared_prefixes() {
+        let a = captured_scene();
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            !screen.contains("/Users/rhl"),
+            "a fully-qualified path reached the trail:\n{screen}"
+        );
+        let trail = trail_texts(&screen);
+        // `recent_actions` is newest-first and `trail_actions` flips it, so the
+        // OLDEST call heads the block. It states the path in full (relative);
+        // every sibling after it elides.
+        assert!(
+            trail
+                .iter()
+                .any(|t| t.contains("codex/codex-rs/hooks") && !t.contains('\u{2026}')),
+            "the oldest row must state the path in full, got {trail:?}:\n{screen}"
+        );
+        let elided = trail.iter().filter(|t| t.contains("\u{2026}/")).count();
+        assert!(
+            elided >= 2,
+            "sibling rows must elide their shared head, got {trail:?}:\n{screen}"
+        );
+        // Elision never hides WHICH tool ran, and never doubles up.
+        for t in &trail {
+            assert!(
+                !t.contains("\u{2026}/\u{2026}"),
+                "double elision in {t:?}:\n{screen}"
+            );
+        }
+    }
+
+    /// **DEFECT 5 + the detail-per-surface rule.** The delegation is described by
+    /// three neighbouring surfaces (roster header, `main` row, roster tree). Each
+    /// may state its own fact once; none may restate another's.
+    #[test]
+    fn no_fleet_surface_restates_another() {
+        let a = captured_scene();
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        // The agent count is stated exactly once, by the header that owns it.
+        assert_eq!(
+            screen.matches("2 agents").count(),
+            1,
+            "the fleet size is stated more than once:\n{screen}"
+        );
+        // `main` earns no row here: no goal, not selected. Its one fact (session
+        // tokens) moved onto the header.
+        assert!(
+            !screen.lines().any(|l| l.trim_start().starts_with("\u{25cf} main")),
+            "the empty `main` row is back:\n{screen}"
+        );
+        assert!(
+            screen.contains("\u{2193}2.8k"),
+            "the folded session tokens were lost, not folded:\n{screen}"
+        );
+        // The routing key never reaches the screen, on any surface.
+        for leak in ["session-", "1785539672538", "b5473d40b767", "osa-explorer"] {
+            assert!(!screen.contains(leak), "{leak:?} leaked:\n{screen}");
+        }
+    }
+
+    /// `main` still gets its row when it has something only it can say (the goal)
+    /// or when it is the selection the user is about to act on. Folding a
+    /// selection the user cannot see would be a worse bug than a crowded panel.
+    #[test]
+    fn main_row_returns_when_it_carries_a_goal_or_the_selection() {
+        for (label, mut a) in [
+            ("goal", {
+                let mut a = captured_scene();
+                a.set_main_row("port the Codex placement model", 231, 2_800);
+                a
+            }),
+            ("selected", captured_scene()),
+        ] {
+            if label == "selected" {
+                a.set_roster_selected(Some(0));
+            }
+            let reserved = a.height().max(1);
+            let screen = snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, reserved));
+            assert!(
+                screen.lines().any(|l| l.trim_start().starts_with("\u{25cf} main")),
+                "{label}: the `main` row must be drawn:\n{screen}"
+            );
+            // Reservation follows the same rule, both ways.
+            assert_eq!(
+                drawn_row_extent(|f| a.draw(f, f.area()), W, reserved),
+                reserved,
+                "{label}: reserved {reserved} rows, drew a different extent:\n{screen}"
+            );
+        }
+    }
+
+    /// The whole scene must survive a width sweep: nothing overflows, nothing
+    /// panics, and the reservation matches the ink at every column count. A
+    /// design that only works at 120 columns is not done.
+    #[test]
+    fn the_captured_scene_holds_across_a_width_sweep() {
+        for w in [40u16, 56, 72, 80, 100, 120, 160] {
+            let a = captured_scene();
+            let reserved = a.height().max(1);
+            let buf = render_to_buffer(|f| a.draw(f, f.area()), w, reserved);
+            let screen = snapshot_buffer(&buf);
+            assert_eq!(
+                drawn_row_extent(|f| a.draw(f, f.area()), w, reserved),
+                reserved,
+                "w={w}: reserved {reserved} rows but the drawn extent disagrees:\n{screen}"
+            );
+            for line in screen.lines() {
+                assert!(
+                    crate::util::cols(line.trim_end()) <= w as usize,
+                    "w={w}: row overflows the pane: {line:?}\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// A CJK/emoji path must still land the right-aligned meta column in the same
+    /// place as an ASCII one — every truncation here goes through `fit_cols`
+    /// (COLUMNS), never bytes or chars.
+    #[test]
+    fn a_wide_glyph_trail_path_still_aligns_the_meta_column() {
+        let mut a = Agents::new();
+        unsafe { std::env::set_var("HOME", "/Users/rhl") };
+        a.set_workspace_root("/Users/rhl/projects/osa");
+        a.set_main_row("", 40, 2_800);
+        a.agent_started("agent:x:osa-explorer", "explorer", "", "scan", None);
+        a.agent_progress(
+            "agent:x:osa-explorer",
+            "dir_list",
+            9,
+            0,
+            "",
+            vec![
+                "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/beta".into(),
+                "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/alpha".into(),
+            ],
+        );
+        for w in [48u16, 72, 100] {
+            let reserved = a.height().max(1);
+            let buf = render_to_buffer(|f| a.draw(f, f.area()), w, reserved);
+            let screen = snapshot_buffer(&buf);
+            for line in screen.lines() {
+                assert!(
+                    crate::util::cols(line.trim_end()) <= w as usize,
+                    "w={w}: wide-glyph row overflows: {line:?}\n{screen}"
+                );
+            }
+            // The roster row's meta stays flush right (within one column of the
+            // pane edge), which is what a byte/char-based fit would break.
+            let roster = screen
+                .lines()
+                .find(|l| l.contains("explorer"))
+                .unwrap_or_else(|| panic!("w={w}: no roster row:\n{screen}"));
+            let used = crate::util::cols(roster.trim_end());
+            assert!(
+                used + 1 >= w as usize,
+                "w={w}: meta column is not flush right ({used} of {w}): {roster:?}\n{screen}"
+            );
+        }
     }
 
     /// The background-terminals summary renders even with no live agents, so it
@@ -3729,3 +4039,488 @@ mod popup_and_toast_invariants {
         }
     }
 }
+
+/// ── Settling: completed prose reaches scrollback while the turn is still running
+///
+/// The reply used to live entirely inside the capped inline preview until the
+/// turn ended, which produced two halves of one complaint:
+///
+///   * completion *revealed* the answer — the user had been watching text they
+///     were never allowed to read in place; and
+///   * while the turn ran, each tool-progress row appended below the prose
+///     pushed a row of prose off the top of the capped region. The live region
+///     is not scrollback: what falls off the top is gone.
+///
+/// `AssistantStream::settle` fixes both by handing completed markdown blocks to
+/// native scrollback as they complete. These are the invariants that keep it
+/// honest: the transcript must end up byte-identical to the authoritative final,
+/// exactly once, however the text was sliced on the way there.
+#[cfg(test)]
+mod settling_invariants {
+    use crate::app::assistant_stream::{
+        commit_assistant_block, commit_assistant_chunk, AssistantStream, Finalize,
+    };
+    use crate::app::settle_guard;
+    use crate::components::chat::Chat;
+    use crate::render::markdown::render_markdown;
+
+    const W: u16 = 80;
+
+    /// A long reply with every block kind that has a freeze rule.
+    const LONG: &str = "\
+# Findings
+
+The parser drops the escape before the writer sees it.
+
+## Where it goes wrong
+
+- `unescape` is called twice on the same span
+- the second call is a no-op, so nothing looks broken
+- the *third* caller then re-escapes
+
+```rust
+fn unescape(s: &str) -> Cow<'_, str> {
+    if !s.contains('x') { return Cow::Borrowed(s); }
+    Cow::Owned(s.replace(\"a\", \"b\"))
+}
+```
+
+| Path | Before | After |
+|---|---|---|
+| read | 2 calls | 1 call |
+| write | 1 call | 1 call |
+
+> Both paths now go through the same helper.
+
+That is the whole change.";
+
+    /// Drive the two handlers the way the app does: deltas settle blocks into
+    /// scrollback as they complete, then the final commits whatever is left.
+    /// Returns the chat plus how many blocks settled early.
+    fn run_turn(full: &str, final_text: &str, chunk: usize) -> (Chat, usize) {
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+        let mut settled = 0usize;
+
+        let mut cut = 0usize;
+        while cut < full.len() {
+            let mut end = (cut + chunk).min(full.len());
+            while !full.is_char_boundary(end) {
+                end += 1;
+            }
+            // `StreamingToken`
+            assert!(stream.push(Some("m1"), &full[cut..end]).is_none());
+            while let Some(block) = stream.settle() {
+                settled += 1;
+                commit_assistant_chunk(&mut chat, &mut header, &block, None);
+            }
+            chat.update_streaming(stream.tail());
+            cut = end;
+        }
+
+        // `AgentResponse`
+        chat.clear_streaming();
+        match stream.finalize(Some("m1"), final_text.to_string()) {
+            Finalize::Emit(rest) => {
+                commit_assistant_chunk(&mut chat, &mut header, &rest, None);
+                chat.end_agent_chunk_flow();
+            }
+            Finalize::Duplicate => panic!("the first finalization must render"),
+        }
+        (chat, settled)
+    }
+
+    /// **The headline invariant.** A long multi-block reply ends with the full
+    /// text in scrollback exactly once, byte-identical to the final — no matter
+    /// how much of it was committed early.
+    #[test]
+    fn a_long_reply_lands_in_scrollback_exactly_once_and_verbatim() {
+        for chunk in [1usize, 3, 17, 64, LONG.len()] {
+            let (chat, settled) = run_turn(LONG, LONG, chunk);
+            let joined = chat.agent_blocks().join("");
+            assert_eq!(
+                joined, LONG,
+                "chunk={chunk}: scrollback is not byte-identical to the final"
+            );
+            // Nothing rendered twice — the most distinctive line appears once.
+            assert_eq!(
+                joined.matches("That is the whole change.").count(),
+                1,
+                "chunk={chunk}: the tail was rendered more than once"
+            );
+            assert_eq!(
+                joined.matches("The parser drops the escape").count(),
+                1,
+                "chunk={chunk}: an early-committed block was repeated by the final"
+            );
+            if chunk < LONG.len() {
+                assert!(
+                    settled > 0,
+                    "chunk={chunk}: nothing settled early — the whole reply still \
+                     appeared only at completion"
+                );
+            }
+        }
+    }
+
+    /// The point of the whole change, stated directly: by the time the turn ends,
+    /// nearly all of the reply is ALREADY in scrollback. Completion reveals only
+    /// the last, still-unfinished block.
+    #[test]
+    fn completion_reveals_only_the_unfinished_tail() {
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        for chunk in LONG.as_bytes().chunks(7) {
+            let part = std::str::from_utf8(chunk).unwrap();
+            stream.push(Some("m1"), part);
+            while let Some(block) = stream.settle() {
+                commit_assistant_chunk(&mut chat, &mut header, &block, None);
+            }
+        }
+        let already_read: usize = chat.agent_blocks().iter().map(|b| b.len()).sum();
+        assert!(
+            already_read * 100 / LONG.len() >= 90,
+            "only {already_read}/{} bytes were readable before completion — the \
+             answer still materialises at turn end",
+            LONG.len()
+        );
+
+        // Whatever completion adds is the final block only.
+        let before = chat.agent_blocks().len();
+        match stream.finalize(Some("m1"), LONG.to_string()) {
+            Finalize::Emit(rest) => {
+                assert!(
+                    rest.len() * 4 < LONG.len(),
+                    "completion still had to render {} of {} bytes",
+                    rest.len(),
+                    LONG.len()
+                );
+                commit_assistant_chunk(&mut chat, &mut header, &rest, None);
+            }
+            Finalize::Duplicate => panic!("the first finalization must render"),
+        }
+        assert!(chat.agent_blocks().len() >= before);
+    }
+
+    /// **Stream-vs-batch equivalence, at the rendering layer.** Committing block
+    /// by block must produce exactly the rows a one-shot render of the whole
+    /// message produces — that is the property `find_frozen_boundary` exists to
+    /// guarantee, and settling is a new consumer of it.
+    #[test]
+    fn chunked_commits_render_identically_to_one_batch_render() {
+        fn flat(t: &ratatui::text::Text<'_>) -> Vec<String> {
+            t.lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        }
+        let (chat, settled) = run_turn(LONG, LONG, 5);
+        assert!(settled > 1, "the reply must have settled in several pieces");
+
+        let mut chunked: Vec<String> = Vec::new();
+        for block in chat.agent_blocks() {
+            chunked.extend(flat(&render_markdown(&block, W - 2)));
+        }
+        let batch = flat(&render_markdown(LONG, W - 2));
+        assert_eq!(
+            chunked, batch,
+            "chunk-by-chunk rendering diverged from a one-shot render"
+        );
+    }
+
+    /// Several generations in one turn still commit once each. Blocks that
+    /// settled under a superseded generation must NOT be handed back for a second
+    /// render when that generation is flushed.
+    #[test]
+    fn several_generations_each_commit_once_with_settling() {
+        let gen1 = "First pass at the answer.\n\nWith a second paragraph.\n\nAnd a trailing thought";
+        let gen2 = "Second, better pass.\n\nAlso in two paragraphs.\n\nDone";
+
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        for (id, text) in [("m1", gen1), ("m2", gen2)] {
+            for chunk in text.as_bytes().chunks(9) {
+                let part = std::str::from_utf8(chunk).unwrap();
+                if let Some(superseded) = stream.push(Some(id), part) {
+                    chat.clear_streaming();
+                    commit_assistant_block(&mut chat, &mut header, &superseded, None);
+                }
+                while let Some(block) = stream.settle() {
+                    commit_assistant_chunk(&mut chat, &mut header, &block, None);
+                }
+                chat.update_streaming(stream.tail());
+            }
+        }
+        chat.clear_streaming();
+        match stream.finalize(Some("m2"), gen2.to_string()) {
+            Finalize::Emit(rest) => {
+                commit_assistant_chunk(&mut chat, &mut header, &rest, None);
+                chat.end_agent_chunk_flow();
+            }
+            Finalize::Duplicate => panic!("m2 must render"),
+        }
+
+        // NUL-joined so a block boundary is visible: welding is two generations
+        // inside ONE block, which the separator would not hide.
+        let joined = chat.agent_blocks().join("\u{0}");
+        // The exact reported corruption must stay impossible.
+        assert!(
+            !joined.contains("thoughtSecond, better pass"),
+            "a superseded generation was welded to its replacement: {joined:?}"
+        );
+        for needle in [
+            "First pass at the answer.",
+            "With a second paragraph.",
+            "And a trailing thought",
+            "Second, better pass.",
+            "Also in two paragraphs.",
+        ] {
+            assert_eq!(joined.matches(needle).count(), 1, "{needle} rendered twice");
+        }
+    }
+
+    /// A repeat `agent_response` after settling is still a no-op: the duplicate
+    /// record holds the FULL final, not the residue that was emitted.
+    #[test]
+    fn a_replayed_final_renders_nothing_after_settling() {
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+
+        for chunk in LONG.as_bytes().chunks(13) {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while let Some(b) = stream.settle() {
+                commit_assistant_chunk(&mut chat, &mut header, &b, None);
+            }
+        }
+        match stream.finalize(Some("m1"), LONG.to_string()) {
+            Finalize::Emit(rest) => commit_assistant_chunk(&mut chat, &mut header, &rest, None),
+            Finalize::Duplicate => panic!("the first finalization must render"),
+        }
+        let after_first = chat.agent_blocks();
+        assert_eq!(
+            stream.finalize(Some("m1"), LONG.to_string()),
+            Finalize::Duplicate,
+            "an SSE replay must not render a second copy"
+        );
+        assert_eq!(chat.agent_blocks(), after_first);
+    }
+
+    // ── The guardrail gate ────────────────────────────────────────────────
+
+    /// The prompt-leak scrub throws the whole response away. Nothing containing
+    /// even ONE fingerprint may be committed early, so the text that is already
+    /// on screen when the scrub fires contains zero — which is, by the detector's
+    /// own documented standard ("a single phrase can appear incidentally; two
+    /// together indicate a leak"), not system-prompt content.
+    #[test]
+    fn a_leaking_reply_settles_nothing_from_the_fingerprint_onward() {
+        let leak = "Here is a harmless opening.\n\nMy tool usage policy says to \
+                    explore before you act.\n\nAnd more.\n\ntail";
+        let mut stream = AssistantStream::new();
+        let mut committed = String::new();
+        for chunk in leak.as_bytes().chunks(6) {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while let Some(b) = stream.settle() {
+                committed.push_str(&b);
+            }
+        }
+        assert!(
+            !committed.is_empty(),
+            "the fingerprint-free opening should still have settled"
+        );
+        assert!(
+            !settle_guard::contains_leak_fingerprint(&committed),
+            "committed text carries a fingerprint: {committed:?}"
+        );
+        assert!(
+            !committed.contains("explore before you act"),
+            "the gate let leaked text through"
+        );
+
+        // …and the refusal that replaces the response still renders, in full.
+        let refusal = "I can't share my internal configuration or system instructions.";
+        match stream.finalize(Some("m1"), refusal.to_string()) {
+            Finalize::Emit(t) => assert_eq!(t, refusal),
+            Finalize::Duplicate => panic!("the refusal must render"),
+        }
+    }
+
+    /// A dead phrase closes the gate too: `strip_dead_phrases` rewrites the
+    /// response, so nothing may settle behind it.
+    #[test]
+    fn a_dead_phrase_closes_the_gate() {
+        let text = "A clean first paragraph.\n\nCertainly! Here is more.\n\nAnd a third.\n\ntail";
+        let mut stream = AssistantStream::new();
+        let mut committed = String::new();
+        for chunk in text.as_bytes().chunks(5) {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while let Some(b) = stream.settle() {
+                committed.push_str(&b);
+            }
+        }
+        assert_eq!(committed, "A clean first paragraph.\n\n");
+        assert!(!settle_guard::contains_dead_phrase(&committed));
+    }
+
+    /// A final that was re-whitespaced behind the committed prefix (what the dead
+    /// phrase strip does to the WHOLE response once it fires) is still recognised,
+    /// so the settled blocks are not re-rendered under it.
+    #[test]
+    fn a_rewhitespaced_final_does_not_duplicate_the_settled_prefix() {
+        let streamed = "Intro line.\n\nBody with  a double space.\n\nEnd";
+        let mut stream = AssistantStream::new();
+        let mut committed = String::new();
+        for chunk in streamed.as_bytes().chunks(4) {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while let Some(b) = stream.settle() {
+                committed.push_str(&b);
+            }
+        }
+        assert!(committed.starts_with("Intro line."));
+        // The backend's normalisation collapsed the double space.
+        let scrubbed = "Intro line.\n\nBody with a double space.\n\nEnd";
+        match stream.finalize(Some("m1"), scrubbed.to_string()) {
+            Finalize::Emit(rest) => {
+                assert!(
+                    !rest.contains("Intro line."),
+                    "the settled prefix was re-emitted under a re-whitespaced final: {rest:?}"
+                );
+                assert!(rest.ends_with("End"));
+            }
+            Finalize::Duplicate => panic!("must render"),
+        }
+    }
+
+    /// A final that genuinely diverges is never matched fuzzily: the residue
+    /// retreats to a settled BLOCK boundary, never to the middle of a sentence.
+    #[test]
+    fn a_diverged_final_retreats_to_a_block_boundary() {
+        let streamed = "Block one.\n\nBlock two.\n\nBlock three";
+        let mut stream = AssistantStream::new();
+        for chunk in streamed.as_bytes().chunks(4) {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while stream.settle().is_some() {}
+        }
+        assert!(stream.settled_bytes() > 0);
+        // Backend replaced everything from block two onwards.
+        let diverged = "Block one.\n\nSomething else entirely.";
+        match stream.finalize(Some("m1"), diverged.to_string()) {
+            Finalize::Emit(rest) => {
+                assert_eq!(
+                    rest, "Something else entirely.",
+                    "divergence must resume at a block boundary"
+                );
+            }
+            Finalize::Duplicate => panic!("must render"),
+        }
+    }
+
+    /// A tool call flushing mid-message must hand over only what has NOT already
+    /// settled — otherwise the tool-interleaved flush re-renders the paragraphs
+    /// the user has been reading.
+    #[test]
+    fn a_tool_flush_hands_over_only_the_unsettled_tail() {
+        let mut stream = AssistantStream::new();
+        let mut committed = String::new();
+        for chunk in "Let me check that.\n\nReading the file now"
+            .as_bytes()
+            .chunks(5)
+        {
+            stream.push(Some("m1"), std::str::from_utf8(chunk).unwrap());
+            while let Some(b) = stream.settle() {
+                committed.push_str(&b);
+            }
+        }
+        assert_eq!(committed, "Let me check that.\n\n");
+        assert_eq!(stream.take(), "Reading the file now");
+        assert!(stream.is_empty());
+    }
+
+    // ── Rebuild budget ────────────────────────────────────────────────────
+
+    /// Every `insert_before` is a full viewport rebuild, so per-block committing
+    /// could have turned one rebuild per reply into one per paragraph. The drain
+    /// batches everything queued in the same iteration into ONE call, so the cost
+    /// is bounded by *frames in which something settled*, not by blocks.
+    ///
+    /// Mirrors the batching arithmetic in `event_loop`'s step 2 exactly.
+    #[test]
+    fn a_sixty_block_reply_stays_within_the_rebuild_budget() {
+        const BLOCKS: usize = 60;
+        const TERM_ROWS: u16 = 40;
+
+        let mut doc = String::new();
+        for i in 0..BLOCKS {
+            doc.push_str(&format!("Paragraph number {i} of the reply.\n\n"));
+        }
+
+        /// One drain pass: how many `insert_before` calls it costs.
+        fn rebuilds(heights: &[u16], cap: u16) -> usize {
+            let (mut calls, mut acc) = (0usize, 0u16);
+            for &h in heights {
+                if h == 0 {
+                    continue;
+                }
+                if acc > 0 && acc.saturating_add(h) > cap {
+                    calls += 1;
+                    acc = 0;
+                }
+                acc = acc.saturating_add(h);
+            }
+            if acc > 0 {
+                calls += 1;
+            }
+            calls
+        }
+
+        // Worst case for the batcher: the reply trickles in, so every paragraph
+        // settles as its OWN queued block, and they are then drained together in
+        // one pass. (When a whole reply lands in one delta the boundary scan
+        // coalesces it into a single block for free — that case costs 1 call.)
+        let mut chat = Chat::new();
+        let mut stream = AssistantStream::new();
+        let mut header = false;
+        let mut blocks = 0;
+        for byte in doc.as_bytes().chunks(1) {
+            stream.push(Some("m1"), std::str::from_utf8(byte).unwrap());
+            while let Some(b) = stream.settle() {
+                blocks += 1;
+                commit_assistant_chunk(&mut chat, &mut header, &b, None);
+            }
+        }
+        assert_eq!(blocks, BLOCKS, "each paragraph should have settled separately");
+        let heights: Vec<u16> = chat
+            .drain_scrollback()
+            .iter()
+            .map(|m| m.height(W))
+            .collect();
+        let total: u16 = heights.iter().copied().sum();
+        let calls = rebuilds(&heights, TERM_ROWS);
+        // Only the screenful cap may split the batch — never the block count.
+        let floor = (total as usize).div_ceil(TERM_ROWS as usize);
+        assert!(
+            calls <= floor + 1,
+            "a {BLOCKS}-block reply drained in one pass cost {calls} viewport \
+             rebuilds ({total} rows, cap {TERM_ROWS}); the batcher should need \
+             about {floor}"
+        );
+        assert!(
+            calls * 4 < BLOCKS,
+            "batching did not help: {calls} rebuilds for {BLOCKS} separately \
+             queued blocks"
+        );
+
+        // And the arithmetic degenerates correctly: one tall message still goes
+        // out on its own rather than being dropped.
+        assert_eq!(rebuilds(&[100], TERM_ROWS), 1);
+        assert_eq!(rebuilds(&[], TERM_ROWS), 0);
+        assert_eq!(rebuilds(&[1, 1, 1], TERM_ROWS), 1);
+    }
+}
+

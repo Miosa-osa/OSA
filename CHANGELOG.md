@@ -9,6 +9,75 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.53] — displays as `v1.0.053`
+
+### Changed — you can read a reply while it is still being written
+
+- **A long answer was unreadable until the turn ended.** The whole reply was held in
+  a bounded live region at the bottom of the screen, so as soon as it grew past that
+  region the beginning scrolled out of it — and tool activity rendering underneath
+  pushed what was left further out of view. Nothing was in the terminal's own
+  scrollback yet, so scrolling up did not bring it back either. The answer arrived in
+  one lump at the end, which is exactly when you no longer need to read it slowly.
+  **Finished blocks now land in scrollback as they finish**: a paragraph, a list, a
+  code block or a table is committed the moment it is complete, so on a typical reply
+  around nine tenths of the text is readable — and scrollable, and selectable — before
+  the turn is over.
+
+- **Only the still-unfinished tail stays in the live region.** The block currently
+  being written keeps updating in place as before, so you still see text appear as it
+  arrives; it is only the part that can no longer change that moves out. A code fence
+  that has not closed counts as unfinished and stays in the tail, so a partial block
+  is never committed in a state it will not end in.
+
+- **Completion no longer replays the answer.** Because everything already settled was
+  subtracted from what the end of a turn commits, finishing reveals only the last
+  unfinished block rather than reprinting the message you have been reading all along
+  — and when a reply happens to end exactly on a block boundary, it reveals nothing at
+  all. Interrupting mid-reply closes the open block cleanly, so the interrupt notice
+  reads as its own paragraph instead of running into the text above it.
+
+### Changed — the multi-agent view now reads as a hierarchy
+
+- **Five surfaces competed for attention at the same visual weight.** The roster, the
+  tool feed, the plan checklist, their headers and their chrome were all drawn with
+  roughly equal emphasis, so nothing on screen told you where to look and the one row
+  that was actually live had to be found by reading. **There is now a three-tier
+  ladder**: the accent belongs only to what is genuinely happening right now — the
+  running tool, the active plan step — arguments, paths and durations sit a tier below
+  in a muted tone, and every label, header and separator recedes into the quietest
+  tier. Section titles are labels for the block beneath them, and are now styled that
+  way rather than as content.
+
+- **Paths are shown relative to your workspace, with shared prefixes elided.** A trail
+  of file operations in one directory printed the same long absolute prefix on every
+  row, spending most of the width on the part that never changed. The prefix is
+  dropped when doing so hides nothing, so what remains is the part that distinguishes
+  one row from the next.
+
+- **Four rows of noise are gone without losing any information.** Batch labels that
+  restated what the rows below them already said are suppressed, the "+N earlier"
+  count is folded into the row it describes instead of occupying a row of its own, and
+  the idle `main` entry — which was on screen permanently whether or not it was doing
+  anything — is folded into the roster header. On a representative screen this is four
+  fewer rows for the same content.
+
+### Changed — the README and docs describe what OSA actually ships
+
+- **The tool and provider lists were wrong in both directions.** The README advertised
+  seven tools that are deliberately not registered — calling one could only ever
+  produce a runtime error — and listed seven providers when twenty-seven are offered.
+  Named OpenAI models that the picker excludes were presented as available. Two
+  keyboard bindings were documented incorrectly, and forty-two slash commands were
+  missing entirely. All of it now matches the shipped build.
+
+- **Homebrew instructions have been removed rather than version-bumped.** The release
+  tarball contains the Elixir backend only — no Rust TUI and no launcher — so a
+  Homebrew install cannot attach a terminal interface at all, and a working formula
+  was never one version bump away. `Formula/osa.rb` now carries a header comment
+  recording why, so the gap is not mistaken for staleness and "fixed" by bumping a
+  version.
+
 ## [1.0.52] — displays as `v1.0.052`
 
 ### Fixed — popups and notifications no longer paint over the conversation

@@ -1,27 +1,28 @@
 # OSA Documentation
 
-> **OSA v1.0.010** — Optimal System Agent
+> **OSA v1.0.052** — Optimal System Agent
 > Elixir/OTP + Rust TUI + Tauri/SvelteKit. Signal Theory-based AI agent orchestration.
-> 154,000 lines · 287 modules · 18 LLM providers · 12 chat channels · Apache 2.0
+> 27 LLM providers · 82 tools · 12 chat channels · Apache 2.0
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install and run
-brew tap miosa-osa/tap
-brew install miosa-osa/tap/osa
-osa serve
+# Install and run (macOS / Linux)
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
+osa
 
-# Compatibility entrypoints installed by the same package:
-osagent version
-miosa version
+# Windows (PowerShell)
+#   irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex
 
 # Or from source
 git clone https://github.com/Miosa-osa/OSA.git
 cd OSA && mix setup && mix osa.serve
 ```
+
+> Homebrew is **not** a supported install path — the tap formula is many
+> releases stale and its tarball omits the Rust TUI. See `Formula/osa.rb`.
 
 See [Getting Started](getting-started/) for installation, configuration, and first run.
 

@@ -217,7 +217,42 @@ impl App {
                             None,
                         );
                     }
-                    self.chat.update_streaming(self.assistant_stream.text());
+                    // Flow completed blocks into the terminal's REAL scrollback
+                    // as they complete, instead of holding the whole reply in
+                    // the capped live region until the turn ends.
+                    //
+                    // Two things depended on that hold and both were wrong: the
+                    // finished answer *appeared* only at turn end (the user had
+                    // been watching text they were never allowed to read in
+                    // place), and every tool-progress row appended below the
+                    // prose pushed a row of prose off the top of the capped
+                    // region — where, not being scrollback, it could not be
+                    // recovered. A settled block is in the terminal's own
+                    // scrollback: activity below it can no longer cost the user
+                    // access to something the model already said.
+                    //
+                    // `settle` hands back only what markdown says is final AND
+                    // what the backend's output guardrails provably cannot
+                    // rewrite (see `settle_guard`); `finalize` later subtracts
+                    // exactly these bytes from the authoritative final, so
+                    // nothing renders twice.
+                    let mut settled_any = false;
+                    while let Some(block) = self.assistant_stream.settle() {
+                        if !settled_any {
+                            // Order stays [prior tools][text]: emit any pending
+                            // collapsed tool run before the prose it precedes.
+                            self.flush_collapse();
+                            settled_any = true;
+                        }
+                        crate::app::assistant_stream::commit_assistant_chunk(
+                            &mut self.chat,
+                            &mut self.agent_header_sent,
+                            &block,
+                            None,
+                        );
+                    }
+                    // The preview now holds ONLY the still-unterminated block.
+                    self.chat.update_streaming(self.assistant_stream.tail());
                     // Count CHARACTERS, not UTF-8 bytes — the ~4-chars/token
                     // estimate inflates badly on non-ASCII output if we use len().
                     self.activity.add_stream_chars(text.chars().count());

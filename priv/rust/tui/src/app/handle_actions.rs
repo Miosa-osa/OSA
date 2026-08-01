@@ -260,6 +260,9 @@ impl App {
         if interrupted {
             let remaining = self.assistant_stream.take();
             let had_output = self.agent_header_sent || !remaining.trim().is_empty();
+            // Close any open chunk flow first: the interrupt notice is its own
+            // block, so the last settled chunk must give up its separator row.
+            self.chat.end_agent_chunk_flow();
             if !remaining.trim().is_empty() {
                 if self.agent_header_sent {
                     self.chat.add_agent_continuation(&remaining);
@@ -290,12 +293,22 @@ impl App {
             // agent_response event (e.g. text → subagent/tool → more text)
             // emitted a second "◈ OSA" header, visually splitting one answer
             // into chunks.
-            crate::app::assistant_stream::commit_assistant_block(
+            // `final_text` is what is LEFT of that message: `finalize` has
+            // already subtracted the blocks that settled into native scrollback
+            // while the reply streamed, so completion reveals only the last,
+            // still-unfinished block — never a wholesale re-appearance of text
+            // the user has been reading all along. It is empty when the reply
+            // ended exactly on a block boundary, and then completion reveals
+            // nothing at all, which is the point.
+            crate::app::assistant_stream::commit_assistant_chunk(
                 &mut self.chat,
                 &mut self.agent_header_sent,
                 &final_text,
                 signal.as_ref(),
             );
+            // The message is over: drop the block separator the last chunk was
+            // still carrying so the answer does not end on a spare row.
+            self.chat.end_agent_chunk_flow();
         }
 
         // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it

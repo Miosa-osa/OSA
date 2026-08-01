@@ -47,8 +47,38 @@
 //! exact repeat of the identical final text.
 //!
 //! Deliberately NOT done here: trimming a common prefix/suffix between the
-//! accumulation and the final. That would hide the real cause and would corrupt
-//! a model that legitimately repeats itself.
+//! accumulation and the final on a *guess*. What IS done is exact bookkeeping —
+//! see "Settling" below: the buffer knows precisely which bytes it already put
+//! on screen, and only subtracts those.
+//!
+//! # Settling — completed blocks flow into scrollback as they complete
+//!
+//! A reply used to live in the capped inline preview for the whole turn and
+//! only reach the terminal's native scrollback at `finalize`. Two things follow
+//! from that, and both were reported: a long answer *appeared* all at once when
+//! the turn ended, and while the turn ran, tool-progress rows appended below
+//! the prose pushed the prose off the top of the capped region, where it could
+//! never be recovered — the live region is not scrollback.
+//!
+//! So a block is **settled** as soon as markdown says it can never change
+//! again: `find_frozen_boundary` (the same depth-0 blank-line checkpoint the
+//! streaming renderer freezes on, which is proven there to make
+//! `render(src[..B]) ++ render(src[B..]) == render(src)`) marks how much of the
+//! accumulation is complete, and everything up to it is committed through the
+//! ordinary `commit_assistant_block` path. `settled` counts those bytes; the
+//! preview then shows only `tail()`, the still-unterminated block.
+//!
+//! Two rules keep this compatible with "the final replaces the accumulation":
+//!
+//! * **The gate.** `settle_guard::may_settle` decides whether the backend's
+//!   output guardrails could still rewrite what we are about to commit; a
+//!   `false` is sticky for the rest of the message. See that module — it is
+//!   where the reasoning about `maybe_scrub_prompt_leak` /
+//!   `maybe_strip_dead_phrases` lives.
+//! * **The subtraction.** `finalize` emits the final *minus the bytes already
+//!   committed*, matched with `common_prefix_modulo_whitespace` and backed off
+//!   to a block boundary when the final genuinely diverged. Nothing is rendered
+//!   twice, and nothing is silently dropped.
 
 /// What a finalizing `agent_response` should render.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +89,19 @@ pub(crate) enum Finalize {
     Emit(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct AssistantStream {
     /// Deltas accumulated for the message identified by `msg_id`.
     buf: String,
+    /// Bytes of `buf` already committed to native scrollback by [`settle`]. Always
+    /// a settle boundary, hence a char boundary and a line start.
+    ///
+    /// [`settle`]: AssistantStream::settle
+    settled: usize,
+    /// Whether completed blocks of THIS message may still be committed early.
+    /// Once cleared it stays cleared until the message ends (see the module
+    /// docs and `settle_guard`).
+    settle_ok: bool,
     /// Identity of the message currently accumulating, when the backend sends one.
     msg_id: Option<String>,
     /// Identity of the last message finalized this turn (`None` for an id-less backend).
@@ -71,18 +110,73 @@ pub(crate) struct AssistantStream {
     finalized_text: Option<String>,
 }
 
+impl Default for AssistantStream {
+    fn default() -> Self {
+        Self {
+            buf: String::new(),
+            settled: 0,
+            settle_ok: true,
+            msg_id: None,
+            finalized_id: None,
+            finalized_text: None,
+        }
+    }
+}
+
 impl AssistantStream {
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// The text accumulated so far for the current message (the live preview).
+    /// Everything accumulated so far for the current message, settled or not.
     pub(crate) fn text(&self) -> &str {
         &self.buf
     }
 
+    /// The part of the current message that is NOT yet in native scrollback —
+    /// what the live preview must show, and what a flush hands over.
+    pub(crate) fn tail(&self) -> &str {
+        &self.buf[self.settled..]
+    }
+
+    /// True when nothing is waiting to be rendered: every accumulated byte has
+    /// already been committed (or none arrived). This is the "is there text to
+    /// flush?" question every caller actually asks.
     pub(crate) fn is_empty(&self) -> bool {
-        self.buf.is_empty()
+        self.buf.len() == self.settled
+    }
+
+    /// Bytes already committed to scrollback for the current message.
+    #[cfg(test)]
+    pub(crate) fn settled_bytes(&self) -> usize {
+        self.settled
+    }
+
+    /// Hand back the next run of **completed** markdown blocks, which the caller
+    /// must commit to scrollback; `None` when nothing new is complete, or when
+    /// the guardrail gate is shut.
+    ///
+    /// Idempotent in the sense that matters: a byte is returned at most once for
+    /// the lifetime of the message.
+    pub(crate) fn settle(&mut self) -> Option<String> {
+        if !self.settle_ok {
+            return None;
+        }
+        // The gate is evaluated against the WHOLE accumulation, not just the
+        // candidate region: both guardrails are triggered by text anywhere in
+        // the response, so a phrase already visible in the unsettled tail must
+        // stop the blocks in front of it from going out.
+        if !crate::app::settle_guard::may_settle(&self.buf) {
+            self.settle_ok = false;
+            return None;
+        }
+        let end = crate::render::markdown_stream::find_frozen_boundary(&self.buf);
+        if end <= self.settled {
+            return None;
+        }
+        let out = self.buf[self.settled..end].to_string();
+        self.settled = end;
+        Some(out)
     }
 
     /// Accept a streamed delta.
@@ -90,15 +184,27 @@ impl AssistantStream {
     /// Returns `Some(previous)` when this delta opens a NEW assistant message
     /// while an uncommitted one was still buffered: that text belongs to the
     /// superseded generation and the caller must commit it as its own block
-    /// before the new message starts accumulating.
+    /// before the new message starts accumulating. Blocks of the superseded
+    /// generation that already settled into scrollback are NOT handed back —
+    /// they are on screen, and handing them back would render them twice.
     pub(crate) fn push(&mut self, message_id: Option<&str>, text: &str) -> Option<String> {
         let new_generation = matches!(
             (self.msg_id.as_deref(), message_id),
             (Some(current), Some(incoming)) if current != incoming
         );
 
-        let superseded = if new_generation && !self.buf.is_empty() {
-            Some(std::mem::take(&mut self.buf))
+        let superseded = if new_generation {
+            let rest = self.buf[self.settled..].to_string();
+            self.buf.clear();
+            self.settled = 0;
+            // A fresh generation is a fresh message: the previous one's gate
+            // decision says nothing about this one.
+            self.settle_ok = true;
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest)
+            }
         } else {
             None
         };
@@ -110,11 +216,16 @@ impl AssistantStream {
         superseded
     }
 
-    /// Take the buffered text for an interleaving flush (a tool call splits one
-    /// message into several rendered blocks). Same generation — the identity is
-    /// kept so a later delta for it is not mistaken for a new message.
+    /// Take the *uncommitted* buffered text for an interleaving flush (a tool
+    /// call splits one message into several rendered blocks). Same generation —
+    /// the identity is kept so a later delta for it is not mistaken for a new
+    /// message, and so is `settle_ok`, since the guardrails still judge the
+    /// whole of this message.
     pub(crate) fn take(&mut self) -> String {
-        std::mem::take(&mut self.buf)
+        let out = self.buf[self.settled..].to_string();
+        self.buf.clear();
+        self.settled = 0;
+        out
     }
 
     /// Apply the turn's terminal `agent_response`.
@@ -122,14 +233,25 @@ impl AssistantStream {
     /// The backend's text REPLACES the accumulation for the message it
     /// finalizes; the accumulation survives only as a fallback when the final
     /// carries no text at all. Repeating a finalization is a no-op.
+    ///
+    /// What is *emitted* is the final minus whatever [`settle`] already put into
+    /// native scrollback, so a reply the user has been reading block by block
+    /// does not re-appear wholesale at turn end. The duplicate bookkeeping still
+    /// records the FULL final, so a replayed delivery is recognised.
+    ///
+    /// [`settle`]: AssistantStream::settle
     pub(crate) fn finalize(&mut self, message_id: Option<&str>, final_text: String) -> Finalize {
         if self.is_duplicate(message_id, &final_text) {
             return Finalize::Duplicate;
         }
 
+        let settled = std::mem::replace(&mut self.settled, 0);
+        self.settle_ok = true;
         let streamed = std::mem::take(&mut self.buf);
         let out = if final_text.trim().is_empty() {
-            streamed
+            // No authoritative text: the accumulation stands in for it, and the
+            // part already on screen is dropped rather than repeated.
+            streamed[settled..].to_string()
         } else {
             final_text
         };
@@ -137,7 +259,7 @@ impl AssistantStream {
         self.finalized_id = message_id.map(str::to_string);
         self.finalized_text = Some(out.clone());
         self.msg_id = None;
-        Finalize::Emit(out)
+        Finalize::Emit(subtract_committed(&out, &streamed[..settled]))
     }
 
     fn is_duplicate(&self, message_id: Option<&str>, final_text: &str) -> bool {
@@ -157,6 +279,8 @@ impl AssistantStream {
     /// late duplicate `agent_response` is still recognised.
     pub(crate) fn clear_buf(&mut self) {
         self.buf.clear();
+        self.settled = 0;
+        self.settle_ok = true;
         self.msg_id = None;
     }
 
@@ -164,10 +288,60 @@ impl AssistantStream {
     /// conversation is replaced), never mid-turn.
     pub(crate) fn reset(&mut self) {
         self.buf.clear();
+        self.settled = 0;
+        self.settle_ok = true;
         self.msg_id = None;
         self.finalized_id = None;
         self.finalized_text = None;
     }
+}
+
+/// `final_text` with the leading run that is already in native scrollback
+/// removed.
+///
+/// Normally `committed` is a byte-exact prefix of `final_text` (the final IS the
+/// accumulation) and this is a plain slice. The two ways it can diverge are both
+/// handled without ever rendering a byte twice on the happy path:
+///
+/// * **Re-whitespaced.** A dead phrase arriving in the unsettled tail makes the
+///   backend run its whitespace normalisation over the *whole* response, which
+///   reaches back into already-committed text.
+///   [`common_prefix_modulo_whitespace`] recognises it anyway.
+/// * **Genuinely different text** — most sharply, the prompt-leak scrub, which
+///   throws the response away and substitutes a one-line refusal. Then no prefix
+///   matches; we back off to the largest *block boundary* inside `committed`
+///   that the final does agree with (often zero) and emit everything after it.
+///   Backing off to a boundary rather than to an arbitrary character is what
+///   keeps a model that legitimately repeats itself from being truncated
+///   mid-sentence.
+///
+/// [`common_prefix_modulo_whitespace`]: crate::app::settle_guard::common_prefix_modulo_whitespace
+fn subtract_committed(final_text: &str, committed: &str) -> String {
+    use crate::app::settle_guard::common_prefix_modulo_whitespace;
+    use crate::render::markdown_stream::find_frozen_boundary;
+
+    if committed.is_empty() {
+        return final_text.to_string();
+    }
+    // Fast path: the final is the accumulation.
+    if let Some(stripped) = final_text.strip_prefix(committed) {
+        return stripped.to_string();
+    }
+    if let Some(cut) = common_prefix_modulo_whitespace(final_text, committed) {
+        return final_text[cut..].to_string();
+    }
+    // Diverged. Retreat one settled block at a time until the final agrees.
+    let mut end = committed.len();
+    while end > 0 {
+        end = find_frozen_boundary(&committed[..end.saturating_sub(1)]);
+        if end == 0 {
+            break;
+        }
+        if let Some(cut) = common_prefix_modulo_whitespace(final_text, &committed[..end]) {
+            return final_text[cut..].to_string();
+        }
+    }
+    final_text.to_string()
 }
 
 /// Commit one assistant block to the chat, honouring the "◈ OSA" header-once
@@ -193,25 +367,66 @@ pub(crate) fn commit_assistant_block(
     text: &str,
     signal: Option<&crate::client::types::Signal>,
 ) {
-    let cleaned;
-    let text: &str = if crate::tools::CONTROL_TAGS
-        .iter()
-        .any(|t| text.contains(&format!("<{t}>")))
-    {
-        cleaned = crate::tools::strip_control_markup(text);
-        cleaned.trim()
-    } else {
-        text
-    };
-
-    if text.is_empty() {
+    let Some(text) = clean_for_commit(text) else {
         return;
-    }
+    };
+    // A block ends whatever chunk flow was open: it is its own unit, with its
+    // own margin above it.
+    chat.end_agent_chunk_flow();
     if *header_sent {
-        chat.add_agent_continuation(text);
+        chat.add_agent_continuation(&text);
     } else {
-        chat.add_agent_message(text, signal);
+        chat.add_agent_message(&text, signal);
         *header_sent = true;
+    }
+}
+
+/// Commit one **settled chunk** of an assistant message — a run of markdown
+/// blocks that is complete and can never change again, handed to native
+/// scrollback while the rest of the reply is still streaming.
+///
+/// Differs from [`commit_assistant_block`] in exactly one way, and it is load
+/// bearing: the text goes in verbatim, separator and all, because a chunk
+/// boundary is a proven safe render split point. See `Chat::add_agent_chunk`.
+pub(crate) fn commit_assistant_chunk(
+    chat: &mut crate::components::chat::Chat,
+    header_sent: &mut bool,
+    text: &str,
+    signal: Option<&crate::client::types::Signal>,
+) {
+    // Control markup is stripped here too, but a chunk whose entire content was
+    // plumbing must not silently swallow its block separator — dropping it whole
+    // is right, and the surrounding chunks still join correctly because each
+    // carries its own terminator.
+    let Some(text) = clean_for_commit(text) else {
+        return;
+    };
+    chat.add_agent_chunk(&text, !*header_sent, signal);
+    *header_sent = true;
+}
+
+/// Shared pre-commit cleanup: strip internal control markup, and report
+/// "nothing to render" for text that was only ever plumbing.
+///
+/// Returns the text unchanged (borrowed) in the overwhelmingly common case that
+/// no control tag is present, so the verbatim guarantee chunks depend on holds.
+fn clean_for_commit(text: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let has_markup = crate::tools::CONTROL_TAGS
+        .iter()
+        .any(|t| text.contains(&format!("<{t}>")));
+    if !has_markup {
+        return if text.is_empty() {
+            None
+        } else {
+            Some(std::borrow::Cow::Borrowed(text))
+        };
+    }
+    let cleaned = crate::tools::strip_control_markup(text);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(std::borrow::Cow::Owned(trimmed.to_string()))
     }
 }
 

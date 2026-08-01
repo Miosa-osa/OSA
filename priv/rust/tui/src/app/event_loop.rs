@@ -702,8 +702,44 @@ impl App {
             // 2. Flush finalized messages into the terminal's native scrollback.
             //    Only meaningful in inline mode — the alt screen (full mode) has no
             //    persistent scrollback, so queued items wait until we return inline.
+            //    Batched: every `insert_before` is a full viewport rebuild, so a
+            //    reply that now flows into scrollback block by block (see
+            //    `AssistantStream::settle`) would otherwise pay one rebuild per
+            //    completed paragraph. Everything drained in the same iteration
+            //    goes out in ONE call, rendered at stacked y-offsets — so the
+            //    rebuild count is bounded by frames in which something settled,
+            //    not by blocks. The batch is flushed whenever adding the next
+            //    message would take it past a screenful, which keeps a single
+            //    `insert_before` from ever having to scroll more than the
+            //    terminal can show at once (an over-tall single message still
+            //    goes out alone, exactly as before).
             if !was_full && self.chat.has_pending_scrollback() {
                 let w = terminal.get_frame().area().width;
+                let cap = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24).max(1);
+                let mut batch: Vec<(crate::components::chat::message::Message, u16)> = Vec::new();
+                let mut batch_h: u16 = 0;
+
+                fn flush(
+                    terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
+                    batch: &mut Vec<(crate::components::chat::message::Message, u16)>,
+                    batch_h: u16,
+                    w: u16,
+                ) -> std::io::Result<()> {
+                    if batch_h == 0 {
+                        batch.clear();
+                        return Ok(());
+                    }
+                    terminal.insert_before(batch_h, |buf| {
+                        let mut y = 0u16;
+                        for (msg, h) in batch.iter() {
+                            msg.render_to_buffer(Rect::new(0, y, w, *h), buf, 0);
+                            y = y.saturating_add(*h);
+                        }
+                    })?;
+                    batch.clear();
+                    Ok(())
+                }
+
                 for msg in self.chat.drain_scrollback() {
                     // Capture a text copy for the on-demand transcript viewer as
                     // each finalized message flows into native scrollback. This is
@@ -719,10 +755,14 @@ impl App {
                     if h == 0 {
                         continue;
                     }
-                    terminal.insert_before(h, |buf| {
-                        msg.render_to_buffer(Rect::new(0, 0, w, h), buf, 0);
-                    })?;
+                    if batch_h > 0 && batch_h.saturating_add(h) > cap {
+                        flush(&mut terminal, &mut batch, batch_h, w)?;
+                        batch_h = 0;
+                    }
+                    batch_h = batch_h.saturating_add(h);
+                    batch.push((msg, h));
                 }
+                flush(&mut terminal, &mut batch, batch_h, w)?;
             }
 
             // `insert_before` (the welcome banner + every finalized-message flush

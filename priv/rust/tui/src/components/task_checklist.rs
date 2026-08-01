@@ -166,8 +166,13 @@ impl TaskChecklist {
             .iter()
             .filter(|i| i.status == ChecklistStatus::Completed)
             .count();
+        // The header is a LABEL for the block below it, not content. It sits in
+        // the quietest tier so the eye goes straight to the one accented row —
+        // the in-progress step — which is the only thing in this band that is
+        // actually news. The `n/m` count keeps the meta tier: it is the one fact
+        // here that changes, and it is what a reader glances at for progress.
         Line::from(vec![
-            Span::styled(title.to_string(), theme.faint()),
+            Span::styled(title.to_string(), theme.recede()),
             Span::styled(format!("  {}/{}", completed, self.items.len()), theme.faint()),
         ])
     }

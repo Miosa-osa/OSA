@@ -3,6 +3,29 @@
 
 # Homebrew formula for OSA.
 #
+# ── UNMAINTAINED — DO NOT ADVERTISE THIS AS AN INSTALL PATH ──────────────────
+#
+# This formula is pinned to v1.0.002 and is ~50 releases behind the current
+# release. It is deliberately NOT being version-bumped, because bumping it
+# would ship a broken product rather than an old one:
+#
+#   * The release tarball this formula installs is ONLY the Elixir/OTP release
+#     (`tar -czf ... -C _build/prod/rel/osagent .`, see .github/workflows/
+#     release.yml). It does NOT contain the Rust TUI (`osagent-tui-<platform>`,
+#     published as a separate release asset) and it does NOT contain the smart
+#     launcher that scripts/install.sh generates.
+#   * So `bin.install_symlink libexec/"bin/osagent" => "osa"` below makes `osa`
+#     the raw Elixir release script. A bare `osa` cannot warm the daemon and
+#     attach a TUI — the entire product entry point — because neither the
+#     launcher nor the TUI binary is present.
+#
+# Fixing this means teaching the formula to fetch BOTH assets and install a
+# real launcher. Until someone does that, the supported install is:
+#
+#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
+#
+# The README no longer mentions Homebrew for this reason.
+#
 # NOTE: This formula is normally consumed from a tap
 # (`brew install Miosa-osa/tap/osa`). The canonical home for it is the
 # homebrew-miosa-osa/tap repository — the copy kept here in the main repo is a

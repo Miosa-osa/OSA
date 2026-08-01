@@ -88,6 +88,12 @@ pub struct Chat {
     /// Appearance flag: draw an understated dim rule between conversation turns.
     /// Default on; `set_turn_separators(false)` suppresses them entirely.
     turn_separators: bool,
+    /// True when the block most recently queued for scrollback was an assistant
+    /// prose *chunk* (see [`Chat::add_agent_chunk`]), so the next chunk of the
+    /// same message continues it directly with no CC margin. Cleared by every
+    /// ordinary block push, so a tool cell landing between two chunks correctly
+    /// re-opens the margin.
+    agent_flow_open: bool,
 }
 
 impl Chat {
@@ -112,6 +118,7 @@ impl Chat {
             raw_view: false,
             turn_started: false,
             turn_separators: true,
+            agent_flow_open: false,
         }
     }
 
@@ -182,6 +189,77 @@ impl Chat {
         self.scrollback_started = true;
         self.scrollback.push(msg);
         self.has_messages = true;
+        self.agent_flow_open = false;
+    }
+
+    /// Queue one **chunk** of an assistant message that is flowing into
+    /// scrollback as it completes, rather than all at once at turn end.
+    ///
+    /// `content` is kept VERBATIM — including the blank line that terminates the
+    /// markdown block — because the chunk boundary is a proven safe split point
+    /// (`render::markdown_stream::find_frozen_boundary`), for which
+    /// `render(a) ++ render(b) == render(a ++ b)` byte for byte. Trimming it, or
+    /// inserting the CC margin the way an independent block gets one, would both
+    /// break that equality. The margin is therefore emitted only for the chunk
+    /// that OPENS the flow.
+    ///
+    /// `header` draws the "◈ OSA" label; only the first block of a turn gets it.
+    pub fn add_agent_chunk(&mut self, content: &str, header: bool, signal: Option<&Signal>) {
+        if self.agent_flow_open {
+            let joined = match self.last_agent_text.take() {
+                Some(mut prev) => {
+                    prev.push_str(content);
+                    prev
+                }
+                None => content.to_string(),
+            };
+            self.last_agent_text = Some(joined);
+        } else {
+            self.last_agent_text = Some(content.to_string());
+        }
+        let mut msg = Message::new(
+            if header {
+                MessageType::Agent
+            } else {
+                MessageType::AgentContinuation
+            },
+            content.to_string(),
+            signal.cloned(),
+        );
+        msg.set_raw_mode(self.raw_view);
+        if self.agent_flow_open && !header {
+            self.scrollback_started = true;
+            self.scrollback.push(msg);
+            self.has_messages = true;
+        } else {
+            self.push_scrollback_block(msg);
+        }
+        self.agent_flow_open = true;
+    }
+
+    /// Close an open chunk flow: the last chunk still carries the blank line
+    /// that separated it from the block that never came, which would leave the
+    /// finished message sitting on a spare row. Drop it.
+    ///
+    /// Only reaches a chunk still queued — one already drained into the
+    /// terminal's native scrollback is, by construction, immutable.
+    pub fn end_agent_chunk_flow(&mut self) {
+        if !self.agent_flow_open {
+            return;
+        }
+        self.agent_flow_open = false;
+        if let Some(last) = self.scrollback.last_mut() {
+            if matches!(
+                last.msg_type,
+                MessageType::Agent | MessageType::AgentContinuation
+            ) {
+                let trimmed = last.content.trim_end();
+                if trimmed.len() != last.content.len() {
+                    last.content.truncate(trimmed.len());
+                    last.invalidate_cache();
+                }
+            }
+        }
     }
 
     pub fn add_user_message(&mut self, content: &str) {
@@ -501,6 +579,7 @@ impl Chat {
         self.last_user_text = None;
         self.scrollback_started = false;
         self.turn_started = false;
+        self.agent_flow_open = false;
     }
 
     pub fn last_agent_message(&self) -> Option<String> {

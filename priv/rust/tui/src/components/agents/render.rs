@@ -98,8 +98,20 @@ impl Agents {
                 "Orchestrator".to_string()
             };
 
+            // WEIGHT, not colour. This row is the TITLE of the tree below it, and
+            // the accent budget of the live region is already spent on the two
+            // things that are genuinely live and changing: the activity line's
+            // verb and the plan's in-progress step. Painting the header in the
+            // same accent made three surfaces shout at once (Codex hides the
+            // status row outright while a second live indicator is on screen; we
+            // cannot hide the roster, so we demote it instead).
+            //
+            // Bold-on-default reads as a heading without joining the colour
+            // competition, and it holds in light themes as well as dark. The
+            // completed tally keeps its green: by then no activity line exists,
+            // so there is nothing to compete with.
             let header_style = if running > 0 {
-                theme.spinner()
+                theme.bold()
             } else {
                 theme.task_done()
             };
@@ -112,12 +124,13 @@ impl Agents {
 
             let mut spans = vec![
                 Span::styled(header_text, header_style),
-                Span::styled(collapse_hint, theme.faint()),
+                // Affordances are structure, not content: quietest tier.
+                Span::styled(collapse_hint, theme.recede()),
             ];
 
             // Advertise the full-screen dashboard when there are tracked agents.
             if !self.entries.is_empty() {
-                spans.push(Span::styled(" \u{00b7} \u{2193} to manage", theme.faint()));
+                spans.push(Span::styled(" \u{00b7} \u{2193} to manage", theme.recede()));
             }
 
             // Live fleet gauge `<running>/<cap> agents` (Part 4.2), from the
@@ -155,6 +168,30 @@ impl Agents {
                 ));
             }
 
+            // Absorbed session tokens: when the `main` root row has nothing of its
+            // own to say it does not get a row, and the one fact it held moves
+            // here (see `Agents::main_row_earns_a_row`). Right-aligned so it lands
+            // in the SAME column as every worker row's `↓<tokens>` — the meta
+            // column then reads as one column down the whole block, with the
+            // header holding the session total. Placing it at the far edge also
+            // keeps it away from the `↓ to manage` hint, so the two `↓` glyphs
+            // never sit adjacent and read as one thing.
+            if let Some(tokens) = self.folded_main_tokens() {
+                let meta = fmt_cc_tokens(tokens);
+                let used: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                let meta_w = UnicodeWidthStr::width(meta.as_str());
+                // Only when it fits with a clear column of separation; on a narrow
+                // pane the affordances win (they are the actionable half).
+                if used + meta_w + 1 <= area.width as usize {
+                    let pad = area.width as usize - used - meta_w;
+                    spans.push(Span::styled(" ".repeat(pad), theme.faint()));
+                    spans.push(Span::styled(meta, theme.faint()));
+                }
+            }
+
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect::new(area.x, y, area.width, 1),
@@ -171,7 +208,7 @@ impl Agents {
         // Always roster index 0, rendered GREEN (● + `main`). Synthesized by the
         // App from live session state (top-level action, turn elapsed, session
         // tokens). Selecting it + Enter detaches back to the main transcript.
-        if let Some(ref main) = self.main_row {
+        if let (true, Some(ref main)) = (self.main_row_earns_a_row(), self.main_row.as_ref()) {
             if y + 1 <= area.y + area.height {
                 let selected = self.roster_selected == Some(0);
                 let type_style = if selected {
@@ -216,7 +253,15 @@ impl Agents {
         // 30+ node fleet never blows past the panel. The full-screen dashboard
         // still lists every node.
         let groups = self.grouped_entries();
-        let has_batches = groups.iter().any(|g| g.batch_id.is_some());
+        // A separator rule must EARN its row (Codex `FinalMessageSeparator`: a
+        // divider is only emitted when it divides something, and it carries a
+        // label so it is never pure decoration).
+        //
+        // With a single group there is nothing to separate — the rule was drawing
+        // a full-width line whose only job was to restate the roster header
+        // directly above it. So batch rules appear only from TWO groups up; below
+        // that the grouping is implicit and costs zero rows.
+        let has_batches = groups.len() > 1 && groups.iter().any(|g| g.batch_id.is_some());
         let mut agents_shown = 0usize;
 
         'groups: for (group_idx, group) in groups.iter().enumerate() {
@@ -231,15 +276,25 @@ impl Agents {
                 // nothing to a reader and consumed the entire separator line.
                 // `short_batch_label` keeps only the word-shaped segments; when
                 // none survive, the ordinal alone is the honest header.
+                // The rule carries a COUNT, so the row it costs buys the reader a
+                // fact ("how big is this group") that nothing else on screen
+                // states. A bare `─── Batch 2 ───` would be decoration.
+                let n = group.entries.len();
+                let count = format!("{} agent{}", n, if n == 1 { "" } else { "s" });
                 let label = match group.batch_id.as_deref() {
                     // Foreground-vs-background display: background agents get a
                     // named section instead of an opaque "Batch N: background".
-                    Some("background") => "─── Background agents ".to_string(),
+                    Some("background") => format!("─── Background \u{00b7} {} ", count),
                     Some(id) => match super::short_batch_label(id) {
-                        Some(name) => format!("─── Batch {}: {} ", group_idx + 1, name),
-                        None => format!("─── Batch {} ", group_idx + 1),
+                        Some(name) => {
+                            format!("─── Batch {}: {} \u{00b7} {} ", group_idx + 1, name, count)
+                        }
+                        // No label survived (it was a routing key, or a noise word
+                        // that only restated this heading) — the ordinal alone is
+                        // the honest header.
+                        None => format!("─── Batch {} \u{00b7} {} ", group_idx + 1, count),
                     },
-                    None => "─── Ungrouped ".to_string(),
+                    None => format!("─── Ungrouped \u{00b7} {} ", count),
                 };
                 // Display-width, not byte-len: the leading `───` are 3-byte box
                 // glyphs (1 column each), so `.len()` would over-count their
@@ -247,8 +302,10 @@ impl Agents {
                 let pad_len =
                     (area.width as usize).saturating_sub(UnicodeWidthStr::width(label.as_str()));
                 let padded = format!("{}{}", label, "─".repeat(pad_len));
+                // Quietest tier: a rule as bright as the rows it separates is
+                // just more content competing for the eye.
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(padded, theme.faint()))),
+                    Paragraph::new(Line::from(Span::styled(padded, theme.rule()))),
                     Rect::new(area.x, y, area.width, 1),
                 );
                 y += 1;
@@ -278,10 +335,15 @@ impl Agents {
                 // falling back to its name. Activity is the live current action.
                 let selected = self.roster_selected == Some(idx + 1);
                 let glyph = if selected { '\u{25cf}' } else { '\u{25cb}' };
+                // Unselected node markers are STRUCTURE (they say "a row starts
+                // here"), so they sit in the quietest tier with the connectors.
+                // Only the selected node is colour-marked — colour is rationed to
+                // identity, and here the identity that matters is "this is the one
+                // Enter will attach to".
                 let glyph_style = if selected {
                     theme.agent_main()
                 } else {
-                    theme.faint()
+                    theme.recede()
                 };
                 let agent_type = if !entry.role.is_empty() {
                     entry.role.clone()
@@ -306,7 +368,7 @@ impl Agents {
                 // agent-type is truncated only if a narrow pane demands it.
                 let row1 = roster_row_line(
                     vec![
-                        Span::styled(connector.to_string(), theme.faint()),
+                        Span::styled(connector.to_string(), theme.recede()),
                         Span::styled(format!("{} ", glyph), glyph_style),
                     ],
                     &agent_type,
@@ -356,31 +418,45 @@ impl Agents {
                         // no argument) and collapses repeats; `TRAIL_MAX_ROWS`
                         // caps the whole block. Row count MUST equal
                         // `Agents::entry_rows`, which calls the same helper.
-                        let mut rows: Vec<(String, Style)> = Vec::new();
-                        let actions = super::trail_actions(entry);
+                        // Paths rewritten workspace-relative, and each row's shared
+                        // directory head collapsed against the row above it, so
+                        // the differing tail lands at a shallow fixed column
+                        // instead of past column 40 on every line.
+                        let actions = self.trail_display_rows(entry);
                         let shown = actions.len();
-                        // The counter is FRAMED, not floated. The trail is drawn
-                        // oldest → newest, so the calls it stands for are the
-                        // ones that happened BEFORE the visible entries — its
-                        // position at the top is chronologically correct, and it
-                        // says so ("+8 earlier tool uses"). The previous wording,
-                        // "+8 more tool uses", read as a trailing overflow
-                        // indicator that had been printed above the very items it
-                        // was supposed to summarize.
-                        if entry.tool_uses as usize > shown {
-                            rows.push((
-                                format!("+{} earlier tool uses", entry.tool_uses as usize - shown),
-                                theme.faint(),
-                            ));
-                        }
-                        // `trail_actions` already returns oldest → newest.
-                        for a in actions {
-                            rows.push((a, theme.faint()));
+                        let hidden = (entry.tool_uses as usize).saturating_sub(shown);
+
+                        // The "+N earlier" counter no longer takes a row.
+                        //
+                        // It was correct to place it ABOVE the entries (the trail
+                        // runs oldest → newest, so the hidden calls really are the
+                        // older ones) but it was rendered at the SAME weight as
+                        // the entries, so a bookkeeping number read as a peer of
+                        // the work itself — and it cost a row per agent in a
+                        // region where rows are the scarcest resource.
+                        //
+                        // It is now a quiet prefix on the oldest VISIBLE row: same
+                        // chronological position, one tier quieter, zero rows.
+                        // With nothing visible to prefix it keeps its own row —
+                        // there is nothing to attach to, and "N tool uses, none
+                        // shown" is still worth saying.
+                        let mut rows: Vec<(String, Style)> =
+                            actions.into_iter().map(|a| (a, theme.faint())).collect();
+                        if hidden > 0 {
+                            match rows.first_mut() {
+                                Some((first, _)) => {
+                                    *first = format!("+{} earlier \u{00b7} {}", hidden, first);
+                                }
+                                None => rows.push((
+                                    format!("+{} earlier tool uses", hidden),
+                                    theme.recede(),
+                                )),
+                            }
                         }
                         rows.truncate(super::TRAIL_MAX_ROWS);
                         if rows.is_empty() {
                             let msg = if entry.current_action.is_empty() {
-                                "Starting…".to_string()
+                                "Starting\u{2026}".to_string()
                             } else {
                                 entry.current_action.clone()
                             };
@@ -401,9 +477,13 @@ impl Agents {
                         .saturating_sub(UnicodeWidthStr::width(continuation) + 4)
                         .max(8);
                     let action_truncated = truncate_display(&line_text, max_action);
+                    // Depth reads by COLOUR as well as position: the gutter is one
+                    // tier below the text it introduces, at every level, so a
+                    // three-deep tree still resolves into foreground and frame at
+                    // a glance instead of a uniform grey block.
                     let row = Line::from(vec![
-                        Span::styled(continuation, theme.faint()),
-                        Span::styled("└─ ", theme.faint()),
+                        Span::styled(continuation, theme.recede()),
+                        Span::styled("\u{2514}\u{2500} ", theme.recede()),
                         Span::styled(action_truncated, line_style),
                     ]);
                     frame.render_widget(Paragraph::new(row), Rect::new(area.x, y, area.width, 1));
