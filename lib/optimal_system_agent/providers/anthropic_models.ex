@@ -41,13 +41,22 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   `top_p`, and `top_k` outright — the Anthropic provider deliberately never
   sends them.
 
+  ## The `:prefill` flag is the same kind of load-bearing
+
+  The same generation boundary removed **assistant message prefill**: a request
+  whose final message has `role: "assistant"` returns a 400 on Opus/Sonnet 4.6
+  and everything newer. `Providers.Anthropic` reads `:prefill` to decide whether
+  to normalize a trailing assistant turn before dispatch — see
+  `supports_prefill?/1`.
+
   ## How to add a new Claude model
 
   1. Take the numbers from Anthropic's published model docs — never a blog post.
      `ctx` is the context window, `max_output` the per-response output cap.
   2. Set `:thinking` to `:adaptive` for Claude 4.7+ and the 5 family,
      `:budget` for anything older that supports extended thinking, `:none` if
-     it has no thinking mode at all.
+     it has no thinking mode at all. Set `:prefill` to `false` for Opus/Sonnet
+     4.6 and newer (prefill removed), `true` only for Haiku 4.5 and older.
   3. Set `:pricing` to `{input, output}` USD per 1M tokens. Leave it `nil`
      rather than guessing — an unpriced model accounts at $0.00 and logs, which
      is honest; a guessed price is not.
@@ -64,6 +73,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
           ctx: pos_integer(),
           max_output: pos_integer(),
           thinking: :adaptive | :budget | :none,
+          prefill: boolean(),
           vision: boolean(),
           tools: boolean(),
           pricing: {number(), number()} | nil,
@@ -80,6 +90,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {5.00, 25.00},
@@ -93,6 +104,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       # $3/$15 list; an introductory $2/$10 applies through 2026-08-31. We
@@ -108,6 +120,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {10.00, 50.00},
@@ -122,6 +135,9 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 64_000,
       # Haiku 4.5 predates adaptive thinking — it still takes a token budget.
       thinking: :budget,
+      # ...and predates the prefill removal: a trailing assistant turn is a
+      # legitimate prefill here, so the provider must NOT normalize it away.
+      prefill: true,
       vision: true,
       tools: true,
       pricing: {1.00, 5.00},
@@ -135,6 +151,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {5.00, 25.00},
@@ -148,6 +165,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {5.00, 25.00},
@@ -162,6 +180,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 128_000,
       # 4.6 still accepts budget_tokens (deprecated) but adaptive is correct.
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {5.00, 25.00},
@@ -176,6 +195,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 128_000,
       # 4.6 still accepts budget_tokens (deprecated) but adaptive is correct.
       thinking: :adaptive,
+      prefill: false,
       vision: true,
       tools: true,
       pricing: {3.00, 15.00},
@@ -337,6 +357,33 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   @doc "True when this model takes `thinking: {type: \"adaptive\"}`."
   @spec adaptive_thinking?(String.t() | nil) :: boolean()
   def adaptive_thinking?(id), do: thinking_mode(id) == :adaptive
+
+  @doc """
+  True when this model accepts a request whose last message is `assistant`
+  (an "assistant message prefill").
+
+  Anthropic **removed** prefill on Opus/Sonnet 4.6 and everything newer,
+  including the whole Claude 5 family: a request whose final message is an
+  assistant turn returns a **400**
+
+      This model does not support assistant message prefill.
+      The conversation must end with a user message.
+
+  Only Haiku 4.5 and older still accept it. `Providers.Anthropic` reads this
+  flag to decide whether to normalize a trailing assistant message before
+  dispatch, so 4.5-era behaviour stays byte-for-byte unchanged.
+
+  Unknown models default to `false`, which is the safe direction: normalizing
+  a prefill a model would have accepted costs one extra user turn, while
+  sending one it rejects is a hard 400 that kills the turn.
+  """
+  @spec supports_prefill?(String.t() | nil) :: boolean()
+  def supports_prefill?(id) do
+    case resolve(id) do
+      nil -> false
+      m -> Map.get(m, :prefill, false)
+    end
+  end
 
   @doc "Default output-token cap for a model. Falls back to 32k for unknown ids."
   @spec max_output(String.t() | nil) :: pos_integer()

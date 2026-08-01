@@ -48,6 +48,14 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       "Provider server error (5xx) · Usually transient — try again; if it persists run /model to switch models.",
     invalid_request:
       "The provider rejected the request (400) · Try rephrasing, or run /model to switch models.",
+    # A malformed request OSA built, not anything the user did and not a model
+    # problem — "/model to switch models" is actively wrong advice here, since
+    # every model would reject the same body. Say so plainly and point at the
+    # only two things that actually help.
+    request_shape:
+      "OSA built a request this model rejects (400) · This is a bug in OSA, not your prompt — " <>
+        "switching models will not help. Run /compact or start a new session to reset the " <>
+        "conversation shape, and please report it.",
     tool_use_mismatch:
       "Conversation history is out of sync (a tool call has no result) · Start a new session or /resume an earlier one.",
     duplicate_tool_use:
@@ -195,11 +203,11 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         :invalid_api_key
 
       String.contains?(down, "invalid model name") or String.contains?(down, "model_not_found") or
-          String.contains?(down, "not_found_error") or has_status?(down, 404) ->
+        String.contains?(down, "not_found_error") or has_status?(down, 404) ->
         :model_not_found
 
       has_status?(down, 401) or has_status?(down, 403) or
-          String.contains?(down, "unauthorized") or String.contains?(down, "forbidden") or
+        String.contains?(down, "unauthorized") or String.contains?(down, "forbidden") or
           String.contains?(down, "permission_error") ->
         :auth
 
@@ -207,11 +215,17 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         :server_overload
 
       has_status?(down, 429) or String.contains?(down, "rate limit") or
-          String.contains?(down, "rate-limit") or String.contains?(down, "rate_limit") ->
+        String.contains?(down, "rate-limit") or String.contains?(down, "rate_limit") ->
         :rate_limit
 
       has_status?(down, 413) or String.contains?(down, "request_too_large") ->
         :request_too_large
+
+      # Request-shape rejections: the body OSA built is invalid for this model.
+      # Checked BEFORE the generic 400/unknown fallthrough so the user is not
+      # told to switch models for a bug that reproduces on every model.
+      request_shape_error?(down) ->
+        :request_shape
 
       String.contains?(down, "ids were found without") ->
         :tool_use_mismatch
@@ -238,27 +252,40 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         :ssl_error
 
       String.contains?(down, "etimedout") or String.contains?(down, "timed out") or
-          String.contains?(down, "timeout") or String.contains?(down, "went silent") ->
+        String.contains?(down, "timeout") or String.contains?(down, "went silent") ->
         :timeout
 
       String.contains?(down, "nxdomain") or String.contains?(down, "enotfound") ->
         :dns_error
 
       String.contains?(down, "econnrefused") or String.contains?(down, "econnreset") or
-          String.contains?(down, "epipe") or String.contains?(down, "connection refused") or
-          String.contains?(down, "connection failed") or
-          String.contains?(down, "connection error") or String.contains?(down, "closed") ->
+        String.contains?(down, "epipe") or String.contains?(down, "connection refused") or
+        String.contains?(down, "connection failed") or
+        String.contains?(down, "connection error") or String.contains?(down, "closed") ->
         :connection_error
 
       has_status?(down, 500) or has_status?(down, 502) or has_status?(down, 503) or
-          has_status?(down, 504) or String.contains?(down, "internal server error") or
-          String.contains?(down, "bad gateway") or String.contains?(down, "service unavailable") or
+        has_status?(down, 504) or String.contains?(down, "internal server error") or
+        String.contains?(down, "bad gateway") or String.contains?(down, "service unavailable") or
           String.contains?(down, "api_error") ->
         :server_error
 
       true ->
         :unknown
     end
+  end
+
+  # True when the provider rejected the SHAPE of the request body rather than
+  # its content — a bug on our side that no amount of retrying, rephrasing, or
+  # model-switching fixes. Kept deliberately narrow: each phrase is a verbatim
+  # Anthropic 400 string.
+  defp request_shape_error?(down) do
+    String.contains?(down, "assistant message prefill") or
+      String.contains?(down, "must end with a user message") or
+      String.contains?(down, "must start with a user message") or
+      String.contains?(down, "roles must alternate") or
+      String.contains?(down, "unexpected role") or
+      String.contains?(down, "is not supported on this model")
   end
 
   # True when the reason describes a key that was never configured (as opposed
@@ -299,7 +326,10 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
     text = to_string_reason(reason)
 
     provider =
-      case Regex.run(~r/^(Anthropic|OpenAI|Groq|Ollama|DeepSeek|OpenRouter|Miosa|Google|Cohere|Mistral)\b/i, text) do
+      case Regex.run(
+             ~r/^(Anthropic|OpenAI|Groq|Ollama|DeepSeek|OpenRouter|Miosa|Google|Cohere|Mistral)\b/i,
+             text
+           ) do
         [_, name] -> String.capitalize(name)
         nil -> nil
       end

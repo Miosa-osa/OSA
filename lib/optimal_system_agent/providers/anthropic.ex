@@ -69,8 +69,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp do_chat(base_url, auth, model, messages, opts) do
     formatted = format_messages(messages)
-    {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
-    system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
+    {system_text, chat_msgs} = split_system(formatted, model)
     thinking = normalize_thinking(Keyword.get(opts, :thinking), model)
 
     body =
@@ -139,8 +138,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp do_chat_stream(base_url, auth, model, messages, callback, opts) do
     formatted = format_messages(messages)
-    {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
-    system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
+    {system_text, chat_msgs} = split_system(formatted, model)
     thinking = normalize_thinking(Keyword.get(opts, :thinking), model)
 
     body =
@@ -163,7 +161,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     timeout = if thinking, do: 600_000, else: 120_000
 
     try do
-      case Req.post("#{base_url}/messages", req_opts(body, headers, timeout, opts) ++ [into: :self]) do
+      case Req.post(
+             "#{base_url}/messages",
+             req_opts(body, headers, timeout, opts) ++ [into: :self]
+           ) do
         {:ok, %{status: 200} = resp} ->
           collect_stream(resp, callback, %{
             content: "",
@@ -465,7 +466,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
          acc
        )
        when is_map(usage) do
-    if Map.has_key?(acc, :usage), do: %{acc | usage: merge_stream_usage(acc.usage, usage)}, else: acc
+    if Map.has_key?(acc, :usage),
+      do: %{acc | usage: merge_stream_usage(acc.usage, usage)},
+      else: acc
   end
 
   defp process_stream_event(%{"type" => "message_start"}, _callback, acc), do: acc
@@ -491,7 +494,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
     case event["usage"] do
       usage when is_map(usage) ->
-        if Map.has_key?(acc, :usage), do: %{acc | usage: merge_stream_usage(acc.usage, usage)}, else: acc
+        if Map.has_key?(acc, :usage),
+          do: %{acc | usage: merge_stream_usage(acc.usage, usage)},
+          else: acc
 
       _ ->
         acc
@@ -609,6 +614,102 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       Keyword.put(base, :connect_options, protocols: [:http1])
     else
       base
+    end
+  end
+
+  # ── Request-shape normalization ───────────────────────────────────────────
+  #
+  # Anthropic's `/v1/messages` has two shape rules OSA's history can violate:
+  #
+  #   1. `system` is a top-level field, not a role inside `messages`.
+  #   2. On Opus/Sonnet 4.6 and everything newer (the whole Claude 5 family)
+  #      the conversation MUST end with a `user` message. A trailing assistant
+  #      turn is an "assistant message prefill", which those models reject:
+  #
+  #        400 — This model does not support assistant message prefill.
+  #              The conversation must end with a user message.
+  #
+  # Both rules are enforced here, at the provider boundary, so no caller can
+  # reintroduce a bad shape.
+  #
+  # The 400 seen in the wild came from rule 1 breaking rule 2. `ReactLoop`'s
+  # steering paths (auto-continue, coding nudge, verification gate,
+  # VerificationGate directives, reasoning-only backstop — ~7 call sites) each
+  # append TWO messages: the assistant's text, then a `role: "system"` nudge
+  # that is meant to be the last thing the model reads. Hoisting EVERY
+  # system-role message onto the system prompt lifted that nudge out of the
+  # conversation and stranded the assistant message as the final one.
+  #
+  # So only LEADING system messages are the system prompt. A system message
+  # that appears after the conversation has started is mid-turn steering and
+  # stays in the conversation as a `user` turn — which preserves its meaning
+  # (the nudges are already written as bracketed `[System: …]` operator notes
+  # the model reads as context) while satisfying the contract. It is NOT sent
+  # as a mid-conversation `role: "system"` message: that shape is accepted only
+  # on Opus 5 / Opus 4.8 / Fable 5 / Mythos 5 and 400s on Sonnet 5, Haiku 4.5
+  # and the 4.6/4.7 models, so it would trade one model-specific 400 for
+  # another.
+  @doc false
+  def split_system(formatted, model) do
+    {leading, rest} = Enum.split_while(formatted, &(&1["role"] == "system"))
+    system_text = Enum.map_join(leading, "\n\n", &system_content_to_string(&1["content"]))
+
+    chat_msgs =
+      rest
+      |> Enum.map(fn
+        %{"role" => "system"} = msg -> %{msg | "role" => "user"}
+        msg -> msg
+      end)
+      |> ensure_trailing_user(model)
+
+    {system_text, chat_msgs}
+  end
+
+  # Last line of defence for rule 2. After the demotion above a trailing
+  # assistant message should be impossible from the steering paths, but it can
+  # still arrive from a caller that committed a partial streamed reply on an
+  # error path, from a resumed/compacted transcript, or from a future call site.
+  #
+  # The trailing content is meaningful — it is a real partial reply — so it is
+  # NOT dropped. It stays exactly where it is and a short bracketed `user` turn
+  # is appended naming what happened, so the model sees its own partial output
+  # as context and knows to continue rather than restart. That keeps the
+  # semantics of a prefill (the model resumes from its own words) without the
+  # rejected shape.
+  #
+  # Gated on the model: Haiku 4.5 and older accept prefill, so their requests
+  # pass through byte-for-byte unchanged.
+  defp ensure_trailing_user([], _model), do: []
+
+  defp ensure_trailing_user(msgs, model) do
+    if AnthropicModels.supports_prefill?(model) do
+      msgs
+    else
+      case List.last(msgs) do
+        %{"role" => "assistant"} ->
+          Logger.debug(
+            "[anthropic] normalized trailing assistant message for #{model} " <>
+              "(prefill unsupported on this model)"
+          )
+
+          msgs ++
+            [
+              %{
+                "role" => "user",
+                "content" => [
+                  %{
+                    "type" => "text",
+                    "text" =>
+                      "[System: your previous message above was cut off before it completed. " <>
+                        "Continue from exactly where it stopped — do not repeat what you already said.]"
+                  }
+                ]
+              }
+            ]
+
+        _ ->
+          msgs
+      end
     end
   end
 

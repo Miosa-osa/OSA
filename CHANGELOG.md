@@ -9,6 +9,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.50] — displays as `v1.0.050`
+
+### Fixed — turns died outright on the Claude 5 models
+
+- **On Opus 5, Sonnet 5 and Fable 5, a turn could stop dead with
+  `This model does not support assistant message prefill`.** OSA steers itself
+  mid-turn — a short nudge to keep going, to write the code, to run the verification
+  it promised — and those nudges are meant to be the last thing the model reads.
+  Instead they were being lifted out of the conversation entirely and folded into the
+  system prompt, which left the request ending on OSA's own words. The Claude 5 family
+  removed the ability to end a request that way, so it was rejected before the model
+  ever saw it. The steering was lost AND the turn was lost. **The nudges now stay in
+  the conversation where they belong**, so they do the job they were written for, and
+  a request can no longer end on the wrong speaker — checked at the last possible
+  moment, keeping whatever had already been written rather than discarding it. Models
+  that still accept the old shape are sent exactly what they were sent before.
+
+- **The error told you to switch models, which could not possibly have helped.** The
+  failure was in the shape of the request OSA built, so every model would have
+  rejected it identically — the one suggestion offered was the one thing guaranteed
+  not to work. **OSA now recognises a request it built wrong** and says so plainly,
+  instead of blaming the model you chose.
+
+### Fixed — "What's new" was empty after updating
+
+- **A source-checkout update printed an empty release-notes section.** It was reading
+  a changelog that stops at 0.9.0 and contains no 1.0 releases at all, so there was
+  never anything to find. It now reads the changelog releases are actually written to.
+
 ## [1.0.49] — displays as `v1.0.049`
 
 ### Fixed — you no longer have to restart anything after an update
