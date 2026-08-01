@@ -1239,7 +1239,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             # Collapse failed — fall back to full compaction
             Logger.info("[loop] Context collapse insufficient, running full compaction")
 
-            OptimalSystemAgent.Agent.Compactor.maybe_compact(
+            OptimalSystemAgent.Agent.ContextEngine.Router.maybe_compact(
               state.messages,
               Map.get(state, :last_input_tokens, 0),
               state.session_id

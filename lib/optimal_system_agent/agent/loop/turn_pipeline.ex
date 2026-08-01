@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.ContextEngine.Router, as: ContextEngine
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Agent.Hooks
@@ -261,7 +262,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
 
     state =
       if compacted != original_messages do
-        %{state | last_input_tokens: Compactor.estimate_tokens(compacted)}
+        %{state | last_input_tokens: ContextEngine.estimate_tokens(compacted)}
       else
         state
       end

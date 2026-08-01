@@ -101,6 +101,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
     emit_cost_update(state, norm, turn_cost)
     maybe_bridge_budget(state, norm)
+    maybe_record_trajectory(state, norm, turn_cost)
 
     state
   end
@@ -297,7 +298,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   defp provider_atom(_), do: :default
 
-  defp maybe_put_last_input(state, input) when input > 0, do: put(state, :last_input_tokens, input)
+  defp maybe_put_last_input(state, input) when input > 0,
+    do: put(state, :last_input_tokens, input)
+
   defp maybe_put_last_input(state, _), do: state
 
   defp fetch_tok(usage, key) do
@@ -324,4 +327,90 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   defp round6(n) when is_float(n), do: Float.round(n, 6)
   defp round6(n), do: n
+
+  defp maybe_record_trajectory(state, norm, turn_cost) do
+    try do
+      messages = Map.get(state, :messages, [])
+      {last_assistant, tool_calls, tool_results} = extract_last_turn(messages)
+
+      OptimalSystemAgent.Agent.Trajectory.record(%{
+        session_id: Map.get(state, :session_id, ""),
+        model: Map.get(state, :model, ""),
+        input_tokens: norm.input_tokens,
+        output_tokens: norm.output_tokens,
+        cache_creation_tokens: Map.get(norm, :cache_creation_input_tokens, 0),
+        cache_read_tokens: Map.get(norm, :cache_read_input_tokens, 0),
+        cost_usd: turn_cost,
+        tool_calls: tool_calls,
+        tool_results: tool_results,
+        assistant_response: last_assistant,
+        context_utilization: extract_utilization(state, messages),
+        compaction_events: []
+      })
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+  end
+
+  defp extract_last_turn(messages) when is_list(messages) do
+    # Walk backwards: find the last assistant message and any tool results after it
+    reversed = Enum.reverse(messages)
+
+    {assistant, tool_results} =
+      Enum.reduce_while(reversed, {nil, []}, fn msg, {acc_asst, acc_tools} ->
+        role = Map.get(msg, :role)
+
+        cond do
+          role == "assistant" and acc_asst == nil ->
+            content = Map.get(msg, :content, "")
+            {:halt, {content, acc_tools}}
+
+          role == "tool" ->
+            {:cont, {acc_asst, [Map.get(msg, :content, "") | acc_tools]}}
+
+          true ->
+            {:cont, {acc_asst, acc_tools}}
+        end
+      end)
+
+    {assistant || "", extract_tool_calls_from_messages(reversed), tool_results}
+  end
+
+  defp extract_last_turn(_), do: {"", [], []}
+
+  defp extract_tool_calls(nil), do: []
+
+  defp extract_tool_calls(calls) when is_list(calls) do
+    Enum.map(calls, fn tc ->
+      %{name: Map.get(tc, :name, ""), arguments: Map.get(tc, :arguments, %{})}
+    end)
+  end
+
+  defp extract_tool_calls(_), do: []
+
+  # Extract tool calls from the last assistant message in the (reversed) list
+  defp extract_tool_calls_from_messages([]), do: []
+
+  defp extract_tool_calls_from_messages([msg | rest]) do
+    case Map.get(msg, :role) do
+      "assistant" ->
+        extract_tool_calls(Map.get(msg, :tool_calls, []))
+
+      _ ->
+        extract_tool_calls_from_messages(rest)
+    end
+  end
+
+  defp extract_utilization(state, _messages) do
+    last_input = Map.get(state, :last_input_tokens, 0)
+
+    if last_input > 0 do
+      max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+      Float.round(last_input / max_tokens * 100, 1)
+    else
+      0.0
+    end
+  end
 end

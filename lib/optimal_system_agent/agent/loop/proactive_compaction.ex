@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   """
   require Logger
 
-  alias OptimalSystemAgent.Agent.Compactor
+  alias OptimalSystemAgent.Agent.ContextEngine.Router, as: Compactor
   alias OptimalSystemAgent.Agent.CompactRestore
   alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
   alias OptimalSystemAgent.Providers.Registry, as: Providers
