@@ -49,16 +49,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # :auto (unattended auto-mode) allows every tool at the tier gate; the safety
   # Guardian (policy classifier) decides block/pause per call downstream.
   def permission_tier_allows?(:auto, _tool), do: true
-  def permission_tier_allows?(:read_only, tool), do: tool in @read_only_tools
+
+  def permission_tier_allows?(:read_only, tool),
+    do: tool in @read_only_tools and not plugin_tool?(tool)
 
   def permission_tier_allows?(:workspace, tool),
-    do: tool in (@read_only_tools ++ @workspace_tools)
+    do: tool in (@read_only_tools ++ @workspace_tools) and not plugin_tool?(tool)
 
   def permission_tier_allows?(:subagent, tool) do
     tool not in @subagent_blocked_tools
   end
 
   def permission_tier_allows?(_, _), do: true
+
+  # Tools contributed by `~/.osa/plugins/*.exs` never satisfy an auto-allow
+  # tier, whatever `safety/0` they declare. The tier gate here is name-based,
+  # so without this a plugin that got a built-in name past the loader would
+  # inherit that name's auto-approval. Plugin tools always reach `maybe_ask/2`.
+  defp plugin_tool?(tool) when is_binary(tool) do
+    OptimalSystemAgent.Plugins.Loader.plugin_tool_name?(tool)
+  rescue
+    _ -> false
+  end
+
+  defp plugin_tool?(_), do: false
 
   @doc """
   Check subagent permission with per-agent allowlist/denylist overrides.
@@ -603,8 +617,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
                   :allow
 
                 _ ->
-                  {:ask, PermissionBroker.new_request_id(),
-                   permission_summary(tool_call, reason)}
+                  {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
               end
           end
       end
@@ -747,8 +760,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       |> Enum.filter(&is_binary/1)
 
     case paths do
-      [] -> nil
-      _ -> "edit #{length(paths)} file#{if length(paths) == 1, do: "", else: "s"}: " <> clip(Enum.join(paths, ", "))
+      [] ->
+        nil
+
+      _ ->
+        "edit #{length(paths)} file#{if length(paths) == 1, do: "", else: "s"}: " <>
+          clip(Enum.join(paths, ", "))
     end
   end
 
@@ -796,7 +813,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # multi_file_edit: no single old/new pair — concatenate each file's
   # old_string/new_string, headed by its path, so the dialog shows what
   # changes in EVERY file instead of the previous {nil, nil} (no diff at all).
-  defp permission_diff(name, %{"edits" => edits}) when name == "multi_file_edit" and is_list(edits) do
+  defp permission_diff(name, %{"edits" => edits})
+       when name == "multi_file_edit" and is_list(edits) do
     {olds, news} =
       edits
       |> Enum.filter(fn
@@ -1152,7 +1170,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       }
       |> Map.merge(tool_metadata)
 
-    Bus.emit(:tool_result, tool_result_event, Observability.annotate(state, source: "agent.tool_executor"))
+    Bus.emit(
+      :tool_result,
+      tool_result_event,
+      Observability.annotate(state, source: "agent.tool_executor")
+    )
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,

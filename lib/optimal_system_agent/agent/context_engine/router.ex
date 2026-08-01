@@ -67,16 +67,38 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
     Map.to_list(@builtins) ++ plugin_engines()
   end
 
-  @doc "Register a plugin engine at boot."
-  @spec register(atom(), module()) :: :ok
+  @doc "The reserved built-in engine ids. Plugins may not claim these."
+  @spec builtin_names() :: [atom()]
+  def builtin_names, do: Map.keys(@builtins)
+
+  @doc """
+  Register a plugin engine at boot.
+
+  Refuses ids that are already claimed by a built-in engine. A plugin that
+  registered as `:compactor` would otherwise silently take over the default
+  context engine for the whole agent, so the collision is rejected and logged
+  rather than merged.
+  """
+  @spec register(atom(), module()) :: :ok | {:error, {:builtin_conflict, atom()}}
   def register(name, mod) when is_atom(name) and is_atom(mod) do
-    existing = plugin_engines()
+    cond do
+      Map.has_key?(@builtins, name) ->
+        Logger.warning(
+          "ContextEngine.Router: refused plugin engine #{inspect(mod)} — id :#{name} is a " <>
+            "built-in engine and cannot be overridden by a plugin"
+        )
 
-    unless List.keymember?(existing, name, 0) do
-      :persistent_term.put({__MODULE__, :plugin_engines}, [{name, mod} | existing])
+        {:error, {:builtin_conflict, name}}
+
+      true ->
+        existing = plugin_engines()
+
+        unless List.keymember?(existing, name, 0) do
+          :persistent_term.put({__MODULE__, :plugin_engines}, [{name, mod} | existing])
+        end
+
+        :ok
     end
-
-    :ok
   end
 
   defp plugin_engines do
@@ -123,7 +145,11 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
   end
 
   defp lookup(name) do
-    all = Map.merge(@builtins, Map.new(plugin_engines()))
+    # Built-ins win. `Map.merge(@builtins, plugins)` had the plugin side as the
+    # override, so a plugin registering `:compactor` silently replaced the
+    # default context engine. Registration already refuses built-in ids; this is
+    # the second line of defence for anything that got in another way.
+    all = Map.merge(Map.new(plugin_engines()), @builtins)
 
     case Map.fetch(all, name) do
       {:ok, mod} -> {:ok, mod}

@@ -300,8 +300,13 @@ defmodule OptimalSystemAgent.Application do
         # Load agent definitions (needs Tools.Registry running)
         OptimalSystemAgent.Agents.Registry.load()
 
-        # Load user plugins from ~/.osa/plugins/*.exs
+        # Load user plugins from ~/.osa/plugins/*.exs.
+        # OFF unless explicitly enabled — plugin files are arbitrary Elixir run
+        # in this VM. See Plugins.Loader for the opt-in and the file checks.
         OptimalSystemAgent.Plugins.Loader.load()
+
+        # Enforce trajectory retention (no-op when recording is disabled)
+        OptimalSystemAgent.Agent.Trajectory.maybe_prune()
 
         # Auto-detect best Ollama model + tier assignments
         # Guarded — if Ollama is unreachable, log and continue without spinning
@@ -427,9 +432,15 @@ defmodule OptimalSystemAgent.Application do
     e = effort |> String.trim() |> String.downcase()
 
     cond do
-      e in ~w(fast medium high xhigh ultra) -> String.to_atom(e)
-      e == "low" -> :fast
-      e == "max" -> :xhigh
+      e in ~w(fast medium high xhigh ultra) ->
+        String.to_atom(e)
+
+      e == "low" ->
+        :fast
+
+      e == "max" ->
+        :xhigh
+
       true ->
         Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
         nil
