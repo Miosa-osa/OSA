@@ -78,9 +78,13 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
   @callback estimate_tokens(input :: String.t() | messages() | nil) :: token_count()
 
   @doc """
-  Context-window utilization as a fraction (0.0 to 1.0+).
+  Context-window utilization as a PERCENTAGE (0.0 to 100.0+).
 
-  Values > 1.0 mean the message list already exceeds the configured window.
+  Values > 100.0 mean the message list already exceeds the configured window.
+  Note this is a percentage, not a 0.0–1.0 fraction: `Telemetry` and the TUI
+  status bar render the returned number directly followed by a `%` sign, and
+  `ProactiveCompaction` compares it against percentage thresholds. An engine
+  that returns a fraction here will read as ~1% full and never compact.
   """
   @callback utilization(messages :: messages()) :: float()
 
@@ -96,12 +100,13 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
 
   @doc """
   Strip media (images, base64) and cap tool-output text for summarization
-  prompts. Returns a cleaned message list suitable for LLM summarization.
+  prompts. Returns a single flattened text blob suitable for embedding in an
+  LLM summarization prompt — NOT a message list. Both built-in engines
+  (`Compactor`, `Noop`) return a `String.t()` here.
 
-  Optional: engines that don't implement this should return messages
-  unchanged.
+  Optional: engines that don't implement this get the Router's fallback.
   """
-  @callback format_for_summary(messages :: messages()) :: messages()
+  @callback format_for_summary(messages :: messages()) :: String.t()
 
   @doc """
   Return compaction metrics (compactions performed, tokens saved, etc.).
