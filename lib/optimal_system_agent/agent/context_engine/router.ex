@@ -160,13 +160,19 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
   end
 
   @doc "Delegate `format_for_summary/1` to the active engine (optional)."
+  @spec format_for_summary([map()]) :: String.t()
   def format_for_summary(messages) do
     mod = ContextEngine.Router.active()
 
     if function_exported?(mod, :format_for_summary, 1) do
       mod.format_for_summary(messages)
     else
-      messages
+      # The callback returns a flattened text blob, not a message list. Falling
+      # back to `messages` here would hand a list to callers that interpolate
+      # the result into a summarization prompt, so render a plain transcript.
+      Enum.map_join(messages, "\n", fn msg ->
+        "[#{Map.get(msg, :role, "unknown")}] #{Map.get(msg, :content, "")}"
+      end)
     end
   end
 

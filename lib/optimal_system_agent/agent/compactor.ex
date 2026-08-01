@@ -291,6 +291,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   words * 1.3 + punctuation * 0.5.
   """
   @spec estimate_tokens([map()] | String.t() | nil) :: non_neg_integer()
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
       content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
@@ -1706,6 +1707,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   an internal pipeline step for the same reason.
   """
   @spec format_for_summary([map()]) :: String.t()
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def format_for_summary(messages) do
     messages
     |> Enum.map(fn msg ->
