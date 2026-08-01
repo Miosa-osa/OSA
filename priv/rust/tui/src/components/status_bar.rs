@@ -216,6 +216,20 @@ fn pending_hint(tokens: u64) -> String {
     }
 }
 
+/// Compact `~Nk` token count for the unknown-window context readout, where a
+/// percentage cannot be computed honestly. The `~` is deliberate: the figure is
+/// the last request's prompt size (or the backend's estimate), not an exact
+/// live count.
+pub(crate) fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("~{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1000 {
+        format!("~{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        format!("~{}", tokens)
+    }
+}
+
 /// Transient goal-verification indicator state, tied to the active-goal line.
 /// Set from the backend `goal_verifier_round` event and cleared on a new turn.
 /// Deliberately understated: one compact chip, never a popup.
@@ -496,11 +510,22 @@ impl StatusBar {
     /// "context used" (the last request's token count over the window) and makes
     /// the meter self-correcting. No-op until we know the window size, so it can
     /// never regress a known value to 0.
+    /// When the window is UNKNOWN (`context_max == 0`) the token count is still
+    /// recorded — it is exactly what the statusline falls back to rendering
+    /// ("~52k ctx") instead of a fabricated percentage. Only the ratio is
+    /// skipped, because there is no honest denominator for it. Previously this
+    /// bailed out entirely on an unknown window, which left `context_estimated`
+    /// frozen at 0 and made the unknown-window readout impossible.
     pub fn note_input_tokens(&mut self, input_tokens: u64) {
-        if input_tokens == 0 || self.context_max == 0 {
+        if input_tokens == 0 {
             return;
         }
         self.context_estimated = input_tokens;
+
+        if self.context_max == 0 {
+            return;
+        }
+
         self.context_utilization =
             (input_tokens as f64 / self.context_max as f64).clamp(0.0, 1.0);
     }
@@ -839,7 +864,6 @@ impl Component for StatusBar {
         // grows as the user types/pastes and shrinks on send/clear. The pending
         // overlay never mutates the committed `context_utilization`.
         let disp_ratio = self.display_context_ratio();
-        let (bar_filled, bar_empty) = braille_bar(disp_ratio, 8);
         // Severity color grades the meter as it approaches the auto-compact
         // threshold (CC parity): primary < 75%, amber >= 75%, red >= 90% OR once
         // the backend flags the low-context warning band (`context_low`, keyed on
@@ -850,21 +874,47 @@ impl Component for StatusBar {
         } else {
             theme.context_bar_color(disp_ratio)
         };
-        if !bar_filled.is_empty() {
-            spans.push(Span::styled(bar_filled, Style::default().fg(ctx_color)));
-        }
-        if !bar_empty.is_empty() {
-            spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
-        }
-        let pct = (disp_ratio * 100.0).round() as u32;
         let pct_style = if self.context_low {
             Style::default().fg(ctx_color).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(ctx_color)
         };
-        // "N% ctx" — labelled like CC's "N% context used" so the number reads as
-        // context occupancy (measured against the effective window server-side).
-        spans.push(Span::styled(format!(" {}% ctx", pct), pct_style));
+
+        // Unknown window (`context_max == 0`) — the backend could not honestly
+        // resolve this model's context length, so there is no denominator and a
+        // percentage would be fabricated. Render the TOKEN COUNT instead
+        // ("~52k ctx"), with no bar and no percent.
+        //
+        // This is the case that made the meter read a permanent, flat `0% ctx`
+        // while 52k tokens were demonstrably in use: every upstream path
+        // (`utilization`, the derive fallback, `note_input_tokens`, the pending
+        // overlay) is gated on a nonzero window and correctly declines to
+        // invent one, so `disp_ratio` collapses to 0.0 — and the renderer had no
+        // unknown-window branch, so it printed that 0.0 as a confident "0%".
+        // A percentage that is always zero is worse than no percentage: it reads
+        // as "context is empty" rather than "context size is unknown".
+        if self.context_max == 0 {
+            let tokens = self.context_estimated + self.pending_input_tokens;
+            if tokens > 0 {
+                spans.push(Span::styled(
+                    format!("{} ctx", compact_tokens(tokens)),
+                    pct_style,
+                ));
+            }
+        } else {
+            let (bar_filled, bar_empty) = braille_bar(disp_ratio, 8);
+            if !bar_filled.is_empty() {
+                spans.push(Span::styled(bar_filled, Style::default().fg(ctx_color)));
+            }
+            if !bar_empty.is_empty() {
+                spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
+            }
+            let pct = (disp_ratio * 100.0).round() as u32;
+            // "N% ctx" — labelled like CC's "N% context used" so the number reads
+            // as context occupancy (measured against the effective window
+            // server-side).
+            spans.push(Span::styled(format!(" {}% ctx", pct), pct_style));
+        }
 
         // Large-paste hint: when the pending composer input is big enough to
         // matter (>= ~1000 tokens), surface its compact size (`+~12k`) in the
@@ -1628,16 +1678,73 @@ mod status_bar_tests {
 
     #[test]
     fn pending_no_percentage_when_window_unknown() {
-        // context_max == 0 (window unknown): the size hint still shows, but the
-        // percentage must stay honest at the committed value (no faked percent),
-        // and rendering must not panic (divide-by-zero guard).
+        // context_max == 0 (window unknown): NO percentage may be rendered — a
+        // fabricated denominator is exactly the bug this branch exists to avoid.
+        // The size hint still shows and rendering must not panic.
         let mut sb = StatusBar::new();
         sb.set_width(120);
         sb.set_pending_input_tokens(8_000);
         assert!((sb.display_context_ratio() - 0.0).abs() < 1e-9);
         let text = render_sb(&sb);
-        assert!(text.contains("0% ctx"), "percent stays at committed value");
+        assert!(!text.contains("% ctx"), "no percentage when window unknown");
         assert!(text.contains("+~8k"), "size hint still surfaces");
+    }
+
+    #[test]
+    fn unknown_window_renders_token_count_not_zero_percent() {
+        // THE regression: 52.1k tokens in on a model whose window the backend
+        // could not resolve. The meter must NEVER read "0% ctx" while tokens are
+        // demonstrably in use — it shows the token count with no percentage.
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        sb.set_context(0.0, 52_100, 0); // utilization 0, 52.1k used, window unknown
+
+        let text = render_sb(&sb);
+        assert!(
+            !text.contains("0% ctx"),
+            "must not claim 0% while 52.1k tokens are in use, got: {text}"
+        );
+        assert!(
+            text.contains("~52.1k ctx"),
+            "token count must be rendered instead, got: {text}"
+        );
+    }
+
+    #[test]
+    fn known_window_still_renders_a_real_percentage() {
+        // The unknown-window branch must not regress the normal case: a resolved
+        // 1M window with 52.1k used reads ~5%, not a token count.
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        sb.set_context(0.0521, 52_100, 1_000_000);
+
+        let text = render_sb(&sb);
+        assert!(text.contains("5% ctx"), "expected a real percent, got: {text}");
+        assert!(!text.contains("~52.1k ctx"));
+    }
+
+    #[test]
+    fn input_tokens_track_usage_even_when_window_unknown() {
+        // `note_input_tokens` is the self-heal path for providers that do not
+        // emit context_pressure every turn (streaming glm/openai-compat). It
+        // must still record the token count when the window is unknown —
+        // otherwise the unknown-window readout has nothing to render.
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        sb.set_context(0.0, 0, 0);
+        sb.note_input_tokens(52_100);
+
+        let text = render_sb(&sb);
+        assert!(text.contains("~52.1k ctx"), "got: {text}");
+        assert!(!text.contains("0% ctx"));
+    }
+
+    #[test]
+    fn compact_tokens_formats() {
+        assert_eq!(compact_tokens(0), "~0");
+        assert_eq!(compact_tokens(999), "~999");
+        assert_eq!(compact_tokens(52_100), "~52.1k");
+        assert_eq!(compact_tokens(1_500_000), "~1.5M");
     }
 
     #[test]

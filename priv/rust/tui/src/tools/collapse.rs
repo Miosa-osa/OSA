@@ -8,8 +8,6 @@
 // full per-call rendering.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
-
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -56,7 +54,7 @@ pub fn classify(name: &str, args: &str) -> ToolKind {
         // Shell — CC parity (BashTool.isSearchOrReadCommand): only pure
         // search/read/list command pipelines collapse; any other command
         // renders in full with its `● Bash(cmd)` header + `⎿` output block.
-        "bash" | "run_bash_command" | "shell" => classify_shell_command(args),
+        "bash" | "run_bash_command" | "shell" | "shell_execute" => classify_shell_command(args),
         // Read-family.
         "read" | "read_file" | "file_read" | "cat" | "head" | "tail" => ToolKind::Read,
         // Directory listing.
@@ -139,6 +137,32 @@ fn extract_read_path(args: &str) -> Option<String> {
     super::parse_json_arg(args, &["file_path", "path", "filename", "file"])
 }
 
+/// Final path segment — the part that actually identifies a file.
+pub(crate) fn basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => name,
+        _ => trimmed,
+    }
+}
+
+/// `Read foo.rs` / `Read foo.rs, bar.ex` / `Read foo.rs, bar.ex +3 more`.
+fn named_read_summary(paths: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let names: Vec<&str> = paths.iter().map(|p| basename(p)).collect();
+    let head = names
+        .iter()
+        .take(SHOWN)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        format!("Read {} +{} more", head, names.len() - SHOWN)
+    } else {
+        format!("Read {}", head)
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -152,7 +176,7 @@ fn plural(n: usize) -> &'static str {
 pub struct Accumulator {
     family: Option<String>,
     search_count: usize,
-    read_paths: HashSet<String>,
+    read_paths: Vec<String>,
     read_ops: usize,
     list_count: usize,
     shell_count: usize,
@@ -180,7 +204,12 @@ impl Accumulator {
         match kind {
             ToolKind::Read => {
                 if let Some(p) = extract_read_path(args) {
-                    self.read_paths.insert(p);
+                    // Ordered + de-duplicated: the summary NAMES these files, so
+                    // they must appear in the order the agent read them. A
+                    // HashSet would shuffle them on every render.
+                    if !self.read_paths.contains(&p) {
+                        self.read_paths.push(p);
+                    }
                 } else {
                     self.read_ops += 1;
                 }
@@ -200,8 +229,13 @@ impl Accumulator {
         if self.shell_count > 0 {
             let n = self.shell_count;
             format!("Ran {} shell command{}", n, plural(n))
-        } else if !self.read_paths.is_empty() || self.read_ops > 0 {
-            let n = self.read_paths.len().max(self.read_ops);
+        } else if !self.read_paths.is_empty() {
+            // NAME the files. "Read 1 file" told the operator nothing about
+            // WHICH file, which made a transcript of several reads unusable.
+            named_read_summary(&self.read_paths)
+        } else if self.read_ops > 0 {
+            // Anonymous fallback: the call carried no recoverable path.
+            let n = self.read_ops;
             format!("Read {} file{}", n, plural(n))
         } else if self.list_count > 0 {
             let n = self.list_count;
@@ -605,5 +639,68 @@ mod shell_classify_tests {
             classify("bash", r#"{"command":"grep foo src && cargo test"}"#),
             ToolKind::NonCollapsible
         );
+    }
+
+    // ── collapsed reads name their files ─────────────────────────────────
+    //
+    // "Read 1 file" told the operator nothing about WHICH file. The paths were
+    // already being collected — they were just never printed.
+
+    fn read_run(paths: &[&str]) -> String {
+        let mut acc = Accumulator::default();
+        for p in paths {
+            acc.add(&ToolKind::Read, p, true);
+        }
+        acc.summary_text()
+    }
+
+    #[test]
+    fn a_single_read_names_the_file() {
+        assert_eq!(read_run(&["/proj/src/main.rs"]), "Read main.rs");
+    }
+
+    #[test]
+    fn a_short_run_names_every_file_in_call_order() {
+        assert_eq!(
+            read_run(&["/a/zeta.rs", "/b/alpha.ex", "/c/mid.ts"]),
+            "Read zeta.rs, alpha.ex, mid.ts"
+        );
+    }
+
+    #[test]
+    fn a_long_run_names_the_first_three_and_counts_the_rest() {
+        let summary = read_run(&["/a/one.rs", "/a/two.rs", "/a/three.rs", "/a/four.rs"]);
+        assert_eq!(summary, "Read one.rs, two.rs, three.rs +1 more");
+    }
+
+    #[test]
+    fn repeated_reads_of_the_same_file_are_named_once() {
+        assert_eq!(read_run(&["/a/one.rs", "/a/one.rs"]), "Read one.rs");
+    }
+
+    #[test]
+    fn a_read_with_no_recoverable_path_falls_back_to_a_count() {
+        let mut acc = Accumulator::default();
+        acc.add(&ToolKind::Read, "", true);
+        acc.add(&ToolKind::Read, "", true);
+        assert_eq!(acc.summary_text(), "Read 2 files");
+    }
+
+    #[test]
+    fn shell_execute_collapses_like_bash() {
+        // OSA's own shell tool name was missing from `classify`, so a run of
+        // read-only shell calls never collapsed.
+        assert_eq!(
+            classify("shell_execute", r#"{"command":"cat a.txt"}"#),
+            ToolKind::Read
+        );
+    }
+
+    #[test]
+    fn basename_handles_edge_shapes() {
+        assert_eq!(basename("/a/b/c.rs"), "c.rs");
+        assert_eq!(basename("c.rs"), "c.rs");
+        assert_eq!(basename("/a/b/"), "b");
+        assert_eq!(basename(""), "");
     }
 }

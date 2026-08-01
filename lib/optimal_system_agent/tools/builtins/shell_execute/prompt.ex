@@ -63,6 +63,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt do
     also notified automatically when it completes, with its exit code.
     - If you already expect the command to be long (builds, full test suites, servers), pass \
     `run_in_background: true` up front to get a `background_id` immediately.
+
+    Discovery scans (du, find, ls -R): bound the FIRST pass cheaply (`-maxdepth`, `-d 1`), never \
+    re-scan ground an earlier command covered, and stop once the question is answered. On a \
+    non-zero exit or a yield CHANGE the command — narrow the scope, exclude the failing path, or \
+    use a cheaper tool; do not retry a near-identical variant. "Operation not permitted" on \
+    system paths (`.Trash`, `Library`, `/System`) is EXPECTED — prune and move on.
     """
   end
 end

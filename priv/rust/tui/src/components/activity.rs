@@ -290,6 +290,39 @@ fn tool_display(name: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// True for the tools that SPAWN a sub-agent. Their live feed line must not
+/// carry a duration: the fleet roster already shows that worker's age on its own
+/// row, and the turn clock lives on the status line — a third number for the
+/// same work is exactly the multi-timer clutter this feed is meant to avoid.
+fn is_agent_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "delegate" | "Delegate" | "Task" | "orchestrate" | "spawn_agent"
+    )
+}
+
+/// Whether `hint` is the backend's *parameter-name* fallback rather than a real
+/// argument preview.
+///
+/// The backend's `tool_call_hint/1` ends with
+/// `args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")` for any tool it has no
+/// specific clause for — so a `delegate` call arrived as the literal string
+/// `"name, role"`, i.e. the SCHEMA's parameter names. Rendered as the tool label
+/// it produced `delegatingname, role`: meaningless, and actively misleading (it
+/// looks like a value). Detect that exact shape — two-or-more comma-separated
+/// bare identifiers — and drop it, rather than painting schema noise. A genuine
+/// hint (a path, a command, a query, a skill name) contains separators, spaces
+/// or punctuation and is never mistaken for one.
+fn is_param_name_list(hint: &str) -> bool {
+    let parts: Vec<&str> = hint.split(',').map(|p| p.trim()).collect();
+    parts.len() >= 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
 /// Tool activity entry in the feed
 struct ToolEntry {
     name: String,
@@ -299,6 +332,14 @@ struct ToolEntry {
     start: std::time::Instant,
     duration_ms: Option<u64>,
     success: Option<bool>,
+    /// Backend call ids currently merged into this row. Pairing `ToolCallEnd`
+    /// against these (rather than against the tool NAME) is what keeps two
+    /// concurrent `delegate` calls from ending each other's row.
+    call_ids: Vec<String>,
+    /// How many in-flight calls this single row represents. `>1` when identical
+    /// concurrent calls were folded together; rendered as a `×N` multiplier
+    /// instead of N byte-identical lines stacked on top of each other.
+    concurrent: usize,
 }
 
 /// Verbosity level for tool display (Hermes-inspired 4-level toggle)
@@ -454,9 +495,17 @@ pub struct Activity {
     /// Bounded preview of the output streamed by the currently running shell
     /// command (`command_output_delta` events). Empty when nothing is
     /// streaming, in which case the feed renders exactly as it always did.
-    live_output: LiveCommandOutput,
-    /// The command the live output belongs to, so a NEW command resets the
-    /// buffer instead of appending to the previous one's tail.
+    /// One bounded preview buffer PER in-flight command, keyed by the owning
+    /// `tool_call_id` (falling back to the command string when an older backend
+    /// does not emit one).
+    ///
+    /// A SINGLE shared buffer was a live corruption bug: routing by command
+    /// string meant two concurrent commands thrashed it (every delta from a
+    /// different command cleared it), while the SAME command run twice
+    /// concurrently never cleared and both streams interleaved into one buffer.
+    live_streams: std::collections::HashMap<String, LiveCommandOutput>,
+    /// Key of the stream most recently written to — the one the preview shows.
+    /// (The activity slot has room for one tail; the freshest wins.)
     live_command: Option<String>,
 }
 
@@ -557,7 +606,7 @@ impl Activity {
             elapsed_running: std::time::Duration::ZERO,
             last_resume_at: None,
             timer_paused: false,
-            live_output: LiveCommandOutput::new(),
+            live_streams: std::collections::HashMap::new(),
             live_command: None,
         }
     }
@@ -661,31 +710,58 @@ impl Activity {
         crate::a11y::phase_label(self.phase).to_string()
     }
 
-    /// Append a `command_output_delta` chunk for `command` to the live preview.
-    /// A different command than the one currently previewed resets the buffer so
-    /// the tail never mixes two commands' output.
-    pub fn push_command_output(&mut self, command: &str, chunk: &str) {
-        if self.live_command.as_deref() != Some(command) {
-            self.live_output.clear();
-            self.live_command = Some(command.to_string());
+    /// Append a `command_output_delta` chunk to the live preview of the stream
+    /// identified by `key` (the owning `tool_call_id`, or the command string on
+    /// an older backend). Each key owns its OWN buffer, so concurrent commands
+    /// never overwrite or interleave each other's output. The stream just
+    /// written to becomes the one the preview shows.
+    pub fn push_command_output(&mut self, key: &str, chunk: &str) {
+        self.live_streams
+            .entry(key.to_string())
+            .or_insert_with(LiveCommandOutput::new)
+            .push_str(chunk);
+        if self.live_command.as_deref() != Some(key) {
+            self.live_command = Some(key.to_string());
         }
-        self.live_output.push_str(chunk);
         // Output flowed — reset the stall bleed exactly like streaming text does.
         self.last_output_at = Some(std::time::Instant::now());
     }
 
-    /// Drop the live preview (the command finished, or the turn ended).
+    /// Drop EVERY live preview (the turn ended / a fresh turn started).
     pub fn clear_command_output(&mut self) {
-        self.live_output.clear();
+        self.live_streams.clear();
         self.live_command = None;
+    }
+
+    /// Drop only the preview owned by `key` (that one command finished). Other
+    /// still-running commands keep their buffers. If the dropped stream was the
+    /// one on screen, fall back to any other stream that still has output.
+    pub fn clear_command_output_for(&mut self, key: &str) {
+        self.live_streams.remove(key);
+        if self.live_command.as_deref() == Some(key) {
+            self.live_command = self
+                .live_streams
+                .iter()
+                .find(|(_, buf)| !buf.is_empty())
+                .map(|(k, _)| k.clone());
+        }
+    }
+
+    /// Whether the stream owned by `key` has produced nothing yet. Used to decide
+    /// whether a delta with `seq > 0` must seed from the rolling `tail` snapshot.
+    pub fn live_stream_is_empty(&self, key: &str) -> bool {
+        self.live_streams.get(key).map_or(true, |b| b.is_empty())
     }
 
     /// The rows the live preview currently wants to render (0 when idle).
     pub fn live_output_lines(&self) -> Vec<String> {
-        if self.live_output.is_empty() {
-            Vec::new()
-        } else {
-            self.live_output.tail_lines(LIVE_OUTPUT_PREVIEW_LINES)
+        match self
+            .live_command
+            .as_deref()
+            .and_then(|k| self.live_streams.get(k))
+        {
+            Some(buf) if !buf.is_empty() => buf.tail_lines(LIVE_OUTPUT_PREVIEW_LINES),
+            _ => Vec::new(),
         }
     }
 
@@ -1037,13 +1113,50 @@ impl Activity {
 
     /// Record a tool call start
     pub fn tool_start(&mut self, name: &str, args: &str) {
+        self.tool_start_with_id(name, args, None);
+    }
+
+    /// Record a tool call start, carrying the backend's stable per-call id when
+    /// it sent one. The id is what lets [`Self::tool_end_with_id`] close the
+    /// RIGHT row when several same-name calls are in flight at once.
+    ///
+    /// Identical concurrent calls (same tool, same argument hint, both still
+    /// running) are folded into ONE row with a `×N` multiplier: two `delegate`
+    /// calls previously drew two byte-identical lines, which read as a rendering
+    /// glitch rather than as two workers.
+    pub fn tool_start_with_id(&mut self, name: &str, args: &str, call_id: Option<&str>) {
         let (emoji, verb) = tool_display(name);
-        // Truncate args for detail preview
-        let detail = if args.len() > 60 {
-            format!("{}...", crate::util::truncate_str(args, 57))
+        // Argument preview. Three shapes have to be rejected or reduced here:
+        //   * schema parameter-name fallbacks (`"options, question"`) — dropped;
+        //   * raw JSON args (file-edit ships its whole arg map so the diff
+        //     renderer can work) — reduced to the identifying value, i.e. the
+        //     PATH, instead of dumping `{"new_string":"  @doc \"Start…`;
+        //   * anything over the column budget — width-aware, and for a path the
+        //     filename (the tail) is what survives, not the head.
+        let hint = crate::util::arg_summary(args.trim());
+        let hint = hint.trim();
+        let detail = if hint.is_empty() || is_param_name_list(hint) {
+            String::new()
         } else {
-            args.to_string()
+            crate::util::fit_arg_summary(hint, 60)
         };
+
+        // Fold an identical still-running call into the existing row.
+        if let Some(existing) = self
+            .tool_feed
+            .iter_mut()
+            .rev()
+            .find(|e| e.name == name && e.detail == detail && e.duration_ms.is_none())
+        {
+            existing.concurrent += 1;
+            if let Some(id) = call_id {
+                existing.call_ids.push(id.to_string());
+            }
+            self.last_tool_name = name.to_string();
+            self.last_output_at = Some(std::time::Instant::now());
+            return;
+        }
+
         self.tool_feed.push(ToolEntry {
             name: name.to_string(),
             emoji,
@@ -1052,6 +1165,8 @@ impl Activity {
             start: std::time::Instant::now(),
             duration_ms: None,
             success: None,
+            call_ids: call_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+            concurrent: 1,
         });
         self.last_tool_name = name.to_string();
         self.last_output_at = Some(std::time::Instant::now());
@@ -1063,22 +1178,53 @@ impl Activity {
 
     /// Record a tool call end
     pub fn tool_end(&mut self, name: &str, duration_ms: u64, success: bool) {
-        // Find the last matching entry without a duration
-        if let Some(entry) = self
-            .tool_feed
-            .iter_mut()
-            .rev()
-            .find(|e| e.name == name && e.duration_ms.is_none())
-        {
-            // If the backend sends 0 (missing or untracked), measure from the
-            // TUI-side start Instant so the display shows real elapsed time.
-            let effective_ms = if duration_ms == 0 {
-                entry.start.elapsed().as_millis() as u64
+        self.tool_end_with_id(name, duration_ms, success, None);
+    }
+
+    /// Close a tool call, pairing by the backend's per-call id when present.
+    ///
+    /// Name-only pairing closed whichever same-name row happened to be last,
+    /// so with two concurrent `delegate` calls the first completion froze the
+    /// second worker's line. When the id is known we close the row that actually
+    /// owns it; a row standing in for several folded concurrent calls just loses
+    /// one of them and keeps running until the last id is retired.
+    pub fn tool_end_with_id(
+        &mut self,
+        name: &str,
+        duration_ms: u64,
+        success: bool,
+        call_id: Option<&str>,
+    ) {
+        let idx = call_id
+            .and_then(|id| {
+                self.tool_feed
+                    .iter()
+                    .rposition(|e| e.duration_ms.is_none() && e.call_ids.iter().any(|c| c == id))
+            })
+            .or_else(|| {
+                self.tool_feed
+                    .iter()
+                    .rposition(|e| e.name == name && e.duration_ms.is_none())
+            });
+        if let Some(i) = idx {
+            let entry = &mut self.tool_feed[i];
+            if let Some(id) = call_id {
+                entry.call_ids.retain(|c| c != id);
+            }
+            if entry.concurrent > 1 {
+                // Other folded calls are still in flight — the row keeps running.
+                entry.concurrent -= 1;
             } else {
-                duration_ms
-            };
-            entry.duration_ms = Some(effective_ms);
-            entry.success = Some(success);
+                // If the backend sends 0 (missing or untracked), measure from the
+                // TUI-side start Instant so the display shows real elapsed time.
+                let effective_ms = if duration_ms == 0 {
+                    entry.start.elapsed().as_millis() as u64
+                } else {
+                    duration_ms
+                };
+                entry.duration_ms = Some(effective_ms);
+                entry.success = Some(success);
+            }
         }
         self.last_output_at = Some(std::time::Instant::now());
     }
@@ -1722,10 +1868,14 @@ impl Component for Activity {
                 break;
             }
 
+            // `{:<10}` alone produced `delegatingname, role`: the verb "delegating"
+            // is exactly 10 chars, so the pad emitted NOTHING and the detail was
+            // glued straight onto it. The trailing space is unconditional so every
+            // verb — short or exactly-at-the-pad — is separated from its detail.
             let mut spans: Vec<Span<'_>> = vec![
                 Span::styled("\u{2506} ", theme.faint()),
                 Span::raw(format!("{} ", entry.emoji)),
-                Span::styled(format!("{:<10}", entry.verb), theme.prefix_active()),
+                Span::styled(format!("{:<10} ", entry.verb), theme.prefix_active()),
             ];
 
             if !entry.detail.is_empty() && self.verbosity != Verbosity::New {
@@ -1733,7 +1883,24 @@ impl Component for Activity {
                 spans.push(Span::raw("  "));
             }
 
-            // Duration / status
+            // Concurrency multiplier for folded identical calls (`×2`), so two
+            // workers read as two workers instead of one duplicated line.
+            if entry.concurrent > 1 {
+                spans.push(Span::styled(
+                    format!("\u{00d7}{}  ", entry.concurrent),
+                    theme.faint(),
+                ));
+            }
+
+            // Duration / status.
+            //
+            // ONE clock per surface: a RUNNING sub-agent tool gets no duration
+            // here at all. Its age is already on that worker's fleet-roster row,
+            // and the turn clock is on the status line above — printing it a third
+            // time on the delegate line is what put four live timers on screen.
+            // Completed calls still report their duration (the roster row is gone
+            // by then, and the number is now a fact, not a competing clock).
+            let suppress_running_timer = is_agent_tool(&entry.name);
             match (entry.duration_ms, entry.success) {
                 (Some(ms), Some(true)) => {
                     spans.push(Span::styled(
@@ -1747,6 +1914,7 @@ impl Component for Activity {
                         theme.error_text(),
                     ));
                 }
+                _ if suppress_running_timer => {}
                 _ => {
                     // Still running
                     let running_ms = entry.start.elapsed().as_millis();
@@ -2537,6 +2705,168 @@ mod slot_invariant_tests {
         }
     }
 
+    // ── Sub-agent (delegate) feed lines ──────────────────────────────────
+
+    /// Render the whole activity slot (status line + feed) as one string per row.
+    fn feed_rows(act: &Activity, w: u16, h: u16) -> Vec<String> {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(w, h.max(1))).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        let cells: Vec<String> = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        (0..h as usize)
+            .map(|y| cells[y * w as usize..(y + 1) * w as usize].concat())
+            .collect()
+    }
+
+    fn delegating(act: &Activity) -> Vec<String> {
+        feed_rows(act, 120, act.max_height().max(2))
+            .into_iter()
+            .filter(|r| r.contains("delegating"))
+            .collect()
+    }
+
+    /// The verb "delegating" is exactly the 10 columns the pad reserved, so
+    /// `{:<10}` emitted NOTHING and the detail was glued straight onto it:
+    /// `delegatingname, role`. The separator must be unconditional.
+    #[test]
+    fn tool_feed_always_separates_the_verb_from_its_detail() {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        // A hint that is a real value (not the schema's parameter names).
+        act.tool_start("delegate", "/w/codex");
+        let rows = delegating(&act);
+        assert_eq!(rows.len(), 1, "one delegate row: {rows:?}");
+        assert!(
+            !rows[0].contains("delegating/w/codex"),
+            "verb ran into its detail: {rows:?}"
+        );
+        assert!(rows[0].contains("delegating "), "missing separator: {rows:?}");
+    }
+
+    /// The backend's `tool_call_hint/1` falls back to the SCHEMA's parameter
+    /// names (`args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")`), so a
+    /// `delegate` call arrived as the literal string `"name, role"`. That is not
+    /// a preview of anything and must never be painted as the tool's label.
+    #[test]
+    fn schema_parameter_name_hints_are_not_rendered_as_a_label() {
+        assert!(is_param_name_list("name, role"));
+        assert!(is_param_name_list("task_id, prompt"));
+        // Real hints must survive.
+        assert!(!is_param_name_list("/Users/rhl/.osa/workspace/codex"));
+        assert!(!is_param_name_list("cargo test --release"));
+        assert!(!is_param_name_list("explorer"));
+        assert!(!is_param_name_list("find the dead code, then report"));
+
+        // The backend no longer emits the key-name shape at all (it returns an
+        // empty hint instead — see `Loop.ToolHint`), so this guard is now
+        // belt-and-braces for older backends. What matters is that it does not
+        // swallow the summaries the fixed backend DOES send.
+        for legitimate in [
+            "Which parser should we keep?",  // ask_user
+            "/proj/lib/agent/loop.ex",       // file tools
+            "cargo test --release",          // shell_execute
+            "smoke-e2e",                     // delegate teammate
+            "Refactor the parser +2 more",   // task_write add_multiple
+            "complete t-7",                  // task_write status change
+        ] {
+            assert!(
+                !is_param_name_list(legitimate),
+                "guard swallowed a real summary: {legitimate:?}"
+            );
+        }
+
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        act.tool_start("delegate", "name, role");
+        let rows = delegating(&act);
+        assert_eq!(rows.len(), 1, "one delegate row: {rows:?}");
+        assert!(
+            !rows[0].contains("name, role"),
+            "schema parameter names leaked into the label: {rows:?}"
+        );
+    }
+
+    /// ONE clock per surface. A RUNNING sub-agent's age belongs to its fleet
+    /// roster row; the turn clock belongs to the status line. The delegate feed
+    /// line must add no third live timer.
+    #[test]
+    fn running_delegate_line_carries_no_timer() {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        act.tool_start("delegate", "/w/codex");
+        let rows = delegating(&act);
+        let has_timer = rows[0]
+            .split_whitespace()
+            .any(|t| {
+                let t = t.trim_end_matches('.');
+                t.ends_with('s')
+                    && t.starts_with(|c: char| c.is_ascii_digit())
+                    && t.chars().all(|c| c.is_ascii_digit() || matches!(c, 'm' | 's' | '.'))
+            });
+        assert!(!has_timer, "running delegate line shows a timer: {rows:?}");
+
+        // A COMPLETED call still reports its duration — the roster row is gone by
+        // then, so the number is a fact rather than a competing clock.
+        act.tool_end("delegate", 4200, true);
+        let done = delegating(&act);
+        assert!(done[0].contains("4.2s"), "finished delegate keeps its duration: {done:?}");
+    }
+
+    /// Two concurrent `delegate` calls drew two byte-identical lines. Fold them
+    /// into one row with a `×N` multiplier instead.
+    #[test]
+    fn identical_concurrent_calls_fold_into_one_row_with_a_multiplier() {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        act.tool_start_with_id("delegate", "name, role", Some("call-a"));
+        act.tool_start_with_id("delegate", "name, role", Some("call-b"));
+        let rows = delegating(&act);
+        assert_eq!(rows.len(), 1, "identical concurrent calls fold: {rows:?}");
+        assert!(rows[0].contains("\u{00d7}2"), "missing ×2 multiplier: {rows:?}");
+        assert_eq!(act.tool_feed.len(), 1, "one feed entry backs the folded row");
+    }
+
+    /// Pairing by tool NAME closed whichever same-name row happened to be last,
+    /// so the first completion froze the OTHER worker's line. With per-call ids
+    /// the row stays live until its last id is retired.
+    #[test]
+    fn tool_end_pairs_by_call_id_not_by_tool_name() {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        act.tool_start_with_id("delegate", "name, role", Some("call-a"));
+        act.tool_start_with_id("delegate", "name, role", Some("call-b"));
+
+        // First completion retires one of the two folded calls; the row runs on.
+        act.tool_end_with_id("delegate", 1000, true, Some("call-a"));
+        assert_eq!(act.tool_feed[0].concurrent, 1, "one call still in flight");
+        assert!(act.tool_feed[0].duration_ms.is_none(), "row must stay live");
+
+        // Second completion closes it for real.
+        act.tool_end_with_id("delegate", 2500, true, Some("call-b"));
+        assert_eq!(act.tool_feed[0].duration_ms, Some(2500));
+
+        // Distinct details are NOT folded, and each id closes its own row.
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start_with_id("delegate", "/a", Some("id-a"));
+        act.tool_start_with_id("delegate", "/b", Some("id-b"));
+        assert_eq!(act.tool_feed.len(), 2);
+        act.tool_end_with_id("delegate", 900, true, Some("id-a"));
+        assert_eq!(act.tool_feed[0].duration_ms, Some(900), "id-a's own row closed");
+        assert!(act.tool_feed[1].duration_ms.is_none(), "id-b still running");
+    }
+
     /// An inactive activity must reserve nothing, so the slot collapses when idle.
     #[test]
     fn idle_activity_reserves_no_rows() {
@@ -2581,6 +2911,52 @@ mod slot_invariant_tests {
         act.push_command_output("first", "from first\n");
         act.push_command_output("second", "from second\n");
         assert_eq!(act.live_output_lines(), vec!["from second"]);
+    }
+
+    #[test]
+    fn concurrent_streams_do_not_corrupt_each_other() {
+        // Regression: there used to be ONE shared buffer routed by the COMMAND
+        // STRING. Two concurrent commands thrashed it (every delta from the
+        // other command cleared it), and the SAME command run twice never
+        // cleared, so both streams interleaved into one buffer. Keyed by the
+        // owning tool_call id, each call owns its own buffer.
+        let mut act = Activity::new();
+        act.start();
+
+        // Two concurrent calls, interleaved deltas.
+        act.push_command_output("call_du", "du line 1\n");
+        act.push_command_output("call_df", "df line 1\n");
+        act.push_command_output("call_du", "du line 2\n");
+        act.push_command_output("call_df", "df line 2\n");
+
+        // The preview shows the freshest stream — df — and ONLY df's lines.
+        let df_view = act.live_output_lines();
+        assert_eq!(df_view, vec!["df line 1", "df line 2"], "df stream leaked du output");
+
+        // du's buffer is intact and uncontaminated: a delta on it brings its
+        // own complete history back into view.
+        act.push_command_output("call_du", "du line 3\n");
+        assert_eq!(
+            act.live_output_lines(),
+            vec!["du line 1", "du line 2", "du line 3"],
+            "du stream was cleared or mixed with df"
+        );
+
+        // Two concurrent runs of the SAME command text are distinct streams.
+        act.push_command_output("call_x1", "x1\n");
+        act.push_command_output("call_x2", "x2\n");
+        assert_eq!(act.live_output_lines(), vec!["x2"]);
+
+        // One call finishing drops only ITS buffer.
+        act.clear_command_output_for("call_x2");
+        assert!(act.live_stream_is_empty("call_x2"));
+        assert!(!act.live_stream_is_empty("call_du"), "du must survive x2 ending");
+        assert!(!act.live_stream_is_empty("call_x1"));
+
+        // Turn end drops everything.
+        act.clear_command_output();
+        assert!(act.live_output_lines().is_empty());
+        assert!(act.live_stream_is_empty("call_du"));
     }
 
     #[test]

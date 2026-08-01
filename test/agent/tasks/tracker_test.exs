@@ -320,4 +320,96 @@ defmodule OptimalSystemAgent.Agent.Tasks.TrackerTest do
       assert length(Tracker.extract_from_response(text)) == 3
     end
   end
+
+  # ── Regression: plans must never be scraped from prose ────────
+  #
+  # v1.0.046 defect: the agent answered a pure analysis question ("compare
+  # Codex to our code") whose prose ended in a findings list "What OSA does
+  # that Codex can't touch: 1..7". A `:post_response` hook named
+  # "task_auto_extract" scraped that list into the session checklist and the
+  # TUI rendered "Plan 0/3" — asserting outstanding work that did not exist.
+  #
+  # The tell was that it lifted items 4, 6 and 7 only: a NON-CONTIGUOUS subset.
+  # That is exactly what the `String.length(t) <= 120` filter in
+  # extract_from_response/1 does — items 1, 2, 3 and 5 were longer than 120
+  # chars and were silently dropped, leaving 3 survivors, which cleared the
+  # hook's `length(titles) >= 3` threshold.
+  #
+  # Fix: the hook is gone. A plan may only come from an explicit tool call.
+
+  describe "no plan inference from prose (regression)" do
+    @findings_prose """
+    Here is the comparison you asked for.
+
+    What OSA does that Codex can't touch:
+
+    1. Multi-agent fleet orchestration with real supervision trees, live agent census, and per-agent token accounting across the whole fleet at once.
+    2. Persistent session memory that survives restarts, with compaction safety and a restore path that replays tool calls rather than just transcript text.
+    3. A pluggable provider registry that hot-swaps models mid-session without dropping the conversation or losing the tool-call history.
+    4. Channels. channels/ — OSA can talk via Telegram, Discord, Slack. Codex is terminal-only.
+    5. Sandboxing policy expressed as data rather than code, so the same policy object drives the shell tool, the browser tool, and the delegate tool uniformly.
+    6. Healing and self-repair. healing/ directory — OSA has self-healing mechanisms. Codex doesn't.
+    7. Speculative execution. speculative/ — OSA can start working on predicted next tasks. Codex can't.
+    """
+
+    test "the auto-extract post_response hook is not registered" do
+      hooks = OptimalSystemAgent.Agent.Hooks.list_hooks()
+      post_response = Map.get(hooks, :post_response, [])
+      names = Enum.map(post_response, & &1.name)
+
+      refute "task_auto_extract" in names,
+             "a :post_response hook is scraping plans out of assistant prose; " <>
+               "plans must come from an explicit tool call only"
+    end
+
+    test "running post_response hooks over findings prose creates no tasks" do
+      sid = session_id()
+
+      # Sanity: the session starts with an empty checklist.
+      assert Tasks.get_tasks(sid) == []
+
+      OptimalSystemAgent.Agent.Hooks.run(:post_response, %{
+        session_id: sid,
+        response: @findings_prose
+      })
+
+      # Give any (unwanted) async hook a chance to fire before asserting.
+      Process.sleep(50)
+
+      assert Tasks.get_tasks(sid) == [],
+             "answering a question must not populate the plan/checklist"
+    end
+
+    test "prose findings still parse to the non-contiguous 4/6/7 subset" do
+      # Documents WHY scraping is unsafe, and pins the mechanism that produced
+      # the observed defect. This helper is pure and opt-in; nothing calls it
+      # on a response automatically.
+      titles = Tracker.extract_from_response(@findings_prose)
+
+      assert length(titles) == 3
+      assert Enum.any?(titles, &String.starts_with?(&1, "Channels."))
+      assert Enum.any?(titles, &String.starts_with?(&1, "Healing and self-repair."))
+      assert Enum.any?(titles, &String.starts_with?(&1, "Speculative execution."))
+
+      # Items 1, 2, 3 and 5 exceed the 120-char cap and vanish — which is how a
+      # 7-item findings list became a 3-item "plan".
+      refute Enum.any?(titles, &String.starts_with?(&1, "Multi-agent fleet"))
+      refute Enum.any?(titles, &String.starts_with?(&1, "Sandboxing policy"))
+
+      # And none of these are actions — they are descriptive statements.
+      assert Enum.all?(titles, &String.contains?(&1, "Codex"))
+    end
+
+    test "explicit add_tasks is still the supported path" do
+      {_pid, name} = start_tracker()
+      sid = session_id()
+
+      assert {:ok, ids} = Tasks.add_tasks(sid, ["Run the test suite", "Fix the failing case"], name)
+      assert length(ids) == 2
+
+      tasks = Tasks.get_tasks(sid, name)
+      assert length(tasks) == 2
+      assert Enum.map(tasks, & &1.title) == ["Run the test suite", "Fix the failing case"]
+    end
+  end
 end

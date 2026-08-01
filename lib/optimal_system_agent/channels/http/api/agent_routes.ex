@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
+  alias OptimalSystemAgent.Runtime.SessionManager
   require Logger
 
   plug(:match)
@@ -47,6 +48,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
 
     case validate_session_owner(session_id, user_id) do
       :ok ->
+        # Opening the session's event stream is how a client ANNOUNCES a session
+        # id it holds. The TUI mints its own id locally at startup
+        # (`generate_session_id/0`) and the backend otherwise learns of it only
+        # when the first message arrives — so between launch and first turn the
+        # id is indistinguishable from garbage, and anything that gates on
+        # `session_exists?/1` (e.g. POST /sessions/:id/provider) 404s a session
+        # the user is legitimately sitting in. Tracking on subscribe records the
+        # id without starting a Loop, which is exactly the "created or tracked by
+        # a runtime channel" case `tracked_session?/1` exists for.
+        SessionManager.track_session(session_id, %{
+          user_id: user_id || "anonymous",
+          channel: :sse
+        })
+
         Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
 
         conn =

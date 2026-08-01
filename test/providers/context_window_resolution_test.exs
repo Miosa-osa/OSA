@@ -157,7 +157,14 @@ defmodule OptimalSystemAgent.Providers.ContextWindowResolutionTest do
 
     test "drops a stale NEGATIVE cache entry (probe failed while daemon was down)" do
       assert Registry.context_window_info(@unknown_cloud_model) == :unknown
-      assert [{@unknown_cloud_model, :no_ctx}] = :ets.lookup(@cache, @unknown_cloud_model)
+
+      # The probe failed at the TRANSPORT level (daemon down), so the negative
+      # entry carries an expiry rather than being permanent — a transport
+      # failure is not an answer about the model's window.
+      assert [{@unknown_cloud_model, {:no_ctx, expires_at}}] =
+               :ets.lookup(@cache, @unknown_cloud_model)
+
+      assert is_integer(expires_at)
 
       Registry.forget_context_window(@unknown_cloud_model)
       assert :ets.lookup(@cache, @unknown_cloud_model) == []

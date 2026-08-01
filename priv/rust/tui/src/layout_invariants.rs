@@ -573,6 +573,194 @@ mod panel_invariants {
         }
     }
 
+    // ───────────────────── fleet-view (multi-agent) invariants ─────────────────
+    //
+    // The multi-agent view reintroduced the exact regression the Activity status
+    // line had already been fixed for: FOUR live durations on screen at once
+    // (turn clock on the status line, the SAME turn clock on the `main` roster
+    // row in a DIFFERENT format, the delegate feed line's running timer, and each
+    // worker's own age). It shipped test-green because nothing counted timers on
+    // the fleet surface. These pin it.
+
+    /// Duration-shaped tokens in one rendered row: `12s`, `54s`, `1m02s`,
+    /// `1m 02s`, `10m 25s`, `0.4s`, `0.4s...`, `1h 05m 22s`.
+    ///
+    /// Spaced forms (`1m 02s`) are joined before counting so `1m` + `02s` is ONE
+    /// timer, not two — otherwise the assertion would be trivially satisfied by
+    /// switching formats, which is itself one of the defects (the fleet view was
+    /// rendering `1m02s` and `1m 02s` for the same clock).
+    fn duration_tokens(row: &str) -> Vec<String> {
+        fn is_duration(tok: &str) -> bool {
+            let t = tok.trim_end_matches('.');
+            !t.is_empty()
+                && t.ends_with(|c| matches!(c, 's' | 'm' | 'h'))
+                && t.starts_with(|c: char| c.is_ascii_digit())
+                && t.chars().all(|c| c.is_ascii_digit() || matches!(c, 'h' | 'm' | 's' | '.'))
+        }
+        let toks: Vec<&str> = row.split_whitespace().collect();
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i < toks.len() {
+            if is_duration(toks[i]) {
+                // Absorb the continuation halves of a spaced duration.
+                let mut joined = toks[i].to_string();
+                while i + 1 < toks.len() && is_duration(toks[i + 1]) {
+                    joined.push_str(toks[i + 1]);
+                    i += 1;
+                }
+                out.push(joined);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// A running fleet: `main` carrying the turn elapsed, plus workers each with
+    /// their own age and a child action trail.
+    fn running_fleet(n: usize, turn_secs: u64) -> Agents {
+        let mut a = Agents::new();
+        a.set_main_row("shipping the fleet view", turn_secs, 678);
+        for i in 0..n {
+            a.agent_started(
+                &format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}"),
+                "explorer",
+                "",
+                &format!("scan module {i}"),
+                None,
+            );
+            a.agent_progress(
+                &format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}"),
+                "dir_list",
+                6,
+                0,
+                "",
+                vec![
+                    "dir_list".into(),
+                    "dir_list".into(),
+                    "file_glob: /w/codex".into(),
+                    "dir_list: /w/codex".into(),
+                ],
+            );
+        }
+        a
+    }
+
+    /// **The multi-timer assertion.** Sweeping the agent count, NO row of the
+    /// fleet panel may carry more than one duration, and the roster root (`main`)
+    /// must carry none at all — its elapsed IS the turn clock the activity status
+    /// line already owns, and one turn gets exactly one clock.
+    #[test]
+    fn fleet_view_rows_show_at_most_one_duration_and_main_shows_none() {
+        for n in 1usize..=6 {
+            let a = running_fleet(n, 62); // 62s → "1m02s" / "1m 02s"
+            let buf = render_to_buffer(|f| a.draw(f, f.area()), W, a.height().max(1));
+            for row in snapshot_buffer(&buf).lines() {
+                let timers = duration_tokens(row);
+                assert!(
+                    timers.len() <= 1,
+                    "{n} agents: fleet row shows {} durations {timers:?}: {row:?}",
+                    timers.len()
+                );
+                if row.contains("main") {
+                    assert!(
+                        timers.is_empty(),
+                        "{n} agents: the `main` roster row must not restate the turn \
+                         clock (found {timers:?}): {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The turn clock must be rendered in exactly one FORMAT too. `1m02s` (the
+    /// status line) and `1m 02s` (the old `main` row) are the same 62 seconds
+    /// spelled two ways, which is what made the panel read as broken.
+    #[test]
+    fn fleet_view_never_renders_the_turn_clock_in_a_second_format() {
+        let a = running_fleet(2, 62);
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            !screen.contains("1m02s") && !screen.contains("1m 02s"),
+            "the fleet panel must not render the turn elapsed at all:\n{screen}"
+        );
+    }
+
+    /// One agent's child list is a bounded status strip, not a log: it may never
+    /// exceed `TRAIL_MAX_ROWS` (the `All`-verbosity feed ceiling in
+    /// `Activity::max_height`), and it may not repeat the row's own label.
+    #[test]
+    fn fleet_view_child_list_is_bounded_and_deduplicated() {
+        let a = running_fleet(1, 30);
+        let reserved = a.height();
+        let screen = snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, reserved));
+        // header + main + 1 agent row + at most TRAIL_MAX_ROWS children.
+        let child_rows = screen
+            .lines()
+            .filter(|l| l.trim_start().starts_with('\u{2514}') || l.contains("\u{2502}  \u{2514}"))
+            .count();
+        assert!(
+            child_rows <= crate::components::agents::TRAIL_MAX_ROWS,
+            "child list drew {child_rows} rows, ceiling is {}:\n{screen}",
+            crate::components::agents::TRAIL_MAX_ROWS
+        );
+        // The agent row already says `dir_list`; a child must not repeat it bare.
+        let bare_repeats = screen
+            .lines()
+            .filter(|l| l.trim_end().ends_with("\u{2514}\u{2500} dir_list"))
+            .count();
+        assert_eq!(
+            bare_repeats, 0,
+            "child list repeats the row's own current-action label:\n{screen}"
+        );
+    }
+
+    /// Reserved-vs-drawn across the same agent-count sweep, with the trail and
+    /// `main` row populated — the shape the capture actually showed (the existing
+    /// sweep uses bare `agent_started` rows with no progress trail).
+    #[test]
+    fn fleet_view_with_trails_never_draws_past_its_reservation() {
+        for n in 0usize..=12 {
+            let a = running_fleet(n, 45);
+            let reserved = a.height();
+            let probe = reserved + 6;
+            let drawn = drawn_row_extent(|f| a.draw(f, f.area()), W, probe);
+            assert!(
+                drawn <= reserved,
+                "{n} agents: reserved {reserved} rows but drew into {drawn}.\n{}",
+                snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, probe))
+            );
+            assert!(
+                reserved.saturating_sub(drawn) <= AGENTS_ALLOWED_TRAILING_BLANK,
+                "{n} agents: reserved {reserved} rows, drew {drawn} — dead space.\n{}",
+                snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, reserved))
+            );
+        }
+    }
+
+    /// The internal routing key must never reach the screen: it is meaningless to
+    /// a reader and long enough to push the interrupt hint off the status line.
+    #[test]
+    fn fleet_view_shows_short_agent_labels_not_routing_keys() {
+        let a = running_fleet(2, 20);
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            !screen.contains("session-1785539672538"),
+            "raw routing key leaked into the fleet panel:\n{screen}"
+        );
+        assert!(
+            screen.contains("explorer"),
+            "the short human label is missing:\n{screen}"
+        );
+    }
+
     /// The background-terminals summary renders even with no live agents, so it
     /// must contribute its row to the reservation.
     #[test]
@@ -800,5 +988,470 @@ mod width_sweep {
                 }
             }
         }
+    }
+}
+
+// ───────────────────── GFM table invariants ─────────────────────
+
+/// **DEFECT 2 — markdown table column allocation.**
+///
+/// `render::markdown::render_table` used to cap an over-wide table by handing
+/// EVERY column the same `(width - chrome) / num_cols` share. On the 3-column
+/// `| Topic | OSA | Codex |` tables the model writes, that gave the 5-column
+/// `Topic` heading the same budget as two columns of prose and then hard-clipped
+/// the prose at an identical point in every single row — `Rust (T…`,
+/// `single thre…`, `orchestrator.ex (52KB) + OTP s…`. The table was unreadable.
+///
+/// The renderer now (a) sizes columns from actual content by water-filling and
+/// (b) WRAPS an over-long cell instead of clipping it. These tests pin both,
+/// plus the wide-character correctness of the padding that keeps the box
+/// aligned.
+mod table_invariants {
+    use super::*;
+    use crate::render::markdown::render_markdown;
+    use crate::util::cols;
+
+    /// The live table from the defect report, trimmed to its shape.
+    const DEFECT_TABLE: &str = "\
+| Topic | OSA | Codex |
+|---|---|---|
+| Language | Elixir (BEAM) | Rust (Tokio, single binary) |
+| Concurrency | BEAM processes, supervision trees | single threaded async runtime |
+| Core | orchestrator.ex (52KB) + OTP supervisors | core crate + session state machine |
+| Sandbox | shell_execute allowlists | linux-sandbox/, bwrap/, execpolicy crates |
+| Delegation | fleet supervisor | codex_delegate.rs (33KB), thread pool |
+";
+
+    /// Wide-character fixtures: CJK (2 columns/char), a ZWJ emoji (3 scalars,
+    /// one glyph), and half-width katakana + a zero-width combining dakuten.
+    /// Every one of them breaks a `.len()` or `.chars().count()` width model.
+    const CJK_TABLE: &str = "\
+| 模型 | 説明 |
+|---|---|
+| 模型模型模型 | 日本語のテキストがここに入ります、折り返しが必要です |
+| 👩‍💻 dev | 👩‍💻 pairs with 模型 and ｶﾞ in one cell to stress the wrapper |
+| ｶﾞｶﾞｶﾞ | short |
+";
+
+    fn lines_at(src: &str, w: u16) -> Vec<String> {
+        render_markdown(src, w)
+            .lines
+            .iter()
+            .map(|l| {
+                let raw: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                // Strip OSC-8 wrappers so widths measure what is on screen.
+                let mut out = String::new();
+                let mut chars = raw.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\x1b' {
+                        for n in chars.by_ref() {
+                            if n == '\\' {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// Column widths read back off the rendered separator row
+    /// (`├─xxx─┼─yyy─┼─zzz─┤`), which is the ground truth the cells pad to.
+    fn column_widths(rendered: &[String]) -> Option<Vec<usize>> {
+        let sep = rendered.iter().find(|l| l.starts_with('├'))?;
+        let inner: &str = sep.trim_start_matches('├').trim_end_matches('┤');
+        Some(
+            inner
+                .split('┼')
+                .map(|seg| seg.chars().filter(|c| *c == '─').count().saturating_sub(2))
+                .collect(),
+        )
+    }
+
+    /// **The regression itself.** A short heading column must NOT be given the
+    /// same budget as a column full of prose. Under the old equal split all
+    /// three columns came back identical; now the content-poor column keeps only
+    /// what it needs and the prose columns get the rest.
+    #[test]
+    fn table_columns_are_sized_from_content_not_split_evenly() {
+        for w in [80u16, 100, 120, 160] {
+            let rendered = lines_at(DEFECT_TABLE, w);
+            let widths = column_widths(&rendered)
+                .unwrap_or_else(|| panic!("w={w}: no separator row in\n{}", rendered.join("\n")));
+            assert_eq!(widths.len(), 3, "w={w}: {widths:?}");
+            assert!(
+                widths[0] < widths[1] && widths[0] < widths[2],
+                "w={w}: column widths {widths:?} — the narrow `Topic` column was handed as much \
+                 room as the prose columns, which is the equal-split bug.\n{}",
+                rendered.join("\n")
+            );
+        }
+    }
+
+    /// **Content survives.** The old renderer clipped every cell of a column at
+    /// the same point, destroying the tail of all of them. Wrapping means the
+    /// full text is still on screen — possibly across several rows — so every
+    /// word of the widest cell must be findable in the render.
+    #[test]
+    fn table_cells_wrap_instead_of_being_clipped() {
+        for w in [70u16, 90, 110, 140] {
+            let rendered = lines_at(DEFECT_TABLE, w);
+            let flat = rendered.join("\n");
+            for token in [
+                "execpolicy",
+                "supervisors",
+                "allowlists",
+                "runtime",
+                "Tokio",
+                "machine",
+            ] {
+                assert!(
+                    flat.contains(token),
+                    "w={w}: {token:?} was lost — cells are still being clipped.\n{flat}"
+                );
+            }
+        }
+    }
+
+    /// **Width sweep.** Across every plausible terminal width the renderer must
+    /// not panic and must not emit a line wider than the terminal — including
+    /// the degenerate widths where a bordered table cannot be drawn at all and
+    /// the renderer falls back to plain wrapped rows.
+    #[test]
+    fn table_width_sweep_never_overflows_and_never_panics() {
+        for src in [DEFECT_TABLE, CJK_TABLE] {
+            for w in 1u16..=200 {
+                for line in lines_at(src, w) {
+                    assert!(
+                        cols(&line) <= w as usize,
+                        "w={w}: line {line:?} is {} cols wide",
+                        cols(&line)
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Wide-char padding correctness.** Every line of a bordered table pads to
+    /// the same total, so all of them — header, separator, and every wrapped
+    /// data row — must measure identically in DISPLAY COLUMNS. Measuring a CJK
+    /// or emoji cell by chars or bytes instead makes the box visibly ragged;
+    /// this catches that without asserting any particular glyph width.
+    #[test]
+    fn table_rows_all_measure_the_same_width_with_wide_glyphs() {
+        for w in [40u16, 60, 80, 120] {
+            let rendered = lines_at(CJK_TABLE, w);
+            let table: Vec<&String> = rendered
+                .iter()
+                .filter(|l| l.starts_with('│') || l.starts_with('├'))
+                .collect();
+            assert!(!table.is_empty(), "w={w}: no table rendered");
+            let first = cols(table[0]);
+            for line in &table {
+                assert_eq!(
+                    cols(line),
+                    first,
+                    "w={w}: ragged table row {line:?} ({} cols vs {first})\n{}",
+                    cols(line),
+                    rendered.join("\n")
+                );
+            }
+        }
+    }
+
+    /// **No mid-grapheme splits.** Wrapping cuts on grapheme boundaries, so a
+    /// multi-scalar cluster is never broken across two rows: `ｶﾞ`'s combining
+    /// dakuten must never open a line, and the ZWJ inside `👩‍💻` must never be
+    /// the first or last scalar of a row.
+    #[test]
+    fn table_wrapping_never_splits_a_grapheme_cluster() {
+        for w in 8u16..=120 {
+            for line in lines_at(CJK_TABLE, w) {
+                // A ZWJ may only appear BETWEEN the two halves of the emoji it
+                // joins. Finding one next to a space or a border means the
+                // cluster was cut open at the join.
+                let chars: Vec<char> = line.chars().collect();
+                for (i, c) in chars.iter().enumerate() {
+                    if *c != '\u{200d}' {
+                        continue;
+                    }
+                    let prev = i.checked_sub(1).map(|j| chars[j]);
+                    let next = chars.get(i + 1).copied();
+                    for (side, ch) in [("before", prev), ("after", next)] {
+                        let ch = ch.unwrap_or_else(|| {
+                            panic!("w={w}: ZWJ at the edge of {line:?} — cluster split")
+                        });
+                        assert!(
+                            !ch.is_whitespace() && ch != '│',
+                            "w={w}: ZWJ has {ch:?} {side} it in {line:?} — cluster split"
+                        );
+                    }
+                }
+                let trimmed = line.trim_start_matches(['│', '├', ' ']);
+                assert!(
+                    !trimmed.starts_with('\u{ff9e}'),
+                    "w={w}: line {line:?} starts with a combining dakuten — its base char was \
+                     left on the previous row"
+                );
+            }
+        }
+    }
+
+    /// The same table pushed through the REAL terminal emulator: the emulated
+    /// screen must match the buffer ratatui intended, row for row. A wide glyph
+    /// mis-measured by one column parks a 2-column glyph in the final cell,
+    /// which a real terminal wraps to the next line — invisible to a `Buffer`
+    /// snapshot, loud here.
+    #[test]
+    fn table_round_trips_through_a_real_terminal() {
+        use crate::test_backend::VT100Backend;
+        use ratatui::widgets::Paragraph;
+
+        // CJK only: how many columns a ZWJ emoji advances is genuinely
+        // terminal-dependent, so a strict round-trip on it would assert an
+        // opinion rather than a bug.
+        let src = "| 模型 | 説明 |\n|---|---|\n| 模型模型 | ｶﾞｶﾞ ok |\n| plain | 日本語のテキスト |\n";
+
+        for w in [24u16, 32, 48, 64, 96] {
+            let text = render_markdown(src, w);
+            let h = (text.lines.len() as u16).max(1);
+            let buf = render_to_buffer(
+                |f| f.render_widget(Paragraph::new(text.clone()), f.area()),
+                w,
+                h,
+            );
+
+            let mut term = Terminal::new(VT100Backend::new(w, h)).unwrap();
+            term.draw(|f| f.render_widget(Paragraph::new(text.clone()), f.area()))
+                .unwrap();
+            let backend = term.backend();
+
+            for y in 0..h {
+                let mut emulated = String::new();
+                let mut x = 0u16;
+                while x < w {
+                    let sym = backend.cell_contents(y, x);
+                    if sym.is_empty() {
+                        emulated.push(' ');
+                        x += 1;
+                    } else {
+                        let adv = cols(&sym).max(1) as u16;
+                        emulated.push_str(&sym);
+                        x += adv;
+                    }
+                }
+                let emulated = emulated.trim_end().to_string();
+                let intended = buffer_row_text(&buf, y);
+                assert_eq!(
+                    emulated, intended,
+                    "w={w} row {y}: the terminal shows {emulated:?} but ratatui intended \
+                     {intended:?}"
+                );
+                assert!(
+                    cols(&emulated) <= w as usize,
+                    "w={w} row {y}: emulated {emulated:?} is {} cols",
+                    cols(&emulated)
+                );
+            }
+        }
+    }
+}
+
+// ───────────────────── ask_user survey picker ─────────────────────
+//
+// `ask_user` blocks the whole turn on the operator, so its picker has to be
+// visible, keyboard-driven and dismissable. It shipped invisible: the backend
+// never forwarded the question, and nothing here checked that the dialog draws
+// what it was handed.
+mod survey_invariants {
+    use super::*;
+    use crate::dialogs::survey::{
+        wrapped_line_count, SurveyAction, SurveyDialog, SurveyOption, SurveyQuestion,
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn question() -> SurveyQuestion {
+        SurveyQuestion {
+            text: "Which parser should we keep?".to_string(),
+            multi_select: false,
+            options: vec![
+                SurveyOption {
+                    label: "Rewrite the parser (Recommended)".to_string(),
+                    description: Some("removes the whole class of escaping bugs".to_string()),
+                },
+                SurveyOption {
+                    label: "Patch in place".to_string(),
+                    description: Some("faster but the bug class stays".to_string()),
+                },
+            ],
+            skippable: true,
+        }
+    }
+
+    fn dialog() -> SurveyDialog {
+        SurveyDialog::new("sv-1".to_string(), vec![question()], true)
+    }
+
+    /// The question and EVERY option label must actually be on screen — the
+    /// live bug was a picker that rendered nothing at all.
+    #[test]
+    fn draws_the_question_and_all_options() {
+        let d = dialog();
+        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
+        let screen = snapshot_buffer(&buf);
+
+        for needle in [
+            "Which parser should we keep?",
+            "Rewrite the parser (Recommended)",
+            "removes the whole class of escaping bugs",
+            "Patch in place",
+            "Type your own answer",
+            "Esc",
+            "Enter",
+        ] {
+            assert!(
+                screen.contains(needle),
+                "survey picker never drew {needle:?}.\n{screen}"
+            );
+        }
+    }
+
+    /// The recommended option is listed FIRST — the model is told to order them
+    /// that way and the dialog must not reorder.
+    #[test]
+    fn recommended_option_is_drawn_first() {
+        let d = dialog();
+        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
+        let screen = snapshot_buffer(&buf);
+        let rec = screen.find("Rewrite the parser").expect("recommended row");
+        let other = screen.find("Patch in place").expect("second row");
+        assert!(rec < other, "recommended option must render first:\n{screen}");
+    }
+
+    /// All ink stays inside the centered dialog rect (70% x 75%), at every size
+    /// from "barely fits" upward — no spill onto the transcript behind it.
+    #[test]
+    fn ink_stays_inside_the_reserved_dialog_rect() {
+        for (w, h) in [(60u16, 16u16), (80, 24), (100, 30), (160, 50), (200, 60)] {
+            let d = dialog();
+            let buf = render_to_buffer(|f| d.draw(f, f.area()), w, h);
+
+            let dw = (w * 70 / 100).max(40).min(w);
+            let dh = (h * 75 / 100).max(12).min(h);
+            let x0 = w.saturating_sub(dw) / 2;
+            let y0 = h.saturating_sub(dh) / 2;
+            let x1 = x0 + dw;
+            let y1 = y0 + dh;
+
+            for y in 0..h {
+                for x in 0..w {
+                    if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                        continue;
+                    }
+                    assert!(
+                        super::is_blank(buf[(x, y)].symbol()),
+                        "{w}x{h}: ink at ({x},{y}) outside dialog rect \
+                         ({x0}..{x1}, {y0}..{y1}).\n{}",
+                        snapshot_buffer(&buf)
+                    );
+                }
+            }
+        }
+    }
+
+    /// A pathologically long question must not push the options off-screen: the
+    /// question block is capped, so the option rows still render.
+    #[test]
+    fn a_long_question_never_hides_the_options() {
+        let mut q = question();
+        q.text = "why ".repeat(200);
+        let d = SurveyDialog::new("sv-long".to_string(), vec![q], true);
+        let buf = render_to_buffer(|f| d.draw(f, f.area()), 100, 30);
+        let screen = snapshot_buffer(&buf);
+        assert!(
+            screen.contains("Rewrite the parser (Recommended)"),
+            "options were pushed off-screen by a long question:\n{screen}"
+        );
+    }
+
+    /// Down/Up move the cursor and Enter returns the chosen option's label —
+    /// the value that travels back to the blocked tool.
+    #[test]
+    fn enter_submits_the_highlighted_option() {
+        let mut d = dialog();
+        assert!(d.handle_key(key(KeyCode::Down)).is_none());
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(result)) => {
+                assert_eq!(result.survey_id, "sv-1");
+                assert_eq!(result.answers.len(), 1);
+                assert_eq!(result.answers[0].selected, vec!["Patch in place".to_string()]);
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+
+        // ...and the first (recommended) option when the cursor never moves.
+        let mut d = dialog();
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(result)) => assert_eq!(
+                result.answers[0].selected,
+                vec!["Rewrite the parser (Recommended)".to_string()]
+            ),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+
+        // Up from the top wraps to the free-text row rather than dead-ending.
+        let mut d = dialog();
+        assert!(d.handle_key(key(KeyCode::Up)).is_none());
+        assert!(
+            d.handle_key(key(KeyCode::Enter)).is_none(),
+            "Enter on the free-text row opens the editor, it does not submit"
+        );
+    }
+
+    /// Esc declines. Without this the operator has no way out and the turn
+    /// deadlocks until the tool's own timeout fires.
+    #[test]
+    fn esc_declines_the_question() {
+        let mut d = dialog();
+        assert!(matches!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(SurveyAction::Skip)
+        ));
+    }
+
+    /// Free text is always reachable, so the operator can answer something the
+    /// model did not offer (the client-supplied "Other").
+    #[test]
+    fn free_text_is_always_offered_and_submits_its_content() {
+        let mut d = dialog();
+        // Down past both options lands on the free-text row.
+        d.handle_key(key(KeyCode::Down));
+        d.handle_key(key(KeyCode::Down));
+        assert!(d.handle_key(key(KeyCode::Enter)).is_none());
+        for c in "neither".chars() {
+            d.handle_key(key(KeyCode::Char(c)));
+        }
+        match d.handle_key(key(KeyCode::Enter)) {
+            Some(SurveyAction::Submit(result)) => {
+                assert_eq!(result.answers[0].free_text.as_deref(), Some("neither"));
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapped_line_count_is_sane() {
+        assert_eq!(wrapped_line_count("", 40), 1);
+        assert_eq!(wrapped_line_count("short", 40), 1);
+        assert_eq!(wrapped_line_count("aaa bbb ccc", 7), 2);
+        assert_eq!(wrapped_line_count("anything", 0), 1);
+        assert!(wrapped_line_count(&"why ".repeat(200), 40) > 3);
     }
 }

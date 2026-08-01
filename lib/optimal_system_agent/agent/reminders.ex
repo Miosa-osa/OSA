@@ -243,8 +243,9 @@ defmodule OptimalSystemAgent.Agent.Reminders do
 
   defp collect_skill_discovery(session_id, tool_call, state) do
     with path when is_binary(path) <- touched_path(tool_call),
-         abs <- Path.expand(path) do
-      root = working_dir(state)
+         abs <- Path.expand(path),
+         root when is_binary(root) <- workspace_root(state),
+         true <- within?(abs, root) do
       query = recent_query(state)
 
       abs
@@ -312,6 +313,37 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     end
   end
 
+  # Expanded workspace root, or nil when it cannot be determined. Skill
+  # discovery is DISABLED when there is no known root: without one the ancestor
+  # walk below has nothing to stop it and climbs all the way to `/`, which is
+  # how `~/.claude/skills/*/SKILL.md` — ANOTHER product's global skills, far
+  # outside this workspace — ended up being announced to the model.
+  defp workspace_root(state) do
+    case working_dir(state) do
+      dir when is_binary(dir) and dir != "" -> Path.expand(dir)
+      _ -> nil
+    end
+  end
+
+  # True when `abs` sits at or below `root`. Paths outside the workspace get no
+  # skill discovery at all — the walk must never leave the project.
+  defp within?(abs, root) do
+    abs == root or String.starts_with?(abs, root <> "/")
+  end
+
+  # The user's home directory, expanded, or nil. Never scanned for skills even
+  # when it happens to be the workspace root: `~/.osa/skills`, `~/.claude/skills`
+  # and friends are GLOBAL, tool-wide skill stores, not "a skill near the path
+  # you just accessed".
+  defp home_dir do
+    case System.user_home() do
+      dir when is_binary(dir) and dir != "" -> Path.expand(dir)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
   # Find SKILL.md files reachable from `abs`: the file itself if it IS a
   # SKILL.md in a skills dir, plus any `<skillsdir>/*/SKILL.md` at each ancestor
   # up to (and including) `root`.
@@ -323,7 +355,12 @@ defmodule OptimalSystemAgent.Agent.Reminders do
         do: [abs],
         else: []
 
-    walked = ancestors(start_dir, root) |> Enum.flat_map(&skill_files_in_dir/1)
+    home = home_dir()
+
+    walked =
+      ancestors(start_dir, root)
+      |> Enum.reject(fn dir -> is_binary(home) and Path.expand(dir) == home end)
+      |> Enum.flat_map(&skill_files_in_dir/1)
 
     (direct ++ walked)
     |> Enum.uniq()
@@ -385,9 +422,35 @@ defmodule OptimalSystemAgent.Agent.Reminders do
 
     tail = if desc == "", do: "", else: " - #{desc}"
 
+    # Name the owning config dir when the skill is not one of OSA's own. These
+    # dirs are interop (a project may carry `.claude/skills` etc.), but the
+    # reminder must never present another product's skill file as OSA's.
+    origin =
+      case owning_config_dir(skill_path) do
+        cfg when is_binary(cfg) and cfg != ".osa" ->
+          " (a third-party #{cfg} skill found in this workspace, not an OSA skill)"
+
+        _ ->
+          ""
+      end
+
     "A skill \"#{name}\" is available near a path you just accessed" <>
       tail <>
+      origin <>
       ".\nIts definition is at #{skill_path}; read it with the read tool if it is relevant to the task."
+  end
+
+  # The `<cfg>` of the `<cfg>/skills/` directory the skill lives under, or nil.
+  defp owning_config_dir(path) do
+    parts = Path.split(Path.dirname(path))
+
+    Enum.find_value(0..max(length(parts) - 2, 0)//1, fn i ->
+      if Enum.at(parts, i) in @skill_config_dirs and Enum.at(parts, i + 1) == "skills",
+        do: Enum.at(parts, i),
+        else: nil
+    end)
+  rescue
+    _ -> nil
   end
 
   # Best-effort one-line description from the SKILL.md front-matter/first line.

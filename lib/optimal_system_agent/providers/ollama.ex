@@ -500,10 +500,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec model_supports_tools?(String.t()) :: boolean()
   def model_supports_tools?(model_name) do
-    case OptimalSystemAgent.Providers.ModelLimits.tool_call(:ollama, model_name) do
-      true -> true
-      false -> false
-      _ -> heuristic_supports_tools?(model_name)
+    # OllamaCloud first: its flags were read from the daemon's own /api/show
+    # `capabilities`, so a hosted model is never gated off tools just because
+    # its NAME lacks a known prefix (e.g. "gpt-oss:120b-cloud").
+    case OptimalSystemAgent.Providers.OllamaCloud.capability(model_name, :tools) do
+      true ->
+        true
+
+      false ->
+        false
+
+      nil ->
+        case OptimalSystemAgent.Providers.ModelLimits.tool_call(:ollama, model_name) do
+          true -> true
+          false -> false
+          _ -> heuristic_supports_tools?(model_name)
+        end
     end
   end
 
@@ -685,10 +697,23 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Returns true for models known to enter unbounded thinking phases by default.
   @doc false
   def thinking_model?(model_name) do
-    case OptimalSystemAgent.Providers.ModelLimits.reasoning(:ollama, model_name) do
-      true -> true
-      false -> false
-      _ -> heuristic_thinking_model?(model_name)
+    # OllamaCloud first — same reason as `model_supports_tools?/1`: its
+    # `thinking` flags came from the daemon's `capabilities`, so reasoning
+    # models whose names miss the heuristic (gemma4, glm, minimax, qwen3.5,
+    # nemotron, gpt-oss) are still driven with `think: true`.
+    case OptimalSystemAgent.Providers.OllamaCloud.capability(model_name, :thinking) do
+      true ->
+        true
+
+      false ->
+        false
+
+      nil ->
+        case OptimalSystemAgent.Providers.ModelLimits.reasoning(:ollama, model_name) do
+          true -> true
+          false -> false
+          _ -> heuristic_thinking_model?(model_name)
+        end
     end
   end
 

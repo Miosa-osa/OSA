@@ -23,9 +23,13 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   @cache_read_multiplier 0.1
 
   # Exact model → {input $/1M, output $/1M}
-  @pricing %{
+  #
+  # Ollama Cloud tags are NOT listed here: they are merged in below from
+  # `Providers.OllamaCloud`, the single source of truth for that catalog. Add a
+  # new cloud model's price THERE (leave it nil if the vendor publishes none —
+  # an unpriced model accounts at $0.00 and logs, which is honest).
+  @static_pricing %{
     # GLM (Z.ai / Zhipu cloud) — OSA's default provider family
-    "glm-5.2:cloud" => {0.60, 2.20},
     "glm-4.7:cloud" => {0.60, 2.20},
     "glm-4.6:cloud" => {0.60, 2.20},
     "glm-4.6" => {0.60, 2.20},
@@ -55,6 +59,11 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     "deepseek-chat" => {0.27, 1.10},
     "deepseek-reasoner" => {0.55, 2.19}
   }
+
+  @pricing Map.merge(
+             @static_pricing,
+             OptimalSystemAgent.Providers.OllamaCloud.pricing()
+           )
 
   # Ordered family fallbacks — first substring match wins. Checked only when
   # there is no exact hit. Keep specific families before generic ones.

@@ -245,6 +245,8 @@ defmodule OptimalSystemAgent.ActionAuthority do
     Map.drop(arguments, [
       "__session_id__",
       :__session_id__,
+      "__tool_use_id__",
+      :__tool_use_id__,
       "__surface__",
       :__surface__
     ])

@@ -206,6 +206,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolError do
   def user_decision?(result_str) when is_binary(result_str) do
     String.contains?(result_str, [
       "you declined to run",
+      "you declined to answer",
       "denied and saved as a standing rule",
       "you asked to reconsider",
       "cancelled before approval",

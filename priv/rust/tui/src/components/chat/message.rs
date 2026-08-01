@@ -47,6 +47,12 @@ pub(crate) const TURN_SEPARATOR_MARKER: &str = "\u{1}osa:turn-separator";
 #[derive(Clone)]
 pub struct ToolCallData {
     pub name: String,
+    /// Backend's stable per-call id, when it sent one. This is what pairs a
+    /// result with ITS cell: every shell call shares the name `shell_execute`
+    /// and tools run concurrently, so matching on `name` alone routes results
+    /// to whichever same-named cell happens to be scanned first. `None` means
+    /// the backend predates the id and the legacy name scan is used.
+    pub tool_call_id: Option<String>,
     pub args: String,
     pub result: String,
     pub duration_ms: u64,
@@ -164,6 +170,7 @@ impl Message {
     pub fn new_turn_separator() -> Self {
         Message::new_tool_call(ToolCallData {
             name: TURN_SEPARATOR_MARKER.to_string(),
+            tool_call_id: None,
             args: String::new(),
             result: String::new(),
             duration_ms: 0,

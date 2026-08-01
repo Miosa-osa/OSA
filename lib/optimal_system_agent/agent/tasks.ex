@@ -20,6 +20,12 @@ defmodule OptimalSystemAgent.Agent.Tasks do
       # Queue
       Tasks.enqueue(task_id, agent_id, payload)
       {:ok, task} = Tasks.lease(agent_id)
+
+  ## Plans are explicit
+
+  Checklist entries are only ever created by an explicit call (`add_task/3`,
+  `add_tasks/3`) — i.e. an explicit tool call by the model. Nothing scrapes a
+  plan out of assistant prose.
   """
   use GenServer
   require Logger
@@ -45,7 +51,6 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   @impl true
   def init(opts) do
     schedule_reap()
-    schedule_hook_registration()
 
     workflow_state = Workflow.init_state()
 
@@ -542,24 +547,6 @@ defmodule OptimalSystemAgent.Agent.Tasks do
     {:noreply, %{state | queue: queue}}
   end
 
-  @impl true
-  def handle_info(:register_hook, state) do
-    try do
-      OptimalSystemAgent.Agent.Hooks.register(
-        :post_response,
-        "task_auto_extract",
-        &auto_extract_hook/1,
-        priority: 80
-      )
-
-      Logger.debug("[Agent.Tasks] Registered auto-extraction hook")
-    rescue
-      _ -> Logger.debug("[Agent.Tasks] Hooks not available, skipping auto-extraction hook")
-    end
-
-    {:noreply, state}
-  end
-
   # ── Private Helpers ────────────────────────────────────────────────────────
 
   defp workflow_state_from(state) do
@@ -574,35 +561,4 @@ defmodule OptimalSystemAgent.Agent.Tasks do
     Process.send_after(self(), :reap, @reap_interval)
   end
 
-  defp schedule_hook_registration do
-    Process.send_after(self(), :register_hook, 500)
-  end
-
-  defp auto_extract_hook(payload) do
-    session_id = payload[:session_id]
-    response = payload[:response] || payload[:text] || ""
-
-    if is_binary(session_id) and is_binary(response) do
-      existing =
-        try do
-          get_tasks(session_id)
-        rescue
-          _ -> []
-        end
-
-      if existing == [] do
-        titles = Tracker.extract_from_response(response)
-
-        if length(titles) >= 3 do
-          try do
-            add_tasks(session_id, titles)
-          rescue
-            _ -> :ok
-          end
-        end
-      end
-    end
-
-    {:ok, payload}
-  end
 end

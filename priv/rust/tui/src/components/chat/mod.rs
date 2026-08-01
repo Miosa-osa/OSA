@@ -170,6 +170,7 @@ impl Chat {
         if self.scrollback_started {
             self.scrollback.push(Message::new_tool_call(ToolCallData {
                 name: String::new(),
+                tool_call_id: None,
                 args: String::new(),
                 result: String::new(),
                 duration_ms: 0,
@@ -258,6 +259,7 @@ impl Chat {
     pub fn add_collapsed_tool_summary(&mut self, line: ratatui::text::Line<'static>) {
         self.push_scrollback_block(Message::new_tool_call(ToolCallData {
             name: String::new(),
+            tool_call_id: None,
             args: String::new(),
             result: String::new(),
             duration_ms: 0,
@@ -282,13 +284,27 @@ impl Chat {
         });
     }
 
-    /// Attach result data to the last matching in-progress tool call and
-    /// re-render its collapsed summary so line-count info appears.
-    pub fn update_last_tool_result(&mut self, tool_name: &str, result: &str) {
+    /// Attach result data to the tool cell this result BELONGS to, and re-render
+    /// its collapsed summary so line-count info appears.
+    ///
+    /// `id` is the backend's per-call `tool_call_id`. When present it is the
+    /// only thing matched on — tools run concurrently and every shell call is
+    /// named `shell_execute`, so a name scan hands `df`'s output to the cell
+    /// showing `du`'s command whenever completions land out of order.
+    /// `None` (older backend that does not emit the id) falls back to the legacy
+    /// newest-first name scan.
+    ///
+    /// Must use the SAME selection rule as [`Self::finalize_tool`], or the cell
+    /// that receives the result and the cell flushed to scrollback differ.
+    pub fn update_last_tool_result(&mut self, tool_name: &str, id: Option<&str>, result: &str) {
         let width = self.width;
         for msg in self.messages.iter_mut().rev() {
             if let Some(ref mut td) = msg.tool_data {
-                if td.name == tool_name && td.result.is_empty() {
+                let matches = match id {
+                    Some(id) => td.tool_call_id.as_deref() == Some(id),
+                    None => td.name == tool_name && td.result.is_empty(),
+                };
+                if matches {
                     td.result = result.to_string();
                     let status = if td.success {
                         crate::tools::ToolStatus::Success
@@ -353,13 +369,27 @@ impl Chat {
             .map_or(false, |td| !td.expanded)
     }
 
-    /// Finalize a specific in-progress tool call (by name) into scrollback.
-    pub fn finalize_tool(&mut self, name: &str) {
-        if let Some(idx) = self
-            .messages
-            .iter()
-            .position(|m| m.tool_data.as_ref().map_or(false, |t| t.name == name))
-        {
+    /// Finalize the in-progress tool call this result belongs to into scrollback.
+    ///
+    /// Keys off `tool_call_id` when the backend sent one. The legacy fallback
+    /// searches OLDEST-first by name, which is what
+    /// [`Self::update_last_tool_result`]'s legacy fallback pairs with only when
+    /// a single same-named call is in flight; with the id both sides select the
+    /// exact same cell, so the cell that got the result is the cell that is
+    /// flushed.
+    pub fn finalize_tool(&mut self, name: &str, id: Option<&str>) {
+        let idx = match id {
+            Some(id) => self.messages.iter().position(|m| {
+                m.tool_data
+                    .as_ref()
+                    .map_or(false, |t| t.tool_call_id.as_deref() == Some(id))
+            }),
+            None => self
+                .messages
+                .iter()
+                .position(|m| m.tool_data.as_ref().map_or(false, |t| t.name == name)),
+        };
+        if let Some(idx) = idx {
             let msg = self.messages.remove(idx);
             self.push_scrollback_block(msg);
         }
@@ -743,5 +773,146 @@ mod stream_cache_tests {
             .unwrap_or(0);
         assert!(cap_after >= cap_before);
         assert_eq!(chat.streaming_content.as_deref(), Some("b"));
+    }
+}
+
+/// Regression: results must land in the cell of the call they belong to.
+///
+/// Tools run CONCURRENTLY (`tool_orchestrator` runs up to 10 in parallel) and
+/// every shell call is named `shell_execute`, so completions routinely land out
+/// of order. Pairing by tool NAME + "most recent cell with an empty result"
+/// therefore showed one command's output under a DIFFERENT command's args.
+///
+/// A second, independent bug lived in the same pair of functions:
+/// `update_last_tool_result` scanned NEWEST-first (`.rev()`) while
+/// `finalize_tool` scanned OLDEST-first (`.position()`), so even the cell that
+/// received the result and the cell flushed to scrollback could differ. Both
+/// now key off `tool_call_id`.
+#[cfg(test)]
+mod concurrent_tool_pairing_tests {
+    use super::*;
+    use ratatui::text::Line;
+
+    const DU: &str = r#"{"command":"du -sh ."}"#;
+    const DF: &str = r#"{"command":"df -h"}"#;
+
+    fn shell_cell(id: Option<&str>, args: &str) -> ToolCallData {
+        ToolCallData {
+            name: "shell_execute".to_string(),
+            tool_call_id: id.map(str::to_string),
+            args: args.to_string(),
+            result: String::new(),
+            duration_ms: 0,
+            success: true,
+            expanded: false,
+            lines: vec![Line::from(args.to_string())],
+        }
+    }
+
+    /// Every finalized cell that carries a call id, as (args, result).
+    fn finalized(chat: &mut Chat) -> Vec<(String, String)> {
+        chat.drain_scrollback()
+            .iter()
+            .filter_map(|m| m.tool_data.as_ref())
+            .filter(|td| td.tool_call_id.is_some())
+            .map(|td| (td.args.clone(), td.result.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn out_of_order_results_land_in_their_own_cell() {
+        let mut chat = Chat::new();
+        // Two concurrent shell calls — SAME tool name, different commands.
+        chat.add_tool_message_rich(shell_cell(Some("call_du"), DU));
+        chat.add_tool_message_rich(shell_cell(Some("call_df"), DF));
+
+        // Results arrive in REVERSE order (df finished first).
+        chat.update_last_tool_result("shell_execute", Some("call_df"), "df says: 42G free");
+        chat.finalize_tool("shell_execute", Some("call_df"));
+        chat.update_last_tool_result("shell_execute", Some("call_du"), "du says: 7.1M .");
+        chat.finalize_tool("shell_execute", Some("call_du"));
+
+        // Nothing left in flight — both cells reached scrollback.
+        assert!(chat.messages.is_empty(), "both cells must be finalized");
+
+        let cells = finalized(&mut chat);
+        assert_eq!(cells.len(), 2, "one scrollback cell per call: {cells:?}");
+
+        // Each cell shows ITS OWN command's output. Before the fix the df result
+        // attached to the du cell (newest-empty scan) and, worse, finalize_tool
+        // then flushed the du cell (oldest-first scan) for the df result.
+        for (args, result) in &cells {
+            if args.contains("du -sh") {
+                assert_eq!(result, "du says: 7.1M .", "du cell got the wrong result");
+            } else if args.contains("df -h") {
+                assert_eq!(result, "df says: 42G free", "df cell got the wrong result");
+            } else {
+                panic!("unexpected cell args: {args}");
+            }
+        }
+    }
+
+    #[test]
+    fn update_and_finalize_select_the_same_cell() {
+        // The independent bug: `.rev()` (newest) vs `.position()` (oldest).
+        // With three same-name calls in flight, the result written by
+        // `update_last_tool_result` must be on the cell `finalize_tool` flushes.
+        let mut chat = Chat::new();
+        chat.add_tool_message_rich(shell_cell(Some("a"), r#"{"command":"one"}"#));
+        chat.add_tool_message_rich(shell_cell(Some("b"), r#"{"command":"two"}"#));
+        chat.add_tool_message_rich(shell_cell(Some("c"), r#"{"command":"three"}"#));
+
+        // Middle call completes first.
+        chat.update_last_tool_result("shell_execute", Some("b"), "TWO-RESULT");
+        chat.finalize_tool("shell_execute", Some("b"));
+
+        let cells = finalized(&mut chat);
+        assert_eq!(cells.len(), 1, "only the completed call is flushed");
+        assert!(
+            cells[0].0.contains("two"),
+            "the flushed cell must be the one that got the result, got {cells:?}"
+        );
+        assert_eq!(cells[0].1, "TWO-RESULT");
+        // The other two are still in flight, still empty.
+        assert_eq!(chat.messages.len(), 2);
+        assert!(chat.messages.iter().all(|m| m
+            .tool_data
+            .as_ref()
+            .map_or(false, |td| td.result.is_empty())));
+    }
+
+    #[test]
+    fn legacy_name_matching_still_works_without_an_id() {
+        // An older backend emits no tool_call_id — the name-based path must
+        // still attach and finalize, so a new TUI keeps working against it.
+        let mut chat = Chat::new();
+        chat.add_tool_message_rich(shell_cell(None, DU));
+        chat.update_last_tool_result("shell_execute", None, "du output");
+        chat.finalize_tool("shell_execute", None);
+
+        assert!(chat.messages.is_empty());
+        let cells: Vec<_> = chat
+            .drain_scrollback()
+            .iter()
+            .filter_map(|m| m.tool_data.as_ref())
+            .filter(|td| td.name == "shell_execute")
+            .map(|td| td.result.clone())
+            .collect();
+        assert_eq!(cells, vec!["du output".to_string()]);
+    }
+
+    #[test]
+    fn a_result_for_an_unknown_id_touches_nothing() {
+        // A stray/duplicated result must never fall back to "some other cell".
+        let mut chat = Chat::new();
+        chat.add_tool_message_rich(shell_cell(Some("call_du"), DU));
+        chat.update_last_tool_result("shell_execute", Some("call_gone"), "orphan");
+        chat.finalize_tool("shell_execute", Some("call_gone"));
+
+        assert_eq!(chat.messages.len(), 1, "the live cell must not be flushed");
+        assert!(chat.messages[0]
+            .tool_data
+            .as_ref()
+            .map_or(false, |td| td.result.is_empty()));
     }
 }

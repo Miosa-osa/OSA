@@ -759,7 +759,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   The static table is retained only as a fallback for when the Catalog is
   unavailable (e.g. GenServer not started) or does not yet know a model.
   """
-  @fallback_context_windows %{
+  @static_context_windows %{
     # Anthropic — all Claude 4.x models have 1M context
     "claude-opus-4-6" => 1_000_000,
     "claude-sonnet-4-6" => 1_000_000,
@@ -805,11 +805,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "glm-4.6" => 200_000,
     "glm-4.5-air" => 128_000,
     "glm-4.5" => 128_000,
-    # Other Ollama Cloud models. Windows verified 2026-07-20 live against
-    # ollama.com/api/show (model_info "<arch>.context_length") per model, so the
-    # runtime context budget matches the model's real limit instead of the
-    # picker's prior guesses (several were 4x off — e.g. nemotron-3-super was
-    # listed at 1M but is 262K, which would overflow the real window).
+    # Ollama model FAMILIES (bare, un-tagged names and local tags). The hosted
+    # ":cloud" / "-cloud" tags are NOT listed here — they come from
+    # `Providers.OllamaCloud`, the single source of truth, and are merged in
+    # below as exact keys. Add a new cloud model THERE, not here.
     "nemotron-3-ultra" => 262_144,
     "nemotron-3-super" => 262_144,
     "minimax-m3" => 524_288,
@@ -822,6 +821,16 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "gpt-oss:20b" => 131_072,
     "gemma4" => 262_144
   }
+
+  # Ollama Cloud tags override the family rows above: they are EXACT keys
+  # ("gemma4:31b-cloud"), so `Map.get/2` finds them before the prefix scan ever
+  # runs, and the same family's local tags keep their own row. These values are
+  # only a FALLBACK — `lookup_context_window/1` probes /api/show first for cloud
+  # tags, so the live window always wins when the daemon can answer.
+  @fallback_context_windows Map.merge(
+                              @static_context_windows,
+                              OptimalSystemAgent.Providers.OllamaCloud.context_windows()
+                            )
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
@@ -1040,12 +1049,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp local_trained_window(_provider, _model, default), do: default
 
-  # True for an Ollama Cloud model (a ":cloud" tag). These are proxied to Ollama's
-  # hosted hardware and keep their full trained window, so `effective_context_window/2`
-  # must not squeeze them under the local KV-cache num_ctx ceiling. Mirrors the
-  # ":cloud" heuristic in `provider_for_model/1`.
-  defp ollama_cloud_model?(model) when is_binary(model), do: String.contains?(model, ":cloud")
-  defp ollama_cloud_model?(_), do: false
+  # True for an Ollama Cloud model. These are proxied to Ollama's hosted
+  # hardware and keep their full trained window, so `effective_context_window/2`
+  # must not squeeze them under the local KV-cache num_ctx ceiling. Delegated to
+  # the OllamaCloud catalog so BOTH hosted tag shapes count — ":cloud" and the
+  # size-qualified "-cloud" ("gpt-oss:120b-cloud") — and so this and
+  # `provider_for_model/1` can never drift apart again.
+  defp ollama_cloud_model?(model),
+    do: OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model)
 
   @doc """
   Resolve the provider atom that OWNS `model`.
@@ -1106,7 +1117,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
     m = String.downcase(model)
 
     cond do
-      String.contains?(m, ":cloud") ->
+      # FIRST — before any vendor-name prefix. A hosted tag belongs to Ollama
+      # Cloud no matter what it is named; without this ordering
+      # "gpt-oss:120b-cloud" fell through to the starts_with?("gpt") branch and
+      # was routed to :openai.
+      OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(m) ->
         :ollama_cloud
 
       String.starts_with?(m, "claude") ->
@@ -1225,6 +1240,26 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # re-pull" rationale of the positive cache.
   @no_ctx_sentinel :no_ctx
 
+  # A TRANSPORT failure is not an answer. Ollama being unreachable, slow, or
+  # unauthenticated at the moment of the probe says nothing about the model's
+  # context length — and since the honest lookups now report `:unknown` (rather
+  # than falling back to the 128k default), a permanently cached transport
+  # failure pins the model's window to 0 FOR THE LIFE OF THE BEAM. That is what
+  # made the context meter read a flat 0% forever: the TUI starts before/faster
+  # than the daemon is ready, the very first probe fails, and the model can
+  # never be resolved again no matter how healthy Ollama becomes.
+  #
+  # So the two negative outcomes are cached differently:
+  #   * definitive  — a 200 response that simply carries no `context_length`
+  #     key. The daemon answered; the answer will not change. Cached forever
+  #     (`@no_ctx_sentinel`).
+  #   * transient   — unreachable / non-200 / timeout / raised. Cached only for
+  #     `@negative_ttl_ms`, so the hot path stays IO-free (at most one probe per
+  #     model per TTL, versus one per ReAct iteration, which is what the
+  #     negative cache existed to prevent) while a daemon that comes up later
+  #     still gets a chance to answer.
+  @negative_ttl_ms 60_000
+
   defp get_ollama_context(model) do
     case cache_lookup(model) do
       {:ok, _ctx} = hit -> hit
@@ -1240,11 +1275,26 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
       _ ->
         case :ets.lookup(:osa_context_cache, model) do
-          [{^model, @no_ctx_sentinel}] -> :negative
-          [{^model, cached_ctx}] when is_integer(cached_ctx) -> {:ok, cached_ctx}
-          _ -> :miss
+          [{^model, @no_ctx_sentinel}] ->
+            :negative
+
+          # Transient failure: honour the negative cache only until it expires,
+          # then fall through to :miss so the model is probed again.
+          [{^model, {@no_ctx_sentinel, expires_at}}] ->
+            if System.monotonic_time(:millisecond) < expires_at, do: :negative, else: :miss
+
+          [{^model, cached_ctx}] when is_integer(cached_ctx) ->
+            {:ok, cached_ctx}
+
+          _ ->
+            :miss
         end
     end
+  end
+
+  # Cache a transient probe failure with an expiry so it can be retried.
+  defp cache_put_transient(model) do
+    cache_put(model, {@no_ctx_sentinel, System.monotonic_time(:millisecond) + @negative_ttl_ms})
   end
 
   defp cache_put(model, value) do
@@ -1254,10 +1304,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  # Best-effort probe. Short timeout, no retries, every failure mode
-  # (unreachable, non-200, malformed, raised) collapses to :error + a negative
-  # cache entry, so a slow or broken Ollama can never stall a request path — the
+  # Best-effort probe. Short timeout, no retries, every failure mode collapses
+  # to :error, so a slow or broken Ollama can never stall a request path — the
   # caller just falls back to the static table / config default.
+  #
+  # The failure is cached PERMANENTLY only when the daemon actually answered and
+  # the answer contained no context length (a definitive "this model does not
+  # report one"). Transport failures get a short TTL instead — see
+  # `@negative_ttl_ms`. Conflating the two is what let a single failed probe at
+  # startup pin a model's window to "unknown" forever.
   @probe_timeout_ms 3_000
 
   defp fetch_ollama_context(model) do
@@ -1284,17 +1339,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
           cache_put(model, ctx)
           {:ok, ctx}
         else
+          # Definitive: the daemon answered and reports no context length.
           cache_put(model, @no_ctx_sentinel)
           :error
         end
 
+      # Transport failure (unreachable / non-200 / timeout) — retryable.
       _ ->
-        cache_put(model, @no_ctx_sentinel)
+        cache_put_transient(model)
         :error
     end
   rescue
     _ ->
-      cache_put(model, @no_ctx_sentinel)
+      cache_put_transient(model)
       :error
   end
 

@@ -71,6 +71,78 @@ defmodule OptimalSystemAgent.Events.TuiForwarderTest do
     refute Map.has_key?(event, "content")
   end
 
+  # ── ask_user → ask_user_question survey frame ────────────────────────
+  #
+  # Regression: `ask_user` was missing from the allowlist entirely, so the
+  # question the tool blocks on never reached the session topic — the TUI
+  # never opened its picker and the tool hung until its 5-minute timeout.
+
+  describe "ask_user" do
+    test "forwards the question as an ask_user_question survey frame", %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :ask_user,
+        session_id: sid,
+        ref: "#Reference<0.1.2.3>",
+        question: "Which parser should we keep?",
+        options: [
+          "Rewrite the parser (Recommended) — removes the whole class of escaping bugs",
+          "Patch in place — faster but the bug class stays"
+        ]
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert event.type == :system_event
+      # Renamed to the wire event the TUI's SSE parser decodes.
+      assert event.event == :ask_user_question
+      assert event.survey_id == "#Reference<0.1.2.3>"
+      assert event.skippable == true
+
+      assert [q] = event.questions
+      assert q.text == "Which parser should we keep?"
+      assert q.multi_select == false
+      assert q.skippable == true
+
+      assert [first, second] = q.options
+      assert first.label == "Rewrite the parser (Recommended)"
+      assert first.description == "removes the whole class of escaping bugs"
+      assert second.label == "Patch in place"
+      assert second.description == "faster but the bug class stays"
+    end
+
+    test "the forwarded frame is JSON-encodable (no PIDs)", %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :ask_user,
+        session_id: sid,
+        ref: "#Reference<0.9.9.9>",
+        question: "Proceed?",
+        options: [],
+        # Even if an emitter leaks a PID, the reshape must drop it — a
+        # non-encodable field made the SSE loop discard the whole frame.
+        reply_to: self()
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert {:ok, json} = Jason.encode(event)
+      assert json =~ "ask_user_question"
+      refute json =~ "reply_to"
+    end
+
+    test "an option with no description survives as a bare label", %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :ask_user,
+        session_id: sid,
+        ref: "r1",
+        question: "Yes or no?",
+        options: ["Yes", "No"]
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert [q] = event.questions
+      assert Enum.map(q.options, & &1.label) == ["Yes", "No"]
+      assert Enum.all?(q.options, &is_nil(&1.description))
+    end
+  end
+
   test "does NOT forward a sub-event absent from the allowlist", %{session_id: sid} do
     Bus.emit(:system_event, %{
       event: :some_unlisted_internal_event,

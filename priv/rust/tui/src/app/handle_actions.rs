@@ -1272,6 +1272,11 @@ impl App {
         // Reconnect SSE with new session
         self.start_sse();
 
+        // `osa --continue --model X` / `osa --resume <id> --model X` resolve the
+        // session through here rather than SessionCreated, so the session-scoped
+        // override has to be applied on this path too (no-op when unset).
+        self.apply_startup_model_override();
+
         self.toasts.push(
             format!("Switched to session {}", truncate_str(session_id, 16)),
             crate::components::toast::ToastLevel::Info,
@@ -1292,6 +1297,46 @@ impl App {
             let event = match result {
                 Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
                 Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Apply a `--model` / `--provider` launch flag to the session that just
+    /// became current.
+    ///
+    /// SESSION-SCOPED on purpose. The boot-time resolution order is stacked
+    /// against an environment variable — `Application` prefers
+    /// `config.toml`/`config.json` over `OLLAMA_MODEL`, `Settings` writes env
+    /// unconditionally, and the shell launcher re-sources `~/.osa/.env` — so on
+    /// any machine where a model has ever been picked in the TUI an env-based
+    /// override is simply ignored. `POST /sessions/:id/provider` swaps the LIVE
+    /// loop instead, which is the thing that decides what the next turn calls,
+    /// so the flag wins for this run without rewriting anything on disk.
+    ///
+    /// Fires at most once (`.take()`), so a later `/new` or `/resume` keeps the
+    /// model the *user* chose rather than resurrecting a stale launch flag.
+    pub(crate) fn apply_startup_model_override(&mut self) {
+        let Some((provider, model)) = self.startup_model.take() else {
+            return;
+        };
+        // An empty model means `--provider` was given alone; the backend fills in
+        // that provider's default. An empty provider means `--model` was given
+        // alone; the backend attributes the model to its owning provider.
+        let req = crate::client::types::ModelSwitchRequest {
+            provider: provider.unwrap_or_default(),
+            model: model.clone(),
+        };
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.switch_session_model(&sid, &req).await {
+                Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
+                Err(e) => BackendEvent::ModelSwitched(Err(format!(
+                    "--model/--provider could not be applied: {}",
+                    e
+                ))),
             };
             let _ = tx.send(Event::Backend(event));
         });

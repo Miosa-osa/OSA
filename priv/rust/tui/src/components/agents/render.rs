@@ -19,6 +19,21 @@ impl Agents {
             return;
         }
 
+        // Honour the SAME ceiling `height()` publishes (`total.min(30)`).
+        //
+        // `height()` clamped its reservation but the paint loops only ever
+        // stopped at the edge of the rect they were handed, so a large fleet
+        // (8 workers x a 4-row child list + header + root = 34 rows) reserved 30
+        // and drew 34 — four rows painted into space the layout had given to
+        // something else, and the roster's own tail silently clipped. The panel
+        // is a bounded status strip: it stops where it said it would.
+        let area = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.min(self.height().max(1)),
+        );
+
         let theme = crate::style::theme();
         let mut y = area.y;
 
@@ -54,8 +69,25 @@ impl Agents {
                 .count();
             let total = self.entries.len();
 
+            // DETAIL-PER-SURFACE (Codex placement rule): three surfaces used to
+            // state "a turn is in progress" at once — the activity spinner line
+            // (`model ∙ ⠸ verb… (1m02s · esc to interrupt)`), this header
+            // (`Running 2 agents…`) and the `main` roster row (`Working…`). Each
+            // now carries only what it alone can say:
+            //   * spinner line → the live verb, the ONE turn clock, interrupt;
+            //   * this header  → the fleet count/cap and the fleet's own controls;
+            //   * `main` row   → the roster root + session tokens.
+            // The `<running>/<cap>` gauge is folded INTO the header text rather
+            // than appended as a second span, so the agent count is stated once.
             let header_text = if running > 0 {
-                format!("Running {} agent{}…", running, if running == 1 { "" } else { "s" })
+                match self.fleet {
+                    Some(ref f) => format!("Running {}\u{2026}", fmt_fleet_gauge(f.running, f.cap)),
+                    None => format!(
+                        "Running {} agent{}\u{2026}",
+                        running,
+                        if running == 1 { "" } else { "s" }
+                    ),
+                }
             } else if total > 0 {
                 format!(
                     "{} agent{} completed",
@@ -89,13 +121,18 @@ impl Agents {
             }
 
             // Live fleet gauge `<running>/<cap> agents` (Part 4.2), from the
-            // backend `fleet_summary` frame. A dim "large fleet" hint appears
-            // once the backend flags the >=25 warning threshold.
+            // backend `fleet_summary` frame. When the turn is running the gauge
+            // is already folded into `header_text` above (stating the count once,
+            // not twice); it is appended here only when nothing is running, where
+            // the header text is a completion tally instead. A dim "large fleet"
+            // hint appears once the backend flags the >=25 warning threshold.
             if let Some(ref f) = self.fleet {
-                spans.push(Span::styled(
-                    format!(" \u{00b7} {}", fmt_fleet_gauge(f.running, f.cap)),
-                    header_style,
-                ));
+                if running == 0 {
+                    spans.push(Span::styled(
+                        format!(" \u{00b7} {}", fmt_fleet_gauge(f.running, f.cap)),
+                        header_style,
+                    ));
+                }
                 if f.warn {
                     spans.push(Span::styled(" \u{00b7} large fleet", theme.faint()));
                 }
@@ -142,7 +179,17 @@ impl Agents {
                 } else {
                     theme.agent_main()
                 };
-                let meta = fmt_cc_meta(main.elapsed_secs, main.tokens);
+                // ONE turn clock. `main.elapsed_secs` IS the turn elapsed the
+                // activity line already renders next to the interrupt hint — the
+                // rule established when the spinner's dual-timer bug was fixed:
+                // exactly one elapsed clock for the turn, bound to the interrupt
+                // affordance. Rendering it again here (and in the OTHER format,
+                // `1m 02s` vs `1m02s`) read as a second, disagreeing clock. The
+                // `main` row keeps only what is uniquely its own: session tokens.
+                //
+                // The full-screen dashboard is a different surface — there no
+                // activity line exists, so `draw_dashboard` still shows elapsed.
+                let meta = fmt_cc_tokens(main.tokens);
                 // Right-align the meta flush to the pane edge so the `main` root
                 // shares the roster's meta column with every worker row below.
                 let line = roster_row_line(
@@ -239,13 +286,10 @@ impl Agents {
                     theme.agent_name()
                 };
                 // Live activity: current action, or the subject as a fallback.
-                let activity = if !entry.current_action.is_empty() {
-                    entry.current_action.clone()
-                } else if !entry.subject.is_empty() {
-                    entry.subject.clone()
-                } else {
-                    String::new()
-                };
+                let activity = super::row_activity(entry).to_string();
+                // Per-agent age. This is the one duration a worker row may carry:
+                // it is that agent's OWN lifetime (not the turn clock), and the
+                // delegate line in the activity feed no longer restates it.
                 let meta = fmt_cc_meta(entry.elapsed_secs(), entry.tokens_used);
 
                 // Right-align the meta flush to the pane edge (display-width
@@ -297,18 +341,27 @@ impl Agents {
                         vec![(msg, theme.error_text())]
                     }
                     _ => {
+                        // De-duplicated + bounded child list. `trail_actions`
+                        // drops the entry that merely repeats this row's own
+                        // current-action label (which is why `dir_list` showed up
+                        // both as the agent's activity AND as a bare child with
+                        // no argument) and collapses repeats; `TRAIL_MAX_ROWS`
+                        // caps the whole block. Row count MUST equal
+                        // `Agents::entry_rows`, which calls the same helper.
                         let mut rows: Vec<(String, Style)> = Vec::new();
-                        let shown = entry.recent_actions.len().min(3);
+                        let actions = super::trail_actions(entry);
+                        let shown = actions.len();
                         if entry.tool_uses as usize > shown {
                             rows.push((
                                 format!("+{} more tool uses", entry.tool_uses as usize - shown),
                                 theme.faint(),
                             ));
                         }
-                        // recent_actions is newest-first; display oldest → newest.
-                        for a in entry.recent_actions.iter().take(3).rev() {
-                            rows.push((a.clone(), theme.faint()));
+                        // `trail_actions` already returns oldest → newest.
+                        for a in actions {
+                            rows.push((a, theme.faint()));
                         }
+                        rows.truncate(super::TRAIL_MAX_ROWS);
                         if rows.is_empty() {
                             let msg = if entry.current_action.is_empty() {
                                 "Starting…".to_string()
@@ -817,10 +870,17 @@ fn fmt_tokens(n: u32) -> String {
 /// k/M token scaler so every roster surface renders identically.
 fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
     format!(
-        "{} \u{00b7} \u{2193}{}",
+        "{} \u{00b7} {}",
         crate::components::status_bar::fmt_elapsed_compact(elapsed_secs),
-        fmt_tokens(tokens),
+        fmt_cc_tokens(tokens),
     )
+}
+
+/// The meta column WITHOUT a duration: `↓<tokens>`. Used by the inline `main`
+/// root row, whose elapsed would be a second rendering of the turn clock the
+/// activity line already owns.
+fn fmt_cc_tokens(tokens: u32) -> String {
+    format!("\u{2193}{}", fmt_tokens(tokens))
 }
 
 /// Format a byte size compactly: 312 → "312", 2100 → "2.1k", 1_500_000 → "1.5M".

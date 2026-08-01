@@ -39,7 +39,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
     session_id = ctx.session_id || params["__session_id__"]
     ref = make_ref()
     ref_str = inspect(ref)
-    caller = self()
 
     register_pending(ref_str, session_id, question, options)
 
@@ -48,28 +47,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
       "osa:ask_user:#{ref_str}"
     )
 
+    # NOTE: the payload must stay JSON-encodable end to end — it is reshaped by
+    # `Events.TuiForwarder` and written straight onto the SSE stream. A PID (the
+    # old `reply_to` field) made `Jason.encode/1` fail, which silently dropped
+    # the frame and left the tool blocking on a question no one ever saw.
     Bus.emit(:system_event, %{
       event: :ask_user,
       question: question,
       options: options,
       ref: ref_str,
-      reply_to: caller,
       session_id: session_id
     })
 
     result =
       receive do
         {:ask_user_response, ^ref, answer} when is_binary(answer) ->
-          {:ok, "User answered: #{answer}"}
+          answered(answer)
 
         {:ask_user_response, _ref, answer} when is_binary(answer) ->
-          {:ok, "User answered: #{answer}"}
+          answered(answer)
 
         {:ask_user_answer, _survey_id, answer} when is_binary(answer) ->
-          {:ok, "User answered: #{answer}"}
+          answered(answer)
+
+        {:ask_user_declined, _survey_id} ->
+          {:ok, declined_text()}
       after
         Constants.timeout_ms() ->
-          {:error, "User did not respond within 5 minutes"}
+          {:ok, timed_out_text()}
       end
 
     Phoenix.PubSub.unsubscribe(OptimalSystemAgent.PubSub, "osa:ask_user:#{ref_str}")
@@ -79,6 +84,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  # An answer that came back empty (the operator dismissed the picker without
+  # choosing) is a decline, not an answer.
+  defp answered(answer) do
+    case String.trim(answer) do
+      "" -> {:ok, declined_text()}
+      trimmed -> {:ok, "User answered: #{trimmed}"}
+    end
+  end
+
+  # Both escape hatches resolve to an `{:ok, _}` model-readable result rather
+  # than an error: a declined question is an answer ("no answer"), not a tool
+  # failure, and must not abort the turn or feed the doom-loop detector.
+  # The wording is matched by `ToolError.user_decision?/1`.
+  defp declined_text do
+    "No answer — you declined to answer this question. " <>
+      "Do not ask it again; continue with your best judgment and state the assumption you made."
+  end
+
+  defp timed_out_text do
+    "No answer — the question timed out with no response. " <>
+      "Do not ask it again; continue with your best judgment and state the assumption you made."
+  end
 
   defp register_pending(ref_str, session_id, question, options) do
     if is_binary(session_id) and session_id != "" do

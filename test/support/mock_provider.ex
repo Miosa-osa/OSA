@@ -43,6 +43,13 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def chat(_messages, _opts) do
     maybe_sleep()
 
+    case forced_final_text() do
+      nil -> chat_scripted()
+      text -> {:ok, %{content: text, tool_calls: []}}
+    end
+  end
+
+  defp chat_scripted do
     case Process.get(:mock_provider_call_count, 0) do
       0 ->
         Process.put(:mock_provider_call_count, 1)
@@ -73,6 +80,20 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def chat_stream(_messages, callback, _opts) do
     maybe_sleep()
 
+    case forced_final_text() do
+      nil ->
+        chat_stream_scripted(callback)
+
+      text ->
+        # `""` means "finish the turn with NO final text" — the silent-child
+        # case the delegation result-recovery path exists for.
+        if text != "", do: callback.({:text_delta, text})
+        callback.({:done, %{content: text, tool_calls: []}})
+        :ok
+    end
+  end
+
+  defp chat_stream_scripted(callback) do
     case Process.get(:mock_provider_call_count, 0) do
       0 ->
         Process.put(:mock_provider_call_count, 1)
@@ -105,6 +126,20 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def reset do
     Process.delete(:mock_provider_call_count)
     :ok
+  end
+
+  # When `:mock_provider_final_text` is set, EVERY call answers with that text
+  # and no tool calls, so a subagent finishes its turn in one deterministic hop.
+  # Set it to `""` to simulate a child that ends its turn producing no text at
+  # all. Unset (the default) keeps the original tool-call-then-answer script,
+  # so existing tests are untouched. Read from application env rather than the
+  # process dictionary because the Loop invokes the provider from short-lived
+  # task processes that do not inherit the test process's dictionary.
+  defp forced_final_text do
+    case Application.get_env(:optimal_system_agent, :mock_provider_final_text) do
+      text when is_binary(text) -> text
+      _ -> nil
+    end
   end
 
   defp maybe_sleep do

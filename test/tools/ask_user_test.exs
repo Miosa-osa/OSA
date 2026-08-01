@@ -203,4 +203,111 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
       assert OptimalSystemAgent.Tools.LegacyAdapter.structured?(Tool)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # execute/2 — answer + escape hatches
+  #
+  # `ask_user` blocks the turn on human input. Every exit from that wait must
+  # be a model-readable `{:ok, _}` result, never a fatal error and never an
+  # unbounded hang.
+  # ---------------------------------------------------------------------------
+
+  alias OptimalSystemAgent.Agent.Loop.ToolError
+
+  # Runs execute/2 in a task and returns {task, survey_id} once the question
+  # has been published (the ref is registered in the pending-questions table).
+  defp start_question(question, options \\ []) do
+    sid = "ask-user-exec-#{System.unique_integer([:positive])}"
+    ctx = %UseContext{session_id: sid}
+
+    task =
+      Task.async(fn ->
+        Handler.execute(%{"question" => question, "options" => options}, ctx)
+      end)
+
+    survey_id = await_pending(sid, 40)
+    {task, survey_id}
+  end
+
+  defp await_pending(_sid, 0), do: flunk("ask_user never registered a pending question")
+
+  defp await_pending(sid, attempts) do
+    match =
+      :osa_pending_questions
+      |> :ets.tab2list()
+      |> Enum.find(fn {_ref, meta} -> meta[:session_id] == sid end)
+
+    case match do
+      {ref, _meta} ->
+        ref
+
+      nil ->
+        Process.sleep(25)
+        await_pending(sid, attempts - 1)
+    end
+  end
+
+  describe "execute/2" do
+    test "an answer broadcast on the ask_user topic resolves the wait" do
+      {task, survey_id} = start_question("Which parser?", ["Rewrite", "Patch"])
+
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:ask_user:#{survey_id}",
+        {:ask_user_answer, survey_id, "Rewrite"}
+      )
+
+      assert {:ok, result} = Task.await(task, 5_000)
+      assert result == "User answered: Rewrite"
+    end
+
+    test "a decline resolves as a non-fatal, model-readable result" do
+      {task, survey_id} = start_question("Which parser?", ["Rewrite", "Patch"])
+
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:ask_user:#{survey_id}",
+        {:ask_user_declined, survey_id}
+      )
+
+      assert {:ok, result} = Task.await(task, 5_000)
+      assert result =~ "you declined to answer"
+      # Must not abort the turn...
+      assert ToolError.classify({:ok, result}) == :not_fatal
+      # ...and must not be counted as a failure signature by the doom-loop
+      # detector, which used to halt a turn after repeated declines.
+      assert ToolError.user_decision?(result)
+    end
+
+    test "an empty answer is treated as a decline, not as an answer" do
+      {task, survey_id} = start_question("Which parser?")
+
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:ask_user:#{survey_id}",
+        {:ask_user_answer, survey_id, "   "}
+      )
+
+      assert {:ok, result} = Task.await(task, 5_000)
+      assert result =~ "you declined to answer"
+    end
+
+    test "the pending question is deregistered once answered" do
+      {task, survey_id} = start_question("Which parser?")
+
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:ask_user:#{survey_id}",
+        {:ask_user_declined, survey_id}
+      )
+
+      assert {:ok, _} = Task.await(task, 5_000)
+      assert :ets.lookup(:osa_pending_questions, survey_id) == []
+    end
+
+    test "the wait is bounded — timeout_ms is finite" do
+      assert is_integer(Constants.timeout_ms())
+      assert Constants.timeout_ms() > 0
+    end
+  end
 end

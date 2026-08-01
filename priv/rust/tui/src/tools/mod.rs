@@ -51,7 +51,56 @@ pub trait ToolRenderer {
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
+/// Strip every `<system-reminder>…</system-reminder>` block from a tool result.
+///
+/// The backend appends cross-cutting reminders (finished background tasks, a
+/// nearby `SKILL.md`, post-edit diagnostics) onto the tool result string so the
+/// MODEL sees them in the same observation. They are internal steering text and
+/// must never reach the user's screen — before this, a Write/Create preview
+/// rendered the reminder as if it were the file's own content
+/// (`+ <system-reminder>` …), which also exposed absolute paths from other
+/// tools' skill directories.
+///
+/// An unterminated opening tag truncates the rest of the result, which is the
+/// safe direction: better to show less than to leak internal text.
+pub fn strip_system_reminders(result: &str) -> String {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+
+    if !result.contains(OPEN) {
+        return result.to_string();
+    }
+
+    let mut out = String::with_capacity(result.len());
+    let mut rest = result;
+
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        match after_open.find(CLOSE) {
+            Some(end) => rest = &after_open[end + CLOSE.len()..],
+            // Unterminated: drop everything from the opening tag on.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
 pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    // Internal <system-reminder> steering is model-facing only — never render it
+    // as tool output. Done once here so every renderer below is covered.
+    let stripped;
+    let result: &str = if result.contains("<system-reminder>") {
+        stripped = strip_system_reminders(result);
+        &stripped
+    } else {
+        result
+    };
+
     let lower = name.to_lowercase();
 
     // MCP prefix: mcp__server__tool
@@ -60,8 +109,10 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
     }
 
     match lower.as_str() {
-        // Bash
-        "bash" | "run_bash_command" => {
+        // Bash. `shell_execute` is OSA's OWN shell tool name — it was missing
+        // here, so every shell call fell through to the generic renderer and
+        // lost its command/output card.
+        "bash" | "run_bash_command" | "shell" | "shell_execute" => {
             bash::BashRenderer.render(name, args, result, opts)
         }
 
@@ -76,8 +127,11 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         }
 
         // File: Edit / MultiEdit / Download
+        // `multi_file_edit` and `notebook_edit` are OSA's own names; both were
+        // absent and rendered generically (no path, no diff).
         "edit" | "edit_file" | "file_edit" | "str_replace_editor"
-        | "multiedit" | "multi_edit" | "download" | "str_replace_based_edit_tool" => {
+        | "multiedit" | "multi_edit" | "multi_file_edit" | "notebook_edit"
+        | "download" | "str_replace_based_edit_tool" => {
             file::FileEditRenderer.render(name, args, result, opts)
         }
 
@@ -343,10 +397,45 @@ pub(crate) fn render_tool_box(
     out
 }
 
+/// Path-ish argument keys. When `args` is a BARE string rather than JSON, it is
+/// the value of one of these — see [`parse_json_arg`].
+const PATH_KEYS: &[&str] = &[
+    "path",
+    "file_path",
+    "filename",
+    "target_file",
+    "file",
+    "notebook_path",
+];
+
 /// Extract the first matching key value from a JSON string (args).
 /// Handles string and number values.
+///
+/// `args` is NOT always JSON. The backend's `ToolHint.summarize/1` sends a
+/// plain display string for every tool except `file_edit` (which needs its full
+/// argument map so the diff can be rendered), so a `file_read`/`file_write`/
+/// `dir_list` call arrives as a bare `"/src/main.rs"`. Parsed strictly as JSON
+/// that yields `None`, which is why those cells rendered their `"…"` path
+/// placeholder and why collapsed runs degraded to an anonymous `Read 1 file`.
+/// When the caller is asking for a path and `args` looks like one, the bare
+/// string IS the answer.
 pub(crate) fn parse_json_arg(args: &str, keys: &[&str]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(args).ok()?;
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        // Bare value. Only honour it for a path lookup — handing a raw command
+        // string back to a caller asking for `old_string` would be a lie.
+        let wants_path = keys.iter().any(|k| PATH_KEYS.contains(k));
+        if wants_path && looks_like_path(trimmed) {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
     for key in keys {
         if let Some(val) = v.get(*key) {
             match val {
@@ -358,6 +447,16 @@ pub(crate) fn parse_json_arg(args: &str, keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether a bare argument string is plausibly a filesystem path rather than a
+/// command, a question or free prose. Conservative on purpose: a false positive
+/// here would put a shell command where a filename belongs.
+pub(crate) fn looks_like_path(s: &str) -> bool {
+    if s.contains(char::is_whitespace) || s.len() > 512 {
+        return false;
+    }
+    s.starts_with('/') || s.starts_with("./") || s.starts_with("~/") || s.contains('/')
 }
 
 /// Build a standard single-line collapsed header:
@@ -502,6 +601,82 @@ pub(crate) fn make_result_line(
 // a mid-char index at 50/55/57/60/80/120. Passing == no panic.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
+mod system_reminder_tests {
+    use super::*;
+
+    const REMINDER: &str = "<system-reminder>\nA skill \"writing-great-skills\" is available near a path you just accessed.\nIts definition is at /Users/rhl/.claude/skills/writing-great-skills/SKILL.md\n</system-reminder>";
+
+    #[test]
+    fn strips_a_trailing_reminder_block() {
+        let raw = format!("Wrote 12 lines to notes.md\n\n{REMINDER}");
+        let out = strip_system_reminders(&raw);
+        assert_eq!(out, "Wrote 12 lines to notes.md");
+        assert!(!out.contains("system-reminder"));
+        assert!(!out.contains(".claude/skills"));
+    }
+
+    #[test]
+    fn strips_multiple_blocks_and_keeps_surrounding_text() {
+        let raw = format!("head\n{REMINDER}\nmiddle\n{REMINDER}\ntail");
+        let out = strip_system_reminders(&raw);
+        assert!(out.starts_with("head"));
+        assert!(out.contains("middle"));
+        assert!(out.ends_with("tail"));
+        assert!(!out.contains("system-reminder"));
+    }
+
+    #[test]
+    fn leaves_ordinary_output_untouched() {
+        let raw = "Replaced in compactor.ex\n--- a\n+++ b\n+ @impl Foo";
+        assert_eq!(strip_system_reminders(raw), raw);
+    }
+
+    #[test]
+    fn unterminated_open_tag_drops_the_remainder() {
+        let raw = "Wrote it\n<system-reminder>\nleaked internal text";
+        let out = strip_system_reminders(raw);
+        assert_eq!(out, "Wrote it");
+    }
+
+    #[test]
+    fn render_tool_never_shows_reminder_text() {
+        let raw = format!("Wrote 12 lines to notes.md\n\n{REMINDER}");
+        let opts = RenderOpts {
+            status: ToolStatus::Success,
+            width: 100,
+            expanded: true,
+            compact: false,
+            spinner_frame: None,
+            duration_ms: 0,
+            truncated: false,
+        };
+
+        for tool in ["file_write", "file_edit", "file_read", "shell_execute", "some_unknown_tool"] {
+            let lines = render_tool(tool, "{\"path\":\"notes.md\"}", &raw, &opts);
+            let text: String = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                !text.contains("system-reminder"),
+                "{tool} leaked the reminder tag: {text}"
+            );
+            assert!(
+                !text.contains(".claude/skills"),
+                "{tool} leaked a foreign skills path: {text}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod render_edge_tests {
     use super::*;
 
@@ -587,6 +762,157 @@ mod render_edge_tests {
         for name in ["Bash", "WebFetch", "mcp__srv__tool", "Agent", "whatever"] {
             let _ = render_tool(name, &args, &mb(40), &opts(false));
             let _ = render_tool(name, &args, &mb(40), &opts(true));
+        }
+    }
+}
+
+// ─── Tool-cell identity ──────────────────────────────────────────────────────
+//
+// Every file-touching cell must NAME ITS FILE. It shipped naming nothing
+// ("⏺ Edit" / "⏺ Read 1 file"), which made a transcript of several edits
+// unreadable and left the agent unable to confirm its own edit landed.
+#[cfg(test)]
+mod cell_identity_tests {
+    use super::*;
+
+    fn cell_opts() -> RenderOpts {
+        RenderOpts {
+            status: ToolStatus::Success,
+            width: 100,
+            expanded: false,
+            compact: true,
+            spinner_frame: None,
+            duration_ms: 12,
+            truncated: false,
+        }
+    }
+
+    fn flatten(lines: &[ratatui::text::Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // ── parse_json_arg: the backend does not always send JSON ────────────
+
+    #[test]
+    fn a_bare_path_is_accepted_as_the_path() {
+        // What `ToolHint.summarize/1` sends for file_read / file_write /
+        // dir_list — a plain display string, not a JSON document.
+        assert_eq!(
+            parse_json_arg("/src/main.rs", &["path", "file_path"]),
+            Some("/src/main.rs".to_string())
+        );
+        assert_eq!(
+            parse_json_arg("  ./lib/app.ex  ", &["file_path"]),
+            Some("./lib/app.ex".to_string())
+        );
+    }
+
+    #[test]
+    fn a_bare_non_path_is_not_mistaken_for_one() {
+        // A shell command must never be shown where a filename belongs.
+        assert_eq!(parse_json_arg("cargo test --release", &["path"]), None);
+        // ...and a bare value is never handed to a non-path lookup.
+        assert_eq!(parse_json_arg("/src/main.rs", &["old_string"]), None);
+        assert_eq!(parse_json_arg("", &["path"]), None);
+    }
+
+    #[test]
+    fn json_args_still_win() {
+        let args = r#"{"path":"/src/main.rs","old_string":"a","new_string":"b"}"#;
+        assert_eq!(
+            parse_json_arg(args, &["path"]),
+            Some("/src/main.rs".to_string())
+        );
+        assert_eq!(parse_json_arg(args, &["old_string"]), Some("a".to_string()));
+    }
+
+    // ── the rendered cells ───────────────────────────────────────────────
+
+    #[test]
+    fn an_edit_cell_names_its_file_for_every_arg_shape() {
+        let shapes = [
+            // Full JSON — what file_edit sends so the diff can be rendered.
+            r#"{"path":"/proj/src/compactor.ex","old_string":"a\nb","new_string":"a\nc"}"#
+                .to_string(),
+            // Bare path — the fallback when the arg map cannot be encoded.
+            "/proj/src/compactor.ex".to_string(),
+        ];
+        for args in shapes {
+            let out = flatten(&render_tool("file_edit", &args, "", &cell_opts()));
+            assert!(
+                out.contains("compactor.ex"),
+                "edit cell did not name its file for args {args:?}:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_cell_names_its_file() {
+        let out = flatten(&render_tool(
+            "file_read",
+            "/proj/src/main.rs",
+            "l1\nl2",
+            &cell_opts(),
+        ));
+        assert!(
+            out.contains("main.rs"),
+            "read cell did not name its file:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_write_cell_names_its_file() {
+        let out = flatten(&render_tool(
+            "file_write",
+            "/proj/src/new.rs",
+            "",
+            &cell_opts(),
+        ));
+        assert!(
+            out.contains("new.rs"),
+            "write cell did not name its file:\n{out}"
+        );
+    }
+
+    // ── dispatch coverage for OSA's own tool names ───────────────────────
+
+    #[test]
+    fn osa_tool_names_reach_their_real_renderers() {
+        // `shell_execute`, `multi_file_edit` and `notebook_edit` are OSA's own
+        // names and were absent from the dispatch, so they fell through to the
+        // generic renderer, which prints the raw tool name and no card.
+        let shell = flatten(&render_tool(
+            "shell_execute",
+            r#"{"command":"cargo test"}"#,
+            "ok",
+            &cell_opts(),
+        ));
+        assert!(
+            !shell.contains("shell_execute("),
+            "shell_execute still hits the generic renderer:\n{shell}"
+        );
+        assert!(shell.contains("cargo test"), "{shell}");
+
+        for name in ["multi_file_edit", "notebook_edit"] {
+            let out = flatten(&render_tool(
+                name,
+                r#"{"path":"/proj/src/main.rs","old_string":"a","new_string":"b"}"#,
+                "",
+                &cell_opts(),
+            ));
+            assert!(
+                out.contains("main.rs"),
+                "{name} did not name its file:\n{out}"
+            );
         }
     }
 }

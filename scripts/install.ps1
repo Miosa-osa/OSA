@@ -294,15 +294,24 @@ New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 # Load user config (provider/model/keys) before booting the backend, mirroring
 # the POSIX launcher which sources ~/.osa/.env. A .env is shell KEY=VALUE format,
 # not PowerShell, so parse it line-by-line. A malformed line is skipped.
+#
+# NON-DESTRUCTIVE (mirrors the POSIX launcher): the file supplies DEFAULTS only.
+# A variable already present in the environment WINS, so `$env:OLLAMA_MODEL='x';
+# osa` is not silently clobbered by whatever ~/.osa/.env last saved.
 if (Test-Path $EnvFile) {
   foreach ($line in Get-Content -LiteralPath $EnvFile) {
     $t = $line.Trim()
     if ($t -eq '' -or $t.StartsWith('#')) { continue }
+    if ($t -match '^export\s+') { $t = $t -replace '^export\s+', '' }
     $eq = $t.IndexOf('=')
     if ($eq -lt 1) { continue }
     $key = $t.Substring(0, $eq).Trim()
     $val = $t.Substring($eq + 1).Trim().Trim('"').Trim("'")
-    if ($key) { Set-Item -Path ("Env:" + $key) -Value $val -ErrorAction SilentlyContinue }
+    if (-not $key) { continue }
+    $existing = [Environment]::GetEnvironmentVariable($key, 'Process')
+    if ([string]::IsNullOrEmpty($existing)) {
+      Set-Item -Path ("Env:" + $key) -Value $val -ErrorAction SilentlyContinue
+    }
   }
 }
 

@@ -28,6 +28,11 @@ pub struct Sidebar {
     session_id: String,
     tool_count: usize,
     context_pct: f64,
+    /// Resolved context window, or 0 when the backend could not determine it.
+    /// 0 switches the Context section to a token count with no percentage.
+    context_max: u64,
+    /// Tokens currently occupying the context, rendered when `context_max` is 0.
+    context_tokens: u64,
     // ── New fields ──────────────────────────────────────────────────────────
     /// Cumulative input tokens across all LlmResponse events this session.
     input_tokens: u64,
@@ -58,6 +63,8 @@ impl Sidebar {
             session_id: String::new(),
             tool_count: 0,
             context_pct: 0.0,
+            context_max: 0,
+            context_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             elapsed_ms: 0,
@@ -99,6 +106,19 @@ impl Sidebar {
 
     pub fn set_context(&mut self, pct: f64) {
         self.context_pct = pct.clamp(0.0, 1.0);
+        self.rebuild_sections();
+    }
+
+    /// Record the resolved context window and the tokens currently in use.
+    ///
+    /// `max == 0` means the backend could not honestly resolve the model's
+    /// window, so there is no denominator and any percentage would be
+    /// fabricated. In that state the Context section renders the token count
+    /// with no bar and no percent — mirroring the status bar, and never
+    /// claiming "0%" while tokens are demonstrably in use.
+    pub fn set_context_window(&mut self, max: u64, used_tokens: u64) {
+        self.context_max = max;
+        self.context_tokens = used_tokens;
         self.rebuild_sections();
     }
 
@@ -219,7 +239,22 @@ impl Sidebar {
         }
 
         // ── Context window ────────────────────────────────────────────────
-        {
+        // When the window is unknown (`context_max == 0`) there is no honest
+        // denominator: show the token count instead of a bar and a percentage
+        // that would always read 0%.
+        if self.context_max == 0 {
+            if self.context_tokens > 0 {
+                self.sections.push(SidebarSection {
+                    title: "Context".into(),
+                    items: vec![
+                        ("used".into(), crate::components::status_bar::compact_tokens(
+                            self.context_tokens,
+                        )),
+                        ("window".into(), "unknown".into()),
+                    ],
+                });
+            }
+        } else {
             // Visual bar width = inner width - label prefix "ctx " (4)
             let bar_w = (self.width as usize).saturating_sub(8).max(4);
             let filled = ((self.context_pct * bar_w as f64).round() as usize).min(bar_w);
@@ -455,5 +490,43 @@ mod sidebar_tests {
             .iter()
             .any(|sec| sec.items.iter().any(|(label, _)| label == "proactive"));
         assert!(has_proactive, "proactive mode should still surface in the sidebar");
+    }
+
+    fn context_items(s: &Sidebar) -> Vec<(String, String)> {
+        s.sections
+            .iter()
+            .filter(|sec| sec.title == "Context")
+            .flat_map(|sec| sec.items.clone())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_window_shows_tokens_not_zero_percent() {
+        // Mirrors the status bar: with no resolvable window there is no honest
+        // denominator, so the sidebar must not claim 0% while tokens are in use.
+        let mut s = Sidebar::new();
+        s.set_context(0.0);
+        s.set_context_window(0, 52_100);
+
+        let items = context_items(&s);
+        assert!(
+            items.iter().any(|(k, v)| k == "used" && v == "~52.1k"),
+            "expected a token count, got: {items:?}"
+        );
+        assert!(
+            !items.iter().any(|(_, v)| v.contains('%')),
+            "no percentage when the window is unknown, got: {items:?}"
+        );
+    }
+
+    #[test]
+    fn known_window_still_shows_bar_and_percent() {
+        let mut s = Sidebar::new();
+        s.set_context(0.05);
+        s.set_context_window(1_000_000, 52_100);
+
+        let items = context_items(&s);
+        assert!(items.iter().any(|(k, v)| k == "use" && v == "5%"), "{items:?}");
+        assert!(items.iter().any(|(k, _)| k == "ctx"), "bar still rendered");
     }
 }

@@ -348,6 +348,11 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 #[serde(default)]
                 duration_ms: u64,
                 success: Option<bool>,
+                /// Stable per-call identity. Absent on an older backend, hence
+                /// `Option` + `#[serde(default)]`; consumers fall back to
+                /// name-based pairing when it is `None`.
+                #[serde(default)]
+                tool_call_id: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -358,10 +363,12 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                     name: ev.name,
                     duration_ms: ev.duration_ms,
                     success: ev.success.unwrap_or(true),
+                    tool_call_id: ev.tool_call_id,
                 }),
                 _ => Some(BackendEvent::ToolCallStart {
                     name: ev.name,
                     args: ev.args,
+                    tool_call_id: ev.tool_call_id,
                 }),
             }
         }
@@ -377,6 +384,8 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 tail: String,
                 #[serde(default)]
                 seq: u64,
+                #[serde(default)]
+                tool_call_id: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -387,6 +396,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 chunk: ev.chunk,
                 tail: ev.tail,
                 seq: ev.seq,
+                tool_call_id: ev.tool_call_id,
             })
         }
 
@@ -396,6 +406,8 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 name: String,
                 result: String,
                 success: bool,
+                #[serde(default)]
+                tool_call_id: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -405,6 +417,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 name: ev.name,
                 result: ev.result,
                 success: ev.success,
+                tool_call_id: ev.tool_call_id,
             })
         }
 
@@ -1771,6 +1784,41 @@ mod tests {
         match parse_sse_event("coordinator_mode", off) {
             Some(BackendEvent::CoordinatorMode { active }) => assert!(!active),
             other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The exact frame `Events.TuiForwarder` now puts on the wire for a
+    /// blocking `ask_user` call. Before the fix the backend never emitted this
+    /// at all (the sub-event was missing from the forwarder allowlist), so the
+    /// picker never opened and the tool hung on its own timeout.
+    #[test]
+    fn parses_ask_user_question_frame_from_the_forwarder() {
+        let data = br##"{"type":"system_event","event":"ask_user_question","session_id":"s1","survey_id":"#Reference<0.1.2.3>","skippable":true,"questions":[{"text":"Which parser should we keep?","multi_select":false,"skippable":true,"options":[{"label":"Rewrite the parser (Recommended)","description":"removes the whole class of escaping bugs"},{"label":"Patch in place","description":"faster but the bug class stays"}]}]}"##;
+
+        // Arrives either under its own frame name or wrapped as a system_event.
+        for frame in ["ask_user_question", "system_event"] {
+            match parse_sse_event(frame, data) {
+                Some(BackendEvent::AskUserQuestion {
+                    survey_id,
+                    questions,
+                    skippable,
+                }) => {
+                    assert_eq!(survey_id, "#Reference<0.1.2.3>");
+                    assert!(skippable, "must be dismissable with Esc");
+                    assert_eq!(questions.len(), 1);
+                    assert_eq!(questions[0].text, "Which parser should we keep?");
+                    assert_eq!(questions[0].options.len(), 2);
+                    assert_eq!(
+                        questions[0].options[0].label,
+                        "Rewrite the parser (Recommended)"
+                    );
+                    assert_eq!(
+                        questions[0].options[0].description.as_deref(),
+                        Some("removes the whole class of escaping bugs")
+                    );
+                }
+                other => panic!("unexpected for {}: {:?}", frame, other),
+            }
         }
     }
 

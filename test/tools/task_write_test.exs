@@ -231,4 +231,44 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWriteTest do
       assert result =~ "[failed: timeout]"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Session routing — the hop that made the checklist panel never appear
+  # ---------------------------------------------------------------------------
+
+  describe "session routing" do
+    alias OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler
+    alias OptimalSystemAgent.Tools.UseContext
+
+    test "the execution context wins over the \"default\" bucket" do
+      ctx = %UseContext{session_id: "real-session-42"}
+      assert Handler.resolve_session_id(%{"action" => "add"}, ctx) == "real-session-42"
+    end
+
+    test "an explicit session_id argument is honoured when there is no context" do
+      assert Handler.resolve_session_id(%{"session_id" => "explicit-7"}, %{}) == "explicit-7"
+    end
+
+    test "context-less, argument-less callers still land in the default bucket" do
+      assert Handler.resolve_session_id(%{}, nil) == "default"
+      assert Handler.resolve_session_id(%{}, %UseContext{session_id: nil}) == "default"
+    end
+
+    test "an added task is broadcast on the SESSION topic the TUI listens on" do
+      sid = "task-route-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{sid}")
+
+      assert {:ok, _msg} =
+               Handler.execute(
+                 %{"action" => "add", "title" => "Refactor the parser"},
+                 %UseContext{session_id: sid}
+               )
+
+      assert_receive {:osa_event, %{event: :task_created} = event}, 2000
+      assert event.session_id == sid
+      assert event.subject == "Refactor the parser"
+
+      Tasks.clear_tasks(sid)
+    end
+  end
 end

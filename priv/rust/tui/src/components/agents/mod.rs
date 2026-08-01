@@ -77,6 +77,96 @@ const SCRATCHPAD_CAP: usize = 5;
 /// `/agents` dashboard (`draw_dashboard`) still lists every node.
 pub(super) const INLINE_ROSTER_MAX_AGENTS: usize = 8;
 
+/// Most recent per-agent actions rendered as the child list under one agent row
+/// (CC `MAX_PROGRESS_MESSAGES_TO_SHOW`).
+pub(crate) const TRAIL_MAX_ACTIONS: usize = 3;
+
+/// Hard ceiling on the rows one agent's child list may occupy (actions + the
+/// optional "+N more tool uses" counter). Deliberately equal to the `All`
+/// verbosity feed ceiling in [`crate::components::activity::Activity::max_height`]
+/// so a fleet row's detail block can never be taller than the tool feed it sits
+/// beside — the child list is a bounded status strip, not a scrolling log.
+pub(crate) const TRAIL_MAX_ROWS: usize = 4;
+
+/// The label rendered on an agent's roster row: its live current action, falling
+/// back to the subject it was spawned with.
+pub(super) fn row_activity(entry: &AgentEntry) -> &str {
+    if !entry.current_action.trim().is_empty() {
+        entry.current_action.trim()
+    } else {
+        entry.subject.trim()
+    }
+}
+
+/// The de-duplicated, bounded child action list for one running agent, ordered
+/// oldest → newest (the order it is drawn in).
+///
+/// Two sources of repetition are removed here, because both were visibly on
+/// screen at once:
+///   * the newest recent action is usually the SAME string the roster row
+///     already shows as the agent's current action (the backend-less fallback in
+///     `agent_progress` pushes `current_action` straight into `recent_actions`),
+///     so the row read `explorer  dir_list` with a child `dir_list`;
+///   * a tool run repeatedly with the same argument (or with none) emitted the
+///     identical trail line several times.
+///
+/// MUST stay in lockstep with [`Agents::entry_rows`] and the trail built in
+/// `draw_tree`, which is why all three go through this one function.
+pub(super) fn trail_actions(entry: &AgentEntry) -> Vec<String> {
+    let head = row_activity(entry);
+    let mut out: Vec<String> = Vec::new();
+    // `recent_actions` is newest-first; collect newest-first, then flip.
+    for a in entry.recent_actions.iter() {
+        let t = a.trim();
+        if t.is_empty() || (!head.is_empty() && t == head) {
+            continue;
+        }
+        if out.iter().any(|e| e == t) {
+            continue;
+        }
+        out.push(t.to_string());
+        if out.len() == TRAIL_MAX_ACTIONS {
+            break;
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// Compact an internal agent routing key into a short human label.
+///
+/// The backend names workers by their full routing key —
+/// `agent:session-1785539672538-b5473d40b767:osa-explorer` — which is
+/// meaningless to a reader and, on the spinner row, ate the whole line and
+/// truncated the "esc to interrupt" affordance. Keep the trailing segment (the
+/// role the worker was spawned as) and drop the `osa-` vendor prefix, so the
+/// label matches the `explorer` shown on that worker's roster row.
+pub fn short_agent_label(name: &str) -> String {
+    let trimmed = name.trim().trim_start_matches('@');
+    let tail = trimmed.rsplit(':').find(|s| !s.trim().is_empty()).unwrap_or(trimmed);
+    let tail = tail.trim();
+    let tail = tail.strip_prefix("osa-").unwrap_or(tail);
+    if tail.is_empty() {
+        trimmed.to_string()
+    } else {
+        tail.to_string()
+    }
+}
+
+impl Agents {
+    /// Human label for `name` as the roster would show it: the tracked entry's
+    /// role when known (the identity the worker rows display), otherwise the
+    /// routing key compacted by [`short_agent_label`].
+    pub fn display_label(&self, name: &str) -> String {
+        if let Some(e) = self.entries.iter().find(|e| e.name == name) {
+            if !e.role.trim().is_empty() {
+                return e.role.trim().to_string();
+            }
+        }
+        short_agent_label(name)
+    }
+}
+
 impl Agents {
     pub fn new() -> Self {
         Self {
@@ -302,16 +392,17 @@ impl Agents {
     }
 
     /// Rows the tree needs for one agent: 1 subject row + the action trail.
-    /// Running agents show up to the last 3 recent actions plus a "+N more tool
-    /// uses" counter line (CC MAX_PROGRESS_MESSAGES_TO_SHOW=3); terminal agents
-    /// keep the compact 2-row layout. MUST stay in lockstep with the trail
-    /// built in `draw_tree` or the layout desyncs.
+    /// Running agents show the de-duplicated recent actions ([`trail_actions`],
+    /// at most [`TRAIL_MAX_ACTIONS`]) plus a "+N more tool uses" counter line,
+    /// the whole child list capped at [`TRAIL_MAX_ROWS`]; terminal agents keep
+    /// the compact 2-row layout. MUST stay in lockstep with the trail built in
+    /// `draw_tree` or the layout desyncs — both call `trail_actions`.
     pub(super) fn entry_rows(entry: &AgentEntry) -> u16 {
         match entry.status {
             AgentStatus::Running | AgentStatus::Spawning => {
-                let shown = entry.recent_actions.len().min(3);
+                let shown = trail_actions(entry).len();
                 let more = usize::from(entry.tool_uses as usize > shown);
-                1 + (shown + more).max(1) as u16
+                1 + (shown + more).max(1).min(TRAIL_MAX_ROWS) as u16
             }
             // Terminal rows: 1 subject + 1 Done/Failed trail + an optional dim
             // `⎿ <summary>` line when the backend delivered a result preview.
@@ -1087,9 +1178,15 @@ mod tests {
         let main_line = lines.iter().find(|l| l.contains("main")).expect("main row");
         assert!(main_line.contains('\u{25cf}'), "main uses ● glyph: {main_line:?}");
         assert!(main_line.contains("orchestrating the fleet"), "main activity: {main_line:?}");
-        // 625s → "10m 25s", 107_300 → "107.3k", arrow ↓.
-        assert!(main_line.contains("10m 25s"), "main elapsed column: {main_line:?}");
+        // 107_300 → "107.3k", arrow ↓.
         assert!(main_line.contains("\u{2193}107.3k"), "main ↓tokens column: {main_line:?}");
+        // ONE turn clock: `main.elapsed_secs` IS the turn elapsed the activity
+        // status line already renders next to the interrupt hint, so the inline
+        // roster root must NOT render it a second time (625s → "10m 25s").
+        assert!(
+            !main_line.contains("10m 25s"),
+            "main row must not restate the turn clock: {main_line:?}"
+        );
 
         // The worker row: `◯` unselected glyph, role as the type, activity, meta.
         let worker_line = lines

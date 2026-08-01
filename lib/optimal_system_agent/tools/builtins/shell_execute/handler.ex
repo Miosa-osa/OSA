@@ -136,7 +136,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
           run_in_sandbox(command, effective_cwd, timeout)
         else
           session_id = ctx && Map.get(ctx, :session_id)
-          run_command(command, effective_cwd, timeout, session_id)
+          # Owning tool_call id — tags every live-output delta so a TUI can
+          # route this command's stream to ITS OWN cell. Without it two
+          # concurrent commands (or the SAME command run twice) share one
+          # preview buffer and their output interleaves.
+          tool_call_id = ctx && Map.get(ctx, :tool_use_id)
+          run_command(command, effective_cwd, timeout, session_id, tool_call_id)
         end
     end
   end
@@ -454,7 +459,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   # ── Private: execution ────────────────────────────────────────────────
 
-  defp run_command(command, cwd, timeout_ms, session_id \\ nil) do
+  defp run_command(command, cwd, timeout_ms, session_id \\ nil, tool_call_id \\ nil) do
     # Spawn via Port (not System.cmd) so that on the timeout path we can kill
     # the underlying OS process — and on Windows its whole tree — instead of
     # only shutting down the BEAM task and leaking an orphaned child.
@@ -490,7 +495,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     # detachable (unique registry) — it still runs normally.
     registered? = register_foreground(session_id)
 
-    detach = %{command: command, cwd: cwd, session_id: session_id}
+    detach = %{
+      command: command,
+      cwd: cwd,
+      session_id: session_id,
+      tool_call_id: tool_call_id
+    }
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     try do
@@ -765,7 +775,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
       true ->
         chunk = stream.pending |> Enum.reverse() |> IO.iodata_to_binary() |> clip_chunk()
-        broadcast_output_delta(session_id, detach.command, chunk, tail, stream.seq)
+        broadcast_output_delta(
+          session_id,
+          detach.command,
+          chunk,
+          tail,
+          stream.seq,
+          Map.get(detach, :tool_call_id)
+        )
 
         %{
           stream
@@ -805,7 +822,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # directly (not via `Events.Bus`), no `Events.TuiForwarder` allowlist entry is
   # needed — the forwarder only bridges Bus-only sub-events, and adding it there
   # would double-emit.
-  defp broadcast_output_delta(session_id, command, chunk, tail, seq) when is_binary(session_id) do
+  defp broadcast_output_delta(session_id, command, chunk, tail, seq, tool_call_id)
+       when is_binary(session_id) do
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:session:#{session_id}",
@@ -814,6 +832,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
          type: :command_output_delta,
          session_id: session_id,
          command: command,
+         # Owning tool_call id. The COMMAND STRING is not a key: two concurrent
+         # runs of the same command are indistinguishable by it, and a client
+         # keyed on it interleaves (or repeatedly clears) their output.
+         tool_call_id: tool_call_id,
          chunk: ensure_utf8(chunk),
          tail: ensure_utf8(tail),
          seq: seq
@@ -827,7 +849,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     _, _ -> :ok
   end
 
-  defp broadcast_output_delta(_, _, _, _, _), do: :ok
+  defp broadcast_output_delta(_, _, _, _, _, _), do: :ok
 
   defp collected_output(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 

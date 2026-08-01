@@ -31,19 +31,30 @@ pub enum BackendEvent {
     },
 
     // === Tool Calls ===
+    //
+    // `tool_call_id` is the backend's stable per-call identity and is the ONLY
+    // correct way to pair a start with its end/result: tools run concurrently
+    // and every shell call is named `shell_execute`, so name-based pairing
+    // shuffles results between cells whenever completions land out of order.
+    // It is `Option` on purpose — a new TUI must still work against an older
+    // backend that does not emit it, in which case consumers fall back to the
+    // legacy name-based path.
     ToolCallStart {
         name: String,
         args: String,
+        tool_call_id: Option<String>,
     },
     ToolCallEnd {
         name: String,
         duration_ms: u64,
         success: bool,
+        tool_call_id: Option<String>,
     },
     ToolResult {
         name: String,
         result: String,
         success: bool,
+        tool_call_id: Option<String>,
     },
 
     /// Live stdout/stderr from a still-running foreground shell command
@@ -52,11 +63,14 @@ pub enum BackendEvent {
     /// since the previous delta; `tail` is a rolling snapshot of the end of the
     /// output for a client that connected late or dropped frames; `seq` is a
     /// per-command counter so gaps are detectable.
+    /// `tool_call_id` identifies the owning shell call so concurrent commands
+    /// each get their own preview buffer. `Option` for old-backend compat.
     CommandOutputDelta {
         command: String,
         chunk: String,
         tail: String,
         seq: u64,
+        tool_call_id: Option<String>,
     },
 
     // === LLM ===

@@ -232,7 +232,11 @@ impl App {
                     self.notify_turn_complete();
                 }
             }
-            BackendEvent::ToolCallStart { name, args } => {
+            BackendEvent::ToolCallStart {
+                name,
+                args,
+                tool_call_id,
+            } => {
                 // Flush any accumulated streaming text as a chat message BEFORE
                 // the tool call. This interleaves text and tool calls
                 // chronologically instead of dumping all text at the end.
@@ -286,7 +290,11 @@ impl App {
                 if !self.activity.is_active() {
                     self.activity.start();
                 }
-                self.activity.tool_start(&name, &args);
+                // Key the live feed line by the per-call id, exactly as the tool
+                // RESULT pairing does. Name-only keying let two concurrent
+                // `delegate` calls close each other's row.
+                self.activity
+                    .tool_start_with_id(&name, &args, tool_call_id.as_deref());
                 self.activity.set_phase(ProcessingPhase::ToolCall);
                 // A shell call with run_in_background counts as a live background
                 // terminal until its `background_command_completed` event lands.
@@ -306,9 +314,14 @@ impl App {
                         self.active_fg_shell_count += 1;
                     }
                 }
-                // Stash args (FIFO queue per name) so ToolCallEnd can build a rich
-                // summary even when several same-name calls overlap.
-                self.pending_tool_args.entry(name.clone()).or_default().push(args);
+                // Stash args so ToolCallEnd can build a rich summary. Keyed by
+                // the per-call id when the backend sent one (exact pairing even
+                // with many concurrent same-name calls); otherwise by name with
+                // the legacy FIFO queue.
+                self.pending_tool_args
+                    .entry(pending_key(&name, tool_call_id.as_deref()))
+                    .or_default()
+                    .push(args);
                 self.recompute_layout();
                 debug!("Tool call start: {}", name);
             }
@@ -317,6 +330,7 @@ impl App {
                 chunk,
                 tail,
                 seq,
+                tool_call_id,
             } => {
                 // A still-running foreground shell command is talking. Append to
                 // the bounded live preview so the activity feed shows a tail
@@ -327,10 +341,15 @@ impl App {
                 // with seq > 0 arriving first (late SSE attach, dropped frames)
                 // seeds from `tail` — the rolling snapshot — instead of showing
                 // a preview that starts mid-stream with no context.
-                let seeding = seq > 0 && self.activity.live_output_lines().is_empty();
+                //
+                // Routed by the owning call id, NOT the command string: two
+                // concurrent commands used to thrash one shared buffer, and the
+                // same command run twice interleaved into it.
+                let key = live_output_key(&command, tool_call_id.as_deref());
+                let seeding = seq > 0 && self.activity.live_stream_is_empty(&key);
                 let text = if seeding { &tail } else { &chunk };
                 if !text.is_empty() {
-                    self.activity.push_command_output(&command, text);
+                    self.activity.push_command_output(&key, text);
                 }
                 // No redraw request needed: the event loop repaints the live
                 // region every tick (the spinner cadence), so the appended tail
@@ -341,13 +360,22 @@ impl App {
                 name,
                 duration_ms,
                 success,
+                tool_call_id,
             } => {
                 // The command is done — its full output goes to scrollback via
-                // the tool summary below, so drop the live preview.
+                // the tool summary below, so drop the live preview. Only THIS
+                // call's buffer: a concurrent command may still be streaming.
+                // Without an id we cannot tell the buffers apart, so keep the
+                // legacy clear-everything behavior.
                 if is_shell_tool(&name) {
-                    self.activity.clear_command_output();
+                    match tool_call_id.as_deref() {
+                        Some(id) => self.activity.clear_command_output_for(id),
+                        None => self.activity.clear_command_output(),
+                    }
                 }
-                self.activity.tool_end(&name, duration_ms, success);
+                let pending_key = pending_key(&name, tool_call_id.as_deref());
+                self.activity
+                    .tool_end_with_id(&name, duration_ms, success, tool_call_id.as_deref());
                 self.activity.set_phase(ProcessingPhase::Waiting);
                 // Item 3 — after a tool completes we're blocked on the model to
                 // resume streaming; name that wait instead of a flavor verb.
@@ -363,7 +391,7 @@ impl App {
                 // building any scrollback line.
                 let pending = self
                     .pending_tool_args
-                    .get_mut(&name)
+                    .get_mut(&pending_key)
                     .filter(|q| !q.is_empty())
                     .map(|q| q.remove(0));
                 let orphan = is_orphan_tool_end(pending.is_some());
@@ -426,6 +454,7 @@ impl App {
                         use crate::components::chat::message::ToolCallData;
                         self.chat.add_tool_message_rich(ToolCallData {
                             name: name.clone(),
+                            tool_call_id: tool_call_id.clone(),
                             args,
                             result: String::new(),
                             duration_ms,
@@ -446,22 +475,29 @@ impl App {
                 // message and finalize it into scrollback. For a collapsible run
                 // (no per-call message) the stashed result is simply discarded so
                 // the map never leaks.
-                if let Some(mut results) = self.pending_tool_results.remove(&name) {
+                if let Some(mut results) = self.pending_tool_results.remove(&pending_key) {
                     if !results.is_empty() {
                         let (res, _succ) = results.remove(0);
                         if built_tool_message && !res.is_empty() {
-                            self.chat.update_last_tool_result(&name, &res);
+                            self.chat.update_last_tool_result(
+                                &name,
+                                tool_call_id.as_deref(),
+                                &res,
+                            );
                         }
-                        self.chat.finalize_tool(&name);
+                        self.chat.finalize_tool(&name, tool_call_id.as_deref());
                     }
                     // Requeue any further out-of-order results for later calls.
                     if !results.is_empty() {
-                        self.pending_tool_results.insert(name.clone(), results);
+                        self.pending_tool_results.insert(pending_key, results);
                     }
                 }
             }
             BackendEvent::ToolResult {
-                name, result, success,
+                name,
+                result,
+                success,
+                tool_call_id,
             } => {
                 // U-B6 — ToolResult can arrive BEFORE its ToolCallEnd on an
                 // out-of-order stream. ToolCallEnd is what builds the scrollback
@@ -470,13 +506,14 @@ impl App {
                 // in `pending_tool_args` (pushed on start, popped on end); in that
                 // window stash the result for ToolCallEnd to attach. Otherwise the
                 // message already exists → attach + finalize now (unchanged path).
+                let pending_key = pending_key(&name, tool_call_id.as_deref());
                 let call_args_still_queued = self
                     .pending_tool_args
-                    .get(&name)
+                    .get(&pending_key)
                     .map_or(false, |q| !q.is_empty());
                 if tool_result_should_stash(call_args_still_queued) {
                     self.pending_tool_results
-                        .entry(name.clone())
+                        .entry(pending_key)
                         .or_default()
                         .push((result, success));
                 } else {
@@ -484,9 +521,10 @@ impl App {
                     // support, then finalize into native scrollback. Scrolled-back
                     // tool calls become static (lose Ctrl+O), matching Claude Code.
                     if !result.is_empty() {
-                        self.chat.update_last_tool_result(&name, &result);
+                        self.chat
+                            .update_last_tool_result(&name, tool_call_id.as_deref(), &result);
                     }
-                    self.chat.finalize_tool(&name);
+                    self.chat.finalize_tool(&name, tool_call_id.as_deref());
                 }
                 debug!("Tool result: {} (success={})", name, success);
             }
@@ -537,6 +575,12 @@ impl App {
                 self.status
                     .set_context_warning(percent_left, context_low.unwrap_or(false));
                 self.sidebar.set_context(ratio);
+                // `max_tokens == 0` means the backend could not honestly resolve
+                // this model's window. Tell the sidebar so it renders the token
+                // count instead of a fabricated (always-zero) percentage, same
+                // as the status bar.
+                self.sidebar
+                    .set_context_window(max_tokens, estimated_tokens);
             }
             BackendEvent::TaskCreated {
                 task_id,
@@ -1107,6 +1151,11 @@ impl App {
                     // still listening on the old one ("waiting for response" forever).
                     self.start_sse();
 
+                    // `--model` / `--provider` land here: the launch session id
+                    // only exists now, and the override is session-scoped so it
+                    // must be applied to THIS id (no-op when the flags are unset).
+                    self.apply_startup_model_override();
+
                     if resumed {
                         // Folder already had a conversation — pull its history back in
                         // so the user sees where they left off (Claude Code style).
@@ -1302,7 +1351,9 @@ impl App {
             }
             BackendEvent::OrchestratorAgentStarted { agent_name, role, model, subject, batch_id } => {
                 self.agents.agent_started(&agent_name, &role, &model, &subject, batch_id);
-                let display = if role.is_empty() { agent_name.clone() } else { format!("{}/{}", agent_name, role) };
+                // Short human label, never the raw `agent:session-…:osa-x` key.
+                let short = crate::components::agents::short_agent_label(&agent_name);
+                let display = if role.is_empty() { short } else { format!("{}/{}", short, role) };
                 self.sidebar.set_current_agent(display);
                 self.recompute_layout();
             }
@@ -1313,10 +1364,18 @@ impl App {
                 // real work. Surface the running sub-agent by name + subject on the
                 // spinner row ("@deep-scan: scanning modules") so the user always
                 // sees WHAT is happening, not just that something is.
+                //
+                // Use the SHORT human label, not the routing key. `agent_name` is
+                // the internal address
+                // (`agent:session-1785539672538-b5473d40b767:osa-explorer`); the
+                // raw form ate the whole status line and truncated the "esc to
+                // interrupt" affordance off the end of it. `display_label` gives
+                // the same identity the worker's roster row shows (`explorer`).
+                let who = self.agents.display_label(&agent_name);
                 let label = if subject.trim().is_empty() {
-                    format!("@{}: {}", agent_name, current_action)
+                    format!("@{}: {}", who, current_action)
                 } else {
-                    format!("@{}: {}", agent_name, subject)
+                    format!("@{}: {}", who, subject)
                 };
                 self.activity.set_active_verb(Some(label));
                 // Trail length can change the panel height — keep layout in sync.
@@ -2376,6 +2435,24 @@ fn is_orphan_tool_end(had_pending_args: bool) -> bool {
     !had_pending_args
 }
 
+/// Key for `pending_tool_args` / `pending_tool_results`.
+///
+/// The backend's per-call `tool_call_id` when it sent one — that is the ONLY
+/// key that survives concurrency, since tools run in parallel and every shell
+/// call is named `shell_execute`, so a name-keyed FIFO drained positionally
+/// (`results.remove(0)`) hands one call's result to another call's cell.
+/// Falls back to the tool name (the legacy FIFO behavior) for an older backend.
+fn pending_key(name: &str, tool_call_id: Option<&str>) -> String {
+    tool_call_id.unwrap_or(name).to_string()
+}
+
+/// Key for the live command-output preview buffers. Same reasoning as
+/// [`pending_key`]: the command STRING is not an identity (the same command can
+/// run twice concurrently), so prefer the owning call id.
+fn live_output_key(command: &str, tool_call_id: Option<&str>) -> String {
+    tool_call_id.unwrap_or(command).to_string()
+}
+
 /// Write a completion ping to the terminal via the channel-selected notifier
 /// (ghostty OSC 777 / kitty OSC 99 / OSC 9 fallback, tmux-wrapped, plus a BEL
 /// for terminals with no notification support). Control sequences the terminal
@@ -2494,6 +2571,36 @@ mod handle_backend_tests {
             !tool_result_should_stash(false),
             "result arriving after ToolCallEnd attaches directly"
         );
+    }
+
+    #[test]
+    fn pending_maps_are_keyed_per_call_not_per_tool_name() {
+        // Regression: `pending_tool_args` / `pending_tool_results` were keyed by
+        // tool NAME and drained positionally (`results.remove(0)`). Every shell
+        // call is named `shell_execute` and tools run concurrently, so two calls
+        // shared one queue and swapped args/results on out-of-order completion.
+        let (du, df) = ("call_du", "call_df");
+        assert_ne!(
+            pending_key("shell_execute", Some(du)),
+            pending_key("shell_execute", Some(df)),
+            "same-name concurrent calls must not share a queue"
+        );
+        assert_eq!(pending_key("shell_execute", Some(du)), du);
+
+        // Old backend (no id): legacy per-name FIFO keying is preserved.
+        assert_eq!(pending_key("shell_execute", None), "shell_execute");
+        assert_eq!(
+            pending_key("shell_execute", None),
+            pending_key("shell_execute", None)
+        );
+
+        // Live-output buffers: the command STRING is not an identity — the same
+        // command run twice concurrently must still get separate buffers.
+        assert_ne!(
+            live_output_key("du -sh .", Some(du)),
+            live_output_key("du -sh .", Some("call_du2")),
+        );
+        assert_eq!(live_output_key("du -sh .", None), "du -sh .");
     }
 
     #[test]

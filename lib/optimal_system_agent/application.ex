@@ -130,6 +130,15 @@ defmodule OptimalSystemAgent.Application do
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
 
+    # ETS table for channel-tracked sessions (SessionManager.track_session/2) —
+    # sessions a client has announced but whose Loop has not started yet.
+    # It was only ever created LAZILY by the first caller, which is usually a
+    # transient HTTP request process; when that process finished, the table it
+    # owned was destroyed and every tracked session vanished with it. Owning it
+    # here (app master, lives as long as the node) makes tracking durable, which
+    # is what lets a pre-first-turn model switch resolve its session.
+    :ets.new(:osa_runtime_sessions, [:named_table, :public, :set])
+
     # ETS table for read-before-write tracking — tracks which files have been read
     # per session so the pre_tool_use hook can nudge when writing unread files.
     :ets.new(:osa_files_read, [:named_table, :public, :set])

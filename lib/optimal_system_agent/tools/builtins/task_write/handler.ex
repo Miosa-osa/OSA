@@ -43,14 +43,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
   # ── Stage 3: Execute ───────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"action" => action} = args, _ctx) do
-    session_id = Map.get(args, "session_id") || Constants.default_session()
+  def execute(%{"action" => action} = args, ctx) do
+    # The checklist events (`task_created` / `task_updated`) are broadcast on
+    # `osa:session:<id>`, which is the topic the TUI's SSE stream subscribes to.
+    # This used to ignore `ctx` entirely and fall back to the literal string
+    # "default", so unless the model guessed the session uuid every task event
+    # was published to `osa:session:default` — a topic with no listener. The
+    # tool reported success and the checklist panel never appeared.
+    session_id = resolve_session_id(args, ctx)
     do_action(action, session_id, args)
   rescue
     e -> {:error, "TaskWrite error: #{Exception.message(e)}"}
   end
 
   def execute(_args, _ctx), do: {:error, "Missing required parameter: action"}
+
+  @doc """
+  The session the task list belongs to.
+
+  Trust the execution context first — it is the only value guaranteed to match
+  the topic the TUI listens on. An explicit `session_id` argument is honoured
+  next (cross-session bookkeeping), and the "default" bucket is the last resort
+  for context-less callers such as tests and the CLI.
+  """
+  @spec resolve_session_id(map(), UseContext.t() | any()) :: String.t()
+  def resolve_session_id(args, ctx) do
+    from_ctx =
+      case ctx do
+        %{session_id: sid} when is_binary(sid) and sid != "" -> sid
+        _ -> nil
+      end
+
+    arg_sid =
+      case Map.get(args, "session_id") || Map.get(args, "__session_id__") do
+        sid when is_binary(sid) and sid != "" -> sid
+        _ -> nil
+      end
+
+    from_ctx || arg_sid || Constants.default_session()
+  end
 
   # ── Actions ───────────────────────────────────────────────────────────
 

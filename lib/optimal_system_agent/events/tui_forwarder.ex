@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
   # producer already broadcasts on the session topic (tool_call, orchestrator_*,
   # background_*) is intentionally NOT here to avoid duplicates.
   @forward_events ~w(
+    ask_user
     progress_ledger
     steer_injected
     monitor_started
@@ -67,10 +68,12 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     session_id = data[:session_id] || data["session_id"] || payload[:session_id]
 
     if sub in @forward_events and is_binary(session_id) do
+      {out_sub, out_data} = shape(sub, data)
+
       event =
-        data
+        out_data
         |> Map.put(:type, :system_event)
-        |> Map.put(:event, sub)
+        |> Map.put(:event, out_sub)
         |> Map.put(:session_id, session_id)
 
       Phoenix.PubSub.broadcast(
@@ -86,6 +89,59 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
   catch
     _, _ -> :ok
   end
+
+  # ── Sub-event reshaping ───────────────────────────────────────────────
+  #
+  # Most sub-events pass through untouched. `ask_user` does NOT: the raw Bus
+  # payload carries a `reply_to` PID (not JSON-encodable — the SSE loop would
+  # drop the whole frame) and its `question`/`options` shape is not the wire
+  # contract the TUI survey dialog decodes. Reshape it into the
+  # `ask_user_question` survey frame the TUI already knows how to render.
+  @doc false
+  @spec shape(atom(), map()) :: {atom(), map()}
+  def shape(:ask_user, data) do
+    question = to_string(get(data, :question) || "")
+    options = get(data, :options) || []
+    ref = to_string(get(data, :ref) || "")
+
+    {:ask_user_question,
+     %{
+       survey_id: ref,
+       questions: [
+         %{
+           text: question,
+           multi_select: false,
+           options: Enum.map(List.wrap(options), &survey_option/1),
+           skippable: true
+         }
+       ],
+       skippable: true
+     }}
+  end
+
+  def shape(sub, data), do: {sub, data}
+
+  # Options arrive as flat strings shaped "Label (Recommended) — why you'd pick
+  # it". Split the label from its one-line rationale so the dialog can render
+  # the description on its own dimmed row (Claude Code / Codex presentation).
+  defp survey_option(opt) when is_map(opt) do
+    %{
+      label: to_string(get(opt, :label) || ""),
+      description: get(opt, :description)
+    }
+  end
+
+  defp survey_option(opt) do
+    text = to_string(opt)
+
+    case String.split(text, [" — ", " – ", " -- "], parts: 2) do
+      [label, desc] -> %{label: String.trim(label), description: String.trim(desc)}
+      _ -> %{label: String.trim(text), description: nil}
+    end
+  end
+
+  defp get(map, key) when is_map(map), do: Map.get(map, key) || Map.get(map, to_string(key))
+  defp get(_, _), do: nil
 
   # The inner emit payload is carried in the CloudEvents `:data` field.
   defp payload_data(%{data: data}) when is_map(data), do: data

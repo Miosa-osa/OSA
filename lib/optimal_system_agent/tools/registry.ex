@@ -293,10 +293,15 @@ defmodule OptimalSystemAgent.Tools.Registry do
   # every call (see `tool_executor.ex:113`); this carries through to the
   # context so structured tools can identify the session without the agent
   # loop having to thread an explicit context through every callsite.
+  # `tool_use_id` is per-call identity injected alongside `__session_id__`. It
+  # carries the owning tool_call id so a streaming tool (shell_execute) can tag
+  # its live-output deltas and the TUI can route them to the right cell even
+  # when several identical commands run concurrently.
   defp build_minimal_use_context(arguments) do
-    OptimalSystemAgent.Tools.UseContext.new(%{
-      session_id: arguments["__session_id__"] || arguments[:__session_id__]
-    })
+    OptimalSystemAgent.Tools.UseContext.new(
+      %{session_id: arguments["__session_id__"] || arguments[:__session_id__]},
+      tool_use_id: arguments["__tool_use_id__"] || arguments[:__tool_use_id__]
+    )
   end
 
   @doc """

@@ -553,56 +553,73 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         return vec![];
     }
 
-    let num_cols = parsed[0].len();
-
-    // Calculate column widths from each cell's VISIBLE width after inline
-    // markdown markup is stripped (so `**bold**` measures as `bold`), min 3.
-    let mut col_widths: Vec<usize> = vec![3; num_cols];
-    for row in &parsed {
-        for (i, cell) in row.iter().enumerate() {
-            if i < num_cols {
-                col_widths[i] = col_widths[i].max(inline_visible_width(cell, theme));
-            }
-        }
-    }
-
-    // Cap total width to available width
-    // Chrome = the `num_cols + 1` border columns PLUS the 3-column `" │ "` between
-    // each pair of columns. `total` accounted for both, but the re-cap below only
-    // subtracted the borders — leaving the capped table 3*(num_cols-1) columns too
-    // wide, so the trailing `│` and the tail of the last column were clipped off.
-    let separators = num_cols.saturating_sub(1) * 3;
-    let chrome = (num_cols + 1) + separators;
-    let total = col_widths.iter().sum::<usize>() + chrome;
-    if total > width as usize && width > 10 {
-        let max_per_col = (width as usize).saturating_sub(chrome) / num_cols.max(1);
-        for w in col_widths.iter_mut() {
-            *w = (*w).min(max_per_col).max(3);
-        }
+    // Rows may be ragged (a model routinely emits a short last row); size the
+    // table to the WIDEST row and blank-pad the short ones, so every rendered
+    // line has the same number of columns and the borders line up.
+    let num_cols = parsed.iter().map(Vec::len).max().unwrap_or(0);
+    if num_cols == 0 {
+        return vec![];
     }
 
     let muted = theme.faint();
 
-    // Render header row (first row, bold + primary)
+    // Natural column widths: each column's WIDEST cell measured after inline
+    // markdown markup is stripped (so `**bold**` measures as `bold`).
+    let mut natural: Vec<usize> = vec![MIN_COL_W; num_cols];
+    for row in &parsed {
+        for (i, cell) in row.iter().enumerate() {
+            if i < num_cols {
+                natural[i] = natural[i].max(inline_visible_width(cell, theme));
+            }
+        }
+    }
+
+    // Chrome = the 2-column `"│ "` lead-in, the 2-column `" │"` tail, and a
+    // 3-column `" │ "` between each pair of columns.
+    //
+    // The old expression was `(num_cols + 1) + 3 * (num_cols - 1)`, which happens
+    // to be right for 3 columns and is short by one for 2 and by two for 1 — so a
+    // 2-column table always drew one column wider than the terminal and lost its
+    // trailing border.
+    let chrome = 4 + num_cols.saturating_sub(1) * 3;
+
+    // Too narrow for a bordered table even at one column per cell: a box drawn
+    // here is pure noise (and would overflow the terminal). Degrade to plain
+    // wrapped text so the CONTENT survives.
+    if (width as usize) < chrome + num_cols {
+        let w = (width as usize).max(1);
+        for row in &parsed {
+            let joined = row
+                .iter()
+                .map(|c| inline_plain(c, theme))
+                .filter(|c| !c.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            for l in wrap_text(&joined, w) {
+                result.push(Line::from(Span::styled(clip_cols(&l, w), muted)));
+            }
+        }
+        return result;
+    }
+
+    let col_widths = allocate_col_widths(&natural, (width as usize) - chrome);
+
+    // Header row (first row, bold + primary).
     if let Some(header) = parsed.first() {
-        let mut spans = Vec::new();
-        spans.push(Span::styled("│ ".to_string(), muted));
         let header_base = Style::default()
             .fg(theme.colors.primary)
             .add_modifier(Modifier::BOLD);
-        for (i, cell) in header.iter().enumerate() {
-            let w = col_widths.get(i).copied().unwrap_or(10);
-            let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
-            spans.extend(fit_cell_spans(cell, w, align, header_base, theme));
-            if i < header.len() - 1 {
-                spans.push(Span::styled(" │ ".to_string(), muted));
-            }
-        }
-        spans.push(Span::styled(" │".to_string(), muted));
-        result.push(Line::from(spans));
+        result.extend(render_row_lines(
+            header,
+            &col_widths,
+            &alignments,
+            header_base,
+            muted,
+            theme,
+        ));
     }
 
-    // Render separator line
+    // Separator line.
     {
         let mut sep = String::from("├─");
         for (i, w) in col_widths.iter().enumerate() {
@@ -615,23 +632,135 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         result.push(Line::from(Span::styled(sep, muted)));
     }
 
-    // Render data rows (skip header)
+    // Data rows (skip header).
     for row in parsed.iter().skip(1) {
-        let mut spans = Vec::new();
-        spans.push(Span::styled("│ ".to_string(), muted));
-        for (i, cell) in row.iter().enumerate() {
-            let w = col_widths.get(i).copied().unwrap_or(10);
+        result.extend(render_row_lines(
+            row,
+            &col_widths,
+            &alignments,
+            Style::default(),
+            muted,
+            theme,
+        ));
+    }
+
+    result
+}
+
+/// Narrowest a table column may shrink to before the whole table degrades to
+/// plain text.
+const MIN_COL_W: usize = 3;
+
+/// Ceiling on the visual rows a single wrapped cell may occupy. A pathological
+/// cell (a pasted paragraph inside a 12-column column) would otherwise push the
+/// rest of the table off screen; past this the cell's tail is elided.
+const MAX_CELL_LINES: usize = 8;
+
+/// Distribute `avail` display columns across columns whose CONTENT widths are
+/// `natural`, by water-filling.
+///
+/// **This replaces an equal split** (`avail / num_cols` applied to every column
+/// alike), which was the bug behind every right-hand cell in a wide table being
+/// clipped at an identical point: a `| Topic | OSA | Codex |` table gave the
+/// 5-column `Topic` the same 24 columns as the 90-column prose columns, wasting
+/// 19 of them and clipping the prose at exactly 23 characters in every row.
+///
+/// Water-filling instead raises a common ceiling until the budget is spent:
+/// columns narrower than the ceiling keep their full natural width and the
+/// columns that actually need room split what is left. Any remainder is then
+/// handed to the still-clipped columns, largest unmet demand first, so no
+/// column is short by more than one column of a fair share.
+fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if natural.iter().sum::<usize>() <= avail {
+        return natural.to_vec();
+    }
+    if avail < n {
+        // Caller guards against this; stay panic-free regardless.
+        return vec![1; n];
+    }
+
+    // Highest ceiling whose capped total still fits. `floor` is never above
+    // `avail / n`, so the starting level always fits and `level` is well-defined.
+    let floor = MIN_COL_W.min(avail / n).max(1);
+    let mut level = floor;
+    for l in floor..=avail {
+        if natural.iter().map(|w| (*w).min(l)).sum::<usize>() <= avail {
+            level = l;
+        } else {
+            break;
+        }
+    }
+    let mut out: Vec<usize> = natural.iter().map(|w| (*w).min(level)).collect();
+
+    // Spend the remainder on whichever column is still furthest from its
+    // content width.
+    let mut leftover = avail.saturating_sub(out.iter().sum::<usize>());
+    while leftover > 0 {
+        let mut best: Option<usize> = None;
+        for i in 0..n {
+            if natural[i] <= out[i] {
+                continue;
+            }
+            let demand = natural[i] - out[i];
+            match best {
+                Some(b) if natural[b] - out[b] >= demand => {}
+                _ => best = Some(i),
+            }
+        }
+        match best {
+            Some(i) => {
+                out[i] += 1;
+                leftover -= 1;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// Render one table row into as many [`Line`]s as its tallest cell needs.
+///
+/// Cells that overflow their column WRAP rather than being clipped, so a narrow
+/// terminal degrades readably; short cells are blank-padded down to the row's
+/// height so the vertical borders stay aligned.
+fn render_row_lines(
+    cells: &[String],
+    col_widths: &[usize],
+    alignments: &[ColAlign],
+    base: Style,
+    muted: Style,
+    theme: &crate::style::Theme,
+) -> Vec<Line<'static>> {
+    let n = col_widths.len();
+    let per_cell: Vec<Vec<Vec<Span<'static>>>> = (0..n)
+        .map(|i| {
+            let cell = cells.get(i).map(String::as_str).unwrap_or("");
             let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
-            spans.extend(fit_cell_spans(cell, w, align, Style::default(), theme));
-            if i < row.len() - 1 {
+            cell_lines(cell, col_widths[i], align, base, theme)
+        })
+        .collect();
+    let height = per_cell.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
+    let mut out = Vec::with_capacity(height);
+    for j in 0..height {
+        let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ".to_string(), muted)];
+        for (i, cell) in per_cell.iter().enumerate() {
+            match cell.get(j) {
+                Some(segs) => spans.extend(segs.iter().cloned()),
+                None => spans.push(Span::styled(" ".repeat(col_widths[i]), base)),
+            }
+            if i + 1 < n {
                 spans.push(Span::styled(" │ ".to_string(), muted));
             }
         }
         spans.push(Span::styled(" │".to_string(), muted));
-        result.push(Line::from(spans));
+        out.push(Line::from(spans));
     }
-
-    result
+    out
 }
 
 /// GFM column alignment parsed from the table separator row.
@@ -642,21 +771,30 @@ enum ColAlign {
     Right,
 }
 
-/// Render a table cell's INLINE markdown (bold / code / links) as styled spans,
-/// padded (or truncated with `…`) to exactly `w` display columns per the column
+/// Render a table cell's INLINE markdown (bold / code / links) as one or more
+/// visual lines, each padded to exactly `w` display columns per the column
 /// alignment. `base` is the cell's default style, under which each inline span's
 /// own style is patched (so header bold + a code cell both apply).
 ///
-/// When the styled content fits, full inline styling is preserved. In the rare
-/// capped-width overflow case the cell degrades to plain truncated text — inline
-/// styling is dropped there rather than mis-measuring escape-laden spans.
-fn fit_cell_spans(
+/// When the styled content fits on one line, full inline styling is preserved.
+/// When it does not, the cell WRAPS on word boundaries (previously it was
+/// hard-clipped to `w-1` columns plus `…`, which destroyed the content of every
+/// row of a narrow column) — inline styling is dropped on that path rather than
+/// mis-measuring escape-laden spans across a wrap point.
+///
+/// All measurement and cutting is display-column and grapheme based
+/// ([`crate::util::cols`] / [`UnicodeSegmentation::graphemes`]); nothing here
+/// slices by byte or by char.
+fn cell_lines(
     cell: &str,
     w: usize,
     align: ColAlign,
     base: Style,
     theme: &crate::style::Theme,
-) -> Vec<Span<'static>> {
+) -> Vec<Vec<Span<'static>>> {
+    if w == 0 {
+        return vec![Vec::new()];
+    }
     let styled: Vec<Span<'static>> = parse_inline(cell, theme)
         .into_iter()
         .map(|s| Span::styled(s.content, base.patch(s.style)))
@@ -664,41 +802,100 @@ fn fit_cell_spans(
     let total: usize = styled.iter().map(|s| visible_width(s.content.as_ref())).sum();
 
     if total <= w {
-        let pad = w - total;
-        let (left, right) = match align {
-            ColAlign::Left => (0, pad),
-            ColAlign::Right => (pad, 0),
-            ColAlign::Center => (pad / 2, pad - pad / 2),
-        };
-        let mut out: Vec<Span<'static>> = Vec::with_capacity(styled.len() + 2);
-        if left > 0 {
-            out.push(Span::styled(" ".repeat(left), base));
-        }
-        out.extend(styled);
-        if right > 0 {
-            out.push(Span::styled(" ".repeat(right), base));
-        }
-        return out;
+        return vec![pad_cell_spans(styled, total, w, align, base)];
     }
 
-    // Overflow: grapheme-truncate the plain (markup-stripped) text.
-    let plain: String = styled.iter().map(|s| strip_escapes(s.content.as_ref())).collect();
+    // Overflow: wrap the plain (markup-stripped) text across as many rows as it
+    // needs, capped so one runaway cell cannot swallow the screen.
+    let plain = inline_plain(cell, theme);
+    let mut wrapped = wrap_text(&plain, w);
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    if wrapped.len() > MAX_CELL_LINES {
+        wrapped.truncate(MAX_CELL_LINES);
+        if let Some(last) = wrapped.last_mut() {
+            *last = elide_cols(last, w);
+        }
+    }
+    wrapped
+        .into_iter()
+        .map(|l| {
+            let l = clip_cols(&l, w);
+            let lw = crate::util::cols(&l);
+            pad_cell_spans(vec![Span::styled(l, base)], lw, w, align, base)
+        })
+        .collect()
+}
+
+/// Pad `spans` (already `total` columns wide) out to exactly `w` columns.
+fn pad_cell_spans(
+    spans: Vec<Span<'static>>,
+    total: usize,
+    w: usize,
+    align: ColAlign,
+    base: Style,
+) -> Vec<Span<'static>> {
+    let pad = w.saturating_sub(total);
+    let (left, right) = match align {
+        ColAlign::Left => (0, pad),
+        ColAlign::Right => (pad, 0),
+        ColAlign::Center => (pad / 2, pad - pad / 2),
+    };
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
+    if left > 0 {
+        out.push(Span::styled(" ".repeat(left), base));
+    }
+    out.extend(spans);
+    if right > 0 {
+        out.push(Span::styled(" ".repeat(right), base));
+    }
+    out
+}
+
+/// Cut `s` to at most `w` display columns on GRAPHEME boundaries. Defensive:
+/// [`wrap_text`] already force-breaks over-long words, but a zero-width or
+/// ambiguous-width sequence must never be allowed to overflow a column.
+fn clip_cols(s: &str, w: usize) -> String {
+    if crate::util::cols(s) <= w {
+        return s.to_string();
+    }
     let mut out = String::new();
-    let mut used = 0;
-    for g in UnicodeSegmentation::graphemes(plain.as_str(), true) {
+    let mut used = 0usize;
+    for g in UnicodeSegmentation::graphemes(s, true) {
         let gw = UnicodeWidthStr::width(g);
-        if used + gw > w.saturating_sub(1) {
+        if used + gw > w {
             break;
         }
         out.push_str(g);
         used += gw;
     }
-    out.push('…');
-    let final_w = UnicodeWidthStr::width(out.as_str());
-    if final_w < w {
-        out.push_str(&" ".repeat(w - final_w));
+    out
+}
+
+/// Mark `s` as elided: cut to at most `w` display columns with a trailing `…`.
+/// The marker is ALWAYS added — the caller only reaches here when content past
+/// this point is being dropped, so the reader must be told even if `s` itself
+/// happened to fit.
+fn elide_cols(s: &str, w: usize) -> String {
+    if w == 0 {
+        return String::new();
     }
-    vec![Span::styled(out, base)]
+    if w == 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut out = clip_cols(s.trim_end(), w - 1);
+    out.push('\u{2026}');
+    out
+}
+
+/// A cell's inline markdown rendered to plain text (markup stripped, OSC-8
+/// escapes removed) — what the wrapper and the narrow-terminal fallback lay out.
+fn inline_plain(cell: &str, theme: &crate::style::Theme) -> String {
+    parse_inline(cell, theme)
+        .iter()
+        .map(|s| strip_escapes(s.content.as_ref()))
+        .collect()
 }
 
 /// Sum of a cell's inline spans' visible widths (markup stripped, escapes
@@ -712,20 +909,11 @@ fn inline_visible_width(cell: &str, theme: &crate::style::Theme) -> usize {
 
 /// Display width of `s` ignoring OSC-8 escape wrappers (`ESC … ST`).
 fn visible_width(s: &str) -> usize {
-    let mut w = 0;
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            for n in chars.by_ref() {
-                if n == '\\' {
-                    break;
-                }
-            }
-        } else {
-            w += UnicodeWidthChar::width(c).unwrap_or(0);
-        }
-    }
-    w
+    // Measured on the WHOLE string, not char by char: `unicode-width` 0.2
+    // resolves emoji ZWJ sequences at the string level (`👩‍💻` is 2 columns), so
+    // summing per-char widths over-counts it by 2 — which is exactly how much a
+    // table row with an emoji cell used to overhang its own border.
+    crate::util::cols(&strip_escapes(s))
 }
 
 /// Strip OSC-8 escape wrappers (`ESC … ST`) from `s`, leaving visible text.
@@ -1278,7 +1466,7 @@ mod tests {
         expand_tabs, format_list_number, is_setext_underline, next_bare_url, parse_chip_index,
         parse_inline, parse_quote_depth, render_markdown, trim_url_trailing, wrap_text,
     };
-    use ratatui::style::Modifier;
+    use ratatui::style::{Modifier, Style};
 
     /// Flatten a full render to per-line visible strings (OSC-8 stripped).
     fn render_lines(src: &str, width: u16) -> Vec<String> {
@@ -1560,5 +1748,129 @@ mod tests {
             assert!(joined.contains(word), "lost word {word:?}: {:?}", l);
         }
         assert!(l[0].starts_with('○'), "{:?}", l);
+    }
+
+    // ── DEFECT 2: table column allocation + cell wrapping ───────────────────
+
+    #[test]
+    fn allocate_col_widths_is_identity_when_the_table_fits() {
+        assert_eq!(super::allocate_col_widths(&[5, 40, 40], 200), vec![5, 40, 40]);
+    }
+
+    /// The bug: an equal split gave the 5-column heading the same share as two
+    /// prose columns. Water-filling leaves the narrow column untouched and
+    /// spends everything it saved on the columns that actually need it.
+    #[test]
+    fn allocate_col_widths_shrinks_only_the_greedy_columns() {
+        let out = super::allocate_col_widths(&[5, 40, 40], 60);
+        assert_eq!(out.iter().sum::<usize>(), 60, "{out:?} must spend the budget");
+        assert_eq!(out[0], 5, "a column that already fits must not be padded: {out:?}");
+        assert!(out[1] > 5 && out[2] > 5, "{out:?}");
+        assert!(out[1].abs_diff(out[2]) <= 1, "equal demand → equal share: {out:?}");
+    }
+
+    /// It must never hand out more than the budget, at any width, and never
+    /// panic on the degenerate ones.
+    #[test]
+    fn allocate_col_widths_never_exceeds_its_budget() {
+        let naturals: &[&[usize]] = &[
+            &[5, 40, 40],
+            &[3, 3, 3],
+            &[100],
+            &[1, 2, 3, 4, 5, 6, 7],
+            &[80, 4, 4, 4],
+        ];
+        for nat in naturals {
+            for avail in 0usize..=200 {
+                let out = super::allocate_col_widths(nat, avail);
+                assert_eq!(out.len(), nat.len());
+                if avail >= nat.len() {
+                    assert!(
+                        out.iter().sum::<usize>() <= avail,
+                        "{nat:?} @ {avail} → {out:?}"
+                    );
+                }
+                assert!(out.iter().all(|w| *w >= 1), "{nat:?} @ {avail} → {out:?}");
+            }
+        }
+    }
+
+    /// A cell too wide for its column wraps onto extra rows instead of being cut
+    /// off with `…`, and every produced row is padded to exactly the column
+    /// width in DISPLAY COLUMNS.
+    #[test]
+    fn table_cell_wraps_and_pads_to_exact_width() {
+        let theme = crate::style::theme();
+        let out = super::cell_lines(
+            "orchestrator.ex (52KB) + OTP supervisors",
+            12,
+            super::ColAlign::Left,
+            Style::default(),
+            &theme,
+        );
+        assert!(out.len() > 1, "expected the cell to wrap: {out:?}");
+        let joined: String = out
+            .iter()
+            .map(|l| l.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // `orchestrator.ex` is 15 columns and cannot fit a 12-column column, so
+        // it is force-broken — but nothing is DISCARDED, which is the point.
+        for word in ["orchestrator", "52KB", "OTP", "supervisors"] {
+            assert!(joined.contains(word), "lost {word:?}: {joined:?}");
+        }
+        for line in &out {
+            let w: usize = line.iter().map(|s| crate::util::cols(s.content.as_ref())).sum();
+            assert_eq!(w, 12, "cell row is {w} cols, want 12: {line:?}");
+        }
+    }
+
+    /// A runaway cell is capped at [`super::MAX_CELL_LINES`] rows, with the cut
+    /// marked — the one place truncation is still allowed.
+    #[test]
+    fn table_cell_wrapping_is_capped() {
+        let theme = crate::style::theme();
+        let cell = "lorem ipsum dolor sit amet ".repeat(40);
+        let out = super::cell_lines(&cell, 6, super::ColAlign::Left, Style::default(), &theme);
+        assert_eq!(out.len(), super::MAX_CELL_LINES);
+        let last: String = out[out.len() - 1]
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(last.contains('\u{2026}'), "elision marker missing: {last:?}");
+    }
+
+    /// Wide glyphs are measured at their true 2-column advance, so a CJK cell
+    /// pads to the same total as an ASCII one and the box stays square.
+    #[test]
+    fn table_cell_wide_glyphs_pad_by_columns_not_chars() {
+        let theme = crate::style::theme();
+        for cell in ["模型", "ｶﾞｶﾞ", "abc", "日本語のテキストがここに入ります"] {
+            for w in 3usize..=20 {
+                for line in super::cell_lines(cell, w, super::ColAlign::Left, Style::default(), &theme)
+                {
+                    let got: usize =
+                        line.iter().map(|s| crate::util::cols(s.content.as_ref())).sum();
+                    assert_eq!(got, w, "cell {cell:?} @ {w} produced {got} cols: {line:?}");
+                }
+            }
+        }
+    }
+
+    /// Below the width where a bordered table can be drawn at all, the renderer
+    /// degrades to plain wrapped rows rather than emitting a broken box that
+    /// overflows the terminal.
+    #[test]
+    fn very_narrow_table_degrades_to_plain_text() {
+        let src = "| a | b | c |\n|---|---|---|\n| one | two | three |\n";
+        let l = render_lines(src, 8);
+        assert!(
+            l.iter().all(|s| !s.contains('┼')),
+            "expected no box drawing at width 8: {l:?}"
+        );
+        let joined = l.join(" ");
+        for word in ["one", "two", "three"] {
+            assert!(joined.contains(word), "lost {word:?}: {l:?}");
+        }
     }
 }

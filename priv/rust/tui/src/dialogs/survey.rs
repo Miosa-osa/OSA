@@ -49,6 +49,36 @@ pub struct SurveyQuestion {
     pub skippable: bool,
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Rows a word-wrapped `text` occupies at `width` columns. Mirrors ratatui's
+/// `Wrap { trim: true }` closely enough to reserve the right height.
+pub(crate) fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let width = width as usize;
+    let mut rows: u16 = 1;
+    let mut col = 0usize;
+    for word in text.split_whitespace() {
+        let w = UnicodeWidthStr::width(word).max(1);
+        if col == 0 {
+            col = w;
+        } else if col + 1 + w <= width {
+            col += 1 + w;
+        } else {
+            rows = rows.saturating_add(1);
+            col = w;
+        }
+        // A single word longer than the line spills onto further rows.
+        while col > width {
+            rows = rows.saturating_add(1);
+            col -= width;
+        }
+    }
+    rows
+}
+
 // ── Focus mode ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,7 +391,12 @@ impl SurveyDialog {
         // Title with step counter
         let total = self.questions.len();
         let current = self.current_step + 1;
-        let title = format!(" {} of {} questions ", current, total);
+        // Short header label — Claude Code / Codex keep it under ~12 chars.
+        let title = if total <= 1 {
+            " Question ".to_string()
+        } else {
+            format!(" {} of {} ", current, total)
+        };
 
         // Progress dots for the right side of the title
         let dots: String = (0..total)
@@ -411,17 +446,21 @@ impl SurveyDialog {
 
         let mut cy = inner.y + 1;
 
-        // Question text (bold)
+        // Question text (bold). Questions are full sentences, so wrap them —
+        // but cap the block at 3 rows so a runaway question can never push the
+        // options (the part the operator has to interact with) off-screen.
+        let q_rows = wrapped_line_count(&question.text, inner.width).clamp(1, 3);
         frame.render_widget(
             Paragraph::new(question.text.as_str())
+                .wrap(ratatui::widgets::Wrap { trim: true })
                 .style(
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-            Rect::new(inner.x, cy, inner.width, 1),
+            Rect::new(inner.x, cy, inner.width, q_rows),
         );
-        cy += 1;
+        cy += q_rows;
 
         // Subtitle
         let subtitle = if question.multi_select {

@@ -307,11 +307,40 @@ fi
 
 # Load user config (provider/model/keys) before booting the backend, so
 # config/runtime.exs sees it. A single malformed .env line is warned, not fatal.
+#
+# NON-DESTRUCTIVE: the file provides DEFAULTS, it does not overwrite. Plain
+# `set -a; . .env` clobbered anything the caller had exported, so
+# `OLLAMA_MODEL=x osa` silently ran whatever ~/.osa/.env last saved — inherited
+# environment must win. We still source the file (preserving its full shell
+# quoting semantics), then restore the values that were already set.
 if [ -f "$OSA_HOME/.env" ]; then
+  _osa_env_keys="$(
+    sed -n \
+      -e 's/^[[:space:]]*//' \
+      -e 's/^export[[:space:]][[:space:]]*//' \
+      -e 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*$/\1/p' \
+      "$OSA_HOME/.env" 2>/dev/null | sort -u
+  )"
+  for _k in $_osa_env_keys; do
+    eval "_v=\${$_k-}"
+    if [ -n "${_v:-}" ]; then
+      eval "_OSA_INHERITED_$_k=\$_v"
+    fi
+  done
+
   set +e; set +u; set -a
   . "$OSA_HOME/.env" 2>/dev/null \
     || echo "warning: some lines in $OSA_HOME/.env could not be parsed — ignoring them" >&2
   set +a; set -eu
+
+  for _k in $_osa_env_keys; do
+    eval "_v=\${_OSA_INHERITED_$_k-}"
+    if [ -n "${_v:-}" ]; then
+      export "$_k=$_v"
+    fi
+    unset "_OSA_INHERITED_$_k" 2>/dev/null || true
+  done
+  unset _osa_env_keys _k _v 2>/dev/null || true
 fi
 
 if [ ! -x "$RELEASE_BIN" ]; then
@@ -468,6 +497,8 @@ print_help() {
   printf "    ${CYAN}--continue${RESET}                      Resume newest session here\n"
   printf "    ${CYAN}--resume${RESET} ${DIM}[id]${RESET}                 Resume a session\n"
   printf "    ${CYAN}--permission-mode${RESET} ${DIM}<mode>${RESET}      ask · auto-edit · plan · overdrive\n"
+  printf "    ${CYAN}--model${RESET} ${DIM}<name>${RESET}                Run this session on <name> ${DIM}(overrides saved config)${RESET}\n"
+  printf "    ${CYAN}--provider${RESET} ${DIM}<name>${RESET}             Provider for ${CYAN}--model${RESET} ${DIM}(inferred when omitted)${RESET}\n"
   printf '\n'
   printf "  ${DIM}The backend keeps running in the background so the next ${RESET}${CYAN}osa${RESET}${DIM} is instant.\n"
   printf "  ${DIM}Stop it any time with ${RESET}${CYAN}osa stop${RESET}${DIM}; it also idles down when unused.${RESET}\n"

@@ -157,6 +157,17 @@ pub struct App {
     /// `--resume [id]`: Some(Some(id)) load that id; Some(None) open the session
     /// browser at startup; None = not requested. Consumed once at resolution.
     pub startup_resume: Option<Option<String>>,
+    /// `--model <name>` / `--provider <name>`: a one-shot, SESSION-SCOPED model
+    /// override applied the moment the launch session id is known.
+    ///
+    /// Session-scoped on purpose. The boot-time chain (`config.toml` outranking
+    /// `OLLAMA_MODEL`, `Settings.put_env`, the launcher sourcing `~/.osa/.env`)
+    /// means an env-based override loses on any machine where a model has ever
+    /// been picked in the TUI. `POST /sessions/:id/provider` swaps the LIVE
+    /// loop, so it beats on-disk config for this run without touching it.
+    /// `.take()`n on first use so a later /new or /resume keeps the choice
+    /// applied by the user, not by a stale launch flag.
+    pub startup_model: Option<(Option<String>, String)>,
 
     // State
     pub state: AppState,
@@ -211,18 +222,27 @@ pub struct App {
     pub cancelled: bool,
     pub sse_reconnecting: bool,
 
-    // Pending tool call args (tool_name -> args JSON), used to pair with ToolCallEnd
-    /// Per-tool-name FIFO queue of pending args. A Vec (not a single String) so
-    /// several concurrent calls of the SAME tool (e.g. many dir_list) don't
-    /// overwrite each other's args — which showed up as tool lines with no path.
+    // Pending tool call args, used to pair with ToolCallEnd.
+    /// Keyed by the backend's per-call `tool_call_id` when it sends one, else by
+    /// tool name (legacy fallback) — see `handle_backend::pending_key`. With an
+    /// id the queue holds exactly the one call's args, so concurrent same-name
+    /// calls can never take each other's. Without one it degrades to the old
+    /// per-name FIFO: a Vec (not a single String) so several concurrent calls of
+    /// the SAME tool don't overwrite each other's args — which showed up as tool
+    /// lines with no path.
     pub pending_tool_args: HashMap<String, Vec<String>>,
 
-    /// U-B6 — per-tool-name FIFO queue of tool results that arrived BEFORE their
+    /// U-B6 — queue of tool results that arrived BEFORE their
     /// `ToolCallEnd` (out-of-order stream). `ToolCallEnd` creates the scrollback
     /// message, so a `ToolResult` seen first has nothing to attach to and the
     /// output was silently dropped. Stashed here while the call is still pending
     /// (its args are still in `pending_tool_args`), then drained onto the message
     /// the instant `ToolCallEnd` builds it.
+    ///
+    /// Keyed identically to `pending_tool_args` (`handle_backend::pending_key`):
+    /// per-call id when available, tool name otherwise. The drain is positional
+    /// (`results.remove(0)`), which is only sound when the key identifies ONE
+    /// call — hence the id.
     pub pending_tool_results: HashMap<String, Vec<(String, bool)>>,
 
     /// U-B6 — signatures of background shell calls already counted in
@@ -532,6 +552,13 @@ impl App {
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,
             startup_resume: cli.resume.clone(),
+            // `--provider` alone (no `--model`) still needs a model to swap to;
+            // the backend resolves the provider's default when model is "".
+            startup_model: match (cli.model.clone(), cli.provider.clone()) {
+                (Some(m), p) => Some((p, m)),
+                (None, Some(p)) => Some((Some(p), String::new())),
+                (None, None) => None,
+            },
 
             workspace_name: None,
             state: AppState::Connecting,
@@ -851,9 +878,15 @@ impl App {
             // CC FleetView `main` root row: synthesize it from live session
             // state (top-level action, turn elapsed, session output tokens). No
             // backend event drives `main` — it is the home node the TUI owns.
+            // The `main` row states the GOAL — something no other surface in the
+            // live region carries. It used to fall back to a bare "Working…",
+            // which merely restated the spinner line's verb and the roster
+            // header's "Running N agents…", stacking three headers that all said
+            // the same thing. With no goal there is nothing unique to add, so the
+            // row stays quiet rather than echoing.
             let activity = match self.goal.as_deref() {
                 Some(g) if !g.trim().is_empty() => g.trim().to_string(),
-                _ if self.state == AppState::Processing => "Working…".to_string(),
+                _ if self.state == AppState::Processing => String::new(),
                 _ => "Ready".to_string(),
             };
             let elapsed = if self.state == AppState::Processing {

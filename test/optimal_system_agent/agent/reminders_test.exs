@@ -100,6 +100,68 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
       state = %{session_id: s, working_dir: tmp}
       assert Reminders.append("results", tc, state) == "results"
     end
+
+    # Regression: the ancestor walk used to climb to `/` whenever the touched
+    # path was outside the workspace root (or no root was known), which is how
+    # ANOTHER product's global skills — `~/.claude/skills/*/SKILL.md` — were
+    # announced to the model as "a skill near a path you just accessed".
+    test "never walks above the workspace root", %{tmp: tmp} do
+      s = sid()
+      outside = Path.join(System.tmp_dir!(), "rem-outside-#{System.unique_integer([:positive])}")
+      inner = Path.join(outside, "sub")
+      File.mkdir_p!(inner)
+      touched = Path.join(inner, "x.ex")
+      File.write!(touched, "x")
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      tc = %{name: "file_read", arguments: %{"path" => touched}, id: "o1"}
+      # `tmp` is the workspace; `touched` lives outside it.
+      state = %{session_id: s, working_dir: tmp}
+
+      assert Reminders.append("obs", tc, state) == "obs"
+    end
+
+    test "does not scan skills when the workspace root is unknown", %{touched: touched} do
+      s = sid()
+      tc = %{name: "file_read", arguments: %{"path" => touched}, id: "n1"}
+      # working_dir: nil and Cwd is the OSA repo, so `touched` (under tmp) is
+      # outside it — nothing may be discovered.
+      state = %{session_id: s, working_dir: nil}
+
+      refute Reminders.append("obs", tc, state) =~ "widget-maker"
+    end
+
+    test "the user's home directory is never scanned for skills" do
+      home = System.user_home!()
+      s = sid()
+      touched = Path.join(home, "some-file-that-need-not-exist.ex")
+      tc = %{name: "file_read", arguments: %{"path" => touched}, id: "h1"}
+      state = %{session_id: s, working_dir: home}
+
+      out = Reminders.append("obs", tc, state)
+      refute out =~ ".claude/skills"
+      refute out =~ ".osa/skills"
+    end
+
+    test "a third-party skills dir is labelled, not presented as an OSA skill" do
+      s = sid()
+      root = Path.join(System.tmp_dir!(), "rem-3p-#{System.unique_integer([:positive])}")
+      skill_dir = Path.join([root, ".claude", "skills", "writing-great-skills"])
+      File.mkdir_p!(skill_dir)
+      File.write!(Path.join(skill_dir, "SKILL.md"), "description: Reference for writing\n")
+      src = Path.join(root, "src")
+      File.mkdir_p!(src)
+      touched = Path.join(src, "a.ex")
+      File.write!(touched, "a")
+      on_exit(fn -> File.rm_rf(root) end)
+
+      tc = %{name: "file_read", arguments: %{"path" => touched}, id: "t3"}
+      out = Reminders.append("obs", tc, %{session_id: s, working_dir: root})
+
+      assert out =~ "writing-great-skills"
+      assert out =~ "third-party .claude skill"
+      assert out =~ "not an OSA skill"
+    end
   end
 
   describe "task-completion collector — subagents (RunStore)" do

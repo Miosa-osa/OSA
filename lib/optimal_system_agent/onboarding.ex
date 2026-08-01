@@ -180,96 +180,15 @@ defmodule OptimalSystemAgent.Onboarding do
         default_model: "glm-5.2:cloud",
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
-        # Current Ollama Cloud catalog (verified live 2026-07). All run with no
-        # local GPU/download — Ollama offloads to its cloud. `:cloud` tags require
-        # either an Ollama Cloud key or a signed-in device identity.
-        models: [
-          %{
-            id: "glm-5.2:cloud",
-            name: "GLM-5.2",
-            ctx: 1_000_000,
-            tools: true,
-            recommended: true,
-            note: "Z.ai flagship — long-horizon agentic + coding"
-          },
-          %{
-            id: "glm-5.1:cloud",
-            name: "GLM-5.1",
-            ctx: 202_752,
-            tools: true,
-            note: "agentic, state-of-the-art coding"
-          },
-          %{
-            id: "kimi-k2.7-code:cloud",
-            name: "Kimi K2.7 Code",
-            ctx: 262_144,
-            tools: true,
-            note: "Moonshot coding-focused agentic"
-          },
-          %{
-            id: "kimi-k2.6:cloud",
-            name: "Kimi K2.6",
-            ctx: 262_144,
-            tools: true,
-            note: "multimodal agentic, long-horizon coding"
-          },
-          %{
-            id: "minimax-m3:cloud",
-            name: "MiniMax M3",
-            ctx: 524_288,
-            tools: true,
-            note: "512K ctx, native multimodal + agentic"
-          },
-          %{
-            id: "deepseek-v4-pro:cloud",
-            name: "DeepSeek V4 Pro",
-            ctx: 524_288,
-            tools: true,
-            note: "512K ctx, frontier MoE, multiple reasoning modes"
-          },
-          %{
-            id: "deepseek-v4-flash:cloud",
-            name: "DeepSeek V4 Flash",
-            ctx: 1_048_576,
-            tools: true,
-            note: "1M ctx, 284B MoE / 13B active — fast"
-          },
-          %{
-            id: "gpt-oss:120b-cloud",
-            name: "GPT-OSS 120B",
-            ctx: 131_072,
-            tools: true,
-            note: "OpenAI open-weight, strong reasoning"
-          },
-          %{
-            id: "qwen3.5:cloud",
-            name: "Qwen 3.5",
-            ctx: 262_144,
-            tools: true,
-            note: "multimodal, vision + tools"
-          },
-          %{
-            id: "gpt-oss:20b-cloud",
-            name: "GPT-OSS 20B",
-            ctx: 131_072,
-            tools: true,
-            note: "OpenAI open-weight, fast — light utility tier"
-          },
-          %{
-            id: "nemotron-3-super:cloud",
-            name: "Nemotron 3 Super",
-            ctx: 262_144,
-            tools: true,
-            note: "262K ctx, 120B MoE — efficient agentic"
-          },
-          %{
-            id: "gemma4:cloud",
-            name: "Gemma 4",
-            ctx: 262_144,
-            tools: true,
-            note: "262K ctx, frontier reasoning + multimodal"
-          }
-        ]
+        # Current Ollama Cloud catalog. All run with no local GPU/download —
+        # Ollama offloads to its cloud. `:cloud` tags require either an Ollama
+        # Cloud key or a signed-in device identity.
+        #
+        # SINGLE SOURCE OF TRUTH: `Providers.OllamaCloud` (context windows,
+        # capabilities, pricing, notes). Add new cloud models THERE — this list
+        # is derived, and so are the Registry context-window table, the pricing
+        # table and the Ollama tool/thinking gating.
+        models: OptimalSystemAgent.Providers.OllamaCloud.picker_models()
       },
       %{
         id: "ollama_local",

@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Agent.Loop.ToolError
+  alias OptimalSystemAgent.Agent.Loop.ToolHint
   alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
   alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Permissions.AutoClassifier
@@ -257,6 +258,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :tool_call,
       %{
         name: tool_call.name,
+        # Stable per-call identity. Tools run CONCURRENTLY and every shell call
+        # shares the name "shell_execute", so any consumer that pairs
+        # start/end/result by NAME shuffles results between cells. Emit the id
+        # that already exists for LLM history so the wire can pair exactly.
+        tool_call_id: tool_call.id,
         phase: :start,
         args: arg_hint,
         session_id: state.session_id,
@@ -275,6 +281,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
        %{
          type: :tool_call,
          name: tool_call.name,
+         tool_call_id: tool_call.id,
          phase: "start",
          args: arg_hint,
          session_id: state.session_id
@@ -990,6 +997,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         enriched_args =
           modified_args
           |> Map.put("__session_id__", state.session_id)
+          |> Map.put("__tool_use_id__", tool_call.id)
           |> Map.put("__surface__", authority_surface(state))
 
         execute_tool(tool_call.name, enriched_args)
@@ -999,6 +1007,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         enriched_args =
           tool_call.arguments
           |> Map.put("__session_id__", state.session_id)
+          |> Map.put("__tool_use_id__", tool_call.id)
           |> Map.put("__surface__", authority_surface(state))
 
         execute_tool(tool_call.name, enriched_args)
@@ -1098,6 +1107,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :tool_call,
       %{
         name: tool_call.name,
+        tool_call_id: tool_call.id,
         phase: :end,
         duration_ms: tool_duration_ms,
         result_bytes: byte_size(result_str),
@@ -1116,6 +1126,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
        %{
          type: :tool_call,
          name: tool_call.name,
+         tool_call_id: tool_call.id,
          phase: "end",
          duration_ms: tool_duration_ms,
          success: true,
@@ -1132,6 +1143,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     tool_result_event =
       %{
         name: tool_call.name,
+        tool_call_id: tool_call.id,
         result: result_preview,
         result_bytes: byte_size(result_str),
         success: tool_success,
@@ -1150,6 +1162,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          %{
            type: :tool_result,
            name: tool_call.name,
+           tool_call_id: tool_call.id,
            result: result_preview,
            success: tool_success,
            session_id: state.session_id
@@ -1245,44 +1258,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       result_str
   end
 
-  # For file_edit: send full JSON args so TUI can render the diff with
-  # old_string/new_string. For other tools: send a short hint.
-  defp tool_call_hint(%{"old_string" => _, "new_string" => _} = args) do
-    case Jason.encode(args) do
-      {:ok, json} -> json
-      _ -> Map.get(args, "path", "")
-    end
-  end
-
-  defp tool_call_hint(%{"action" => "screenshot"}), do: "screenshot"
-  defp tool_call_hint(%{"action" => "click", "x" => x, "y" => y}), do: "click (#{x}, #{y})"
-  defp tool_call_hint(%{"action" => "click", "target" => t}), do: "click → #{t}"
-
-  defp tool_call_hint(%{"action" => "double_click", "x" => x, "y" => y}),
-    do: "double_click (#{x}, #{y})"
-
-  defp tool_call_hint(%{"action" => "type", "text" => t}), do: "type #{String.slice(t, 0, 30)}"
-  defp tool_call_hint(%{"action" => "key", "text" => t}), do: "key #{t}"
-  defp tool_call_hint(%{"action" => "scroll", "direction" => d}), do: "scroll #{d}"
-
-  defp tool_call_hint(%{"action" => "move_mouse", "x" => x, "y" => y}),
-    do: "move_mouse (#{x}, #{y})"
-
-  defp tool_call_hint(%{"action" => "drag", "x" => x, "y" => y}), do: "drag (#{x}, #{y})"
-  defp tool_call_hint(%{"action" => a}), do: a
-
-  defp tool_call_hint(%{"command" => cmd}), do: String.slice(cmd, 0, 60)
-  defp tool_call_hint(%{"path" => p}), do: p
-  defp tool_call_hint(%{"query" => q}), do: String.slice(q, 0, 60)
-  # use_skill: surface the skill name (not the arg keys) so the live activity
-  # feed and permission dialog show which skill is running.
-  defp tool_call_hint(%{"skill_name" => s}) when is_binary(s), do: s
-
-  defp tool_call_hint(args) when is_map(args) and map_size(args) > 0 do
-    args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")
-  end
-
-  defp tool_call_hint(_), do: ""
+  # Argument summary shown next to the tool name in the TUI. Extracted into
+  # `Loop.ToolHint` so it is directly testable — the previous inline version
+  # was private, and the only "test" for it was a hand-copied MIRROR of the
+  # clauses in test/agent/loop_injection_test.exs, which could not catch the
+  # schema-parameter-name and raw-JSON regressions this replaces.
+  defp tool_call_hint(args), do: ToolHint.summarize(args)
 
   defp file_was_read?(session_id, path) do
     try do

@@ -7,8 +7,13 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   each transition for the CLI renderer to pick up.
 
   Persistence: `~/.osa/sessions/{session_id}/tasks.json` (atomic .tmp→rename).
-  Auto-extraction: registers a `:post_response` hook that parses numbered lists
-  and markdown checkboxes from agent responses.
+
+  Plans are NEVER inferred from assistant prose. Tasks enter the checklist only
+  through an explicit call (`add_task/3`, `add_tasks/3`) — i.e. an explicit tool
+  call by the model. A `:post_response` hook used to scrape numbered lists out of
+  answers, which turned descriptive findings ("1. Channels. OSA can talk via
+  Telegram…") into fake outstanding work; that hook has been removed.
+  `extract_tasks_from_response/1` remains available but is opt-in only.
   """
   use GenServer
   require Logger
@@ -126,6 +131,11 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
 
   Parses numbered lists (`1. Do something`) and markdown checkboxes
   (`- [ ] Do something`). Only returns titles between 5–120 chars, capped at 20.
+
+  NOTE: this is a pure helper, and is deliberately NOT wired to any response
+  hook. Do not use it to populate a session checklist automatically — prose
+  numbered lists are usually findings, not actions, and the 120-char cap makes
+  it silently take a non-contiguous subset of them.
   """
   @spec extract_tasks_from_response(String.t()) :: [String.t()]
   def extract_tasks_from_response(text) when is_binary(text) do
@@ -146,8 +156,6 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
 
   @impl true
   def init(_opts) do
-    # Register auto-extraction hook after Hooks GenServer is up
-    schedule_hook_registration()
     Logger.info("[TaskTracker] Started")
     {:ok, %__MODULE__{}}
   end
@@ -446,24 +454,6 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
     end
   end
 
-  @impl true
-  def handle_info(:register_hook, state) do
-    try do
-      OptimalSystemAgent.Agent.Hooks.register(
-        :post_response,
-        "task_auto_extract",
-        &auto_extract_hook/1,
-        priority: 80
-      )
-
-      Logger.debug("[TaskTracker] Registered auto-extraction hook")
-    rescue
-      _ -> Logger.debug("[TaskTracker] Hooks not available, skipping auto-extraction hook")
-    end
-
-    {:noreply, state}
-  end
-
   # ── Private ────────────────────────────────────────────────────────
 
   defp safe_emit(event_type, payload) do
@@ -479,10 +469,6 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
     end)
 
     :ok
-  end
-
-  defp schedule_hook_registration do
-    Process.send_after(self(), :register_hook, 500)
   end
 
   defp new_task(title, opts \\ %{}) do
@@ -633,35 +619,4 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   end
 
   defp parse_datetime(_), do: nil
-
-  # ── Auto-extraction hook ───────────────────────────────────────────
-
-  defp auto_extract_hook(payload) do
-    session_id = payload[:session_id]
-    response = payload[:response] || payload[:text] || ""
-
-    if is_binary(session_id) and is_binary(response) do
-      # Only extract if no tasks exist yet for this session
-      existing =
-        try do
-          get_tasks(session_id)
-        rescue
-          _ -> []
-        end
-
-      if existing == [] do
-        titles = extract_tasks_from_response(response)
-
-        if length(titles) >= 3 do
-          try do
-            add_tasks(session_id, titles)
-          rescue
-            _ -> :ok
-          end
-        end
-      end
-    end
-
-    {:ok, payload}
-  end
 end

@@ -430,6 +430,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     session_id = conn.params["id"]
     user_id = conn.assigns[:user_id] || "anonymous"
 
+    # Same announcement semantics as GET /stream/:session_id in AgentRoutes:
+    # subscribing records the client-held id so pre-first-turn, session-scoped
+    # writes (model switch) resolve instead of 404ing. No Loop is started here.
+    SessionManager.track_session(session_id, %{user_id: user_id, channel: :sse})
+
     Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
 
     conn =
@@ -716,6 +721,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       key = {session_id, survey_id}
       :ets.insert(:osa_survey_answers, {key, :skipped})
 
+      # Escape hatch: unblock a waiting `ask_user` tool immediately instead of
+      # letting it sit on its 5-minute timeout. The tool turns this into an
+      # `{:ok, "No answer — you declined…"}` result the model can read.
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:ask_user:#{survey_id}",
+        {:ask_user_declined, survey_id}
+      )
+
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(200, Jason.encode!(%{status: "skipped"}))
@@ -834,8 +848,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     session_id = conn.params["id"]
     body = conn.body_params
 
-    provider = body["provider"]
-    model = body["model"]
+    # Either half may be omitted. `osa --model <name>` names a model without a
+    # provider; `osa --provider <name>` names a provider without a model. Fill in
+    # the missing half here (Registry.provider_for_model/1 is exactly the
+    # cross-provider attribution the CLI `/model` switch already relies on) so a
+    # one-flag override is not rejected as a malformed request. When neither half
+    # can be resolved we still 400 — an unattributable model is not a swap.
+    {provider, model} = resolve_swap_target(body["provider"], body["model"])
 
     cond do
       not (is_binary(provider) and provider != "") ->
@@ -1235,4 +1254,106 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   defp parse_int(val, _default) when is_integer(val), do: val
   defp parse_int(_, default), do: default
+
+  # ── POST /:id/provider — fill in whichever half of {provider, model} the
+  # caller omitted. Returns `{provider_string | nil, model_string | nil}`;
+  # the route 400s when the provider still cannot be determined.
+  @spec resolve_swap_target(term(), term()) :: {String.t() | nil, String.t() | nil}
+  defp resolve_swap_target(provider, model) do
+    provider = presence(provider)
+    model = presence(model)
+
+    provider = provider || provider_owning(model)
+    model = model || default_model_for(provider)
+
+    {provider, model}
+  end
+
+  defp presence(v) when is_binary(v), do: if(String.trim(v) == "", do: nil, else: v)
+  defp presence(_), do: nil
+
+  # `--model <name>` with no `--provider`: work out who should serve it.
+  #
+  # LOCALLY-INSTALLED WINS. `ollama launch` hands us a tag like
+  # "qwen3-coder:30b", and models.dev attributes that name to the hosted `qwen`
+  # provider — so pure catalog attribution would route a tag the user has pulled
+  # into their own Ollama at a cloud endpoint they may have no key for. When the
+  # configured provider is a local runtime that ACTUALLY has the tag installed,
+  # that is the unambiguous answer. Only otherwise do we fall back to catalog /
+  # heuristic attribution (which is what powers the cross-provider `/model`
+  # switch, e.g. "claude-sonnet-4-6" → :anthropic), and finally to the
+  # configured default provider.
+  defp provider_owning(nil), do: nil
+
+  defp provider_owning(model) do
+    configured = default_provider()
+
+    if local_provider_has?(configured, model) do
+      Atom.to_string(configured)
+    else
+      catalog_owner(model) || fallback_provider(configured, model)
+    end
+  end
+
+  defp catalog_owner(model) do
+    case OptimalSystemAgent.Providers.Registry.provider_for_model(model) do
+      nil -> nil
+      atom -> Atom.to_string(atom)
+    end
+  end
+
+  # Unattributable tag: hand it to the configured provider when that provider
+  # accepts arbitrary tags (local runtimes do — models are pulled dynamically),
+  # rather than 400-ing a launch flag the user typed deliberately.
+  defp fallback_provider(configured, model) do
+    if OptimalSystemAgent.Providers.Registry.known_model?(configured, model) do
+      Atom.to_string(configured)
+    end
+  end
+
+  defp default_provider do
+    Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+  end
+
+  # True only when `provider` is a local runtime AND `model` is in its installed
+  # tag list. Deliberately positive-only: an unreachable daemon or a missing tag
+  # just means "not proven local", never a wrong-provider claim.
+  defp local_provider_has?(:ollama, model), do: ollama_tag_installed?(model)
+  defp local_provider_has?(_provider, _model), do: false
+
+  defp ollama_tag_installed?(model) do
+    case OptimalSystemAgent.Providers.Ollama.list_models() do
+      {:ok, models} ->
+        Enum.any?(models, fn m ->
+          name = m[:name] || m["name"]
+          name == model or name == model <> ":latest"
+        end)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  end
+
+  # `--provider <name>` with no `--model`: fall back to that provider's default.
+  defp default_model_for(nil), do: nil
+
+  defp default_model_for(provider) do
+    with atom when not is_nil(atom) <- provider_atom(provider),
+         {:ok, %{default_model: dm}} when is_binary(dm) <-
+           OptimalSystemAgent.Providers.Registry.provider_info(atom) do
+      dm
+    else
+      _ -> nil
+    end
+  end
+
+  # String → registered provider atom, without minting atoms from user input.
+  defp provider_atom(name) do
+    Enum.find(
+      OptimalSystemAgent.Providers.Registry.list_providers(),
+      &(Atom.to_string(&1) == name)
+    )
+  end
 end

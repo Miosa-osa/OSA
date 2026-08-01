@@ -149,6 +149,99 @@ pub fn truncate_str_start(s: &str, max_bytes: usize) -> &str {
     &s[idx..]
 }
 
+/// Argument keys, in priority order, that actually IDENTIFY a tool call. The
+/// first one present wins. Ordered so the most specific identifier (the file a
+/// file-tool touches, the command a shell runs) beats a generic free-text field.
+const IDENTIFYING_ARG_KEYS: &[&str] = &[
+    "path",
+    "file_path",
+    "filename",
+    "target_file",
+    "file",
+    "notebook_path",
+    "command",
+    "cmd",
+    "question",
+    "skill_name",
+    "agent_name",
+    "subagent_type",
+    "agent",
+    "name",
+    "pattern",
+    "query",
+    "url",
+    "task",
+    "title",
+    "subject",
+    "description",
+    "prompt",
+    "message",
+    "text",
+];
+
+/// Reduce a backend argument hint to something worth showing next to a tool name.
+///
+/// Three inputs have to be handled, because the backend sends all three:
+///
+///   * a plain display string (`"cargo test"`, `"/src/main.rs"`) — passed through;
+///   * a JSON blob (file-edit calls ship their full args so the diff renderer can
+///     work) — reduced to the single identifying value, because dumping
+///     `{"new_string":"  @doc \"Start…` into the live feed tells the user nothing
+///     about WHICH file is being edited;
+///   * a list of schema PARAMETER NAMES (`"options, question"`) from the
+///     backend's old key-name fallback — dropped entirely, see
+///     [`crate::components::activity`]'s guard.
+///
+/// Returns an empty string when nothing identifying could be recovered — an
+/// empty detail is strictly better than schema noise or raw JSON.
+pub fn arg_summary(hint: &str) -> String {
+    let hint = hint.trim();
+    if !(hint.starts_with('{') || hint.starts_with('[')) {
+        return hint.to_string();
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(hint) else {
+        // Malformed / truncated JSON — never show the fragment.
+        return String::new();
+    };
+
+    // A fan-out array (e.g. delegate's `tasks`): summarize the first entry.
+    let obj = match &value {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Array(items) => match items.first() {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => return String::new(),
+        },
+        _ => return String::new(),
+    };
+
+    for key in IDENTIFYING_ARG_KEYS {
+        match obj.get(*key) {
+            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+                return s.trim().to_string()
+            }
+            Some(serde_json::Value::Number(n)) => return n.to_string(),
+            _ => {}
+        }
+    }
+
+    String::new()
+}
+
+/// Fit an argument summary into `max_cols` display columns. Paths keep their
+/// TAIL (the filename is what identifies the file); everything else keeps its
+/// head. Always width-aware — never cuts by bytes or chars.
+pub fn fit_arg_summary(summary: &str, max_cols: usize) -> String {
+    if cols(summary) <= max_cols {
+        return summary.to_string();
+    }
+    if summary.contains('/') && !summary.contains(' ') {
+        ellipsize_path_middle(summary, max_cols)
+    } else {
+        fit_cols(summary, max_cols)
+    }
+}
+
 /// Middle-ellipsize a path to at most `max_cols` DISPLAY columns, preserving the
 /// final path segment (the filename) — Claude Code `truncatePathMiddle` parity.
 /// `src/components/deeply/nested/MyComponent.tsx` -> `src/components/…/MyComponent.tsx`.
@@ -262,5 +355,89 @@ mod tests {
             let out = truncate_str(&big, limit);
             assert!(big.starts_with(out));
         }
+    }
+
+    // ── arg_summary: what the tool cell actually shows ──────────────────
+    //
+    // Three shapes reached the screen and none was useful: schema PARAMETER
+    // NAMES ("options, question"), a raw JSON dump of the whole argument map,
+    // and an unshortened path whose filename fell off the right edge.
+
+    #[test]
+    fn arg_summary_passes_plain_strings_through() {
+        assert_eq!(arg_summary("cargo test --release"), "cargo test --release");
+        assert_eq!(arg_summary("/src/main.rs"), "/src/main.rs");
+        assert_eq!(arg_summary("  spaced  "), "spaced");
+        assert_eq!(arg_summary(""), "");
+    }
+
+    #[test]
+    fn arg_summary_reduces_file_edit_json_to_the_path() {
+        // The backend ships the whole arg map so the diff renderer can work.
+        // The live feed must show the FILE, not `{"new_string":"  @doc \"…`.
+        let json = r#"{"new_string":"  @doc \"Start the Compactor GenServer.\"\n","old_string":"x","path":"/src/compactor.ex","replace_all":false}"#;
+        assert_eq!(arg_summary(json), "/src/compactor.ex");
+    }
+
+    #[test]
+    fn arg_summary_prefers_the_identifying_key_over_free_text() {
+        let json = r#"{"description":"a long prose description","path":"/src/main.rs"}"#;
+        assert_eq!(arg_summary(json), "/src/main.rs");
+
+        let json = r#"{"prompt":"go do the thing","name":"smoke-e2e"}"#;
+        assert_eq!(arg_summary(json), "smoke-e2e");
+    }
+
+    #[test]
+    fn arg_summary_handles_a_fan_out_array() {
+        let json = r#"[{"prompt":"first worker","subagent_type":"explorer"}]"#;
+        assert_eq!(arg_summary(json), "explorer");
+    }
+
+    #[test]
+    fn arg_summary_drops_json_it_cannot_identify_or_parse() {
+        // A cut-off JSON fragment must never be shown.
+        assert_eq!(arg_summary(r#"{"new_string":"  @doc \"Start the Comp"#), "");
+        // Parseable, but nothing identifying in it.
+        assert_eq!(arg_summary(r#"{"replace_all":true,"dry_run":false}"#), "");
+    }
+
+    #[test]
+    fn fit_arg_summary_keeps_the_filename_of_a_long_path() {
+        let path =
+            "/home/user/projects/osa/OSA/lib/optimal_system_agent/agent/loop/tool_executor.ex";
+        let fitted = fit_arg_summary(path, 40);
+        assert!(cols(&fitted) <= 40, "overflowed: {fitted:?}");
+        assert!(
+            fitted.ends_with("tool_executor.ex"),
+            "the filename is the part that identifies the file: {fitted:?}"
+        );
+    }
+
+    #[test]
+    fn fit_arg_summary_keeps_the_head_of_prose_and_commands() {
+        let cmd = "cargo test --release --workspace --all-features -- --nocapture";
+        let fitted = fit_arg_summary(cmd, 20);
+        assert!(cols(&fitted) <= 20, "overflowed: {fitted:?}");
+        assert!(fitted.starts_with("cargo test"), "{fitted:?}");
+    }
+
+    #[test]
+    fn fit_arg_summary_is_width_aware_not_byte_aware() {
+        // Wide glyphs advance two columns each.
+        let wide = "\u{5EFA}\u{7ACB}\u{89E3}\u{6790}\u{5668}\u{6D4B}\u{8BD5}";
+        for max in 1usize..=16 {
+            let fitted = fit_arg_summary(wide, max);
+            assert!(
+                cols(&fitted) <= max,
+                "max={max} produced {fitted:?} at {} cols",
+                cols(&fitted)
+            );
+        }
+    }
+
+    #[test]
+    fn fit_arg_summary_leaves_short_values_untouched() {
+        assert_eq!(fit_arg_summary("smoke-e2e", 60), "smoke-e2e");
     }
 }

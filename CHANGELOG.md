@@ -9,6 +9,108 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.47] — displays as `v1.0.047`
+
+### Fixed — asking you a question deadlocked the turn
+
+- **The agent could not ask you anything.** The ask-user event was missing from the
+  event-forwarder's allowlist, so a question raised by the agent never reached the
+  TUI at all. The TUI already contained a complete survey dialog — it was simply
+  unreachable, with no path by which it could ever be shown. Every ask therefore
+  blocked for the tool's full **five-minute timeout** and then failed, which read as
+  the agent hanging mid-turn for no reason.
+  - The event is now forwarded, so the dialog appears when the agent asks.
+  - **Esc now declines cleanly** instead of leaving the turn stuck: the decline is
+    delivered to the waiting tool immediately, and the agent continues with the
+    knowledge that you chose not to answer.
+
+### Fixed — work the agent did was invisible or looked like it produced nothing
+
+- **The task checklist never appeared.** Tasks were broadcast on a hardcoded
+  `"default"` session id rather than the session that actually requested them, so
+  they were published to a topic nobody was listening on. The tool reported success
+  and nothing rendered — the most confusing possible failure, because there was no
+  error to notice. Broadcasts now carry the real session id.
+
+- **Delegated subagents appeared to return nothing.** Two separate defects
+  compounded:
+  - Results led with a status header, and the collapsed tool cell shows only the
+    first line — so every delegation displayed its status banner and hid the actual
+    report underneath it. The report now leads.
+  - A child agent that finished without a closing message had **all of its work
+    discarded**, so genuine completed work was thrown away rather than returned.
+
+- **Tool cells didn't say what they acted on.** Read, Edit and Write rendered with
+  no file path, the task tool showed a bare verb with no subject, and live status
+  lines dumped raw JSON or the schema's parameter names instead of the values. A
+  transcript of a long session was effectively unreadable — a column of identical
+  verbs. Cells now name their target.
+
+- **Internal reminders leaked into visible tool output**, mixing OSA's own
+  bookkeeping into the results you read. This included skill files belonging to
+  *other* tools, discovered by a lookup that walked as far as **40 directories above
+  the workspace** — well outside the project, picking up unrelated content from
+  elsewhere on the machine.
+
+### Fixed — the long-session guard was ending sessions that were going fine
+
+- **The doom-loop detector aborted correct work.** It is meant to catch an agent
+  stuck repeating a failing action, but it keyed on **the first 100 characters of a
+  tool result** — which are identical for every edit to the same file — so a
+  sequence of distinct, successful edits looked like one action repeated. It then
+  classified those successes as *failures*, because the diff embedded in the result
+  happened to contain words like "error". The guard concluded the agent was looping
+  and instructed it to abandon work that was correct.
+  - Detection is now keyed on the actual call arguments and the real outcome, so
+    repetition and failure are each judged on what they are.
+
+### Fixed — the context indicator reported a confident 0%
+
+- Two independent faults stacked into one wrong number:
+  - A **transport failure** while probing a model's context window was cached as if
+    it were the answer, and cached **permanently** — one blip early on pinned that
+    model's window to zero for the entire life of the process, with no recovery.
+  - The TUI had **no branch for an unknown window**, so it divided by that zero and
+    rendered a confident, precise, wrong `0%`.
+- An unknown window now shows a **token count with no percentage**, and a failed
+  probe is no longer cached as a result.
+
+### Fixed — multi-agent view, model switching, and markdown tables
+
+- **Multi-agent view** had four simultaneous timers running, a mangled label, raw
+  internal session ids on screen, duplicated rows, and a widget drawing **34 rows
+  into a 30-row reservation** — overflowing its own space and pushing the layout out
+  of shape. One timer, real names, no duplicates, and the widget now fits.
+- **Switching model returned 404 on a fresh session.** Sessions are now announced on
+  stream subscribe, so the session is known by the time you can act on it. Also
+  fixed the underlying cause of related disappearances: an ETS table with **no
+  durable owner**, which silently dropped tracked sessions when its owner went away.
+- **Markdown tables clipped every column to the same width**, regardless of the
+  content, so wide columns lost their text while narrow ones sat mostly empty.
+  Columns are now content-sized and wrap rather than truncate.
+
+- **Plans were being invented from prose.** A hook scraped numbered lines out of the
+  agent's answers and promoted them into checklist items — so ordinary prose that
+  happened to be numbered became a plan the agent had never proposed. Removed.
+
+### Added
+
+- **`--model` and `--provider` flags**, so a run can select both from the command
+  line. Relatedly, **unknown flags now error** instead of being silently ignored: a
+  typo previously launched a normal session while quietly discarding the option you
+  asked for.
+- **Locally-installed model tags now take precedence over catalog attribution**, so
+  a model you actually have installed is identified as such.
+- **kimi-k3 and gemma4**, and Ollama Cloud model registration is consolidated into a
+  **single source of truth**. Adding one model previously required coordinated edits
+  in **seven separate places**, which is why the set drifted out of agreement.
+
+### Changed
+
+- Agent instructions steer away from re-running commands that overlap work already
+  done, and toward **stopping once a question has been answered** rather than
+  continuing to investigate past the point of an answer.
+
 ## [1.0.46] — displays as `v1.0.046`
 
 ### Security — a cloned repo could execute code just by having OSA run git in it
