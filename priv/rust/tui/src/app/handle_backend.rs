@@ -726,22 +726,30 @@ impl App {
                         tools.iter().map(|t| t.name.clone()).collect();
                     self.refresh_command_completions();
                     self.sidebar.set_tool_count(tools.len());
-                    self.chat.set_welcome_info(
-                        self.header.provider(),
-                        self.header.model_name(),
-                        tools.len(),
-                    );
+                    // Identity for the welcome/banner comes off the STATUS BAR —
+                    // the same fields the bar renders one line below the banner —
+                    // so the pair on screen is one value read twice, not two
+                    // copies that can drift (the banner once read a stale header
+                    // copy and printed "anthropic / llama3.2:latest" while the bar
+                    // showed the real model).
+                    let (provider, model) = self.identity();
+                    self.chat
+                        .set_welcome_info(&provider, &model, tools.len());
 
                     // Emit the OSA welcome BANNER (bordered box + ASCII logo) into
                     // the terminal scrollback once, after tools load so the count
                     // is accurate. The event loop renders it via insert_before.
+                    //
+                    // `tools.len()` is the count `GET /api/v1/tools` returns: every
+                    // registered, available tool MINUS `Registry.model_hidden`
+                    // (harness/orchestration internals). It is the session's usable
+                    // toolbox and matches the `/tools` browser exactly — it is
+                    // deliberately NOT the raw registry size, which counts tools
+                    // the model is never offered.
                     if !self.welcome_injected && !self.chat.has_messages {
                         self.welcome_injected = true;
-                        self.pending_welcome_banner = Some((
-                            tools.len(),
-                            Some(self.header.provider().to_string()),
-                            Some(self.header.model_name().to_string()),
-                        ));
+                        self.pending_welcome_banner =
+                            Some((tools.len(), Some(provider), Some(model)));
                         // Keep the status-bar folder label in lockstep with the
                         // banner: both show the real working dir the agent operates
                         // in, so the two surfaces can never disagree.
@@ -1165,14 +1173,7 @@ impl App {
             }
             BackendEvent::ModelSwitched(result) => match result {
                 Ok(resp) => {
-                    self.header.set_provider_info(&resp.provider, &resp.model);
-                    self.status.set_provider_info(&resp.provider, &resp.model);
-                    self.sidebar.set_provider_info(&resp.provider, &resp.model);
-                    self.chat.set_welcome_info(
-                        &resp.provider,
-                        &resp.model,
-                        self.header.tool_count(),
-                    );
+                    self.set_identity(&resp.provider, &resp.model);
                     // Reset context bar with new model's window size
                     if let Some(ctx) = resp.context_window {
                         self.status.set_context(0.0, 0, ctx);
@@ -2310,9 +2311,7 @@ impl App {
                         .filter(|s| !s.is_empty())
                         .or(wiz_model)
                         .unwrap_or_else(|| "unknown".to_string());
-                    self.header.set_provider_info(&prov, &mdl);
-                    self.status.set_provider_info(&prov, &mdl);
-                    self.sidebar.set_provider_info(&prov, &mdl);
+                    self.set_identity(&prov, &mdl);
                     self.onboarding = None;
                     if self.state == AppState::Onboarding {
                         self.discard_overlay_return();

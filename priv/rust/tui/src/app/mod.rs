@@ -4,6 +4,7 @@ pub mod attachment;
 pub mod commands;
 pub mod event_loop;
 pub mod focus;
+pub mod frame_size;
 mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
@@ -447,6 +448,33 @@ pub struct App {
 }
 
 impl App {
+    /// Write the active provider/model to EVERY surface that displays it, in one
+    /// call.
+    ///
+    /// The header, the status bar, the sidebar and the chat welcome each kept
+    /// their own copy, updated by three separate call sites that all had to
+    /// remember all four. Backend-side this is already solved —
+    /// `Runtime.Identity` is the one resolver behind `GET /health`, `osa doctor`
+    /// and `/status` — so the TUI gets the same guarantee here: one writer, one
+    /// value, no surface can drift.
+    pub fn set_identity(&mut self, provider: &str, model: &str) {
+        self.header.set_provider_info(provider, model);
+        self.status.set_provider_info(provider, model);
+        self.sidebar.set_provider_info(provider, model);
+        let tool_count = self.header.tool_count();
+        self.chat.set_welcome_info(provider, model, tool_count);
+    }
+
+    /// The active `(provider, model)` as currently displayed — read straight off
+    /// the status bar, so anything built from this (notably the startup banner)
+    /// is showing the exact strings the bar is showing.
+    pub fn identity(&self) -> (String, String) {
+        (
+            self.status.provider().to_string(),
+            self.status.model_name().to_string(),
+        )
+    }
+
     pub async fn new(config: Config, cli: Cli, kbd_enhanced: bool) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -471,7 +499,8 @@ impl App {
         crate::style::set_theme(theme);
 
         // Use actual terminal size instead of hardcoded 80x24
-        let (init_w, init_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        let init = crate::app::frame_size::probe();
+        let (init_w, init_h) = (init.cols, init.rows);
 
         info!(
             "App initialized: session={}, url={}, term={}x{}, cwd={}",

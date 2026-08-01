@@ -104,10 +104,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
       Application.get_env(:optimal_system_agent, :default_provider, :ollama)
       |> to_string()
 
-    model =
-      (Application.get_env(:optimal_system_agent, :default_model) ||
-         Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest"))
-      |> to_string()
+    # Runtime.Identity, not a hand-rolled chain: reading `:ollama_model` as the
+    # fallback hands an Ollama model to whatever provider is active, and its
+    # hardcoded literal is where stray "llama3.2:latest" sightings come from.
+    model = OptimalSystemAgent.Runtime.Identity.model()
 
     working_dir = Map.get(file_config, "working_dir") || safe_cwd()
     agent_name = Map.get(file_config, "agent_name") || "OSA Agent"

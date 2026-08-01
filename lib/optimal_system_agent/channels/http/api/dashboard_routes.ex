@@ -96,12 +96,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DashboardRoutes do
     _ -> "ollama"
   end
 
+  # Runtime.Identity, not a hand-rolled chain: the old `:ollama_model` fallback
+  # reported an Ollama model (and, unset, a hardcoded "llama3.2:latest") no
+  # matter which provider was actually active.
   defp fetch_model do
-    (Application.get_env(:optimal_system_agent, :default_model) ||
-       Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest"))
-    |> to_string()
+    OptimalSystemAgent.Runtime.Identity.model()
   rescue
-    _ -> "llama3.2:latest"
+    _ -> "unknown"
   end
 
   defp fetch_uptime_seconds do

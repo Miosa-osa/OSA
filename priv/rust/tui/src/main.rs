@@ -33,6 +33,10 @@ mod voice;
 /// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
 #[cfg(test)]
 mod test_backend;
+/// The band arbiter's contract: rects derive from measurements, bands tile the
+/// region, and the composer is never shed.
+#[cfg(test)]
+mod layout_contract;
 /// Reserved-vs-drawn layout invariants for the live-region components.
 #[cfg(test)]
 mod layout_invariants;
@@ -208,7 +212,7 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     // terminal is warmed up before ratatui's Viewport::Inline construction issues
     // its own DSR cursor query below. The inline-viewport creation still retries
     // (see below) as a final graceful fallback for stubborn launch contexts.
-    let (_cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let rows = app::frame_size::probe().rows;
     let viewport_h = compute_viewport_height(rows);
 
     // Create the inline viewport, retrying if the cursor query still times out

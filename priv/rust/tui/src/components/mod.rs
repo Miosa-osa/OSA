@@ -6,6 +6,7 @@ pub mod agents;
 pub mod chat;
 pub mod header;
 pub mod input;
+pub mod measure;
 pub mod notify;
 pub mod osc8;
 pub mod osc52;

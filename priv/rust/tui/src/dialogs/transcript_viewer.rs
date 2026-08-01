@@ -537,7 +537,8 @@ impl TranscriptViewer {
 /// Current full-viewport size. The overlay always runs in the alternate-screen
 /// full viewport, so the terminal size equals the drawable area.
 fn viewport() -> (u16, u16) {
-    crossterm::terminal::size().unwrap_or((80, 24))
+    let s = crate::app::frame_size::probe();
+    (s.cols, s.rows)
 }
 
 /// Body wrap width for a given viewport/area width (1-column left gutter).

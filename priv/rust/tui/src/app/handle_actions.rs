@@ -23,17 +23,10 @@ impl App {
                 // status bar, welcome banner, and /version never show a stale
                 // compile-time value.
                 crate::config::set_runtime_version(&health.version);
-                self.header
-                    .set_provider_info(&health.provider, &health.model);
-                self.status
-                    .set_provider_info(&health.provider, &health.model);
-                self.sidebar
-                    .set_provider_info(&health.provider, &health.model);
-                self.chat.set_welcome_info(
-                    &health.provider,
-                    &health.model,
-                    self.header.tool_count(),
-                );
+                // One writer for every surface (header / status bar / sidebar /
+                // welcome), so the banner and the status bar cannot show
+                // different models on the same screen.
+                self.set_identity(&health.provider, &health.model);
 
                 // Welcome injection moved to ToolsLoaded handler (accurate tool count)
 

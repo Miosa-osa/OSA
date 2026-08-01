@@ -4870,4 +4870,489 @@ Beta is the one I would pick.
             }
         }
     }
+
+    // ── the drag: one live region, however many columns it crossed ───
+
+    /// The three rows a user counts when they say "the composer duplicated".
+    ///
+    /// Deliberately synthetic rather than the real `InputComponent` /
+    /// `StatusBar`: this bug is geometric, not textual, and a marker that cannot
+    /// drift keeps the assertion ("exactly one of each, anywhere the user can
+    /// still reach") readable and independent of copy changes in the chrome.
+    /// The SHAPE mirrors `App::draw_inline_chrome` — a full-width rule, the
+    /// composer, the hint row, the status bar — plus, optionally, the bands a
+    /// live turn puts above them.
+    const COMPOSER: &str = "COMPOSER\u{2588}";
+    const HINT: &str = "HINT\u{2588}";
+    const STATUS: &str = "STATUS\u{2588}";
+    /// A band row, in shed-priority order: the LAST one is dropped first.
+    const BANDS: [&str; 3] = ["TOAST\u{2588}", "CHECKLIST\u{2588}", "SURVEY\u{2588}"];
+
+    /// How tall the live region wants to be, given how many bands are up.
+    /// `1` rule + `1` composer + `1` hint + `1` status + one row per band.
+    fn chrome_height(bands: usize) -> u16 {
+        4 + bands as u16
+    }
+
+    /// Paint the live region into `area`, shedding bands from the lowest
+    /// priority up until it fits. The composer and the status bar are the two
+    /// rows that must survive any height — "it should fit no matter what".
+    fn render_chrome(f: &mut ratatui::Frame<'_>, area: Rect, bands: usize) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let w = area.width as usize;
+        // Rows in priority order, most important LAST so truncation from the
+        // front sheds the cheapest rows first.
+        let mut rows: Vec<String> = Vec::new();
+        for b in BANDS.iter().take(bands) {
+            rows.push((*b).to_string());
+        }
+        rows.push("\u{2500}".repeat(w));
+        rows.push(format!("\u{276f} {COMPOSER}"));
+        rows.push(HINT.to_string());
+        rows.push(STATUS.to_string());
+        let keep = (area.height as usize).min(rows.len());
+        let rows = rows.split_off(rows.len() - keep);
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(rows.join("\n")),
+            Rect::new(area.x, area.y, area.width, keep as u16),
+        );
+        // The composer's caret, exactly as the real composer sets it — it is
+        // what the cursor query in a viewport rebuild reads back.
+        let caret_row = area.y + keep.saturating_sub(3) as u16;
+        f.set_cursor_position((2, caret_row.min(area.y + area.height - 1)));
+    }
+
+    /// `App::run`'s per-iteration terminal reconciliation, headless.
+    ///
+    /// The real loop needs an `App` (a backend connection, a tokio runtime, a
+    /// live provider), so this is a MODEL — but it is faithful in the four
+    /// respects that decide what the screen looks like across a resize, and it
+    /// is those four that this bug lives in:
+    ///
+    ///   1. **Where the size comes from.** The loop reads the ROW count live
+    ///      from the terminal every iteration, but the COLUMN count from
+    ///      `App::width`, which is written only when the crossterm `Resize`
+    ///      EVENT is dispatched. The kernel changes the size at SIGWINCH; the
+    ///      event arrives later, over the reader task. [`sigwinch`] and
+    ///      [`deliver_resize_event`] are those two moments, separately.
+    ///   2. **When it erases and rebuilds** — `resize_dirty`, or a wanted
+    ///      height that no longer matches the built one.
+    ///   3. **That it commits finalized output with `insert_before` BEFORE it
+    ///      draws.** This is the step that stranded renders: `insert_before`
+    ///      does not autoresize (ratatui-0.29 `terminal.rs:579`); it scrolls by
+    ///      `last_known_area.height` and paints rows at `last_known_area.width`
+    ///      (`terminal.rs:617`, `:772`) — the geometry the viewport was last
+    ///      BUILT at. Run it while the terminal has already reflowed and the
+    ///      scroll amount is wrong, so the outgoing viewport is never scrolled
+    ///      away and the new one is set below it.
+    ///   4. **That the draw is a real ratatui draw**, so `autoresize` gets its
+    ///      chance to re-anchor the viewport behind the app's back.
+    ///
+    /// [`iterate`](Self::iterate) is therefore a mirror of `App::run`'s loop
+    /// body, and is meant to be kept one. As written it mirrors the behaviour
+    /// that ships the bug: the loop learns a terminal's new width only when the
+    /// crossterm `Resize` event is dispatched, so the frame drawn in between is
+    /// laid out at a width the terminal no longer has. The three assertions
+    /// below fail against that shape, on purpose. When the loop adopts the
+    /// ioctl size at the top of every iteration (and erases and rebuilds before
+    /// committing or drawing at it), mirror that here — move the
+    /// `deliver_resize_event` effect into the top of `iterate` — and they pass.
+    /// A change that makes them pass any other way has not fixed anything.
+    struct LoopModel {
+        term: Option<Terminal<VT100Backend>>,
+        /// `App::width` / `App::height`. Written by whichever observer sees a
+        /// resize FIRST — the top-of-loop ioctl sample (`App::sample_frame_size`)
+        /// or the crossterm Resize event — both funnelling through
+        /// `App::adopt_frame_size`.
+        app_size: (u16, u16),
+        resize_dirty: bool,
+        /// Size the resize-settle window is currently timing. `Some` means a
+        /// burst is still moving and this iteration must produce nothing
+        /// observable. Models `RESIZE_SETTLE` deterministically: one iteration
+        /// of quiet at an unchanged size counts as settled.
+        resize_settle: Option<(u16, u16)>,
+        cur_inline_h: u16,
+        last_inline_top: Option<u16>,
+        bands: usize,
+        /// Output waiting to go into native scrollback (a live turn always has
+        /// some: tool results, settled paragraphs).
+        pending: Vec<Message>,
+        /// One entry per frame actually drawn: (width it was laid out at, width
+        /// the terminal really had).
+        drawn_at: Vec<(u16, u16)>,
+        /// Erase-and-rebuild count.
+        rebuilds: usize,
+    }
+
+    impl LoopModel {
+        fn new(w: u16, h: u16, bands: usize) -> Self {
+            let inline_h = chrome_height(bands).min(h.saturating_sub(1)).max(1);
+            let term = Terminal::with_options(
+                VT100Backend::with_scrollback(w, h, 8000),
+                TerminalOptions { viewport: Viewport::Inline(inline_h) },
+            )
+            .unwrap();
+            Self {
+                term: Some(term),
+                app_size: (w, h),
+                resize_dirty: false,
+                resize_settle: None,
+                cur_inline_h: inline_h,
+                last_inline_top: None,
+                bands,
+                pending: Vec::new(),
+                drawn_at: Vec::new(),
+                rebuilds: 0,
+            }
+        }
+
+        fn term(&mut self) -> &mut Terminal<VT100Backend> {
+            self.term.as_mut().unwrap()
+        }
+
+        fn backend(&self) -> &VT100Backend {
+            self.term.as_ref().unwrap().backend()
+        }
+
+        fn real_size(&self) -> (u16, u16) {
+            let s = ratatui::backend::Backend::size(self.backend()).unwrap();
+            (s.width, s.height)
+        }
+
+        /// The window changed. The emulator reflows NOW; the app is not told.
+        fn sigwinch(&mut self, w: u16, h: u16) {
+            self.term.as_mut().unwrap().backend_mut().resize(w, h);
+        }
+
+        /// The crossterm `Resize` event finally reaches `App::update`.
+        fn deliver_resize_event(&mut self) {
+            // Idempotent: the top-of-loop ioctl sample has usually adopted this
+            // already, exactly as `App::adopt_frame_size` no-ops on a second
+            // observation of the same size.
+            let now = self.real_size();
+            if now != self.app_size {
+                self.app_size = now;
+                self.resize_dirty = true;
+            }
+        }
+
+        /// Queue a finalized block for native scrollback, as a live turn does.
+        fn queue_output(&mut self, text: &str) {
+            self.pending
+                .push(Message::new(MessageType::Agent, text.to_string(), None));
+        }
+
+        /// One pass of the run loop.
+        fn iterate(&mut self) {
+            // ── ONE SIZE PER FRAME, READ FIRST ────────────────────────────
+            // The ioctl reflects the kernel's view as of SIGWINCH, strictly
+            // earlier than the crossterm Resize event (which has to travel
+            // through the reader task). Adopting it here is what stops ratatui's
+            // `autoresize` from noticing the change first and re-anchoring the
+            // inline viewport behind the app — which clears only the NEW rect
+            // and strands the old one on screen, once per intermediate width.
+            let sampled = self.real_size();
+            if sampled != self.app_size {
+                self.app_size = sampled;
+                self.resize_dirty = true;
+            }
+
+            // ── RESIZE-BURST SETTLE WINDOW ────────────────────────────────
+            // While the size is still moving, produce NOTHING observable: no
+            // rebuild, no `insert_before`, no draw. Reaching `Terminal::draw` is
+            // what hands control to `autoresize`, so skipping the draw is not an
+            // optimisation — it is what keeps an intermediate width from ever
+            // being rendered at all.
+            if self.resize_dirty {
+                match self.resize_settle {
+                    Some(last) if last == sampled => self.resize_settle = None,
+                    _ => {
+                        self.resize_settle = Some(sampled);
+                        return;
+                    }
+                }
+            }
+
+            let (real_w, real_h) = sampled;
+            let term_rows = real_h;
+            // Laid out at the size this frame sampled — by construction the size
+            // the terminal really has.
+            let laid_out_w = self.app_size.0;
+            let desired = chrome_height(self.bands)
+                .min(term_rows.saturating_sub(1))
+                .max(1);
+
+            let resized = std::mem::take(&mut self.resize_dirty);
+            if resized || desired != self.cur_inline_h {
+                let mut out = self.backend().fork();
+                if resized {
+                    clear_screen_for_resize(&mut out).unwrap();
+                } else if let Some(top) = self.last_inline_top {
+                    let max_row = term_rows.saturating_sub(1);
+                    crossterm::execute!(
+                        out,
+                        crossterm::cursor::MoveTo(0, top.min(max_row)),
+                        crossterm::terminal::Clear(
+                            crossterm::terminal::ClearType::FromCursorDown
+                        ),
+                    )
+                    .unwrap();
+                }
+                let backend = self.backend().fork();
+                self.term = None; // drop the old Terminal, exactly as `rebuild_inline` does
+                self.term = Some(
+                    Terminal::with_options(
+                        backend,
+                        TerminalOptions { viewport: Viewport::Inline(desired) },
+                    )
+                    .unwrap(),
+                );
+                self.cur_inline_h = desired;
+                self.rebuilds += 1;
+            }
+
+            // Step 2 — commit finalized output into native scrollback.
+            if !self.pending.is_empty() {
+                // This frame's sampled width. `get_frame().area().width` is a
+                // THIRD size source — the width the viewport was last BUILT at —
+                // so mid-drag it lags and commits finalized messages into native
+                // scrollback, permanently, at a width the terminal no longer has.
+                let w = laid_out_w;
+                let msgs = std::mem::take(&mut self.pending);
+                let sized: Vec<(Message, u16)> = msgs
+                    .into_iter()
+                    .map(|m| {
+                        let h = m.height(w);
+                        (m, h)
+                    })
+                    .filter(|(_, h)| *h > 0)
+                    .collect();
+                let total: u16 = sized.iter().map(|(_, h)| *h).sum();
+                if total > 0 {
+                    self.term()
+                        .insert_before(total, |buf| {
+                            let mut y = 0u16;
+                            for (m, h) in sized.iter() {
+                                m.render_to_buffer(Rect::new(0, y, w, *h), buf, 0);
+                                y = y.saturating_add(*h);
+                            }
+                        })
+                        .unwrap();
+                }
+            }
+            self.last_inline_top = Some(self.term().get_frame().area().top());
+
+            // Step 3 — draw.
+            self.drawn_at.push((laid_out_w, real_w));
+            let bands = self.bands;
+            self.term()
+                .draw(|f| {
+                    let a = f.area();
+                    render_chrome(f, a, bands);
+                })
+                .unwrap();
+        }
+
+        /// Every live-region row, counted across screen AND scroll history.
+        fn copies(&self) -> (usize, usize, usize) {
+            // ONE walk of the history: `scrollback_lines` re-pages the emulator,
+            // and this runs on every step of a 178-column sweep.
+            let mut all = self.backend().scrollback_lines();
+            let screen = self.backend().contents();
+            all.extend(screen.lines().map(str::to_string));
+            let count = |needle: &str| all.iter().filter(|l| l.contains(needle)).count();
+            (count(COMPOSER), count(HINT), count(STATUS))
+        }
+
+        /// **No frame may be laid out at a width the terminal no longer has.**
+        ///
+        /// This is the precondition every stranded render is downstream of. A
+        /// frame drawn or committed while `App::width` disagrees with the real
+        /// terminal is a frame ratatui reconciles by itself — `Terminal::draw`
+        /// re-anchors the inline viewport through `autoresize`, and
+        /// `insert_before` scrolls by a `last_known_area` that describes a
+        /// terminal that no longer exists — and finalized messages committed in
+        /// that state are written into native scrollback, permanently, at the
+        /// wrong width.
+        ///
+        /// The loop must adopt the size the moment the ioctl reports it, not
+        /// when the crossterm event eventually arrives.
+        fn assert_no_frame_used_a_stale_width(&self, ctx: &str) {
+            if let Some((laid_out, real)) =
+                self.drawn_at.iter().copied().find(|(a, b)| a != b)
+            {
+                panic!(
+                    "{ctx}: a frame was laid out at {laid_out} columns while the \
+                     terminal was {real} columns wide. The kernel changed the size \
+                     at SIGWINCH; the crossterm Resize event had not arrived yet, \
+                     and the loop drew (and committed to scrollback) anyway."
+                );
+            }
+        }
+
+        fn assert_single_live_region(&self, ctx: &str) {
+            let (c, h, s) = self.copies();
+            assert_eq!(
+                (c, h, s),
+                (1, 1, 1),
+                "{ctx}: the user can reach {c} composers, {h} hint rows and {s} \
+                 status bars. There is exactly ONE live region; every extra copy \
+                 is a render a resize left behind instead of replacing.\n\
+                 --- screen ---\n{}\n--- history ---\n{}",
+                self.backend().contents(),
+                self.backend().scrollback_lines().join("\n"),
+            );
+        }
+    }
+
+    /// The widths a drag crosses: every single column from 40 to 120 and back,
+    /// plus the rapid one-column alternation a pointer produces when it jitters
+    /// on the edge.
+    fn drag_widths() -> Vec<u16> {
+        let mut v: Vec<u16> = (40u16..=120).collect();
+        v.extend((40u16..=120).rev());
+        for _ in 0..8 {
+            v.push(79);
+            v.push(80);
+        }
+        v
+    }
+
+    /// **The regression, stated as the user states it.** A drag crosses 160+
+    /// columns; afterwards there must be ONE composer, ONE hint row and ONE
+    /// status bar reachable — not one per column crossed.
+    #[test]
+    fn a_resize_sweep_leaves_exactly_one_composer_hint_and_status() {
+        let mut m = LoopModel::new(40, 24, 0);
+        m.queue_output("A first answer, so the live region is bottom-anchored\n");
+        m.iterate();
+        m.assert_single_live_region("before the drag");
+
+        for w in drag_widths() {
+            // The window moves: the emulator reflows now, the app is not told.
+            m.sigwinch(w, 24);
+            // The loop wakes on the 200ms tick and runs a full iteration —
+            // commit + draw — against a terminal it still thinks is the old
+            // size. THIS is the frame that strands a render.
+            m.iterate();
+            // The crossterm Resize event finally lands; the loop rebuilds.
+            m.deliver_resize_event();
+            m.iterate();
+            m.assert_single_live_region(&format!("after dragging to {w} columns"));
+        }
+        m.assert_no_frame_used_a_stale_width("during the drag");
+    }
+
+    /// The same drag during a LIVE TURN: bands up (toast, checklist, survey)
+    /// and finalized output flowing into scrollback on nearly every iteration,
+    /// which is the state the nine stacked renders were captured in.
+    #[test]
+    fn a_resize_sweep_during_a_live_turn_leaves_exactly_one_live_region() {
+        let mut m = LoopModel::new(40, 24, BANDS.len());
+        m.queue_output("The turn opens with a paragraph of prose.\n");
+        m.iterate();
+        m.assert_single_live_region("before the drag");
+
+        for (i, w) in drag_widths().into_iter().enumerate() {
+            // A live turn is settling blocks into scrollback continuously.
+            m.queue_output(&format!("tool result {i}: ran a command and got output\n"));
+            m.sigwinch(w, 24);
+            m.iterate();
+            m.deliver_resize_event();
+            m.iterate();
+            m.assert_single_live_region(&format!("mid-turn, after dragging to {w} columns"));
+        }
+        m.assert_no_frame_used_a_stale_width("during the mid-turn drag");
+    }
+
+    /// **"It should fit no matter what."** At heights a live region cannot
+    /// fully fit in, it sheds bands from the lowest priority up — it never
+    /// overflows, and it never pushes the composer or the status bar off the
+    /// screen into scroll history, where the user cannot type into them.
+    #[test]
+    fn a_short_terminal_sheds_bands_and_never_loses_the_composer_or_status_bar() {
+        for rows in [6u16, 8, 10] {
+            // The product's own sizing rule, asserted directly: however much
+            // the composer wants, the live region is clamped so at least one
+            // row of transcript survives above it, and never below the height
+            // that fits the composer and the status bar.
+            for input_needed in 1u16..=12 {
+                let h = crate::app::event_loop::live_region_height(input_needed, rows);
+                assert!(
+                    h <= rows.saturating_sub(1).max(1),
+                    "{rows} rows / composer wants {input_needed}: live region \
+                     reserved {h} rows and would overflow the terminal"
+                );
+                assert!(h >= 3, "{rows} rows: reserved {h} rows, too few for composer + status");
+            }
+            let mut m = LoopModel::new(80, rows, BANDS.len());
+            m.queue_output("An answer that was already on screen.\n");
+            m.iterate();
+            m.assert_single_live_region(&format!("{rows} rows, before the drag"));
+
+            for w in [79u16, 60, 100, 41, 120, 80] {
+                m.sigwinch(w, rows);
+                m.iterate();
+                m.deliver_resize_event();
+                m.iterate();
+                m.assert_single_live_region(&format!("{rows} rows, after dragging to {w}"));
+                // The two rows the user interacts with must be on the LIVE
+                // screen, not banished into history.
+                let screen = m.backend().contents();
+                assert!(
+                    screen.contains(COMPOSER),
+                    "{rows}x{w}: the composer left the screen; a live region that \
+                     cannot fit must shed bands, never the composer.\n{screen}"
+                );
+                assert!(
+                    screen.contains(STATUS),
+                    "{rows}x{w}: the status bar left the screen.\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// **The size-source pin** (Codex's
+    /// `resize_draw_applies_event_dimensions_without_querying_backend_size`).
+    ///
+    /// A frame is laid out against ONE size. `Terminal::draw` is allowed to read
+    /// the backend's size once — that is `autoresize` checking — but it must
+    /// never go on to query the CURSOR, because a cursor query during a draw
+    /// means `autoresize` decided the size had changed and re-anchored the
+    /// inline viewport itself, clearing only the new rect and leaving the
+    /// previous render on screen. The app must always have learned about the
+    /// resize first.
+    #[test]
+    fn a_frame_never_lets_ratatui_reanchor_the_viewport_behind_the_app() {
+        let mut m = LoopModel::new(60, 20, 1);
+        m.queue_output("Something already committed.\n");
+        m.iterate();
+        // Constructing an Inline viewport legitimately queries the cursor once
+        // (`compute_inline_size` at `Terminal::with_options`), and so does the
+        // first commit + draw. The invariant under test is about the frames
+        // drawn AFTER the terminal changes size, so start the count there.
+        m.backend().reset_probes();
+
+        for w in [61u16, 62, 63, 70, 55, 54, 100] {
+            m.sigwinch(w, 20);
+            m.iterate();
+            let probes = (m.backend().size_probes(), m.backend().cursor_probes());
+            m.backend().reset_probes();
+            assert_eq!(
+                probes.1, 0,
+                "drawing at {w} columns made ratatui query the cursor \
+                 ({} size reads, {} cursor reads). That only happens inside \
+                 `autoresize` → `Terminal::resize` → `compute_inline_size`, i.e. \
+                 ratatui re-anchored the live region because the app had not \
+                 noticed the resize yet. The app must adopt the new size — and \
+                 erase — before any frame is drawn at it.",
+                probes.0, probes.1
+            );
+            m.deliver_resize_event();
+            m.iterate();
+            m.backend().reset_probes();
+        }
+    }
 }

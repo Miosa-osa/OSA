@@ -552,6 +552,21 @@ impl StatusBar {
         self.model_name = model.to_string();
     }
 
+    /// The provider string this bar is rendering.
+    ///
+    /// Exposed so the startup banner can be built from the *same* fields the bar
+    /// draws (see `App::identity`), rather than from a parallel copy that a
+    /// future call site could forget to update. The two surfaces are on screen
+    /// together; they must not be able to disagree.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The model string this bar is rendering. See [`Self::provider`].
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
     pub fn set_signal(&mut self, signal: Signal) {
         self.signal = Some(signal);
     }

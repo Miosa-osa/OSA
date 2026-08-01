@@ -9,6 +9,62 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.57] — displays as `v1.0.057`
+
+### Fixed — resizing the terminal left a stranded copy of the interface behind at every step
+
+- **A single drag could leave nine stacked composers on screen.** Widening the
+  window by nine columns left nine copies of the live region, each one column wider
+  than the one above it, all of them stale and none of them reflowing. Two separate
+  causes, both fixed. First, OSA only learned that the terminal had changed size
+  when the resize *event* arrived — but the kernel had already changed the size, and
+  every frame drawn in that gap was reconciled behind OSA's back by ratatui, which
+  re-anchors the live region and clears only the *new* rectangle, leaving the old
+  one painted on the screen. **OSA now takes the size directly from the kernel at
+  the top of every frame**, so it is always the first to know rather than the last.
+
+- **A drag now settles before anything is drawn or committed.** Dragging a window
+  edge emits a size for every intermediate width, and OSA was rebuilding — and
+  committing finished output — at each one, at widths that had already ceased to
+  exist by the time the ink landed. The intermediate sizes are now absorbed and only
+  the size the drag comes to rest at is drawn.
+
+### Fixed — the interface now fits any terminal
+
+- **Regions could overlap, overdraw, and disagree about their own size.** Each of
+  the ten regions of the live area claimed its rows independently, with nothing
+  deciding what actually fit in the space available; in a short or narrow terminal
+  that produced a checklist painted on top of the reply, a roster reserving thirty
+  rows and drawing thirty-four, and a dropdown painting into rows nothing had set
+  aside. **All ten regions are now measured by a single arbiter** that grants rows
+  and, when space runs out, sheds the least important surfaces in a fixed order —
+  never the composer, which is always kept.
+
+- **Heights are measured once and the rectangles derived from them**, so a region's
+  reservation and its paint cannot drift apart. The property is enforced by tests
+  rather than by discipline: the bands are swept across a range of widths, heights
+  and content states and asserted to tile the region exactly — no row shared, no row
+  lost — and a check over the source tree fails the build if the terminal size is
+  read anywhere other than the one place permitted to read it.
+
+### Fixed — the startup banner could name a model OSA was not running
+
+- **The banner reported `anthropic / llama3.2:latest` directly above a status bar
+  reading `claude-opus-5`.** Provider and model were resolved from different sources
+  at boot, so a provider chosen from the environment could be paired with a model
+  persisted in the config file for an entirely different provider. A model saved for
+  one provider is no longer stapled onto another; when it does not apply, OSA falls
+  back to that provider's own default, so the pair is coherent by construction.
+
+- **The same false pair reached everything else that names the model.** The settings
+  dialog, the dashboard, the model picker and the agent's own prompt each rebuilt the
+  answer by hand, and each fell back to an Ollama model — down to a hardcoded
+  `llama3.2:latest` — regardless of which provider was serving the turn. **Every
+  identity surface now reads one resolver**, so what the banner, the status bar, the
+  picker and the agent believe about the running model cannot disagree.
+
+---
+
 ## [1.0.56] — displays as `v1.0.056`
 
 ### Fixed — replies start faster, because the unchanging part of every prompt is finally cached

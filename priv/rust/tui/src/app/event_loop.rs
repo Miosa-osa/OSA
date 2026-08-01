@@ -14,7 +14,9 @@ use tokio::time;
 use tracing::info;
 
 use super::App;
+use crate::app::frame_size::FrameSize;
 use crate::app::state::AppState;
+use crate::components::measure::Measured;
 use crate::components::Component;
 use crate::event::{terminal, Event};
 
@@ -60,6 +62,10 @@ pub(crate) const CHECKLIST_INLINE_CAP: u16 = 12;
 /// must survive around it (chrome + a minimum stream band). Kept as a free pure
 /// function so the "the checklist never starves the rest of the live region"
 /// invariant is unit-testable without constructing a full `App`.
+/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
+/// primitive the reserved-vs-drawn invariant suite exercises. Production
+/// code has exactly one arbiter; a second live path is the defect.
+#[cfg(test)]
 pub(crate) fn checklist_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
     want.min(CHECKLIST_INLINE_CAP)
         .min(area_h.saturating_sub(floor))
@@ -73,6 +79,10 @@ pub(crate) fn checklist_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
 /// that must survive around it. The survey band is a REAL reserved band — it is
 /// never drawn as an overlay into the stream rect, which is the class of bug
 /// that had the checklist painting over a streaming markdown table.
+/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
+/// primitive the reserved-vs-drawn invariant suite exercises. Production
+/// code has exactly one arbiter; a second live path is the defect.
+#[cfg(test)]
 pub(crate) fn survey_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
     want.min(crate::dialogs::survey::SURVEY_INLINE_CAP)
         .min(area_h.saturating_sub(floor))
@@ -90,6 +100,10 @@ pub(crate) const TOAST_INLINE_CAP: u16 = crate::components::toast::MAX_VISIBLE a
 
 /// Rows the toast band should take inside an inline region of `area_h` rows.
 /// Same contract as [`checklist_band_height`] / [`survey_band_height`].
+/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
+/// primitive the reserved-vs-drawn invariant suite exercises. Production
+/// code has exactly one arbiter; a second live path is the defect.
+#[cfg(test)]
 pub(crate) fn toast_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
     want.min(TOAST_INLINE_CAP).min(area_h.saturating_sub(floor))
 }
@@ -101,6 +115,10 @@ pub(crate) const POPUP_INLINE_CAP: u16 = 12;
 
 /// Rows the completion band should take inside an inline region of `area_h`
 /// rows. Same contract as [`checklist_band_height`] / [`survey_band_height`].
+/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
+/// primitive the reserved-vs-drawn invariant suite exercises. Production
+/// code has exactly one arbiter; a second live path is the defect.
+#[cfg(test)]
 pub(crate) fn popup_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
     want.min(POPUP_INLINE_CAP).min(area_h.saturating_sub(floor))
 }
@@ -124,7 +142,11 @@ pub(crate) const ROW_STATUS: usize = 9;
 /// `u16` argument is exactly the silent, invisible defect this layout keeps
 /// producing. `..Default::default()` means a caller that does not care about a
 /// band collapses it to 0 explicitly.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Every band is listed here — including the two that used to be hard-coded
+/// `Constraint::Length` literals inside [`inline_split`] (the context-hint row
+/// and the status bar). A band the arbiter cannot see is a band it cannot shed,
+/// and an unsheddable band on a 6-row terminal is an overflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Bands {
     /// Ephemeral notifications (top of the region).
     pub toast: u16,
@@ -140,6 +162,195 @@ pub(crate) struct Bands {
     pub popup: u16,
     /// Composer (top + bottom dividers included).
     pub input: u16,
+    /// Right-aligned notice row above the composer.
+    pub hint: u16,
+    /// Status line + permission/shell line.
+    pub status: u16,
+}
+
+/// `hint` and `status` default to the rows they have always occupied (1 and 2),
+/// NOT to zero: `..Default::default()` in a caller means "I do not care about
+/// the optional bands", and silently collapsing the chrome would be a different
+/// layout, not an unspecified one.
+impl Default for Bands {
+    fn default() -> Self {
+        Self {
+            toast: 0,
+            checklist: 0,
+            think: 0,
+            agents: 0,
+            survey: 0,
+            popup: 0,
+            input: 0,
+            hint: HINT_ROWS,
+            status: STATUS_ROWS,
+        }
+    }
+}
+
+/// The right-aligned notice row above the composer.
+pub(crate) const HINT_ROWS: u16 = 1;
+/// Status line + permission/shell line.
+pub(crate) const STATUS_ROWS: u16 = 2;
+/// Rows the streaming band keeps even when every sheddable band has been shed.
+/// The reply, the inline permission prompt and the plan-review panel all live
+/// here, so a region with zero stream rows has nothing to say.
+pub(crate) const STREAM_FLOOR: u16 = 1;
+/// Rows the composer keeps no matter what. Below this there is no interactive
+/// surface left and OSA is a picture of a terminal.
+pub(crate) const INPUT_FLOOR: u16 = 1;
+
+/// A band, for the arbiter to name when it sheds one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Band {
+    Toast,
+    Agents,
+    Checklist,
+    Think,
+    Hint,
+    Survey,
+    Popup,
+    Status,
+    Input,
+}
+
+/// **The shed ladder — lowest priority first.**
+///
+/// The live region must FIT any viewport, degrading rather than overflowing. On
+/// a terminal too short for every band, something has to go; the failure mode
+/// that shipped was that nothing did, because ten bands each independently
+/// claimed rows and no single thing decided what fitted.
+///
+/// The order, and why:
+///
+/// | shed | band | reasoning |
+/// |------|------|-----------|
+/// | 1st | toast | ephemeral by definition; it re-fires, and it is the only band whose whole purpose is to be transient |
+/// | 2nd | agents | a roster of who is working — informative, never load-bearing |
+/// | 3rd | checklist | the plan is also committed to scrollback, so losing the live copy loses nothing permanently |
+/// | 4th | think | the tool feed is progress, not content |
+/// | 5th | hint | passive chrome; the status bar already states the context number |
+/// | 6th | survey | the user is being ASKED something — shed only under real pressure |
+/// | 7th | popup | a completion menu the user opened deliberately, one keystroke ago |
+/// | 8th | status | the last chrome to go, and only when the alternative is losing the composer |
+/// | 9th | input | never shed below [`INPUT_FLOOR`]; it is the only interactive surface |
+///
+/// `survey` and `popup` outrank the informational bands because both are live
+/// asks: something is waiting on the operator, and hiding it strands the turn.
+/// They still sit below `status`/`input` because a question you cannot answer is
+/// worse than a question you cannot see.
+pub(crate) const SHED_ORDER: [Band; 9] = [
+    Band::Toast,
+    Band::Agents,
+    Band::Checklist,
+    Band::Think,
+    Band::Hint,
+    Band::Survey,
+    Band::Popup,
+    Band::Status,
+    Band::Input,
+];
+
+impl Bands {
+    fn get(&self, band: Band) -> u16 {
+        match band {
+            Band::Toast => self.toast,
+            Band::Agents => self.agents,
+            Band::Checklist => self.checklist,
+            Band::Think => self.think,
+            Band::Hint => self.hint,
+            Band::Survey => self.survey,
+            Band::Popup => self.popup,
+            Band::Status => self.status,
+            Band::Input => self.input,
+        }
+    }
+
+    fn set(&mut self, band: Band, rows: u16) {
+        match band {
+            Band::Toast => self.toast = rows,
+            Band::Agents => self.agents = rows,
+            Band::Checklist => self.checklist = rows,
+            Band::Think => self.think = rows,
+            Band::Hint => self.hint = rows,
+            Band::Survey => self.survey = rows,
+            Band::Popup => self.popup = rows,
+            Band::Status => self.status = rows,
+            Band::Input => self.input = rows,
+        }
+    }
+
+    /// Rows every fixed band reserves. The streaming preview is the `Min(0)`
+    /// remainder, so it is deliberately NOT counted here — `area_h - reserved()`
+    /// is exactly what is left for the reply.
+    pub(crate) fn reserved(&self) -> u16 {
+        [
+            self.toast,
+            self.checklist,
+            self.think,
+            self.agents,
+            self.survey,
+            self.popup,
+            self.input,
+            self.hint,
+            self.status,
+        ]
+        .into_iter()
+        .fold(0u16, |acc, h| acc.saturating_add(h))
+    }
+
+    /// Clamp each band to its own ceiling. Independent of the viewport: a band
+    /// may not claim more than its cap even on a very tall terminal, because
+    /// these caps are what keep the live region from swallowing the scrollback
+    /// the user is reading.
+    pub(crate) fn capped(mut self) -> Self {
+        self.toast = self.toast.min(TOAST_INLINE_CAP);
+        self.checklist = self.checklist.min(CHECKLIST_INLINE_CAP);
+        self.agents = self.agents.min(AGENTS_INLINE_CAP);
+        self.survey = self.survey.min(crate::dialogs::survey::SURVEY_INLINE_CAP);
+        self.popup = self.popup.min(POPUP_INLINE_CAP);
+        self.input = self.input.max(INPUT_FLOOR);
+        self
+    }
+}
+
+/// **The arbiter.** Turn the bands the components *asked* for into the bands
+/// that actually fit in `area_h` rows.
+///
+/// This is the single place that decides what fits, and it is the answer to
+/// "it should be able to fit no matter what". Before it existed, each band
+/// clamped itself against an independently hand-written floor expression
+/// (`think + agents + checklist + survey + popup + 1 + 2 + 2`, repeated five
+/// times with a different prefix each time, and separately re-summed in
+/// `desired_inline_height`) — five chances to write the wrong prefix, and no
+/// global guarantee that the total fitted at all.
+///
+/// Guarantees, all pinned by tests:
+/// * the result never claims more than `area_h` rows, so `inline_split`'s
+///   `Min(0)` stream band is never negative and no band overflows into its
+///   neighbour;
+/// * bands are shed in [`SHED_ORDER`], partially (a band shrinks before it
+///   disappears) so a 1-row squeeze costs one row and not a whole feature;
+/// * the composer survives to [`INPUT_FLOOR`] on any viewport;
+/// * at any size where everything fits, the result is the input unchanged — so
+///   normal terminals see byte-identical layout to before the arbiter existed.
+pub(crate) fn fit_bands(want: Bands, area_h: u16) -> Bands {
+    let mut b = want.capped();
+    for band in SHED_ORDER {
+        let claimed = b.reserved().saturating_add(STREAM_FLOOR);
+        if claimed <= area_h {
+            break;
+        }
+        let excess = claimed - area_h;
+        let floor = match band {
+            Band::Input => INPUT_FLOOR,
+            _ => 0,
+        };
+        let cur = b.get(band);
+        let take = excess.min(cur.saturating_sub(floor));
+        b.set(band, cur - take);
+    }
+    b
 }
 
 /// The inline live region's vertical split. Kept as a free function so the
@@ -156,10 +367,10 @@ pub(crate) fn inline_split(area: Rect, b: Bands) -> std::rc::Rc<[Rect]> {
             Constraint::Length(b.think), // thinking / activity
             Constraint::Length(b.agents), // agents panel / background summary
             Constraint::Length(b.survey), // inline ask_user question band (own band)
-            Constraint::Length(1),       // right-aligned "N% context used" hint
+            Constraint::Length(b.hint),  // right-aligned notice row
             Constraint::Length(b.popup), // `/` popup / `@` dropdown (own band, never over the hint)
             Constraint::Length(b.input), // input box (top + bottom dividers)
-            Constraint::Length(2),       // status line + permission/shell line
+            Constraint::Length(b.status), // status line + permission/shell line
         ])
         .split(area)
 }
@@ -429,6 +640,25 @@ impl App {
         // of this is the one true "turn complete" event — see `turn_just_ended`
         // below and `App::settle_turn_chrome`.
         let mut prev_turn_active = false;
+        // Resize-burst settle window. A window drag emits a Resize per
+        // intermediate width; acting on each one produced ONE stranded live
+        // region per step (the "nine ascending stacks" report), because every
+        // rebuild re-anchors through a DSR cursor query and erases only the rect
+        // it just computed. While the size is still moving we therefore do
+        // NOTHING observable — no rebuild, no `insert_before`, no draw — and
+        // commit once at the settled size. Codex settles for 75ms, grok for 16;
+        // 50ms is comfortably longer than a drag's inter-event gap and still
+        // below the ~100ms at which a resize starts to feel sticky.
+        //
+        // Ordering note: this is a burst *coalescer*, not the fix. The erase /
+        // re-anchor defect is fixed independently (see `sample_frame_size` and
+        // the resize arm of the rebuild block below); a debounce alone would
+        // just reduce the number of stranded copies from nine to one.
+        let mut resize_settle: Option<(FrameSize, std::time::Instant)> = None;
+        const RESIZE_SETTLE: Duration = Duration::from_millis(50);
+        // How long to nap between re-samples while a burst settles. Short enough
+        // that the settle window dominates the latency, long enough not to spin.
+        const RESIZE_POLL: Duration = Duration::from_millis(8);
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
@@ -456,10 +686,52 @@ impl App {
                 self.settle_turn_chrome();
             }
 
+            // ONE SIZE PER FRAME. Sampled exactly once, here, and threaded
+            // through everything this iteration does — viewport sizing, band
+            // measurement, the scrollback commit width, the surgical clear's
+            // bottom clamp. Nothing below may ask the terminal again; see
+            // `app::frame_size` and its source-guard test for why.
+            let size = self.sample_frame_size();
+
+            // Hold a moving resize. `self.resize_dirty` is set by whichever
+            // observer saw the change first (the ioctl above, or the crossterm
+            // Resize event); while the size is STILL moving, this iteration
+            // produces nothing observable and simply re-samples.
+            //
+            // Critically it does not reach `terminal.draw` — a draw is what
+            // hands control to ratatui's `autoresize`, and `autoresize` is what
+            // re-anchors the viewport and leaves the previous one on screen.
+            // Skipping the draw is therefore not an optimisation; it is the
+            // thing that stops an intermediate width from ever being rendered.
+            if !want_full && self.resize_dirty {
+                let settled = match resize_settle {
+                    Some((last, since)) if last == size => since.elapsed() >= RESIZE_SETTLE,
+                    // First sighting, or the size moved again: restart the clock.
+                    _ => {
+                        resize_settle = Some((size, std::time::Instant::now()));
+                        false
+                    }
+                };
+                if !settled {
+                    // Keep draining events (so a Resize still updates the size,
+                    // and a Ctrl+C during a drag is still honoured), then loop.
+                    match time::timeout(RESIZE_POLL, self.event_rx.recv()).await {
+                        Ok(Some(event)) => {
+                            if self.dispatch_event(event) {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {}
+                    }
+                    continue;
+                }
+                resize_settle = None;
+            }
+
             // Height the inline live region wants right now (grows with the
             // composer, always clamped to the terminal so it can't overflow).
-            let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
-            let desired_inline_h = self.desired_inline_height(term_rows);
+            let desired_inline_h = self.desired_inline_height(size);
             // Did a terminal resize (pane split / drag) land since the last
             // frame? Consumed once here. The whole event backlog is drained by
             // `dispatch_event` before this runs, so a burst of Resize events from
@@ -472,7 +744,7 @@ impl App {
             // every time I run a command".
             // Both composer-anchored popups (`/` commands and the `@`-mention
             // dropdown) share one reserved band, so both share this edge.
-            let popup_h_now = self.popup_slot();
+            let popup_h_now = self.input.popup_desired_height();
             let popup_changed = popup_h_now != prev_popup_h;
             prev_popup_h = popup_h_now;
             // A REAL terminal resize (pane drag / window change). ONLY this may take
@@ -543,7 +815,7 @@ impl App {
                     // practice (the user just closed a dialog).
                     term_handle.abort();
                     let _ = term_handle.await;
-                    switch_to_inline(&mut terminal, desired_inline_h, last_inline_top)?;
+                    switch_to_inline(&mut terminal, desired_inline_h, last_inline_top, size)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                     cur_inline_h = desired_inline_h;
                     last_inline_top = Some(terminal.get_frame().area().top());
@@ -644,9 +916,7 @@ impl App {
                         // the whole screen here (the earlier bug) repainted on every
                         // notice / keystroke / scroll and stacked chrome. Clamp into
                         // the current screen in case a shrink left the row past bottom.
-                        let max_row = crossterm::terminal::size()
-                            .map(|(_, r)| r.saturating_sub(1))
-                            .unwrap_or(top);
+                        let max_row = size.rows.saturating_sub(1);
                         let _ = execute!(
                             std::io::stdout(),
                             crossterm::cursor::MoveTo(0, top.min(max_row)),
@@ -694,10 +964,10 @@ impl App {
                 if let Some((tool_count, provider, model)) =
                     self.pending_welcome_banner.take()
                 {
-                    // Use the real terminal width so the full ASCII logo shows
-                    // whenever the window is wide enough (the inline frame area can
-                    // lag a resize and under-report the width).
-                    let w = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80);
+                    // This frame's width (the inline frame area can lag a resize
+                    // and under-report it, which is why the banner must use the
+                    // frame's sampled size rather than `get_frame().area()`).
+                    let w = size.cols;
                     let lines = crate::components::chat::welcome::welcome_lines(
                         w,
                         tool_count,
@@ -733,8 +1003,13 @@ impl App {
             //    terminal can show at once (an over-tall single message still
             //    goes out alone, exactly as before).
             if !was_full && self.chat.has_pending_scrollback() {
-                let w = terminal.get_frame().area().width;
-                let cap = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24).max(1);
+                // Both from this frame's ONE size. `get_frame().area().width` was
+                // a third, independent size source: it reports the width the
+                // viewport was last BUILT at, so mid-drag it lags the ioctl and
+                // finalized messages were rendered — permanently, into native
+                // scrollback — at a width the terminal no longer had.
+                let w = size.cols;
+                let cap = size.rows.max(1);
                 let mut batch: Vec<(crate::components::chat::message::Message, u16)> = Vec::new();
                 let mut batch_h: u16 = 0;
 
@@ -880,7 +1155,9 @@ impl App {
         // (the geometry asserted by `resize_clear_top_from_bottom`), so clearing
         // from there down erases exactly it and never the real transcript
         // scrollback above it.
-        let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
+        // Teardown runs after the last frame, so this is a fresh sample of its
+        // own rather than a frame's threaded size.
+        let term_rows = crate::app::frame_size::probe().rows;
         if let Some(top) = clamp_inline_top(Some(term_rows.saturating_sub(cur_inline_h)), term_rows)
         {
             let _ = execute!(
@@ -1292,65 +1569,112 @@ impl App {
     /// leaving stacked / whitespace artifacts. A pending plan-review panel is
     /// reserved the same way (fixed slot), and completed content still flushes to
     /// native scrollback as before.
-    pub fn desired_inline_height(&self, term_rows: u16) -> u16 {
-        let input_needed = self.input.needed_height();
-        // FIXED-height agents slot — the same fixed-slot cure as the streaming
-        // preview and the activity feed. The multi-agent roster grows one row per
-        // spawned fleet node; sizing the viewport to the LIVE roster count grew it
-        // mid-turn, and every growth rebuilt the viewport (a DSR cursor re-anchor) →
-        // stacked composer + status bar down the screen, exactly like the per-tool
-        // feed did. Reserve the constant cap whenever the roster is shown so the
-        // height stays stable for the whole fleet turn; the roster draws into it.
-        let agents_h = if self.agents.height() > 0 {
-            AGENTS_INLINE_CAP
-        } else {
-            0
-        };
-        // The checklist owns a real band in `draw_inline` (it used to overlay the
-        // stream band and paint over the reply). Reserve it here too, or the band
-        // would be carved out of the streaming preview and squeeze the composer.
-        let checklist_h = self.checklist_slot();
-        // Same treatment for the inline `ask_user` band: it owns a real band in
-        // `draw_inline`, so the viewport must be built tall enough for it or the
-        // question would be carved out of the streaming preview (or clipped off
-        // the bottom entirely, which is how the picker "shipped invisible").
-        let survey_h = self.survey_slot();
-        // Ephemeral notifications own a real band above the stream (they used to
-        // be an unreserved overlay painted over the top of the streaming reply).
-        let toast_h = self.toast_slot();
+    /// This frame's size. Written exactly once per run-loop iteration by
+    /// [`Self::sample_frame_size`]; every measurement and every layout inside
+    /// the frame reads it from here, so a reservation and the paint it governs
+    /// are computed against the same numbers by construction.
+    pub(crate) fn frame_size(&self) -> FrameSize {
+        FrameSize::new(self.width, self.height)
+    }
+
+    /// Capture the ONE size this frame is laid out against — **first**, before
+    /// anything else in the iteration can observe a different one.
+    ///
+    /// "One size per frame" is only half the invariant. The other half is *read
+    /// first*: if OSA learns of a resize later than ratatui does, ratatui
+    /// reconciles behind it and the unification buys nothing.
+    ///
+    /// It really does reconcile. In ratatui 0.29 (`terminal/terminal.rs`),
+    /// `Terminal::draw` → `autoresize()` (line 242) queries `backend.size()` on
+    /// EVERY draw of an inline viewport and, on any mismatch with
+    /// `last_known_area`, calls `resize()` (line 212) → `compute_inline_size()`
+    /// (line 824). That issues a **DSR cursor query**, re-anchors the viewport,
+    /// and then calls `self.clear()` — which clears the viewport area *it just
+    /// computed*, i.e. the NEW rect. The old rect is never erased. One stranded
+    /// live region per intermediate width is precisely the "nine ascending
+    /// stacks after one drag" report. `insert_before` has the same dependency:
+    /// it scrolls by `last_known_area.height` and renders at
+    /// `last_known_area.width` (lines 617, 772, 795), so a stale value commits
+    /// finalized messages to native scrollback at a width the terminal no longer
+    /// has.
+    ///
+    /// So the size is taken from the **ioctl**, which reflects the kernel's view
+    /// as of SIGWINCH — strictly earlier than the crossterm `Resize` event,
+    /// which has to travel through the reader task first. Adopting it here means
+    /// OSA has already marked the viewport dirty (and, with the settle window
+    /// below, will not draw at all) before ratatui gets a chance to reconcile.
+    ///
+    /// The result is stored into `self.width` / `self.height`, which is what
+    /// every component measures itself at — so "measured at one width, laid out
+    /// at another" stops being expressible.
+    fn sample_frame_size(&mut self) -> FrameSize {
+        let size = crate::app::frame_size::probe();
+        self.adopt_frame_size(size);
+        size
+    }
+
+    /// Adopt a terminal size observed by *either* observer — the top-of-loop
+    /// ioctl or the crossterm `Resize` event — and re-lay-out for it.
+    ///
+    /// Returns whether the size actually changed. Idempotent, so whichever
+    /// observer notices first does the work and the other is a no-op; that is
+    /// what lets the ioctl run ahead of the event without doing it twice.
+    pub(crate) fn adopt_frame_size(&mut self, size: FrameSize) -> bool {
+        if self.width == size.cols && self.height == size.rows {
+            return false;
+        }
+        let width_changed = self.width != size.cols;
+        self.width = size.cols;
+        self.height = size.rows;
+        // Re-derive every wrap width and push it into chat/input/status;
+        // `Chat::set_size` invalidates the width-keyed render caches (per-message
+        // wrapped height + the live streaming markdown cache) so nothing renders
+        // at the stale width.
+        self.recompute_layout();
+        // A width change additionally forces a defensive re-invalidation of the
+        // width-keyed caches — `recompute_layout` already did this via
+        // `set_size`, but keep the intent explicit and independent of that
+        // call's internals so a future refactor cannot silently drop the reflow.
+        if width_changed {
+            self.chat.invalidate_width_caches();
+        }
+        // Signal the run loop to rebuild the inline viewport fresh at the new
+        // size. Without this a width-only resize (a horizontal split) leaves the
+        // viewport at its old geometry with stale rows, and a height shrink
+        // would be held by the transient-dip debounce for ~0.8s.
+        self.resize_dirty = true;
+        true
+    }
+
+    pub fn desired_inline_height(&self, size: FrameSize) -> u16 {
+        let term_rows = size.rows;
+        // ONE measurement, shared with `draw_inline`. Sizing and layout used to
+        // be two hand-written sums of the same ten numbers, each maintained by
+        // discipline; every band that ever "silently stole rows from the
+        // streaming reply" was one of them drifting from the other.
+        let b = self.measure_bands(size);
+        let input_needed = b.input;
         let hi0 = term_rows.saturating_sub(1).max(1);
-        // Reserve rows for the composer-anchored completion band — the open `/`
-        // popup OR the `@`-mention dropdown — so the upward-growing menu always
-        // has room above the input (same mechanism as the agents panel). Zero
-        // when both are closed, so idle height is unchanged.
-        let popup_h = self.popup_slot();
-        // Extra rows the live tool-use feed needs beyond the single activity
-        // row already baked into `live_region_height`'s fixed chrome. Without
-        // this the base (non-streaming) viewport reserves only 1 row for the
-        // activity component, so the per-tool feed drawn by draw_inline would
-        // be clipped off the bottom of the inline viewport. `think_row_height`
-        // is the shared source of truth, so viewport and layout grow together.
-        let activity_feed_extra = self.think_row_height();
         let base = live_region_height(input_needed, term_rows)
-            .saturating_add(agents_h)
-            .saturating_add(checklist_h)
-            .saturating_add(survey_h)
-            .saturating_add(toast_h)
-            .saturating_add(popup_h)
-            .saturating_add(activity_feed_extra)
+            .saturating_add(b.agents)
+            .saturating_add(b.checklist)
+            .saturating_add(b.survey)
+            .saturating_add(b.toast)
+            .saturating_add(b.popup)
+            .saturating_add(b.think)
             .min(hi0);
 
         // A pending permission prompt renders inline above the composer; grow the
         // live region to fit its compact height so the ask isn't clipped.
         if let Some(ref perm) = self.permissions {
-            let perm_rows = perm.content_height(self.width);
-            let overhead: u16 = self.think_row_height() + 1 + 2;
+            let perm_rows = perm.desired_height(size.cols);
+            let overhead: u16 = b.think + b.hint + b.status;
             let want = overhead
                 .saturating_add(input_needed)
                 .saturating_add(perm_rows)
-                .saturating_add(agents_h)
-                .saturating_add(toast_h)
-                .saturating_add(popup_h);
+                .saturating_add(b.agents)
+                .saturating_add(b.toast)
+                .saturating_add(b.popup);
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
         }
@@ -1363,28 +1687,23 @@ impl App {
         // the same fixed-slot principle as the streaming preview below. Mirrors
         // the permission-prompt branch above.
         if let Some(ref review) = self.plan_review {
-            let overhead: u16 = self.think_row_height() + 1 + 2;
+            let overhead: u16 = b.think + b.hint + b.status;
             let want = overhead
                 .saturating_add(input_needed)
-                .saturating_add(review.content_height(self.width))
-                .saturating_add(agents_h)
-                .saturating_add(toast_h)
-                .saturating_add(popup_h);
+                .saturating_add(review.desired_height(size.cols))
+                .saturating_add(b.agents)
+                .saturating_add(b.toast)
+                .saturating_add(b.popup);
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
         }
 
         // Streaming preview — FIXED-height, internally-scrolled slot (the real
-        // cure). `streaming_height` is consulted ONLY as a boolean "is anything
-        // streaming?" gate, NEVER for sizing: the reserved slot is a constant
-        // STREAM_PREVIEW_ROWS, so the inline-viewport height stays CONSTANT for the
-        // whole turn. Previously this branch grew (quantized) with the reply, which
-        // rebuilt the inline viewport mid-turn → a DSR cursor re-anchor tmux/SSH can
-        // drop → the stacked / whitespace artifacts. With a fixed slot the viewport
-        // is built once per turn; the newest lines scroll WITHIN the slot
-        // (`Chat::draw_live` bottom-anchors the tail) and completed content still
-        // flushes to native scrollback exactly as before.
-        let content_h = self.chat.streaming_height(self.width);
+        // cure). The reserved slot is a constant STREAM_PREVIEW_ROWS, quantized
+        // upward in whole steps for a long reply, so the inline-viewport height
+        // is stable for the whole turn: growing it per token rebuilt the viewport
+        // mid-turn → a DSR cursor re-anchor tmux/SSH can drop → stacked chrome.
+        let content_h = self.chat.desired_height(size.cols);
         let streaming = content_h > 1;
         if !streaming {
             // Not streaming ⇒ no turn's worth of growth to remember. Releasing the
@@ -1406,247 +1725,114 @@ impl App {
             stream_preview_ceiling(term_rows),
         );
         self.stream_preview_hw.set(preview_rows);
-        // Chrome below the streaming preview: thinking/activity row (dynamic —
-        // shared with draw_inline via think_row_height so the two can never drift a
-        // row apart) + ctx-hint(1) + status(2). `agents_h`/`popup_h` — and the
-        // reserved BANDS (checklist + survey) — are counted in BOTH branches so
-        // viewport sizing and the draw_inline layout stay in lockstep. A
-        // disagreement here is not cosmetic: the bands are carved out of the same
-        // `Min(0)` slot the streaming preview lives in, so every row missing from
-        // this reservation is a row taken off the visible reply.
-        let overhead: u16 = self.think_row_height() + 1 + 2;
+        // Every band that consumes stream rows is counted in BOTH `base` and
+        // `want`. Omitting one from `want` is a real bug that shipped: whenever
+        // `want > base` the clamp returns `want`, so a band counted only in
+        // `base` silently vanished from the reservation while `draw_inline` still
+        // carved it out — the plan block sitting where the rest of the reply
+        // should have been. Taking every number from ONE `measure_bands` call is
+        // what makes the omission unwritable.
+        let overhead: u16 = b.think + b.hint + b.status;
         let hi = term_rows.saturating_sub(1).max(1);
         streaming_inline_height(
             base,
             overhead,
             input_needed,
-            agents_h,
-            checklist_h.saturating_add(survey_h).saturating_add(toast_h),
-            popup_h,
+            b.agents,
+            b.checklist.saturating_add(b.survey).saturating_add(b.toast),
+            b.popup,
             preview_rows,
             hi,
         )
     }
 
-    /// Rows the live task checklist reserves in the inline region. The SINGLE
-    /// source of truth for BOTH `desired_inline_height` (viewport sizing) and
-    /// `draw_inline` (layout), so the reserved band can never disagree with the
-    /// drawn one — the disagreement class that let the checklist paint over the
-    /// streaming reply.
+    /// **Measure every live-region band, once, for this frame.**
     ///
-    /// Unlike the agents roster (which grows a row per spawned teammate all turn
-    /// long, hence its constant cap), the checklist's height is set by the plan
-    /// burst and then holds: the frequent event is a STATUS change, which never
-    /// changes the row count. So reserving the exact height costs at most one
-    /// viewport rebuild per plan and leaves no dead rows.
+    /// The single source of truth for BOTH the viewport height
+    /// ([`Self::desired_inline_height`]) and the layout ([`Self::draw_inline`]).
     ///
-    /// Zero whenever an inline permission prompt or plan-review panel owns the
-    /// band, or the user hid the checklist with Ctrl+T.
-    fn checklist_slot(&self) -> u16 {
-        if self.task_checklist_hidden
-            || self.permissions.is_some()
-            || self.plan_review.is_some()
+    /// This function replaced five near-identical `*_slot()` methods plus a
+    /// `think_row_height()`, each of which had to be called from two places and
+    /// kept in agreement by hand. The source comments on those methods are a
+    /// record of the agreement failing: "must MATCH `desired_inline_height`'s
+    /// reservation expression exactly", "a disagreement here is not cosmetic",
+    /// "the bug that shipped was ONE rect handed to TWO components". With one
+    /// measurement feeding both consumers, a disagreement is not expressible.
+    ///
+    /// Every height comes from the component itself, through
+    /// [`crate::components::measure::Measured`]; what stays here is only the
+    /// *app-level gating* a component cannot know — which bands stand down while
+    /// a blocking ask owns the region, and which display mode the a11y setting
+    /// selects.
+    ///
+    /// The result is [`Bands::capped`]: these are the rows each band may claim on
+    /// an arbitrarily tall terminal. Fitting them into a real one is
+    /// [`fit_bands`]'s job, and only [`fit_bands`]'s job.
+    pub(crate) fn measure_bands(&self, size: FrameSize) -> Bands {
+        let w = size.cols;
+        // An inline permission prompt or plan-review panel takes over the stream
+        // band while pending. The informational bands stand down: two blocking
+        // asks are never stacked, and the panel needs the rows.
+        let blocking_ask = self.permissions.is_some() || self.plan_review.is_some();
+
+        // The checklist owns a real band. It used to be drawn as an OVERLAY into
+        // the stream band's own rect — the same rect the reply had already
+        // painted into — so a plan and a streaming markdown table interleaved.
+        let checklist = if self.task_checklist_hidden
+            || blocking_ask
             || !self.task_checklist.is_visible()
         {
-            return 0;
-        }
-        self.task_checklist.height().min(CHECKLIST_INLINE_CAP)
-    }
+            0
+        } else {
+            self.task_checklist.desired_height(w)
+        };
 
-    /// Rows the inline `ask_user` question band reserves. The SINGLE source of
-    /// truth for BOTH `desired_inline_height` (viewport sizing) and `draw_inline`
-    /// (layout) — exactly the `checklist_slot` contract, and for exactly the same
-    /// reason: the bug that shipped was ONE rect handed to TWO components, so the
-    /// band a component draws into must be the band the sizing reserved.
-    ///
-    /// Bounded by `SurveyDialog::band_height` (≤ `SURVEY_INLINE_CAP` = 14 rows),
-    /// so a 12-option question scrolls INTERNALLY instead of swallowing the
-    /// terminal. Zero while an inline permission prompt or plan-review panel owns
-    /// the live region — two blocking asks are never stacked.
-    pub(crate) fn survey_slot(&self) -> u16 {
-        if self.permissions.is_some() || self.plan_review.is_some() {
-            return 0;
-        }
-        match self.survey {
-            Some(ref s) => s.band_height(self.width),
-            None => 0,
-        }
-    }
+        // Inline `ask_user` question band — a REAL band, never an overlay, for
+        // exactly the reason above.
+        let survey = match self.survey {
+            Some(ref s) if !blocking_ask => s.desired_height(w),
+            _ => 0,
+        };
 
-    /// Rows the ephemeral toast band reserves. The SINGLE source of truth for
-    /// BOTH `desired_inline_height` (viewport sizing) and `draw_inline` (layout)
-    /// — the `checklist_slot` / `survey_slot` contract, for the same reason.
-    ///
-    /// Toasts were the last unreserved overlay in the live region: `draw_inline`
-    /// laid out every band and then painted `toast_rect(area)` — the TOP THREE
-    /// ROWS OF THE STREAM BAND — over whatever the reply had drawn there. A
-    /// toast firing mid-reply erased the top of the answer for its 4–6s dwell.
-    ///
-    /// An overlay is NOT the right shape here even though toasts are ephemeral:
-    /// nothing about a notification requires destroying the reply underneath it,
-    /// and the live region is short enough that three stolen rows are a
-    /// significant fraction of the visible answer. So it gets a real band.
-    ///
-    /// The reservation is the EXACT live count (not a fixed cap): a toast
-    /// appearing or expiring is a discrete event, so this costs at most one
-    /// viewport rebuild per toast edge and leaves no dead rows — the same
-    /// trade-off `checklist_slot` documents. Zero when no toast is live, so an
-    /// idle live region is byte-for-byte what it was before.
-    pub(crate) fn toast_slot(&self) -> u16 {
-        self.toasts.live_count()
-    }
-
-    /// Rows the composer-anchored completion band reserves — the `/`-command
-    /// popup or the `@`-mention dropdown. The SINGLE source of truth for BOTH
-    /// `desired_inline_height` (viewport sizing) and `draw_inline` (layout), and
-    /// additionally for the run loop's `popup_changed` immediate-rebuild edge.
-    ///
-    /// The `@`-dropdown had the same defect the checklist did: `InputComponent::draw`
-    /// painted its rows at `area.y - n .. area.y`, i.e. ABOVE the composer's own
-    /// rect, into rows owned by the context-hint / survey / agents bands, with
-    /// nothing reserving them. (The `/` popup did the same, and merely happened
-    /// to have its height added to the viewport total, which grew the region but
-    /// never told the layout which rows were spoken for.) Both now draw into
-    /// `ROW_POPUP`, which sits between the hint row and the composer.
-    ///
-    /// `max` rather than a sum because exactly one of the two ever paints (see
-    /// `InputComponent::draw_popup`, which gives the `/` popup precedence), so
-    /// they can never share a row.
-    ///
-    /// **Why a fixed slot for the mention dropdown** (`MENTION_POPUP_ROWS`,
-    /// independent of the match count): the dropdown re-filters on every
-    /// keystroke, so an exactly-sized band would change height mid-word — and
-    /// every height change rebuilds the inline viewport via a DSR cursor query,
-    /// which is precisely the churn that produced the stacked-composer artifacts.
-    /// A constant slot changes height exactly twice per dropdown session (open,
-    /// close), no matter how many characters are typed into the mention. The
-    /// dropdown is bottom-anchored inside it so a 1-match dropdown still sits
-    /// tight against the composer instead of floating on 4 dead rows.
-    pub(crate) fn popup_slot(&self) -> u16 {
-        self.input
-            .completions_popup_height()
-            .max(self.input.mention_popup_height())
-    }
-
-    /// Height of the thinking/activity row. The SINGLE source of truth used by
-    /// BOTH `desired_inline_height` (viewport sizing) and `draw_inline` (layout)
-    /// so the reserved overhead can never disagree with the drawn row by a line
-    /// — that 1-row disagreement is exactly the height-thrash class of bug that
-    /// stacks a ghost second Thinking box + composer (see the agents_h note in
-    /// `desired_inline_height`).
-    fn think_row_height(&self) -> u16 {
-        // NOTE the `a11y` predicate: `draw_inline` picks the thinking box ONLY when
-        // `!thinking_box.is_empty() && !activity.a11y()` — in screen-reader mode it
-        // draws the activity's 1-row plain-text line instead. Sizing must use the
-        // SAME predicate or it reserves the expanded box's 12 rows and draws 1,
-        // leaving 11 dead rows above the composer for screen-reader users.
-        if !self.thinking_box.is_empty() && !self.activity.a11y() {
-            // Collapsed → 1 row; expanded (ctrl+t) → the box's measured height.
-            self.thinking_box.height(self.width)
+        // NOTE the `a11y` predicate: the boxed thinking display is skipped for
+        // screen readers in favour of the activity's 1-row plain-text line.
+        // Measuring with a DIFFERENT predicate than the draw reserved the box's
+        // 12 rows and painted 1, leaving 11 dead rows above the composer.
+        let think = if !self.thinking_box.is_empty() && !self.activity.a11y() {
+            self.thinking_box.desired_height(w)
         } else if self.activity.height() > 0 {
-            // FIXED-height activity slot — the same fixed-slot cure the streaming
-            // preview uses. The live tool-use feed grows 0→N rows as tools run
-            // (spinner, then one row per running/finished tool). Sizing this to the
-            // LIVE count grew the inline viewport mid-turn, and EVERY growth rebuilt
-            // the viewport (a DSR cursor re-anchor) — which, tick after tick as tools
-            // ran, stacked a fresh composer + status bar down the whole screen.
-            //
-            // The ceiling is derived from the CURRENT VERBOSITY rather than a flat
-            // constant. It is equally stable (verbosity changes only on explicit user
-            // action, never mid-turn) but exact: a flat 6 over-reserved the common
-            // modes (Off=1, New=2 → up to 5 dead rows) AND under-reserved `Verbose`
-            // (wants 9 → the 3 oldest feed rows were silently clipped). `draw_inline`
-            // bottom-anchors the content inside this slot, so any slack sits above
-            // the spinner as padding instead of railed dead rows below it.
-            self.activity.max_height()
+            self.activity.desired_height(w)
         } else {
             0
+        };
+
+        Bands {
+            toast: self.toasts.desired_height(w),
+            checklist,
+            think,
+            agents: self.agents.desired_height(w),
+            survey,
+            popup: self.input.popup_desired_height(),
+            input: self.input.desired_height(w),
+            ..Bands::default()
         }
+        .capped()
     }
+
 
     /// Draw the compact inline live region: streaming preview, thinking/activity,
     /// status, and input. Finalized conversation lives in native scrollback.
     fn draw_inline(&self, frame: &mut Frame, area: Rect) {
-        let think_h: u16 = self.think_row_height();
-        // Inline agents panel: multi-agent tree + "N background terminals" summary.
-        // Height 0 when idle (row collapses); capped so it never swallows the
-        // compact live region, and bounded by what's left after the fixed chrome.
-        // Must MATCH `desired_inline_height`'s reservation expression exactly. When
-        // sizing reserved the constant cap but this used the LIVE roster count, the
-        // difference leaked into the `Min(0)` stream band as blank rows. The trailing
-        // `.min(...)` is only a tiny-terminal safety clamp (a no-op at normal sizes).
-        let agents_h = {
-            let slot = if self.agents.height() > 0 {
-                super::event_loop::AGENTS_INLINE_CAP
-            } else {
-                0
-            };
-            let reserved = think_h + 1 + 2 + 2; // hint + status + stream/input floor
-            slot.min(area.height.saturating_sub(reserved))
-        };
-        // Live task checklist band. It USED to be drawn as an overlay into
-        // `a_stream` — the same rect `Chat::draw_live` had already painted the
-        // reply into — so a plan and a streaming markdown table interleaved
-        // ("Plan 3/3" printed on top of a table row). It now owns a band of its
-        // own, taken out of the `Min(0)` stream band, so the two can never share
-        // a row. Zero when hidden/empty or while an inline prompt owns the band.
-        // Must MATCH `desired_inline_height`'s reservation (`checklist_slot`)
-        // exactly; the trailing `.min(...)` is only a tiny-terminal safety clamp
-        // (a no-op at normal sizes), same shape as `agents_h` above.
-        let checklist_h = checklist_band_height(
-            self.checklist_slot(),
-            area.height,
-            // chrome that must survive + one row of stream band
-            think_h + agents_h + 1 + 2 + 2,
-        );
-        // Inline `ask_user` question band — same reserved-band contract as the
-        // checklist directly above (see `survey_slot`). NEVER an overlay into
-        // `a_stream`: the question is a blocking ask, and painting it over the
-        // reply is the exact defect the checklist band was created to end.
-        // Must MATCH `desired_inline_height`'s reservation (`survey_slot`).
-        let survey_h = survey_band_height(
-            self.survey_slot(),
-            area.height,
-            think_h + agents_h + checklist_h + 1 + 2 + 2,
-        );
-        // Composer-anchored completion band (`/` popup or `@` dropdown). Both
-        // USED to paint at `area.y - n` from inside `InputComponent::draw`, i.e.
-        // over the context-hint row and whatever band sat above it, with nothing
-        // reserving those rows. Must MATCH `desired_inline_height`'s reservation
-        // (`popup_slot`); the trailing `.min(...)` is the tiny-terminal clamp.
-        let popup_h = popup_band_height(
-            self.popup_slot(),
-            area.height,
-            think_h + agents_h + checklist_h + survey_h + 1 + 2 + 2,
-        );
-        // Ephemeral toast band at the top of the region — same reserved-band
-        // contract (see `toast_slot`); NEVER an overlay over `a_stream`.
-        let toast_h = toast_band_height(
-            self.toast_slot(),
-            area.height,
-            think_h + agents_h + checklist_h + survey_h + popup_h + 1 + 2 + 2,
-        );
-        // Chrome overhead below the streaming preview: activity + agents +
-        // checklist + survey + popup + toast + ctx-hint(1) + status(2). The input
-        // takes whatever is left, clamped to what it needs.
-        let overhead = think_h + agents_h + checklist_h + survey_h + popup_h + toast_h + 1 + 2;
-        let input_h = self
-            .input
-            .needed_height()
-            .min(area.height.saturating_sub(overhead)) // streaming row is content-sized (0 when idle)
-            .max(1);
-        let rows = inline_split(
-            area,
-            Bands {
-                toast: toast_h,
-                checklist: checklist_h,
-                think: think_h,
-                agents: agents_h,
-                survey: survey_h,
-                popup: popup_h,
-                input: input_h,
-            },
-        );
+        // **Heights compute, Rects derive.** One measurement, arbitrated once
+        // into what actually fits, then split into rects. `draw_inline` used to
+        // re-derive all six band heights here with its own copy of the floor
+        // expressions ("must MATCH `desired_inline_height`'s reservation exactly"
+        // appears five times in the deleted code); every band that ever painted
+        // where nothing had reserved was one of those copies drifting.
+        //
+        // Nothing below may compute a height. It may only read a rect.
+        let bands = fit_bands(self.measure_bands(self.frame_size()), area.height);
+        let rows = inline_split(area, bands);
 
         // Wipe the whole inline region first so no stale rows from a previous,
         // differently-sized frame bleed through (belt-and-braces against the
@@ -1889,7 +2075,12 @@ fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
 /// downward before rebuilding erases exactly the old chrome (never the real
 /// transcript scrollback above `prev_inline_top`, which this never touches)
 /// so the freshly built viewport lands in the same place the old one started.
-fn switch_to_inline(terminal: &mut Term, inline_h: u16, prev_inline_top: Option<u16>) -> Result<()> {
+fn switch_to_inline(
+    terminal: &mut Term,
+    inline_h: u16,
+    prev_inline_top: Option<u16>,
+    size: FrameSize,
+) -> Result<()> {
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
     crate::app::alt_screen::mark_left();
 
@@ -1904,11 +2095,13 @@ fn switch_to_inline(terminal: &mut Term, inline_h: u16, prev_inline_top: Option<
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 
-    // Erase the old inline chrome before rebuilding. `crossterm::terminal::size`
-    // reflects the terminal as it stands right now (a resize could have landed
-    // while the dialog owned the screen), so re-validate the remembered row
-    // against it rather than trusting a possibly-stale value blindly.
-    let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(u16::MAX);
+    // Erase the old inline chrome before rebuilding. `size` is THIS frame's
+    // size — sampled once at the top of the run loop, and already re-adopted if
+    // a resize landed while the dialog owned the screen — so the remembered top
+    // row is re-validated against the terminal as it stands now rather than
+    // trusted blindly. It used to be a second, independent
+    // `crossterm::terminal::size()` here; see `app::frame_size`.
+    let term_rows = size.rows;
     if let Some(top) = clamp_inline_top(prev_inline_top, term_rows) {
         let _ = execute!(
             std::io::stdout(),

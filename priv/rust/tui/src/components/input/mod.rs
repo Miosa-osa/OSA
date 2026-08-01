@@ -519,6 +519,20 @@ impl InputComponent {
         }
     }
 
+    /// Rows the composer-anchored completion band wants — the `/`-command popup
+    /// OR the `@`-mention dropdown, whichever is open.
+    ///
+    /// `max` rather than a sum because exactly one of the two ever paints
+    /// (`draw_popup` gives the `/` popup precedence), so they can never share a
+    /// row. That rule lives HERE, next to the draw that enforces it, rather than
+    /// in the app's band arbiter: the arbiter reserves what a component asks
+    /// for, and a component that knows two of its sub-widgets are mutually
+    /// exclusive is the only thing that can honestly ask for one band.
+    pub fn popup_desired_height(&self) -> u16 {
+        self.completions_popup_height()
+            .max(self.mention_popup_height())
+    }
+
     /// Draw the composer-anchored completion band: the `/`-command popup, or the
     /// `@`-mention dropdown. Never both — the `/` popup wins — so the two can
     /// never share a row.

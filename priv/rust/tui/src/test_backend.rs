@@ -62,6 +62,33 @@ impl Write for SharedParser {
 pub struct VT100Backend {
     crossterm_backend: CrosstermBackend<SharedParser>,
     parser: Rc<RefCell<vt100::Parser>>,
+    /// How many times ratatui has asked this backend how big it is, and how
+    /// many times it has asked where the cursor is. Shared with every [`fork`]
+    /// of this backend, because the inline path replaces its `Terminal` (and
+    /// therefore its backend) on every rebuild while the *terminal* underneath
+    /// stays the same one the counters are about.
+    ///
+    /// These exist to make Codex's rule assertable here. Codex forbids querying
+    /// the backend while a resize frame is being drawn and pins it with
+    /// `resize_draw_applies_event_dimensions_without_querying_backend_size`
+    /// (`codex-rs/tui/custom_terminal.rs`), which counts the calls. The counts
+    /// matter because of what ratatui does with them: `Terminal::draw` calls
+    /// `autoresize()`, which reads `backend.size()` and — if it disagrees with
+    /// the size the viewport was built at — calls `Terminal::resize()`, which
+    /// queries the CURSOR (`compute_inline_size`) and re-anchors the inline
+    /// viewport, clearing only the new rect and leaving the previous render on
+    /// screen. So `size()` called once per draw is normal and healthy;
+    /// `get_cursor_position()` called during a draw means ratatui just
+    /// re-anchored the live region behind the app's back, which is the
+    /// stacked-chrome bug in the act.
+    probes: Rc<Probes>,
+}
+
+/// Backend-call counters shared by a backend and all its forks.
+#[derive(Default)]
+pub struct Probes {
+    size: std::cell::Cell<usize>,
+    cursor: std::cell::Cell<usize>,
 }
 
 impl VT100Backend {
@@ -93,7 +120,27 @@ impl VT100Backend {
         Self {
             crossterm_backend: CrosstermBackend::new(SharedParser(Rc::clone(&parser))),
             parser,
+            probes: Rc::new(Probes::default()),
         }
+    }
+
+    /// Times ratatui has asked this terminal for its size since the last
+    /// [`reset_probes`](Self::reset_probes).
+    pub fn size_probes(&self) -> usize {
+        self.probes.size.get()
+    }
+
+    /// Times ratatui has asked this terminal where its cursor is since the last
+    /// [`reset_probes`](Self::reset_probes). Non-zero during a `draw` means
+    /// `autoresize` re-anchored the inline viewport — see [`Probes`].
+    pub fn cursor_probes(&self) -> usize {
+        self.probes.cursor.get()
+    }
+
+    /// Zero both counters, so an assertion can be scoped to a single frame.
+    pub fn reset_probes(&self) {
+        self.probes.size.set(0);
+        self.probes.cursor.set(0);
     }
 
     /// A second backend driving the SAME emulated terminal.
@@ -106,6 +153,7 @@ impl VT100Backend {
         Self {
             crossterm_backend: CrosstermBackend::new(SharedParser(Rc::clone(&self.parser))),
             parser: Rc::clone(&self.parser),
+            probes: Rc::clone(&self.probes),
         }
     }
 
@@ -215,6 +263,7 @@ impl Backend for VT100Backend {
     ///
     /// `vt100` reports `(row, col)`; `Position` is `(x, y)` — i.e. `(col, row)`.
     fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.probes.cursor.set(self.probes.cursor.get() + 1);
         let (row, col) = self.parser.borrow().screen().cursor_position();
         Ok(Position::new(col, row))
     }
@@ -238,6 +287,7 @@ impl Backend for VT100Backend {
     /// Answered from the emulated screen for the same reason as
     /// [`Self::get_cursor_position`]. `vt100` reports `(rows, cols)`.
     fn size(&self) -> io::Result<Size> {
+        self.probes.size.set(self.probes.size.get() + 1);
         let (rows, cols) = self.parser.borrow().screen().size();
         Ok(Size::new(cols, rows))
     }

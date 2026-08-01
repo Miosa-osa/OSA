@@ -78,11 +78,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentStateRoutes do
       Application.get_env(:optimal_system_agent, :default_provider, :ollama)
       |> to_string()
 
-    model =
-      Application.get_env(:optimal_system_agent, :default_model) ||
-        Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
-
-    {provider, to_string(model)}
+    # Runtime.Identity, not a hand-rolled chain — the `:ollama_model` fallback
+    # (and its hardcoded literal) reported an Ollama model for every provider.
+    {provider, OptimalSystemAgent.Runtime.Identity.model()}
   end
 
   defp total_memory_mb do

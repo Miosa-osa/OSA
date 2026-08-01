@@ -88,9 +88,21 @@ defmodule OptimalSystemAgent.Application do
     # and when it does, config.toml wins (documented defaults < config.json < toml).
     # config.json remains the user's PERSISTED selection (onboarding + in-TUI
     # /switch write it) so it still beats a possibly-stale OLLAMA_MODEL env var.
+    #
+    # Both file/env model sources are PROVIDER-SCOPED (see model_for_provider/3
+    # and ollama_env_model/2): a model persisted for provider X must never be
+    # stapled onto provider Y. Without that gate the provider half and the model
+    # half of the same selection came from different places, which is exactly how
+    # `/health` — and therefore the status bar, the startup banner, `osa doctor`
+    # and the agent's own context line — reported the impossible pair
+    # "anthropic / llama3.2:latest".
     resolved_model =
-      OptimalSystemAgent.ConfigFile.model_name() ||
-        System.get_env("OLLAMA_MODEL") ||
+      model_for_provider(
+        provider,
+        OptimalSystemAgent.ConfigFile.model_name(),
+        OptimalSystemAgent.ConfigFile.provider()
+      ) ||
+        ollama_env_model(provider, System.get_env("OLLAMA_MODEL")) ||
         Application.get_env(:optimal_system_agent, :"#{provider}_model") ||
         Application.get_env(:optimal_system_agent, :default_model)
 
@@ -435,6 +447,51 @@ defmodule OptimalSystemAgent.Application do
         end
     end
   end
+
+  @doc false
+  # The config-file model, but ONLY when it belongs to the provider that won.
+  #
+  # `~/.osa/config.json` is written as a PAIR — `{"provider": ..., "model": ...}`
+  # — by onboarding, the model picker and `POST /models/switch`. Provider
+  # resolution above deliberately does NOT read that file (config.toml and
+  # `OSA_DEFAULT_PROVIDER` decide), so the pair can be split: an env-selected
+  # provider wins while the file's model is still applied to it. That is how the
+  # startup banner came to read "anthropic / llama3.2:latest" — an Ollama
+  # selection stapled onto Anthropic.
+  #
+  # A model persisted for provider X is not a model for provider Y. Dropping it
+  # leaves `:default_model` unset, and `Runtime.Identity.model/0` then falls back
+  # to the provider's own catalog default — so the displayed pair is coherent by
+  # construction instead of merely being coherent by luck. A config file that
+  # names no provider keeps the old behaviour untouched.
+  @spec model_for_provider(atom(), String.t() | nil, String.t() | nil) :: String.t() | nil
+  def model_for_provider(provider, model, config_provider)
+
+  def model_for_provider(_provider, model, _config_provider)
+      when not is_binary(model) or model == "",
+      do: nil
+
+  def model_for_provider(_provider, model, config_provider)
+      when not is_binary(config_provider) or config_provider == "",
+      do: model
+
+  def model_for_provider(provider, model, config_provider) do
+    if String.downcase(String.trim(config_provider)) == to_string(provider),
+      do: model,
+      else: nil
+  end
+
+  @doc false
+  # `OLLAMA_MODEL` is provider-scoped by its very name. `config/runtime.exs`
+  # already refuses to seed `:default_model` from it unless the active provider
+  # is Ollama; this mirrors that gate at boot so the two cannot disagree (before,
+  # an OLLAMA_MODEL left over in `~/.osa/.env` would be handed to Anthropic).
+  @spec ollama_env_model(atom(), String.t() | nil) :: String.t() | nil
+  def ollama_env_model(provider, model)
+      when is_binary(model) and model != "" and provider in [:ollama, :ollama_cloud],
+      do: model
+
+  def ollama_env_model(_provider, _model), do: nil
 
   @doc false
   # Pure effort resolution — normalizes a config.toml [model].effort string to a

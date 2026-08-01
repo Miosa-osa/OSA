@@ -104,33 +104,22 @@ impl App {
     pub fn update(&mut self, event: Event) -> bool {
         match event {
             Event::Terminal(CrosstermEvent::Resize(w, h)) => {
-                // A terminal resize (window drag, tmux/terminal pane split)
-                // changes the width and/or height. Store the new dims and fully
-                // re-lay-out: `recompute_layout` re-derives every wrap width and
-                // pushes them into chat/input/status, and `Chat::set_size`
-                // invalidates the width-keyed render caches (per-message wrapped
-                // height + the live streaming markdown cache) so nothing renders
-                // at the stale width. Coalescing is free — a pane-drag emits a
-                // burst of Resize events that the event loop drains before its
-                // next draw, so only the FINAL (w, h) survives here.
-                let width_changed = self.width != w;
-                self.width = w;
-                self.height = h;
-                self.recompute_layout();
-                // A width change additionally forces a defensive re-invalidation
-                // of the width-keyed caches — recompute_layout already did this
-                // via set_size, but keep the intent explicit and independent of
-                // that call's internals so a future refactor can't silently drop
-                // the reflow.
-                if width_changed {
-                    self.chat.invalidate_width_caches();
-                }
-                // Signal the event loop to rebuild the inline viewport fresh at
-                // the new size (see `resize_dirty`). Without this a width-only
-                // resize (height unchanged, e.g. a horizontal split) leaves the
-                // viewport at its old geometry with stale rows, and a height
-                // shrink would be held by the transient-dip debounce for ~0.8s.
-                self.resize_dirty = true;
+                // The crossterm Resize event is the SECOND observer of a resize,
+                // not the first: the kernel changed the size at SIGWINCH, the
+                // ioctl reports it immediately, and this event only arrives once
+                // the reader task has delivered it. The run loop therefore also
+                // samples the ioctl at the top of every iteration
+                // (`sample_frame_size`) and adopts a change the moment it sees
+                // one — otherwise every frame drawn in that gap is reconciled by
+                // ratatui's own `autoresize`, which re-anchors the inline
+                // viewport through a DSR cursor query and clears ONLY the new
+                // rect, stranding the old one on screen. That is the mechanism
+                // behind "one drag left nine stacked live regions".
+                //
+                // Both observers funnel into the same `adopt_frame_size`, so
+                // whichever notices first does the identical work and the second
+                // is a no-op.
+                self.adopt_frame_size(crate::app::frame_size::FrameSize::from_resize_event(w, h));
                 false
             }
             Event::Terminal(CrosstermEvent::Key(key))

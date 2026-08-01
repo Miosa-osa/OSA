@@ -206,11 +206,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       Application.get_env(:optimal_system_agent, :default_provider, :ollama)
       |> to_string()
 
-    model =
-      Application.get_env(:optimal_system_agent, :default_model) ||
-        Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
-
-    model_name = to_string(model)
+    # Runtime.Identity, not a hand-rolled chain — the `:ollama_model` fallback
+    # (and its hardcoded literal) reported an Ollama model for every provider.
+    model_name = OptimalSystemAgent.Runtime.Identity.model()
 
     context_window =
       try do
@@ -339,9 +337,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   defp handle_list_models(conn) do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
-    current_model =
-      Application.get_env(:optimal_system_agent, :default_model) ||
-        Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
+    # Marks the "current" row in the model picker — same resolver as /health, so
+    # the picker highlights the model the status bar and banner are showing.
+    current_model = OptimalSystemAgent.Runtime.Identity.model()
 
     ollama_models =
       try do

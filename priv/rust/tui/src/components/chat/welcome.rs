@@ -331,6 +331,131 @@ mod welcome_tests {
         assert!(!text3.contains("No provider configured"));
     }
 
+    /// Flatten a rendered `StatusBar` to a single string, the same way the
+    /// status-bar tests do.
+    fn render_status_text(sb: &crate::components::status_bar::StatusBar) -> String {
+        let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        term.draw(|f| {
+            use super::super::super::Component;
+            sb.draw(f, f.area())
+        })
+        .unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn banner_text(sb: &crate::components::status_bar::StatusBar, tools: usize) -> String {
+        welcome_lines(92, tools, Some(sb.provider()), Some(sb.model_name()), None)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn banner_identity_matches_status_bar() {
+        // The banner and the status bar sit on the same screen. They used to
+        // keep independent copies of provider/model and printed
+        // "anthropic / llama3.2:latest" next to a status bar reading the real
+        // model. `App::identity()` now builds the banner from the very fields
+        // the bar renders, so this holds for a configured Anthropic session, an
+        // Ollama session, AND across a mid-session `/switch`.
+        let mut sb = crate::components::status_bar::StatusBar::new();
+        sb.set_width(120);
+
+        for (provider, model) in [
+            ("anthropic", "claude-opus-5"),
+            ("ollama", "glm-5.2:cloud"),
+            // mid-session switch — the bar moves, and the banner built from it
+            // moves with it.
+            ("anthropic", "claude-sonnet-4-6"),
+        ] {
+            sb.set_provider_info(provider, model);
+            assert_eq!(sb.provider(), provider);
+            assert_eq!(sb.model_name(), model);
+
+            let bar = render_status_text(&sb);
+            let banner = banner_text(&sb, 53);
+
+            assert!(
+                bar.contains(model),
+                "status bar must render {model}, got: {bar}"
+            );
+            assert!(
+                banner.contains(model),
+                "banner must render the same model {model}, got: {banner}"
+            );
+            assert!(
+                banner.contains(&format!("{provider} / {model}")),
+                "banner must pair {provider} with {model}, got: {banner}"
+            );
+            // The provider/model pair must never be crossed: an Ollama model can
+            // never appear beside the Anthropic provider.
+            if provider != "ollama" {
+                assert!(
+                    !banner.contains("llama3.2:latest"),
+                    "the Ollama last-resort default must never reach a {provider} banner"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn banner_tool_count_is_the_number_it_claims() {
+        // The count is whatever `GET /api/v1/tools` returned (registered and
+        // available, minus Registry.model_hidden) — the same list `/tools`
+        // browses. Whatever it is, the banner must print THAT number.
+        for n in [0usize, 45, 53, 82] {
+            let lines = welcome_lines(92, n, Some("anthropic"), Some("claude-opus-5"), None);
+            let text: String = lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<Vec<_>>()
+                .join("");
+            assert!(
+                text.contains(&format!("{n} tools")),
+                "banner must claim exactly {n} tools, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_identity_is_the_only_identity_writer() {
+        // Source-level guard: the drift this fixes came from four surfaces being
+        // updated by hand at three call sites. `App::set_identity` is now the one
+        // writer — if a new call site starts poking `set_provider_info` directly,
+        // a surface will silently fall behind again, so fail loudly here.
+        for (file, src) in [
+            (
+                "app/handle_actions.rs",
+                include_str!("../../app/handle_actions.rs"),
+            ),
+            (
+                "app/handle_backend.rs",
+                include_str!("../../app/handle_backend.rs"),
+            ),
+        ] {
+            assert_eq!(
+                src.matches(".set_provider_info(").count(),
+                0,
+                "{file} must set identity via App::set_identity, not set_provider_info directly"
+            );
+        }
+        // set_identity itself fans out to all three components + the welcome.
+        let app = include_str!("../../app/mod.rs");
+        assert_eq!(
+            app.matches(".set_provider_info(").count(),
+            3,
+            "App::set_identity must be the single fan-out point (header, status, sidebar)"
+        );
+        assert!(app.contains("pub fn set_identity"));
+        assert!(app.contains("pub fn identity"));
+    }
+
     #[test]
     fn draw_welcome_never_panics() {
         for &(w, h) in &[(1u16, 1u16), (10, 3), (52, 20), (200, 60)] {
