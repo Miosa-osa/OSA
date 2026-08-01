@@ -175,16 +175,21 @@ defmodule OptimalSystemAgent.Providers.Replicate do
           msg
       end)
 
-    system_text =
-      formatted
-      |> Enum.filter(&(&1["role"] == "system"))
-      |> Enum.map_join("\n\n", & &1["content"])
+    # Only LEADING system messages are the system prompt. A system message that
+    # appears after the conversation has started is mid-turn steering from
+    # `ReactLoop` (it appends `[assistant_text, system_nudge]` and means the
+    # nudge to be the last thing the model reads), so hoisting it into
+    # `system_prompt` would bury a directive in background context. Same defect
+    # as Providers.Google; here it degrades silently too, since the transcript is
+    # flattened into a prompt string. Mid-turn system messages stay in place,
+    # rendered as `User:` lines so they read as input to act on.
+    {leading, rest} = Enum.split_while(formatted, &(&1["role"] == "system"))
+
+    system_text = Enum.map_join(leading, "\n\n", & &1["content"])
 
     conversation =
-      formatted
-      |> Enum.reject(&(&1["role"] == "system"))
-      |> Enum.map_join("\n", fn msg ->
-        role = String.capitalize(msg["role"] || "user")
+      Enum.map_join(rest, "\n", fn msg ->
+        role = String.capitalize(if msg["role"] in [nil, "system"], do: "user", else: msg["role"])
         "#{role}: #{msg["content"]}"
       end)
 

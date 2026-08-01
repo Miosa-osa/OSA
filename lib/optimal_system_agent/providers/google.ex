@@ -160,14 +160,47 @@ defmodule OptimalSystemAgent.Providers.Google do
     end)
   end
 
+  @doc """
+  Test seam: build the `{systemInstruction_text, contents}` pair for a raw
+  message list, without a live HTTP call.
+  """
+  def build_contents(messages), do: messages |> format_messages() |> extract_system()
+
+  # Only LEADING system messages are the system prompt.
+  #
+  # The bug this replaces: `Enum.split_with(messages, &(&1["role"] == "system"))`
+  # hoisted EVERY system-role message onto `systemInstruction`, wherever it sat.
+  # `ReactLoop`'s steering paths (auto-continue, coding nudge, verification gate,
+  # VerificationGate directive, reasoning-only backstop — ~7 call sites) each
+  # append TWO messages: the assistant's text, then a `role: "system"` nudge that
+  # is meant to be the LAST thing the model reads. Hoisting lifted that nudge out
+  # of the conversation and buried it in background context.
+  #
+  # Unlike Anthropic — where the same defect stranded a trailing assistant turn
+  # and produced a hard 400 — Gemini happily accepts a trailing `model` turn, so
+  # this failed SILENTLY: no error, just degraded steering. Which is why there is
+  # no `ensure_trailing_user` analogue here: it is not needed and adding it would
+  # inject a phantom turn into every tool-calling round trip.
+  #
+  # A system message that appears after the conversation has started is mid-turn
+  # steering and stays in `contents`, demoted to a `user` turn — the only role
+  # Gemini offers for "input the model must act on" (`contents` accepts exactly
+  # "user" and "model"; there is no system role, and "model" would make OSA's own
+  # directive read as something Gemini already said).
   defp extract_system(messages) do
-    {sys_msgs, chat_msgs} = Enum.split_with(messages, &(&1["role"] == "system"))
+    {sys_msgs, rest} = Enum.split_while(messages, &(&1["role"] == "system"))
 
     system_text =
       case sys_msgs do
         [] -> nil
         msgs -> Enum.map_join(msgs, "\n\n", &to_string(&1["content"] || ""))
       end
+
+    chat_msgs =
+      Enum.map(rest, fn
+        %{"role" => "system"} = msg -> Map.put(msg, "role", "user")
+        msg -> msg
+      end)
 
     # Gemini accepts exactly two roles: "user" and "model". "assistant" and
     # "tool" are both INVALID and are translated here.
@@ -184,8 +217,46 @@ defmodule OptimalSystemAgent.Providers.Google do
         content_part(msg, names)
       end)
 
-    {system_text, Enum.reject(contents, &(&1["parts"] == []))}
+    contents =
+      contents
+      |> Enum.reject(&(&1["parts"] == []))
+      |> collapse_same_role()
+
+    {system_text, contents}
   end
+
+  # Merge adjacent same-role turns into one turn with multiple parts.
+  #
+  # Google's reference says the role "should alternate between user and model",
+  # and consecutive same-role `contents` are reported in the wild as
+  # 400 INVALID_ARGUMENT; the accepted remedy is collapsing them rather than
+  # dropping one. Demoting a mid-conversation system nudge to `user` can produce
+  # exactly that shape (e.g. a tool result — already emitted as a `user` turn —
+  # followed immediately by a nudge), so the collapse runs unconditionally.
+  #
+  # It is deliberately restricted to TEXT-ONLY turns: a `functionCall` /
+  # `functionResponse` part must stay in the turn Gemini pairs it with, so the
+  # tool round-trip is left byte-for-byte as it was.
+  defp collapse_same_role(contents) do
+    contents
+    |> Enum.reduce([], fn c, acc ->
+      case acc do
+        [prev | rest] ->
+          if prev["role"] == c["role"] and text_only?(prev) and text_only?(c) do
+            [Map.put(prev, "parts", prev["parts"] ++ c["parts"]) | rest]
+          else
+            [c | acc]
+          end
+
+        [] ->
+          [c]
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp text_only?(%{"parts" => parts}), do: Enum.all?(parts, &Map.has_key?(&1, "text"))
+  defp text_only?(_), do: false
 
   # Tool result → a "user" turn carrying a functionResponse part.
   defp content_part(%{"role" => "tool"} = msg, names) do

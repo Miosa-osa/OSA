@@ -9,6 +9,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.54] — displays as `v1.0.054`
+
+### Fixed — on Google and Replicate, OSA stopped listening to itself mid-turn
+
+- **A course correction OSA gave itself was filed as background reading instead of
+  read as an instruction.** OSA steers itself while a turn is running — keep going,
+  write the code, run the verification you promised, stop and check before claiming
+  done — and each of those nudges is written to be the last thing the model reads.
+  On Google and on Replicate, every such nudge was being lifted out of the
+  conversation and folded into the system prompt, arriving as standing context from
+  before the turn began rather than as a correction to what was just said. The model
+  could therefore keep going in a direction it had already been told to abandon,
+  finish a turn it had been told to continue, or skip a check it had been told to
+  run. **Mid-turn steering now stays where it was put**, at the end of the
+  conversation, so it lands as an instruction about what to do next.
+
+- **Nothing reported this, which is why it lasted.** The same defect on the Claude
+  models produced a hard error and was fixed in 1.0.50; here both providers accepted
+  the malformed request happily and returned a perfectly ordinary answer, so the only
+  visible symptom was an agent that seemed not to take direction. Instructions that
+  genuinely belong to the system prompt — the ones present before the conversation
+  starts — are still sent exactly as they were.
+
+- **Tool calls are untouched.** Google requires the conversation to alternate
+  speakers, so keeping a nudge in place can put two turns from the same side next to
+  each other; those are now merged rather than dropped. The merge is limited to plain
+  text, so a turn carrying a tool call or a tool result is passed through byte for
+  byte and the tool round-trip behaves exactly as before.
+
 ## [1.0.53] — displays as `v1.0.053`
 
 ### Changed — you can read a reply while it is still being written
