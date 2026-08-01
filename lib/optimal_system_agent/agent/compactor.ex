@@ -84,6 +84,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   use GenServer
   require Logger
 
+  @behaviour OptimalSystemAgent.Agent.ContextEngine
+
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.PromptLoader
   alias OptimalSystemAgent.Agent.CompactionSafety
@@ -131,6 +133,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc "Start the Compactor GenServer."
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, %__MODULE__{}, name: __MODULE__)
   end
@@ -139,6 +142,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   Returns current compaction metrics including per-step usage counts.
   """
   @spec stats() :: map()
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def stats do
     GenServer.call(__MODULE__, :stats)
   end
@@ -183,6 +187,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   the original messages unchanged.
   """
   @spec maybe_compact([map()], non_neg_integer() | nil, String.t() | nil, keyword()) :: [map()]
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def maybe_compact(messages, known_tokens \\ nil, session_id \\ nil, opts \\ []) do
     try do
       do_maybe_compact(messages, known_tokens, session_id, opts)
@@ -240,6 +245,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   Can be called on a timer for lightweight context maintenance.
   """
   @spec micro_compact([map()]) :: [map()]
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def micro_compact(messages) do
     {system_msgs, non_system} = split_system(messages)
     annotated = annotate_importance(non_system)
@@ -670,7 +676,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     # older) becomes a prune candidate.
     {_total, prune_candidates, pruned_tokens} =
       Enum.reduce(tool_entries_newest_first, {0, [], 0}, fn {{msg, _imp}, idx},
-                                                              {total, candidates, pruned} ->
+                                                            {total, candidates, pruned} ->
         if MapSet.member?(protected, tool_name_of(msg)) do
           {total, candidates, pruned}
         else

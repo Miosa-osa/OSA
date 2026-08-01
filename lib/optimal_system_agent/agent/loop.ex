@@ -1126,8 +1126,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     stats = %{
       messages_before: length(messages),
       messages_after: length(compacted),
-      tokens_before: OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages),
-      tokens_after: OptimalSystemAgent.Agent.Compactor.estimate_tokens(compacted)
+      tokens_before: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(messages),
+      tokens_after: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(compacted)
     }
 
     {:reply, {:ok, stats}, %{state | messages: compacted}}

@@ -1290,7 +1290,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             # compactor's `:unknown`-window deferral policy waits for. Compact
             # even when the window cannot be resolved; the threaded window
             # still sizes the target when it CAN be.
-            OptimalSystemAgent.Agent.Compactor.maybe_compact(
+            OptimalSystemAgent.Agent.ContextEngine.Router.maybe_compact(
               state.messages,
               Map.get(state, :last_input_tokens, 0),
               state.session_id,

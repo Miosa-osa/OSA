@@ -334,6 +334,9 @@ defmodule OptimalSystemAgent.Application do
         # Load agent definitions (needs Tools.Registry running)
         OptimalSystemAgent.Agents.Registry.load()
 
+        # Load user plugins from ~/.osa/plugins/*.exs
+        OptimalSystemAgent.Plugins.Loader.load()
+
         # Auto-detect best Ollama model + tier assignments
         # Guarded — if Ollama is unreachable, log and continue without spinning
         if provider == :ollama do
