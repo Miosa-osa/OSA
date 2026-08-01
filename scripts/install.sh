@@ -533,6 +533,350 @@ _tui_is_version() {
   [ -n "$_got" ] && [ "$_want" = "$_got" ]
 }
 
+# ── Disk vs RAM version skew, and its automatic repair ──────────────────────
+#
+# Mirrors bin/osa's source-checkout logic. OSA keeps a warm backend that
+# deliberately outlives the TUI, so a daemon started before an update keeps
+# serving the OLD code from memory while the new code sits on disk — the TUI
+# then reports the daemon's version and the update looks like it never shipped.
+# Single-process agents never have this problem; OSA absorbs the cost itself
+# rather than telling the user to run `osa stop`, which is not an instruction
+# anyone should ever be given.
+#
+# `do_update` already stops the daemon before swapping, so this covers the OTHER
+# routes into skew: a reinstall via install.sh while a daemon runs, or a daemon
+# left behind by a different shell/version.
+
+# Version reported by the LIVE daemon (empty if none / unreadable).
+_daemon_version() {
+  _body=""
+  if command -v curl >/dev/null 2>&1; then
+    _body="$(curl -sf --max-time 3 "$HEALTH_URL" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    _body="$(wget -qO- --timeout=3 "$HEALTH_URL" 2>/dev/null || true)"
+  fi
+  [ -n "$_body" ] || return 1
+  printf '%s' "$_body" \
+    | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# 0 = the live daemon matches what is INSTALLED (or there is nothing to
+# compare), 1 = skew. The installed TUI binary is the truth here, not the
+# ~/.osa/version stamp: the stamp records intent, the binary records reality.
+_daemon_matches_install() {
+  _inst="$(_installed_tui_version 2>/dev/null || true)"
+  [ -n "$_inst" ] || return 0
+  backend_healthy || return 0
+  _run="$(_daemon_version || true)"
+  [ -n "$_run" ] || return 0
+  [ "$(_norm_version "$_run")" = "$(_norm_version "$_inst")" ]
+}
+
+# Stop the backend and POLL until :$PORT really stops answering. The PORT, not
+# the PID, is the contract: anything still listening is what the TUI attaches
+# to. "quiet" swallows stop_daemon's pid chatter.
+_stop_backend_confirmed() {
+  _n=0
+  if [ "${1:-}" = "quiet" ]; then
+    stop_daemon >/dev/null 2>&1 || true
+  else
+    stop_daemon || true
+  fi
+  while [ "$_n" -lt 40 ]; do
+    if ! backend_healthy; then break; fi
+    sleep 0.25
+    _n=$((_n + 1))
+  done
+  if backend_healthy; then return 1; fi
+  return 0
+}
+
+# Is anyone relying on this daemon right now? Both signals are observed from
+# OUTSIDE the process, because the daemon being judged runs OLD code and would
+# not report any field added for this purpose. Echoes a reason, returns 0=busy.
+_daemon_busy_reason() {
+  if command -v pgrep >/dev/null 2>&1 && [ -x "$TUI_BIN" ]; then
+    if pgrep -f "^${TUI_BIN}" >/dev/null 2>&1; then
+      echo "another OSA session is attached to it"
+      return 0
+    fi
+  fi
+  if [ -f "$LOG_FILE" ]; then
+    _mt="$(stat -c %Y "$LOG_FILE" 2>/dev/null || stat -f %m "$LOG_FILE" 2>/dev/null || echo 0)"
+    _now="$(date +%s)"
+    if [ "${_mt:-0}" -gt 0 ] && [ $((_now - _mt)) -lt 15 ]; then
+      echo "it is still writing output (mid-turn)"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Repair skew before the attach decision. 0 = proceed, 1 = hard error.
+_ensure_fresh_daemon() {
+  if _daemon_matches_install; then
+    return 0
+  fi
+  _inst="$(_installed_tui_version 2>/dev/null || true)"
+  _run="$(_daemon_version || true)"
+
+  if _busy="$(_daemon_busy_reason)"; then
+    if [ -t 0 ]; then
+      printf "  ${YELLOW}⚠${RESET} The backend is running an older build ${DIM}(%s → %s)${RESET}, but %s.\n" \
+        "${_run:-?}" "${_inst:-?}" "$_busy"
+      printf "  ${BOLD}Restart it anyway? This ends that work. [y/N]${RESET} "
+      _reply=""
+      read -r _reply || true
+      case "$_reply" in
+        y|Y|yes|YES) ;;
+        *) printf "  ${DIM}Left it running — attaching to %s.${RESET}\n" "${_run:-?}"; return 0 ;;
+      esac
+    else
+      printf "  ${YELLOW}⚠${RESET} ${BOLD}A stale OSA backend is running on :%s.${RESET}\n" "$PORT" >&2
+      printf "      ${DIM}installed:${RESET} %s\n" "${_inst:-?}" >&2
+      printf "      ${DIM}running:${RESET}   %s  ${DIM}← this is what the TUI will display${RESET}\n" "${_run:-<unreadable>}" >&2
+      printf "  ${DIM}It was left alone because it is busy; it will be refreshed automatically once idle.${RESET}\n" >&2
+      return 0
+    fi
+  fi
+
+  printf "  ${CYAN}→${RESET} Backend was running an older build — restarting…\n"
+  if ! _stop_backend_confirmed quiet; then
+    printf "  ${RED}✗${RESET} ${BOLD}The old backend on :%s would not stop.${RESET}\n" "$PORT" >&2
+    printf "  ${DIM}It reports %s but %s is installed, so attaching would silently run${RESET}\n" \
+      "${_run:-<unreadable>}" "${_inst:-?}" >&2
+    printf "  ${DIM}the OLD build. OSA will not do that.${RESET}\n" >&2
+    printf "  ${DIM}Find what is holding :%s: ${RESET}${CYAN}lsof -i :%s${RESET}\n" "$PORT" "$PORT" >&2
+    return 1
+  fi
+  clear_stale_pid
+  return 0
+}
+
+# ── The launcher has to update ITSELF ───────────────────────────────────────
+#
+# `osa update` downloaded the backend release and the TUI binary but never this
+# file. So every fix to the launcher — the stale-daemon auto-restart above, the
+# honest "Updated to X" wording, this very function — only ever reached a user
+# who re-ran install.sh by hand. That is PERMANENT staleness, not the one-run
+# staleness bin/osa fixes for source checkouts, and it is the worst kind:
+# invisible, and worse the longer you leave it.
+#
+# SOURCE OF TRUTH: the raw `scripts/install.sh` at the RELEASE TAG we are
+# installing — never `main`. Chosen over shipping the launcher as a release
+# asset because:
+#   · install.sh GENERATES this launcher, so the tag's install.sh is by
+#     construction the exact launcher that shipped with these binaries. There is
+#     no second artifact that can drift out of sync with the first.
+#   · A git tag is an immutable ref, so the fetch is version-matched by the URL
+#     itself. `main` is not: it would hand a user a launcher NEWER than their
+#     binaries, which is the same class of bug in the other direction.
+#   · It needs no new release asset and no change to the release workflow, so it
+#     works for every release that ALREADY exists (and cannot break the pipeline
+#     that has to succeed tonight).
+# The one thing the asset route would have bought is a .sha256 sidecar. That is
+# why the verification below is structural and strict, why the swap is atomic,
+# and why the outgoing launcher is kept as a backup that is restored if anything
+# at all goes wrong. Note also that this is not a new trust root: the documented
+# way to install OSA is to pipe this same host's install.sh into sh. Fetching it
+# at a pinned tag is strictly narrower trust than that.
+_LAUNCHER_SELF="$OSA_HOME/bin/osa"
+_LAUNCHER_RAW_BASE="${OSA_LAUNCHER_RAW_BASE:-https://raw.githubusercontent.com/${GITHUB_REPO}}"
+
+# Carve the launcher back out of an install.sh: everything between the heredoc
+# opener and its terminator. This is the inverse of how it was written.
+_launcher_extract() {
+  awk '
+    /^cat > "\$LAUNCHER" <</ { inb = 1; next }
+    inb && $0 == "LAUNCHER_EOF" { exit }
+    inb { print }
+  ' "$1"
+}
+
+# Would it be safe to let $1 become the `osa` command? Every check is a "no"
+# that must be impossible to get wrong: a truncated download, a captive-portal
+# HTML page or a GitHub 404 body must never be able to overwrite a launcher
+# that works. Loud on every rejection; 0 only when the file is genuinely ours.
+_launcher_verify() {
+  _lv="$1"
+  if [ ! -s "$_lv" ]; then
+    printf "  ${RED}✗${RESET} The downloaded launcher is empty.\n" >&2
+    return 1
+  fi
+  _lv_lines="$(wc -l < "$_lv" 2>/dev/null | tr -d ' ')"
+  if [ "${_lv_lines:-0}" -lt 200 ]; then
+    printf "  ${RED}✗${RESET} The downloaded launcher is only %s lines — truncated.\n" "${_lv_lines:-0}" >&2
+    return 1
+  fi
+  case "$(head -1 "$_lv" 2>/dev/null)" in
+    '#!'*) ;;
+    *)
+      printf "  ${RED}✗${RESET} The downloaded launcher does not start with a shebang — not a shell script.\n" >&2
+      return 1 ;;
+  esac
+  # Sentinels: three lines that only the OSA launcher has, spread from its head
+  # to its very last line, so a body that is merely shell-shaped still fails.
+  for _lv_m in 'OSA_HOME="${OSA_HOME:-$HOME/.osa}"' 'do_update() {' 'exec "$TUI_BIN" "$@"'; do
+    if ! grep -qF "$_lv_m" "$_lv"; then
+      printf "  ${RED}✗${RESET} The downloaded launcher is not the OSA launcher (missing: %s).\n" "$_lv_m" >&2
+      return 1
+    fi
+  done
+  # Syntax check with the interpreter the shebang actually names.
+  if command -v bash >/dev/null 2>&1; then
+    if ! bash -n "$_lv" 2>/dev/null; then
+      printf "  ${RED}✗${RESET} The downloaded launcher is not valid shell (bash -n failed).\n" >&2
+      return 1
+    fi
+  elif ! sh -n "$_lv" 2>/dev/null; then
+    printf "  ${RED}✗${RESET} The downloaded launcher is not valid shell (sh -n failed).\n" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Replace $_LAUNCHER_SELF with the launcher belonging to release $1, then hand
+# the rest of the update over to it.
+#
+# THE SELF-REFERENCE PROBLEM APPLIES HERE TOO. The shell has already read this
+# file; rewriting it on disk does not change the code that is running. So on a
+# successful replacement this function does NOT return — it execs the new
+# launcher so the fixes it just installed are the ones that finish the job,
+# exactly as bin/osa does for source checkouts. The `update` verb and the
+# user's remaining argv are replayed; the post-download phase state travels in
+# the environment so the child re-downloads nothing.
+#
+# Returns 0 only to mean "carry on in THIS process": the launcher was already
+# byte-identical, or we are the handed-off child. Non-zero is a hard, already
+# reported failure — never a silent fallback to the old launcher.
+# $1 = release tag; the remaining arguments are the argv to replay.
+_update_launcher() {
+  _ul_tag="$1"; shift
+
+  if [ ! -f "$_LAUNCHER_SELF" ]; then
+    printf "  ${RED}✗${RESET} ${BOLD}Cannot refresh the launcher${RESET} — %s does not exist.\n" "$_LAUNCHER_SELF" >&2
+    printf "  ${DIM}  Reinstall with:${RESET} ${CYAN}curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sh${RESET}\n" "$GITHUB_REPO" >&2
+    return 3
+  fi
+
+  printf "  ${CYAN}→${RESET} Refreshing the launcher for %s…\n" "$_ul_tag"
+  _ul_tmp="$(mktemp -d "${TMPDIR:-/tmp}/osa-launcher.XXXXXX")" || {
+    printf "  ${RED}✗${RESET} ${BOLD}Could not create a temp dir for the launcher refresh.${RESET}\n" >&2
+    return 3
+  }
+  _ul_src="$_ul_tmp/install.sh"
+  _ul_new="$_ul_tmp/osa"
+  _ul_url="${_LAUNCHER_RAW_BASE}/${_ul_tag}/scripts/install.sh"
+
+  if ! _download "$_ul_url" "$_ul_src"; then
+    rm -rf "$_ul_tmp"
+    printf "  ${RED}✗${RESET} ${BOLD}Could not download the launcher for %s.${RESET}\n" "$_ul_tag" >&2
+    printf "  ${DIM}  %s${RESET}\n" "$_ul_url" >&2
+    printf "  ${DIM}  The backend and TUI ARE updated; %s is still the OLD launcher.${RESET}\n" "$_LAUNCHER_SELF" >&2
+    printf "  ${DIM}  Repair with:${RESET} ${CYAN}curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sh${RESET}\n" "$GITHUB_REPO" >&2
+    return 2
+  fi
+
+  _launcher_extract "$_ul_src" > "$_ul_new" 2>/dev/null || true
+  if ! _launcher_verify "$_ul_new"; then
+    rm -rf "$_ul_tmp"
+    printf "  ${DIM}  Your working launcher was NOT touched. Nothing was overwritten.${RESET}\n" >&2
+    printf "  ${DIM}  Repair with:${RESET} ${CYAN}curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sh${RESET}\n" "$GITHUB_REPO" >&2
+    return 3
+  fi
+
+  if cmp -s "$_ul_new" "$_LAUNCHER_SELF"; then
+    printf "  ${GREEN}✓${RESET} Launcher already current ${DIM}(unchanged in %s)${RESET}\n" "$_ul_tag"
+    rm -rf "$_ul_tmp"
+    return 0
+  fi
+
+  # ── Loop guard. The child is marked before exec and checks the mark here.
+  # If it still sees a difference (a second release published mid-update, a
+  # hand-edited launcher) it stops: an update that re-execs forever is far worse
+  # than one that finishes under one-generation-old logic — and we say so out
+  # loud rather than hiding it.
+  if [ -n "${OSA_UPDATE_REEXECED:-}" ]; then
+    printf "  ${YELLOW}!${RESET} The launcher changed again after the hand-off; continuing with the current one.\n" >&2
+    printf "  ${DIM}  Re-executing a second time is refused by design (loop guard).${RESET}\n" >&2
+    rm -rf "$_ul_tmp"
+    return 0
+  fi
+
+  # ── Backup, stage beside the target (same filesystem → the mv is atomic),
+  # swap, then re-verify what actually landed. The backup is the whole safety
+  # net: a half-finished swap must leave a WORKING `osa`, never none at all.
+  _ul_bak="${_LAUNCHER_SELF}.bak"
+  if ! cp "$_LAUNCHER_SELF" "$_ul_bak"; then
+    rm -rf "$_ul_tmp"
+    printf "  ${RED}✗${RESET} ${BOLD}Could not back up the current launcher${RESET} to %s — refusing to replace it.\n" "$_ul_bak" >&2
+    return 3
+  fi
+  if ! cp "$_ul_new" "${_LAUNCHER_SELF}.new" || ! chmod +x "${_LAUNCHER_SELF}.new"; then
+    rm -f "${_LAUNCHER_SELF}.new"; rm -rf "$_ul_tmp"
+    printf "  ${RED}✗${RESET} ${BOLD}Could not stage the new launcher${RESET} at %s.new.\n" "$_LAUNCHER_SELF" >&2
+    printf "  ${DIM}  Your launcher is untouched. Check disk space and permissions.${RESET}\n" >&2
+    return 3
+  fi
+  if ! mv "${_LAUNCHER_SELF}.new" "$_LAUNCHER_SELF"; then
+    rm -f "${_LAUNCHER_SELF}.new"; rm -rf "$_ul_tmp"
+    if [ ! -s "$_LAUNCHER_SELF" ]; then
+      cp "$_ul_bak" "$_LAUNCHER_SELF" 2>/dev/null && chmod +x "$_LAUNCHER_SELF" 2>/dev/null
+    fi
+    printf "  ${RED}✗${RESET} ${BOLD}Could not replace the launcher${RESET} at %s.\n" "$_LAUNCHER_SELF" >&2
+    printf "  ${DIM}  The previous launcher was restored from %s.${RESET}\n" "$_ul_bak" >&2
+    return 3
+  fi
+  rm -rf "$_ul_tmp"
+
+  # What is on disk NOW is what the exec below will run. Verify that, not the
+  # candidate we verified a moment ago.
+  if [ ! -x "$_LAUNCHER_SELF" ] || ! _launcher_verify "$_LAUNCHER_SELF"; then
+    cp "$_ul_bak" "$_LAUNCHER_SELF" 2>/dev/null && chmod +x "$_LAUNCHER_SELF" 2>/dev/null
+    printf "  ${RED}✗${RESET} ${BOLD}The installed launcher did not verify${RESET} — restored the previous one from %s.\n" "$_ul_bak" >&2
+    return 3
+  fi
+  printf "  ${GREEN}✓${RESET} Launcher updated ${DIM}(%s)${RESET}\n" "$_LAUNCHER_SELF"
+
+  # ── Hand off. Everything the successor must not redo travels in the env.
+  printf "  ${CYAN}→${RESET} Handing off to the new launcher to finish this update…\n"
+  OSA_UPDATE_REEXECED=1
+  OSA_UPDATE_PHASE="post-install"
+  OSA_UPDATE_OLD_VER="${_ul_old_ver:-unknown}"
+  OSA_UPDATE_NEW_VER="$_ul_tag"
+  OSA_UPDATE_UPTODATE="${_ul_uptodate:-0}"
+  OSA_UPDATE_NOTES_FILE="${_ul_notes_file:-}"
+  export OSA_UPDATE_REEXECED OSA_UPDATE_PHASE OSA_UPDATE_OLD_VER \
+    OSA_UPDATE_NEW_VER OSA_UPDATE_UPTODATE OSA_UPDATE_NOTES_FILE
+  exec "$_LAUNCHER_SELF" update ${1+"$@"}
+
+  # Only reached if exec itself failed.
+  printf "  ${RED}✗${RESET} ${BOLD}Could not execute the new launcher${RESET} (%s).\n" "$_LAUNCHER_SELF" >&2
+  printf "  ${DIM}  The update is applied on disk; finish it with: ${RESET}${CYAN}osa update${RESET}\n" >&2
+  return 3
+}
+
+# The success report. Factored out so the same-process run and the handed-off
+# run print literally the same thing. $1 = previous version, $2 = new version,
+# $3 = release notes (may be empty).
+_update_report() {
+  printf '\n'
+  printf "  ${GREEN}${BOLD}✓ Updated ${RESET}${DIM}%s${RESET} → ${BOLD}%s${RESET}\n" "$1" "$2"
+  printf '\n'
+  printf "  ${BOLD}What's new${RESET}\n"
+  if [ -n "${3:-}" ]; then
+    printf '%s\n' "$3" | sed 's/^/    /' | head -30
+  else
+    printf "    See ${CYAN}https://github.com/%s/releases/tag/%s${RESET}\n" "$GITHUB_REPO" "$2"
+  fi
+  printf '\n'
+  if [ -t 0 ]; then
+    printf "  ${DIM}Press Enter to launch OSA…${RESET} "
+    read -r _ || true
+  fi
+  return 0
+}
+
 # ── Real in-place update: download prebuilt release + TUI, verify sha256,
 # atomically swap under ~/.osa, print the delta + what's new, then launch. ──
 #
@@ -542,6 +886,30 @@ _tui_is_version() {
 # how a half-applied update (new backend, old TUI) used to be reported as
 # success.
 do_update() {
+  # ── Resumption point for a handed-off update (see _update_launcher). The
+  # download, the checksum verification and the swap all already happened in
+  # our parent process; redoing any of them would re-download the whole release
+  # for nothing. All that is left is to say what happened — which is precisely
+  # the part the new launcher exists to get right.
+  if [ "${OSA_UPDATE_PHASE:-}" = "post-install" ]; then
+    printf "  ${GREEN}✓${RESET} Continuing under the updated launcher ${DIM}(the rest of this update runs the NEW logic)${RESET}\n"
+    _du_notes=""
+    if [ -n "${OSA_UPDATE_NOTES_FILE:-}" ] && [ -f "${OSA_UPDATE_NOTES_FILE}" ]; then
+      _du_notes="$(cat "${OSA_UPDATE_NOTES_FILE}" 2>/dev/null || true)"
+      rm -f "${OSA_UPDATE_NOTES_FILE}" 2>/dev/null || true
+    fi
+    _du_rc=0
+    if [ "${OSA_UPDATE_UPTODATE:-0}" = "1" ]; then
+      printf "  ${GREEN}✓${RESET} Already up to date ${DIM}(%s)${RESET}\n" "${OSA_UPDATE_NEW_VER:-unknown}"
+    else
+      _update_report "${OSA_UPDATE_OLD_VER:-unknown}" "${OSA_UPDATE_NEW_VER:-unknown}" "$_du_notes" || _du_rc=$?
+    fi
+    # Do not leak the hand-off state into the TUI we are about to launch.
+    unset OSA_UPDATE_PHASE OSA_UPDATE_OLD_VER OSA_UPDATE_NEW_VER \
+      OSA_UPDATE_UPTODATE OSA_UPDATE_NOTES_FILE 2>/dev/null || true
+    return $_du_rc
+  fi
+
   os=""; arch=""
   case "$(uname -s)" in
     Darwin) os="macos" ;;
@@ -590,6 +958,12 @@ do_update() {
     # `osa update` would no-op forever. Verify against the real binary and
     # self-heal by re-installing instead of lying.
     if _tui_is_version "$latest"; then
+      # The binaries are current — but the LAUNCHER may not be, and nothing
+      # else in this install would ever notice. Checking it here is what makes
+      # "`osa update` leaves you with the launcher for the release you have" an
+      # unconditional invariant rather than a side effect of upgrading.
+      _ul_old_ver="$cur"; _ul_uptodate=1; _ul_notes_file=""
+      _update_launcher "$latest" ${1+"$@"} || return $?
       printf "  ${GREEN}✓${RESET} Already up to date ${DIM}(%s)${RESET}\n" "$cur"
       return 0
     fi
@@ -744,20 +1118,33 @@ do_update() {
   printf "%s\n" "$latest" > "$OSA_HOME/version"
   rm -rf "$tmp"
 
-  printf '\n'
-  printf "  ${GREEN}${BOLD}✓ Updated ${RESET}${DIM}%s${RESET} → ${BOLD}%s${RESET}\n" "$cur" "$latest"
-  printf '\n'
-  printf "  ${BOLD}What's new${RESET}\n"
+  # ── Third half of the update: the launcher. Deliberately LAST of the three
+  # swaps — a failure to fetch it must never be able to abort an update whose
+  # binaries have not landed yet, and by this line the only work remaining is
+  # the report, which is cheap for the successor to redo.
+  #
+  # The notes came from the GitHub API and would be lost across the exec, so
+  # they travel on disk. The child deletes the file after reading it.
+  _ul_notes_file=""
   if [ -n "$notes" ]; then
-    printf '%s\n' "$notes" | sed 's/^/    /' | head -30
-  else
-    printf "    See ${CYAN}https://github.com/%s/releases/tag/%s${RESET}\n" "$GITHUB_REPO" "$latest"
+    _ul_notes_file="$(mktemp "${TMPDIR:-/tmp}/osa-notes.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$_ul_notes_file" ]; then
+      printf '%s\n' "$notes" > "$_ul_notes_file" || _ul_notes_file=""
+    fi
   fi
-  printf '\n'
-  if [ -t 0 ]; then
-    printf "  ${DIM}Press Enter to launch OSA…${RESET} "
-    read -r _ || true
+  _ul_old_ver="$cur"; _ul_uptodate=0
+  # NOTE: captured on its own line. Inside `if ! cmd; then`, `$?` is the status
+  # of the NEGATION (always 0), so the failure code would be swallowed and this
+  # function would report success after refusing to install the launcher.
+  _update_launcher "$latest" ${1+"$@"}
+  _ul_rc=$?
+  if [ "$_ul_rc" -ne 0 ]; then
+    [ -n "$_ul_notes_file" ] && rm -f "$_ul_notes_file" 2>/dev/null
+    return "$_ul_rc"
   fi
+  [ -n "$_ul_notes_file" ] && rm -f "$_ul_notes_file" 2>/dev/null
+
+  _update_report "$cur" "$latest" "$notes"
   return 0
 }
 
@@ -878,13 +1265,25 @@ case "$OSA_VERB" in
   update)
     # The `update` token was already stripped from argv by the verb translation
     # above, so the remaining flags launch normally after a successful update.
-    do_update || exit $?
+    # They are passed IN so that, if the update replaces this launcher and hands
+    # off to the new one (see _update_launcher), the user's exact invocation is
+    # replayed across the process boundary instead of being silently dropped.
+    do_update ${1+"$@"} || exit $?
     # fall through to launch on success
     ;;
   help)                 print_help; exit 0 ;;
 esac
 
 # ── Default: warm the daemon (attach instantly if healthy), then TUI ──
+#
+# Skew repair runs FIRST: a backend serving an older build than the installed
+# one is stopped here, which turns the fast attach below into the start-fresh
+# path for exactly the launches that need it. The user is never told to run
+# `osa stop`.
+if backend_healthy && ! _ensure_fresh_daemon; then
+  exit 1
+fi
+
 if backend_healthy; then
   printf "  ${DIM}Backend already running on :%s — attaching.${RESET}\n" "$PORT"
 else

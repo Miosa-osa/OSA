@@ -9,6 +9,60 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.49] — displays as `v1.0.049`
+
+### Fixed — you no longer have to restart anything after an update
+
+- **OSA kept a backend running from before the update and quietly served you the old
+  build.** OSA's backend deliberately outlives the TUI so the next `osa` is instant —
+  but that also means a backend started before an update keeps running the OLD code
+  from memory while the new code sits on disk. The version you saw was the running
+  one, so a successful update looked like it had never shipped, and the advice was to
+  go and run `osa stop` first. That is not an instruction anyone should ever be given,
+  and "daemon" is not a word anyone should have to learn. **OSA now detects a backend
+  older than the build on disk and refreshes it itself, on launch, in one line** — not
+  only after `osa update`, since a plain rebuild produces exactly the same skew.
+  A backend that is genuinely mid-turn is left alone rather than having its work
+  destroyed; it is refreshed once it is idle. If a stale backend refuses to stop, OSA
+  now stops with a clear error instead of attaching to the wrong build.
+
+### Fixed — the updater could not apply its own fixes
+
+- **`osa update` fetched a fixed updater and then ran the old one anyway.** The
+  updater IS the script being updated, and the shell has already read it into memory
+  before the first byte is downloaded — so a run that collected a fix could not use
+  it, and you needed a second, entirely separate update before it took effect. This
+  was not hypothetical: the previous release pulled both the backend-restart fix and
+  the release-notes fix, then skipped the restart and printed `[Unreleased]`, because
+  the code doing the work was the pre-fix code. **The update now hands itself over to
+  the version it just installed and finishes there**, so a fix applies on the run that
+  delivers it. Nothing is downloaded twice, your local changes travel across the
+  hand-off untouched, and handing over more than once is refused outright.
+
+### Fixed — installed copies never received launcher updates at all
+
+- **On the standard one-line install, `osa update` replaced the backend and the TUI
+  but never the `osa` command itself.** Every improvement to the launcher — including
+  all of the above — reached only the people who happened to re-run the installer by
+  hand. That is not a delay; it is permanent, and invisible, and it gets worse the
+  longer it goes unnoticed. **`osa update` now also updates the launcher**, taking it
+  from the release being installed rather than from whatever is newest, so it always
+  matches the binaries beside it. It is refused unless it downloads whole, parses as a
+  valid script, and is recognisably OSA's, so a half-finished download or an error page
+  cannot replace a working command; the previous one is kept and put back if anything
+  goes wrong. Same story as above once installed, the new launcher takes over and
+  finishes the update itself.
+  - Upgrading **from 1.0.48 or earlier still needs the installer run once** — the old
+    launcher has no way to replace itself. From this release onward it is automatic.
+
+### Fixed — two tests that could fail for no reason
+
+- Timing-dependent MCP progress and terminal tests now wait on the condition they
+  actually care about instead of on the clock, so a slow machine no longer produces a
+  failure that says nothing about the code.
+
+---
+
 ## [1.0.48] — displays as `v1.0.048`
 
 ### Fixed — web page fetching was completely broken

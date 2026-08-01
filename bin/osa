@@ -255,8 +255,10 @@ _daemon_matches_tree() {
   [ "$(_norm_version "$running")" = "$(_norm_version "$tree")" ]
 }
 
-# Loud, never-silent report of a stale backend. A disk/RAM skew is exactly what
-# made several consecutive update cycles look like no-ops.
+# Loud report of a stale backend the user must resolve themselves. Since the
+# launch path now REPAIRS skew automatically (_ensure_fresh_daemon below), this
+# is reached only in the one case where repairing would destroy someone's work:
+# the daemon is genuinely busy and we could not ask (non-interactive).
 _warn_stale_daemon() {
   local running tree
   tree="$(_tree_version)"
@@ -265,7 +267,105 @@ _warn_stale_daemon() {
   echo -e "    ${DIM}on disk:${RESET} v${tree}" >&2
   echo -e "    ${DIM}running:${RESET} v${running:-<unreadable>}  ${DIM}← this is what the TUI will display${RESET}" >&2
   echo -e "  ${DIM}That daemon started before the current build, so it still serves the OLD code.${RESET}" >&2
-  echo -e "  ${DIM}Fix with: ${RESET}${CYAN}osa stop${RESET}${DIM} then ${RESET}${CYAN}osa${RESET}" >&2
+  echo -e "  ${DIM}It was left alone because it is busy; it will be refreshed automatically once idle.${RESET}" >&2
+}
+
+# ── Is the running backend in the middle of something? ──────────────────────
+#
+# Restarting drops warm state and kills whatever the daemon is doing, so the
+# auto-repair below needs an "is anyone relying on this process right now?"
+# answer. Crucially it CANNOT come from /health: the daemon we are judging is by
+# definition running OLD code, so any field added here would be missing on
+# exactly the daemons that need judging. Both signals below are therefore
+# observed from OUTSIDE the daemon and work against any version, past or future.
+#
+# Echoes a human reason and returns 0 when busy; returns 1 when idle.
+_daemon_busy_reason() {
+  # (1) Another OSA TUI is attached. Work in OSA is driven through a session, so
+  # a live TUI means a real user is mid-conversation with this exact daemon.
+  # Matched on the FULL binary path, so an unrelated `osagent` elsewhere on the
+  # box (e.g. a prebuilt install's own binary) is not mistaken for ours.
+  if command -v pgrep >/dev/null 2>&1 && [ -x "$TUI_BIN" ]; then
+    if pgrep -f "^${TUI_BIN}" >/dev/null 2>&1; then
+      echo "another OSA session is attached to it"
+      return 0
+    fi
+  fi
+  # (2) The backend logged something in the last 15s — it is mid-turn even with
+  # no TUI attached (a messaging channel or a headless run). An idle OSA backend
+  # writes nothing at all, so recent output is a real activity signal and not a
+  # heartbeat false-positive.
+  if [ -f "$LOG_FILE" ]; then
+    local mt now
+    mt="$(stat -c %Y "$LOG_FILE" 2>/dev/null || stat -f %m "$LOG_FILE" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    if [ "${mt:-0}" -gt 0 ] && [ $((now - mt)) -lt 15 ]; then
+      echo "it is still writing output (mid-turn)"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# ── Auto-repair disk/RAM skew on every launch ───────────────────────────────
+#
+# OSA's persistent backend is its own architectural cost: single-process agents
+# (Claude Code, Codex) are new code the moment you relaunch them, while a warm
+# OSA daemon happily outlives a rebuild and keeps serving the OLD version from
+# memory. That cost is OSA's to absorb, not the user's — "run `osa stop` first"
+# is not an instruction anyone should ever be given, and the word "daemon" is
+# not one they should ever have to learn.
+#
+# So: skew is REPAIRED, not reported. This runs on the plain `osa` launch path,
+# not just after `osa update`, because the skew is equally produced by a bare
+# `mix compile` / `cargo build --release` or by another checkout having started
+# the daemon earlier.
+#
+# Returns 0 when the caller may proceed (port freed, or deliberately left
+# alone), 1 when the stale daemon refused to die — which is a hard error, since
+# attaching anyway means silently running the wrong build.
+_ensure_fresh_daemon() {
+  if _daemon_matches_tree; then
+    return 0
+  fi
+
+  local tree running busy=""
+  tree="$(_tree_version)"
+  running="$(_daemon_version || true)"
+
+  if busy="$(_daemon_busy_reason)"; then
+    # Restarting now would destroy work in flight. Ask if we can; if we cannot
+    # ask, leave it running and say so loudly rather than killing it silently.
+    if [ -t 0 ]; then
+      echo -e "${YELLOW}⚠${RESET} The backend is running an older build ${DIM}(v${running:-?} → v${tree})${RESET}, but ${busy}."
+      printf "  %bRestart it anyway? This ends that work. [y/N]%b " "$BOLD" "$RESET"
+      local _reply=""
+      read -r _reply || true
+      case "$_reply" in
+        y|Y|yes|YES) ;;
+        *)
+          echo -e "  ${DIM}Left it running — attaching to v${running:-?}.${RESET}"
+          return 0
+          ;;
+      esac
+    else
+      _warn_stale_daemon
+      return 0
+    fi
+  fi
+
+  # The default path, and the one nearly every user gets: no question, no
+  # instruction, one calm line.
+  echo -e "${CYAN}→${RESET} Backend was running an older build — restarting…"
+  if ! _stop_backend_confirmed quiet; then
+    echo -e "${RED}✗${RESET} ${BOLD}The old backend on :${PORT} would not stop.${RESET}" >&2
+    echo -e "  ${DIM}It reports v${running:-<unreadable>} but this checkout is v${tree}, so attaching${RESET}" >&2
+    echo -e "  ${DIM}would silently run the OLD build. OSA will not do that.${RESET}" >&2
+    echo -e "  ${DIM}Find what is holding :${PORT}: ${RESET}${CYAN}lsof -i :${PORT}${RESET}" >&2
+    return 1
+  fi
+  clear_stale_pid
+  return 0
 }
 
 daemon_pid() {
@@ -314,6 +414,34 @@ stop_daemon() {
   fi
   rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
   echo -e "${GREEN}✓${RESET} Backend stopped."
+}
+
+# Stop the backend and POLL until :$PORT really stops answering.
+#
+# `stop_daemon` signals and waits on the PID, but the PID is not the contract —
+# the PORT is: anything still listening on :$PORT is what the next launch (and
+# the TUI) will attach to. A stop that "succeeded" while a socket lingers is the
+# exact shape of the disk/RAM skew bug, so this is the single primitive both the
+# update path and the launch path use. 0 = the port is free, 1 = it is not.
+#
+# Deliberately silent about WHY it is stopping: the callers own that message.
+# Pass "quiet" to swallow stop_daemon's own pid/progress chatter — the launch
+# path repairs skew as routine housekeeping and should read as one calm line,
+# not as a three-line incident report about a process the user never asked about.
+_stop_backend_confirmed() {
+  local n=0
+  if [ "${1:-}" = "quiet" ]; then
+    stop_daemon >/dev/null 2>&1 || true
+  else
+    stop_daemon || true
+  fi
+  while [ $n -lt 40 ]; do
+    if ! backend_healthy; then break; fi
+    sleep 0.25
+    n=$((n + 1))
+  done
+  if backend_healthy; then return 1; fi
+  return 0
 }
 
 # Spinner while waiting for /health. Returns 0 healthy, 1 timeout, 2 died.
@@ -498,7 +626,12 @@ _update_verify_tui() {
     echo -e "  ${DIM}Rebuild it with: ${RESET}${CYAN}(cd $TUI_DIR && cargo build --release)${RESET}" >&2
     return 1
   fi
-  echo -e "${GREEN}✓${RESET} Built TUI verified ${DIM}(reports v$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}'))${RESET}"
+  # Print the binary's own words, unmolested. The previous `v${...}` prepended a
+  # "v" to a field that already carries one, so a healthy update signed off with
+  # "reports vv1.0.49" — a cosmetic wart on the one line whose entire job is to
+  # be believed. The failure branch above already prints the raw value; so does
+  # the prebuilt launcher's equivalent line.
+  echo -e "${GREEN}✓${RESET} Built TUI verified ${DIM}(reports $("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}'))${RESET}"
   return 0
 }
 
@@ -513,17 +646,12 @@ _update_verify_tui() {
 #
 # If the old process will not die we refuse to report the update as live.
 _update_restart_backend() {
-  local want="$1" running n=0
+  local want="$1" running
   if ! backend_healthy && [ -z "$(daemon_pid)" ]; then
     return 0   # nothing running — the launch path will start the new build fresh
   fi
   echo -e "${CYAN}→${RESET} Restarting the backend so the new build is what actually runs..."
-  stop_daemon || true
-  while [ $n -lt 40 ]; do
-    backend_healthy || break
-    sleep 0.25; n=$((n + 1))
-  done
-  if backend_healthy; then
+  if ! _stop_backend_confirmed; then
     running="$(_daemon_version || true)"
     echo -e "${RED}✗${RESET} ${BOLD}The old backend on :${PORT} would not stop.${RESET}" >&2
     echo -e "  ${DIM}The rebuild succeeded, but OSA would attach to that old process and show${RESET}" >&2
@@ -552,7 +680,157 @@ _update_print_stash_recovery() {
   echo -e "  ${DIM}Nothing was deleted. The stash is NOT dropped automatically.${RESET}" >&2
 }
 
+# ── The updater cannot update itself mid-run (and what we do about it) ──────
+#
+# `osa update` on a source checkout IS this script running `git pull`, and this
+# script is one of the files that pull rewrites. Bash has already read the old
+# text into memory, so the run that FETCHES a fixed updater still EXECUTES the
+# old one. That is not a hypothetical: the v1.0.48 update pulled the commit that
+# added the daemon restart and the exact-version release notes, then — in that
+# same run — skipped the restart and printed `[Unreleased]`, because the code
+# doing the work was the pre-fix code. Both bugs were already fixed on disk.
+#
+# The fix is to hand the rest of the update over to the script we just pulled.
+#
+# Fingerprint of every file that would change the update's BEHAVIOUR if pulled.
+# Content hashes, not mtimes: a rebase rewrites mtimes on files whose bytes are
+# identical, and re-exec'ing when nothing actually changed is its own bug.
+_update_script_fingerprint() {
+  local f h out=""
+  for f in "$ROOT/bin/osa" "$ROOT/bin/osa-update"; do
+    if [ ! -f "$f" ]; then
+      out="${out}absent "
+      continue
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      h="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      h="$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')"
+    else
+      # cksum is POSIX and always present; CRC+size is ample for "did this
+      # file's content change during OUR OWN pull, seconds ago".
+      h="$(cksum "$f" 2>/dev/null | awk '{print $1 "-" $2}')"
+    fi
+    out="${out}${h:-unreadable} "
+  done
+  printf '%s' "$out"
+}
+
+# Hand the rest of the update to the freshly pulled script, if and only if that
+# script actually changed. $1 = pre-pull fingerprint; the remaining arguments
+# are the original `osa update` argv, replayed verbatim so --staged,
+# --discard-local, --dev and anything else survive the boundary.
+#
+# Returns 0 to mean "carry on in THIS process" (nothing changed, or we are
+# already the re-exec'd process). Returns 1 to mean "we should have handed over
+# and could not" — a hard failure, never a silent fallback to the old logic,
+# because silently continuing while pretending all is well is the entire family
+# of bugs this change exists to kill.
+_update_reexec_if_updater_changed() {
+  local pre="$1"; shift
+  local post new
+  post="$(_update_script_fingerprint)"
+
+  if [ "$pre" = "$post" ]; then
+    return 0
+  fi
+
+  # ── Loop guard. The child is marked before exec and checks the mark here.
+  # Even if the child somehow observes another change (a second pull, a
+  # concurrent edit), it stops: an update that re-execs forever is far worse
+  # than an update that finishes under one-generation-old logic, and we say so
+  # out loud rather than hiding it.
+  if [ -n "${OSA_UPDATE_REEXECED:-}" ]; then
+    echo -e "${YELLOW}⚠${RESET} The updater changed again after the hand-off; continuing with the current one." >&2
+    echo -e "  ${DIM}Re-executing a second time is refused by design (loop guard).${RESET}" >&2
+    return 0
+  fi
+
+  new="$ROOT/bin/osa"
+  if [ ! -f "$new" ] || [ ! -x "$new" ]; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} The pull replaced the updater, but ${new}" >&2
+    echo -e "  ${DIM}is missing or not executable, so the rest of this update would run under the${RESET}" >&2
+    echo -e "  ${DIM}OLD logic — which is exactly the bug being fixed. Refusing to continue.${RESET}" >&2
+    echo -e "  ${DIM}Your tree is already on the new commit; finish with: ${RESET}${CYAN}chmod +x '$new' && osa update${RESET}" >&2
+    return 1
+  fi
+  if ! bash -n "$new" 2>/dev/null; then
+    echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} The pulled ${new} is not valid shell." >&2
+    echo -e "  ${DIM}Refusing to hand off to a broken updater, and refusing to silently fall back${RESET}" >&2
+    echo -e "  ${DIM}to the old one. Your tree is on the new commit; inspect with: ${RESET}${CYAN}bash -n '$new'${RESET}" >&2
+    return 1
+  fi
+
+  echo -e "${CYAN}→${RESET} The updater itself changed — handing off to the new one ${DIM}(v$(cat "$ROOT/VERSION" 2>/dev/null || echo '?'))${RESET}"
+
+  # State the successor must not redo or lose. The pull, the stash and the
+  # stash's reapplication have ALL already happened in this process; the child
+  # resumes at the build, so it must never re-fetch, re-rebase or re-stash.
+  export OSA_UPDATE_REEXECED=1
+  export OSA_UPDATE_PHASE="post-pull"
+  export OSA_UPDATE_OLD_VER="${_ur_old_ver:-}"
+  export OSA_UPDATE_HEAD_REV="${_ur_head_rev:-}"
+  export OSA_UPDATE_NEW_VER="${_ur_new_ver:-}"
+  export OSA_UPDATE_NEW_REV="${_ur_new_rev:-}"
+  export OSA_UPDATE_RESTORED="${_ur_restored:-0}"
+  export OSA_UPDATE_DIRTY="${_ur_dirty:-0}"
+  export OSA_UPDATE_DISCARD="${_ur_discard:-0}"
+  export OSA_UPDATE_STASH_NAME="${_ur_stash_name:-}"
+
+  exec "$new" update ${1+"$@"}
+  # Only reached if exec itself failed.
+  echo -e "${RED}✗${RESET} ${BOLD}Not updated.${RESET} Could not execute ${new}." >&2
+  return 1
+}
+
+# Phase 2 of an in-place update: everything AFTER the tree has moved and local
+# work has been reapplied. Factored out so the re-exec boundary has a defined
+# place to resume into, and — more importantly — so the same-process run and
+# the handed-off run execute literally the same code.
+_update_after_pull() {
+  local old_ver="$1" head_rev="$2" new_ver="$3" new_rev="$4"
+  local restored="$5" dirty="$6" discard_local="$7" stash_name="$8"
+
+  _update_build || return 1
+  _update_verify_tui "$new_ver" || return 1
+  # Disk is now new; make sure MEMORY is too before claiming anything.
+  _update_restart_backend "$new_ver" || return 1
+
+  # ── (a) Honest success report.
+  echo ""
+  if [ "$old_ver" = "$new_ver" ]; then
+    echo -e "${GREEN}✓${RESET} ${BOLD}Updated${RESET} ${DIM}${head_rev} → ${new_rev}${RESET} ${DIM}(version unchanged: v${new_ver})${RESET}"
+  else
+    echo -e "${GREEN}✓${RESET} ${BOLD}Updated: v${old_ver} → v${new_ver}${RESET} ${DIM}(${head_rev} → ${new_rev})${RESET}"
+  fi
+  if [ "$restored" = "1" ]; then
+    echo -e "${GREEN}✓${RESET} Your local changes were reintegrated cleanly."
+  elif [ "$dirty" = "1" ] && [ "$discard_local" = "1" ]; then
+    echo -e "${YELLOW}⚠${RESET} Local changes were set aside and NOT reapplied (--discard-local)."
+    _update_print_stash_recovery "$stash_name"
+  fi
+
+  # Release notes for the version actually installed — never `[Unreleased]`.
+  print_release_notes "$new_ver"
+  _update_finish
+  return 0
+}
+
 do_update_source() {
+  # ── Resumption point for a re-exec'd update (see
+  # _update_reexec_if_updater_changed). The pull, the stash and the reapply are
+  # already done by our parent process; redoing any of them would at best
+  # double-stash and at worst rebase a tree that is already rebased.
+  if [ "${OSA_UPDATE_PHASE:-}" = "post-pull" ]; then
+    echo -e "${GREEN}✓${RESET} Continuing under the updated ${BOLD}bin/osa${RESET} ${DIM}(the rest of this update runs the NEW logic)${RESET}"
+    _update_after_pull \
+      "${OSA_UPDATE_OLD_VER:-unknown}" "${OSA_UPDATE_HEAD_REV:-?}" \
+      "${OSA_UPDATE_NEW_VER:-unknown}" "${OSA_UPDATE_NEW_REV:-?}" \
+      "${OSA_UPDATE_RESTORED:-0}" "${OSA_UPDATE_DIRTY:-0}" \
+      "${OSA_UPDATE_DISCARD:-0}" "${OSA_UPDATE_STASH_NAME:-}"
+    return $?
+  fi
+
   local discard_local=0 _a
   for _a in "$@"; do
     case "$_a" in
@@ -704,6 +982,13 @@ do_update_source() {
     esac
   fi
 
+  # Snapshot the updater's own bytes BEFORE the tree moves, so that after the
+  # rebase we can tell "the pull rewrote the script I am running" from "it
+  # didn't". Taken after the stash push, so a stashed local edit to bin/osa is
+  # already out of the way and cannot register as an incoming change.
+  local pre_fp
+  pre_fp="$(_update_script_fingerprint)"
+
   # ── Rebase (preserves local commits). On failure: abort, restore, report (c).
   echo -e "${CYAN}→${RESET} Rebasing onto ${BOLD}${upstream}${RESET}..."
   if ! _ug rebase "$upstream"; then
@@ -755,29 +1040,24 @@ do_update_source() {
     fi
   fi
 
-  _update_build || return 1
-  _update_verify_tui "$new_ver" || return 1
-  # Disk is now new; make sure MEMORY is too before claiming anything.
-  _update_restart_backend "$new_ver" || return 1
+  # ── Hand off to the updater we just pulled, if the pull replaced it.
+  #
+  # Deliberately placed HERE — after the stash has been reapplied and dropped,
+  # before anything is built. Re-exec'ing earlier would carry a live stash and
+  # an unrestored working tree across a process boundary for no benefit; by
+  # this line the user's work is already back in the tree and the only thing
+  # left to do (build → verify → restart → report) is precisely the part whose
+  # bugs the new script fixes. If the apply conflicted we returned above and
+  # never get here, so a re-exec can never strand an unapplied stash.
+  _ur_old_ver="$old_ver"; _ur_head_rev="$head_rev"
+  _ur_new_ver="$new_ver"; _ur_new_rev="$new_rev"
+  _ur_restored="$restored"; _ur_dirty="$dirty"
+  _ur_discard="$discard_local"; _ur_stash_name="$stash_name"
+  _update_reexec_if_updater_changed "$pre_fp" ${_osa_update_argv[@]+"${_osa_update_argv[@]}"} || return 1
 
-  # ── (a) Honest success report.
-  echo ""
-  if [ "$old_ver" = "$new_ver" ]; then
-    echo -e "${GREEN}✓${RESET} ${BOLD}Updated${RESET} ${DIM}${head_rev} → ${new_rev}${RESET} ${DIM}(version unchanged: v${new_ver})${RESET}"
-  else
-    echo -e "${GREEN}✓${RESET} ${BOLD}Updated: v${old_ver} → v${new_ver}${RESET} ${DIM}(${head_rev} → ${new_rev})${RESET}"
-  fi
-  if [ "$restored" -eq 1 ]; then
-    echo -e "${GREEN}✓${RESET} Your local changes were reintegrated cleanly."
-  elif [ "$dirty" -eq 1 ] && [ "$discard_local" -eq 1 ]; then
-    echo -e "${YELLOW}⚠${RESET} Local changes were set aside and NOT reapplied (--discard-local)."
-    _update_print_stash_recovery "$stash_name"
-  fi
-
-  # Release notes for the version actually installed — never `[Unreleased]`.
-  print_release_notes "$new_ver"
-  _update_finish
-  return 0
+  _update_after_pull "$old_ver" "$head_rev" "$new_ver" "$new_rev" \
+    "$restored" "$dirty" "$discard_local" "$stash_name"
+  return $?
 }
 
 # Shared tail of every successful do_update_source path.
@@ -1018,6 +1298,11 @@ case "${1:-}" in
         exit 1
       fi
     else
+      # Recorded verbatim so that if the pull replaces bin/osa mid-update we can
+      # replay the user's exact invocation into the new script (see
+      # _update_reexec_if_updater_changed). `--settings` is not here because it
+      # is consumed above into the exported OSA_SETTINGS, which survives exec.
+      _osa_update_argv=(${_update_args[@]+"${_update_args[@]}"})
       # Propagate the exit code: a failed in-place update must NOT fall through
       # to the launch path as if it had succeeded.
       do_update_source ${_update_args[@]+"${_update_args[@]}"} || exit $?
@@ -1237,15 +1522,17 @@ for arg in "$@"; do
 done
 
 # ── Warm the backend daemon (attach instantly if already healthy) ──
+#
+# Skew repair comes FIRST, before the attach decision: _ensure_fresh_daemon
+# stops a backend that is serving an older build than this checkout, which
+# turns the fast attach path below into the slow start-fresh path for exactly
+# the launches that need it. The user is never told to run `osa stop`.
+if backend_healthy && ! _ensure_fresh_daemon; then
+  exit 1
+fi
+
 if backend_healthy; then
   echo -e "${DIM}Backend already running on :${PORT} — attaching.${RESET}"
-  # Attaching is the fast path, but it is also how you end up running old code:
-  # the daemon outlives the TUI by design, so one started before a rebuild keeps
-  # serving the previous version (and the TUI shows ITS version, not the tree's).
-  # This catches the `osa update` case AND a plain `cargo build`/`mix compile`
-  # with no update at all. Warn only — attaching to a stale daemon is still a
-  # working session, and silently restarting would kill the user's warm state.
-  _daemon_matches_tree || _warn_stale_daemon
 else
   clear_stale_pid
   start_daemon

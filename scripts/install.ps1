@@ -288,6 +288,11 @@ $RunDir      = Join-Path $OsaHome 'run'
 $PidFile     = Join-Path $RunDir 'backend.pid'
 $EnvFile     = Join-Path $OsaHome '.env'
 $VersionFile = Join-Path $OsaHome 'version'
+# This very script. `osa update` has to be able to replace it - see
+# Update-Launcher for why, and for why replacing it is only half the job.
+$LauncherSelf   = Join-Path $OsaHome 'bin\osa.ps1'
+$LauncherRawBase = if ($env:OSA_LAUNCHER_RAW_BASE) { $env:OSA_LAUNCHER_RAW_BASE }
+                   else { "https://raw.githubusercontent.com/$Repo" }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 
@@ -368,6 +373,96 @@ function Start-Daemon {
     -PassThru -WindowStyle Hidden -RedirectStandardOutput $backendLog
   Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding ASCII
   return $proc
+}
+
+# ── Disk vs RAM version skew, and its automatic repair ─────────────────────
+#
+# Mirrors bin/osa and the POSIX launcher. OSA's backend deliberately outlives
+# the TUI, so a daemon started before an update keeps serving the OLD code from
+# memory while the new code sits on disk - and the TUI then reports the
+# daemon's version, making the update look like it never shipped. OSA absorbs
+# that cost itself; telling the user to run `osa stop` first is not acceptable.
+
+function Get-DaemonVersion {
+  try {
+    $r = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 3
+    $m = [regex]::Match($r.Content, '"version"\s*:\s*"([^"]*)"')
+    if ($m.Success) { return $m.Groups[1].Value }
+  } catch { }
+  return ''
+}
+
+# $true when the live daemon matches what is INSTALLED (or nothing to compare).
+function Test-DaemonMatchesInstall {
+  $inst = Get-InstalledTuiVersion
+  if (-not $inst) { return $true }
+  if (-not (Test-Health $HealthUrl)) { return $true }
+  $run = Get-DaemonVersion
+  if (-not $run) { return $true }
+  return ((ConvertTo-NormalizedVersion $run) -eq (ConvertTo-NormalizedVersion $inst))
+}
+
+# Stop the backend, then POLL until :$Port really stops answering. The PORT,
+# not the PID, is the contract: anything still listening is what the TUI would
+# attach to. Returns $true when the port is free.
+function Stop-BackendConfirmed {
+  Stop-Daemon | Out-Null
+  for ($i = 0; $i -lt 40; $i++) {
+    if (-not (Test-Health $HealthUrl)) { return $true }
+    Start-Sleep -Milliseconds 250
+  }
+  return (-not (Test-Health $HealthUrl))
+}
+
+# Is anyone relying on this daemon right now? Observed from OUTSIDE, because
+# the daemon being judged runs OLD code and would not report any field added
+# for this purpose. Returns a reason string, or '' when idle.
+function Get-DaemonBusyReason {
+  $tuiName = [System.IO.Path]::GetFileNameWithoutExtension($TuiBin)
+  if (Get-Process -Name $tuiName -ErrorAction SilentlyContinue) {
+    return 'another OSA session is attached to it'
+  }
+  $backendLog = Join-Path $LogDir 'backend.log'
+  if (Test-Path $backendLog) {
+    $age = (Get-Date) - (Get-Item $backendLog).LastWriteTime
+    if ($age.TotalSeconds -lt 15) { return 'it is still writing output (mid-turn)' }
+  }
+  return ''
+}
+
+# Repair skew before the attach decision. $true = proceed, $false = hard error.
+function Repair-StaleDaemon {
+  if (Test-DaemonMatchesInstall) { return $true }
+  $inst = Get-InstalledTuiVersion
+  $run  = Get-DaemonVersion
+  $busy = Get-DaemonBusyReason
+
+  if ($busy) {
+    if ([Environment]::UserInteractive) {
+      Write-Host "  [!] The backend is running an older build ($run -> $inst), but $busy." -ForegroundColor Yellow
+      $reply = Read-Host '  Restart it anyway? This ends that work. [y/N]'
+      if ($reply -notmatch '^(y|Y|yes|YES)$') {
+        Write-Host "  Left it running - attaching to $run." -ForegroundColor DarkGray
+        return $true
+      }
+    } else {
+      Write-Host "  [!] A stale OSA backend is running on :$Port." -ForegroundColor Yellow
+      Write-Host "      installed: $inst" -ForegroundColor DarkGray
+      Write-Host "      running:   $run  <- this is what the TUI will display" -ForegroundColor DarkGray
+      Write-Host "      It was left alone because it is busy; it will be refreshed automatically once idle." -ForegroundColor DarkGray
+      return $true
+    }
+  }
+
+  Write-Host '  -> Backend was running an older build - restarting...' -ForegroundColor Cyan
+  if (-not (Stop-BackendConfirmed)) {
+    Write-Host "  [x] The old backend on :$Port would not stop." -ForegroundColor Red
+    Write-Host "      It reports $run but $inst is installed, so attaching would silently" -ForegroundColor DarkGray
+    Write-Host '      run the OLD build. OSA will not do that.' -ForegroundColor DarkGray
+    return $false
+  }
+  Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+  return $true
 }
 
 function Wait-Health {
@@ -457,12 +552,273 @@ function Test-TuiIsVersion([string]$want) {
   return ($got -eq (ConvertTo-NormalizedVersion $want))
 }
 
+# ── The launcher has to update ITSELF ───────────────────────────────────────
+#
+# Update-Osa downloaded the backend release and the TUI binary but never
+# osa.ps1, the launcher itself. So every launcher fix - the stale-daemon
+# auto-restart above, the honest "Updated to X" wording, this very function -
+# only ever reached a user who re-ran install.ps1 by hand. That is PERMANENT
+# staleness. Mirrors the POSIX launcher in scripts/install.sh exactly.
+#
+# SOURCE OF TRUTH: raw scripts/install.ps1 at the RELEASE TAG being installed,
+# never `main`. install.ps1 GENERATES this launcher, so the tag's install.ps1 is
+# by construction the launcher that shipped with these binaries; a git tag is an
+# immutable ref, so the fetch is version-matched by the URL itself; and it needs
+# no new release asset, so it works for every release that already exists.
+
+# Carve osa.ps1 back out of an install.ps1 - the inverse of the here-string it
+# was written from. A PowerShell here-string terminator must sit at column 0,
+# so `'@` on its own line is unambiguous.
+function Get-LauncherFromInstaller([string]$path) {
+  $lines = Get-Content -LiteralPath $path -ErrorAction Stop
+  $out = New-Object System.Collections.Generic.List[string]
+  $inBody = $false
+  foreach ($l in $lines) {
+    if (-not $inBody) {
+      if ($l -match "^\`$osaPs1\s*=\s*@'") { $inBody = $true }
+      continue
+    }
+    if ($l -eq "'@") { break }
+    $out.Add($l)
+  }
+  return $out.ToArray()
+}
+
+# Would it be safe to let these lines become the `osa` command? Every check is a
+# "no" that must be impossible to get wrong: a truncated download, a captive
+# portal's HTML or a GitHub 404 body must never overwrite a working launcher.
+function Test-LauncherCandidate([string[]]$lines) {
+  if (-not $lines -or $lines.Count -eq 0) {
+    Write-Host "  [x] The downloaded launcher is empty." -ForegroundColor Red
+    return $false
+  }
+  if ($lines.Count -lt 200) {
+    Write-Host "  [x] The downloaded launcher is only $($lines.Count) lines - truncated." -ForegroundColor Red
+    return $false
+  }
+  # Sentinels: three lines only the OSA launcher has, spread from its head to
+  # its very last line, so a body that is merely PowerShell-shaped still fails.
+  foreach ($m in @("`$Repo = 'Miosa-osa/OSA'", 'function Update-Osa {', '& $TuiBin @argList')) {
+    if (-not ($lines | Where-Object { $_.Contains($m) })) {
+      Write-Host "  [x] The downloaded launcher is not the OSA launcher (missing: $m)." -ForegroundColor Red
+      return $false
+    }
+  }
+  # The PowerShell equivalent of `bash -n`: parse it without running it.
+  $text = ($lines -join "`n")
+  $errors = $null
+  try {
+    [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+  } catch {
+    Write-Host "  [x] The downloaded launcher could not be parsed." -ForegroundColor Red
+    return $false
+  }
+  if ($errors -and $errors.Count -gt 0) {
+    Write-Host "  [x] The downloaded launcher is not valid PowerShell ($($errors.Count) parse error(s))." -ForegroundColor Red
+    Write-Host "      $($errors[0].Message)" -ForegroundColor DarkGray
+    return $false
+  }
+  return $true
+}
+
+# Replace $LauncherSelf with the launcher belonging to release $Tag, then hand
+# the rest of the update over to it.
+#
+# THE SELF-REFERENCE PROBLEM APPLIES HERE TOO: PowerShell parses the whole
+# script file before running a line of it, so rewriting osa.ps1 on disk does not
+# change the code that is running. On a successful replacement this function
+# therefore does NOT return - it relaunches the new osa.ps1 and exits with its
+# status, the closest thing PowerShell has to the POSIX launcher's `exec`. The
+# `update` verb and the user's remaining argv are replayed; the post-download
+# phase state travels in the environment so the child re-downloads nothing.
+#
+# Returns 0 only to mean "carry on in THIS process": the launcher was already
+# identical, or we are the handed-off child. Non-zero is a hard, already
+# reported failure - never a silent fallback to the old launcher.
+function Update-Launcher {
+  param(
+    [string]$Tag,
+    [string]$OldVer = 'unknown',
+    [bool]$UpToDate = $false,
+    [string]$NotesFile = '',
+    [string[]]$ReplayArgs = @()
+  )
+
+  if (-not (Test-Path -LiteralPath $LauncherSelf)) {
+    Write-Host "  [x] Cannot refresh the launcher - $LauncherSelf does not exist." -ForegroundColor Red
+    Write-Host "      Reinstall: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 3
+  }
+
+  Write-Host "  -> Refreshing the launcher for $Tag..." -ForegroundColor Cyan
+  $ltmp = Join-Path $env:TEMP ("osa-launcher-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $ltmp | Out-Null
+  $lsrc = Join-Path $ltmp 'install.ps1'
+  $lurl = "$LauncherRawBase/$Tag/scripts/install.ps1"
+  try {
+    Invoke-WebRequest -Uri $lurl -OutFile $lsrc -UseBasicParsing
+  } catch {
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not download the launcher for $Tag." -ForegroundColor Red
+    Write-Host "      $lurl" -ForegroundColor DarkGray
+    Write-Host "      The backend and TUI ARE updated; $LauncherSelf is still the OLD launcher." -ForegroundColor DarkGray
+    Write-Host "      Repair with: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 2
+  }
+
+  $candidate = @()
+  try { $candidate = Get-LauncherFromInstaller $lsrc } catch { $candidate = @() }
+  if (-not (Test-LauncherCandidate $candidate)) {
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    Write-Host "      Your working launcher was NOT touched. Nothing was overwritten." -ForegroundColor DarkGray
+    Write-Host "      Repair with: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 3
+  }
+
+  # Compared as LINES, not bytes: Set-Content's line endings are the platform's,
+  # so a byte comparison would report a difference on every run and rewrite a
+  # launcher that is in fact identical.
+  $curLines = @()
+  try { $curLines = @(Get-Content -LiteralPath $LauncherSelf) } catch { $curLines = @() }
+  if (($curLines -join "`n") -eq ($candidate -join "`n")) {
+    Write-Host "  [ok] Launcher already current (unchanged in $Tag)" -ForegroundColor Green
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    return 0
+  }
+
+  # Loop guard. The child is marked before relaunch and checks the mark here.
+  # An update that relaunches forever is far worse than one that finishes under
+  # one-generation-old logic - and we say so out loud rather than hiding it.
+  if ($env:OSA_UPDATE_REEXECED) {
+    Write-Host "  [!] The launcher changed again after the hand-off; continuing with the current one." -ForegroundColor Yellow
+    Write-Host "      Relaunching a second time is refused by design (loop guard)." -ForegroundColor DarkGray
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    return 0
+  }
+
+  # Backup, stage beside the target, swap, then re-verify what actually landed.
+  # The backup is the whole safety net: a half-finished swap must leave a
+  # WORKING `osa`, never none at all.
+  $lbak = "$LauncherSelf.bak"
+  $lnew = "$LauncherSelf.new"
+  try {
+    Copy-Item -LiteralPath $LauncherSelf -Destination $lbak -Force
+  } catch {
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not back up the current launcher to $lbak - refusing to replace it." -ForegroundColor Red
+    return 3
+  }
+  try {
+    Set-Content -LiteralPath $lnew -Value $candidate -Encoding UTF8
+  } catch {
+    Remove-Item -Force $lnew -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not stage the new launcher at $lnew." -ForegroundColor Red
+    Write-Host "      Your launcher is untouched. Check disk space and permissions." -ForegroundColor DarkGray
+    return 3
+  }
+  try {
+    Move-Item -LiteralPath $lnew -Destination $LauncherSelf -Force
+  } catch {
+    Remove-Item -Force $lnew -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $LauncherSelf)) {
+      Copy-Item -LiteralPath $lbak -Destination $LauncherSelf -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "  [x] Could not replace the launcher at $LauncherSelf." -ForegroundColor Red
+    Write-Host "      The previous launcher was restored from $lbak." -ForegroundColor DarkGray
+    return 3
+  }
+  Remove-Item -Recurse -Force $ltmp -ErrorAction SilentlyContinue
+
+  # What is on disk NOW is what the relaunch below will run. Verify that, not
+  # the candidate we verified a moment ago.
+  $landed = @()
+  try { $landed = @(Get-Content -LiteralPath $LauncherSelf) } catch { $landed = @() }
+  if (-not (Test-LauncherCandidate $landed)) {
+    Copy-Item -LiteralPath $lbak -Destination $LauncherSelf -Force -ErrorAction SilentlyContinue
+    Write-Host "  [x] The installed launcher did not verify - restored the previous one from $lbak." -ForegroundColor Red
+    return 3
+  }
+  Write-Host "  [ok] Launcher updated ($LauncherSelf)" -ForegroundColor Green
+
+  # Hand off. Everything the successor must not redo travels in the environment.
+  Write-Host "  -> Handing off to the new launcher to finish this update..." -ForegroundColor Cyan
+  $env:OSA_UPDATE_REEXECED  = '1'
+  $env:OSA_UPDATE_PHASE     = 'post-install'
+  $env:OSA_UPDATE_OLD_VER   = $OldVer
+  $env:OSA_UPDATE_NEW_VER   = $Tag
+  $env:OSA_UPDATE_UPTODATE  = $(if ($UpToDate) { '1' } else { '0' })
+  $env:OSA_UPDATE_NOTES_FILE = $NotesFile
+
+  $psExe = $null
+  try { $psExe = (Get-Process -Id $PID).Path } catch { $psExe = $null }
+  if (-not $psExe -or -not (Test-Path -LiteralPath $psExe)) {
+    $psExe = Join-Path $PSHOME 'powershell.exe'
+  }
+  if (-not (Test-Path -LiteralPath $psExe)) {
+    Write-Host "  [x] Could not locate the PowerShell host to relaunch ($psExe)." -ForegroundColor Red
+    Write-Host "      The update is applied on disk; finish it with: osa update" -ForegroundColor DarkGray
+    return 3
+  }
+  # Built as one flat array so the verb and the user's flags each arrive as
+  # separate argv entries (an inline array literal would be joined into one).
+  $reArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $LauncherSelf, 'update') + $ReplayArgs
+  & $psExe @reArgs
+  exit $LASTEXITCODE
+}
+
+# The success report. Factored out so the same-process run and the handed-off
+# run print literally the same thing.
+function Write-UpdateReport([string]$from, [string]$to, [string]$notes) {
+  Write-Host ""
+  Write-Host "  [ok] Updated $from -> $to" -ForegroundColor Green
+  Write-Host ""
+  Write-Host "  What's new"
+  if ($notes) {
+    ($notes -split "`n" | Select-Object -First 30) | ForEach-Object { Write-Host ("    " + $_.TrimEnd()) }
+  } else {
+    Write-Host "    See https://github.com/$Repo/releases/tag/$to" -ForegroundColor Cyan
+  }
+  Write-Host ""
+  if ([Environment]::UserInteractive) {
+    Read-Host "  Press Enter to launch OSA" | Out-Null
+  }
+}
+
 function Update-Osa {
   # Real in-place update: download the prebuilt release + TUI, verify sha256,
   # atomically swap under ~/.osa, print the delta + what's new, then return.
   #
   # Every mutating step below is checked explicitly: an unchecked failure here
   # is how a half-applied update (new backend, old TUI) got reported as success.
+  param([string[]]$ReplayArgs = @())
+
+  # Resumption point for a handed-off update (see Update-Launcher). The
+  # download, the checksum verification and the swap all already happened in our
+  # parent process; redoing any of them would re-download the whole release for
+  # nothing. All that is left is to say what happened - which is precisely the
+  # part the new launcher exists to get right.
+  if ($env:OSA_UPDATE_PHASE -eq 'post-install') {
+    Write-Host "  [ok] Continuing under the updated launcher (the rest of this update runs the NEW logic)" -ForegroundColor Green
+    $rnotes = ''
+    if ($env:OSA_UPDATE_NOTES_FILE -and (Test-Path -LiteralPath $env:OSA_UPDATE_NOTES_FILE)) {
+      try { $rnotes = Get-Content -Raw -LiteralPath $env:OSA_UPDATE_NOTES_FILE } catch { $rnotes = '' }
+      Remove-Item -Force -LiteralPath $env:OSA_UPDATE_NOTES_FILE -ErrorAction SilentlyContinue
+    }
+    if ($env:OSA_UPDATE_UPTODATE -eq '1') {
+      Write-Host "  [ok] Already up to date ($($env:OSA_UPDATE_NEW_VER))" -ForegroundColor Green
+    } else {
+      Write-UpdateReport $env:OSA_UPDATE_OLD_VER $env:OSA_UPDATE_NEW_VER $rnotes
+    }
+    # Do not leak the hand-off state into the TUI we are about to launch.
+    foreach ($v in 'OSA_UPDATE_PHASE','OSA_UPDATE_OLD_VER','OSA_UPDATE_NEW_VER',
+                   'OSA_UPDATE_UPTODATE','OSA_UPDATE_NOTES_FILE') {
+      Remove-Item -Path ("Env:" + $v) -ErrorAction SilentlyContinue
+    }
+    return 0
+  }
+
   $platform = 'windows-x64'
   $zip = "osa-$platform.zip"
   $tuiAsset = "osagent-tui-$platform.exe"
@@ -487,6 +843,12 @@ function Update-Osa {
     # while the TUI still runs old code - and every later `osa update` would
     # no-op forever. Verify against the real binary and self-heal instead.
     if (Test-TuiIsVersion $latest) {
+      # The binaries are current - but the LAUNCHER may not be, and nothing else
+      # in this install would ever notice. Checking it here is what makes
+      # "`osa update` leaves you with the launcher for the release you have" an
+      # unconditional invariant rather than a side effect of upgrading.
+      $ulrc = Update-Launcher -Tag $latest -OldVer $cur -UpToDate $true -ReplayArgs $ReplayArgs
+      if ($ulrc -ne 0) { return $ulrc }
       Write-Host "  [ok] Already up to date ($cur)" -ForegroundColor Green
       return 0
     }
@@ -643,19 +1005,24 @@ function Update-Osa {
   Set-Content -LiteralPath $VersionFile -Value $latest -Encoding ASCII
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
-  Write-Host ""
-  Write-Host "  [ok] Updated $cur -> $latest" -ForegroundColor Green
-  Write-Host ""
-  Write-Host "  What's new"
+  # Third half of the update: the launcher. Deliberately LAST of the three
+  # swaps - a failure to fetch it must never abort an update whose binaries have
+  # not landed yet, and by this line the only work remaining is the report,
+  # which is cheap for the successor to redo.
+  #
+  # The notes came from the GitHub API and would be lost across the relaunch, so
+  # they travel on disk. The child deletes the file after reading it.
+  $notesFile = ''
   if ($notes) {
-    ($notes -split "`n" | Select-Object -First 30) | ForEach-Object { Write-Host ("    " + $_.TrimEnd()) }
-  } else {
-    Write-Host "    See https://github.com/$Repo/releases/tag/$latest" -ForegroundColor Cyan
+    $notesFile = Join-Path $env:TEMP ("osa-notes-" + [Guid]::NewGuid().ToString('N') + ".txt")
+    try { Set-Content -LiteralPath $notesFile -Value $notes -Encoding UTF8 } catch { $notesFile = '' }
   }
-  Write-Host ""
-  if ([Environment]::UserInteractive) {
-    Read-Host "  Press Enter to launch OSA" | Out-Null
-  }
+  $ulrc = Update-Launcher -Tag $latest -OldVer $cur -UpToDate $false `
+    -NotesFile $notesFile -ReplayArgs $ReplayArgs
+  if ($notesFile) { Remove-Item -Force -LiteralPath $notesFile -ErrorAction SilentlyContinue }
+  if ($ulrc -ne 0) { return $ulrc }
+
+  Write-UpdateReport $cur $latest $notes
   return 0
 }
 
@@ -755,7 +1122,10 @@ switch -Exact ($cmd) {
   'update' {
     # The `update` token was already stripped from $argList by the verb
     # translation above, so the remaining flags launch normally afterwards.
-    $urc = Update-Osa
+    # They are passed IN so that, if the update replaces this launcher and hands
+    # off to the new one (see Update-Launcher), the user's exact invocation is
+    # replayed across the process boundary instead of being silently dropped.
+    $urc = Update-Osa -ReplayArgs $argList
     if ($urc -ne 0) { exit $urc }
     # fall through to launch on success
   }
@@ -763,6 +1133,15 @@ switch -Exact ($cmd) {
 }
 
 # ── Default: warm the daemon (attach instantly if healthy), then TUI ──
+#
+# Skew repair runs FIRST: a backend serving an older build than the installed
+# one is stopped here, which turns the fast attach below into the start-fresh
+# path for exactly the launches that need it. The user is never told to run
+# `osa stop`.
+if ((Test-Health $HealthUrl) -and -not (Repair-StaleDaemon)) {
+  exit 1
+}
+
 if (Test-Health $HealthUrl) {
   Write-Host "  Backend already running on :$Port - attaching." -ForegroundColor DarkGray
 } else {

@@ -176,9 +176,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
          }}
       )
 
-      Process.sleep(50)
+      assert [] == pty_frames_before_sentinel(pty_pid)
       assert Process.alive?(pty_pid)
-      refute_received {:send_frame, _}
     end
   end
 
@@ -187,9 +186,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
   describe "unknown session" do
     test "pty_input for unknown session is silently dropped", %{pty_pid: pty_pid} do
       cast_to_pty(pty_pid, {:pty_input, %{session_id: "ghost-session", data: "ls\n"}})
-      Process.sleep(50)
+
+      assert [] == pty_frames_before_sentinel(pty_pid)
       assert Process.alive?(pty_pid)
-      refute_received {:send_frame, _}
     end
 
     test "pty_close for unknown session is silently ignored", %{pty_pid: pty_pid} do
@@ -230,6 +229,58 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
   end
 
   # ── Private test helpers ──────────────────────────────────────────────────────
+
+  # Deterministic replacement for `refute_received {:send_frame, _}`.
+  #
+  # Two things were wrong with the old shape:
+  #
+  #   1. `refute_received` only says "nothing had arrived *yet*". It passed by
+  #      being faster than the executor, not because the executor stayed quiet,
+  #      so it could never have failed reliably either.
+  #   2. This mailbox is not exclusively ours. `FrameRouter` is a globally
+  #      named singleton and the test process is its registered host_client, so
+  #      *any* executor's outbound frame lands here — including a
+  #      `{:clipboard_synced, _}` from a `Task.start/1` in `Clipboard` that
+  #      outlived the clipboard test that spawned it. Absence of *anything* was
+  #      never the property being tested; absence of a *pty* frame was.
+  #
+  # So assert on ordering instead of on time. `GenServer.cast/2` into
+  # PtyExecutor is FIFO and every outbound frame is relayed through the single
+  # FrameRouter, so a frame produced by the frame under test would necessarily
+  # be delivered before one produced by a later cast. We enqueue a sentinel
+  # that provokes a known reply, drain until it arrives, and return every pty
+  # frame seen ahead of it — which must be none. Foreign frames are ignored
+  # rather than failing the test.
+  defp pty_frames_before_sentinel(pty_pid, timeout_ms \\ 2_000) do
+    sentinel_sid = gen_session_id()
+    open_session(pty_pid, sentinel_sid, shell: "/usr/bin/sentinel_shell_not_allowed")
+    collect_until_sentinel(sentinel_sid, timeout_ms, [])
+  end
+
+  defp collect_until_sentinel(sentinel_sid, timeout_ms, acc) do
+    receive do
+      {:send_frame, {:pty_error, %{session_id: ^sentinel_sid, reason: :shell_not_allowed}}} ->
+        Enum.reverse(acc)
+
+      {:send_frame, {tag, _payload} = frame} when is_atom(tag) ->
+        if pty_frame?(tag) do
+          collect_until_sentinel(sentinel_sid, timeout_ms, [frame | acc])
+        else
+          collect_until_sentinel(sentinel_sid, timeout_ms, acc)
+        end
+
+      {:send_frame, _other} ->
+        collect_until_sentinel(sentinel_sid, timeout_ms, acc)
+    after
+      timeout_ms ->
+        flunk(
+          "sentinel pty_error frame never arrived within #{timeout_ms}ms — " <>
+            "cannot conclude anything about what the executor did or did not emit"
+        )
+    end
+  end
+
+  defp pty_frame?(tag), do: tag |> Atom.to_string() |> String.starts_with?("pty_")
 
   defp assert_received_output(session_id, needle, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
