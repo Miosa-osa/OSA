@@ -149,21 +149,27 @@ impl Completions {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    /// Draw the popup INTO `area` — the band the inline layout reserved for it
+    /// (`ROW_POPUP`, sized from [`Self::desired_height`] via `App::popup_slot`).
+    ///
+    /// `area` used to be the COMPOSER's rect and the popup placed itself at
+    /// `area.y - popup_height`, i.e. into rows owned by the context-hint row and
+    /// whatever band sat above it. Its height was added to the viewport total,
+    /// so the region was tall enough — but no band ever claimed the rows, so the
+    /// popup simply painted over its neighbours. It now fills a band of its own,
+    /// bottom-anchored inside it so it still sits tight against the composer.
+    pub fn draw_in(&self, frame: &mut Frame, area: Rect) {
         if !self.visible || self.filtered.is_empty() {
             return;
         }
 
         let theme = crate::style::theme();
 
-        // The popup is bottom-anchored above the input and grows upward. It MUST
-        // stay inside the frame's real drawable area: the inline viewport's frame
-        // buffer starts at `bounds.y` (e.g. y=13 when parked partway down the
-        // terminal), so a naive `area.y - popup_height` lands ABOVE the buffer
-        // top and a popup taller than the viewport spills BELOW its bottom —
-        // either writes outside the buffer and panics ratatui. We therefore fit
-        // the popup to the space available *above the input, within the frame*,
-        // and clip every widget to `bounds` before rendering.
+        // Everything is still clipped to the frame's real drawable area: the
+        // inline viewport's frame buffer starts at `bounds.y` (e.g. y=13 when
+        // parked partway down the terminal), and a lagged resize can leave a
+        // reserved row partly outside the buffer — writing outside it panics
+        // ratatui ("index outside of buffer").
         let bounds = frame.area();
         if bounds.width == 0 || bounds.height == 0 {
             return;
@@ -190,16 +196,18 @@ impl Completions {
         let visible_count = self.filtered.len().min(self.max_visible) as u16;
         let desired_height = visible_count + 2; // border top + bottom
 
-        // Room available above the input line, bounded by the frame's top. The
-        // popup can be at most this tall; if there isn't room for even a border
-        // pair + one row, skip drawing rather than overflow.
-        let room_above = area.y.saturating_sub(bounds.y);
-        let popup_height = desired_height.min(room_above);
+        // Never taller than the reserved band. `desired_height` is what the band
+        // was sized from, so at normal terminal sizes these are equal and the
+        // `.min` is the tiny-terminal clamp; if there isn't room for even a
+        // border pair + one row, skip drawing rather than overflow.
+        let popup_height = desired_height.min(area.height);
         if popup_height < 3 {
             return;
         }
 
-        let popup_y = area.y.saturating_sub(popup_height).max(bounds.y);
+        // Bottom-anchored INSIDE the band, so the popup keeps hugging the
+        // composer when the band happens to be taller than the popup wants.
+        let popup_y = (area.y + area.height.saturating_sub(popup_height)).max(bounds.y);
         let popup_x = area.x.max(bounds.x).min(bounds.right().saturating_sub(1));
 
         let popup_rect = Rect {

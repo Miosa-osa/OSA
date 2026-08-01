@@ -78,39 +78,88 @@ pub(crate) fn survey_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
         .min(area_h.saturating_sub(floor))
 }
 
+/// Rows the ephemeral toast band may occupy — one row per live toast, bounded by
+/// [`crate::components::toast::MAX_VISIBLE`].
+///
+/// Toasts USED to be a bare overlay: `draw_inline` finished laying out every
+/// band and then painted `toast_rect(area)` — the top 3 rows of the live region,
+/// which belong to the STREAMING band — straight over whatever the reply had
+/// already drawn there. Nothing reserved those rows, so a toast firing mid-reply
+/// ate the top of the answer. The toast now owns a real band above the stream.
+pub(crate) const TOAST_INLINE_CAP: u16 = crate::components::toast::MAX_VISIBLE as u16;
+
+/// Rows the toast band should take inside an inline region of `area_h` rows.
+/// Same contract as [`checklist_band_height`] / [`survey_band_height`].
+pub(crate) fn toast_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
+    want.min(TOAST_INLINE_CAP).min(area_h.saturating_sub(floor))
+}
+
+/// Rows the composer-anchored completion band may occupy: the `/`-command
+/// popup (≤ `max_visible` 8 + 2 border rows) or the `@`-mention dropdown
+/// ([`crate::components::input::MENTION_POPUP_ROWS`]).
+pub(crate) const POPUP_INLINE_CAP: u16 = 12;
+
+/// Rows the completion band should take inside an inline region of `area_h`
+/// rows. Same contract as [`checklist_band_height`] / [`survey_band_height`].
+pub(crate) fn popup_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
+    want.min(POPUP_INLINE_CAP).min(area_h.saturating_sub(floor))
+}
+
 /// Row indices into [`inline_split`]'s result.
-pub(crate) const ROW_STREAM: usize = 0;
-pub(crate) const ROW_CHECKLIST: usize = 1;
-pub(crate) const ROW_THINK: usize = 2;
-pub(crate) const ROW_AGENTS: usize = 3;
-pub(crate) const ROW_SURVEY: usize = 4;
-pub(crate) const ROW_HINT: usize = 5;
-pub(crate) const ROW_INPUT: usize = 6;
-pub(crate) const ROW_STATUS: usize = 7;
+pub(crate) const ROW_TOAST: usize = 0;
+pub(crate) const ROW_STREAM: usize = 1;
+pub(crate) const ROW_CHECKLIST: usize = 2;
+pub(crate) const ROW_THINK: usize = 3;
+pub(crate) const ROW_AGENTS: usize = 4;
+pub(crate) const ROW_SURVEY: usize = 5;
+pub(crate) const ROW_HINT: usize = 6;
+pub(crate) const ROW_POPUP: usize = 7;
+pub(crate) const ROW_INPUT: usize = 8;
+pub(crate) const ROW_STATUS: usize = 9;
+
+/// Every reserved band height the inline live region is laid out from.
+///
+/// A struct rather than a positional argument list because the band count keeps
+/// growing (checklist → survey → toast + completion popup) and a mis-ordered
+/// `u16` argument is exactly the silent, invisible defect this layout keeps
+/// producing. `..Default::default()` means a caller that does not care about a
+/// band collapses it to 0 explicitly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Bands {
+    /// Ephemeral notifications (top of the region).
+    pub toast: u16,
+    /// Live task checklist.
+    pub checklist: u16,
+    /// Thinking box / tool-use activity feed.
+    pub think: u16,
+    /// Multi-agent roster + background-terminals summary.
+    pub agents: u16,
+    /// Inline `ask_user` question band.
+    pub survey: u16,
+    /// `/`-command popup or `@`-mention dropdown, anchored to the composer.
+    pub popup: u16,
+    /// Composer (top + bottom dividers included).
+    pub input: u16,
+}
 
 /// The inline live region's vertical split. Kept as a free function so the
 /// "no two components share a row" invariant is testable against the REAL
 /// layout instead of a hand-copied mirror of it — the checklist overdraw bug
 /// was invisible precisely because nothing exercised this split.
-pub(crate) fn inline_split(
-    area: Rect,
-    checklist_h: u16,
-    think_h: u16,
-    agents_h: u16,
-    survey_h: u16,
-    input_h: u16,
-) -> std::rc::Rc<[Rect]> {
+pub(crate) fn inline_split(area: Rect, b: Bands) -> std::rc::Rc<[Rect]> {
     RLayout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0), // streaming preview (collapses to 0 when idle - no dead rows)
-            Constraint::Length(checklist_h), // live task checklist (own band, never over the reply)
-            Constraint::Length(think_h), // thinking / activity
-            Constraint::Length(agents_h), // agents panel / background summary
-            Constraint::Length(survey_h), // inline ask_user question band (own band, never overlay)
-            Constraint::Length(1), // right-aligned "N% context used" hint
-            Constraint::Length(input_h), // input box (top + bottom dividers)
-            Constraint::Length(2), // status line + permission/shell line
+            Constraint::Length(b.toast), // toasts (own band, never over the reply)
+            Constraint::Min(0),          // streaming preview (collapses to 0 when idle)
+            Constraint::Length(b.checklist), // live task checklist (own band)
+            Constraint::Length(b.think), // thinking / activity
+            Constraint::Length(b.agents), // agents panel / background summary
+            Constraint::Length(b.survey), // inline ask_user question band (own band)
+            Constraint::Length(1),       // right-aligned "N% context used" hint
+            Constraint::Length(b.popup), // `/` popup / `@` dropdown (own band, never over the hint)
+            Constraint::Length(b.input), // input box (top + bottom dividers)
+            Constraint::Length(2),       // status line + permission/shell line
         ])
         .split(area)
 }
@@ -421,7 +470,9 @@ impl App {
             // the popup never leaves stacked chrome behind during the shrink
             // debounce. This is the fix for "it duplicates the composer/status
             // every time I run a command".
-            let popup_h_now = self.input.completions_popup_height();
+            // Both composer-anchored popups (`/` commands and the `@`-mention
+            // dropdown) share one reserved band, so both share this edge.
+            let popup_h_now = self.popup_slot();
             let popup_changed = popup_h_now != prev_popup_h;
             prev_popup_h = popup_h_now;
             // A REAL terminal resize (pane drag / window change). ONLY this may take
@@ -941,7 +992,8 @@ impl App {
                 };
             tv.draw(frame, area, entries);
             if self.toasts.has_toasts() {
-                self.toasts.draw(frame, toast_rect(area).intersection(area));
+                self.toasts
+                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
             }
             return;
         }
@@ -1137,7 +1189,8 @@ impl App {
                 }
             }
             if self.toasts.has_toasts() {
-                self.toasts.draw(frame, toast_rect(area).intersection(area));
+                self.toasts
+                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
             }
         } else {
             self.draw_inline(frame, area);
@@ -1183,11 +1236,15 @@ impl App {
         // question would be carved out of the streaming preview (or clipped off
         // the bottom entirely, which is how the picker "shipped invisible").
         let survey_h = self.survey_slot();
+        // Ephemeral notifications own a real band above the stream (they used to
+        // be an unreserved overlay painted over the top of the streaming reply).
+        let toast_h = self.toast_slot();
         let hi0 = term_rows.saturating_sub(1).max(1);
-        // Reserve rows for an open slash-completions popup so the upward-growing
-        // menu always has room above the input (same mechanism as the agents
-        // panel). Zero when the popup is closed, so idle height is unchanged.
-        let popup_h = self.input.completions_popup_height();
+        // Reserve rows for the composer-anchored completion band — the open `/`
+        // popup OR the `@`-mention dropdown — so the upward-growing menu always
+        // has room above the input (same mechanism as the agents panel). Zero
+        // when both are closed, so idle height is unchanged.
+        let popup_h = self.popup_slot();
         // Extra rows the live tool-use feed needs beyond the single activity
         // row already baked into `live_region_height`'s fixed chrome. Without
         // this the base (non-streaming) viewport reserves only 1 row for the
@@ -1199,6 +1256,7 @@ impl App {
             .saturating_add(agents_h)
             .saturating_add(checklist_h)
             .saturating_add(survey_h)
+            .saturating_add(toast_h)
             .saturating_add(popup_h)
             .saturating_add(activity_feed_extra)
             .min(hi0);
@@ -1212,6 +1270,7 @@ impl App {
                 .saturating_add(input_needed)
                 .saturating_add(perm_rows)
                 .saturating_add(agents_h)
+                .saturating_add(toast_h)
                 .saturating_add(popup_h);
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
@@ -1230,6 +1289,7 @@ impl App {
                 .saturating_add(input_needed)
                 .saturating_add(review.content_height(self.width))
                 .saturating_add(agents_h)
+                .saturating_add(toast_h)
                 .saturating_add(popup_h);
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
@@ -1282,7 +1342,7 @@ impl App {
             overhead,
             input_needed,
             agents_h,
-            checklist_h.saturating_add(survey_h),
+            checklist_h.saturating_add(survey_h).saturating_add(toast_h),
             popup_h,
             preview_rows,
             hi,
@@ -1332,6 +1392,61 @@ impl App {
             Some(ref s) => s.band_height(self.width),
             None => 0,
         }
+    }
+
+    /// Rows the ephemeral toast band reserves. The SINGLE source of truth for
+    /// BOTH `desired_inline_height` (viewport sizing) and `draw_inline` (layout)
+    /// — the `checklist_slot` / `survey_slot` contract, for the same reason.
+    ///
+    /// Toasts were the last unreserved overlay in the live region: `draw_inline`
+    /// laid out every band and then painted `toast_rect(area)` — the TOP THREE
+    /// ROWS OF THE STREAM BAND — over whatever the reply had drawn there. A
+    /// toast firing mid-reply erased the top of the answer for its 4–6s dwell.
+    ///
+    /// An overlay is NOT the right shape here even though toasts are ephemeral:
+    /// nothing about a notification requires destroying the reply underneath it,
+    /// and the live region is short enough that three stolen rows are a
+    /// significant fraction of the visible answer. So it gets a real band.
+    ///
+    /// The reservation is the EXACT live count (not a fixed cap): a toast
+    /// appearing or expiring is a discrete event, so this costs at most one
+    /// viewport rebuild per toast edge and leaves no dead rows — the same
+    /// trade-off `checklist_slot` documents. Zero when no toast is live, so an
+    /// idle live region is byte-for-byte what it was before.
+    pub(crate) fn toast_slot(&self) -> u16 {
+        self.toasts.live_count()
+    }
+
+    /// Rows the composer-anchored completion band reserves — the `/`-command
+    /// popup or the `@`-mention dropdown. The SINGLE source of truth for BOTH
+    /// `desired_inline_height` (viewport sizing) and `draw_inline` (layout), and
+    /// additionally for the run loop's `popup_changed` immediate-rebuild edge.
+    ///
+    /// The `@`-dropdown had the same defect the checklist did: `InputComponent::draw`
+    /// painted its rows at `area.y - n .. area.y`, i.e. ABOVE the composer's own
+    /// rect, into rows owned by the context-hint / survey / agents bands, with
+    /// nothing reserving them. (The `/` popup did the same, and merely happened
+    /// to have its height added to the viewport total, which grew the region but
+    /// never told the layout which rows were spoken for.) Both now draw into
+    /// `ROW_POPUP`, which sits between the hint row and the composer.
+    ///
+    /// `max` rather than a sum because exactly one of the two ever paints (see
+    /// `InputComponent::draw_popup`, which gives the `/` popup precedence), so
+    /// they can never share a row.
+    ///
+    /// **Why a fixed slot for the mention dropdown** (`MENTION_POPUP_ROWS`,
+    /// independent of the match count): the dropdown re-filters on every
+    /// keystroke, so an exactly-sized band would change height mid-word — and
+    /// every height change rebuilds the inline viewport via a DSR cursor query,
+    /// which is precisely the churn that produced the stacked-composer artifacts.
+    /// A constant slot changes height exactly twice per dropdown session (open,
+    /// close), no matter how many characters are typed into the mention. The
+    /// dropdown is bottom-anchored inside it so a 1-match dropdown still sits
+    /// tight against the composer instead of floating on 4 dead rows.
+    pub(crate) fn popup_slot(&self) -> u16 {
+        self.input
+            .completions_popup_height()
+            .max(self.input.mention_popup_height())
     }
 
     /// Height of the thinking/activity row. The SINGLE source of truth used by
@@ -1415,16 +1530,44 @@ impl App {
             area.height,
             think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
+        // Composer-anchored completion band (`/` popup or `@` dropdown). Both
+        // USED to paint at `area.y - n` from inside `InputComponent::draw`, i.e.
+        // over the context-hint row and whatever band sat above it, with nothing
+        // reserving those rows. Must MATCH `desired_inline_height`'s reservation
+        // (`popup_slot`); the trailing `.min(...)` is the tiny-terminal clamp.
+        let popup_h = popup_band_height(
+            self.popup_slot(),
+            area.height,
+            think_h + agents_h + checklist_h + survey_h + 1 + 2 + 2,
+        );
+        // Ephemeral toast band at the top of the region — same reserved-band
+        // contract (see `toast_slot`); NEVER an overlay over `a_stream`.
+        let toast_h = toast_band_height(
+            self.toast_slot(),
+            area.height,
+            think_h + agents_h + checklist_h + survey_h + popup_h + 1 + 2 + 2,
+        );
         // Chrome overhead below the streaming preview: activity + agents +
-        // checklist + survey + ctx-hint(1) + status(2). The input takes whatever
-        // is left, clamped to what it needs.
-        let overhead = think_h + agents_h + checklist_h + survey_h + 1 + 2;
+        // checklist + survey + popup + toast + ctx-hint(1) + status(2). The input
+        // takes whatever is left, clamped to what it needs.
+        let overhead = think_h + agents_h + checklist_h + survey_h + popup_h + toast_h + 1 + 2;
         let input_h = self
             .input
             .needed_height()
             .min(area.height.saturating_sub(overhead)) // streaming row is content-sized (0 when idle)
             .max(1);
-        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        let rows = inline_split(
+            area,
+            Bands {
+                toast: toast_h,
+                checklist: checklist_h,
+                think: think_h,
+                agents: agents_h,
+                survey: survey_h,
+                popup: popup_h,
+                input: input_h,
+            },
+        );
 
         // Wipe the whole inline region first so no stale rows from a previous,
         // differently-sized frame bleed through (belt-and-braces against the
@@ -1437,12 +1580,14 @@ impl App {
         // `area`, but a lagged resize or an under-reported inline viewport can
         // leave a row partly outside the frame buffer; clamping keeps each
         // component's internal `render_widget` calls inside the buffer.
+        let a_toast = clamp_to_frame(frame, rows[ROW_TOAST]);
         let a_stream = clamp_to_frame(frame, rows[ROW_STREAM]);
         let a_checklist = clamp_to_frame(frame, rows[ROW_CHECKLIST]);
         let a_think = clamp_to_frame(frame, rows[ROW_THINK]);
         let a_agents = clamp_to_frame(frame, rows[ROW_AGENTS]);
         let a_survey = clamp_to_frame(frame, rows[ROW_SURVEY]);
         let a_hint = clamp_to_frame(frame, rows[ROW_HINT]);
+        let a_popup = clamp_to_frame(frame, rows[ROW_POPUP]);
         let a_input = clamp_to_frame(frame, rows[ROW_INPUT]);
         let a_status = clamp_to_frame(frame, rows[ROW_STATUS]);
 
@@ -1477,6 +1622,12 @@ impl App {
         self.agents.draw(frame, bottom_anchored(a_agents, self.agents.height()));
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
+        // `/` popup or `@` dropdown, in the band reserved by `popup_slot` — never
+        // painted over the hint row / stream band from inside the composer's own
+        // draw, which is what both used to do.
+        if a_popup.height > 0 {
+            self.input.draw_popup(frame, a_popup);
+        }
         self.status.draw(frame, a_status);
         // Live task checklist (Claude Code's todo panel), drawn into the band
         // reserved for it above the activity row — NEVER into `a_stream`, which
@@ -1493,8 +1644,11 @@ impl App {
                 survey.draw_inline(frame, a_survey);
             }
         }
-        if self.toasts.has_toasts() {
-            self.toasts.draw(frame, toast_rect(area).intersection(bounds));
+        // Ephemeral notifications, in the band reserved by `toast_slot` — never
+        // an overlay over `a_stream`. The band is full-width; `toast_window`
+        // keeps the historical right-hand 40-column placement.
+        if a_toast.height > 0 {
+            self.toasts.draw(frame, toast_window(a_toast).intersection(bounds));
         }
     }
 
@@ -1783,13 +1937,35 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
     crate::app::key_normalize::is_ctrl_o(key)
 }
 
-/// Top-right toast overlay rectangle within `area`.
-fn toast_rect(area: Rect) -> Rect {
+/// The right-hand 40-column window of an already-reserved toast band.
+///
+/// Only the horizontal placement — the HEIGHT comes from the band, which the
+/// layout reserved (`App::toast_slot` → `ROW_TOAST`). It used to also invent a
+/// 3-row height at `area.y`, which is how toasts came to be painted over the top
+/// of the streaming reply.
+pub(crate) fn toast_window(band: Rect) -> Rect {
+    Rect::new(
+        band.x + band.width.saturating_sub(40),
+        band.y,
+        40.min(band.width),
+        band.height,
+    )
+}
+
+/// Top-right toast rectangle for the FULL-VIEWPORT (dialog) surfaces.
+///
+/// Here an overlay is genuinely correct: a dialog owns the whole screen, is
+/// repainted in full every frame, and has no live region to budget. The overlay
+/// is BOUNDED to the rows it actually writes (one per live toast, ≤
+/// [`TOAST_INLINE_CAP`]) rather than a blanket 3, and because the dialog redraws
+/// beneath it every frame the covered content returns the moment the toast
+/// expires. The inline live region does NOT use this — it has a reserved band.
+fn toast_rect(area: Rect, live: u16) -> Rect {
     Rect::new(
         area.x + area.width.saturating_sub(40),
         area.y,
         40.min(area.width),
-        3.min(area.height),
+        live.min(TOAST_INLINE_CAP).min(area.height),
     )
 }
 
@@ -1807,7 +1983,9 @@ fn toast_rect(area: Rect) -> Rect {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod render_tests {
-    use super::{clamp_to_frame, safe_render_widget};
+    use super::{
+        clamp_to_frame, inline_split, safe_render_widget, Bands, ROW_INPUT, ROW_POPUP, ROW_STATUS,
+    };
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
@@ -2061,23 +2239,33 @@ mod render_tests {
     fn draw_inline_chrome(frame: &mut Frame, input: &InputComponent, status: &StatusBar) {
         let area = frame.area();
         let think_h = 1u16;
-        let overhead = think_h + 1 + 2;
+        // The composer-anchored popups draw into their OWN reserved band
+        // (`ROW_POPUP`) — never over the composer's neighbours — so the mirror
+        // uses the REAL `inline_split` rather than a hand-rolled copy of it.
+        let popup_h = super::popup_band_height(
+            input
+                .completions_popup_height()
+                .max(input.mention_popup_height()),
+            area.height,
+            think_h + 1 + 2 + 2,
+        );
+        let overhead = think_h + popup_h + 1 + 2;
         let input_h = input
             .needed_height()
             .min(area.height.saturating_sub(overhead + 1))
             .max(1);
-        let rows = RLayout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(think_h),
-                Constraint::Length(1),
-                Constraint::Length(input_h),
-                Constraint::Length(2),
-            ])
-            .split(area);
-        input.draw(frame, clamp_to_frame(frame, rows[3]));
-        status.draw(frame, clamp_to_frame(frame, rows[4]));
+        let rows = inline_split(
+            area,
+            Bands {
+                think: think_h,
+                popup: popup_h,
+                input: input_h,
+                ..Default::default()
+            },
+        );
+        input.draw(frame, clamp_to_frame(frame, rows[ROW_INPUT]));
+        input.draw_popup(frame, clamp_to_frame(frame, rows[ROW_POPUP]));
+        status.draw(frame, clamp_to_frame(frame, rows[ROW_STATUS]));
     }
 
     /// Build a real `Inline` viewport whose top sits at `top` and render the

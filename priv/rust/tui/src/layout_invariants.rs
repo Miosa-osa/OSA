@@ -587,7 +587,7 @@ mod panel_invariants {
     #[test]
     fn checklist_band_never_shares_a_row_with_the_stream_band() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, ROW_CHECKLIST, ROW_STREAM,
+            checklist_band_height, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
         };
         use ratatui::layout::Rect;
 
@@ -606,7 +606,7 @@ mod panel_invariants {
                     think_h + agents_h + 1 + 2 + 2,
                 );
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+                let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
                 let stream = rows[ROW_STREAM];
                 let list = rows[ROW_CHECKLIST];
                 assert_eq!(
@@ -628,7 +628,9 @@ mod panel_invariants {
     /// its own band, and the stream band's content must come out untouched.
     #[test]
     fn drawing_the_checklist_does_not_erase_the_stream_band() {
-        use crate::app::event_loop::{checklist_band_height, inline_split, ROW_CHECKLIST, ROW_STREAM};
+        use crate::app::event_loop::{
+            checklist_band_height, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
+        };
         use ratatui::layout::Rect;
         use ratatui::widgets::Paragraph;
 
@@ -645,7 +647,7 @@ mod panel_invariants {
         let buf = render_to_buffer(
             |f| {
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+                let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
                 // Stand in for a streaming markdown table.
                 let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
                     .map(|_| ratatui::text::Line::from("│ table cell │ table cell │"))
@@ -657,7 +659,7 @@ mod panel_invariants {
             area_h,
         );
 
-        let rows = inline_split(Rect::new(0, 0, W, area_h), checklist_h, think_h, agents_h, 0, input_h);
+        let rows = inline_split(Rect::new(0, 0, W, area_h), Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
         for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
             let text = buffer_row_text(&buf, y);
             assert!(
@@ -685,7 +687,7 @@ mod panel_invariants {
     #[test]
     fn a_visible_plan_never_steals_rows_from_the_streaming_reply() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, streaming_inline_height, ROW_STREAM,
+            checklist_band_height, inline_split, Bands, streaming_inline_height, ROW_STREAM,
             STREAM_PREVIEW_ROWS,
         };
         use ratatui::layout::Rect;
@@ -718,7 +720,7 @@ mod panel_invariants {
                 area_h,
                 think_h + agents_h + 1 + 2 + 2,
             );
-            let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+            let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
             assert_eq!(
                 checklist_h, want_checklist,
                 "{n} tasks: the plan band was squeezed ({want_checklist} → {checklist_h})"
@@ -738,7 +740,7 @@ mod panel_invariants {
     #[test]
     fn a_committed_final_block_survives_beside_the_plan_band() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, streaming_inline_height, ROW_CHECKLIST,
+            checklist_band_height, inline_split, Bands, streaming_inline_height, ROW_CHECKLIST,
             ROW_STREAM,
         };
         use ratatui::layout::Rect;
@@ -763,7 +765,7 @@ mod panel_invariants {
         let checklist_h =
             checklist_band_height(want_checklist, area_h, think_h + agents_h + 1 + 2 + 2);
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, checklist_h, think_h, agents_h, 0, input_h);
+        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
 
         let final_text = "The parser rewrite is done; here is what changed and why.";
         let buf = render_to_buffer(
@@ -1986,7 +1988,7 @@ mod table_invariants {
 mod survey_invariants {
     use super::*;
     use crate::app::event_loop::{
-        inline_split, survey_band_height, ROW_INPUT, ROW_STREAM, ROW_SURVEY,
+        inline_split, survey_band_height, Bands, ROW_INPUT, ROW_STREAM, ROW_SURVEY,
     };
     use crate::dialogs::survey::{
         option_columns, option_window, question_rows, wrap_to, wrapped_line_count, SurveyAction,
@@ -2234,7 +2236,7 @@ mod survey_invariants {
                 );
                 let area = Rect::new(0, 0, W, area_h);
                 let rows =
-                    inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+                    inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
                 assert_eq!(
                     rows[ROW_STREAM].intersection(rows[ROW_SURVEY]).height,
                     0,
@@ -2275,7 +2277,7 @@ mod survey_invariants {
         assert!(survey_h > 0, "the survey must reserve a band");
 
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
         let buf = render_to_buffer(
             |f| {
                 let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
@@ -2320,7 +2322,7 @@ mod survey_invariants {
             think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
 
         // Stand in for the just-committed final assistant block.
         let final_text = "The parser rewrite is done; here is the summary of what changed.";
@@ -2748,6 +2750,7 @@ mod turn_completion_invariants {
     use crate::app::assistant_stream::{commit_assistant_block, AssistantStream, Finalize};
     use crate::app::event_loop::{
         checklist_band_height, inline_split, settle_working_chrome, stream_preview_ceiling,
+        Bands,
         stream_preview_rows, streaming_inline_height, survey_band_height, ROW_AGENTS,
         ROW_CHECKLIST, ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, STREAM_PREVIEW_MAX,
         STREAM_PREVIEW_ROWS, STREAM_PREVIEW_STEP,
@@ -2876,7 +2879,7 @@ mod turn_completion_invariants {
                         think_h + agents_h + checklist_h + 1 + 2 + 2,
                     );
                     let rows =
-                        inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+                        inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
 
                     let ctx = format!(
                         "preview={preview} tasks={n_tasks} survey={survey_want} area_h={area_h}"
@@ -3119,7 +3122,7 @@ mod turn_completion_invariants {
             think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, checklist_h, think_h, agents_h, survey_h, input_h);
+        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
         assert!(rows[ROW_STREAM].height >= preview);
 
         const LINE: &str = "the committed answer, row for row";
@@ -3139,6 +3142,588 @@ mod turn_completion_invariants {
                 buffer_row_text(&buf, y),
                 LINE,
                 "row {y} of the committed block was overpainted:\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+}
+
+// ───────── composer popups + toasts (the last unreserved overlays) ─────────
+//
+// Two components were still painting into rows nothing had reserved — the same
+// defect shape as the task checklist ("one rect handed to two components") and
+// the agents tree ("reserved 30, drew 34"):
+//
+//   * the `@`-mention dropdown and the `/`-command popup were drawn from inside
+//     `InputComponent::draw` at `area.y - n`, i.e. ABOVE the composer's own rect,
+//     into rows owned by the context-hint row and whatever band sat above it.
+//     (The `/` popup's height was at least ADDED to the viewport total, so the
+//     region was tall enough — but no band ever claimed the rows, so it still
+//     painted over its neighbours. The `@` dropdown was not even counted, so it
+//     also silently squeezed the streaming preview.)
+//   * toasts were painted, after every band had been laid out, into
+//     `toast_rect(area)` — the top three rows of the STREAM band.
+//
+// Both now own real bands (`ROW_POPUP` between the hint row and the composer,
+// `ROW_TOAST` above the stream), reserved through `App::popup_slot` /
+// `App::toast_slot` exactly like `checklist_slot` and `survey_slot`. These tests
+// hold the shape: drawn ≤ reserved at every width and content size, neighbouring
+// ink survives verbatim, a toast expiring gives its rows back, and opening or
+// closing the dropdown costs a bounded number of viewport rebuilds.
+#[cfg(test)]
+mod popup_and_toast_invariants {
+    use super::*;
+    use crate::app::event_loop::{
+        inline_split, popup_band_height, toast_band_height, Bands, ROW_HINT, ROW_INPUT, ROW_POPUP,
+        ROW_STREAM, ROW_TOAST, TOAST_INLINE_CAP,
+    };
+    use crate::components::input::{InputComponent, MENTION_POPUP_ROWS};
+    use crate::components::toast::{ToastLevel, Toasts, MAX_VISIBLE};
+    use crate::components::Component;
+    use crate::util::cols;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Paragraph;
+
+    const W: u16 = 100;
+
+    /// Deliberately hostile mention candidates: a plain path, a very long path,
+    /// a CJK path (2 display columns per char) and an emoji one. Width handling
+    /// that measures bytes or chars breaks on at least one of these.
+    fn wide_paths(n: usize) -> Vec<String> {
+        let fixtures = [
+            "src/app/event_loop.rs",
+            "src/components/input/completions_and_a_very_long_file_name_indeed.rs",
+            "ドキュメント/設計/日本語のファイル名.md",
+            "assets/🚀-launch-🎉/README.md",
+            "priv/rust/tui/src/layout_invariants.rs",
+        ];
+        (0..n)
+            .map(|i| format!("{}#{}", fixtures[i % fixtures.len()], i + 1))
+            .collect()
+    }
+
+    fn dropdown(n: usize, selected: usize) -> InputComponent {
+        let owned = wide_paths(n);
+        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+        let mut input = InputComponent::new();
+        input.set_width(W);
+        input.seed_mention_dropdown(&refs, selected);
+        input
+    }
+
+    fn slash_popup(w: u16) -> InputComponent {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut input = InputComponent::new();
+        input.set_width(w);
+        input.set_commands_with_descriptions(
+            [
+                ("help", "Show all commands"),
+                ("compact", "Compact the conversation to free context"),
+                ("resume", "Browse and resume a past session"),
+                ("model", "Switch the active model"),
+                ("quit", "Exit OSA"),
+            ]
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect(),
+        );
+        input.handle_event(&crate::event::Event::Terminal(
+            crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        ));
+        input
+    }
+
+    fn toasts_with(msgs: &[&str]) -> Toasts {
+        let mut t = Toasts::new();
+        for (i, m) in msgs.iter().enumerate() {
+            let level = match i % 4 {
+                0 => ToastLevel::Info,
+                1 => ToastLevel::Success,
+                2 => ToastLevel::Warning,
+                _ => ToastLevel::Error,
+            };
+            t.push((*m).to_string(), level);
+        }
+        t
+    }
+
+    /// Render `draw` with its band parked `above` rows down a taller buffer, and
+    /// return the rows that received ink OUTSIDE the band (which must be none).
+    fn ink_outside_band<F>(
+        w: u16,
+        above: u16,
+        band_h: u16,
+        below: u16,
+        draw: F,
+    ) -> Vec<(u16, String)>
+    where
+        F: FnOnce(&mut ratatui::Frame, Rect),
+    {
+        let total = above + band_h + below;
+        let band = Rect::new(0, above, w, band_h);
+        let buf = render_to_buffer(|f| draw(f, band), w, total.max(1));
+        (0..total)
+            .filter(|y| *y < above || *y >= above + band_h)
+            .map(|y| (y, buffer_row_text(&buf, y)))
+            .filter(|(_, t)| !t.trim().is_empty())
+            .collect()
+    }
+
+    // ── @-mention dropdown ────────────────────────────────────────────────
+
+    /// **Reserved-vs-drawn sweep.** Across widths AND content sizes (a 1-item
+    /// dropdown through a 20-item one), the dropdown must put ink only on the
+    /// rows its reservation claimed. The band is parked partway down a taller
+    /// buffer so a widget drawing "upward from the composer" — the old
+    /// behaviour — lands on rows the assertion can see.
+    #[test]
+    fn mention_dropdown_never_draws_past_its_reserved_band() {
+        for w in [30u16, 40, 60, 80, 100, 140] {
+            for n in [1usize, 2, 3, 5, 7, 20] {
+                for sel in [0usize, n / 2, n - 1] {
+                    let mut input = dropdown(n, sel);
+                    input.set_width(w);
+                    let reserved = input.mention_popup_height();
+                    assert_eq!(
+                        reserved, MENTION_POPUP_ROWS,
+                        "w={w} n={n}: an open dropdown must reserve a CONSTANT slot"
+                    );
+                    let stray = ink_outside_band(w, 4, reserved, 4, |f, band| {
+                        input.draw_popup(f, band)
+                    });
+                    assert!(
+                        stray.is_empty(),
+                        "w={w} n={n} sel={sel}: the dropdown painted outside its \
+                         {reserved}-row band: {stray:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A closed dropdown reserves nothing and draws nothing — an idle live
+    /// region must be byte-for-byte what it was before the band existed.
+    #[test]
+    fn a_closed_dropdown_reserves_and_draws_nothing() {
+        let input = InputComponent::new();
+        assert_eq!(input.mention_popup_height(), 0);
+        let stray = ink_outside_band(W, 2, 0, 6, |f, band| input.draw_popup(f, band));
+        assert!(stray.is_empty(), "a closed dropdown painted something: {stray:?}");
+    }
+
+    /// **Rebuild budget.** The dropdown re-filters on every keystroke of a
+    /// mention, and every inline-viewport height change costs a rebuild (a DSR
+    /// cursor query tmux/SSH can drop — the stacked-composer bug class). The
+    /// reservation is therefore a CONSTANT while open: a whole typing session,
+    /// however many characters and however wildly the match count swings, may
+    /// change the reserved height at most twice — once on open, once on close.
+    ///
+    /// Same shape as `the_preview_grows_in_bounded_steps_and_never_shrinks_mid_turn`.
+    #[test]
+    fn opening_and_closing_the_dropdown_costs_at_most_two_rebuilds() {
+        let mut heights = vec![InputComponent::new().mention_popup_height()];
+        // A realistic session: `@` (20 loose matches) narrowing to 1, widening
+        // again as the user backspaces, then dismissed.
+        for n in [20usize, 12, 7, 3, 1, 2, 6, 20, 9, 1] {
+            heights.push(dropdown(n, 0).mention_popup_height());
+        }
+        heights.push(InputComponent::new().mention_popup_height());
+        heights.dedup();
+        assert!(
+            heights.len() <= 3,
+            "the dropdown changed the reserved height {} times ({heights:?}); an \
+             open→close session may change it at most twice",
+            heights.len()
+        );
+        assert_eq!(heights.first(), Some(&0));
+        assert_eq!(heights.last(), Some(&0));
+    }
+
+    /// The popup band never shares a row with the context hint, the composer or
+    /// the stream, at any region height or popup size.
+    #[test]
+    fn popup_band_never_shares_a_row_with_its_neighbours() {
+        for area_h in 10u16..=40 {
+            for want in 0u16..=12 {
+                let popup_h = popup_band_height(want, area_h, 1 + 1 + 2 + 2);
+                let area = Rect::new(0, 0, W, area_h);
+                let rows = inline_split(
+                    area,
+                    Bands {
+                        think: 1,
+                        popup: popup_h,
+                        input: 3,
+                        ..Default::default()
+                    },
+                );
+                for (name, idx) in [("hint", ROW_HINT), ("composer", ROW_INPUT), ("stream", ROW_STREAM)] {
+                    assert_eq!(
+                        rows[ROW_POPUP].intersection(rows[idx]).height,
+                        0,
+                        "h={area_h} want={want}: popup {:?} overlaps {name} {:?}",
+                        rows[ROW_POPUP],
+                        rows[idx]
+                    );
+                }
+                assert!(
+                    rows[ROW_INPUT].height >= 1,
+                    "h={area_h} want={want}: composer starved by the popup band"
+                );
+            }
+        }
+    }
+
+    /// **The ink proof.** Fill the neighbouring bands with known content, open
+    /// the dropdown into its own band, and every neighbouring row must come out
+    /// verbatim. This is the pattern that proved the checklist fix.
+    #[test]
+    fn drawing_the_mention_dropdown_does_not_erase_its_neighbours() {
+        const STREAM: &str = "| table cell | table cell | table cell |";
+        const HINT: &str = "42% context used";
+        for n in [1usize, 20] {
+            let area_h = 28u16;
+            let input = dropdown(n, 0);
+            let popup_h = popup_band_height(input.mention_popup_height(), area_h, 1 + 1 + 2 + 2);
+            assert!(popup_h > 0, "the dropdown must reserve a band");
+            let area = Rect::new(0, 0, W, area_h);
+            let rows = inline_split(
+                area,
+                Bands {
+                    think: 1,
+                    popup: popup_h,
+                    input: 3,
+                    ..Default::default()
+                },
+            );
+            let buf = render_to_buffer(
+                |f| {
+                    let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                        .map(|_| ratatui::text::Line::from(STREAM))
+                        .collect();
+                    f.render_widget(Paragraph::new(lines), rows[ROW_STREAM]);
+                    f.render_widget(Paragraph::new(HINT), rows[ROW_HINT]);
+                    input.draw_popup(f, rows[ROW_POPUP]);
+                },
+                W,
+                area_h,
+            );
+            for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+                assert_eq!(
+                    buffer_row_text(&buf, y).trim_end(),
+                    STREAM,
+                    "n={n}: stream row {y} was overpainted by the dropdown\n{}",
+                    snapshot_buffer(&buf)
+                );
+            }
+            assert_eq!(
+                buffer_row_text(&buf, rows[ROW_HINT].y).trim_end(),
+                HINT,
+                "n={n}: the context-hint row was overpainted by the dropdown\n{}",
+                snapshot_buffer(&buf)
+            );
+            // …and the dropdown really did paint into its own band: the LAST row
+            // of the band carries the bottom-anchored content.
+            let last = buffer_row_text(&buf, rows[ROW_POPUP].y + popup_h - 1);
+            assert!(
+                !last.trim().is_empty(),
+                "n={n}: the dropdown band came out blank\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+
+    /// **Width-aware truncation.** Every drawn row is fitted with `util::fit_cols`
+    /// (display COLUMNS, never bytes or chars), so a mention of a file with CJK
+    /// or emoji in its path can never overflow the band — at any width.
+    #[test]
+    fn mention_dropdown_rows_never_exceed_the_band_width() {
+        for w in [20u16, 24, 30, 40, 60, 80, 120] {
+            let mut input = dropdown(5, 0);
+            input.set_width(w);
+            let h = input.mention_popup_height();
+            let buf = render_to_buffer(
+                |f| input.draw_popup(f, Rect::new(0, 0, w, h)),
+                w,
+                h,
+            );
+            for y in 0..h {
+                let text = buffer_row_text(&buf, y);
+                assert!(
+                    cols(&text) <= w as usize,
+                    "w={w}: dropdown row {y} is {} columns wide: {text:?}",
+                    cols(&text)
+                );
+            }
+        }
+    }
+
+    /// The visible window always contains the selection. The old overlay always
+    /// drew `file_matches[0..5]`, so cycling with ↑/↓ past the fifth of the ten
+    /// candidates highlighted a row that was not on screen.
+    #[test]
+    fn the_dropdown_window_always_contains_the_selection() {
+        let n = 10usize;
+        let paths = wide_paths(n);
+        for sel in 0..n {
+            let mut input = dropdown(n, sel);
+            input.set_width(W);
+            let h = input.mention_popup_height();
+            let buf =
+                render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, W, h)), W, h);
+            // Reconstructed the way a terminal shows them — `buffer_row_text`
+            // skips the placeholder cells a wide glyph occupies, so a CJK path
+            // is not spuriously spaced out.
+            let lines: Vec<String> = (0..h).map(|y| buffer_row_text(&buf, y)).collect();
+            let screen = lines.join("\n");
+            let marked = lines.iter().find(|l| l.contains('\u{25b8}'));
+            let marked = marked.unwrap_or_else(|| {
+                panic!("sel={sel}: no selection marker on screen\n{screen}")
+            });
+            // The selected candidate's leaf name must be on the MARKED row (the
+            // path is middle-ellipsized, so match on the tail).
+            let leaf = paths[sel].rsplit('/').next().unwrap().to_string();
+            let tail: String = leaf.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+            assert!(
+                marked.contains(&tail),
+                "sel={sel}: selected candidate {leaf:?} is not the highlighted row\n{screen}"
+            );
+        }
+    }
+
+    /// The `/`-command popup shares the same band and the same contract.
+    #[test]
+    fn slash_popup_draws_only_inside_its_reserved_band() {
+        for w in [40u16, 60, 92, 120] {
+            let input = slash_popup(w);
+            let reserved = input.completions_popup_height();
+            assert!(reserved >= 3, "w={w}: an open `/` popup should want rows");
+            let stray =
+                ink_outside_band(w, 5, reserved, 5, |f, band| input.draw_popup(f, band));
+            assert!(
+                stray.is_empty(),
+                "w={w}: the `/` popup painted outside its {reserved}-row band: {stray:?}"
+            );
+        }
+    }
+
+    /// Exactly one popup ever paints, so the two can never share a row: with a
+    /// `/` popup open the mention dropdown is not drawn.
+    #[test]
+    fn only_one_popup_ever_paints_into_the_band() {
+        let mut input = slash_popup(W);
+        input.seed_mention_dropdown(&["src/main.rs", "src/app/mod.rs"], 0);
+        let h = input.completions_popup_height().max(input.mention_popup_height());
+        let buf = render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, W, h)), W, h);
+        let screen = snapshot_buffer(&buf);
+        assert!(
+            screen.contains("/help"),
+            "the `/` popup must win the shared band\n{screen}"
+        );
+        assert!(
+            !screen.contains("main.rs"),
+            "the mention dropdown painted into the same rows as the `/` popup\n{screen}"
+        );
+    }
+
+    // ── toasts ────────────────────────────────────────────────────────────
+
+    /// **Reserved-vs-drawn sweep** for toasts: across widths, toast counts and a
+    /// short vs. a long wrapping message, the drawn rows equal the reserved ones.
+    #[test]
+    fn toast_reserved_height_matches_what_it_draws() {
+        let long = "the background terminal for the release build exited with status 1 \
+                    after 12 minutes — 日本語のメッセージ 🚀 — see the transcript";
+        for w in [24u16, 40, 60, 100, 160] {
+            for msgs in [
+                vec!["saved"],
+                vec!["saved", "compacted"],
+                vec!["saved", "compacted", "model switched"],
+                vec![long],
+                vec![long, long, long],
+            ] {
+                let t = toasts_with(&msgs);
+                let reserved = t.live_count();
+                assert_eq!(
+                    reserved,
+                    msgs.len().min(MAX_VISIBLE) as u16,
+                    "w={w}: toast reservation must be the live count"
+                );
+                let stray = ink_outside_band(w, 3, reserved, 5, |f, band| t.draw(f, band));
+                assert!(
+                    stray.is_empty(),
+                    "w={w} msgs={}: toasts painted outside their {reserved}-row band: {stray:?}",
+                    msgs.len()
+                );
+                // Every reserved row is used — no dead rows above the reply.
+                let buf = render_to_buffer(
+                    |f| t.draw(f, Rect::new(0, 0, w, reserved)),
+                    w,
+                    reserved.max(1),
+                );
+                for y in 0..reserved {
+                    let text = buffer_row_text(&buf, y);
+                    assert!(
+                        !text.trim().is_empty(),
+                        "w={w}: reserved toast row {y} was left blank\n{}",
+                        snapshot_buffer(&buf)
+                    );
+                    assert!(
+                        cols(&text) <= w as usize,
+                        "w={w}: toast row {y} is {} columns wide: {text:?}",
+                        cols(&text)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The toast band never shares a row with the stream band or the composer.
+    #[test]
+    fn toast_band_never_shares_a_row_with_the_stream_band() {
+        for area_h in 10u16..=40 {
+            for live in 0u16..=TOAST_INLINE_CAP {
+                let toast_h = toast_band_height(live, area_h, 1 + 1 + 2 + 2);
+                let area = Rect::new(0, 0, W, area_h);
+                let rows = inline_split(
+                    area,
+                    Bands {
+                        toast: toast_h,
+                        think: 1,
+                        input: 3,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(
+                    rows[ROW_TOAST].intersection(rows[ROW_STREAM]).height,
+                    0,
+                    "h={area_h} live={live}: toast {:?} overlaps stream {:?}",
+                    rows[ROW_TOAST],
+                    rows[ROW_STREAM]
+                );
+                assert_eq!(
+                    rows[ROW_TOAST].intersection(rows[ROW_INPUT]).height,
+                    0,
+                    "h={area_h} live={live}: toast band overlaps the composer"
+                );
+                assert!(rows[ROW_INPUT].height >= 1);
+            }
+        }
+    }
+
+    /// **The ink proof for toasts**, short and long/wrapping alike: fill the
+    /// stream band with a streaming markdown table, raise the toasts, and every
+    /// stream row must survive verbatim. This is the exact defect that shipped —
+    /// `toast_rect(area)` used to be the top three rows of the stream band.
+    #[test]
+    fn raising_a_toast_does_not_erase_the_stream_band() {
+        const STREAM: &str = "| table cell | table cell | table cell |";
+        let long = "the release build exited with status 1 — 日本語 🚀 — see transcript";
+        for msgs in [vec!["saved"], vec![long, long, long]] {
+            let area_h = 26u16;
+            let t = toasts_with(&msgs);
+            let toast_h = toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2);
+            assert!(toast_h > 0, "live toasts must reserve a band");
+            let area = Rect::new(0, 0, W, area_h);
+            let rows = inline_split(
+                area,
+                Bands {
+                    toast: toast_h,
+                    think: 1,
+                    input: 3,
+                    ..Default::default()
+                },
+            );
+            let buf = render_to_buffer(
+                |f| {
+                    let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
+                        .map(|_| ratatui::text::Line::from(STREAM))
+                        .collect();
+                    f.render_widget(Paragraph::new(lines), rows[ROW_STREAM]);
+                    t.draw(f, crate::app::event_loop::toast_window(rows[ROW_TOAST]));
+                },
+                W,
+                area_h,
+            );
+            for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
+                assert_eq!(
+                    buffer_row_text(&buf, y).trim_end(),
+                    STREAM,
+                    "stream row {y} was overpainted by a toast\n{}",
+                    snapshot_buffer(&buf)
+                );
+            }
+            assert!(
+                !buffer_row_text(&buf, rows[ROW_TOAST].y).trim().is_empty(),
+                "the toast band came out blank\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+
+    /// **Expiry restores what the toast covered.** Once the dwell elapses the
+    /// band collapses to zero rows and the stream gets them back — with the
+    /// reply's own content on them, not a hole.
+    #[test]
+    fn toast_expiry_restores_the_rows_it_covered() {
+        use std::time::Duration;
+        const STREAM: &str = "| table cell | table cell | table cell |";
+        let area_h = 26u16;
+        let mut t = toasts_with(&["saved", "compacted", "model switched"]);
+
+        let with_toasts = toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2);
+        assert_eq!(with_toasts, 3, "three live toasts reserve three rows");
+
+        // Dwell elapses (errors linger longest at 6s).
+        t.age_all(Duration::from_secs(30));
+        t.tick();
+        assert!(!t.has_toasts(), "the dwell elapsed; no toast should be live");
+        assert_eq!(t.live_count(), 0, "an expired toast must give its rows back");
+
+        let area = Rect::new(0, 0, W, area_h);
+        let after = inline_split(
+            area,
+            Bands {
+                toast: toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2),
+                think: 1,
+                input: 3,
+                ..Default::default()
+            },
+        );
+        let before = inline_split(
+            area,
+            Bands {
+                toast: with_toasts,
+                think: 1,
+                input: 3,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            after[ROW_STREAM].height,
+            before[ROW_STREAM].height + with_toasts,
+            "the stream band did not get the toast's rows back"
+        );
+
+        // And the reply repaints onto them — the rows the toast covered are the
+        // reply's again, verbatim.
+        let buf = render_to_buffer(
+            |f| {
+                let lines: Vec<ratatui::text::Line<'static>> = (0..after[ROW_STREAM].height)
+                    .map(|_| ratatui::text::Line::from(STREAM))
+                    .collect();
+                f.render_widget(Paragraph::new(lines), after[ROW_STREAM]);
+                if after[ROW_TOAST].height > 0 {
+                    t.draw(f, crate::app::event_loop::toast_window(after[ROW_TOAST]));
+                }
+            },
+            W,
+            area_h,
+        );
+        for y in after[ROW_STREAM].y..(after[ROW_STREAM].y + after[ROW_STREAM].height) {
+            assert_eq!(
+                buffer_row_text(&buf, y).trim_end(),
+                STREAM,
+                "row {y} did not come back after the toast expired\n{}",
                 snapshot_buffer(&buf)
             );
         }

@@ -65,7 +65,11 @@ pub struct ToastRecord {
 }
 
 /// Most toasts shown at once — they stack one-per-row without overlap.
-const MAX_VISIBLE: usize = 3;
+///
+/// Public because it is also the toast band's reserved-row cap
+/// (`event_loop::TOAST_INLINE_CAP`): the rows a toast may DRAW and the rows the
+/// layout RESERVES for it must be one number, not two that can drift.
+pub const MAX_VISIBLE: usize = 3;
 /// Cap on the retained notification history.
 const HISTORY_CAP: usize = 50;
 
@@ -112,6 +116,16 @@ impl Toasts {
         }
     }
 
+    /// Test-only: push every live toast's creation time `by` into the past, so
+    /// [`Self::tick`] expires it for real instead of the test having to sleep
+    /// through a 4–6 second dwell.
+    #[cfg(test)]
+    pub(crate) fn age_all(&mut self, by: Duration) {
+        for t in &mut self.queue {
+            t.created = t.created.checked_sub(by).unwrap_or(t.created);
+        }
+    }
+
     pub fn tick(&mut self) {
         self.queue
             .retain(|t| t.created.elapsed() < t.level.dwell());
@@ -119,6 +133,14 @@ impl Toasts {
 
     pub fn has_toasts(&self) -> bool {
         !self.queue.is_empty()
+    }
+
+    /// Rows the live toasts need — one per toast, bounded by [`MAX_VISIBLE`]
+    /// (which `push` already enforces on the queue). This is what the inline
+    /// live region RESERVES as the toast band, and exactly what `draw` paints
+    /// into it, so drawn ≤ reserved holds by construction.
+    pub fn live_count(&self) -> u16 {
+        self.queue.len().min(MAX_VISIBLE) as u16
     }
 
     /// Recent notifications (oldest → newest), a scrollback record of what fired.
@@ -172,7 +194,11 @@ impl Component for Toasts {
             // can't spill/clip (the row is right-aligned, so overflow would
             // otherwise drop the start).
             let icon = toast.level.icon();
-            let icon_cols = icon.chars().count() + 1;
+            // DISPLAY columns, not chars: `⚠` is East-Asian-ambiguous and renders
+            // 2 columns wide on CJK-configured terminals, so a char count
+            // under-reserves the icon cell and the right-aligned body spills off
+            // the left edge of the 40-column window.
+            let icon_cols = crate::util::cols(icon) + 1;
             let text = fit_to_width(
                 &toast.message,
                 (area.width as usize).saturating_sub(icon_cols),

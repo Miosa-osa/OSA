@@ -29,6 +29,13 @@ use self::completions::{CompletionAction, CompletionItem, Completions};
 use self::mentions::{Attachment, Candidate, Frecency, MentionKind, SubmitKind};
 use super::{AppAction, Component, ComponentAction};
 
+/// Rows the `@`-mention dropdown reserves while it is open.
+///
+/// A CONSTANT, not the live match count — see [`InputComponent::mention_popup_height`]:
+/// the dropdown re-filters on every keystroke, and an exactly-sized band would
+/// rebuild the inline viewport per character typed.
+pub const MENTION_POPUP_ROWS: u16 = 5;
+
 pub struct InputComponent {
     /// The text content
     content: String,
@@ -486,10 +493,127 @@ impl InputComponent {
     }
 
     /// Rows the open slash-completions popup wants above the input, or 0 when it
-    /// is closed. `desired_inline_height` reserves this so the upward-growing
-    /// popup always has room to render real commands (not just a scroll arrow).
+    /// is closed. `App::popup_slot` reserves this (as `ROW_POPUP`) so the
+    /// upward-growing popup always has room to render real commands (not just a
+    /// scroll arrow) — and, since it is a real band, so it never paints over the
+    /// context-hint row or the band above it.
     pub fn completions_popup_height(&self) -> u16 {
         self.completions.desired_height()
+    }
+
+    /// Rows the `@`-mention dropdown reserves, or 0 when it is closed.
+    ///
+    /// Deliberately a CONSTANT ([`MENTION_POPUP_ROWS`]) rather than the live
+    /// match count: the dropdown re-filters on every keystroke of a mention, so
+    /// an exactly-sized band would change the inline-viewport height mid-word,
+    /// and every height change rebuilds the viewport through a DSR cursor query
+    /// — the churn that produced the stacked-composer artifacts. A fixed slot
+    /// changes height exactly twice per dropdown session (open, close). The
+    /// dropdown is bottom-anchored inside it, so a 1-match dropdown still sits
+    /// tight against the composer.
+    pub fn mention_popup_height(&self) -> u16 {
+        if self.file_search_active && !self.file_matches.is_empty() {
+            MENTION_POPUP_ROWS
+        } else {
+            0
+        }
+    }
+
+    /// Draw the composer-anchored completion band: the `/`-command popup, or the
+    /// `@`-mention dropdown. Never both — the `/` popup wins — so the two can
+    /// never share a row.
+    ///
+    /// `area` is `ROW_POPUP`, reserved by `App::popup_slot`. Both of these used
+    /// to be painted from inside [`Component::draw`] at `area.y - n`, i.e. into
+    /// rows nothing had reserved: the unreserved-overlay defect.
+    pub fn draw_popup(&self, frame: &mut Frame, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if self.completions.is_visible() {
+            self.completions.draw_in(frame, area);
+            return;
+        }
+        self.draw_mention_dropdown(frame, area);
+    }
+
+    /// Test-only: put the `@`-mention dropdown into an exact, deterministic
+    /// state. The real path (`rebuild_file_matches`) walks the cwd, so a layout
+    /// test driven through it would depend on the machine's file tree.
+    #[cfg(test)]
+    pub(crate) fn seed_mention_dropdown(&mut self, inserts: &[&str], selected: usize) {
+        self.content = "@".into();
+        self.cursor = 1;
+        self.file_search_start = 0;
+        self.file_search_active = !inserts.is_empty();
+        self.file_matches = inserts
+            .iter()
+            .map(|s| Candidate::file((*s).to_string()))
+            .collect();
+        self.file_match_index = selected.min(self.file_matches.len().saturating_sub(1));
+    }
+
+    /// The `@`-file/dir/agent dropdown, inside its reserved band.
+    ///
+    /// Bottom-anchored, bounded to [`MENTION_POPUP_ROWS`] rows, and windowed so
+    /// the SELECTED candidate is always on screen — the old overlay always drew
+    /// `file_matches[0..5]`, so cycling with ↑/↓ past the fifth of the ten
+    /// candidates highlighted nothing visible. Every row is fitted with
+    /// `util::fit_cols` (display COLUMNS, never bytes or chars) so a mention of
+    /// a path with CJK or emoji in it cannot overflow the band's width.
+    fn draw_mention_dropdown(&self, frame: &mut Frame, area: Rect) {
+        if !self.file_search_active || self.file_matches.is_empty() {
+            return;
+        }
+        let theme = style::theme();
+        let bounds = frame.area();
+        let shown = self
+            .file_matches
+            .len()
+            .min(MENTION_POPUP_ROWS as usize)
+            .min(area.height as usize);
+        if shown == 0 {
+            return;
+        }
+        // Scroll window that always contains the selection.
+        let first = self
+            .file_match_index
+            .saturating_sub(shown - 1)
+            .min(self.file_matches.len() - shown);
+        // Bottom-anchored inside the reserved slot.
+        let top = area.y + area.height.saturating_sub(shown as u16);
+        let inner_w = area.width.saturating_sub(4).max(1);
+        for (row, cand) in self.file_matches[first..first + shown].iter().enumerate() {
+            let is_selected = first + row == self.file_match_index;
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.colors.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.colors.muted)
+            };
+            let prefix = if is_selected { "\u{25b8} " } else { "  " };
+            // U-T30 — per-kind type glyph (file / dir / agent), measured in
+            // display columns because several of them are 2 cols wide.
+            let glyph = cand.kind.glyph();
+            let head_cols = crate::util::cols(prefix) + crate::util::cols(glyph) + 1;
+            let ep = crate::util::ellipsize_path_middle(
+                &cand.insert,
+                (inner_w as usize).saturating_sub(head_cols).max(1),
+            );
+            let display = crate::util::fit_cols(
+                &format!("{}{} {}", prefix, glyph, ep),
+                inner_w as usize,
+            );
+            let row_area = Rect::new(area.x + 2, top + row as u16, inner_w, 1).intersection(bounds);
+            if row_area.width == 0 || row_area.height == 0 {
+                continue;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(display, style))),
+                row_area,
+            );
+        }
     }
 
     /// Set commands with descriptions AND an optional category for the inline
@@ -2845,51 +2969,12 @@ impl Component for InputComponent {
             frame.render_widget(paragraph, input_area);
         }
 
-        // Slash command completions popup (draws above input)
-        self.completions.draw(frame, area);
-
-        // Step 9: File search dropdown — drawn above the input, growing upward.
-        // It must stay inside the frame's real drawable area: the inline
-        // viewport's frame buffer starts at `bounds.y`, so rows are clamped to
-        // never land above the buffer top (or the input) and each row rect is
-        // clipped to `bounds` before rendering.
-        let bounds = frame.area();
-        if self.file_search_active && !self.file_matches.is_empty() && area.height > 3 {
-            // Room available above the input, bounded by the frame's top.
-            let room_above = area.y.saturating_sub(bounds.y);
-            let max_visible = self.file_matches.len().min(5).min(room_above as usize) as u16;
-            let dropdown_y = area.y.saturating_sub(max_visible).max(bounds.y);
-            for (i, cand) in self.file_matches.iter().take(max_visible as usize).enumerate() {
-                let row_y = dropdown_y + i as u16;
-                if row_y >= area.y {
-                    break;
-                }
-                let is_selected = i == self.file_match_index;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(theme.colors.primary)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.colors.muted)
-                };
-                let prefix = if is_selected { "\u{25b8} " } else { "  " };
-                // U-T30 — per-kind type glyph (file / dir / agent). The glyph is
-                // 2 display cols, so it's included in the width budget below.
-                let glyph = cand.kind.glyph();
-                let ep = crate::util::ellipsize_path_middle(
-                    &cand.insert,
-                    (area.width as usize).saturating_sub(9).max(8),
-                );
-                let display = format!("{}{} {}", prefix, glyph, ep);
-                let line = Line::from(Span::styled(display, style));
-                let row_area =
-                    Rect::new(area.x + 2, row_y, area.width.saturating_sub(4), 1).intersection(bounds);
-                if row_area.width == 0 || row_area.height == 0 {
-                    continue;
-                }
-                frame.render_widget(Paragraph::new(line), row_area);
-            }
-        }
+        // NOTE: the `/`-completions popup and the `@`-mention dropdown are NOT
+        // drawn here any more. Both used to paint at `area.y - n`, i.e. into rows
+        // ABOVE the composer's own rect that belong to the context-hint / survey /
+        // agents bands, with nothing reserving them — the same unreserved-overlay
+        // defect the task checklist had. They now draw into `ROW_POPUP` via
+        // `draw_popup`, a band the layout reserves (`App::popup_slot`).
 
         // Stash indicator
         if self.stash.is_some() && self.content.is_empty() {

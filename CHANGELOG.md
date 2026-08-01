@@ -9,6 +9,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.52] — displays as `v1.0.052`
+
+### Fixed — popups and notifications no longer paint over the conversation
+
+- **A notification could cover the top of the reply you were reading.** Toasts were
+  drawn on top of the first three rows of the streaming area, so for the four to six
+  seconds one was on screen the beginning of the answer underneath it was simply
+  gone — and it came back only once the toast expired. **Toasts now occupy a
+  reserved region of their own**, above the reply rather than across it, so nothing
+  a notification says costs you the text it lands on.
+
+- **The `@`-mention list overwrote the rows above the composer.** Typing `@` drew the
+  file and agent matches upward from the input line into rows that belonged to the
+  hint line and whatever sat above it, wiping them for as long as the list was open.
+  The same was true of the `/` command popup. **Both now sit in a region the layout
+  reserves for them**, so opening either one moves the conversation up rather than
+  drawing over it, and closing it gives the rows straight back.
+
+- **The mention list now scrolls to follow your selection.** It always drew the first
+  five matches while offering up to ten, so pressing ↓ past the fifth highlighted an
+  entry that was not on screen — the list looked frozen while the selection kept
+  moving invisibly. The visible window now follows the highlight, so the entry you
+  are about to accept is always the one you can see.
+
+- **Long paths and names are measured in screen columns.** Every row of these popups
+  and of the toasts is now fitted by display width rather than by character count, so
+  a mention of a path containing CJK text or an emoji can no longer overrun the width
+  it was given and push a row out of shape.
+
 ## [1.0.51] — displays as `v1.0.051`
 
 ### Changed — tables now render as a proper bordered grid
