@@ -361,6 +361,117 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
+  # ── Structured-content normalization (the second provider boundary) ────────
+  #
+  # The sibling of `sanitize_tool_schemas/1` above, for message CONTENT.
+  #
+  # Anthropic is the only provider OSA talks to whose `content` field accepts an
+  # array of typed blocks. Every other provider module does `to_string(content)`
+  # somewhere in its `format_messages/1` (`openai_compat.ex`, `ollama.ex`,
+  # `cohere.ex`, `replicate.ex`) or its `extract_system/1` (`google.ex`), and a
+  # list has no `String.Chars` implementation — so a block list reaching any of
+  # them raises `ArgumentError: cannot convert the given list to a string`.
+  #
+  # That was survivable only while block-shaped content was rare. Two callers
+  # now produce it on the normal path:
+  #
+  #   * `Agent.Context.build_system_message/4` emits the system prompt as three
+  #     `cache_control`-marked blocks whenever the provider is `:anthropic` —
+  #     the prompt-cache fix, without which the hit rate is a hard 0%.
+  #   * `MessageHandler.build_messages/3` and `ToolExecutor` emit `user`/`tool`
+  #     turns as `text` + `image` blocks whenever an image is attached.
+  #
+  # And `Loop.LLMClient` hands `FallbackChain` the SAME already-built messages
+  # without rebuilding context for the new provider. So an Anthropic 5xx used to
+  # fail over into a guaranteed `ArgumentError` on every remaining provider,
+  # each one swallowed by `FallbackChain`'s `rescue` and reported as
+  # `{:error, "All providers failed: …"}` — the fallback path was dead exactly
+  # when it was needed.
+  #
+  # WHY HERE, and not by rebuilding context per-provider in `FallbackChain`:
+  # rebuilding is the more principled fix (a fallback to Ollama would get a
+  # prompt sized for Ollama's window), but it needs the full agent state threaded
+  # down into the provider layer, it only fixes the one caller, and it leaves
+  # every direct `Registry.chat/2` caller — subagents, the compactor, the goal
+  # verifier, `chat_with_fallback/3` — still holding the crash. Normalizing at
+  # dispatch fixes all of them at once, is idempotent (so re-entry through a
+  # retry or a fallback hop is free), and touches nothing in the loop. The
+  # rebuild remains worth doing on its own merits; it is not what unbreaks this.
+  #
+  # Normalization is keyed on the DISPATCH TARGET, not on the requested
+  # provider, so it is decided by who is actually about to receive the bytes.
+  @doc false
+  @spec normalize_message_content(list(), module() | {:compat, atom()}) :: list()
+  def normalize_message_content(messages, Providers.Anthropic), do: messages
+
+  def normalize_message_content(messages, _target) when is_list(messages) do
+    # Cheap guard: the overwhelmingly common case is all-string content, and a
+    # retry loop re-enters here on every attempt. Only rebuild when there is
+    # something to rebuild.
+    if Enum.any?(messages, &structured_content?/1) do
+      Enum.map(messages, &flatten_message_content/1)
+    else
+      messages
+    end
+  end
+
+  def normalize_message_content(messages, _target), do: messages
+
+  defp structured_content?(%{content: c}) when is_list(c), do: true
+  defp structured_content?(%{"content" => c}) when is_list(c), do: true
+  defp structured_content?(_msg), do: false
+
+  defp flatten_message_content(%{content: c} = msg) when is_list(c),
+    do: %{msg | content: flatten_blocks(c)}
+
+  defp flatten_message_content(%{"content" => c} = msg) when is_list(c),
+    do: Map.put(msg, "content", flatten_blocks(c))
+
+  defp flatten_message_content(msg), do: msg
+
+  # The separator is `"\n\n"` and the empty-block rejection is deliberate: it
+  # reproduces `Context.build_system_message/4`'s own non-Anthropic branch
+  # (`[static_base, world_state, volatile] |> Enum.reject(&(&1 == "")) |>
+  # Enum.join("\n\n")`) exactly, so a flattened system prompt is BYTE-IDENTICAL
+  # to the string these providers received before the cache fix split it into
+  # blocks. Anything else here would silently rewrite every non-Anthropic prompt.
+  #
+  # `cache_control` is dropped rather than translated: it is an Anthropic-only
+  # wire field. It survives untouched on the Anthropic path, which never reaches
+  # this function.
+  defp flatten_blocks(blocks) do
+    blocks
+    |> Enum.map(&block_to_text/1)
+    |> Enum.reject(&(&1 == nil or &1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  # An image block cannot be flattened into text, and these providers would
+  # otherwise raise on it. It becomes an honest placeholder — the same choice
+  # `OpenAICompat`'s 413 image-stripping recovery already makes — so the model
+  # is told the image is missing instead of hallucinating its contents. (OSA has
+  # no Anthropic-block → OpenAI `image_url` translation anywhere; until it does,
+  # this is the difference between a degraded answer and a crash.)
+  @image_omitted "[An image was omitted here because the provider serving this request does not accept inline image content. Do not describe or reason about it; ask the user to re-share it if it matters.]"
+
+  defp block_to_text(block) when is_binary(block), do: block
+  defp block_to_text(%{text: t}) when is_binary(t), do: t
+  defp block_to_text(%{"text" => t}) when is_binary(t), do: t
+
+  defp block_to_text(%{type: t}) when t in ["image", "image_url", :image, :image_url],
+    do: @image_omitted
+
+  defp block_to_text(%{"type" => t}) when t in ["image", "image_url"], do: @image_omitted
+
+  # Anything else structured (a stray tool_use/tool_result block, say) carries no
+  # text these providers can render; dropping it is what `Anthropic`'s own
+  # `system_content_to_blocks/1` does with unreadable blocks.
+  defp block_to_text(block) when is_map(block), do: nil
+
+  defp block_to_text(other) do
+    if String.Chars.impl_for(other), do: to_string(other), else: inspect(other)
+  end
+
   defp call_with_fallback(provider, module, messages, opts) do
     # Same-provider retry (backoff, retry-after aware) runs *before* any
     # model/provider fallback. Only once these retries are exhausted do we
@@ -558,13 +669,17 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # A single native streaming attempt — NO sync fallback. Returns
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
   # error and decide whether to retry the same provider.
-  defp native_stream({:compat, provider}, messages, callback, opts) do
+  defp native_stream(target, messages, callback, opts) do
+    do_native_stream(target, normalize_message_content(messages, target), callback, opts)
+  end
+
+  defp do_native_stream({:compat, provider}, messages, callback, opts) do
     @compat.chat_stream(provider, messages, callback, opts)
   rescue
     e -> {:error, "Compat provider #{provider} streaming raised: #{Exception.message(e)}"}
   end
 
-  defp native_stream(module, messages, callback, opts) when is_atom(module) do
+  defp do_native_stream(module, messages, callback, opts) when is_atom(module) do
     Logger.info("[Registry] Calling #{module}.chat_stream/3 (native, retryable)")
     module.chat_stream(messages, callback, opts)
   rescue
@@ -658,7 +773,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp notify_stream_retry(_callback, _info), do: :ok
 
-  defp try_stream_provider({:compat, provider}, messages, callback, opts) do
+  defp try_stream_provider(target, messages, callback, opts) do
+    do_try_stream_provider(target, normalize_message_content(messages, target), callback, opts)
+  end
+
+  defp do_try_stream_provider({:compat, provider}, messages, callback, opts) do
     # Compat providers now support chat_stream via OpenAICompatProvider
     try do
       @compat.chat_stream(provider, messages, callback, opts)
@@ -672,7 +791,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  defp try_stream_provider(module, messages, callback, opts) when is_atom(module) do
+  defp do_try_stream_provider(module, messages, callback, opts) when is_atom(module) do
     if function_exported?(module, :chat_stream, 3) do
       try do
         Logger.info("[Registry] Calling #{module}.chat_stream/3")
@@ -715,7 +834,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp merge_retry_ctx(opts, _ctx), do: opts
 
-  defp apply_provider({:compat, provider}, messages, opts) do
+  defp apply_provider(target, messages, opts) do
+    do_apply_provider(target, normalize_message_content(messages, target), opts)
+  end
+
+  defp do_apply_provider({:compat, provider}, messages, opts) do
     try do
       @compat.chat(provider, messages, opts)
     rescue
@@ -725,7 +848,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  defp apply_provider(module, messages, opts) when is_atom(module) do
+  defp do_apply_provider(module, messages, opts) when is_atom(module) do
     try do
       module.chat(messages, opts)
     rescue
@@ -843,7 +966,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # above (the Anthropic/OpenAI rows in @static_context_windows are retained
   # only for older ids the catalogs no longer list).
   @fallback_context_windows @static_context_windows
-                            |> Map.merge(OptimalSystemAgent.Providers.OllamaCloud.context_windows())
+                            |> Map.merge(
+                              OptimalSystemAgent.Providers.OllamaCloud.context_windows()
+                            )
                             |> Map.merge(
                               OptimalSystemAgent.Providers.AnthropicModels.context_windows()
                             )

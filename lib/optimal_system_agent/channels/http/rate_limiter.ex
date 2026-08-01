@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   def init(opts), do: opts
 
   @impl Plug
-  def call(conn, _opts) do
+  def call(conn, opts) do
     normalized = normalize_ip(conn.remote_ip)
 
     # Loopback is the trusted local TUI/SDK — the only client when the backend
@@ -56,12 +56,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
       ip = format_ip(normalized)
       limit = limit_for_path(conn.request_path)
 
-      consume(conn, ip, limit)
+      consume(conn, ip, limit, now(opts))
     end
   end
 
-  defp consume(conn, ip, limit) do
-    case check_and_consume(ip, limit) do
+  # The bucket's notion of "now" (unix seconds). Injectable via the plug opts so
+  # tests can freeze or step the clock instead of racing the wall clock: the
+  # proportional refill below hands back a whole token per elapsed second at the
+  # 60/min limit, so a drain that merely straddles a second tick silently gets an
+  # extra request. Production passes no `:clock` and keeps the system clock.
+  defp now(opts) when is_list(opts) do
+    case Keyword.get(opts, :clock) do
+      nil -> unix_now()
+      fun when is_function(fun, 0) -> fun.()
+    end
+  end
+
+  defp now(_opts), do: unix_now()
+
+  defp consume(conn, ip, limit, now) do
+    case check_and_consume(ip, limit, now) do
       {:ok, remaining} ->
         conn
         |> put_resp_header("x-ratelimit-limit", Integer.to_string(limit))
@@ -84,9 +98,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
 
   # ── Token bucket ────────────────────────────────────────────────────────
 
-  defp check_and_consume(ip, limit) do
-    now = unix_now()
-
+  defp check_and_consume(ip, limit, now) do
     case :ets.lookup(@table, ip) do
       [] ->
         # First request: full bucket minus this one

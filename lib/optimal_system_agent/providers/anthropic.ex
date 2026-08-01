@@ -649,10 +649,27 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # on Opus 5 / Opus 4.8 / Fable 5 / Mythos 5 and 400s on Sonnet 5, Haiku 4.5
   # and the 4.6/4.7 models, so it would trade one model-specific 400 for
   # another.
+  #
+  # ── The system prompt keeps its BLOCK structure ───────────────────────────
+  #
+  # Anthropic's `system` field accepts either a string or an array of content
+  # blocks, each optionally carrying its own `cache_control` breakpoint.
+  # `Context.build_system_message/4` deliberately emits three blocks — static
+  # base (cached), diffed world state (cached), volatile tail (uncached) — so
+  # that the ~30k-token stable prefix is served from cache while the clock,
+  # turn count and working-tree state stay outside every cached region.
+  #
+  # Flattening those three blocks into one string here destroyed that: the
+  # single re-wrapped block carried `Context.runtime_block/1`'s timestamp
+  # INSIDE the cached region, making every request byte-unique and the cache
+  # hit rate a hard 0%. So leading system messages are returned as blocks
+  # whenever any of them carries a cache breakpoint, and as a plain string
+  # otherwise (the overwhelmingly common shape for non-Context callers, and
+  # the cheapest thing to put on the wire).
   @doc false
   def split_system(formatted, model) do
     {leading, rest} = Enum.split_while(formatted, &(&1["role"] == "system"))
-    system_text = Enum.map_join(leading, "\n\n", &system_content_to_string(&1["content"]))
+    system = system_prompt(leading)
 
     chat_msgs =
       rest
@@ -662,8 +679,67 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       end)
       |> ensure_trailing_user(model)
 
-    {system_text, chat_msgs}
+    {system, chat_msgs}
   end
+
+  # Leading system messages -> either a plain string or an array of content
+  # blocks. Blocks are returned only when at least one carries `cache_control`,
+  # so every existing caller that sends a plain system string keeps the exact
+  # wire shape it had before.
+  defp system_prompt([]), do: ""
+
+  defp system_prompt(leading) do
+    blocks = Enum.flat_map(leading, &system_content_to_blocks(&1["content"]))
+
+    if Enum.any?(blocks, &Map.has_key?(&1, "cache_control")) do
+      blocks
+    else
+      Enum.map_join(leading, "\n\n", &system_content_to_string(&1["content"]))
+    end
+  end
+
+  defp system_content_to_blocks(content) when is_binary(content),
+    do: if(content == "", do: [], else: [%{"type" => "text", "text" => content}])
+
+  defp system_content_to_blocks(nil), do: []
+
+  defp system_content_to_blocks(content) when is_list(content) do
+    Enum.flat_map(content, fn
+      %{"text" => t} = b when is_binary(t) ->
+        [put_cache_control(%{"type" => "text", "text" => t}, b)]
+
+      %{text: t} = b when is_binary(t) ->
+        [put_cache_control(%{"type" => "text", "text" => t}, b)]
+
+      t when is_binary(t) ->
+        [%{"type" => "text", "text" => t}]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp system_content_to_blocks(other), do: [%{"type" => "text", "text" => to_string(other)}]
+
+  # Copy a `cache_control` marker from a source block onto a normalized one,
+  # accepting either key style and normalizing the marker itself to string keys
+  # so the serialized body is stable regardless of how the caller built it.
+  defp put_cache_control(target, source) when is_map(source) do
+    case Map.get(source, :cache_control) || Map.get(source, "cache_control") do
+      nil -> target
+      cc -> Map.put(target, "cache_control", normalize_cache_control(cc))
+    end
+  end
+
+  defp put_cache_control(target, _source), do: target
+
+  defp normalize_cache_control(cc) when is_map(cc) do
+    Map.new(cc, fn {k, v} ->
+      {to_string(k), if(is_atom(v), do: to_string(v), else: v)}
+    end)
+  end
+
+  defp normalize_cache_control(cc), do: cc
 
   # Last line of defence for rule 2. After the demotion above a trailing
   # assistant message should be impossible from the steering paths, but it can
@@ -842,8 +918,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                 }
               }
 
-            %{type: "text", text: text} ->
-              %{"type" => "text", "text" => to_string(text)}
+            # `cache_control` MUST survive this hop. `Context.build_system_message/4`
+            # emits the system prompt as three blocks carrying two ephemeral cache
+            # breakpoints; a clause that rebuilt the block from `type`/`text` alone
+            # silently dropped the marker before `split_system/2` ever saw it, so the
+            # deliberate multi-block cache structure never reached the wire.
+            %{type: "text", text: text} = block ->
+              put_cache_control(%{"type" => "text", "text" => to_string(text)}, block)
 
             other ->
               other
@@ -881,8 +962,29 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp system_content_to_string(other), do: to_string(other)
 
+  # Anthropic allows at most 4 `cache_control` breakpoints per request. The
+  # system array is emitted stable-prefix-first, so when a caller somehow
+  # exceeds the cap the EARLIEST markers are the ones worth keeping: each one
+  # covers a longer stable prefix than the marker after it.
+  @max_cache_breakpoints 4
+
   defp maybe_add_system(body, ""), do: body
   defp maybe_add_system(body, nil), do: body
+  defp maybe_add_system(body, []), do: body
+
+  # Pre-blocked system prompt (Context's static / world-state / volatile split).
+  # Passed through as an array so each block keeps its own cache breakpoint —
+  # crucially leaving the volatile tail OUTSIDE every cached region.
+  defp maybe_add_system(body, blocks) when is_list(blocks) do
+    blocks =
+      if prompt_caching_enabled?() do
+        cap_cache_breakpoints(blocks)
+      else
+        Enum.map(blocks, &Map.delete(&1, "cache_control"))
+      end
+
+    Map.put(body, :system, blocks)
+  end
 
   defp maybe_add_system(body, system_text) do
     if prompt_caching_enabled?() do
@@ -900,6 +1002,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     else
       Map.put(body, :system, system_text)
     end
+  end
+
+  defp cap_cache_breakpoints(blocks) do
+    {kept, _} =
+      Enum.map_reduce(blocks, 0, fn block, seen ->
+        cond do
+          not Map.has_key?(block, "cache_control") -> {block, seen}
+          seen < @max_cache_breakpoints -> {block, seen + 1}
+          true -> {Map.delete(block, "cache_control"), seen}
+        end
+      end)
+
+    kept
   end
 
   defp prompt_caching_enabled? do

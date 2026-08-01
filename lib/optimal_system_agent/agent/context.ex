@@ -1470,7 +1470,15 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     lines = [
       "## Runtime Context",
-      "- Timestamp: #{DateTime.utc_now() |> DateTime.to_iso8601()}",
+      # Truncated to the SECOND, not microseconds. Nothing the model does with
+      # this line needs sub-second resolution, and a microsecond clock is pure
+      # entropy: it guarantees this block differs on every single request, which
+      # matters for providers whose caching is a plain byte-prefix match (OpenAI)
+      # and for any future change that moves this block earlier in the prompt.
+      # This is hygiene, not the cache fix — the fix is that the block carrying
+      # this line sits outside every `cache_control` region (see
+      # `build_system_message/4` and `Providers.Anthropic.split_system/2`).
+      "- Timestamp: #{DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()}",
       # Identity is KNOWN, not discoverable: same resolver /health feeds the TUI
       # status bar from, so this line and the bar can never disagree. Without it
       # "what model are you" costs three tool calls and two wrong guesses.

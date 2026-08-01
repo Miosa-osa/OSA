@@ -4,8 +4,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiterTest do
 
   alias OptimalSystemAgent.Channels.HTTP.RateLimiter
 
-  @opts RateLimiter.init([])
   @table :osa_rate_limits
+
+  # A frozen clock. The bucket refills proportionally to elapsed time, which at
+  # the 60/min limit hands back a whole token for every whole second that passes
+  # (`trunc(elapsed / 60 * 60)`). Draining 60 requests against the *wall* clock
+  # therefore leaks an extra request whenever the drain straddles a second tick
+  # — so the request after the drain sailed through un-halted and left
+  # `conn.status` nil. That is timing, not intent, so the clock is pinned here
+  # and stepped explicitly by the one test that cares about refill.
+  @frozen_now 1_700_000_000
+
+  @doc false
+  def frozen_clock, do: Process.get(:rate_limiter_now, @frozen_now)
+
+  defp opts, do: RateLimiter.init(clock: &__MODULE__.frozen_clock/0)
 
   # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -16,11 +29,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiterTest do
       _ -> :ets.delete_all_objects(@table)
     end
 
+    Process.put(:rate_limiter_now, @frozen_now)
+
     :ok
   end
 
+  # Advance the injected clock by `seconds`.
+  defp advance(seconds) do
+    Process.put(:rate_limiter_now, Process.get(:rate_limiter_now, @frozen_now) + seconds)
+  end
+
   defp call_limiter(conn) do
-    RateLimiter.call(conn, @opts)
+    RateLimiter.call(conn, opts())
   end
 
   # Build a conn with a specific remote IP to simulate independent clients.
@@ -187,6 +207,39 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiterTest do
 
       assert Enum.all?(results_a, fn c -> not c.halted end)
       assert Enum.all?(results_b, fn c -> not c.halted end)
+    end
+  end
+
+  # ── Refill over time ──────────────────────────────────────────────────
+
+  describe "token refill" do
+    test "an exhausted IP recovers one request per elapsed second" do
+      ip = {198, 51, 100, 1}
+      drain(60, ip, "/sessions")
+
+      assert (conn_for_ip("/sessions", ip) |> call_limiter()).status == 429
+
+      # One second of the 60s window refills 1/60th of a 60-token bucket.
+      advance(1)
+      conn = conn_for_ip("/sessions", ip) |> call_limiter()
+      refute conn.halted
+      assert get_resp_header(conn, "x-ratelimit-remaining") == ["0"]
+
+      # ...and that single token is all that was granted.
+      assert (conn_for_ip("/sessions", ip) |> call_limiter()).status == 429
+    end
+
+    test "a full window elapsing restores the whole bucket" do
+      ip = {198, 51, 100, 2}
+      drain(60, ip, "/sessions")
+
+      assert (conn_for_ip("/sessions", ip) |> call_limiter()).status == 429
+
+      advance(60)
+      results = drain(60, ip, "/sessions")
+
+      assert Enum.all?(results, fn c -> not c.halted end)
+      assert (conn_for_ip("/sessions", ip) |> call_limiter()).status == 429
     end
   end
 

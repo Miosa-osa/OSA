@@ -9,6 +9,74 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.56] — displays as `v1.0.056`
+
+### Fixed — replies start faster, because the unchanging part of every prompt is finally cached
+
+- **Every request to the Claude models was re-reading the entire prompt from scratch.**
+  The large, unchanging preamble OSA sends on every turn — the instructions, your
+  project's context, the tool descriptions, tens of thousands of tokens of it — is
+  meant to be cached by the provider and skipped on the next turn. None of it ever
+  was. The cache hit rate was a flat zero for every request OSA has ever sent, so
+  each turn paid the full cost, in time and in tokens, of material that had not
+  changed since the previous one. **That prefix is now genuinely cached**, so a reply
+  begins sooner and the repeated part of the prompt is no longer billed at full
+  price on every turn.
+
+- **The cause was a timestamp buried inside the cached region.** OSA builds the
+  prompt as three parts — a static base, a slowly-changing world state, and a
+  volatile tail carrying the clock and the turn count — precisely so the first two
+  can be cached and the third cannot. Two separate steps on the way to the wire
+  undid that: one dropped the cache markers, and the next flattened all three parts
+  into a single block, which was then marked as cacheable *as a whole*. Since that
+  now-cached block contained a microsecond-resolution timestamp, every request
+  differed from the last by a few bytes at exactly the point where a cache lookup
+  needs them to be identical, and nothing could ever match. The three parts now stay
+  three parts, the volatile tail sits outside every cached region, and the timestamp
+  is rounded to the second.
+
+- **Verified on the wire, not inferred.** Two consecutive real requests are captured
+  and the cached prefix compared byte for byte: 137,974 bytes, identical, same
+  sha256 — with a control assertion that the volatile tail *does* differ between
+  them, so the comparison cannot pass by accident.
+
+### Fixed — image attachments and provider fallback no longer fail outside the Claude models
+
+- **Attaching an image crashed every non-Claude provider.** Images are packaged in
+  the Claude models' structured format regardless of which provider is actually
+  serving the request, and the other five providers accept only plain text; handed a
+  structured block, they raised outright. Any turn with an image attached failed on
+  OpenAI, Google, Ollama, Cohere and Replicate — not degraded, crashed.
+
+- **Provider fallback was dead in the one situation it exists for.** When Claude
+  returns a 5xx, OSA is supposed to retry the request on another provider. It handed
+  that provider the already-built message list, which crashed it the same way, and
+  each crash was swallowed and reported as the generic "All providers failed" — so
+  an outage at one provider took the whole turn down instead of falling through to a
+  working one.
+
+- **Content is now translated at the provider boundary.** Structured content is
+  flattened losslessly for the providers that need plain text and passed through
+  untouched for the ones that do not. A flattened prompt is byte-identical to what
+  those providers received before, so nothing about their behaviour changes. An
+  image, which has no text equivalent, becomes an explicit note that it was omitted
+  — the model is told the image is missing rather than left to invent it.
+
+### Fixed — a rate-limiter test that could fail on timing alone
+
+- **The HTTP rate limiter's test suite raced the wall clock and intermittently
+  reddened an otherwise green run.** The limiter refills its budget in proportion to
+  elapsed time, which at the default 60-per-minute limit hands back a whole request
+  for every whole second that passes. A test that spent 60 requests and then checked
+  the 61st was refused would get an extra one for free whenever those 60 requests
+  happened to straddle a second tick — likely on a loaded machine — and the request
+  that should have been refused sailed through. **The limiter's clock is now
+  injectable**, so the tests pin it and step it deliberately rather than depending on
+  how fast the machine happens to be. The limiter's behaviour in production is
+  unchanged; two new tests cover refill over time explicitly.
+
+---
+
 ## [1.0.55] — displays as `v1.0.055`
 
 ### Fixed — resizing the terminal left permanent duplicate copies of the screen in scrollback
