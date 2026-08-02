@@ -9,6 +9,112 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.0] — displays as `v1.1.000`
+
+The first minor release. OSA's context handling, its tool surface and its record
+of what a session did are no longer fixed at compile time: each is now something
+that can be swapped, extended or switched on. Nothing in this release changes
+what OSA does by default — the two new capabilities are off until you turn them
+on — but the architecture beneath them has moved.
+
+### Added — the context engine is now a contract, not a single hardcoded implementation
+
+- **Everything that manages the conversation window now goes through one
+  interface.** Compaction — deciding when a session has grown too large, what to
+  summarize, and what to keep verbatim — was reachable only as one concrete
+  module, called directly from seven places. It is now expressed as a behaviour
+  with a router in front of it, resolved from application config or
+  `config.toml`, so an alternative strategy can be supplied without touching the
+  call sites. The existing compactor is unchanged in behaviour and remains the
+  default; a no-op engine ships alongside it as a reference implementation.
+
+- **The contract states the units it actually uses.** While wiring this up, the
+  declared interface was found to disagree with the code on both sides of it:
+  utilization was documented as a fraction while every implementation and every
+  reader treated it as a percentage, and the summary formatter was declared to
+  return a message list while both implementations returned a string. An engine
+  written against the old description would have read a full session as roughly
+  one percent full and never compacted. The declaration now matches reality, and
+  a router that could not resolve a model's real context window no longer falls
+  back to a fabricated one — it reports that the figure is unknown rather than a
+  confident wrong number.
+
+### Added — plugins, off by default and verified before anything is loaded
+
+- **OSA can discover and load tools and context engines from
+  `~/.osa/plugins/`.** This is **opt-in and disabled by default**: it must be
+  enabled explicitly through application config, `[plugins]` in
+  `~/.osa/config.toml`, or the user-level `settings.json`. When it is off, no
+  directory is created and nothing is read.
+
+- **A project cannot switch it on for you.** The opt-in is read from the *user*
+  settings layer only, never the merged cascade — a repository that shipped both
+  the flag and a plugin file would otherwise have gained code execution the
+  moment you changed directory into it. Workspace-supplied settings cannot
+  enable plugin loading at any trust level.
+
+- **Files are verified before they are compiled.** The plugin directory must
+  exist, be a directory, be owned by you, and not be writable by anyone else;
+  files must be regular, owned by you, and within a size limit; symlinks are
+  resolved and refused when they point outside the directory. Every refusal is
+  logged with the file and the reason, and the ownership check fails closed when
+  it cannot determine the answer.
+
+- **A plugin cannot impersonate a built-in or grant itself privileges.** A
+  plugin tool whose name collides with a registered tool is refused rather than
+  replacing it, built-in engine ids cannot be claimed, and plugin-contributed
+  tools are tracked by provenance and forced onto the approval path regardless
+  of the safety level they declare for themselves. A plugin that fails to
+  register now costs only itself: registration failures are contained, including
+  the timeout case, which previously escaped and would have taken the boot down
+  with it.
+
+### Added — trajectory recording, off by default and redacted
+
+- **Each LLM round-trip in a session can be recorded to
+  `~/.osa/trajectories/`** — tokens, cost, tool calls and results — for replaying
+  or auditing what a session actually did. Like plugins, it is **opt-in and off
+  by default**, with a retention window that prunes old files at boot.
+
+- **Credentials are stripped before anything is written.** Tool arguments, tool
+  results and assistant responses pass through redaction — provider keys, GitHub
+  and Slack tokens, AWS key ids, JWTs, `Bearer`/`Basic` headers and
+  credential-shaped assignments — and redaction runs before truncation, so a
+  secret cannot survive by being cut in half.
+
+### Fixed — recording that was supposed to be off was always on
+
+- **The trajectory opt-in never guarded anything.** The check was written as an
+  expression whose result was evaluated and then discarded, so the write ran
+  unconditionally: trajectory recording was **always on for every user**, despite
+  being documented and configured as disabled by default. Since each entry
+  carries the assistant response along with raw tool arguments and results, every
+  session was appending unredacted conversation content to disk with no way to
+  turn it off. The guard is now a real branch, and the content it writes is
+  redacted.
+
+### Fixed — every turn was recorded as having cost nothing
+
+- **The transcript recorded zero tokens for all of them.** Per-turn token counts
+  are now written as the turn completes, cached tokens included — without those,
+  a large turn was recorded as a small one and the figure *fell* as the cache
+  warmed, which is exactly backwards. Plan-mode turns, which are often the most
+  expensive in a session, recorded nothing at all and are now counted like any
+  other. This is groundwork: the figures are recorded, but nothing reads them
+  yet, so `/cost` and `/status` are unchanged for now.
+
+### Fixed — a reconnect announced a coordinator change that never happened
+
+- **Losing and regaining the connection raised a notification about a switch
+  that had not occurred.** The reconnect path re-announced the coordinator mode
+  unconditionally rather than only when it had actually changed. Because an
+  identical notification refreshes its dwell instead of stacking, a flapping
+  connection could hold a phantom notification on screen indefinitely, and each
+  one rebuilt the viewport twice. The announcement is now made only on a real
+  change.
+
+---
+
 ## [1.0.57] — displays as `v1.0.057`
 
 ### Fixed — resizing the terminal left a stranded copy of the interface behind at every step
