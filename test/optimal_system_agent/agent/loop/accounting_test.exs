@@ -101,6 +101,107 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
     end
   end
 
+  # A turn's spend lives on the immutable state threaded through `ReactLoop`, so
+  # an exception unwinding out of it takes the spend with it: `Loop`'s rescue arm
+  # returns the PRE-turn state, and a turn that billed three round-trips before
+  # crashing on the fourth used to record a flat 0 — dropping real money out of
+  # session accounting AND out of the `max_budget_usd` cap. `record/2` therefore
+  # mirrors its absolute counters into the process dictionary, which survives the
+  # unwind because `ReactLoop.run/1` runs inline in the `Loop` GenServer process.
+  describe "partial-spend surrender across a crashed turn" do
+    setup do
+      Accounting.forget_partial()
+      on_exit(&Accounting.forget_partial/0)
+      :ok
+    end
+
+    test "adopt_partial/1 recovers the spend of round-trips that completed before a crash" do
+      usage = %{input_tokens: 1_000_000, output_tokens: 1_000_000}
+      pre_turn = base_state()
+
+      # Three billed round-trips, then the turn blows up and the state they
+      # were accumulated onto becomes unreachable — exactly what an exception
+      # inside ReactLoop does.
+      assert_raise RuntimeError, fn ->
+        pre_turn
+        |> Accounting.record(usage)
+        |> Accounting.record(usage)
+        |> Accounting.record(usage)
+        |> then(fn _lost -> raise "boom" end)
+      end
+
+      recovered = Accounting.adopt_partial(pre_turn)
+
+      # 3 turns x $18 (sonnet 1M in @ $3 + 1M out @ $15).
+      assert recovered.session_cost_usd == 54.0
+      assert recovered.session_input_tokens == 3_000_000
+      assert recovered.session_output_tokens == 3_000_000
+      assert recovered.last_input_tokens == 1_000_000
+
+      # Guard the actual defect: the pre-turn state on its own reports nothing,
+      # which is what shipped.
+      assert pre_turn.session_cost_usd == 0.0
+      assert pre_turn.session_input_tokens == 0
+    end
+
+    test "adopting twice cannot double-bill" do
+      # Absolute counters, not deltas, precisely so a duplicated or out-of-order
+      # merge is idempotent.
+      state = Accounting.record(base_state(), %{input_tokens: 1_000_000})
+
+      once = Accounting.adopt_partial(base_state())
+      twice = once |> Accounting.adopt_partial() |> Accounting.adopt_partial()
+
+      assert once.session_cost_usd == state.session_cost_usd
+      assert twice.session_cost_usd == once.session_cost_usd
+      assert twice.session_input_tokens == once.session_input_tokens
+    end
+
+    test "adopt_partial/1 is a no-op when nothing was recorded" do
+      state = base_state()
+      assert Accounting.adopt_partial(state) == state
+    end
+
+    test "forget_partial/0 stops a later turn adopting an earlier turn's spend" do
+      Accounting.record(base_state(), %{input_tokens: 1_000_000})
+
+      # `Loop.run_and_reply/1` calls this at the top of every turn. The Loop
+      # GenServer is long-lived, so without it a turn that crashes before its
+      # first round-trip would inherit — and re-bill — the previous turn.
+      Accounting.forget_partial()
+
+      next_turn = base_state()
+      assert Accounting.adopt_partial(next_turn) == next_turn
+    end
+
+    test "every counter record/2 writes is carried across the crash" do
+      # A counter added to accounting but not to the stash list would be
+      # silently dropped on a crashed turn — the exact class of bug this
+      # mechanism exists to fix. Pin that the two stay in step.
+      usage = %{
+        input_tokens: 11,
+        output_tokens: 22,
+        cache_creation_input_tokens: 33,
+        cache_read_input_tokens: 44
+      }
+
+      recorded = Accounting.record(base_state(), usage)
+      recovered = Accounting.adopt_partial(base_state())
+
+      for key <- [
+            :session_cost_usd,
+            :session_input_tokens,
+            :session_output_tokens,
+            :session_cache_creation_tokens,
+            :session_cache_read_tokens,
+            :last_input_tokens
+          ] do
+        assert Map.fetch!(recovered, key) == Map.fetch!(recorded, key),
+               "#{key} was not carried across the crash boundary"
+      end
+    end
+  end
+
   describe "snapshot/1" do
     test "exposes running spend for the TUI / auto-mode" do
       state = Accounting.record(base_state(), %{input_tokens: 1_000_000, output_tokens: 0})

@@ -1,0 +1,67 @@
+name: PTY layout
+
+# The layout suite the in-process Rust tests structurally cannot be.
+#
+# `cargo test` renders through `VT100Backend`, a perfect in-process emulator
+# that answers ratatui's DSR cursor queries from its own model. The inline
+# viewport's re-anchor therefore always lands on the right row, and the whole
+# "a resize strands one copy of the live region per step" class cannot
+# materialise — a single window drag once left nine stacked composers on screen
+# with ~1000 tests green.
+#
+# This lane drives the REAL `osagent` binary on a REAL kernel PTY, resizes it
+# with TIOCSWINSZ (delivering SIGWINCH exactly like a drag), renders the output
+# through `pyte`, and asserts exactly one composer / status bar afterwards.
+#
+# No display server is needed — a PTY is not a GUI — so this runs on a plain
+# ubuntu runner. See test/pty/README.md for the documented pyte-vs-VTE reflow
+# limitation that bounds what a green run here proves.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "priv/rust/tui/**"
+      - "test/pty/**"
+      - ".github/workflows/pty-layout.yml"
+  pull_request:
+    paths:
+      - "priv/rust/tui/**"
+      - "test/pty/**"
+      - ".github/workflows/pty-layout.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: pty-layout-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pty-layout:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            priv/rust/tui/target
+          key: pty-cargo-${{ runner.os }}-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
+          restore-keys: pty-cargo-${{ runner.os }}-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pyte
+        run: python3 -m pip install --upgrade pyte
+
+      # `run.sh` builds the release binary itself, so the harness runs against
+      # exactly what a user would run — not a debug build with different timing.
+      - name: Run the PTY layout harness
+        run: ./test/pty/run.sh

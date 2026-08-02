@@ -587,7 +587,7 @@ mod panel_invariants {
     #[test]
     fn checklist_band_never_shares_a_row_with_the_stream_band() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
+            fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
         };
         use ratatui::layout::Rect;
 
@@ -600,13 +600,17 @@ mod panel_invariants {
                 let think_h = 3u16;
                 let agents_h = 0u16;
                 let input_h = 3u16;
-                let checklist_h = checklist_band_height(
-                    cl.height(),
-                    area_h,
-                    think_h + agents_h + 1 + 2 + 2,
-                );
+                let want = Bands {
+                    checklist: cl.height(),
+                    think: think_h,
+                    agents: agents_h,
+                    survey: 0,
+                    input: input_h,
+                    ..Default::default()
+                };
+                let bands = fit_bands(want, area_h);
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
+                let rows = inline_split(area, bands);
                 let stream = rows[ROW_STREAM];
                 let list = rows[ROW_CHECKLIST];
                 assert_eq!(
@@ -620,6 +624,22 @@ mod panel_invariants {
                     rows[crate::app::event_loop::ROW_INPUT].height >= 1,
                     "h={area_h}, {n} items: composer starved to 0 rows"
                 );
+                // The disjointness assertion above is satisfied trivially at
+                // heights where the arbiter has shed the checklist to zero, so
+                // pin the two things that stay load-bearing there: the stream
+                // keeps its floor, and the checklist is only ever shed under
+                // real pressure — never while there is room for it.
+                assert!(
+                    stream.height >= crate::app::event_loop::STREAM_FLOOR,
+                    "h={area_h}, {n} items: stream band starved below its floor"
+                );
+                if want.capped().reserved() + crate::app::event_loop::STREAM_FLOOR <= area_h {
+                    assert_eq!(
+                        list.height,
+                        cl.height().min(crate::app::event_loop::CHECKLIST_INLINE_CAP),
+                        "h={area_h}, {n} items: the plan band was shed with room to spare"
+                    );
+                }
             }
         }
     }
@@ -629,7 +649,7 @@ mod panel_invariants {
     #[test]
     fn drawing_the_checklist_does_not_erase_the_stream_band() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
+            fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
         };
         use ratatui::layout::Rect;
         use ratatui::widgets::Paragraph;
@@ -640,14 +660,23 @@ mod panel_invariants {
             cl.add(format!("t{i}"), format!("plan step {i}"), None);
         }
         let (think_h, agents_h, input_h) = (3u16, 0u16, 3u16);
-        let checklist_h =
-            checklist_band_height(cl.height(), area_h, think_h + agents_h + 1 + 2 + 2);
-        assert!(checklist_h > 0, "checklist must reserve a band");
+        let bands = fit_bands(
+            Bands {
+                checklist: cl.height(),
+                think: think_h,
+                agents: agents_h,
+                survey: 0,
+                input: input_h,
+                ..Default::default()
+            },
+            area_h,
+        );
+        assert!(bands.checklist > 0, "checklist must reserve a band");
 
         let buf = render_to_buffer(
             |f| {
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
+                let rows = inline_split(area, bands);
                 // Stand in for a streaming markdown table.
                 let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
                     .map(|_| ratatui::text::Line::from("│ table cell │ table cell │"))
@@ -659,7 +688,7 @@ mod panel_invariants {
             area_h,
         );
 
-        let rows = inline_split(Rect::new(0, 0, W, area_h), Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
+        let rows = inline_split(Rect::new(0, 0, W, area_h), bands);
         for y in rows[ROW_STREAM].y..(rows[ROW_STREAM].y + rows[ROW_STREAM].height) {
             let text = buffer_row_text(&buf, y);
             assert!(
@@ -687,7 +716,7 @@ mod panel_invariants {
     #[test]
     fn a_visible_plan_never_steals_rows_from_the_streaming_reply() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, Bands, streaming_inline_height, ROW_STREAM,
+            fit_bands, inline_split, Bands, streaming_inline_height, ROW_STREAM,
             STREAM_PREVIEW_ROWS,
         };
         use ratatui::layout::Rect;
@@ -715,12 +744,19 @@ mod panel_invariants {
                 hi,
             );
             let area = Rect::new(0, 0, W, area_h);
-            let checklist_h = checklist_band_height(
-                want_checklist,
+            let bands = fit_bands(
+                Bands {
+                    checklist: want_checklist,
+                    think: think_h,
+                    agents: agents_h,
+                    survey: 0,
+                    input: input_h,
+                    ..Default::default()
+                },
                 area_h,
-                think_h + agents_h + 1 + 2 + 2,
             );
-            let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
+            let checklist_h = bands.checklist;
+            let rows = inline_split(area, bands);
             assert_eq!(
                 checklist_h, want_checklist,
                 "{n} tasks: the plan band was squeezed ({want_checklist} → {checklist_h})"
@@ -740,7 +776,7 @@ mod panel_invariants {
     #[test]
     fn a_committed_final_block_survives_beside_the_plan_band() {
         use crate::app::event_loop::{
-            checklist_band_height, inline_split, Bands, streaming_inline_height, ROW_CHECKLIST,
+            fit_bands, inline_split, Bands, streaming_inline_height, ROW_CHECKLIST,
             ROW_STREAM,
         };
         use ratatui::layout::Rect;
@@ -762,10 +798,19 @@ mod panel_invariants {
             crate::app::event_loop::STREAM_PREVIEW_ROWS,
             59,
         );
-        let checklist_h =
-            checklist_band_height(want_checklist, area_h, think_h + agents_h + 1 + 2 + 2);
+        let bands = fit_bands(
+            Bands {
+                checklist: want_checklist,
+                think: think_h,
+                agents: agents_h,
+                survey: 0,
+                input: input_h,
+                ..Default::default()
+            },
+            area_h,
+        );
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: 0, input: input_h, ..Default::default() });
+        let rows = inline_split(area, bands);
 
         let final_text = "The parser rewrite is done; here is what changed and why.";
         let buf = render_to_buffer(
@@ -2298,7 +2343,7 @@ mod table_invariants {
 mod survey_invariants {
     use super::*;
     use crate::app::event_loop::{
-        inline_split, survey_band_height, Bands, ROW_INPUT, ROW_STREAM, ROW_SURVEY,
+        fit_bands, inline_split, Bands, ROW_INPUT, ROW_STREAM, ROW_SURVEY,
     };
     use crate::dialogs::survey::{
         option_columns, option_window, question_rows, wrap_to, wrapped_line_count, SurveyAction,
@@ -2539,14 +2584,17 @@ mod survey_invariants {
             for n in 1usize..=12 {
                 let d = SurveyDialog::new("sv".into(), vec![wide_question(n)], true);
                 let (think_h, agents_h, checklist_h, input_h) = (3u16, 0u16, 0u16, 3u16);
-                let survey_h = survey_band_height(
-                    d.band_height(W),
-                    area_h,
-                    think_h + agents_h + checklist_h + 1 + 2 + 2,
-                );
+                let want = Bands {
+                    checklist: checklist_h,
+                    think: think_h,
+                    agents: agents_h,
+                    survey: d.band_height(W),
+                    input: input_h,
+                    ..Default::default()
+                };
+                let bands = fit_bands(want, area_h);
                 let area = Rect::new(0, 0, W, area_h);
-                let rows =
-                    inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
+                let rows = inline_split(area, bands);
                 assert_eq!(
                     rows[ROW_STREAM].intersection(rows[ROW_SURVEY]).height,
                     0,
@@ -2565,6 +2613,18 @@ mod survey_invariants {
                     rows[ROW_INPUT].height >= 1,
                     "h={area_h} n={n}: composer starved to 0 rows by the survey band"
                 );
+                // Both disjointness assertions above hold vacuously once the
+                // arbiter has shed the survey to zero rows, so pin what stays
+                // load-bearing at those heights: the band is only ever shed
+                // under real pressure. The user is being ASKED something — it
+                // must not vanish while the region has room for it.
+                if want.capped().reserved() + crate::app::event_loop::STREAM_FLOOR <= area_h {
+                    assert_eq!(
+                        rows[ROW_SURVEY].height,
+                        d.band_height(W).min(SURVEY_INLINE_CAP),
+                        "h={area_h} n={n}: the question band was shed with room to spare"
+                    );
+                }
             }
         }
     }
@@ -2579,15 +2639,21 @@ mod survey_invariants {
         let area_h = 30u16;
         let d = SurveyDialog::new("sv".into(), vec![wide_question(4)], true);
         let (think_h, agents_h, checklist_h, input_h) = (3u16, 0u16, 0u16, 3u16);
-        let survey_h = survey_band_height(
-            d.band_height(W),
+        let bands = fit_bands(
+            Bands {
+                checklist: checklist_h,
+                think: think_h,
+                agents: agents_h,
+                survey: d.band_height(W),
+                input: input_h,
+                ..Default::default()
+            },
             area_h,
-            think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
-        assert!(survey_h > 0, "the survey must reserve a band");
+        assert!(bands.survey > 0, "the survey must reserve a band");
 
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
+        let rows = inline_split(area, bands);
         let buf = render_to_buffer(
             |f| {
                 let filler: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
@@ -2626,13 +2692,19 @@ mod survey_invariants {
         let area_h = 26u16;
         let d = SurveyDialog::new("sv".into(), vec![wide_question(3)], true);
         let (think_h, agents_h, checklist_h, input_h) = (1u16, 0u16, 4u16, 3u16);
-        let survey_h = survey_band_height(
-            d.band_height(W),
+        let bands = fit_bands(
+            Bands {
+                checklist: checklist_h,
+                think: think_h,
+                agents: agents_h,
+                survey: d.band_height(W),
+                input: input_h,
+                ..Default::default()
+            },
             area_h,
-            think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
+        let rows = inline_split(area, bands);
 
         // Stand in for the just-committed final assistant block.
         let final_text = "The parser rewrite is done; here is the summary of what changed.";
@@ -3059,9 +3131,9 @@ mod turn_completion_invariants {
     use super::*;
     use crate::app::assistant_stream::{commit_assistant_block, AssistantStream, Finalize};
     use crate::app::event_loop::{
-        checklist_band_height, inline_split, settle_working_chrome, stream_preview_ceiling,
+        fit_bands, inline_split, settle_working_chrome, stream_preview_ceiling,
         Bands,
-        stream_preview_rows, streaming_inline_height, survey_band_height, ROW_AGENTS,
+        stream_preview_rows, streaming_inline_height, ROW_AGENTS,
         ROW_CHECKLIST, ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, STREAM_PREVIEW_MAX,
         STREAM_PREVIEW_ROWS, STREAM_PREVIEW_STEP,
     };
@@ -3178,18 +3250,20 @@ mod turn_completion_invariants {
                         hi,
                     );
                     let area = Rect::new(0, 0, W, area_h);
-                    let checklist_h = checklist_band_height(
-                        want_checklist,
+                    let fitted = fit_bands(
+                        Bands {
+                            checklist: want_checklist,
+                            think: think_h,
+                            agents: agents_h,
+                            survey: survey_want,
+                            input: input_h,
+                            ..Default::default()
+                        },
                         area_h,
-                        think_h + agents_h + 1 + 2 + 2,
                     );
-                    let survey_h = survey_band_height(
-                        survey_want,
-                        area_h,
-                        think_h + agents_h + checklist_h + 1 + 2 + 2,
-                    );
-                    let rows =
-                        inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
+                    let checklist_h = fitted.checklist;
+                    let survey_h = fitted.survey;
+                    let rows = inline_split(area, fitted);
 
                     let ctx = format!(
                         "preview={preview} tasks={n_tasks} survey={survey_want} area_h={area_h}"
@@ -3424,15 +3498,19 @@ mod turn_completion_invariants {
             preview,
             59,
         );
-        let checklist_h =
-            checklist_band_height(want_checklist, area_h, think_h + agents_h + 1 + 2 + 2);
-        let survey_h = survey_band_height(
-            survey_want,
+        let fitted = fit_bands(
+            Bands {
+                checklist: want_checklist,
+                think: think_h,
+                agents: agents_h,
+                survey: survey_want,
+                input: input_h,
+                ..Default::default()
+            },
             area_h,
-            think_h + agents_h + checklist_h + 1 + 2 + 2,
         );
         let area = Rect::new(0, 0, W, area_h);
-        let rows = inline_split(area, Bands { checklist: checklist_h, think: think_h, agents: agents_h, survey: survey_h, input: input_h, ..Default::default() });
+        let rows = inline_split(area, fitted);
         assert!(rows[ROW_STREAM].height >= preview);
 
         const LINE: &str = "the committed answer, row for row";
@@ -3484,7 +3562,7 @@ mod turn_completion_invariants {
 mod popup_and_toast_invariants {
     use super::*;
     use crate::app::event_loop::{
-        inline_split, popup_band_height, toast_band_height, Bands, ROW_HINT, ROW_INPUT, ROW_POPUP,
+        fit_bands, inline_split, Bands, ROW_HINT, ROW_INPUT, ROW_POPUP,
         ROW_STREAM, ROW_TOAST, TOAST_INLINE_CAP,
     };
     use crate::components::input::{InputComponent, MENTION_POPUP_ROWS};
@@ -3655,17 +3733,15 @@ mod popup_and_toast_invariants {
     fn popup_band_never_shares_a_row_with_its_neighbours() {
         for area_h in 10u16..=40 {
             for want in 0u16..=12 {
-                let popup_h = popup_band_height(want, area_h, 1 + 1 + 2 + 2);
+                let wanted = Bands {
+                    think: 1,
+                    popup: want,
+                    input: 3,
+                    ..Default::default()
+                };
+                let bands = fit_bands(wanted, area_h);
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(
-                    area,
-                    Bands {
-                        think: 1,
-                        popup: popup_h,
-                        input: 3,
-                        ..Default::default()
-                    },
-                );
+                let rows = inline_split(area, bands);
                 for (name, idx) in [("hint", ROW_HINT), ("composer", ROW_INPUT), ("stream", ROW_STREAM)] {
                     assert_eq!(
                         rows[ROW_POPUP].intersection(rows[idx]).height,
@@ -3679,6 +3755,16 @@ mod popup_and_toast_invariants {
                     rows[ROW_INPUT].height >= 1,
                     "h={area_h} want={want}: composer starved by the popup band"
                 );
+                // Disjointness is vacuous once the arbiter has shed the popup,
+                // so also pin that it is only shed under real pressure: the
+                // user opened this menu one keystroke ago.
+                if wanted.capped().reserved() + crate::app::event_loop::STREAM_FLOOR <= area_h {
+                    assert_eq!(
+                        rows[ROW_POPUP].height,
+                        want.min(crate::app::event_loop::POPUP_INLINE_CAP),
+                        "h={area_h} want={want}: the completion band was shed with room to spare"
+                    );
+                }
             }
         }
     }
@@ -3693,18 +3779,18 @@ mod popup_and_toast_invariants {
         for n in [1usize, 20] {
             let area_h = 28u16;
             let input = dropdown(n, 0);
-            let popup_h = popup_band_height(input.mention_popup_height(), area_h, 1 + 1 + 2 + 2);
-            assert!(popup_h > 0, "the dropdown must reserve a band");
-            let area = Rect::new(0, 0, W, area_h);
-            let rows = inline_split(
-                area,
+            let bands = fit_bands(
                 Bands {
                     think: 1,
-                    popup: popup_h,
+                    popup: input.mention_popup_height(),
                     input: 3,
                     ..Default::default()
                 },
+                area_h,
             );
+            assert!(bands.popup > 0, "the dropdown must reserve a band");
+            let area = Rect::new(0, 0, W, area_h);
+            let rows = inline_split(area, bands);
             let buf = render_to_buffer(
                 |f| {
                     let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
@@ -3733,7 +3819,7 @@ mod popup_and_toast_invariants {
             );
             // …and the dropdown really did paint into its own band: the LAST row
             // of the band carries the bottom-anchored content.
-            let last = buffer_row_text(&buf, rows[ROW_POPUP].y + popup_h - 1);
+            let last = buffer_row_text(&buf, rows[ROW_POPUP].y + bands.popup - 1);
             assert!(
                 !last.trim().is_empty(),
                 "n={n}: the dropdown band came out blank\n{}",
@@ -3892,17 +3978,15 @@ mod popup_and_toast_invariants {
     fn toast_band_never_shares_a_row_with_the_stream_band() {
         for area_h in 10u16..=40 {
             for live in 0u16..=TOAST_INLINE_CAP {
-                let toast_h = toast_band_height(live, area_h, 1 + 1 + 2 + 2);
+                let wanted = Bands {
+                    toast: live,
+                    think: 1,
+                    input: 3,
+                    ..Default::default()
+                };
+                let bands = fit_bands(wanted, area_h);
                 let area = Rect::new(0, 0, W, area_h);
-                let rows = inline_split(
-                    area,
-                    Bands {
-                        toast: toast_h,
-                        think: 1,
-                        input: 3,
-                        ..Default::default()
-                    },
-                );
+                let rows = inline_split(area, bands);
                 assert_eq!(
                     rows[ROW_TOAST].intersection(rows[ROW_STREAM]).height,
                     0,
@@ -3916,6 +4000,16 @@ mod popup_and_toast_invariants {
                     "h={area_h} live={live}: toast band overlaps the composer"
                 );
                 assert!(rows[ROW_INPUT].height >= 1);
+                // Toasts are first on the shed ladder, so at tight heights the
+                // disjointness above is vacuous. Pin the other half: with room
+                // to spare, every live toast gets its row.
+                if wanted.capped().reserved() + crate::app::event_loop::STREAM_FLOOR <= area_h {
+                    assert_eq!(
+                        rows[ROW_TOAST].height,
+                        live.min(TOAST_INLINE_CAP),
+                        "h={area_h} live={live}: the toast band was shed with room to spare"
+                    );
+                }
             }
         }
     }
@@ -3931,18 +4025,18 @@ mod popup_and_toast_invariants {
         for msgs in [vec!["saved"], vec![long, long, long]] {
             let area_h = 26u16;
             let t = toasts_with(&msgs);
-            let toast_h = toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2);
-            assert!(toast_h > 0, "live toasts must reserve a band");
-            let area = Rect::new(0, 0, W, area_h);
-            let rows = inline_split(
-                area,
+            let bands = fit_bands(
                 Bands {
-                    toast: toast_h,
+                    toast: t.live_count(),
                     think: 1,
                     input: 3,
                     ..Default::default()
                 },
+                area_h,
             );
+            assert!(bands.toast > 0, "live toasts must reserve a band");
+            let area = Rect::new(0, 0, W, area_h);
+            let rows = inline_split(area, bands);
             let buf = render_to_buffer(
                 |f| {
                     let lines: Vec<ratatui::text::Line<'static>> = (0..rows[ROW_STREAM].height)
@@ -3980,7 +4074,18 @@ mod popup_and_toast_invariants {
         let area_h = 26u16;
         let mut t = toasts_with(&["saved", "compacted", "model switched"]);
 
-        let with_toasts = toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2);
+        let live_bands = |live: u16| {
+            fit_bands(
+                Bands {
+                    toast: live,
+                    think: 1,
+                    input: 3,
+                    ..Default::default()
+                },
+                area_h,
+            )
+        };
+        let with_toasts = live_bands(t.live_count()).toast;
         assert_eq!(with_toasts, 3, "three live toasts reserve three rows");
 
         // Dwell elapses (errors linger longest at 6s).
@@ -3990,24 +4095,8 @@ mod popup_and_toast_invariants {
         assert_eq!(t.live_count(), 0, "an expired toast must give its rows back");
 
         let area = Rect::new(0, 0, W, area_h);
-        let after = inline_split(
-            area,
-            Bands {
-                toast: toast_band_height(t.live_count(), area_h, 1 + 1 + 2 + 2),
-                think: 1,
-                input: 3,
-                ..Default::default()
-            },
-        );
-        let before = inline_split(
-            area,
-            Bands {
-                toast: with_toasts,
-                think: 1,
-                input: 3,
-                ..Default::default()
-            },
-        );
+        let after = inline_split(area, live_bands(t.live_count()));
+        let before = inline_split(area, live_bands(3));
         assert_eq!(
             after[ROW_STREAM].height,
             before[ROW_STREAM].height + with_toasts,

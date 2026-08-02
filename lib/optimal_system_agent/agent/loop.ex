@@ -48,6 +48,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
 
+  alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
@@ -1440,6 +1441,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # mid-turn compaction, continuation) falls within the window.
     tokens_before = token_counters(state)
 
+    # Scope the partial-accounting stash to THIS turn. `Accounting.record/2`
+    # mirrors each round-trip's absolute counters into the process dictionary so
+    # the crash arms below can recover spend that the immutable state thread
+    # takes with it on an unwind; clearing it here stops a turn that crashes
+    # before its first round-trip from adopting the previous turn's numbers.
+    Accounting.forget_partial()
+
     {response, state} =
       try do
         ReactLoop.run(state)
@@ -1449,13 +1457,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
             "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
           )
 
-          {"I hit an error processing that request. Check the logs for details.", state}
+          {"I hit an error processing that request. Check the logs for details.",
+           Accounting.adopt_partial(state)}
       catch
         :exit, reason ->
           Logger.error("[loop] EXIT in ReactLoop: #{inspect(reason)}")
 
           {"I hit a timeout or process error. This usually means the LLM connection dropped — try again.",
-           state}
+           Accounting.adopt_partial(state)}
       end
 
     response = maybe_scrub_prompt_leak(response)
@@ -1517,11 +1526,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     # Fire post_response hooks (async, non-blocking).
     #
-    # NOTE the crash/exit arms above return the PRE-ReactLoop `state`, so on a
-    # crashed turn this delta is 0 and the round-trips that did complete are
-    # dropped from session accounting entirely. That is pre-existing — fixing it
-    # needs `ReactLoop.run/1` to surrender its partial state on the way out, not
-    # a wider subtraction here.
+    # The crash/exit arms above return the PRE-ReactLoop `state` — an unwind
+    # takes the immutable state thread with it — but they now merge back the
+    # accounting `Accounting.record/2` stashed outside that thread, so a turn
+    # that billed three round-trips and crashed on the fourth reports those
+    # three here instead of a flat 0. Only accounting is recovered, not the
+    # message history; see `Accounting.adopt_partial/1` for why.
     turn_tokens = token_delta(tokens_before, token_counters(state))
 
     try do

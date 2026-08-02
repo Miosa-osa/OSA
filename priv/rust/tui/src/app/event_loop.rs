@@ -56,38 +56,6 @@ pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
 /// only bounds how much of the stream band it may take.
 pub(crate) const CHECKLIST_INLINE_CAP: u16 = 12;
 
-/// Rows the checklist band should take inside an inline region of `area_h` rows.
-///
-/// `want` is the reserved slot (`App::checklist_slot`); `floor` is the rows that
-/// must survive around it (chrome + a minimum stream band). Kept as a free pure
-/// function so the "the checklist never starves the rest of the live region"
-/// invariant is unit-testable without constructing a full `App`.
-/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
-/// primitive the reserved-vs-drawn invariant suite exercises. Production
-/// code has exactly one arbiter; a second live path is the defect.
-#[cfg(test)]
-pub(crate) fn checklist_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
-    want.min(CHECKLIST_INLINE_CAP)
-        .min(area_h.saturating_sub(floor))
-}
-
-/// Rows the inline `ask_user` survey band should take inside an inline region of
-/// `area_h` rows.
-///
-/// Same contract as [`checklist_band_height`]: `want` is the reserved slot
-/// (`App::survey_slot`, itself `SurveyDialog::band_height`), `floor` is the rows
-/// that must survive around it. The survey band is a REAL reserved band — it is
-/// never drawn as an overlay into the stream rect, which is the class of bug
-/// that had the checklist painting over a streaming markdown table.
-/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
-/// primitive the reserved-vs-drawn invariant suite exercises. Production
-/// code has exactly one arbiter; a second live path is the defect.
-#[cfg(test)]
-pub(crate) fn survey_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
-    want.min(crate::dialogs::survey::SURVEY_INLINE_CAP)
-        .min(area_h.saturating_sub(floor))
-}
-
 /// Rows the ephemeral toast band may occupy — one row per live toast, bounded by
 /// [`crate::components::toast::MAX_VISIBLE`].
 ///
@@ -98,30 +66,10 @@ pub(crate) fn survey_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
 /// ate the top of the answer. The toast now owns a real band above the stream.
 pub(crate) const TOAST_INLINE_CAP: u16 = crate::components::toast::MAX_VISIBLE as u16;
 
-/// Rows the toast band should take inside an inline region of `area_h` rows.
-/// Same contract as [`checklist_band_height`] / [`survey_band_height`].
-/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
-/// primitive the reserved-vs-drawn invariant suite exercises. Production
-/// code has exactly one arbiter; a second live path is the defect.
-#[cfg(test)]
-pub(crate) fn toast_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
-    want.min(TOAST_INLINE_CAP).min(area_h.saturating_sub(floor))
-}
-
 /// Rows the composer-anchored completion band may occupy: the `/`-command
 /// popup (≤ `max_visible` 8 + 2 border rows) or the `@`-mention dropdown
 /// ([`crate::components::input::MENTION_POPUP_ROWS`]).
 pub(crate) const POPUP_INLINE_CAP: u16 = 12;
-
-/// Rows the completion band should take inside an inline region of `area_h`
-/// rows. Same contract as [`checklist_band_height`] / [`survey_band_height`].
-/// **Superseded by [`fit_bands`]** and retained only as the per-band clamp
-/// primitive the reserved-vs-drawn invariant suite exercises. Production
-/// code has exactly one arbiter; a second live path is the defect.
-#[cfg(test)]
-pub(crate) fn popup_band_height(want: u16, area_h: u16, floor: u16) -> u16 {
-    want.min(POPUP_INLINE_CAP).min(area_h.saturating_sub(floor))
-}
 
 /// Row indices into [`inline_split`]'s result.
 pub(crate) const ROW_TOAST: usize = 0;
@@ -2554,13 +2502,22 @@ mod render_tests {
         // The composer-anchored popups draw into their OWN reserved band
         // (`ROW_POPUP`) — never over the composer's neighbours — so the mirror
         // uses the REAL `inline_split` rather than a hand-rolled copy of it.
-        let popup_h = super::popup_band_height(
-            input
-                .completions_popup_height()
-                .max(input.mention_popup_height()),
+        let popup_want = input
+            .completions_popup_height()
+            .max(input.mention_popup_height());
+        // Size the composer against the popup the ARBITER granted, not the one
+        // it asked for: on a short viewport those differ, and sizing against
+        // the request is how a band ends up claiming rows nothing reserved.
+        let popup_h = super::fit_bands(
+            Bands {
+                think: think_h,
+                popup: popup_want,
+                input: super::INPUT_FLOOR,
+                ..Default::default()
+            },
             area.height,
-            think_h + 1 + 2 + 2,
-        );
+        )
+        .popup;
         let overhead = think_h + popup_h + 1 + 2;
         let input_h = input
             .needed_height()
@@ -2568,12 +2525,15 @@ mod render_tests {
             .max(1);
         let rows = inline_split(
             area,
-            Bands {
-                think: think_h,
-                popup: popup_h,
-                input: input_h,
-                ..Default::default()
-            },
+            super::fit_bands(
+                Bands {
+                    think: think_h,
+                    popup: popup_h,
+                    input: input_h,
+                    ..Default::default()
+                },
+                area.height,
+            ),
         );
         input.draw(frame, clamp_to_frame(frame, rows[ROW_INPUT]));
         input.draw_popup(frame, clamp_to_frame(frame, rows[ROW_POPUP]));

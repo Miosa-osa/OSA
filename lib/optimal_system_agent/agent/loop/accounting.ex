@@ -99,11 +99,95 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       |> put(:session_cache_read_tokens, cache_read)
       |> maybe_put_last_input(norm.input_tokens)
 
+    # Surrender this round-trip's numbers OUTSIDE the immutable state thread,
+    # so a turn that crashes after burning tokens can still be billed for them.
+    # See `adopt_partial/1`.
+    stash_partial(state)
+
     emit_cost_update(state, norm, turn_cost)
     maybe_bridge_budget(state, norm)
     maybe_record_trajectory(state, norm, turn_cost)
 
     state
+  end
+
+  # ── Partial-spend surrender across a crashed turn ────────────────────────
+  #
+  # `Loop.run_and_reply/1` wraps `ReactLoop.run/1` in a `try`. Both the `rescue`
+  # and the `catch` arm return the state bound BEFORE the call, because on an
+  # exception every intermediate state is unreachable — Elixir state is
+  # immutable and threaded through the recursion, so the unwind takes it with
+  # it. The consequence was that a turn which completed three billed round-trips
+  # and then crashed on the fourth recorded a token delta of zero and dropped
+  # that spend from session accounting entirely: the `:cost_update` stream, the
+  # transcript's token column, and — worse — the `max_budget_usd` cap all went
+  # on believing the money had never been spent.
+  #
+  # The seam is the process dictionary, which is the mechanism this codebase
+  # already uses to carry work across an error boundary (`ReactLoop` drains
+  # streamed tool results through `:osa_streaming_tool_ctx` the same way).
+  # `ReactLoop.run/1` runs INLINE in the `Loop` GenServer process, so the key
+  # written here survives the unwind and is readable by the rescue arm.
+  #
+  # ABSOLUTE counters are stashed, not deltas. Re-merging an absolute snapshot
+  # is idempotent, so a duplicated or out-of-order merge cannot double-bill;
+  # merging deltas twice would.
+  @partial_key :osa_turn_accounting
+
+  # Exactly the keys `do_record/2` writes. A counter added to accounting and
+  # not to this list would be silently dropped on a crashed turn, which is the
+  # bug this whole mechanism exists to fix — so the two lists must stay
+  # together, and `accounting_test.exs` pins that they do.
+  @partial_keys [
+    :session_cost_usd,
+    :session_input_tokens,
+    :session_output_tokens,
+    :session_cache_creation_tokens,
+    :session_cache_read_tokens,
+    :last_input_tokens
+  ]
+
+  defp stash_partial(state) do
+    Process.put(@partial_key, Map.take(state, @partial_keys))
+    :ok
+  end
+
+  @doc """
+  Drop any stashed partial accounting.
+
+  Called by `Loop.run_and_reply/1` at the TOP of every turn. The `Loop`
+  GenServer is long-lived and the process dictionary is not, so without this a
+  turn that crashed before its first round-trip would adopt the PREVIOUS turn's
+  snapshot and bill it a second time.
+  """
+  @spec forget_partial() :: :ok
+  def forget_partial do
+    Process.delete(@partial_key)
+    :ok
+  end
+
+  @doc """
+  Merge any accounting recorded during a crashed turn back onto the pre-turn
+  state.
+
+  Deliberately merges ONLY the accounting keys. `state.messages`,
+  `state.iteration` and `state.total_tool_calls` from a half-crashed turn are
+  not recovered here and should not be: a message list interrupted mid-cycle can
+  be structurally invalid (an assistant tool-call block with no matching tool
+  result), and merging it would poison the next request to the provider.
+  Recovering history is a separate, larger problem. Recovering the money is not.
+
+  A no-op when nothing was recorded, so it is safe on every path.
+  """
+  @spec adopt_partial(map()) :: map()
+  def adopt_partial(state) do
+    case Process.get(@partial_key) do
+      snapshot when is_map(snapshot) and map_size(snapshot) > 0 ->
+        Map.merge(state, snapshot)
+
+      _ ->
+        state
+    end
   end
 
   @doc """
