@@ -272,6 +272,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   is worse than no percentage at all.
   """
   @spec utilization_percent([map()], window_input()) :: float() | :unknown
+  @impl OptimalSystemAgent.Agent.ContextEngine
   def utilization_percent(messages, context_window \\ nil)
 
   def utilization_percent(messages, context_window) when is_list(messages) do

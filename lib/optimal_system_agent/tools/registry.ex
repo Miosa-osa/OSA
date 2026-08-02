@@ -37,9 +37,17 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   # ── Public API ────────────────────────────────────────────────────────
 
-  @doc "Register a tool module implementing Tools.Behaviour."
-  def register(skill_module) do
-    GenServer.call(__MODULE__, {:register_module, skill_module})
+  @doc """
+  Register a tool module implementing Tools.Behaviour.
+
+  `timeout` is generous by default because the handler recompiles the goldrush
+  dispatcher (`:glc.compile/2`) over EVERY registered tool name — with a full
+  built-in toolbox that routinely exceeds the 5s `GenServer.call` default, and a
+  timeout here is an `exit`, not an error return, so it takes down whatever was
+  registering rather than failing that one tool.
+  """
+  def register(skill_module, timeout \\ 30_000) do
+    GenServer.call(__MODULE__, {:register_module, skill_module}, timeout)
   end
 
   # Tools that stay REGISTERED and callable (internal orchestration uses them,

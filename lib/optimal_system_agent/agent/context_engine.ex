@@ -24,9 +24,10 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
 
   ## Required callbacks
 
-    * `maybe_compact/3`  — inspect and possibly compact a message list.
+    * `maybe_compact/4`  — inspect and possibly compact a message list.
     * `estimate_tokens/1` — token estimate for a string or message list.
-    * `utilization/1`    — context-window utilization percentage (0.0–1.0).
+    * `utilization_percent/2` — context-window utilization, 0.0–100.0 PERCENT
+      or `:unknown`.
 
   ## Optional callbacks
 
@@ -44,7 +45,7 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
   1. The engine module is resolved at boot by `ContextEngine.Router`.
   2. If the module exports `start_link/1`, it is placed under the AgentServices
      supervisor.
-  3. Call sites invoke `ContextEngine.Router.maybe_compact/3` etc. which
+  3. Call sites invoke `ContextEngine.Router.maybe_compact/4` etc. which
      delegate to the active engine.
   4. On config change (settings watcher), the Router re-resolves the module.
   """
@@ -58,15 +59,26 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
   Inspect `messages` and return a possibly-compacted list.
 
   `known_tokens` is the last reported input-token count from the provider
-  (0 if unknown). `session_id` identifies the session for logging/metrics.
+  (0 or nil if unknown). `session_id` identifies the session for logging and
+  metrics.
+
+  `opts` carries the decision inputs an engine MUST honour:
+
+    * `:context_window` — the real per-model window for this session. An engine
+      must not substitute a constant when this is absent: a fabricated
+      denominator is what made the built-in compactor fire at ~11% of a 1M
+      window. Defer instead, and let the overflow path below force the issue.
+    * `:force` — the provider has already returned a context-length error. This
+      is the real overflow signal; compact even when the window is unresolvable.
 
   Returns the (possibly unchanged) message list. Never crashes — on any
   error the original messages are returned unmodified.
   """
   @callback maybe_compact(
               messages :: messages(),
-              known_tokens :: token_count(),
-              session_id :: String.t() | nil
+              known_tokens :: token_count() | nil,
+              session_id :: String.t() | nil,
+              opts :: keyword()
             ) :: compact_result()
 
   @doc """
@@ -78,15 +90,26 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
   @callback estimate_tokens(input :: String.t() | messages() | nil) :: token_count()
 
   @doc """
-  Context-window utilization as a PERCENTAGE (0.0 to 100.0+).
+  Context-window utilization as a PERCENT in 0.0..100.0 — not a 0.0..1.0
+  fraction. The unit is in the name for a reason: the TUI status bar renders
+  this number directly followed by a `%`, and threshold comparisons are against
+  percentages, so an engine returning a fraction reads as ~1% full and never
+  compacts.
 
-  Values > 100.0 mean the message list already exceeds the configured window.
-  Note this is a percentage, not a 0.0–1.0 fraction: `Telemetry` and the TUI
-  status bar render the returned number directly followed by a `%` sign, and
-  `ProactiveCompaction` compares it against percentage thresholds. An engine
-  that returns a fraction here will read as ~1% full and never compact.
+  `context_window` takes the same shapes as `maybe_compact/4`'s
+  `:context_window` option. Return `:unknown` — never a number — when the
+  window cannot be resolved. A percentage of a fabricated denominator is worse
+  than no percentage at all; that substitution is what made the built-in
+  compactor summarize a 1M-token session at ~11% occupancy.
+
+  Optional: no call site in the tree requires it today. It is declared so a
+  third-party engine implements the same unit and the same `:unknown` contract
+  as the built-in, rather than reinventing both.
   """
-  @callback utilization(messages :: messages()) :: float()
+  @callback utilization_percent(
+              messages :: messages(),
+              context_window :: term()
+            ) :: float() | :unknown
 
   @doc """
   P5 token-protected prune: strip redundant tool-call details from recent
@@ -125,6 +148,7 @@ defmodule OptimalSystemAgent.Agent.ContextEngine do
 
   @optional_callbacks micro_compact: 1,
                       format_for_summary: 1,
+                      utilization_percent: 2,
                       stats: 0,
                       start_link: 1
 end

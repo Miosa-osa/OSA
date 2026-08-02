@@ -10,7 +10,8 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Noop do
   @behaviour OptimalSystemAgent.Agent.ContextEngine
 
   @impl true
-  def maybe_compact(messages, _known_tokens, _session_id), do: messages
+  def maybe_compact(messages, _known_tokens \\ nil, _session_id \\ nil, _opts \\ []),
+    do: messages
 
   @impl true
   def estimate_tokens(nil), do: 0
@@ -26,8 +27,11 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Noop do
     end)
   end
 
+  # `:unknown`, not 0.0. This engine never compacts, so it has no window and no
+  # honest denominator — and a hardcoded 0.0 would render as a status bar that
+  # confidently reads "0% context used" on a session about to overflow.
   @impl true
-  def utilization(_messages), do: 0.0
+  def utilization_percent(_messages, _context_window \\ nil), do: :unknown
 
   @impl true
   def micro_compact(messages), do: messages

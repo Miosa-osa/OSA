@@ -516,6 +516,18 @@ defmodule OptimalSystemAgent.Plugins.Loader do
             )
 
             []
+        catch
+          # `Registry.register/2` is a `GenServer.call`, so a busy or dead
+          # registry EXITS rather than raising, and `rescue` alone would let
+          # that escape. This runs at boot under the application supervisor:
+          # one unregisterable plugin must cost that plugin, not the node.
+          kind_, reason ->
+            Logger.warning(
+              "Plugins.Loader: failed to register #{kind} #{inspect(mod)}: " <>
+                "#{kind_} #{inspect(reason)}"
+            )
+
+            []
         end
     end
   end

@@ -228,9 +228,8 @@ defmodule OptimalSystemAgent.Plugins.LoaderTest do
       defmodule OsaTestGoodEngine do
         @behaviour OptimalSystemAgent.Agent.ContextEngine
 
-        def maybe_compact(messages, _known \\\\ 0, _sid \\\\ nil), do: {:ok, messages}
+        def maybe_compact(messages, _known \\\\ nil, _sid \\\\ nil, _opts \\\\ []), do: messages
         def estimate_tokens(_), do: 0
-        def utilization(_), do: 0.0
       end
       """)
 
