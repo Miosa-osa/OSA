@@ -11,16 +11,19 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceHardeningTest do
 
   alias OptimalSystemAgent.Agent.SessionPersistence
 
-  @dir Path.expand("~/.osa/sessions")
+  # Resolved at RUNTIME, never as a compile-time `Path.expand("~/.osa/...")`
+  # attribute: the suite runs against an isolated per-run config dir, and a
+  # frozen `~/.osa` here made these assertions read the OPERATOR's real home.
+  defp sessions_dir, do: Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
 
   defp session_file(id) do
     safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-    Path.join(@dir, "#{safe}.json")
+    Path.join(sessions_dir(), "#{safe}.json")
   end
 
   defp updates_file(id) do
     safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-    Path.join(@dir, "#{safe}.updates.jsonl")
+    Path.join(sessions_dir(), "#{safe}.updates.jsonl")
   end
 
   setup do
@@ -86,7 +89,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceHardeningTest do
     # the chat view can replay it.
     test "find_latest_for_dir resolves a saved session and load restores turns",
          %{id: id} do
-      dir = Path.expand("~/.osa/sessions")
+      dir = sessions_dir()
 
       convo = [
         %{role: "user", content: "first question"},

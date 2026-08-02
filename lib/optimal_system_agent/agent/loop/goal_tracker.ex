@@ -687,6 +687,22 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     ArgumentError -> :ok
   end
 
+  @doc """
+  Create the cross-turn goal table up front, owned by the long-lived caller.
+
+  Called from `Application.start/2` (Phase 2) for the same reason as
+  `Infra.BoundedTable.init_tables/0` and `Agent.RunStore.init_store/0`: a
+  lazily created named table is owned by whatever process happened to insert
+  first, and here that is usually a TRANSIENT one (a ReAct loop task, a
+  subagent). When that process exits the table vanishes with it and every
+  anchored goal silently disappears mid-run — `goal_loop?/1` starts answering
+  `false`, the cross-turn run cap and stall breaker reset to zero, and an
+  autonomous run loses its circuit breaker without ever failing loudly.
+  Giving the table a durable owner at boot removes that whole class of bug.
+  """
+  @spec init_table() :: :ok
+  def init_table, do: ensure_table()
+
   defp ensure_table do
     case :ets.whereis(@table) do
       :undefined ->

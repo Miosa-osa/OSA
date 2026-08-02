@@ -21,7 +21,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceBusyLoopTest do
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.SessionPersistence
 
-  @dir Path.expand("~/.osa/sessions")
+  # Resolved at RUNTIME, never as a compile-time `Path.expand("~/.osa/...")`
+  # attribute: the suite runs against an isolated per-run config dir, and a
+  # frozen `~/.osa` here made these assertions read the OPERATOR's real home.
+  defp sessions_dir, do: Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
 
   # Stand-in for Agent.Loop: blocks in handle_call exactly like a mid-turn loop
   # and services {:persist_session, id} the same way Loop does.
@@ -48,9 +51,9 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceBusyLoopTest do
   end
 
   defp safe(id), do: Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-  defp session_file(id), do: Path.join(@dir, "#{safe(id)}.json")
-  defp updates_file(id), do: Path.join(@dir, "#{safe(id)}.updates.jsonl")
-  defp spend_file(id), do: Path.join(@dir, "#{safe(id)}.spend.json")
+  defp session_file(id), do: Path.join(sessions_dir(), "#{safe(id)}.json")
+  defp updates_file(id), do: Path.join(sessions_dir(), "#{safe(id)}.updates.jsonl")
+  defp spend_file(id), do: Path.join(sessions_dir(), "#{safe(id)}.spend.json")
 
   setup do
     id = "osa_busy_loop_#{System.unique_integer([:positive])}"

@@ -215,6 +215,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SessionSearchTest do
 
   describe "structured layout" do
     test "exports execute/2" do
+      # `function_exported?/3` answers for LOADED modules only, and under
+      # `mix test`'s lazy code loading whether this module is already loaded
+      # depends on which tests ran before — so without the explicit load this
+      # assertion fails at random in a full-suite run and passes in isolation.
+      Code.ensure_loaded!(SessionSearch)
       assert function_exported?(SessionSearch, :execute, 2)
     end
 

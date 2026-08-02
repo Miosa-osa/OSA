@@ -246,6 +246,12 @@ defmodule OptimalSystemAgent.Application do
     OptimalSystemAgent.Infra.BoundedTable.init_tables()
     OptimalSystemAgent.Memory.Search.init_tables()
 
+    # Cross-turn goal state (status/phase, run cap, stall breaker). Same
+    # reasoning again: the loop's goal table was created lazily by whichever
+    # TRANSIENT process anchored a goal first, so it died with that process and
+    # took every autonomous run's circuit breaker with it.
+    OptimalSystemAgent.Agent.Loop.GoalTracker.init_table()
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 

@@ -18,11 +18,14 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceCursorTest do
 
   alias OptimalSystemAgent.Agent.SessionPersistence
 
-  @dir Path.expand("~/.osa/sessions")
+  # Resolved at RUNTIME, never as a compile-time `Path.expand("~/.osa/...")`
+  # attribute: the suite runs against an isolated per-run config dir, and a
+  # frozen `~/.osa` here made these assertions read the OPERATOR's real home.
+  defp sessions_dir, do: Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
 
   defp safe(id), do: Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-  defp session_file(id), do: Path.join(@dir, "#{safe(id)}.json")
-  defp updates_file(id), do: Path.join(@dir, "#{safe(id)}.updates.jsonl")
+  defp session_file(id), do: Path.join(sessions_dir(), "#{safe(id)}.json")
+  defp updates_file(id), do: Path.join(sessions_dir(), "#{safe(id)}.updates.jsonl")
   defp cursor_file(id), do: updates_file(id) <> ".cursor"
 
   defp cleanup(id) do
@@ -46,7 +49,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceCursorTest do
 
   setup do
     id = "osa_cursor_#{System.unique_integer([:positive])}"
-    File.mkdir_p!(@dir)
+    File.mkdir_p!(sessions_dir())
     on_exit(fn -> cleanup(id) end)
     {:ok, id: id}
   end

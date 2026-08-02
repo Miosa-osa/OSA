@@ -14,16 +14,19 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
   alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Agent.SessionPersistence.Jsonl
 
-  @dir Path.expand("~/.osa/sessions")
+  # Resolved at RUNTIME, never as a compile-time `Path.expand("~/.osa/...")`
+  # attribute: the suite runs against an isolated per-run config dir, and a
+  # frozen `~/.osa` here made these assertions read the OPERATOR's real home.
+  defp sessions_dir, do: Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
 
   defp session_file(id) do
     safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-    Path.join(@dir, "#{safe}.json")
+    Path.join(sessions_dir(), "#{safe}.json")
   end
 
   defp updates_file(id) do
     safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-    Path.join(@dir, "#{safe}.updates.jsonl")
+    Path.join(sessions_dir(), "#{safe}.updates.jsonl")
   end
 
   defp cleanup(id) do
@@ -43,7 +46,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
 
   setup do
     id = "osa_two_log_#{System.unique_integer([:positive])}"
-    File.mkdir_p!(@dir)
+    File.mkdir_p!(sessions_dir())
     on_exit(fn -> cleanup(id) end)
     {:ok, id: id}
   end
@@ -195,7 +198,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
 
   describe "existing resume path is preserved (back-compat)" do
     test "save -> find_latest_for_dir -> load still restores turns", %{id: id} do
-      dir = @dir
+      dir = sessions_dir()
 
       convo = [
         %{role: "user", content: "first question"},

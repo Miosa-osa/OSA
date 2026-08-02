@@ -508,7 +508,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
       # the same files a live session's turns are saved to.
       :ok = OptimalSystemAgent.Agent.SessionPersistence.save(session_id, [%{role: "user", content: "hi"}])
 
-      sessions_dir = Path.expand("~/.osa/sessions")
+      # Runtime-resolved, not a frozen `~/.osa`: the suite runs against an
+      # isolated per-run config dir, so expanding the real home here asserted
+      # against the OPERATOR's sessions directory.
+      sessions_dir = Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
       json_path = Path.join(sessions_dir, "#{session_id}.json")
       updates_path = Path.join(sessions_dir, "#{session_id}.updates.jsonl")
 

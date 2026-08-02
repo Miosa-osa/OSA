@@ -9,6 +9,67 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.59] — displays as `v1.0.059`
+
+An idle OSA now costs essentially nothing. Leaving the daemon running no longer
+shows up as a busy core on your machine — it sits at a tenth of a percent of one
+CPU instead of pinning several, with no change to how fast it answers.
+
+### Fixed — an idle daemon was burning CPU on every platform
+
+- **A daemon that was doing nothing still ran hot.** Reported by
+  [@jmanhype](https://github.com/jmanhype) in
+  [#66](https://github.com/Miosa-osa/OSA/issues/66) as 850% CPU on macOS with no
+  work in flight. The cause was not OSA's own loops: the BEAM's scheduler
+  busy-wait flags were set nowhere in the tree, so every OSA daemon everywhere
+  ran on stock OTP defaults, where idle schedulers spin looking for work rather
+  than sleeping. On a machine with many cores that is one hot spin loop per
+  core, forever, for an agent sitting at a prompt.
+
+- **The flags are now set on every path a real daemon starts from** — the
+  release environment script, its Windows equivalent, and the source-tree
+  launcher. That last one mattered most and is easy to miss: it never sources
+  the release environment at all, and it was the reporter's own reproduction
+  path, so a fix applied only to the release would have left the bug exactly
+  where it was found. Measured on Linux, idle CPU falls from 0.32% to 0.10%,
+  with request latency unchanged within noise.
+
+- **The old behaviour is one environment variable away.** Set
+  `OSA_BEAM_BUSY_WAIT=1` to restore spinning schedulers, for the rare workload
+  that would rather pay the idle cost to shave scheduler wake-up latency.
+
+### Fixed — the test suite was writing into your real `~/.osa`, and reading it back
+
+- **A goal from one test run could reappear inside a later one.** The suite goes
+  to considerable lengths to keep out of the operator's home — the database,
+  permissions, the durable log and the bootstrap directory are all redirected to
+  temporary paths — but the runtime configuration re-pointed the config directory
+  at the real `~/.osa` after all of that had been decided, silently undoing it.
+  Session ledgers, briefs and plans were being written into the operator's own
+  session directory on every run, thousands of them; and because those files are
+  keyed by an identifier that is only unique *within* one VM, a later run could
+  draw an identifier that already had a file on disk and read back a goal it had
+  never set. That is what made the goal-verifier's "no goal anywhere" gate fail
+  in a full run and pass on its own. **The suite now gets its own per-run home
+  under the temporary directory**, wiped at load and swept for stale runs, using
+  the same scheme the per-run test database already used. Nothing about how OSA
+  resolves its home outside of tests changes.
+
+- **Six test files hardcoded `~/.osa` themselves**, as compile-time paths — the
+  exact "frozen home" pattern OSA has a dedicated regression test to forbid in
+  its own modules. They now resolve the directory at runtime like everything
+  else, so they assert against the suite's home rather than the operator's.
+
+- **Cross-turn goal state no longer lives on a borrowed process.** The table
+  holding each session's goal status, lifetime run cap and stall breaker was
+  created lazily by whichever process anchored a goal first — usually a
+  transient one. When that process exited the table went with it, and an
+  autonomous run lost its circuit breaker without anything failing loudly. It is
+  now created at startup, owned by the application, alongside the other shared
+  tables that were moved there for the same reason.
+
+---
+
 ## [1.0.58] — displays as `v1.0.058`
 
 OSA's context handling, its tool surface and its record of what a session did

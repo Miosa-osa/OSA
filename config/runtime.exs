@@ -5,8 +5,44 @@ import Config
 # evaluated during `mix release` on the build host (HOME=/home/runner on CI)
 # and would otherwise bake that path into the release. Resolve it here at boot
 # so it tracks the running user's home (or OSA_HOME override).
-config :optimal_system_agent,
-  config_dir: System.get_env("OSA_HOME") || Path.expand("~/.osa")
+#
+# EXCEPT under :test. config/test.exs goes to great lengths to keep the suite
+# out of the operator's real ~/.osa (bootstrap_dir, permissions_file,
+# durable_log_dir, ...), but `config_dir` wins over `bootstrap_dir` in
+# `ConfigFile.config_dir/0` and runtime.exs is loaded AFTER test.exs — so this
+# very line silently defeated all of it. The suite was writing real session
+# ledgers, briefs and plans into ~/.osa/sessions on every run (2000+ files
+# accumulated on a developer box), and because those files are keyed by
+# `System.unique_integer/1` — unique only WITHIN a VM — a later run's session id
+# could collide with a leftover ledger from an earlier run and read back a goal
+# it never set. That is a genuine cross-run flake source, not a theoretical one:
+# `GoalVerifier.skip_reason/1` returned `nil` instead of `:no_goal` because a
+# stale `## Goal` section from a previous suite run was still on disk.
+#
+# So give :test a per-RUN home under tmp, wiped at config-load time, exactly
+# like the per-run test database above it in config/test.exs — same tag
+# (`OSA_HTTP_PORT`, falling back to the OS pid) so two concurrent suites never
+# clobber each other, and the same age-based sweep so per-run naming does not
+# leak directories forever.
+if config_env() == :test do
+  test_home_tag = System.get_env("OSA_HTTP_PORT") || System.pid()
+  test_home = Path.join(System.tmp_dir!(), "osa-test-home-#{test_home_tag}")
+
+  _ = File.rm_rf(test_home)
+  _ = File.mkdir_p(test_home)
+
+  stale_home_before = System.os_time(:second) - 86_400
+
+  for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-home-*")),
+      match?({:ok, %{mtime: mtime}} when mtime < stale_home_before, File.stat(stale, time: :posix)) do
+    _ = File.rm_rf(stale)
+  end
+
+  config :optimal_system_agent, config_dir: test_home
+else
+  config :optimal_system_agent,
+    config_dir: System.get_env("OSA_HOME") || Path.expand("~/.osa")
+end
 
 # ── Logger level override via env var ────────────────────────────────────
 case System.get_env("LOGGER_LEVEL") do

@@ -11,11 +11,14 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueuePersistenceTest do
   alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Channels.CLI.MessageQueue
 
-  @dir Path.expand("~/.osa/sessions")
+  # Runtime-resolved (see FrozenHomeRuntimeTest): a compile-time `~/.osa`
+  # here writes into the OPERATOR's real home instead of the suite's
+  # isolated per-run config dir.
+  defp sessions_dir, do: Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "sessions")
 
   defp session_file(id) do
     safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
-    Path.join(@dir, "#{safe}.json")
+    Path.join(sessions_dir(), "#{safe}.json")
   end
 
   setup do
