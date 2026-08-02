@@ -2466,18 +2466,37 @@ impl App {
             BackendEvent::CoordinatorMode { active } => {
                 // The backend is authoritative for coordinator state (sticky
                 // per-session store): reflect it on the status-bar chip, toast the
-                // transition, and announce it for screen readers.
+                // TRANSITION, and announce it for screen readers.
+                //
+                // Toast only when the state actually CHANGED. The TUI sends a
+                // `coordinator status` query on every SSE (re)connect (see the
+                // SseConnected arm above), so an unguarded handler announced
+                // "Coordinator mode off: full tool access" on every reconnect
+                // even though nothing had changed. The backend no longer emits
+                // for a status read (`handle_coordinator_command`); this guard is
+                // the second half of the same fix, so any other path that
+                // re-broadcasts the current state stays silent too.
+                //
+                // It is not only cosmetic noise: the toast band is a RESERVED
+                // layout band (`measure_bands` → `Bands.toast`, sized by the live
+                // toast count), so a spurious toast changes
+                // `desired_inline_height` on arrival and again on expiry —
+                // rebuilding the inline viewport twice for an event that carried
+                // no information.
+                let changed = self.status.coordinator() != active;
                 self.status.set_coordinator(active);
-                let msg = if active {
-                    "Coordinator mode on: delegation and messaging only"
-                } else {
-                    "Coordinator mode off: full tool access"
-                };
-                self.toasts.push(
-                    msg.into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
-                self.announce_a11y(msg);
+                if changed {
+                    let msg = if active {
+                        "Coordinator mode on: delegation and messaging only"
+                    } else {
+                        "Coordinator mode off: full tool access"
+                    };
+                    self.toasts.push(
+                        msg.into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                    self.announce_a11y(msg);
+                }
             }
         }
         false

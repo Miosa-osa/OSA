@@ -141,5 +141,33 @@ defmodule OptimalSystemAgent.Agent.CoordinatorModeTest do
       assert status["active"] == true
       assert CoordinatorMode.get(id) == true
     end
+
+    # The TUI issues `coordinator status` on every SSE (re)connect. Routing that
+    # read through `set_coordinator/2` emitted a `coordinator_mode` system_event
+    # each time, and the TUI turned every one into a toast — a state-change
+    # announcement for a state that had not changed, once per reconnect.
+    test "status emits no coordinator_mode event (a read has no side effects)" do
+      id = sid()
+      CoordinatorMode.put(id, false)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{id}")
+
+      assert exec("coordinator", "status", id)["active"] == false
+      # The empty verb takes the same read path.
+      assert exec("coordinator", "", id)["active"] == false
+
+      refute_receive {:osa_event, %{type: :system_event, event: :coordinator_mode}}, 300
+    end
+
+    # The other half of the contract: a real transition must still announce, or
+    # the status-bar chip would go stale.
+    test "on / off still emit coordinator_mode so the chip tracks the transition" do
+      id = sid()
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{id}")
+
+      assert exec("coordinator", "on", id)["active"] == true
+
+      assert_receive {:osa_event, %{type: :system_event, event: :coordinator_mode, active: true}},
+                     2000
+    end
   end
 end

@@ -184,7 +184,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # `/coordinator [on|off|toggle|status]`: the TUI coordinator posture toggle.
   # Applied IN PLACE on the live loop (no session restart / id churn), recorded
   # in the sticky `Agent.CoordinatorMode` store, and echoed as a `coordinator_mode`
-  # system_event so the status-bar chip tracks it. `status` reads without changing.
+  # system_event so the status-bar chip tracks it.
+  #
+  # `status` is a READ. It must not reach `set_coordinator/2`, which emits a
+  # `coordinator_mode` system_event unconditionally — including when the value it
+  # is handed is the one already stored. The TUI queries `coordinator status` on
+  # every SSE (re)connect, so routing the read through the writer announced a
+  # state transition that had not happened, once per reconnect. The status arm
+  # below answers from the sticky store and emits nothing; a read has no side
+  # effects.
   defp handle_coordinator_command(conn, arg) do
     session_id =
       conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
@@ -192,15 +200,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     verb = arg |> to_string() |> String.trim() |> String.downcase()
     current = coordinator_active?(session_id)
 
-    desired =
-      case verb do
-        v when v in ~w(on true 1 yes enable) -> true
-        v when v in ~w(off false 0 no disable) -> false
-        v when v in ["status", ""] -> current
-        _ -> not current
-      end
+    active =
+      if verb in ["status", ""] do
+        current
+      else
+        desired =
+          case verb do
+            v when v in ~w(on true 1 yes enable) -> true
+            v when v in ~w(off false 0 no disable) -> false
+            _ -> not current
+          end
 
-    {:ok, active} = OptimalSystemAgent.Agent.Loop.set_coordinator(session_id, desired)
+        {:ok, active} = OptimalSystemAgent.Agent.Loop.set_coordinator(session_id, desired)
+        active
+      end
 
     output =
       if active,
