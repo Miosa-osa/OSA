@@ -1353,6 +1353,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp dispatch_message(state, skip_plan) do
     if not skip_plan and should_plan?(state) do
       state = %{state | plan_mode: true}
+      # Plan mode runs a full investigative ReactLoop of its own, so it spends
+      # real tokens. Snapshot before the call for the same delta the reply path
+      # takes — otherwise every plan row in the transcript reads 0 tokens for
+      # what is often the most expensive turn in a session.
+      plan_tokens_before = token_counters(state)
 
       case MessageHandler.run_plan_mode(state) do
         {:ok, plan_text, state} ->
@@ -1362,11 +1367,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
           # :post_response fires — persist the plan here (tool_name "plan")
           # so it appears in /sessions resume, transcript, and recap. The
           # user turn was already saved at ingestion by TurnPipeline.
+          plan_tokens =
+            plan_tokens_before
+            |> token_delta(token_counters(state))
+            |> Map.values()
+            |> Enum.sum()
+
           OptimalSystemAgent.Store.SessionTranscript.save_turn(
             state.session_id,
             "assistant",
             plan_text,
-            tool_name: "plan"
+            tool_name: "plan",
+            tokens: plan_tokens
           )
 
           Telemetry.emit_context_pressure(state)
@@ -1387,6 +1399,30 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # The four running token counters `Loop.Accounting.record/2` maintains on the
+  # loop state. Read as a tuple so a turn's cost is one subtraction, and so a
+  # new counter cannot be added to accounting and silently missed here.
+  defp token_counters(state) do
+    {
+      Map.get(state, :session_input_tokens, 0) || 0,
+      Map.get(state, :session_output_tokens, 0) || 0,
+      Map.get(state, :session_cache_creation_tokens, 0) || 0,
+      Map.get(state, :session_cache_read_tokens, 0) || 0
+    }
+  end
+
+  # Per-turn delta, as the payload keys the `save_transcript` hook reads.
+  # Clamped at 0: a session resumed from a checkpoint can restore counters that
+  # are lower than the live ones, and a negative "cost" is never meaningful.
+  defp token_delta({i0, o0, cw0, cr0}, {i1, o1, cw1, cr1}) do
+    %{
+      turn_input_tokens: max(i1 - i0, 0),
+      turn_output_tokens: max(o1 - o0, 0),
+      turn_cache_creation_tokens: max(cw1 - cw0, 0),
+      turn_cache_read_tokens: max(cr1 - cr0, 0)
+    }
+  end
+
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
@@ -1397,6 +1433,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # any earlier turn ever used.
     msg_len_before = length(state.messages)
     tool_calls_before = Map.get(state, :total_tool_calls, 0)
+    # Same reasoning for tokens: `Loop.Accounting` accumulates its four counters
+    # for the whole session, so this turn's cost is the difference across the
+    # ReactLoop call. The snapshot is taken here and the delta computed after
+    # `ReactLoop.run/1` returns, so every re-entry branch inside it (tool cycles,
+    # mid-turn compaction, continuation) falls within the window.
+    tokens_before = token_counters(state)
 
     {response, state} =
       try do
@@ -1473,17 +1515,31 @@ defmodule OptimalSystemAgent.Agent.Loop do
       Observability.annotate(state, source: "agent.loop")
     )
 
-    # Fire post_response hooks (async, non-blocking)
+    # Fire post_response hooks (async, non-blocking).
+    #
+    # NOTE the crash/exit arms above return the PRE-ReactLoop `state`, so on a
+    # crashed turn this delta is 0 and the round-trips that did complete are
+    # dropped from session accounting entirely. That is pre-existing — fixing it
+    # needs `ReactLoop.run/1` to surrender its partial state on the way out, not
+    # a wider subtraction here.
+    turn_tokens = token_delta(tokens_before, token_counters(state))
+
     try do
-      Hooks.run_async(:post_response, %{
-        session_id: state.session_id,
-        response: response,
-        input: state.current_input || "",
-        turn_count: state.turn_count,
-        iteration: state.iteration,
-        tools_used: Map.get(state.last_meta, :tools_used, []),
-        total_tool_calls: state.total_tool_calls
-      })
+      Hooks.run_async(
+        :post_response,
+        Map.merge(
+          %{
+            session_id: state.session_id,
+            response: response,
+            input: state.current_input || "",
+            turn_count: state.turn_count,
+            iteration: state.iteration,
+            tools_used: Map.get(state.last_meta, :tools_used, []),
+            total_tool_calls: state.total_tool_calls
+          },
+          turn_tokens
+        )
+      )
     rescue
       _ -> :ok
     catch

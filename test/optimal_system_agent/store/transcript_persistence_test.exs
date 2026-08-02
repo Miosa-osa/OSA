@@ -57,14 +57,79 @@ defmodule OptimalSystemAgent.Store.TranscriptPersistenceTest do
       sid = unique_sid("stream")
       streamed = "line one\nline two — final accumulated text"
 
-      assert {:ok, _} = Handlers.save_transcript(%{session_id: sid, input: "q", response: streamed})
+      assert {:ok, _} =
+               Handlers.save_transcript(%{session_id: sid, input: "q", response: streamed})
+
       assert roles_contents(sid) == [{"assistant", streamed}]
     end
 
     test "skips empty assistant response and never writes a user row" do
       sid = unique_sid("empty")
-      assert {:ok, _} = Handlers.save_transcript(%{session_id: sid, input: "question", response: ""})
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{session_id: sid, input: "question", response: ""})
+
       assert roles_contents(sid) == []
+    end
+  end
+
+  describe "save_transcript token attribution" do
+    test "persists the per-turn delta the loop computed" do
+      sid = unique_sid("tok")
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{
+                 session_id: sid,
+                 input: "question",
+                 response: "answer",
+                 turn_input_tokens: 1200,
+                 turn_output_tokens: 350
+               })
+
+      [row] = SessionTranscript.get_transcript(sid)
+      assert row.role == "assistant"
+      assert row.tokens == 1550
+    end
+
+    # The gap that made this worth landing at all: with prompt caching working,
+    # a repeat turn bills mostly as cache reads. Counting only input+output
+    # would report this 21_400-token turn as 1_400 — and the number would drop
+    # as the cache got WARMER.
+    test "counts cache reads and cache writes, not just input and output" do
+      sid = unique_sid("tok-cache")
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{
+                 session_id: sid,
+                 response: "answer",
+                 turn_input_tokens: 400,
+                 turn_output_tokens: 1000,
+                 turn_cache_creation_tokens: 8000,
+                 turn_cache_read_tokens: 12_000
+               })
+
+      [row] = SessionTranscript.get_transcript(sid)
+      assert row.tokens == 21_400
+    end
+
+    test "absent or nil counters degrade to zero rather than crashing" do
+      sid = unique_sid("tok-nil")
+      assert {:ok, _} = Handlers.save_transcript(%{session_id: sid, response: "a"})
+      assert [%{tokens: 0}] = SessionTranscript.get_transcript(sid)
+
+      sid2 = unique_sid("tok-nil-vals")
+
+      assert {:ok, _} =
+               Handlers.save_transcript(%{
+                 session_id: sid2,
+                 response: "a",
+                 turn_input_tokens: nil,
+                 turn_output_tokens: nil,
+                 turn_cache_creation_tokens: nil,
+                 turn_cache_read_tokens: nil
+               })
+
+      assert [%{tokens: 0}] = SessionTranscript.get_transcript(sid2)
     end
   end
 

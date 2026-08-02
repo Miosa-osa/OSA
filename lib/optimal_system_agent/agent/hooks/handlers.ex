@@ -514,13 +514,20 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   # under role "user" because :input was mis-derived from the merged
   # message list. Memory auto-extraction moved to ingestion with it.
   # `response` is the fully accumulated streamed final text from ReactLoop.
+  #
+  # The `turn_*_tokens` fields carry the per-turn token delta the caller
+  # (`Loop.run_and_reply/1`) computed by diffing `Loop.Accounting`'s running
+  # session totals across the turn. Without them the `tokens` column was written
+  # as a literal 0 on every row.
   def save_transcript(%{session_id: sid, response: response} = payload)
       when is_binary(sid) do
     alias OptimalSystemAgent.Store.SessionTranscript
 
+    tokens = turn_tokens(payload)
+
     try do
       if is_binary(response) and response != "" do
-        SessionTranscript.save_turn(sid, "assistant", response)
+        SessionTranscript.save_turn(sid, "assistant", response, tokens: tokens)
       end
     rescue
       _ -> :ok
@@ -530,6 +537,35 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   end
 
   def save_transcript(payload), do: {:ok, payload}
+
+  # Tokens billed for one turn — ALL FOUR counters `Loop.Accounting` tracks, not
+  # just input + output.
+  #
+  # Cache reads are not a rounding error here. With prompt caching actually
+  # working (v1.0.56), a repeat turn's prompt arrives almost entirely as
+  # `cache_read_input_tokens` and `input_tokens` collapses to the short uncached
+  # tail. Summing only input + output would report a large turn as a small one,
+  # and would make the column read LOWER the better the cache performed — the
+  # opposite of what it is for. Cache writes are billed too (at a premium), so
+  # they count as well.
+  #
+  # Missing, nil or negative fields contribute 0, so a caller that computes no
+  # delta behaves exactly as before rather than crashing the hook.
+  defp turn_tokens(payload) do
+    [
+      :turn_input_tokens,
+      :turn_output_tokens,
+      :turn_cache_creation_tokens,
+      :turn_cache_read_tokens
+    ]
+    |> Enum.map(fn key ->
+      case Map.get(payload, key) do
+        n when is_integer(n) and n > 0 -> n
+        _ -> 0
+      end
+    end)
+    |> Enum.sum()
+  end
 
   # Auto-save session state for resume.
   def auto_save_session(%{session_id: sid} = payload) when is_binary(sid) do
