@@ -184,7 +184,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # `/coordinator [on|off|toggle|status]`: the TUI coordinator posture toggle.
   # Applied IN PLACE on the live loop (no session restart / id churn), recorded
   # in the sticky `Agent.CoordinatorMode` store, and echoed as a `coordinator_mode`
-  # system_event so the status-bar chip tracks it. `status` reads without changing.
+  # system_event so the status-bar chip tracks it.
+  #
+  # `status` is a READ-ONLY query: it must NOT call `set_coordinator/2` (which
+  # unconditionally emits a `coordinator_mode` system_event via `Bus.emit`).
+  # The TUI sends `coordinator status` on every SSE (re)connect, so emitting an
+  # event for a no-op status read produces a redundant toast on each reconnect.
+  # The TUI-side handler now also guards against unchanged-state toasts, but the
+  # root cause is here: a read should not have side effects.
   defp handle_coordinator_command(conn, arg) do
     session_id =
       conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
@@ -192,23 +199,33 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     verb = arg |> to_string() |> String.trim() |> String.downcase()
     current = coordinator_active?(session_id)
 
-    desired =
-      case verb do
-        v when v in ~w(on true 1 yes enable) -> true
-        v when v in ~w(off false 0 no disable) -> false
-        v when v in ["status", ""] -> current
-        _ -> not current
-      end
+    if verb in ["status", ""] do
+      # Read-only: return current state without emitting a system_event.
+      output =
+        if current,
+          do: "Coordinator mode ON (delegation and messaging only).",
+          else: "Coordinator mode OFF (full tool access)."
 
-    {:ok, active} = OptimalSystemAgent.Agent.Loop.set_coordinator(session_id, desired)
+      body = Jason.encode!(%{output: output, command: "coordinator", active: current})
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    else
+      desired =
+        case verb do
+          v when v in ~w(on true 1 yes enable) -> true
+          v when v in ~w(off false 0 no disable) -> false
+          _ -> not current
+        end
 
-    output =
-      if active,
-        do: "Coordinator mode ON (delegation and messaging only).",
-        else: "Coordinator mode OFF (full tool access)."
+      {:ok, active} = OptimalSystemAgent.Agent.Loop.set_coordinator(session_id, desired)
 
-    body = Jason.encode!(%{output: output, command: "coordinator", active: active})
-    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+      output =
+        if active,
+          do: "Coordinator mode ON (delegation and messaging only).",
+          else: "Coordinator mode OFF (full tool access)."
+
+      body = Jason.encode!(%{output: output, command: "coordinator", active: active})
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    end
   end
 
   defp coordinator_active?(session_id) do
@@ -260,13 +277,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
           do: {:mode, :ask},
           else: {:mode, :overdrive}
 
-      Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) -> {:mode, :overdrive}
+      Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) ->
+        {:mode, :overdrive}
+
       Enum.any?(tokens, &(&1 in ~w(accept-edits accept_edits auto-edit auto_edit edits))) ->
         {:mode, :accept_edits}
 
-      Enum.any?(tokens, &(&1 in ~w(plan plan-mode plan_mode))) -> {:mode, :plan}
-      Enum.any?(tokens, &(&1 in ~w(ask default prompt))) -> {:mode, :ask}
-      true -> :tier
+      Enum.any?(tokens, &(&1 in ~w(plan plan-mode plan_mode))) ->
+        {:mode, :plan}
+
+      Enum.any?(tokens, &(&1 in ~w(ask default prompt))) ->
+        {:mode, :ask}
+
+      true ->
+        :tier
     end
   end
 
@@ -348,43 +372,43 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
     if cmd_name in @blocked_http_commands do
-        body =
-          Jason.encode!(%{
-            output: "Command '#{cmd_name}' is not available via HTTP.",
-            command: command
-          })
+      body =
+        Jason.encode!(%{
+          output: "Command '#{cmd_name}' is not available via HTTP.",
+          command: command
+        })
 
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
-      else
-        session_id =
-          conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    else
+      session_id =
+        conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
-        output =
+      output =
+        try do
+          {:ok, string_io} = StringIO.open("")
+          original_gl = Process.group_leader()
+          Process.group_leader(self(), string_io)
+
           try do
-            {:ok, string_io} = StringIO.open("")
-            original_gl = Process.group_leader()
-            Process.group_leader(self(), string_io)
-
-            try do
-              OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
-            after
-              Process.group_leader(self(), original_gl)
-            end
-
-            {_, captured} = StringIO.close(string_io)
-            captured
-          rescue
-            e -> "Error: #{Exception.message(e)}"
+            OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+          after
+            Process.group_leader(self(), original_gl)
           end
 
-        clean_output =
-          output
-          |> String.replace(~r/\e\[[0-9;]*m/, "")
-          |> String.trim()
+          {_, captured} = StringIO.close(string_io)
+          captured
+        rescue
+          e -> "Error: #{Exception.message(e)}"
+        end
 
-        body = Jason.encode!(%{output: clean_output, command: command})
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
-      end
+      clean_output =
+        output
+        |> String.replace(~r/\e\[[0-9;]*m/, "")
+        |> String.trim()
+
+      body = Jason.encode!(%{output: clean_output, command: command})
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    end
   end
 
   # ── POST /:name/execute (tools) ────────────────────────────────────
