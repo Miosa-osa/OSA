@@ -384,7 +384,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
               Process.group_leader(self(), original_gl)
             end
 
-            {_, captured} = StringIO.close(string_io)
+            {:ok, {_input, captured}} = StringIO.close(string_io)
             captured
           rescue
             e -> "Error: #{Exception.message(e)}"
