@@ -42,6 +42,25 @@ HOME="${HOME:-/root}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export LANG="${LANG:-C.UTF-8}"
 
+# ── BEAM scheduler busy-wait: off (issue #66) ─────────────────────
+# Mirrors rel/env.sh.eex for the source-tree launcher, which starts the daemon
+# with `mix osa.serve` and so never runs the release's env.sh. The BEAM's
+# schedulers, dirty-CPU and dirty-IO schedulers spin looking for work before
+# they park; that is right for a dedicated server and wrong for a warm
+# background daemon on a laptop that spends nearly all of its wall-clock
+# waiting on a model. Left as-is it can burn close to one core per scheduler
+# thread for as long as OSA is installed.
+#
+# Set OSA_BEAM_BUSY_WAIT=1 to keep the stock OTP behaviour; an ERL_FLAGS that
+# already mentions +sbwt is left completely alone.
+if [ -z "${OSA_BEAM_BUSY_WAIT:-}" ]; then
+  case "${ERL_FLAGS:-}" in
+    *+sbwt*) ;;
+    *) ERL_FLAGS="${ERL_FLAGS:+${ERL_FLAGS} }+sbwt none +sbwtdcpu none +sbwtdio none" ;;
+  esac
+  export ERL_FLAGS
+fi
+
 # Capture the user's launch directory BEFORE any `cd` below, and hand it to the
 # backend as OSA_ORIGINAL_CWD. The daemon starts with `cd "$ROOT"` (the OSA
 # source tree) then `mix osa.serve`, so without this the backend's File.cwd!()
