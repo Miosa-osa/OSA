@@ -117,6 +117,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         OptimalSystemAgent.Agent.SessionPersistence.find_latest_for_dir(working_dir)
 
     if existing do
+      # A directory-scoped resume must also bring the loop back up, exactly like
+      # the create path below — otherwise the resumed session has no live Loop and
+      # every message / slash command 404s with :session_not_found.
+      SessionManager.ensure_loop(existing,
+        user_id: user_id,
+        channel: :http,
+        working_dir: working_dir
+      )
+
       body = Jason.encode!(%{id: existing, status: "resumed", working_dir: working_dir})
 
       conn
