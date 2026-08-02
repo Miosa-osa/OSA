@@ -9,93 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [1.1.1] — displays as `v1.1.001`
+## [1.0.58] — displays as `v1.0.058`
 
-A patch release. Nothing OSA does changes: there is no new capability, no new
-option and no change to defaults. What changes is how much of the interface is
-actually tested, and whether a turn that dies takes its spend with it.
+OSA's context handling, its tool surface and its record of what a session did
+are no longer fixed at compile time: each is now something that can be swapped,
+extended or switched on. Nothing here changes what OSA does by default — the two
+new capabilities are off until you turn them on. Alongside that, the interface
+gains a test lane that drives the real binary on a real terminal, the last
+hand-written layout measurements are gone, and a turn that dies no longer takes
+its spend with it.
 
-### Added — a layout suite that drives the real binary on a real terminal
-
-- **The worst bug of the last release passed a thousand tests.** A terminal
-  resize left one stranded copy of the interface behind at every step of a drag,
-  and the existing suite structurally could not see it: it renders through a
-  perfect in-process emulator that answers the cursor query from its own model,
-  so the re-anchor always lands on the right row and the failure cannot
-  materialise. Tests were not missing. The class was unreachable.
-
-- **`test/pty/` closes that from the outside.** It gives the built `osagent` a
-  real kernel PTY, resizes it for real — the same signal a window drag delivers —
-  renders the resulting byte stream through an independent emulator, and asserts
-  that exactly one composer, one hint row and one status bar survive. Three
-  cases ship: a width drag, a height drag, and a viewport squeezed to eight rows
-  where the composer must still be there. It runs in CI as the `PTY layout`
-  workflow, on a plain runner — a PTY is not a GUI, so no display server is
-  needed.
-
-- **It was verified by putting the bug back.** Reintroducing the defect turns
-  the suite red with several stacked composers, which is what a test that cannot
-  fail is missing.
-
-- **What a green run does not prove.** The emulator the harness renders through
-  does not re-wrap existing lines when the terminal narrows; GNOME Terminal and
-  the other libvte-backed terminals do. So this reproduces the re-anchor half of
-  the problem — the half that produced the stacked copies — and under-reproduces
-  the reflow half. Concretely, the deliberate choice of clear sequence at the
-  resize site, which exists because one of them pushes a snapshot of the live
-  region into unreflowable scrollback on a real terminal, would not turn this
-  suite red if it were reverted. Changes touching reflow, scrollback or clear
-  semantics still want a human looking at a real terminal. The limitation is
-  written down in `test/pty/README.md` rather than left to be discovered.
-
-### Changed — one arbiter measures the layout, and the tests can no longer disagree with it
-
-- **The last hand-written band-height helpers are gone.** Four of them survived
-  the previous release as test-only functions, each re-stating in a second place
-  how tall one band should be. A test that mirrors an expression production has
-  stopped using does not check production — it checks the mirror, and passes
-  while the screen is wrong. Every measurement now goes through the single
-  arbiter the running program uses.
-
-- **The small-height assertions came out stronger, not weaker.** Where the
-  mirror sized a band against the rows it *asked* for, it now sizes against the
-  rows the arbiter *granted*. On a short viewport those differ, and sizing
-  against the request is exactly how a band ends up drawing into rows nothing
-  reserved for it.
-
-### Fixed — a turn that crashed took its spend with it
-
-- **Tokens that had been paid for vanished from the accounting.** When a turn
-  errored partway through, the error path returned the state from before the
-  turn began — every intermediate state having been carried off by the unwind —
-  so a turn that completed three billed round-trips and then failed on the
-  fourth was recorded as having cost nothing. The transcript wrote a zero, the
-  live spend readout never moved, and the session budget cap went on believing
-  the money was still there.
-
-- **The accounting now survives the crash.** Each round-trip's absolute totals
-  are surrendered outside the state thread and merged back if the turn dies, so
-  the spend that happened is the spend that gets reported. Absolute figures, not
-  increments, so a repeated merge cannot double-bill; and the stash is cleared at
-  the top of every turn so a turn that fails before spending anything cannot
-  inherit the previous one's numbers.
-
-- **Deliberately not recovered: the conversation.** Only the accounting is
-  merged back. A message list interrupted mid-cycle can be structurally invalid
-  — an assistant tool call with no matching result — and restoring it would
-  poison the next request to the provider. Recovering history is a separate and
-  larger problem; recovering the money is not, and the money is what was
-  silently wrong.
-
----
-
-## [1.1.0] — displays as `v1.1.000`
-
-The first minor release. OSA's context handling, its tool surface and its record
-of what a session did are no longer fixed at compile time: each is now something
-that can be swapped, extended or switched on. Nothing in this release changes
-what OSA does by default — the two new capabilities are off until you turn them
-on — but the architecture beneath them has moved.
+> **This release supersedes `v1.1.000` and `v1.1.001`, which have been
+> withdrawn.** Those two were published briefly and carried exactly the content
+> below under an incorrect version number; the minor bump was a mistake, and
+> OSA's numbering continues on the `1.0.x` line. If you installed OSA in that
+> window you are running this same code under a version string that no longer
+> exists — reinstall, or pin `OSA_VERSION=v1.0.058`, so that update checks and
+> bug reports line up with a release that is actually published.
 
 ### Added — the context engine is now a contract, not a single hardcoded implementation
 
@@ -162,6 +92,54 @@ on — but the architecture beneath them has moved.
   credential-shaped assignments — and redaction runs before truncation, so a
   secret cannot survive by being cut in half.
 
+### Added — a layout suite that drives the real binary on a real terminal
+
+- **The worst bug of the last release passed a thousand tests.** A terminal
+  resize left one stranded copy of the interface behind at every step of a drag,
+  and the existing suite structurally could not see it: it renders through a
+  perfect in-process emulator that answers the cursor query from its own model,
+  so the re-anchor always lands on the right row and the failure cannot
+  materialise. Tests were not missing. The class was unreachable.
+
+- **`test/pty/` closes that from the outside.** It gives the built `osagent` a
+  real kernel PTY, resizes it for real — the same signal a window drag delivers —
+  renders the resulting byte stream through an independent emulator, and asserts
+  that exactly one composer, one hint row and one status bar survive. Three
+  cases ship: a width drag, a height drag, and a viewport squeezed to eight rows
+  where the composer must still be there. It runs in CI as the `PTY layout`
+  workflow, on a plain runner — a PTY is not a GUI, so no display server is
+  needed.
+
+- **It was verified by putting the bug back.** Reintroducing the defect turns
+  the suite red with several stacked composers, which is what a test that cannot
+  fail is missing.
+
+- **What a green run does not prove.** The emulator the harness renders through
+  does not re-wrap existing lines when the terminal narrows; GNOME Terminal and
+  the other libvte-backed terminals do. So this reproduces the re-anchor half of
+  the problem — the half that produced the stacked copies — and under-reproduces
+  the reflow half. Concretely, the deliberate choice of clear sequence at the
+  resize site, which exists because one of them pushes a snapshot of the live
+  region into unreflowable scrollback on a real terminal, would not turn this
+  suite red if it were reverted. Changes touching reflow, scrollback or clear
+  semantics still want a human looking at a real terminal. The limitation is
+  written down in `test/pty/README.md` rather than left to be discovered.
+
+### Changed — one arbiter measures the layout, and the tests can no longer disagree with it
+
+- **The last hand-written band-height helpers are gone.** Four of them survived
+  the previous release as test-only functions, each re-stating in a second place
+  how tall one band should be. A test that mirrors an expression production has
+  stopped using does not check production — it checks the mirror, and passes
+  while the screen is wrong. Every measurement now goes through the single
+  arbiter the running program uses.
+
+- **The small-height assertions came out stronger, not weaker.** Where the
+  mirror sized a band against the rows it *asked* for, it now sizes against the
+  rows the arbiter *granted*. On a short viewport those differ, and sizing
+  against the request is exactly how a band ends up drawing into rows nothing
+  reserved for it.
+
 ### Fixed — recording that was supposed to be off was always on
 
 - **The trajectory opt-in never guarded anything.** The check was written as an
@@ -192,6 +170,30 @@ on — but the architecture beneath them has moved.
   connection could hold a phantom notification on screen indefinitely, and each
   one rebuilt the viewport twice. The announcement is now made only on a real
   change.
+
+### Fixed — a turn that crashed took its spend with it
+
+- **Tokens that had been paid for vanished from the accounting.** When a turn
+  errored partway through, the error path returned the state from before the
+  turn began — every intermediate state having been carried off by the unwind —
+  so a turn that completed three billed round-trips and then failed on the
+  fourth was recorded as having cost nothing. The transcript wrote a zero, the
+  live spend readout never moved, and the session budget cap went on believing
+  the money was still there.
+
+- **The accounting now survives the crash.** Each round-trip's absolute totals
+  are surrendered outside the state thread and merged back if the turn dies, so
+  the spend that happened is the spend that gets reported. Absolute figures, not
+  increments, so a repeated merge cannot double-bill; and the stash is cleared at
+  the top of every turn so a turn that fails before spending anything cannot
+  inherit the previous one's numbers.
+
+- **Deliberately not recovered: the conversation.** Only the accounting is
+  merged back. A message list interrupted mid-cycle can be structurally invalid
+  — an assistant tool call with no matching result — and restoring it would
+  poison the next request to the provider. Recovering history is a separate and
+  larger problem; recovering the money is not, and the money is what was
+  silently wrong.
 
 ---
 
