@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "sessions" => {"List recent sessions", :cmd_sessions},
     "tasks" => {"Show current tasks", :cmd_tasks},
     "plan" => {"Toggle plan mode", :cmd_plan},
+    "latex" => {"Toggle LaTeX + Lean 4 rendering mode", :cmd_latex},
     "doctor" => {"Run health check", :cmd_doctor},
     "export" => {"Export conversation as markdown", :cmd_export},
     "version" => {"Show version and check for updates", :cmd_version},
@@ -1013,6 +1014,29 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
       {:error, _reason} ->
         IO.puts("  #{@yellow}error: could not toggle plan mode#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  def cmd_latex(_args, session_id) do
+    IO.puts("")
+
+    case Loop.toggle_latex_mode(session_id) do
+      {:ok, true} ->
+        IO.puts(
+          "  #{@green}#{@reset} LaTeX + Lean mode #{@bold}enabled#{@reset} — all output renders as LaTeX math and Lean 4"
+        )
+
+      {:ok, false} ->
+        IO.puts("  #{@green}#{@reset} LaTeX + Lean mode #{@bold}disabled#{@reset}")
+
+      {:error, :no_session} ->
+        IO.puts("  #{@yellow}error: session not found#{@reset}")
+
+      {:error, _reason} ->
+        IO.puts("  #{@yellow}error: could not toggle LaTeX mode#{@reset}")
     end
 
     IO.puts("")

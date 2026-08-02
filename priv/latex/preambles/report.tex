@@ -1,0 +1,55 @@
+% report.tex -- report-class preamble (chapters + titlepage friendly).
+% Compiles clean under tectonic and pdflatex.
+% Usage:
+%   \documentclass[11pt,a4paper]{report}
+%   \providecommand{\LatexLibRoot}{../}
+%   \input{\LatexLibRoot preambles/report.tex}
+
+% --- Encoding & fonts -----------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% --- Page geometry --------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+
+% --- Math -----------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+
+% --- Graphics, tables, units, color --------------------------------------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+
+% --- Language & quotes ----------------------------------------------------
+\usepackage{csquotes}
+
+% --- Chapter/section headings & running heads -----------------------------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhead{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[RE]{\leftmark}
+\fancyhead[LO]{\rightmark}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Hyperlinks (load last) -----------------------------------------------
+\usepackage{hyperref}
+\definecolor{linknavy}{RGB}{0,51,102}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=linknavy,
+  citecolor=linknavy,
+  urlcolor=linknavy,
+  filecolor=linknavy,
+  pdfborder={0 0 0},
+  bookmarksnumbered=true,
+}
+
+% --- Shared macros --------------------------------------------------------
+\input{\LatexLibRoot macros.tex}

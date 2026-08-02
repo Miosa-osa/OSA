@@ -91,6 +91,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     tools: [],
     plan_mode: false,
     plan_mode_enabled: false,
+    latex_mode: false,
     turn_count: 0,
     last_meta: %{iteration_count: 0, tools_used: []},
     explored_files: MapSet.new(),
@@ -352,6 +353,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @spec toggle_plan_mode(String.t()) :: {:ok, boolean()} | {:error, :no_session | term()}
   def toggle_plan_mode(session_id) do
     GenServer.call(via(session_id), :toggle_plan_mode)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Toggle LaTeX + Lean 4 output mode for the session.
+
+  Returns `{:ok, enabled?}` or `{:error, :no_session}`.
+  """
+  @spec toggle_latex_mode(String.t()) :: {:ok, boolean()} | {:error, :no_session | term()}
+  def toggle_latex_mode(session_id) do
+    GenServer.call(via(session_id), :toggle_latex_mode)
   catch
     :exit, _ -> {:error, :no_session}
   end
@@ -1186,6 +1199,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call({:get_coordinator}, _from, state) do
     {:reply, {:ok, state.coordinator}, state}
+  end
+
+  # LaTeX + Lean 4 output mode (toggled via /latex). A plain boolean the
+  # Agent.Context reads to inject the output-mode directive; changes no tools.
+  def handle_call(:toggle_latex_mode, _from, state) do
+    on? = not Map.get(state, :latex_mode, false)
+    {:reply, {:ok, on?}, %{state | latex_mode: on?}}
   end
 
   def handle_call({:set_strategy, _strategy_name}, _from, state) do

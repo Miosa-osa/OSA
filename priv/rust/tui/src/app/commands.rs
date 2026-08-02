@@ -61,6 +61,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("login", "Authenticate with the backend"),
     ("logout", "Sign out"),
     ("voice", "Show the voice provider"),
+    ("latex", "Toggle LaTeX + Lean 4 rendering mode"),
     ("exit", "Quit OSA"),
     ("quit", "Quit OSA"),
 ];

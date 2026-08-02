@@ -1,0 +1,47 @@
+% base-beamer.tex -- minimal, compilable beamer deck.
+% Compile from this directory (priv/latex/templates/) with:
+%   tectonic base-beamer.tex
+
+\documentclass{beamer}
+
+\providecommand{\LatexLibRoot}{../}
+\input{\LatexLibRoot preambles/beamer.tex}
+
+\title{A Compile-Ready Beamer Deck}
+\subtitle{OSA \LaTeX{} Library}
+\author{OSA \LaTeX{} Author}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Motivation}
+  \begin{itemize}
+    \item Consistent, compile-clean slides.
+    \item No navigation symbols; clean theme.
+    \item Math works out of the box: $e^{i\pi} + 1 = 0$.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Some Math and a Table}
+  A displayed equation:
+  \[
+    \sum_{k=1}^{n} k = \frac{n(n+1)}{2}.
+  \]
+  \begin{table}
+    \centering
+    \begin{tabular}{lr}
+      \toprule
+      Item & Value \\
+      \midrule
+      Alpha & 1 \\
+      Beta  & 2 \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+\end{frame}
+
+\end{document}

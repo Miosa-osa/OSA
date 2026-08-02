@@ -457,6 +457,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       # changes what the turn is allowed to DO, so it must never lose the budget
       # race to a longer advisory block.
       {plan_mode_block(state), 0, "plan_mode"},
+      {latex_mode_block(state), 0, "latex_mode"},
       {memory_block_relevant(state), 1, "memory"},
       {episodic_block(state), 1, "episodic"},
       {task_state_block(state), 1, "task_state"},
@@ -1200,6 +1201,31 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   defp plan_mode_block(_), do: nil
+
+  # LaTeX + Lean 4 output mode (toggled via /latex). Priority 0 like plan mode:
+  # it dictates the SHAPE of every answer, so it must not lose the budget race
+  # to advisory blocks.
+  defp latex_mode_block(%{latex_mode: true} = _state) do
+    """
+    ## OUTPUT MODE — LaTeX + Lean 4 (ACTIVE, until /latex is turned off)
+
+    EVERY response containing any mathematics MUST include BOTH of the following,
+    or it is incomplete:
+
+    1. **LaTeX for all math** — inline `$...$`, display `$$...$$`. Never ASCII or
+       plain-word math: write `$x^2$`, `$\\sqrt{2}$`, `$\\ge$`, not x^2 / sqrt / >=.
+       The terminal renders it.
+    2. **A Lean 4 block** — for every definition/theorem/lemma/claim/proof, append a
+       fenced ```lean block of valid Lean 4 + Mathlib code (`theorem`/`def` with a
+       `by` tactic proof). REQUIRED, not optional; if a step is genuinely beyond you,
+       close it with `sorry` and say so — but still emit the block.
+
+    Before finishing, verify BOTH the LaTeX and the ```lean block are present.
+    Presentation only — this changes no tools.
+    """
+  end
+
+  defp latex_mode_block(_), do: nil
 
   # Surface a previously written (but not yet approved) plan file so a
   # resumed / re-invoked plan-mode turn can incrementally revise it instead

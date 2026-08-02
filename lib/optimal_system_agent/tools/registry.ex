@@ -774,6 +774,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep.Tool,
       "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList.Tool,
       "shell_execute" => OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool,
+      "latex_compile" => OptimalSystemAgent.Tools.Builtins.LatexCompile.Tool,
 
       # ── Interactive PTY tools (complement to shell_execute for tty programs) ─
       "pty_start" => OptimalSystemAgent.Tools.Builtins.Pty.PtyStart,

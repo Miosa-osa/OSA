@@ -1,0 +1,31 @@
+% beamer.tex -- clean beamer preamble (no navigation symbols).
+% Compiles clean under tectonic and pdflatex.
+% Usage:
+%   \documentclass{beamer}
+%   \providecommand{\LatexLibRoot}{../}
+%   \input{\LatexLibRoot preambles/beamer.tex}
+
+% --- Theme ----------------------------------------------------------------
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}   % drop the navigation clutter.
+\setbeamertemplate{caption}[numbered]
+
+% --- Encoding & fonts -----------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% --- Math -----------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+
+% --- Graphics, tables, units, color --------------------------------------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+
+% --- Language & quotes ----------------------------------------------------
+\usepackage{csquotes}

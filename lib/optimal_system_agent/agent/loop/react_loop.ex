@@ -288,6 +288,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     context = cached_context(state)
     Logger.debug("[loop] context built, #{length(context.messages)} messages")
     context = FastPath.inject_context(context, FastPath.await_prefetch(fast_prefetch_task))
+    context = maybe_nudge_latex_mode(context, state)
 
     # Consume prefetched memory (waits max 2s, falls back to sync if timeout)
     context =
@@ -1644,7 +1645,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # session_id, memory version, and channel so it auto-invalidates on any change.
   defp cached_context(state) do
     cache_key =
-      {state.plan_mode, state.session_id, Process.get(:osa_memory_version, 0), state.channel}
+      {state.plan_mode, Map.get(state, :latex_mode, false), state.session_id,
+       Process.get(:osa_memory_version, 0), state.channel}
 
     case Process.get(:osa_system_msg_cache) do
       {^cache_key, cached_system_msg} ->
@@ -1682,6 +1684,44 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp maybe_inject_memory(context, _state), do: context
+
+  # LaTeX + Lean 4 output mode: when active, append a terse imperative reminder to
+  # the latest user message so the model cannot skip the fenced lean block on a hard
+  # proof (the system-prompt directive alone is weaker at recency). Transient — only
+  # the in-flight context is touched, never the persisted history.
+  defp maybe_nudge_latex_mode(%{messages: msgs} = context, %{latex_mode: true}) do
+    last_user =
+      msgs
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn {m, i} -> if m[:role] == "user", do: i, else: nil end)
+
+    case last_user do
+      nil ->
+        context
+
+      i ->
+        msgs =
+          List.update_at(msgs, i, fn m ->
+            case m[:content] do
+              c when is_binary(c) -> %{m | content: c <> latex_mode_nudge()}
+              _ -> m
+            end
+          end)
+
+        %{context | messages: msgs}
+    end
+  end
+
+  defp maybe_nudge_latex_mode(context, _state), do: context
+
+  defp latex_mode_nudge do
+    "\n\n[LaTeX+Lean mode ON — write ALL math in LaTeX ($...$ / $$...$$), and for " <>
+      "EVERY theorem/lemma/definition/proof include a fenced lean code block of valid " <>
+      "Lean 4 + Mathlib (theorem/def with a `by` proof; if a step is beyond reach close " <>
+      "it with `sorry` but STILL emit the block). Verify both the LaTeX and the lean " <>
+      "block are present before finishing.]"
+  end
 
   # Mid-turn steer drain (primitive #32). Destructively pulls any steer
   # directives queued for this session out of the ETS steer queue and appends

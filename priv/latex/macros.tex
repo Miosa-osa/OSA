@@ -1,0 +1,67 @@
+% macros.tex -- shared math macros and theorem environments.
+% \input this AFTER amsmath/amssymb/amsthm are loaded (the preambles do so).
+% Compatible with pdflatex and tectonic. No shell-escape, no extra packages.
+
+% ---------------------------------------------------------------------------
+% Number sets (blackboard bold).
+% ---------------------------------------------------------------------------
+\providecommand{\R}{\mathbb{R}}
+\providecommand{\N}{\mathbb{N}}
+\providecommand{\Z}{\mathbb{Z}}
+\providecommand{\Q}{\mathbb{Q}}
+\providecommand{\C}{\mathbb{C}}
+\providecommand{\F}{\mathbb{F}}
+
+% ---------------------------------------------------------------------------
+% Paired delimiters (auto-sizing via \left..\right, with a starred *-variant
+% for explicit sizing). Requires amsmath (\DeclarePairedDelimiter).
+% ---------------------------------------------------------------------------
+\DeclarePairedDelimiter{\abs}{\lvert}{\rvert}
+\DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
+\DeclarePairedDelimiter{\set}{\{}{\}}
+\DeclarePairedDelimiter{\ceil}{\lceil}{\rceil}
+\DeclarePairedDelimiter{\floor}{\lfloor}{\rfloor}
+\DeclarePairedDelimiter{\inner}{\langle}{\rangle}
+
+% ---------------------------------------------------------------------------
+% Calculus helpers.
+%   \dd            upright differential "d"
+%   \dd[n]{x}      n-th differential of x, e.g. \dd{x} -> dx, \dd[2]{t}
+%   \eval          evaluation bar: \eval{expr}{a}{b}
+% ---------------------------------------------------------------------------
+\providecommand{\dd}{}
+\renewcommand{\dd}[2][]{\mathop{}\!\mathrm{d}^{#1}#2}
+\newcommand{\eval}[3]{\left.#1\right\rvert_{#2}^{#3}}
+
+% Common operators not predefined by amsmath.
+\DeclareMathOperator{\diverg}{div}
+\DeclareMathOperator{\curl}{curl}
+\DeclareMathOperator{\grad}{grad}
+\DeclareMathOperator{\rank}{rank}
+\DeclareMathOperator{\trace}{tr}
+\DeclareMathOperator{\spann}{span}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+% Convenience shorthands.
+\providecommand{\eps}{\varepsilon}
+\providecommand{\To}{\longrightarrow}
+\newcommand{\deriv}[2]{\frac{\dd{#1}}{\dd{#2}}}
+\newcommand{\pderiv}[2]{\frac{\partial #1}{\partial #2}}
+
+% ---------------------------------------------------------------------------
+% Theorem environments (amsthm). Shared numbering within sections.
+% ---------------------------------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+% (The `proof` environment is provided by amsthm automatically.)

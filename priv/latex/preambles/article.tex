@@ -1,0 +1,47 @@
+% article.tex -- modern article preamble.
+% Compiles clean under tectonic and pdflatex (uses fontenc[T1]+lmodern, not fontspec).
+% Usage: after \documentclass{article}, \input this file, then \input macros.
+%   \documentclass[11pt,a4paper]{article}
+%   \input{../preambles/article.tex}   % or an absolute/relative path
+% This file loads ../macros.tex at the end, so callers get macros for free.
+
+% --- Encoding & fonts (pdflatex + tectonic compatible) --------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% --- Page geometry --------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+
+% --- Math -----------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+
+% --- Graphics, tables, units, color --------------------------------------
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+
+% --- Language & quotes ----------------------------------------------------
+\usepackage{csquotes}
+
+% --- Hyperlinks (load hyperref last, before any macros that need it) ------
+\usepackage{hyperref}
+\definecolor{linknavy}{RGB}{0,51,102}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=linknavy,
+  citecolor=linknavy,
+  urlcolor=linknavy,
+  filecolor=linknavy,
+  pdfborder={0 0 0},
+  bookmarksnumbered=true,
+}
+
+% --- Shared macros --------------------------------------------------------
+\input{\LatexLibRoot macros.tex}
