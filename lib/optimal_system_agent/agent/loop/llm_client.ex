@@ -114,7 +114,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     end
   end
 
-  defp service_tier_for(state) when is_map(state) do
+  @doc false
+  def service_tier_for(state) when is_map(state) do
     provider = Map.get(state, :provider)
 
     case Map.get(state, :priority) do
@@ -125,13 +126,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         "priority"
 
       _ ->
-        if fast_service_tier?(), do: fast_tier_for(provider), else: nil
+        if fast_service_tier?(Map.get(state, :session_id)),
+          do: fast_tier_for(provider),
+          else: nil
     end
   end
 
-  defp service_tier_for(_), do: nil
+  def service_tier_for(_), do: nil
 
-  defp fast_tier_for(:groq), do: "auto"
+  # Both Anthropic and Groq define `auto` as "use priority/performance capacity
+  # when this account has it, otherwise fall back to standard capacity". That
+  # makes `/fast` safe for accounts without a paid capacity commitment.
+  defp fast_tier_for(provider) when provider in [:anthropic, :groq], do: "auto"
 
   defp fast_tier_for(provider)
        when provider in [:openai, :openai_codex, :xai, :google, :openrouter, :bedrock],
@@ -447,11 +453,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   defp maybe_retry_without_service_tier(result, _messages, _opts, _request), do: result
 
-  defp tier_rejection?(reason) do
+  @doc false
+  def tier_rejection?(reason) do
     text = reason |> inspect() |> String.downcase()
 
-    String.contains?(text, ["service_tier", "service tier", "priority tier"]) or
-      Regex.match?(~r/\b(400|403|422)\b/, text)
+    String.contains?(text, [
+      "service_tier",
+      "service tier",
+      "servicetier",
+      "priority tier",
+      "priority processing",
+      "fast mode"
+    ])
   end
 
   defp repair_field(%{} = result, key) do

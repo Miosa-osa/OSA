@@ -102,8 +102,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
     **cursor_position** — Alias for `cursor`; return the current pointer coordinates.
 
     > Coverage varies by platform. Linux X11 supports the full set above; Linux Wayland and
-    > Windows cover screenshot + click/type/key/scroll/drag + clipboard; the MIOSA REST adapter
-    > implements every action. Actions unsupported by the active backend return a clear
+    > Windows cover screenshot + click/type/key/scroll/drag + clipboard. MIOSA exposes most
+    > remote desktop actions but not a local accessibility tree or pointer-only movement.
+    > Actions unsupported by the active backend return a clear
     > "not supported" error rather than failing silently.
 
     ## Parameters

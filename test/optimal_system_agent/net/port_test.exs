@@ -12,12 +12,17 @@ defmodule OptimalSystemAgent.Net.PortTest do
   describe "configured_http_port/0" do
     setup do
       prev_env = System.get_env("OSA_HTTP_PORT")
+      prev_launcher_env = System.get_env("OSA_PORT")
       prev_app = Application.get_env(:optimal_system_agent, :http_port)
 
       on_exit(fn ->
         if prev_env,
           do: System.put_env("OSA_HTTP_PORT", prev_env),
           else: System.delete_env("OSA_HTTP_PORT")
+
+        if prev_launcher_env,
+          do: System.put_env("OSA_PORT", prev_launcher_env),
+          else: System.delete_env("OSA_PORT")
 
         if prev_app,
           do: Application.put_env(:optimal_system_agent, :http_port, prev_app),
@@ -28,26 +33,42 @@ defmodule OptimalSystemAgent.Net.PortTest do
     end
 
     test "OSA_HTTP_PORT env wins" do
+      System.put_env("OSA_PORT", "12344")
       System.put_env("OSA_HTTP_PORT", "12345")
       assert Port.configured_http_port() == 12_345
     end
 
+    test "OSA_PORT is accepted as a launcher-compatible alias" do
+      System.delete_env("OSA_HTTP_PORT")
+      System.put_env("OSA_PORT", "12346")
+      assert Port.configured_http_port() == 12_346
+    end
+
     test "falls back to app-env :http_port when env is unset" do
       System.delete_env("OSA_HTTP_PORT")
+      System.delete_env("OSA_PORT")
       Application.put_env(:optimal_system_agent, :http_port, 23456)
       assert Port.configured_http_port() == 23_456
     end
 
     test "defaults to 9089 when nothing is configured" do
       System.delete_env("OSA_HTTP_PORT")
+      System.delete_env("OSA_PORT")
       Application.delete_env(:optimal_system_agent, :http_port)
       assert Port.configured_http_port() == 9089
     end
 
     test "a non-integer OSA_HTTP_PORT degrades to the default instead of raising" do
       System.put_env("OSA_HTTP_PORT", "not-a-port")
+      System.delete_env("OSA_PORT")
       Application.delete_env(:optimal_system_agent, :http_port)
       assert Port.configured_http_port() == 9089
+    end
+
+    test "an invalid OSA_HTTP_PORT falls through to a valid OSA_PORT alias" do
+      System.put_env("OSA_HTTP_PORT", "not-a-port")
+      System.put_env("OSA_PORT", "12347")
+      assert Port.configured_http_port() == 12_347
     end
   end
 

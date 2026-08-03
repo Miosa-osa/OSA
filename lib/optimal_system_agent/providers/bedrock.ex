@@ -156,7 +156,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     {system, conversation} = split_system(messages)
 
     %{"messages" => format_messages(conversation)}
-    |> maybe_put("serviceTier", Keyword.get(opts, :service_tier))
+    |> maybe_put_service_tier(Keyword.get(opts, :service_tier))
     |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
     |> put_inference_config(opts)
     |> put_tool_config(opts)
@@ -170,6 +170,11 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     |> ImageBudget.gate_unsupported(:bedrock, model)
     |> ImageBudget.apply(provider: :bedrock)
   end
+
+  # Bedrock Converse expects a tagged object, not the bare tier string used by
+  # OpenAI-compatible and Gemini APIs.
+  defp maybe_put_service_tier(body, nil), do: body
+  defp maybe_put_service_tier(body, tier), do: Map.put(body, "serviceTier", %{"type" => tier})
 
   defp do_chat(auth, model, messages, opts) do
     body = build_request_body(messages, model, opts)

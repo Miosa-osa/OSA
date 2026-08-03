@@ -101,7 +101,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
     refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(other_session_id)
 
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai_codex,
+             session_id: session_id
+           }) == "priority"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :groq,
+             session_id: session_id
+           }) == "auto"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :anthropic,
+             session_id: session_id
+           }) == "auto"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :ollama,
+             session_id: session_id
+           }) == nil
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai_codex,
+             session_id: other_session_id
+           }) == nil
+
     execute("fast", session_id)
     refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+  end
+
+  test "fast-tier fallback only recognizes acceleration-specific errors" do
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: invalid tool schema"
+           )
+
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?("HTTP 403: account suspended")
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: service_tier priority is unavailable for this project"
+           )
   end
 end

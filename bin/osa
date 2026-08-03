@@ -37,6 +37,12 @@
 #   --permission-mode <mode>           ask | auto-edit | plan | overdrive
 #   --dev                              Dev profile (port 19001)
 #   --settings <file>                  Extra settings file (highest-priority file layer)
+#
+# Multiple Instances:
+#   Running `osa` in different directories automatically isolates each one
+#   into its own backend daemon (separate port, state dir, memory, sessions).
+#   Same directory = attach to the existing daemon. Different directory = new
+#   daemon on the next free port. Set OSA_PORT or OSA_HOME to override.
 
 set -euo pipefail
 
@@ -130,6 +136,18 @@ _http_ok() {
   fi
 }
 
+# True when any TCP listener owns a local port, whether it is OSA or another
+# process. Auto-isolation must skip foreign listeners too; probing only OSA's
+# /health endpoint mistakes them for free ports and selects a guaranteed bind
+# failure. Bash's /dev/tcp keeps this dependency-free when lsof is unavailable.
+_port_in_use() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti ":$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+  fi
+}
+
 # Elixir version check (>= 1.17)
 check_elixir_version() {
   local ver major minor
@@ -189,19 +207,79 @@ fi
 
 TUI_DIR="$ROOT/priv/rust/tui"
 TUI_BIN="$TUI_DIR/target/release/osagent"
+
+# ── Resolve backend port (honor --dev anywhere in args) ──────────
+# OSA_PORT is the launcher's historical knob; OSA_HTTP_PORT is the backend's.
+# Accept either one, then export both below so the launcher, TUI, and BEAM can
+# never observe different ports.
+_EXPLICIT_PORT="${OSA_PORT:-${OSA_HTTP_PORT:-}}"
+PORT="${_EXPLICIT_PORT:-9089}"
+for _a in "$@"; do
+  [ "$_a" = "--dev" ] && PORT="${_EXPLICIT_PORT:-19001}"
+done
+
+# ── Auto-isolation by working directory ──────────────────────────
+#
+# Like `claude` — run `osa` anywhere and it just works. Same cwd = attach to
+# the existing daemon. Different cwd = spin up a new daemon on the next free
+# port with its own state dir. Zero extra commands.
+#
+# Skip entirely when the user explicitly sets either port name or OSA_HOME (the power-
+# user escape hatch). `--dev` also bypasses: the dev profile is a single
+# fixed instance on 19001.
+if [ -z "$_EXPLICIT_PORT" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
+  _dev_flag=0
+  for _a in "$@"; do [ "$_a" = "--dev" ] && _dev_flag=1; done
+  if [ "$_dev_flag" -eq 0 ]; then
+    # Hash the working directory into a short, stable slug.
+    _ws_hash=$(printf '%s' "$OSA_ORIGINAL_CWD" | shasum -a 256 | cut -c1-12)
+    _ws_home="${HOME}/.osa/workspaces/${_ws_hash}"
+    _ws_port_file="${_ws_home}/run/backend.port"
+
+    # Does this workspace already have a daemon? Check its port file + health.
+    if [ -f "$_ws_port_file" ]; then
+      _ws_port="$(cat "$_ws_port_file" 2>/dev/null || true)"
+      if [ -n "$_ws_port" ] && _http_ok "http://localhost:${_ws_port}/health" 2>/dev/null; then
+        PORT="$_ws_port"
+        OSA_HOME="$_ws_home"
+      fi
+    fi
+
+    # No healthy daemon for this workspace yet — find the next free port.
+    if [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
+      mkdir -p "$_ws_home/run" "$_ws_home/logs"
+      _candidate=9089
+      if _port_in_use "${_candidate}"; then
+        _candidate=9090
+        while _port_in_use "${_candidate}"; do
+          _candidate=$((_candidate + 1))
+        done
+      fi
+      PORT="$_candidate"
+      OSA_HOME="$_ws_home"
+    fi
+  fi
+fi
+export OSA_HOME
+export OSA_PORT="$PORT"
+export OSA_HTTP_PORT="$PORT"
+
+# Fresh per-workspace homes inherit the operator's existing credentials. A
+# real workspace .env still wins, so per-project credentials remain possible.
+if [ "$OSA_HOME" != "${HOME}/.osa" ] && [ -f "${HOME}/.osa/.env" ] && [ ! -e "$OSA_HOME/.env" ]; then
+  ln -s "${HOME}/.osa/.env" "$OSA_HOME/.env" 2>/dev/null || true
+fi
+
+# ── Derived paths (computed AFTER isolation may reassign OSA_HOME) ─
+# PID_FILE / PORT_FILE / LOG_FILE must live under the finalized OSA_HOME
+# so start_daemon writes and stop_daemon reads the same files.
 LOG_DIR="$OSA_HOME/logs"
 RUN_DIR="$OSA_HOME/run"
 PID_FILE="$RUN_DIR/backend.pid"
 PORT_FILE="$RUN_DIR/backend.port"
 LOG_FILE="$LOG_DIR/backend.log"
-
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
-# ── Resolve backend port (honor --dev anywhere in args) ──────────
-PORT="${OSA_PORT:-9089}"
-for _a in "$@"; do
-  [ "$_a" = "--dev" ] && PORT="${OSA_PORT:-19001}"
-done
 HEALTH_URL="http://localhost:${PORT}/health"
 
 # ── --settings <file>: extra highest-priority settings file layer ─
@@ -596,6 +674,11 @@ print_help() {
   echo ""
   echo -e "  ${DIM}The backend keeps running in the background so the next ${RESET}${CYAN}osa${RESET}${DIM} is instant."
   echo -e "  ${DIM}Stop it any time with ${RESET}${CYAN}osa stop${RESET}${DIM}; it also idles down when unused.${RESET}"
+  echo ""
+  echo -e "  ${BOLD}Multiple Instances${RESET}"
+  echo -e "    ${DIM}Run ${RESET}${CYAN}osa${RESET}${DIM} in different directories and each gets its own isolated${RESET}"
+  echo -e "    ${DIM}backend — separate memory, sessions, and config. Same directory = attach.${RESET}"
+  echo -e "    ${DIM}Set ${RESET}${CYAN}OSA_PORT${RESET}${DIM} or ${RESET}${CYAN}OSA_HOME${RESET}${DIM} to override auto-isolation.${RESET}"
   echo ""
 }
 
