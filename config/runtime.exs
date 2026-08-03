@@ -24,25 +24,48 @@ import Config
 # (`OSA_HTTP_PORT`, falling back to the OS pid) so two concurrent suites never
 # clobber each other, and the same age-based sweep so per-run naming does not
 # leak directories forever.
-if config_env() == :test do
-  test_home_tag = System.get_env("OSA_HTTP_PORT") || System.pid()
-  test_home = Path.join(System.tmp_dir!(), "osa-test-home-#{test_home_tag}")
+config_dir =
+  if config_env() == :test do
+    test_home_tag = System.get_env("OSA_HTTP_PORT") || System.pid()
+    test_home = Path.join(System.tmp_dir!(), "osa-test-home-#{test_home_tag}")
 
-  _ = File.rm_rf(test_home)
-  _ = File.mkdir_p(test_home)
+    _ = File.rm_rf(test_home)
+    _ = File.mkdir_p(test_home)
 
-  stale_home_before = System.os_time(:second) - 86_400
+    stale_home_before = System.os_time(:second) - 86_400
 
-  for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-home-*")),
-      match?({:ok, %{mtime: mtime}} when mtime < stale_home_before, File.stat(stale, time: :posix)) do
-    _ = File.rm_rf(stale)
+    for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-home-*")),
+        match?({:ok, %{mtime: mtime}} when mtime < stale_home_before, File.stat(stale, time: :posix)) do
+      _ = File.rm_rf(stale)
+    end
+
+    test_home
+  else
+    System.get_env("OSA_HOME") || Path.expand("~/.osa")
   end
 
-  config :optimal_system_agent, config_dir: test_home
-else
-  config :optimal_system_agent,
-    config_dir: System.get_env("OSA_HOME") || Path.expand("~/.osa")
-end
+# config/config.exs derives skills_dir, episodic_dir, mcp_config_path,
+# bootstrap_dir, data_dir, sessions_dir and Store.Repo's database path from
+# the SAME Path.expand("~/.osa/...") pattern as config_dir above — but only
+# config_dir gets re-resolved here at boot. The other six are still whatever
+# HOME was on the machine that ran `mix release` (e.g. /Users/runner on CI),
+# so every fresh install boots pointed at a directory that only exists on the
+# build host: Exqlite.Connection fails with `enoent` opening the sqlite file,
+# the backend crash-loops before it can ever save onboarding state, and
+# `osa doctor` reports missing workspace files it's looking for in the wrong
+# place. Re-derive all of them from the same runtime-resolved config_dir so
+# they track the operator's actual home like config_dir already does.
+config :optimal_system_agent,
+  config_dir: config_dir,
+  skills_dir: Path.join(config_dir, "skills"),
+  episodic_dir: Path.join(config_dir, "memory/episodic"),
+  mcp_config_path: Path.join(config_dir, "mcp.json"),
+  bootstrap_dir: config_dir,
+  data_dir: Path.join(config_dir, "data"),
+  sessions_dir: Path.join(config_dir, "sessions")
+
+config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
+  database: Path.join(config_dir, "osa.db")
 
 # ── Logger level override via env var ────────────────────────────────────
 case System.get_env("LOGGER_LEVEL") do
