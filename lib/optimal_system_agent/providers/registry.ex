@@ -361,7 +361,134 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  # ── Structured-content normalization (the second provider boundary) ────────
+  # Opts for a hop to a DIFFERENT provider than the one the turn resolved.
+  #
+  # `opts[:model]` is resolved for the provider that just failed. Forwarding it
+  # asked Ollama for `claude-sonnet-5` — a tag its daemon has never heard of — so
+  # every Ollama fallback failed for a reason that had nothing to do with the
+  # actual fault, and that bogus error is the one the chain reported. Dropping the
+  # key lets each provider resolve its own configured default (`OLLAMA_MODEL`,
+  # `OPENAI_MODEL`, …), which is the only model it can actually serve.
+  defp cross_provider_opts(opts), do: Keyword.drop(opts, [:model])
+
+  # ── Outbound message normalization (the second provider boundary) ─────────
+  #
+  # Everything a provider module reads off a MESSAGE gets normalized here, once,
+  # before dispatch/fallback: structured `content` blocks (below) and tool-call
+  # `arguments` (further below). Both are idempotent, so re-entry through a retry
+  # or a fallback hop is free.
+  @doc false
+  @spec normalize_outbound_messages(list(), module() | {:compat, atom()}) :: list()
+  def normalize_outbound_messages(messages, target) when is_list(messages) do
+    messages
+    |> normalize_tool_call_arguments()
+    |> normalize_message_content(target)
+  end
+
+  def normalize_outbound_messages(messages, _target), do: messages
+
+  # ── Tool-call argument normalization ──────────────────────────────────────
+  #
+  # A tool call's `arguments` must be an OBJECT by the time it reaches any wire.
+  # Providers emit it verbatim — Anthropic as `tool_use.input`, Ollama/Google as
+  # a nested map, the OpenAI-compatible providers as a JSON encoding OF it — and
+  # every one of them rejects a bare string:
+  #
+  #     anthropic → 400 messages.N.content.M.tool_use.input: Input should be an object
+  #     ollama    → 400 {"error":"Value looks like object, but can't find closing '}' symbol"}
+  #
+  # `Agent.Compactor` used to strip heavy arguments to the STRING
+  # `"[args stripped]"`, and compacted history is PERSISTED. That made the damage
+  # permanent and provider-independent: the primary provider 400'd, then every
+  # provider in the fallback chain 400'd on the same message, so the only error
+  # the user ever saw was the last hop's — an Ollama parse error on a session
+  # configured for Anthropic, unfixable by switching models.
+  #
+  # The Compactor no longer writes it, but sessions already on disk still carry
+  # it, so the coercion belongs HERE as well as at the source: history is loaded,
+  # not rebuilt, and a session recorded before the fix must not stay bricked.
+  # This is also the natural home for the inverse case — an OpenAI-shaped
+  # provider that reported `arguments` as a JSON-encoded object string.
+  @doc false
+  @spec normalize_tool_call_arguments(list()) :: list()
+  def normalize_tool_call_arguments(messages) when is_list(messages) do
+    # Cheap guard: valid arguments are the overwhelmingly common case, and a
+    # retry loop re-enters here on every attempt. Only rebuild when needed.
+    if Enum.any?(messages, &invalid_tool_args?/1) do
+      Enum.map(messages, &coerce_message_tool_args/1)
+    else
+      messages
+    end
+  end
+
+  def normalize_tool_call_arguments(messages), do: messages
+
+  defp invalid_tool_args?(msg) when is_map(msg) do
+    case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
+      calls when is_list(calls) ->
+        Enum.any?(calls, fn
+          tc when is_map(tc) -> not is_map(tc[:arguments] || tc["arguments"])
+          _ -> false
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp invalid_tool_args?(_msg), do: false
+
+  defp coerce_message_tool_args(msg) when is_map(msg) do
+    cond do
+      is_list(Map.get(msg, :tool_calls)) ->
+        Map.put(msg, :tool_calls, Enum.map(Map.get(msg, :tool_calls), &coerce_tool_call_args/1))
+
+      is_list(Map.get(msg, "tool_calls")) ->
+        Map.put(msg, "tool_calls", Enum.map(Map.get(msg, "tool_calls"), &coerce_tool_call_args/1))
+
+      true ->
+        msg
+    end
+  end
+
+  defp coerce_message_tool_args(msg), do: msg
+
+  # Write back under the key shape the call already uses, for the same reason the
+  # Compactor does: a rehydrated call from a persisted session is string-keyed,
+  # and an atom `:arguments` added beside its `"arguments"` would leave the
+  # invalid value still sitting on the wire under the string key.
+  defp coerce_tool_call_args(tc) when is_map(tc) do
+    cond do
+      is_map(Map.get(tc, :arguments)) ->
+        tc
+
+      is_map(Map.get(tc, "arguments")) ->
+        tc
+
+      Map.has_key?(tc, "arguments") and not Map.has_key?(tc, :arguments) ->
+        Map.put(tc, "arguments", decode_tool_args(Map.get(tc, "arguments")))
+
+      true ->
+        Map.put(tc, :arguments, decode_tool_args(Map.get(tc, :arguments)))
+    end
+  end
+
+  defp coerce_tool_call_args(tc), do: tc
+
+  # A JSON-encoded object is recovered rather than discarded — that is a real
+  # OpenAI-shaped wire value and the call's inputs are still in there. Anything
+  # else (the old `"[args stripped]"` placeholder, a stream truncated mid-object,
+  # a JSON array or scalar, `nil`) becomes the empty object.
+  defp decode_tool_args(raw) when is_binary(raw) do
+    case Jason.decode(raw) do
+      {:ok, %{} = decoded} -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp decode_tool_args(_raw), do: %{}
+
+  # ── Structured-content normalization ──────────────────────────────────────
   #
   # The sibling of `sanitize_tool_schemas/1` above, for message CONTENT.
   #
@@ -615,14 +742,31 @@ defmodule OptimalSystemAgent.Providers.Registry do
     fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
 
     remaining_chain =
-      fallback_chain
-      |> Enum.drop_while(&(&1 == provider))
-      |> then(fn
-        chain when chain == fallback_chain -> chain
-        [_ | rest] -> rest
-        [] -> []
-      end)
-      |> filter_boot_excluded_providers()
+      if should_fallback?(reason) do
+        fallback_chain
+        |> Enum.drop_while(&(&1 == provider))
+        |> then(fn
+          chain when chain == fallback_chain -> chain
+          [_ | rest] -> rest
+          [] -> []
+        end)
+        |> filter_boot_excluded_providers()
+      else
+        # Same policy the sync path has enforced since finding #9, which this
+        # path was simply missing: a non-transient failure — invalid request,
+        # bad request shape, auth, model-not-found, context overflow — is not
+        # provider-specific. Re-sending it only produces a SECOND, unrelated
+        # error from the next provider, and because the chain reported its LAST
+        # error, that impostor is what the user saw. A malformed tool_use in the
+        # history surfaced as an Ollama JSON parse error on a session configured
+        # for Anthropic, which is why switching models appeared to change nothing.
+        Logger.warning(
+          "Provider #{provider} stream failed with a non-transient error — not falling back: " <>
+            Resilience.reason_to_string(reason)
+        )
+
+        []
+      end
 
     if remaining_chain == [] do
       Logger.error(
@@ -636,13 +780,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
           "Trying fallback chain: #{inspect(remaining_chain)}"
       )
 
-      Enum.reduce_while(remaining_chain, {:error, reason}, fn fb_provider, _acc ->
+      Enum.reduce_while(remaining_chain, {:error, reason}, fn fb_provider, acc ->
         case Map.get(@providers, fb_provider) do
           nil ->
-            {:cont, {:error, "Unknown fallback provider: #{fb_provider}"}}
+            Logger.warning("Unknown fallback provider: #{fb_provider}")
+            {:cont, acc}
 
           fb_module ->
-            case try_stream_provider(fb_module, messages, callback, opts) do
+            case try_stream_provider(fb_module, messages, callback, cross_provider_opts(opts)) do
               :ok ->
                 emit_serving_provider(fb_provider, opts)
                 {:halt, :ok}
@@ -652,7 +797,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
                   "Fallback stream provider #{fb_provider} failed: #{Resilience.reason_to_string(r)}"
                 )
 
-                {:cont, {:error, r}}
+                # Keep the PRIMARY reason as the accumulator. It is the only
+                # actionable one: the fallback hops are collateral, and reporting
+                # the last hop's error is what made an Anthropic history bug read
+                # as an Ollama failure.
+                {:cont, acc}
             end
         end
       end)
@@ -670,7 +819,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
   # error and decide whether to retry the same provider.
   defp native_stream(target, messages, callback, opts) do
-    do_native_stream(target, normalize_message_content(messages, target), callback, opts)
+    do_native_stream(target, normalize_outbound_messages(messages, target), callback, opts)
   end
 
   defp do_native_stream({:compat, provider}, messages, callback, opts) do
@@ -774,7 +923,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp notify_stream_retry(_callback, _info), do: :ok
 
   defp try_stream_provider(target, messages, callback, opts) do
-    do_try_stream_provider(target, normalize_message_content(messages, target), callback, opts)
+    do_try_stream_provider(target, normalize_outbound_messages(messages, target), callback, opts)
   end
 
   defp do_try_stream_provider({:compat, provider}, messages, callback, opts) do
@@ -835,7 +984,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp merge_retry_ctx(opts, _ctx), do: opts
 
   defp apply_provider(target, messages, opts) do
-    do_apply_provider(target, normalize_message_content(messages, target), opts)
+    do_apply_provider(target, normalize_outbound_messages(messages, target), opts)
   end
 
   defp do_apply_provider({:compat, provider}, messages, opts) do
