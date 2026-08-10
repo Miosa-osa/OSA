@@ -5,7 +5,7 @@
 #   bin/install
 #
 # For a fresh install from scratch, use the one-liner instead:
-#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
 
 set -euo pipefail
 
