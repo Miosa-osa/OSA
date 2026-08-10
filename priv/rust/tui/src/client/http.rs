@@ -355,6 +355,16 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// POST /api/v1/mcp/:name/toggle — flip an inherited server on or off.
+    ///
+    /// The backend owns the allow-list edit (`mcp_import_only` in user
+    /// settings) and reloads the client, so the caller only has to refetch.
+    pub async fn toggle_mcp_server(&self, name: &str) -> Result<()> {
+        let path = format!("/api/v1/mcp/{name}/toggle");
+        let _ = self.post(&path, &serde_json::json!({})).await?;
+        Ok(())
+    }
+
     /// GET /api/v1/cost — spend + token accounting.
     pub async fn get_cost(&self) -> Result<crate::client::types::CostResponse> {
         let resp = self.get("/api/v1/cost").await?;

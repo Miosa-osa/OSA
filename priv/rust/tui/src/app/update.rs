@@ -259,12 +259,18 @@ impl App {
             }
             AppState::Mcp => {
                 use crate::dialogs::mcp_servers::McpServersAction;
-                if matches!(
-                    self.mcp_servers.as_mut().map(|d| d.handle_key(key)),
-                    Some(McpServersAction::Close)
-                ) {
-                    self.mcp_servers = None;
-                    self.exit_overlay();
+                match self.mcp_servers.as_mut().map(|d| d.handle_key(key)) {
+                    Some(McpServersAction::Close) => {
+                        self.mcp_servers = None;
+                        self.exit_overlay();
+                    }
+                    Some(McpServersAction::Toggle(name)) => {
+                        // The backend owns the allow-list edit and reloads the
+                        // client; refetch so the row reflects reality rather
+                        // than an optimistic guess that could disagree with it.
+                        self.toggle_mcp_server(name);
+                    }
+                    _ => {}
                 }
                 false
             }

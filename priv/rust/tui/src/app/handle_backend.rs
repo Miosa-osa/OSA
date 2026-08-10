@@ -912,6 +912,8 @@ impl App {
                             enabled: s.enabled,
                             status: s.status,
                             tool_count: s.tool_count,
+                            source: s.source,
+                            toggleable: s.toggleable,
                         })
                         .collect();
                     self.mcp_servers =

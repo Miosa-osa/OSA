@@ -34,6 +34,10 @@ pub struct McpServer {
     pub enabled: bool,
     pub status: String,
     pub tool_count: i64,
+    /// Where it came from ("osa" = the operator's own mcp.json).
+    pub source: String,
+    /// Whether space can switch it on/off here.
+    pub toggleable: bool,
 }
 
 /// The full `/mcp` view: the server list plus cursor + scroll state.
@@ -46,10 +50,13 @@ pub struct McpServers {
 }
 
 /// Bubble-up result of `/mcp` key handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServersAction {
     /// The overlay should be dismissed.
     Close,
+    /// Switch this server on or off, then refetch. Carries the name rather
+    /// than the row index so the caller is not coupled to sort order.
+    Toggle(String),
     /// Key consumed; keep the overlay open.
     None,
 }
@@ -87,6 +94,17 @@ impl McpServers {
             }
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = last,
+            // Space switches the highlighted server on or off. Only inherited
+            // servers are toggleable: OSA's own mcp.json entries are the
+            // operator's deliberate config and are not rewritten from here, so
+            // the key is a no-op on those rather than a silent failure.
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if let Some(s) = self.servers.get(self.cursor) {
+                    if s.toggleable {
+                        return McpServersAction::Toggle(s.name.clone());
+                    }
+                }
+            }
             _ => {}
         }
         McpServersAction::None
@@ -133,10 +151,25 @@ impl McpServers {
         // ── header count ────────────────────────────────────────────────────
         let total = self.servers.len();
         let connected = self.connected_count();
-        let header = format!(
-            "{total} server{} ({connected} connected)",
-            if total == 1 { "" } else { "s" }
-        );
+        // "available" rows are servers found in another tool's config that the
+        // allow list does not name yet. Counting them separately answers the
+        // question the old header could not: how many could I turn on?
+        let off = self
+            .servers
+            .iter()
+            .filter(|s| s.status.eq_ignore_ascii_case("available"))
+            .count();
+        let header = if off > 0 {
+            format!(
+                "{} on ({connected} connected) \u{00b7} {off} available to enable",
+                total - off
+            )
+        } else {
+            format!(
+                "{total} server{} ({connected} connected)",
+                if total == 1 { "" } else { "s" }
+            )
+        };
         put(
             frame,
             Paragraph::new(Line::from(Span::styled(
@@ -194,6 +227,11 @@ impl McpServers {
                     Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "space",
+                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" enable/disable  ", Style::default().fg(c.dim)),
                 Span::styled(
                     "esc",
                     Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
@@ -318,11 +356,11 @@ mod mcp_servers_tests {
 
     fn sample() -> Vec<McpServer> {
         vec![
-            McpServer { name: "filesystem".into(), transport: "stdio".into(), enabled: true, status: "connected".into(), tool_count: 12 },
-            McpServer { name: "github".into(), transport: "stdio".into(), enabled: true, status: "connecting".into(), tool_count: 0 },
-            McpServer { name: "postgres".into(), transport: "http".into(), enabled: false, status: "disabled".into(), tool_count: 3 },
-            McpServer { name: "sentry".into(), transport: "sse".into(), enabled: true, status: "error".into(), tool_count: 1 },
-            McpServer { name: "\u{4e2d}\u{6587}\u{670d}\u{52a1}\u{5668}".into(), transport: "\u{20ac}".repeat(40), enabled: true, status: "ready".into(), tool_count: 99 },
+            McpServer { name: "filesystem".into(), transport: "stdio".into(), enabled: true, status: "connected".into(), tool_count: 12, source: "claude_code".into(), toggleable: true },
+            McpServer { name: "github".into(), transport: "stdio".into(), enabled: true, status: "connecting".into(), tool_count: 0, source: "claude_code".into(), toggleable: true },
+            McpServer { name: "postgres".into(), transport: "http".into(), enabled: false, status: "disabled".into(), tool_count: 3, source: "claude_code".into(), toggleable: true },
+            McpServer { name: "sentry".into(), transport: "sse".into(), enabled: true, status: "error".into(), tool_count: 1, source: "claude_code".into(), toggleable: true },
+            McpServer { name: "\u{4e2d}\u{6587}\u{670d}\u{52a1}\u{5668}".into(), transport: "\u{20ac}".repeat(40), enabled: true, status: "ready".into(), tool_count: 99, source: "claude_code".into(), toggleable: true },
         ]
     }
 
