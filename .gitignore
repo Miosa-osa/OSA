@@ -90,3 +90,9 @@ desktop/vite.config.ts.timestamp-*
 
 # Competitive intelligence (never push)
 .competitive-intel/
+
+# Local agent-tool state. .axon holds a ~100MB kuzu graph DB that exceeds
+# GitHub's 100MB file limit, so an auto-stash that sweeps it up produces a
+# branch that can never be pushed.
+.axon/
+.serena/
