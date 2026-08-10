@@ -59,8 +59,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
     "metrics" => {"Show telemetry metrics", :cmd_metrics},
-    "login" => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
-    "logout" => {"Disconnect OAuth session for a provider", :cmd_logout},
+    "login" => {"Provider sign-in status (OSA uses API keys)", :cmd_login},
+    "logout" => {"Clear a provider sign-in session", :cmd_logout},
     "setup" => {"Re-run the setup wizard", :cmd_setup},
     "customize" => {"Make OSA yours — identity, skills, schedules, channels", :cmd_customize},
     "channels" => {"Show connected messaging channels", :cmd_channels},
@@ -1255,143 +1255,45 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
-  @oauth_providers %{
-    "anthropic" => %{name: "Anthropic", module: OptimalSystemAgent.Auth.OAuth}
-    # Future: "openai" => %{name: "OpenAI", module: OptimalSystemAgent.Auth.OpenAIOAuth}
-  }
+  # ── /login, /logout — Anthropic sign-in REMOVED ───────────────────────
+  #
+  # These used to run an OAuth 2.0 + PKCE flow against console.anthropic.com
+  # with Claude Code's first-party client id. Removed — see
+  # `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`. The commands remain so a
+  # user who relied on them gets a clear explanation and the API-key route,
+  # rather than "unknown command".
 
-  def cmd_login(args, session_id) do
-    provider_slug = String.trim(args) |> String.downcase()
+  def cmd_login(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}Sign in with a provider#{@reset}")
+    IO.puts("")
+    IO.puts("  #{@yellow}Anthropic sign-in is no longer available.#{@reset}")
+    IO.puts("  #{@dim}#{OptimalSystemAgent.Auth.LegacyAnthropicOAuth.notice()}#{@reset}")
+    IO.puts("")
+    IO.puts("  #{@dim}No provider currently supports account sign-in — use an API key:#{@reset}")
 
-    cond do
-      provider_slug == "" ->
-        # No provider specified — show available OAuth providers
-        IO.puts("")
-        IO.puts("  #{@bold}Sign in with a provider#{@reset}")
-        IO.puts("")
+    IO.puts(
+      "  #{@cyan}/setup#{@reset}  #{@dim}or#{@reset}  #{@cyan}ANTHROPIC_API_KEY=sk-ant-...#{@reset}"
+    )
 
-        for {slug, meta} <- @oauth_providers do
-          configured = check_oauth_configured(slug)
-
-          status =
-            if configured,
-              do: "#{@green}✓ connected#{@reset}",
-              else: "#{@dim}not connected#{@reset}"
-
-          IO.puts("  #{@cyan}/login #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}  #{status}")
-        end
-
-        IO.puts("")
-        IO.puts("#{@dim}  Or set an API key directly: ANTHROPIC_API_KEY=sk-...#{@reset}\n")
-
-      Map.has_key?(@oauth_providers, provider_slug) ->
-        meta = @oauth_providers[provider_slug]
-
-        if check_oauth_configured(provider_slug) do
-          IO.puts("#{@green}  ✓ Already signed in with #{meta.name}#{@reset}")
-          IO.puts("#{@dim}  Use /logout #{provider_slug} to disconnect#{@reset}\n")
-        else
-          start_oauth_flow(meta.name)
-        end
-
-      true ->
-        IO.puts("#{@yellow}  Unknown provider: #{provider_slug}#{@reset}")
-        available = Map.keys(@oauth_providers) |> Enum.join(", ")
-        IO.puts("#{@dim}  Providers with OAuth: #{available}#{@reset}\n")
-    end
+    IO.puts("")
 
     session_id
   end
 
-  def cmd_logout(args, session_id) do
-    provider_slug = String.trim(args) |> String.downcase()
+  def cmd_logout(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@dim}No account sign-in sessions exist — OSA uses API keys only.#{@reset}")
 
-    cond do
-      provider_slug == "" ->
-        # Show what's connected
-        connected =
-          Enum.filter(@oauth_providers, fn {slug, _} -> check_oauth_configured(slug) end)
-
-        if connected == [] do
-          IO.puts("#{@dim}  No OAuth sessions active#{@reset}\n")
-        else
-          for {slug, meta} <- connected do
-            IO.puts("#{@dim}  /logout #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}")
-          end
-
-          IO.puts("")
-        end
-
-      Map.has_key?(@oauth_providers, provider_slug) ->
-        meta = @oauth_providers[provider_slug]
-
-        if check_oauth_configured(provider_slug) do
-          OptimalSystemAgent.Auth.OAuth.clear_credentials()
-          IO.puts("#{@dim}  Disconnected from #{meta.name}#{@reset}\n")
-        else
-          IO.puts("#{@dim}  Not connected to #{meta.name}#{@reset}\n")
-        end
-
-      true ->
-        IO.puts("#{@yellow}  Unknown provider: #{provider_slug}#{@reset}\n")
+    if OptimalSystemAgent.Auth.LegacyAnthropicOAuth.purged?() do
+      IO.puts(
+        "  #{@dim}A stale ~/.osa/oauth.json from the removed Anthropic sign-in was deleted.#{@reset}"
+      )
     end
+
+    IO.puts("")
 
     session_id
-  end
-
-  defp check_oauth_configured(_slug) do
-    # Currently all OAuth providers use the same credential store
-    OptimalSystemAgent.Auth.OAuth.oauth_configured?()
-  end
-
-  defp start_oauth_flow(provider_name) do
-    alias OptimalSystemAgent.Auth.OAuth
-
-    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
-    redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
-    {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
-
-    try do
-      :ets.new(:oauth_state, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> :oauth_state
-    end
-
-    :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
-
-    IO.puts("")
-    IO.puts("#{@bold}  Sign in with #{provider_name}#{@reset}")
-    IO.puts("#{@dim}  Opening your browser...#{@reset}")
-    IO.puts("")
-
-    # Best-effort only — on a headless box (SSH, container) with no
-    # xdg-open/open on PATH, System.cmd/2 raises ErlangError(:enoent). The
-    # URL is printed below regardless, so a missing/failing opener must
-    # never crash the /login flow. See OptimalSystemAgent.Utils.Browser.
-    OptimalSystemAgent.Utils.Browser.open(authorize_url)
-
-    IO.puts("#{@dim}  If the browser didn't open, visit:#{@reset}")
-    IO.puts("#{@cyan}  #{authorize_url}#{@reset}")
-    IO.puts("")
-    IO.puts("#{@dim}  Waiting for authorization...#{@reset}")
-
-    poll_oauth_status(30)
-  end
-
-  defp poll_oauth_status(0) do
-    IO.puts("#{@yellow}  Timed out waiting for authorization#{@reset}\n")
-  end
-
-  defp poll_oauth_status(remaining) do
-    Process.sleep(2_000)
-
-    case OptimalSystemAgent.Auth.OAuth.oauth_configured?() do
-      true ->
-        IO.puts("#{@green}  ✓ Connected to Anthropic#{@reset}\n")
-
-      false ->
-        poll_oauth_status(remaining - 1)
-    end
   end
 
   def cmd_setup(_args, session_id) do
@@ -2549,12 +2451,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     depth =
       case Enum.drop_while(tokens, &(&1 not in ["--depth", "-d"])) do
-        [_, value | _] -> case Integer.parse(value) do
-                            {n, _} when n > 0 -> min(n, 6)
-                            _ -> 3
-                          end
+        [_, value | _] ->
+          case Integer.parse(value) do
+            {n, _} when n > 0 -> min(n, 6)
+            _ -> 3
+          end
 
-        _ -> 3
+        _ ->
+          3
       end
 
     path = Enum.find(tokens, &(not String.starts_with?(&1, "-") and &1 not in [to_string(depth)]))

@@ -275,7 +275,53 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     {nil, entry && entry.base_url}
   end
 
+  # The dual-mode fork, driven off the catalog's `auth_modes` through the same
+  # pure decision functions the in-app `/setup` uses
+  # (`OptimalSystemAgent.CLI.Setup`), so both entry points offer the identical
+  # choice — exactly the pattern `Onboarding.ollama_cloud_route/3` already
+  # established for Ollama Cloud.
+  #
+  # A key-only provider gets `[]` back from `auth_options/1` and falls through
+  # to the unchanged key flow below.
   defp collect_credentials(provider_id, detected) do
+    modes = Onboarding.usable_auth_modes(provider_id)
+
+    choice =
+      case Onboarding.auth_options(provider_id) do
+        [] -> nil
+        options -> Prompt.select("How do you want to connect?", options)
+      end
+
+    case Onboarding.auth_route_for(modes, choice) do
+      :oauth -> wizard_sign_in(provider_id, modes, detected)
+      :api_key -> collect_api_key(provider_id, detected)
+    end
+  end
+
+  defp wizard_sign_in(provider_id, modes, detected) do
+    entry = catalog_entry(provider_id)
+    name = (entry && entry.name) || provider_id
+
+    case OptimalSystemAgent.Auth.Subscription.login(provider_id, io: &IO.puts/1) do
+      {:ok, _} ->
+        Prompt.completed("Credentials", "signed in to #{name}")
+        {nil, entry && entry.base_url}
+
+      {:error, reason} ->
+        IO.puts("")
+        IO.puts("\e[33m  #{OptimalSystemAgent.Auth.Subscription.message(reason, name)}\e[0m")
+
+        # No automatic fallback — silently switching billing model is worse
+        # than a clear error. Offer it, do not impose it.
+        if :api_key in modes and Prompt.confirm("Use an API key instead?") do
+          collect_api_key(provider_id, detected)
+        else
+          {nil, entry && entry.base_url}
+        end
+    end
+  end
+
+  defp collect_api_key(provider_id, detected) do
     env_var = provider_env_var(provider_id)
     existing_key = find_detected_key(provider_id, detected) || System.get_env(env_var)
 

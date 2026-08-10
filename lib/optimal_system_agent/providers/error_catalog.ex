@@ -28,16 +28,16 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
     credit_balance:
       "Credit balance is too low · Top up your provider account, or run /model to switch to a different provider.",
     missing_api_key:
-      "No API key configured · Run `osa setup` (or /login) to add a provider key, then try again.",
+      "No API key configured · Run `osa setup` to add a provider key, then try again.",
     invalid_api_key:
-      "Invalid or missing API key · Run /login to re-authenticate, or update the provider key in your settings.",
-    token_revoked: "OAuth token revoked · Run /login to re-authenticate.",
+      "Invalid or missing API key · Run `osa setup`, or update the provider key in your settings.",
+    token_revoked: "Provider token revoked · Run `osa setup` to supply a fresh API key.",
     oauth_org_not_allowed:
-      "Your organization does not allow OAuth for this tool · Run /login with a different account, or contact your administrator.",
+      "Your organization does not allow this sign-in method · Use an API key (`osa setup`), or contact your administrator.",
     org_disabled:
       "This API key belongs to a disabled organization · Update or unset the configured API key (check environment variables and settings).",
     auth:
-      "Authentication failed (401/403) · Run /login, or verify the provider API key in your settings.",
+      "Authentication failed (401/403) · Run `osa setup`, or verify the provider API key in your settings.",
     model_not_found:
       "The selected model is unavailable (404 or unknown model) · Run /model to pick a different model.",
     request_too_large:
@@ -319,8 +319,8 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       [_, env_var] ->
         provider = env_var |> String.replace_suffix("_API_KEY", "") |> humanize_provider()
 
-        "#{@api_error_prefix}: No API key configured for #{provider} · Run `osa setup` " <>
-          "(or /login), or set #{env_var}=…, then try again."
+        "#{@api_error_prefix}: No API key configured for #{provider} · Run `osa setup`, " <>
+          "or set #{env_var}=…, then try again."
 
       _ ->
         "#{@api_error_prefix}: #{Map.fetch!(@messages, :missing_api_key)}"

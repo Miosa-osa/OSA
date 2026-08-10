@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.062-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.063-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-82-blue.svg)](#built-in-tools)
@@ -48,7 +48,7 @@ setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.062` (`$env:OSA_VERSION = "v1.0.062"` on
+specific release with `OSA_VERSION=v1.0.063` (`$env:OSA_VERSION = "v1.0.063"` on
 Windows). On any other platform (macOS Intel, Linux arm64) the installer stops
 and points you at the from-source script below.
 
@@ -407,7 +407,7 @@ osa
 First run detects your setup and offers:
 
 1. **Quick Start**: auto-detect providers and go
-2. **Manual Setup**: choose a provider, enter an API key or OAuth sign-in, pick a model
+2. **Manual Setup**: choose a provider, enter an API key, pick a model
 3. **Skip**: configure later with `/setup` or by editing `~/.osa/.env`
 
 Then just talk to it:
@@ -469,7 +469,6 @@ Anything already exported in your shell wins over this file, so
 ├── keybindings.json  # Optional TUI key remapping
 ├── mcp.json          # Your MCP servers (user scope)
 ├── trusted_workspaces.json  # Directories you have granted trust
-├── oauth.json        # OAuth credentials (auto-refreshed)
 ├── version           # Installed release, used by `osa update`
 ├── IDENTITY.md       # Agent personality
 ├── USER.md           # User profile

@@ -64,7 +64,28 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       check_working_directory(),
       check_postgresql(),
       check_amqp()
-    ] ++ onboarding_checks()
+    ] ++ legacy_anthropic_oauth_checks() ++ onboarding_checks()
+  end
+
+  # Only ever appears for a user who was signed in with the removed Anthropic
+  # subscription flow — everyone else sees no extra row. `osa doctor` runs from
+  # a cold VM too (no Application.start), so purge here as well as at boot.
+  defp legacy_anthropic_oauth_checks do
+    alias OptimalSystemAgent.Auth.LegacyAnthropicOAuth
+
+    purged = LegacyAnthropicOAuth.purge() == :purged
+
+    if purged or LegacyAnthropicOAuth.purged?() do
+      # `:optional`, not `:fail` — a user who ALSO has an API key configured is
+      # perfectly healthy and must not be told "NOT READY". The row exists to
+      # explain the change; `check_provider` is what reports an actual
+      # missing-credential failure.
+      [{:optional, "Anthropic sign-in", LegacyAnthropicOAuth.notice()}]
+    else
+      []
+    end
+  rescue
+    _ -> []
   end
 
   @doc """

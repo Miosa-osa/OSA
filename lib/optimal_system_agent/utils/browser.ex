@@ -2,17 +2,21 @@ defmodule OptimalSystemAgent.Utils.Browser do
   @moduledoc """
   Best-effort "open a URL in the system browser" helper.
 
-  Every OAuth flow in OSA (REPL `/login`, `/setup`'s Anthropic OAuth branch,
-  the legacy `osa.chat` first-run) prints the authorize URL and then tries to
+  Any browser hand-off in OSA should print the URL first and then try to
   auto-open it as a convenience. On a headless box (SSH session, container,
   WSL without a desktop) the opener binary (`xdg-open` on Linux, `open` on
   macOS) is frequently missing, and `System.cmd/2` RAISES `ErlangError`
   (`:enoent`) rather than returning an error tuple when the executable can't
-  be found on PATH. Every call site used to invoke `System.cmd/2` directly
-  and unguarded, so a first-time user on a headless machine choosing
-  "Sign in with Anthropic" crashed the whole setup process with a raw
-  Erlang stack trace — even though the URL had already been printed and the
-  flow could keep working fine via manual copy/paste.
+  be found on PATH. Call sites used to invoke `System.cmd/2` directly and
+  unguarded, so a first-time user on a headless machine picking a
+  browser-based setup step crashed the whole setup process with a raw Erlang
+  stack trace — even though the URL had already been printed and the flow
+  could keep working fine via manual copy/paste.
+
+  > OSA currently has no in-app browser hand-off: the only one that existed was
+  > the Anthropic subscription sign-in, which was removed (see
+  > `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`). This helper is kept as the
+  > safe entry point for the next one.
 
   This wraps the attempt so a missing/failing opener silently degrades to
   "user copies the printed link" instead of taking down onboarding.
@@ -20,8 +24,8 @@ defmodule OptimalSystemAgent.Utils.Browser do
   Opening is gated by `config :optimal_system_agent, :browser_open_enabled`
   (default `true`, set to `false` in `config/test.exs`). Without that gate a
   test that exercises `open/1` on a developer's DESKTOP machine really does
-  launch their browser — which is exactly how a placeholder OAuth URL from a
-  test fixture ended up popping open on a user's screen on every suite run.
+  launch their browser — which is exactly how a placeholder URL from a test
+  fixture ended up popping open on a user's screen on every suite run.
   """
 
   @doc """

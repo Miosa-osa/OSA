@@ -9,6 +9,135 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.63] — displays as `v1.0.063`
+
+You can now run OSA on a ChatGPT Plus/Pro plan instead of an API key: pick the
+provider, choose "connect account", approve in the browser, done. Provider setup
+grew a general notion of *how* you want to connect, so a provider that offers
+both a sign-in and a key asks once and every setup surface asks it the same way.
+Two live security issues are fixed — an Anthropic sign-in OSA should never have
+shipped, and two secrets that were readable out of `ps` by any local user. And
+the in-app `/setup` provider picker, broken in v1.0.62, works again.
+
+### Added — sign in with your ChatGPT plan
+
+- **`ChatGPT (Codex)` is a new provider entry.** Choose it in `osa setup`, in
+  `mix osa.setup.wizard` or in the TUI picker, choose "Sign in with ChatGPT",
+  approve in the browser, and the credential is stored and refreshed for you.
+  Inference bills against your existing subscription rather than per-token API
+  credit.
+
+- **It is a separate provider, not a second auth mode on `openai`.** The two
+  differ in more than the credential: a different base URL, a different wire
+  protocol, and a Codex-only model list. Same reasoning as the existing
+  `ollama_local` / `ollama_cloud` split. The `openai` provider and
+  `openai_compat.ex` are byte-for-byte untouched — an OpenAI API key still
+  belongs on the `openai` entry, and still behaves exactly as it did.
+
+- **A new Responses-API transport** (`providers/openai_responses.ex`) sits
+  alongside the existing chat/completions one rather than replacing it. The two
+  protocols disagree on request shape, streaming events and usage keys; a
+  working path quietly reshaped by a change aimed at something else is the
+  failure mode this project has been bitten by most often.
+
+- **Sign-in runs over the OAuth device flow** (`auth/device_flow.ex`,
+  `auth/providers/openai_codex.ex`), with tokens in a 0600 credential store
+  separate from your keys, refreshed on use and never written to argv or logs.
+  A signed-in provider is badged as configured in the picker exactly like a
+  provider with a key in the environment.
+
+- **On the borrowed client id, plainly:** OpenAI publishes no registration path
+  for third-party clients here, so this uses the Codex CLI's client id, as every
+  other tool offering ChatGPT-plan sign-in does. That is tolerated, not
+  licensed, and OpenAI can invalidate it at any time. Unlike the Anthropic flow
+  removed in this same release, it is not a documented terms violation and is
+  not blocked server-side — that distinction is the whole reason one was deleted
+  and this one exists. OSA also sends `osa` as its originator rather than
+  claiming to be the Codex CLI.
+
+### Added — provider setup asks how you want to connect
+
+- **`auth_modes` on each provider entry is the single source of truth.** One
+  shared fork now drives `osa setup`, `mix osa.setup.wizard` and the TUI picker,
+  computed by pure functions (`Onboarding.auth_options/1`, `auth_route_for/2`)
+  that all three call. The alternative — one "which providers support sign-in"
+  list per surface — is how the tool this was modelled on ended up with three
+  lists that disagreed with each other.
+
+- **All 27 existing providers are unchanged.** A provider that declares nothing
+  defaults to `[:api_key]` and gets `[]` options back, meaning *do not prompt at
+  all*: no extra question, no extra keystroke, identical to before the field
+  existed. Verified against a fixture of the pre-change catalog output
+  (`test/support/fixtures/providers_list_baseline.exs`), so a future provider
+  cannot silently acquire a sign-in prompt it has no implementation for.
+
+- **A failed sign-in never silently switches your billing model.** If sign-in
+  fails you are told exactly what happened and, when the provider also takes a
+  key, offered that route explicitly. There is no automatic fallback.
+
+### Security — the Anthropic subscription sign-in has been removed
+
+- **OSA shipped an OAuth flow it had no right to ship.** It authenticated
+  against `console.anthropic.com` using **Claude Code's first-party client id**
+  and sent the subscription request fingerprint. Anthropic's Consumer Terms
+  permit automated access only via an Anthropic API key, so the agreement being
+  breached was the *user's*, and the account carrying the risk was the user's.
+  Anthropic has also blocked it server-side since 2026-01-09, and the token
+  endpoint it pointed at now 404s. It has been removed entirely — from
+  `osa setup`, `/setup`, `/login`, `/logout`, the HTTP onboarding routes, the
+  TUI picker, the desktop onboarding and the Anthropic provider's header
+  builder.
+
+- **Stored tokens are deleted on upgrade, with an explanation.** A stale bearer
+  credential for a banned, blocked, 404ing flow is worth nothing and is not
+  something to leave sitting in a home directory, so `~/.osa/oauth.json` is
+  purged at boot and by `osa doctor`. Anyone who was signed in this way gets a
+  message naming the API-key replacement rather than an unexplained wall, from
+  `osa doctor`, from `/login`, and from the provider's own "no key" error.
+
+- **Anthropic API-key auth is untouched** and is the supported path. The four
+  removed HTTP routes answer `410 Gone` with that explanation instead of being
+  deleted, so an older desktop or TUI build still calling them says something
+  useful rather than 404ing.
+
+- **A duplicate-header bug went with it.** The removed OAuth clause emitted its
+  own `anthropic-beta` header, so any request with another beta active carried
+  two of them. Betas are now collected in one place and emitted as a single
+  comma-joined header, by construction.
+
+### Security — two secrets were readable from `ps`
+
+- **`/proc/<pid>/cmdline` is world-readable on Linux**, and `ps` shows the full
+  argument vector to every local user on the machine. Two call sites put a live
+  credential there.
+
+- **The Ollama Cloud bearer token, on every single request.** It was passed as
+  `-H "Authorization: Bearer <token>"` in curl's argv. It now goes in a 0600
+  curl config file passed by path; argv carries nothing sensitive. Both temp
+  files are created 0600 *before* anything is written, closing the window in
+  which the default umask exposed their contents.
+
+- **The GitHub Actions runner registration token.** It was passed as
+  `--token <token>` to `config.sh`. It now travels in
+  `ACTIONS_RUNNER_INPUT_TOKEN` — the runner's own documented mechanism, masked
+  in its logs and unset after it is read — and a process's environment block is
+  owner-readable only.
+
+- **Tree-wide scanners were added so this cannot recur**
+  (`test/optimal_system_agent/security/no_secrets_in_argv_test.exs`). They
+  assert on the *constructed command*, not on whether the request succeeds: a
+  request that works while leaking the token is exactly the bug.
+
+### Fixed — the in-app `/setup` provider picker was broken
+
+- **It was handed `nil` instead of the provider catalog.** `cli/setup.ex` read
+  `@providers`, an undefined module attribute that evaluates to `nil` rather
+  than failing, so the first step of `/setup` had nothing to list. It now calls
+  `providers()`, and a regression test pins the picker's input to the real
+  catalog.
+
+---
+
 ## [1.0.62] — displays as `v1.0.062`
 
 A community release: three outside contributors found and fixed real bugs. A
@@ -107,6 +236,51 @@ over HTTP and in the TUI.
   of whether `Port.available?/1` was correct. It now mirrors ThousandIsland,
   which hard-defaults `reuseaddr: true` — the actual production condition — and
   the assertion discriminates: it passes with the fix and fails without it.
+
+---
+
+## [1.0.61] — displays as `v1.0.061`
+
+Auto-extracted memories stopped inventing preferences you never stated.
+
+### Fixed — memory auto-extraction was tuned the wrong way round
+
+- **A false positive is permanent; a false negative costs nothing.** Extracted
+  memories are injected into every later turn's context, and the agent can
+  always call `memory_save` explicitly, so the extractor is now biased to
+  precision. In [#102](https://github.com/Miosa-osa/OSA/pull/102).
+
+- **Machine-authored text is no longer stored as a user preference.** The turn
+  pipeline also runs for subagent sessions, where the "user message" is a task
+  brief OSA wrote itself; those were being recorded as things you said about
+  yourself. Patterns now require explicit standing-preference phrasing — bare
+  "I am", "I need", "I want" and "actually" match ordinary task requests far
+  more often than durable facts — and only the matching sentence is stored,
+  bounded to 12–300 characters, never the whole message.
+
+---
+
+## [1.0.60] — displays as `v1.0.060`
+
+`osa update` can restart the backend again. Two bugs kept a successful rebuild
+from ever going live.
+
+### Fixed — a successful update reported that it could not start
+
+- **The stop path killed the launcher and left the BEAM holding the port.** In
+  [#101](https://github.com/Miosa-osa/OSA/pull/101). `stop_daemon` signalled the
+  pidfile PID's process group, but `mix` can re-exec `beam.smp` into a group of
+  its own: the launcher died, the group kill found nothing left to reap, and the
+  BEAM kept the listener on `:9089`. The update then correctly refused to claim
+  it was live, and the user was told to run `osa stop` by hand — after seeing
+  "Backend stopped" immediately above. The port, not the PID, is the contract,
+  so the stop path now reclaims it by ownership and waits on the LISTEN socket
+  rather than on `/health`.
+
+- **The boot preflight then rejected the restart anyway.** `Port.available?/1`
+  probed without `SO_REUSEADDR` while ThousandIsland hard-defaults it to `true`,
+  so a `TIME_WAIT` left by a closed connection counted as an occupied port for
+  roughly 30 seconds after every restart.
 
 ---
 

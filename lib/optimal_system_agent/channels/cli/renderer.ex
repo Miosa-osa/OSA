@@ -56,13 +56,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
     channels_str = if channels == [], do: "none", else: Enum.join(channels, ", ")
 
-    # OAuth status
-    oauth_status =
-      try do
-        if OptimalSystemAgent.Auth.OAuth.oauth_configured?(), do: "oauth", else: "api key"
-      rescue
-        _ -> "api key"
-      end
+    # Auth mode. Always "api key" — the Anthropic subscription sign-in that
+    # used to make this read "oauth" was removed (see
+    # `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`).
+    auth_status = "api key"
 
     # Soul/identity status
     soul_status =
@@ -110,7 +107,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
           "",
           "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
           "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
-          "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
+          "#{@dim}auth: #{auth_status} · soul: #{soul_status}#{@reset}",
           "#{@dim}scheduler: #{scheduler_str}#{@reset}",
           "#{@dim}#{cwd}#{@reset}"
         ]

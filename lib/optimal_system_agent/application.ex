@@ -36,6 +36,14 @@ defmodule OptimalSystemAgent.Application do
     # Load .env file FIRST (before anything reads env vars)
     load_dotenv()
 
+    # Upgrade migration: delete any credential left by the removed Anthropic
+    # subscription sign-in. It is a bearer credential for a paid account, for a
+    # flow Anthropic bans and blocks and whose endpoint 404s — worth nothing,
+    # and not something to leave sitting on disk. Records a flag so this run's
+    # "no API key" error and `osa doctor` can explain the change rather than
+    # letting a previously-signed-in user hit an unexplained wall.
+    OptimalSystemAgent.Auth.LegacyAnthropicOAuth.purge()
+
     # Load settings cascade (user → project → local → flag)
     load_settings_into_app_env()
 

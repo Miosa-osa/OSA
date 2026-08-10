@@ -140,8 +140,42 @@ defmodule OptimalSystemAgent.Onboarding do
 
     ollama_local = probe_ollama_local()
 
-    %{detected: detected, ollama_local: ollama_local}
+    %{detected: detected ++ detect_subscriptions(detected), ollama_local: ollama_local}
   end
+
+  # A connected account is "already configured" every bit as much as a key in
+  # the environment is, so the picker must badge it the same way — otherwise a
+  # user who signed in last week comes back, sees no ✓ against the provider,
+  # and concludes nothing is wired up.
+  #
+  # Env keys are detected FIRST and win the dedupe: if a user has both, the key
+  # they explicitly set is the one shown, matching the resolution order (an
+  # explicitly-set credential is never shadowed by an auto-discovered one).
+  #
+  # Pure read — `Subscription.status/1` never touches the network, so drawing
+  # the provider picker can never hang on, or be failed by, a token refresh.
+  defp detect_subscriptions(already_detected) do
+    keyed = MapSet.new(already_detected, & &1.provider)
+
+    OptimalSystemAgent.Auth.Subscription.status_all()
+    |> Enum.filter(&(&1.connected? and not MapSet.member?(keyed, &1.provider)))
+    |> Enum.map(fn status ->
+      %{
+        provider: status.provider,
+        source: "subscription",
+        mode: :oauth,
+        key_preview: subscription_preview(status)
+      }
+    end)
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp subscription_preview(%{expired?: true}), do: "sign-in expired"
+  defp subscription_preview(%{account: a}) when is_binary(a) and a != "", do: "connected as #{a}"
+  defp subscription_preview(_), do: "connected"
 
   @doc "Return the full provider catalog for the onboarding UI."
   def providers_list do
@@ -285,6 +319,33 @@ defmodule OptimalSystemAgent.Onboarding do
         signup_url: "https://platform.openai.com/api-keys",
         models: OptimalSystemAgent.Providers.OpenAIModels.picker_models()
       },
+      # ChatGPT plan sign-in. A SEPARATE entry from `openai` rather than a
+      # second auth mode on it, because the two differ in more than the
+      # credential — different base URL, different wire protocol (Responses vs
+      # chat/completions) and a Codex-only model list. Same reasoning as the
+      # existing `ollama_cloud` / `ollama_local` split.
+      #
+      # `auth_modes: [:oauth]` — there is deliberately NO key path here. An
+      # OpenAI API key belongs on the `openai` entry, where it bills
+      # per-token against the endpoint that accepts it.
+      %{
+        id: "openai_codex",
+        name: "ChatGPT (Codex)",
+        description: "Use your ChatGPT Plus/Pro plan — no per-token billing",
+        group: "recommended",
+        requires_key: false,
+        env_var: nil,
+        default_model: OptimalSystemAgent.Providers.OpenAICodex.default_model(),
+        base_url: "https://chatgpt.com/backend-api/codex",
+        signup_url: "https://chatgpt.com/",
+        auth_modes: [:oauth],
+        subscription: %{
+          kind: :device_code,
+          label: "Sign in with ChatGPT",
+          hint: "Uses your ChatGPT plan — no per-token billing"
+        },
+        models: :dynamic
+      },
       %{
         id: "custom",
         name: "Custom Endpoint",
@@ -297,8 +358,62 @@ defmodule OptimalSystemAgent.Onboarding do
         signup_url: nil,
         models: :manual
       }
-    ] ++ additional_providers()
+    ]
+    |> Kernel.++(additional_providers())
+    |> Enum.map(&normalize_auth_modes/1)
   end
+
+  # ── auth_modes: the SINGLE capability source of truth ─────────────────────
+  #
+  # Every setup surface (`osa setup`, `mix osa.setup.wizard`, the TUI's
+  # GET /onboarding/status, `/model`) reads the fork from THIS field and
+  # nowhere else.
+  #
+  # The alternative — a separate "which providers support sign-in" list per
+  # surface — is the exact failure mode observed in the tool this was modelled
+  # on, which grew three such lists that disagreed with each other: a provider
+  # was `api_key` in its registry, landed in the GUI's *keys* tab, and yet had
+  # the most elaborate subscription-vs-key menu in its CLI. Declaring the
+  # capability ON the provider entry makes disagreement unrepresentable.
+  #
+  # Defaulting here (rather than writing `auth_modes: [:api_key]` 27 times) is
+  # what guarantees the refactor is behaviour-preserving: a provider that says
+  # nothing keeps exactly the key-only flow it had before this field existed,
+  # and a NEW provider added to @additional_providers cannot accidentally
+  # acquire a sign-in prompt it has no implementation for.
+  defp normalize_auth_modes(entry) when is_map(entry) do
+    Map.put_new(entry, :auth_modes, [:api_key])
+  end
+
+  @doc """
+  The authentication modes a provider offers, in render order.
+
+  `[:api_key]` for every provider that only takes a pasted credential (the
+  default), `[:api_key, :oauth]` for a provider that can also connect the
+  user's own account/subscription.
+
+  Unknown ids answer `[:api_key]` rather than raising: an id that is not in
+  the catalog cannot have a sign-in implementation, so key-only is both the
+  safe answer and the correct one.
+  """
+  @spec auth_modes(String.t() | atom()) :: [:api_key | :oauth]
+  def auth_modes(provider_id) do
+    id = to_string(provider_id)
+
+    case Enum.find(providers_list(), &(&1.id == id)) do
+      nil -> [:api_key]
+      entry -> Map.get(entry, :auth_modes, [:api_key])
+    end
+  rescue
+    _ -> [:api_key]
+  end
+
+  @doc """
+  True when a provider offers more than one way in, i.e. its setup step must
+  render the fork instead of going straight to a key prompt.
+  """
+  @spec dual_mode?(String.t() | atom()) :: boolean()
+  def dual_mode?(provider_id), do: length(auth_modes(provider_id)) > 1
 
   # ── The rest of the routable catalog ─────────────────────────────────────
   #
@@ -802,6 +917,42 @@ defmodule OptimalSystemAgent.Onboarding do
        message: "MIOSA Cloud is in limited early access. Request access at miosa.ai.",
        signup_url: "https://miosa.ai/settings/keys"
      }}
+  end
+
+  # A subscription provider has no key to verify, so "is this configured?" is
+  # a question about the stored sign-in, not about an endpoint accepting a
+  # credential. Answered from the credential store as a PURE READ: probing the
+  # live endpoint here would make `osa doctor` and the setup wizard capable of
+  # triggering a token refresh — and of reporting a refresh failure as a
+  # health failure — as a side effect of asking a question.
+  def health_check(%{"provider" => "openai_codex"} = _params) do
+    case OptimalSystemAgent.Auth.Subscription.status("openai_codex") do
+      %{connected?: true, expired?: false} = status ->
+        {:ok,
+         %{
+           status: "connected",
+           verified: true,
+           auth_mode: "subscription",
+           plan: status.plan,
+           message: "Signed in to ChatGPT#{if status.plan, do: " (#{status.plan} plan)", else: ""}."
+         }}
+
+      %{connected?: true} ->
+        {:error,
+         %{
+           verified: :unverified,
+           error: "sign_in_expired",
+           message: "Your ChatGPT sign-in has expired. Run `osa setup` and sign in again."
+         }}
+
+      _ ->
+        {:error,
+         %{
+           verified: :unverified,
+           error: "not_connected",
+           message: "Not signed in to ChatGPT. Run `osa setup` and choose \"Sign in with ChatGPT\"."
+         }}
+    end
   end
 
   def health_check(%{"provider" => "ollama_cloud"} = params) do
@@ -2144,6 +2295,158 @@ defmodule OptimalSystemAgent.Onboarding do
   def ollama_cloud_route(local_reachable, use_local?, key)
   def ollama_cloud_route(true, true, _key), do: {nil, "http://localhost:11434"}
   def ollama_cloud_route(_local_reachable, _use_local?, key), do: {key, "https://ollama.com"}
+
+  @doc """
+  The options a provider's auth step should offer, in render order.
+
+  `auth_modes` is a **capability set** in a canonical order (`:api_key` first,
+  so the key-only default `[:api_key]` is a stable prefix and equality
+  comparisons against it are meaningful). Presentation order is decided *here*
+  instead, because it is a UX question, not a data question: sign-in is shown
+  first for a user who already pays for the plan.
+
+  Returns `[]` for a key-only provider — meaning **do not prompt at all**,
+  fall straight through to the existing key flow. That empty list is what
+  keeps the 27 key-only providers byte-identical to their pre-`auth_modes`
+  behaviour: no extra question, no extra keystroke.
+
+  Returns a `Prompt.select/2`-shaped option list for a dual-mode provider.
+  Sign-in is listed first because it is the cheaper answer for someone who
+  already pays for the plan, and the hints name the BILLING MODEL
+  ("subscription" vs "pay-per-token") rather than the protocol, because that
+  is the distinction the user is actually choosing between.
+
+  Pure — no I/O, no TTY. Shared by the in-app `/setup`
+  (`OptimalSystemAgent.CLI.Setup`) and the standalone `mix osa.setup.wizard`
+  so both entry points render the identical fork, exactly as
+  `ollama_cloud_route/3` already does for Ollama Cloud.
+  """
+  @spec auth_options(String.t() | atom()) :: [map()]
+  def auth_options(provider_id) do
+    id = to_string(provider_id)
+    entry = Enum.find(providers_list(), &(&1.id == id)) || %{id: id}
+
+    auth_options_for(entry)
+  end
+
+  @doc """
+  `auth_options/1` for a provider entry that is already in hand.
+
+  The catalog lookup and the decision are split because they are different
+  concerns and fail differently: the lookup can miss, the decision cannot.
+  Keeping the decision total and pure means it can be exercised directly —
+  including for a provider shape that is not (yet) in the catalog — without
+  either mocking the catalog or, worse, adding a half-wired entry to the real
+  one just to have something to test against.
+  """
+  @spec auth_options_for(map()) :: [map()]
+  def auth_options_for(entry) when is_map(entry) do
+    modes = usable_auth_modes_for(entry)
+
+    if length(modes) < 2 do
+      []
+    else
+      sub = Map.get(entry, :subscription) || %{}
+      name = Map.get(entry, :name) || Map.get(entry, :id) || "this provider"
+
+      # Sign-in first — see the note above on why order is decided here.
+      modes
+      |> Enum.sort_by(fn
+        :oauth -> 0
+        _ -> 1
+      end)
+      |> Enum.map(fn
+        :oauth ->
+          %{
+            value: :oauth,
+            label: Map.get(sub, :label) || "Sign in with #{name}",
+            hint: Map.get(sub, :hint) || "Opens your browser — uses your existing plan"
+          }
+
+        :api_key ->
+          %{
+            value: :api_key,
+            label: Map.get(sub, :key_label) || "Paste an API key",
+            hint: Map.get(sub, :key_hint) || "Pay-per-token billing"
+          }
+      end)
+    end
+  end
+
+  @doc """
+  Resolve a provider + the user's (possibly absent) choice into the auth mode
+  to execute.
+
+  * a key-only provider always resolves to `:api_key`, whatever was passed —
+    a stray `:oauth` choice can never route a provider into a sign-in flow
+    that does not exist for it
+  * `nil` (nothing chosen: non-interactive run, `--yes`, a TUI client that
+    has not been taught the fork) resolves to `:api_key`, the mode that works
+    everywhere and never blocks on a browser
+  * an explicit, supported choice is honoured
+
+  Pure decision table — the single place the fork's MEANING lives, so the two
+  CLI surfaces cannot drift apart on it.
+  """
+  @spec auth_route(String.t() | atom(), :api_key | :oauth | nil) :: :api_key | :oauth
+  def auth_route(provider_id, choice) do
+    auth_route_for(usable_auth_modes(provider_id), choice)
+  end
+
+  @doc """
+  `auth_route/2` for a mode list already in hand.
+
+  The default when nothing is chosen is `:api_key` **when that mode is
+  available**, because it works everywhere and never blocks on a browser. A
+  provider that offers ONLY sign-in (`openai_codex` — an OpenAI API key
+  belongs on the `openai` entry, billed per-token against the endpoint that
+  accepts it) has no key path to fall back to, so it resolves to its single
+  available mode instead. Falling back to `:api_key` there would prompt for a
+  credential the provider cannot use.
+  """
+  @spec auth_route_for([:api_key | :oauth], :api_key | :oauth | nil) :: :api_key | :oauth
+  def auth_route_for(modes, choice) when is_list(modes) do
+    cond do
+      choice != nil and choice in modes -> choice
+      :api_key in modes -> :api_key
+      true -> List.first(modes) || :api_key
+    end
+  end
+
+  @doc """
+  The declared auth modes, minus any the running build cannot actually
+  perform.
+
+  `auth_modes/1` answers what the provider *offers*; this answers what the
+  user can *do right now*. They differ when a sign-in implementation exists
+  but has no registered OAuth client id configured — in that case `:oauth` is
+  dropped here, the fork is not rendered, and the provider behaves exactly
+  like a key-only one. Degrading to "one fewer menu entry" is the only
+  acceptable outcome; offering a path that cannot possibly complete is not.
+
+  `:api_key` is never removed, so this can never return an empty list and no
+  provider can become unconfigurable.
+  """
+  @spec usable_auth_modes(String.t() | atom()) :: [:api_key | :oauth]
+  def usable_auth_modes(provider_id) do
+    id = to_string(provider_id)
+    entry = Enum.find(providers_list(), &(&1.id == id)) || %{id: id}
+
+    usable_auth_modes_for(entry)
+  end
+
+  @doc "`usable_auth_modes/1` for a provider entry already in hand."
+  @spec usable_auth_modes_for(map()) :: [:api_key | :oauth]
+  def usable_auth_modes_for(entry) when is_map(entry) do
+    id = Map.get(entry, :id)
+
+    entry
+    |> Map.get(:auth_modes, [:api_key])
+    |> Enum.filter(fn
+      :oauth -> OptimalSystemAgent.Auth.Subscription.available?(id)
+      _ -> true
+    end)
+  end
 
   defp env_has_provider?(env_path) do
     case File.read(env_path) do

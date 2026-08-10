@@ -4,7 +4,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   Guides the user through:
   1. Provider selection (Anthropic, OpenAI, Ollama, etc.)
-  2. API key input (or OAuth for Anthropic)
+  2. API key input (every cloud provider is API-key only)
   3. Model selection
   4. Optional channel setup (WhatsApp, Telegram, etc.)
 
@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   """
 
   alias OptimalSystemAgent.CLI.Prompt
+  alias OptimalSystemAgent.Auth.Subscription
   alias OptimalSystemAgent.Onboarding
 
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
@@ -86,7 +87,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
     warn_if_port_unavailable()
 
     # Step 1: Provider
-    provider = Prompt.select("Choose your AI provider", @providers)
+    # `providers()`, not `@providers`: the latter is an undefined module
+    # attribute that silently evaluates to nil, so this picker was being
+    # handed nil instead of the provider catalog.
+    provider = Prompt.select("Choose your AI provider", providers())
 
     if is_nil(provider) do
       Prompt.outro("Setup cancelled")
@@ -96,13 +100,25 @@ defmodule OptimalSystemAgent.CLI.Setup do
       # non-nil for :ollama_cloud (localhost = keyless local daemon route,
       # https://ollama.com = keyed cloud route — item 1 audit fix, M2 parity
       # with the good first-run wizard).
-      {api_key, base_url} = get_auth(provider)
+      auth = get_auth(provider)
 
       # Providers that legitimately need no key: local Ollama, a signed-in
-      # local Ollama Cloud route, the local OpenAI-compatible servers, and a
-      # Custom Endpoint whose server may not require auth at all.
-      if is_nil(api_key) and
-           provider not in [:ollama, :ollama_cloud, :lmstudio, :llamacpp, :custom] do
+      # local Ollama Cloud route, the local OpenAI-compatible servers, a
+      # Custom Endpoint whose server may not require auth at all, and a
+      # subscription provider whose credential lives in the credential store
+      # rather than in a key.
+      {api_key, base_url} = if auth == :cancelled, do: {nil, nil}, else: auth
+
+      if auth == :cancelled or
+           (is_nil(api_key) and
+              provider not in [
+                :ollama,
+                :ollama_cloud,
+                :lmstudio,
+                :llamacpp,
+                :custom,
+                :openai_codex
+              ]) do
         Prompt.outro("Setup cancelled")
         :skip
       else
@@ -239,36 +255,11 @@ defmodule OptimalSystemAgent.CLI.Setup do
     end
   end
 
-  defp get_auth(:anthropic) do
-    method =
-      Prompt.select("How do you want to connect?", [
-        %{
-          value: :oauth,
-          label: "Sign in with Anthropic",
-          hint: "Opens browser, uses your account"
-        },
-        %{
-          value: :api_key,
-          label: "Paste an API key",
-          hint: "From console.anthropic.com/settings/keys"
-        }
-      ])
-
-    key =
-      case method do
-        :oauth ->
-          run_oauth_flow()
-
-        :api_key ->
-          key = Prompt.text("Anthropic API key", placeholder: "sk-ant-api03-...", mask: true)
-          if key && String.trim(key) != "", do: String.trim(key), else: nil
-
-        _ ->
-          nil
-      end
-
-    {key, nil}
-  end
+  # NOTE: there is deliberately no `get_auth(:anthropic)` clause. Anthropic used
+  # to fork here into "Sign in with Anthropic" (OAuth) vs "Paste an API key";
+  # the sign-in branch was removed (see
+  # `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`) so Anthropic now falls
+  # through to the generic API-key clause below like every other cloud provider.
 
   # Custom Endpoint is the one entry that is USELESS without a base URL — it is
   # defined by the URL. Asking for the key and silently dropping the URL is how
@@ -290,7 +281,74 @@ defmodule OptimalSystemAgent.CLI.Setup do
     {nil, nil}
   end
 
+  # The dual-mode fork, driven entirely off the catalog's `auth_modes` via
+  # `Onboarding.auth_options/1` + `auth_route_for/2` — the SAME pure decision
+  # functions `mix osa.setup.wizard` calls, so the two entry points cannot
+  # drift apart on what they offer or what a choice means.
+  #
+  # A key-only provider gets `[]` back and falls straight through to the key
+  # prompt below: no extra question, no extra keystroke, byte-identical to
+  # the behaviour before `auth_modes` existed.
   defp get_auth(provider) do
+    id = onboarding_provider_id(provider)
+    modes = Onboarding.usable_auth_modes(id)
+
+    choice =
+      case Onboarding.auth_options(id) do
+        [] -> nil
+        options -> Prompt.select("How do you want to connect?", options)
+      end
+
+    case Onboarding.auth_route_for(modes, choice) do
+      :oauth -> sign_in(id, modes, provider)
+      :api_key -> ask_api_key(provider)
+    end
+  end
+
+  # Run a provider's account sign-in. On failure the user is told exactly what
+  # happened and, when the provider also accepts a key, offered that route
+  # instead — the whole point of the fork is that either path reaches the same
+  # configured state, so a user blocked here is never stuck.
+  #
+  # There is deliberately no AUTOMATIC fallback to the key path: silently
+  # switching someone's billing model is worse than a clear error.
+  defp sign_in(id, modes, provider) do
+    name = provider_display_name(id)
+
+    case Subscription.login(id, io: &IO.puts/1) do
+      {:ok, _entry} ->
+        Prompt.completed("Credentials", "signed in to #{name}")
+        {nil, subscription_base_url(id)}
+
+      {:error, reason} ->
+        IO.puts("")
+        IO.puts("\e[33m  #{Subscription.message(reason, name)}\e[0m")
+
+        if :api_key in modes and Prompt.confirm("Use an API key instead?") do
+          ask_api_key(provider)
+        else
+          :cancelled
+        end
+    end
+  end
+
+  defp provider_display_name(id) do
+    case Enum.find(Onboarding.providers_list(), &(&1.id == id)) do
+      %{name: name} -> name
+      _ -> id
+    end
+  end
+
+  # The endpoint pinned into the credential at sign-in time, never one
+  # resolved later from the settings cascade.
+  defp subscription_base_url(id) do
+    case Enum.find(Onboarding.providers_list(), &(&1.id == id)) do
+      %{base_url: url} when is_binary(url) -> url
+      _ -> nil
+    end
+  end
+
+  defp ask_api_key(provider) do
     placeholder =
       case provider do
         :openai -> "sk-..."
@@ -351,61 +409,6 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp onboarding_provider_id(:ollama_cloud), do: "ollama_cloud"
   defp onboarding_provider_id(:custom), do: "custom"
   defp onboarding_provider_id(provider), do: to_string(provider)
-
-  # ── OAuth ────────────────────────────────────────────────────────
-
-  defp run_oauth_flow do
-    alias OptimalSystemAgent.Auth.OAuth
-
-    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
-    redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
-    {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
-
-    try do
-      :ets.new(:oauth_state, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> :oauth_state
-    end
-
-    :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
-
-    IO.puts("\e[2m│  Opening browser...\e[0m")
-
-    # Best-effort only — on a headless box (SSH, container) with no
-    # xdg-open/open on PATH, System.cmd/2 raises ErlangError(:enoent). The
-    # URL is printed below regardless, so a missing/failing opener must
-    # never crash the setup wizard. See OptimalSystemAgent.Utils.Browser.
-    OptimalSystemAgent.Utils.Browser.open(authorize_url)
-
-    IO.puts("\e[2m│  If browser didn't open:\e[0m")
-    IO.puts("\e[36m│  #{authorize_url}\e[0m")
-    IO.puts("\e[2m│\e[0m")
-    IO.puts("\e[2m│  Waiting for authorization...\e[0m")
-
-    # Poll
-    case poll_oauth(45) do
-      :ok ->
-        Prompt.completed("Anthropic", "Connected via OAuth")
-        # OAuth creates an API key — return it
-        Application.get_env(:optimal_system_agent, :anthropic_api_key)
-
-      :timeout ->
-        IO.puts("\e[33m  ⚠ OAuth timed out. You can try /login later.\e[0m")
-        nil
-    end
-  end
-
-  defp poll_oauth(0), do: :timeout
-
-  defp poll_oauth(remaining) do
-    Process.sleep(2_000)
-
-    if OptimalSystemAgent.Auth.OAuth.oauth_configured?() do
-      :ok
-    else
-      poll_oauth(remaining - 1)
-    end
-  end
 
   # ── Validation ───────────────────────────────────────────────────
 
@@ -794,8 +797,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
     pairs =
       [{"OLLAMA_URL", url}] ++
-        (if api_key, do: [{"OLLAMA_API_KEY", api_key}], else: []) ++
-        (if model, do: [{"OLLAMA_MODEL", model}], else: [])
+        if(api_key, do: [{"OLLAMA_API_KEY", api_key}], else: []) ++
+        if model, do: [{"OLLAMA_MODEL", model}], else: []
 
     {"ollama", pairs}
   end
@@ -810,17 +813,17 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # `config/runtime.exs` reads back into `:openai_url`) rather than dropped.
   defp provider_pairs(:custom, api_key, model, base_url) do
     pairs =
-      (if api_key, do: [{"OPENAI_API_KEY", api_key}], else: []) ++
-        (if base_url, do: [{"OPENAI_BASE_URL", base_url}], else: []) ++
-        (if model, do: [{"OSA_MODEL", model}], else: [])
+      if(api_key, do: [{"OPENAI_API_KEY", api_key}], else: []) ++
+        if(base_url, do: [{"OPENAI_BASE_URL", base_url}], else: []) ++
+        if model, do: [{"OSA_MODEL", model}], else: []
 
     {"openai", pairs}
   end
 
   defp provider_pairs(provider, api_key, model, _base_url) do
     pairs =
-      (if api_key, do: [{provider_env_key(provider), api_key}], else: []) ++
-        (if model, do: [{"OSA_MODEL", model}], else: [])
+      if(api_key, do: [{provider_env_key(provider), api_key}], else: []) ++
+        if model, do: [{"OSA_MODEL", model}], else: []
 
     {to_string(provider), pairs}
   end

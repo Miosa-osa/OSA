@@ -308,6 +308,15 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner do
     end
   end
 
+  # The runner registration token is a credential. It used to be passed as
+  # `--token <token>`, i.e. an argv element — and `/proc/<pid>/cmdline` is
+  # world-readable on Linux, so every local user could read it out of `ps` for
+  # as long as config.sh ran. actions/runner's `CommandSettings` accepts every
+  # argument via an `ACTIONS_RUNNER_INPUT_<NAME>` environment variable
+  # (command-line args take precedence; the env var is masked in logs and
+  # unset by the runner after it is read), and a process's environment block is
+  # owner-readable only. So the token goes through the environment and the
+  # non-secret arguments stay on argv.
   defp configure_runner(dir, payload) do
     config_sh = config_sh_path(dir)
 
@@ -315,8 +324,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner do
       [
         "--url",
         payload.repo_url,
-        "--token",
-        payload.registration_token,
         "--name",
         payload.runner_name,
         "--labels",
@@ -324,7 +331,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner do
         "--unattended"
       ] ++ if(payload.ephemeral, do: ["--ephemeral"], else: [])
 
-    case System.cmd(config_sh, args, cd: dir, stderr_to_stdout: true) do
+    env = [{"ACTIONS_RUNNER_INPUT_TOKEN", payload.registration_token}]
+
+    case System.cmd(config_sh, args, cd: dir, env: env, stderr_to_stdout: true) do
       {_, 0} ->
         :ok
 

@@ -477,9 +477,15 @@ impl ModelPicker {
         // Auth methods available per provider. PasteKey is always first and the
         // default focus. OAuth is a "coming soon" stub for providers that will
         // support sign-in. Ollama Cloud offers a key-free device-identity path.
+        //
+        // Anthropic is deliberately NOT in the OAuth list: OSA's Anthropic
+        // subscription sign-in was removed (Anthropic does not permit
+        // subscription credentials in third-party tools), so advertising
+        // "Sign in (OAuth) — coming soon" for it would promise something that
+        // is never coming. Anthropic is API-key only.
         let methods: Vec<AuthMethod> = match p.id.as_str() {
             "ollama_cloud" => vec![AuthMethod::PasteKey, AuthMethod::DeviceFree],
-            "anthropic" | "miosa" => vec![AuthMethod::PasteKey, AuthMethod::OAuth],
+            "miosa" => vec![AuthMethod::PasteKey, AuthMethod::OAuth],
             _ => vec![AuthMethod::PasteKey],
         };
         self.key_entry = Some(KeyEntryState {

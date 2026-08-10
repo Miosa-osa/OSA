@@ -403,7 +403,12 @@ defmodule OptimalSystemAgent.OnboardingByokTest do
       # api.openai.com, so a Google/Groq/xAI key was POSTed to OpenAI.
       # `custom` has no fixed host, `openai` IS api.openai.com, and `miosa` is
       # gated early access (a static "coming soon", no request at all).
-      for %{id: id} <- Onboarding.providers_list(), id not in ~w(custom openai miosa) do
+      # `openai_codex` is exempt for a stronger reason than the others: it has
+      # no API key at all. Its credential is a subscription token that is only
+      # ever read from the credential store and sent to the base URL pinned
+      # into that store at sign-in, so there is no key here that COULD be sent
+      # to the wrong host.
+      for %{id: id} <- Onboarding.providers_list(), id not in ~w(custom openai miosa openai_codex) do
         name = stub_name(:host)
         parent = self()
 

@@ -25,7 +25,7 @@ defmodule OptimalSystemAgent.Providers.UserKeyPathTest do
     for reason <- [
           "Anthropic returned 401: invalid x-api-key",
           "HTTP 401: Incorrect API key provided: sk-abc",
-          "ANTHROPIC_API_KEY not configured (no API key or OAuth token)",
+          "ANTHROPIC_API_KEY not configured",
           "OPENAI_API_KEY not configured"
         ] do
       test "no fallback for: #{reason}" do

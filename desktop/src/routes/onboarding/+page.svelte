@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { fly } from 'svelte/transition';
   import { cubicOut, cubicIn } from 'svelte/easing';
-  import type { Provider, OnboardingStep, DetectionResult, WorkspaceConfig, AuthMethod } from '$lib/onboarding/types';
+  import type { Provider, OnboardingStep, DetectionResult, WorkspaceConfig } from '$lib/onboarding/types';
   import { detectLocalProviders } from '$lib/onboarding/detection';
   import { completeOnboarding, getDefaultWorkingDirectory } from '$lib/onboarding/store';
   import StepWorkspace from './steps/StepWorkspace.svelte';
@@ -24,8 +24,6 @@
   let detecting = $state(true);
   let apiKey = $state('');
   let agentName = $state('OSA Agent');
-  let authMethod = $state<AuthMethod>('api_key');
-  let oauthConnected = $state(false);
 
   // Step 3: first task
   let firstTask = $state('');
@@ -93,11 +91,10 @@
     step = 2;
   }
 
-  function handleAgentDone(opts: { provider: Provider; apiKey: string; agentName: string; authMethod: AuthMethod }) {
+  function handleAgentDone(opts: { provider: Provider; apiKey: string; agentName: string }) {
     provider = opts.provider;
     apiKey = opts.apiKey;
     agentName = opts.agentName;
-    authMethod = opts.authMethod;
     direction = 1;
     step = 3;
   }
@@ -180,8 +177,6 @@
               {detecting}
               bind:apiKey
               bind:agentName
-              bind:authMethod
-              bind:oauthConnected
               onSelect={(p) => { provider = p; }}
               onNext={handleAgentDone}
               onBack={back}

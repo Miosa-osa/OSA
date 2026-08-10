@@ -229,37 +229,20 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         "[Ollama] Cloud request: model=#{model}, tools=#{tool_count}, body_size=#{byte_size(body)}"
       )
 
-      # Write body to a temp file to avoid shell quoting issues with large JSON
-      body_file =
-        Path.join(
-          System.tmp_dir!(),
-          "osa_ollama_body_#{:erlang.unique_integer([:positive])}.json"
-        )
-
-      File.write!(body_file, body)
+      # Write body to a 0600 temp file to avoid shell quoting issues with large
+      # JSON, and the auth header to a 0600 curl config file — NEVER to argv.
+      body_file = write_private_temp!("osa_ollama_body", ".json", body)
+      config_file = write_private_temp!("osa_ollama_curl", ".conf", curl_config(api_key))
 
       # Use spawn_executable with explicit args to avoid shell quoting issues
       curl_exe = System.find_executable("curl") || "curl"
-
-      curl_args = [
-        "-sN",
-        "--max-time",
-        "300",
-        "-H",
-        "Content-Type: application/json",
-        "-H",
-        "Authorization: Bearer #{api_key}",
-        "-d",
-        "@#{body_file}",
-        "#{url}/api/chat"
-      ]
 
       port =
         Port.open({:spawn_executable, curl_exe}, [
           :binary,
           :exit_status,
           {:line, 1_048_576},
-          {:args, curl_args}
+          {:args, curl_args(config_file, body_file, url)}
         ])
 
       result =
@@ -272,11 +255,76 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           # models such as glm-5.2:cloud inline reasoning in the content field).
           think: ThinkStreamParser.new()
         })
+
       File.rm(body_file)
+      File.rm(config_file)
       result
     else
       chat_stream_impl(messages, callback, opts, url)
     end
+  end
+
+  # ── curl invocation (secret never reaches argv) ──────────────────────
+  #
+  # `/proc/<pid>/cmdline` is world-readable on Linux, and `ps` shows the full
+  # argv to every local user. The Ollama Cloud bearer token used to be an argv
+  # element (`-H "Authorization: Bearer <token>"`), so every local user could
+  # read it on every single request. The token now goes into a 0600 curl config
+  # file passed by path; argv carries nothing sensitive.
+
+  @doc false
+  @spec curl_args(String.t(), String.t(), String.t()) :: [String.t()]
+  def curl_args(config_file, body_file, url) do
+    [
+      "-sN",
+      "--max-time",
+      "300",
+      "-H",
+      "Content-Type: application/json",
+      # Authorization header lives here, not in argv.
+      "--config",
+      config_file,
+      "-d",
+      "@#{body_file}",
+      "#{url}/api/chat"
+    ]
+  end
+
+  @doc false
+  @spec curl_config(String.t() | nil) :: String.t()
+  def curl_config(api_key) when is_binary(api_key) and api_key != "" do
+    ~s(header = "Authorization: Bearer #{escape_curl_config_value(api_key)}"\n)
+  end
+
+  def curl_config(_api_key), do: ""
+
+  # curl config files use backslash escapes inside double-quoted values.
+  defp escape_curl_config_value(value) do
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
+  end
+
+  # Create at 0600 BEFORE writing anything. `File.write!` followed by
+  # `File.chmod!` leaves a TOCTOU window in which the default umask (commonly
+  # 0644) exposes the contents to every local user.
+  defp write_private_temp!(prefix, ext, content) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}_#{:erlang.unique_integer([:positive])}#{ext}"
+      )
+
+    {:ok, io} = File.open(path, [:write, :binary, :exclusive])
+    :ok = File.chmod(path, 0o600)
+
+    try do
+      IO.binwrite(io, content)
+    after
+      File.close(io)
+    end
+
+    path
   end
 
   # Read streaming NDJSON from curl port line by line.
@@ -415,6 +463,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # The callback approach runs directly in the calling process, bypassing all
     # mailbox message format differences between HTTP and HTTPS connections.
     stream_key = {__MODULE__, :stream, make_ref()}
+
     Process.put(stream_key, %{
       buffer: "",
       content: "",
@@ -588,7 +637,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   defp round_up_ctx(n) when n <= 16384, do: 16384
   defp round_up_ctx(n) when n <= 32768, do: 32768
   defp round_up_ctx(n) when n <= 65536, do: 65536
-  defp round_up_ctx(_), do: 131072
+  defp round_up_ctx(_), do: 131_072
 
   # Keep the model resident between turns. Default 30m, overridable via
   # :ollama_keep_alive app env (OLLAMA_KEEP_ALIVE). Applied to sync AND streaming

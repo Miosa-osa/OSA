@@ -176,15 +176,11 @@
         const [, cmd, args] = match;
         const arg = (args ?? '').trim();
 
-        // Handle /login <provider> specifically
-        if (cmd === 'login' && arg) {
-          void startProviderOAuth(arg);
-          return;
-        }
-
-        // Handle /logout <provider>
-        if (cmd === 'logout' && arg) {
-          void handleCommand('logout');
+        // /login and /logout no longer take a provider — OSA is API-key only
+        // (Anthropic sign-in was removed). Route both to handleCommand so the
+        // user gets the explanation regardless of any argument they pass.
+        if (cmd === 'login' || cmd === 'logout') {
+          void handleCommand(cmd);
           return;
         }
       }
@@ -205,40 +201,6 @@
     }
 
     chatStore.sendMessage(text);
-  }
-
-  async function startProviderOAuth(providerSlug: string): Promise<void> {
-    const supported: Record<string, string> = { anthropic: 'Anthropic' };
-    const name = supported[providerSlug.toLowerCase()];
-
-    if (!name) {
-      const available = Object.entries(supported).map(([k, v]) => `\`/login ${k}\` — ${v}`).join('\n');
-      injectSystemMessage(`Unknown provider: \`${providerSlug}\`\n\nAvailable:\n${available}`);
-      return;
-    }
-
-    injectSystemMessage(`Opening ${name} sign-in in your browser...`);
-    try {
-      const { openUrl } = await import('@tauri-apps/plugin-opener');
-      const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
-      const data = await res.json() as { authorize_url: string };
-      await openUrl(data.authorize_url);
-
-      for (let i = 0; i < 60; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
-          const d = await status.json() as { connected: boolean };
-          if (d.connected) {
-            injectSystemMessage(`**Connected to ${name}** ✓`);
-            return;
-          }
-        } catch { /* keep polling */ }
-      }
-      injectSystemMessage(`OAuth timed out. Try \`/login ${providerSlug}\` again.`);
-    } catch (e) {
-      injectSystemMessage(`Login failed: ${e instanceof Error ? e.message : 'unknown error'}`);
-    }
   }
 
   // ── Slash commands ─────────────────────────────────────────────────────────
@@ -323,40 +285,16 @@
       }
 
       case 'login': {
-        // Show available OAuth providers and their status
-        const OAUTH_PROVIDERS: { slug: string; name: string }[] = [
-          { slug: 'anthropic', name: 'Anthropic' },
-          // Future: { slug: 'openai', name: 'OpenAI' },
-        ];
-
-        // Check status
-        let connected = false;
-        try {
-          const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
-          const data = await res.json() as { connected: boolean };
-          connected = data.connected;
-        } catch { /* offline */ }
-
-        if (connected) {
-          injectSystemMessage('**Already connected** ✓\n\nUse `/logout` to disconnect.');
-          break;
-        }
-
-        // Show available providers
-        const lines = OAUTH_PROVIDERS.map(p =>
-          `\`/login ${p.slug}\` — Sign in with ${p.name}`
-        ).join('\n');
-        injectSystemMessage(`**Sign in with a provider**\n\n${lines}\n\nOr set an API key in Settings.`);
+        injectSystemMessage(
+          '**Sign in with a provider**\n\n' +
+          'Anthropic sign-in (Claude Pro/Max) has been removed from OSA. Anthropic does not permit subscription credentials in third-party tools, and the endpoint it used no longer exists. Use an Anthropic API key instead — set it in Settings, or set `ANTHROPIC_API_KEY`.\n\n' +
+          'No provider currently supports account sign-in — OSA uses API keys.'
+        );
         break;
       }
 
       case 'logout': {
-        try {
-          await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
-          injectSystemMessage('Disconnected from OAuth provider.');
-        } catch {
-          injectSystemMessage('Failed to disconnect. Backend may be offline.');
-        }
+        injectSystemMessage('No account sign-in sessions exist — OSA uses API keys only.');
         break;
       }
 

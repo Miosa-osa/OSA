@@ -30,8 +30,11 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
   end
 
   describe "user_message/1" do
-    test "auth errors point at /login" do
-      assert Catalog.user_message("Anthropic returned 401: unauthorized") =~ "/login"
+    test "auth errors point at `osa setup`" do
+      # Was "/login" — that command no longer authenticates anything now that
+      # the Anthropic subscription sign-in is removed; OSA is API-key only.
+      assert Catalog.user_message("Anthropic returned 401: unauthorized") =~ "osa setup"
+      refute Catalog.user_message("Anthropic returned 401: unauthorized") =~ "/login"
     end
 
     test "model errors point at /model" do
@@ -76,7 +79,7 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "Anthropic"
       assert msg =~ "ANTHROPIC_API_KEY"
       assert msg =~ "osa setup"
-      assert msg =~ "/login"
+      refute msg =~ "/login"
       # Must NOT tell the user to "try again" as if it were transient, and must
       # not misfile a no-key error under a generic retry hint.
       refute msg =~ "switch models"
@@ -88,15 +91,16 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "No API key configured"
     end
 
-    test "P4: Anthropic's own no-key/no-OAuth phrasing classifies as missing_api_key" do
-      # anthropic.ex resolve_auth/0's error when neither an API key nor a
-      # valid OAuth token is present. Previously read "No Anthropic API key
-      # or OAuth token configured." which never matched the "not configured"
-      # substring the missing_api_key? guard looks for (the word "not" never
-      # appears), so it fell through to :unknown and skipped the actionable
-      # `osa setup` guidance for the provider a Claude-first user is most
-      # likely to hit first.
-      reason = "ANTHROPIC_API_KEY not configured (no API key or OAuth token). Run `osa setup` or set ANTHROPIC_API_KEY."
+    test "P4: Anthropic's own no-key phrasing classifies as missing_api_key" do
+      # anthropic.ex resolve_auth/0's error when no API key is present.
+      # Previously read "No Anthropic API key or OAuth token configured."
+      # which never matched the "not configured" substring the
+      # missing_api_key? guard looks for (the word "not" never appears), so
+      # it fell through to :unknown and skipped the actionable `osa setup`
+      # guidance for the provider a Claude-first user is most likely to hit
+      # first. (The OAuth half of that message is gone — Anthropic is
+      # API-key only now; see Auth.LegacyAnthropicOAuth.)
+      reason = "ANTHROPIC_API_KEY not configured. Run `osa setup` or set ANTHROPIC_API_KEY."
       assert Catalog.classify(reason) == :missing_api_key
 
       msg = Catalog.user_message(reason)

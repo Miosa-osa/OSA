@@ -1,11 +1,11 @@
 defmodule OptimalSystemAgent.Utils.BrowserTest do
   @moduledoc """
-  Regression coverage for the "missing xdg-open crashes onboarding OAuth"
+  Regression coverage for the "missing xdg-open crashes onboarding browser hand-off"
   bug: on a headless box (no desktop, SSH session), `System.cmd/2` raises
-  `ErlangError` (:enoent) when the opener binary isn't on PATH. Every OAuth
-  call site used to invoke `System.cmd/2` directly and unguarded, so
-  `/setup` → "Sign in with Anthropic" → browser-open crashed the whole
-  process instead of degrading to "copy the printed URL".
+  `ErlangError` (:enoent) when the opener binary isn't on PATH. Every browser
+  call site used to invoke `System.cmd/2` directly and unguarded, so a
+  browser-open step in `/setup` crashed the whole process instead of
+  degrading to "copy the printed URL".
   """
   # Mutates PATH for the process — must not run concurrently with anything
   # else that shells out.
@@ -33,10 +33,10 @@ defmodule OptimalSystemAgent.Utils.BrowserTest do
   describe "open/1 — the suite must never launch a real browser" do
     test "is disabled in the test env, so nothing is ever spawned" do
       # THE REGRESSION. This test previously called Browser.open/1 with a
-      # placeholder OAuth URL under the real PATH, which on a desktop machine
+      # placeholder URL under the real PATH, which on a desktop machine
       # (real $DISPLAY) made `xdg-open` genuinely open a browser tab to
       # `https://example.invalid/oauth/callback?state=test` on EVERY suite run.
-      # The user experienced that as OSA repeatedly demanding OAuth against an
+      # The user experienced that as OSA repeatedly demanding sign-in against an
       # RFC-2606 reserved domain that can never resolve.
       refute Browser.enabled?()
       assert Browser.open("https://osa.test/never-opened") == :ok

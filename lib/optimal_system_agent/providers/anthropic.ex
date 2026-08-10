@@ -1109,12 +1109,17 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   to nil (no 1M beta) so pre-existing `build_headers/2` callers are unaffected.
   """
   def build_headers(auth, thinking, model \\ nil) do
+    # API-key auth (`x-api-key`) is the ONLY supported Anthropic auth path.
+    # The former `{:oauth, token}` clause — `Authorization: Bearer …` plus the
+    # subscription fingerprint `anthropic-beta: oauth-2025-04-20` — was removed;
+    # see `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`. Its removal also fixes
+    # the duplicate-header bug it caused: that clause emitted its own
+    # `anthropic-beta` entry, so whenever any other beta was active the request
+    # carried TWO `anthropic-beta` headers. Betas are now collected in exactly
+    # one place and emitted as a single comma-joined header, by construction.
     auth_header =
       case auth do
-        {:oauth, token} ->
-          [{"authorization", "Bearer #{token}"}, {"anthropic-beta", "oauth-2025-04-20"}]
-
-        {:api_key, key} ->
+        {:api_key, key} when is_binary(key) ->
           [{"x-api-key", key}]
 
         key when is_binary(key) ->
@@ -1141,9 +1146,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   @doc """
-  Resolve authentication — checks API key first, falls back to OAuth.
+  Resolve authentication.
 
-  Returns `{:api_key, key}`, `{:oauth, token}`, or `{:error, reason}`.
+  Anthropic is **API-key only**. Returns `{:api_key, key}` or `{:error, reason}`.
+  The former subscription-OAuth fallback was removed — see
+  `OptimalSystemAgent.Auth.LegacyAnthropicOAuth` for why.
   """
   def resolve_auth do
     # Try credential pool first (supports key rotation)
@@ -1171,24 +1178,25 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       is_binary(api_key) and api_key != "" ->
         {:api_key, api_key}
 
-      true ->
-        case OptimalSystemAgent.Auth.OAuth.get_valid_token() do
-          {:ok, token} ->
-            {:oauth, token}
+      # A user who was signed in with the removed Anthropic subscription flow
+      # would otherwise just see "no API key" with no explanation of why the
+      # thing that worked yesterday stopped. Name the removal explicitly for
+      # the run in which their stale credential was purged.
+      OptimalSystemAgent.Auth.LegacyAnthropicOAuth.purged?() ->
+        {:error,
+         "ANTHROPIC_API_KEY not configured. " <>
+           OptimalSystemAgent.Auth.LegacyAnthropicOAuth.notice()}
 
-          {:error, _} ->
-            # Phrased so `ErrorCatalog.missing_api_key?/1` (which matches "not
-            # configured") catches it — previously "No Anthropic API key or
-            # OAuth token configured." fell through that matcher (the word
-            # "not" never appeared) and got classified :unknown, skipping the
-            # actionable `osa setup`/env-var guidance for exactly the provider
-            # a Claude-first user is most likely to hit first (P4). Leads with
-            # "ANTHROPIC_API_KEY" so the message-level regex
-            # (`missing_api_key_message/1`) also names the right env var.
-            {:error,
-             "ANTHROPIC_API_KEY not configured (no API key or OAuth token). Run `osa setup` " <>
-               "or set ANTHROPIC_API_KEY."}
-        end
+      true ->
+        # Phrased so `ErrorCatalog.missing_api_key?/1` (which matches "not
+        # configured") catches it — previously "No Anthropic API key or
+        # OAuth token configured." fell through that matcher (the word
+        # "not" never appeared) and got classified :unknown, skipping the
+        # actionable `osa setup`/env-var guidance for exactly the provider
+        # a Claude-first user is most likely to hit first (P4). Leads with
+        # "ANTHROPIC_API_KEY" so the message-level regex
+        # (`missing_api_key_message/1`) also names the right env var.
+        {:error, "ANTHROPIC_API_KEY not configured. Run `osa setup` or set ANTHROPIC_API_KEY."}
     end
   end
 

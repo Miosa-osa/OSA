@@ -66,6 +66,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  mistral: {:compat, :mistral},
                  openrouter: {:compat, :openrouter},
 
+                 # ChatGPT Plus/Pro plan over the Responses API. A SEPARATE
+                 # entry from :openai, not a second auth mode on it — different
+                 # base URL, different wire protocol, different model catalogue.
+                 openai_codex: Providers.OpenAICodex,
+
                  # Native API providers (custom protocol, not OpenAI-compatible)
                  anthropic: Providers.Anthropic,
                  google: Providers.Google,
