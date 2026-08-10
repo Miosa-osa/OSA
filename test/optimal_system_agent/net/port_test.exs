@@ -75,8 +75,18 @@ defmodule OptimalSystemAgent.Net.PortTest do
     # from binding. When `available?/1` omitted `reuseaddr` it reported such a
     # port as occupied, and boot aborted with "Port 9089 is in use by another
     # process" seconds after a restart, with nothing listening at all.
+    #
+    # The fixture MUST create its listener with `reuseaddr: true`, exactly as
+    # ThousandIsland does. Linux's `inet_csk_bind_conflict` only lets a new bind
+    # step over a TIME_WAIT when SO_REUSEADDR is set on BOTH sockets: the one
+    # binding now AND the one that left the TIME_WAIT behind. An accepted socket
+    # inherits `sk_reuse` from its listener, so in production the lingering entry
+    # on :9089 carries reuse=1 (ThousandIsland's default) and the rebind succeeds.
+    # A fixture that listens without `reuseaddr` leaves a reuse=0 TIME_WAIT, which
+    # no bind can ever step over — it would assert something the kernel never
+    # promised, and fail regardless of whether `available?/1` is correct.
     test "a TIME_WAIT from a closed client connection does not mark the port occupied" do
-      {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
       {:ok, port} = :inet.port(listener)
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
