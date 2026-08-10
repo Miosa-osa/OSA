@@ -100,6 +100,10 @@ class PtySession:
         # so counting only the visible screen would miss real strandings.
         self.screen = pyte.HistoryScreen(cols, rows, history=history)
         self.stream = pyte.Stream(self.screen)
+        # Every byte the child has written, appended by `pump`. The rendered
+        # screen is the primary evidence; this is for the defects the renderer
+        # cannot show (see `emitted_since`).
+        self.raw = bytearray()
         self.pid: int | None = None
         self.fd: int | None = None
 
@@ -159,6 +163,34 @@ class PtySession:
         assert self.fd is not None
         os.write(self.fd, data)
 
+    def mark(self) -> int:
+        """Current position in the emitted byte stream, for `emitted_since`."""
+        return len(self.raw)
+
+    def emitted_since(self, mark: int) -> bytes:
+        """Bytes the child wrote after `mark`.
+
+        Exists because pyte does not reflow on resize and VTE does, so a
+        sequence that scrolls the live region into unreflowable history renders
+        identically here to one that erases it in place. The distinction is
+        entirely in the bytes: ED2 (`ESC[2J`) is implemented by VTE as a scroll
+        into scrollback, whereas ED0 (`ESC[J`) is an in-place erase everywhere.
+        Asserting on the emission makes the invariant checkable on any
+        emulator, including this one.
+        """
+        return bytes(self.raw[mark:])
+
+    def in_alt_screen(self) -> bool:
+        """True if the last alt-screen toggle emitted was an enter.
+
+        ED2 is harmless inside the alternate screen — it has no scrollback to
+        scroll into — so the scrollback-safety assertions only apply to the
+        inline path, and need to know which one is live.
+        """
+        enter = self.raw.rfind(b"\x1b[?1049h")
+        leave = self.raw.rfind(b"\x1b[?1049l")
+        return enter > leave
+
     def pump(self, duration: float) -> None:
         """Read and render output for `duration` seconds, answering DSR."""
         assert self.fd is not None
@@ -174,6 +206,13 @@ class PtySession:
                 return
             if not chunk:
                 return
+            # Keep the raw bytes as well as the rendered screen. Some defects
+            # are invisible in the rendering but obvious in the byte stream:
+            # pyte does not reflow on resize, so a sequence that deposits the
+            # live region into scrollback on VTE leaves this screen looking
+            # perfectly correct. Asserting on what OSA *emitted* sidesteps the
+            # emulator's fidelity entirely. See `emitted_since`.
+            self.raw.extend(chunk)
             self.stream.feed(chunk.decode("utf-8", "replace"))
             # Answer every cursor query from the EMULATOR's cursor, which is
             # what a real terminal does and what the in-process backend cannot

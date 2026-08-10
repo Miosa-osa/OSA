@@ -249,9 +249,115 @@ def test_resize_with_transcript(backend: StubBackend) -> None:
         assert_single_live_region(s, "after widening sweep WITH transcript")
 
 
+def test_resize_emits_nothing_that_deposits_into_scrollback(
+    backend: StubBackend,
+) -> None:
+    """The reflow-independent half of the resize contract.
+
+    Every other test here asserts on the RENDERED screen, and that is exactly
+    where this defect hides: pyte does not reflow on resize and VTE does, so a
+    sequence that shoves the live region into unreflowable history renders here
+    identically to one that erases it in place. `test_resize_with_transcript`
+    passes on this harness while the same drag stacks copies on the user's
+    GNOME Terminal, which is why the bug has survived several fixes.
+
+    So assert on what OSA EMITS instead of how this emulator draws it. Two
+    families are unsafe while inline:
+
+    * **ED2 (`ESC[2J`)** — visually identical to ED0, but VTE (GNOME Terminal,
+      Tilix, Terminator, every libvte embedder) implements it by SCROLLING the
+      screen into the scrollback buffer rather than erasing it. Emitting it
+      once per drag step deposits a full copy of composer + status per step.
+      ED0 (`ESC[J` / `ESC[0J`) is an in-place erase on VTE, xterm, kitty and
+      Alacritty alike, and is what the resize path is supposed to use.
+    * **Explicit scrolls** (`ESC[S`, `ESC[T`, and the `ESC[NL`/`ESC[NM`
+      insert/delete-line pair) — these move real lines into history by
+      definition.
+
+    Inside the alternate screen both are harmless: there is no scrollback to
+    scroll into. The assertion is therefore scoped to the inline path, which is
+    the one the user lives in.
+
+    A failure here names the exact sequence, so the fix is immediate rather
+    than another round of hypotheses.
+    """
+    unsafe = {
+        b"\x1b[2J": "ED2 — VTE scrolls this into scrollback instead of erasing",
+        b"\x1b[S": "scroll-up — moves lines into history",
+        b"\x1b[T": "scroll-down — moves lines into history",
+        b"\x1b[L": "insert-line — scrolls the region, pushing lines out",
+        b"\x1b[M": "delete-line — scrolls the region, pushing lines out",
+    }
+    # NOT covered, and worth stating rather than implying completeness: a
+    # newline written on the last row scrolls the screen IMPLICITLY, with no
+    # escape sequence to match on. That is how `insert_before` makes room, so
+    # this test cannot by itself exonerate the transcript-commit path — it
+    # rules out the explicit families only.
+
+    with PtySession(backend.base_url, cols=120, rows=30) as s:
+        s.boot()
+
+        # Commit real transcript content first: `insert_before` is a full
+        # viewport rebuild, so a drag on an empty screen never exercises the
+        # path where the stranding was reported.
+        for _ in range(3):
+            s.write(b"/version")
+            s.pump(0.3)
+            s.write(b"\r")
+            s.pump(0.2)
+            s.write(b"\r")
+            s.pump(0.4)
+            s.write(b"\x1b")
+            s.pump(0.2)
+        s.pump(SETTLE)
+
+        if s.in_alt_screen():
+            raise AssertionError(
+                "expected to be inline before the drag; an overlay is open, so "
+                "this test would vacuously pass"
+            )
+
+        mark = s.mark()
+        for width in range(115, 79, -5):
+            s.resize(width, 30)
+            s.pump(0.05)
+        for width in range(85, 125, 5):
+            s.resize(width, 30)
+            s.pump(0.05)
+        s.pump(SETTLE * 2)
+
+        emitted = s.emitted_since(mark)
+        found = [
+            f"{seq!r} ({why}) x{emitted.count(seq)}"
+            for seq, why in unsafe.items()
+            if seq in emitted
+        ]
+        if found:
+            raise AssertionError(
+                "the resize path emitted sequences that deposit the live "
+                "region into scrollback:\n  "
+                + "\n  ".join(found)
+                + "\n\nThis is invisible on pyte (no reflow) and visible on "
+                "VTE. Use ED0 (ESC[J) from home instead of ED2, and do not "
+                "scroll to make room during a rebuild."
+            )
+
+        # The erase must actually have happened — a resize path that emits
+        # nothing at all would pass the check above for the wrong reason.
+        if b"\x1b[J" not in emitted and b"\x1b[0J" not in emitted:
+            raise AssertionError(
+                "the resize path emitted no ED0 erase at all; either the "
+                "rebuild did not run, or it is clearing by some other means "
+                "that this assertion no longer covers"
+            )
+
+        assert_single_live_region(s, "after the emission-checked drag")
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
+    test_resize_emits_nothing_that_deposits_into_scrollback,
     test_height_resize,
     test_small_viewport,
     test_provider_surface,
