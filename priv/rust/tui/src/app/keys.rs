@@ -93,6 +93,36 @@ pub fn is_permission_cycle(event: &KeyEvent) -> bool {
     crate::app::key_normalize::is_permission_cycle(event)
 }
 
+/// True when `event` is a key the user pressed in order to TYPE A CHARACTER:
+/// a printable `Char`, with no modifiers beyond Shift.
+///
+/// This is the guard for a whole bug class, not one key. In the typing contexts
+/// (Idle and Processing) the composer is the owner of every such keystroke, and
+/// no app-level shortcut may take one — because a shortcut that does is
+/// indistinguishable, from the user's chair, from a character that silently
+/// vanished. That is exactly what shipped: bare `y` (copy last message) and
+/// bare `?` (help), both gated on "the composer is empty", so the FIRST letter
+/// of a message was eaten while later ones typed fine. `y` was not even
+/// documented, so there was nothing to connect the disappearance to.
+///
+/// "The composer is empty" is not a safe predicate for stealing a printable
+/// key: an empty composer is precisely the state a user is in when they start
+/// typing. Shortcuts that want a bare letter must instead be reachable from a
+/// key that can never be text (a function key, or one carrying Ctrl/Alt), or
+/// from a slash command.
+///
+/// Control characters are excluded so a terminal that delivers e.g. Enter or
+/// Tab as `Char` is still routed as the control key it is. Modifiers other than
+/// Shift (Ctrl/Alt/Super/Hyper/Meta) mean the keystroke is a chord, not text.
+pub fn is_typed_text(event: &KeyEvent) -> bool {
+    match event.code {
+        KeyCode::Char(c) => {
+            !c.is_control() && event.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// All key bindings — 22 bindings matching Go keymap
 pub struct KeyMap {
     pub submit: KeyBinding,
@@ -192,8 +222,10 @@ impl Default for KeyMap {
                 KeyModifiers::CONTROL,
                 "command palette",
             ),
+            // F2, not the bare `y` this table used to name: a plain character
+            // key can never be a shortcut here (see `is_typed_text`).
             copy_message: KeyBinding::new(
-                KeyCode::Char('y'),
+                KeyCode::F(2),
                 KeyModifiers::NONE,
                 "copy last message",
             ),
@@ -207,6 +239,94 @@ impl Default for KeyMap {
                 KeyModifiers::NONE,
                 "hands-free voice",
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_text_tests {
+    use super::is_typed_text;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn k(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, m)
+    }
+
+    /// THE regression test for the reported bug, swept rather than spot-checked.
+    ///
+    /// A user typed `y` as the first letter of a message and it vanished,
+    /// because `y` was a shortcut gated on "the composer is empty". Asserting
+    /// only about `y` would have left `?` (which had the identical defect) and
+    /// whatever letter someone binds next. So: EVERY printable ASCII character,
+    /// unmodified and Shift-modified, must be classified as text — which is
+    /// what routes it to the composer ahead of every shortcut.
+    #[test]
+    fn every_printable_ascii_char_is_text() {
+        for c in ' '..='~' {
+            for m in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                assert!(
+                    is_typed_text(&k(KeyCode::Char(c), m)),
+                    "{c:?} with {m:?} must be typed text — a shortcut that takes \
+                     it makes a character the user typed silently disappear"
+                );
+            }
+        }
+    }
+
+    /// The specific characters that were stolen, named so the bug report and
+    /// the suite mention the same keys.
+    #[test]
+    fn the_reported_and_sibling_steals_are_text() {
+        for c in ['y', 'Y', '?', '/', 'n', 'a', 'd', 'q', 'z', 'x', '0', '9'] {
+            assert!(is_typed_text(&k(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+    }
+
+    /// A modifier makes the keystroke a chord, not text: Ctrl+C must still
+    /// interrupt, Alt+V must still toggle voice.
+    #[test]
+    fn modified_chars_are_not_text() {
+        for m in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::META,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ] {
+            assert!(
+                !is_typed_text(&k(KeyCode::Char('y'), m)),
+                "y with {m:?} is a shortcut, not text"
+            );
+        }
+    }
+
+    /// Non-`Char` keys keep their app-level meaning — the guard must not
+    /// swallow Esc, Enter, Tab or the arrows into the composer path.
+    #[test]
+    fn control_keys_are_not_text() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Backspace,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::F(1),
+            KeyCode::F(2),
+        ] {
+            assert!(!is_typed_text(&k(code, KeyModifiers::NONE)), "{code:?}");
+        }
+    }
+
+    /// Some terminals deliver Enter/Tab as `Char('\r')`/`Char('\t')`. Those are
+    /// control characters, not text, and must not be routed as typing.
+    #[test]
+    fn control_chars_delivered_as_char_are_not_text() {
+        for c in ['\r', '\n', '\t', '\u{0}', '\u{7f}'] {
+            assert!(!is_typed_text(&k(KeyCode::Char(c), KeyModifiers::NONE)), "{c:?}");
         }
     }
 }

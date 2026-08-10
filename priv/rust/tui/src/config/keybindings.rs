@@ -292,6 +292,24 @@ pub enum Resolution {
 /// Chords whose semantics are hardwired (interrupt / quit / submit / cancel
 /// with double-press windows) and may not appear in user bindings.
 fn non_rebindable_reason(chord: &[Keystroke]) -> Option<&'static str> {
+    // A chord that STARTS with a bare printable character would consume a key
+    // the user pressed in order to type — the exact defect that made a typed
+    // `y` disappear when it was a hardcoded shortcut. The key router refuses to
+    // hand such keys to the map at all, so honouring the binding here would be
+    // a lie; reject it with a reason instead of silently doing nothing.
+    //
+    // Only the FIRST step is restricted: `ctrl+x y` is fine, because the user
+    // has already committed to the chord with a prefix that is not text.
+    if let Some(first) = chord.first() {
+        if matches!(first.code, KeyCode::Char(c) if !c.is_control())
+            && first.mods.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            return Some(
+                "a plain character key cannot start a binding — it would swallow \
+                 typed text; add ctrl/alt, or use a function key",
+            );
+        }
+    }
     for ks in chord {
         let bad = match (ks.code, ks.mods) {
             (KeyCode::Char('c'), m) if m == KeyModifiers::CONTROL => {
@@ -345,6 +363,10 @@ impl Keybindings {
             // authoritative for shortcut_display but not for dispatch.
             (Context::Global, "shift+tab", Action::CycleMode),
             (Context::Idle, "f1", Action::Help),
+            // Copy-last-message used to be a bare `y` on an empty composer,
+            // which ate the first `y` of a message. It lives on a function key
+            // now: nothing the composer could ever have wanted to type.
+            (Context::Idle, "f2", Action::CopyLast),
             (Context::Idle, "alt+v", Action::Voice),
             // macOS-friendly alias for voice: on a Mac terminal the Option key
             // sends composed characters (Option+V = "√"), so alt+v never reaches
@@ -575,6 +597,46 @@ mod tests {
 
     fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    /// No shipped default may begin with a plain character. This is the
+    /// standing guard for the reported bug: `y` (copy last message) and `?`
+    /// (help) were hardcoded shortcuts on bare letters, so the first `y` or `?`
+    /// a user typed disappeared into a shortcut instead of the composer.
+    #[test]
+    fn no_default_binding_starts_with_a_typable_character() {
+        for b in Keybindings::defaults().bindings {
+            let first = b.chord.first().expect("a chord has at least one step");
+            let typable = matches!(first.code, KeyCode::Char(c) if !c.is_control())
+                && first.mods.difference(KeyModifiers::SHIFT).is_empty();
+            assert!(
+                !typable,
+                "default {:?} for {:?} starts with a plain character — it would \
+                 eat that character out of anything the user types",
+                b.action, b.context
+            );
+        }
+    }
+
+    /// And the user file cannot introduce one either: it is rejected with a
+    /// reason rather than silently binding a key the router will never deliver.
+    #[test]
+    fn plain_character_chords_are_rejected_as_bindings() {
+        for chord in ["y", "?", "a", "shift+y", "Z", "1"] {
+            let parsed = parse_chord(chord).expect("parses as a chord");
+            assert!(
+                non_rebindable_reason(&parsed).is_some(),
+                "{chord:?} must be refused — it would swallow typed text"
+            );
+        }
+    }
+
+    /// A plain character is still legal as the CONTINUATION of a chord: the
+    /// non-text prefix already established intent.
+    #[test]
+    fn plain_character_is_allowed_after_a_chord_prefix() {
+        let parsed = parse_chord("ctrl+x y").expect("parses as a chord");
+        assert!(non_rebindable_reason(&parsed).is_none());
     }
 
     #[test]

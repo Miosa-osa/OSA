@@ -875,7 +875,8 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  Ctrl+K", "Command palette (empty input)"),
         ("  /", "Slash command list"),
         ("  @", "File-path reference"),
-        ("  ?", "This help (empty input)"),
+        ("  F1", "This help"),
+        ("  F2", "Copy last message"),
         ("  Ctrl+N", "New session"),
         ("  Ctrl+L", "Toggle sidebar"),
         ("  Ctrl+O", "Transcript / expand tool call"),
@@ -894,7 +895,6 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  Ctrl+S", "Stash / restore input"),
         ("  Shift+Tab", "Cycle permission mode"),
         ("  Up/Down", "History / line nav"),
-        ("  j/k", "Scroll (input empty)"),
         ("  PgUp/PgDn", "Page scroll"),
         ("  Shift+drag", "Select text to copy"),
     ];

@@ -533,6 +533,34 @@ impl Default for Permissions {
 mod tests {
     use super::*;
 
+    /// The other half of the "typing `y` vanished" fix: making printable keys
+    /// always reach the composer must NOT disarm the real confirmations. A
+    /// permission prompt is a distinct AppState — it is on screen and awaiting
+    /// an answer — so its quick-keys keep working exactly as before.
+    #[test]
+    fn a_displayed_permission_prompt_still_confirms_on_y() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "npm test".into(), "req_y".into());
+        assert!(matches!(
+            d.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            Some(DialogAction::PermissionAllow)
+        ));
+        assert!(matches!(
+            d.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
+            Some(DialogAction::PermissionAllow)
+        ));
+    }
+
+    #[test]
+    fn a_displayed_permission_prompt_still_declines_on_n() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "rm -rf /".into(), "req_n".into());
+        assert!(matches!(
+            d.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Some(DialogAction::PermissionDeny)
+        ));
+    }
+
     #[test]
     fn display_label_prefers_target_over_tool_name() {
         let mut d = Permissions::new();

@@ -9,6 +9,64 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.64] — displays as `v1.0.064`
+
+Typing a message that began with the letter `y` lost that letter. So did a
+message beginning with `?`. The cause was a pair of undocumented shortcuts —
+bare `y` copied the last message, bare `?` opened help — each guarded on "the
+composer is empty", which is exactly the state you are in when you start
+typing. Only the first character of a message was ever affected, which made it
+read as the terminal dropping input rather than as anything OSA did. Both are
+fixed, and fixed as a class: printable text now reaches the composer ahead of
+every shortcut, so no future binding can take a character out of what you type.
+
+### Fixed — the first letter of a message no longer disappears
+
+- **Printable keys are routed to the composer first.** A key with a printable
+  character and no modifier beyond Shift now goes to the composer *before* the
+  keybinding map and before every hardcoded shortcut arm. Previously each
+  shortcut decided for itself whether to yield, and two of them decided wrong.
+  The rule replaces the judgement: an empty composer is no longer a licence for
+  anything to claim a typed character.
+
+- **Chord continuations still work.** Only a bare keystroke is treated as text.
+  `ctrl+x y` still completes as a chord, because the non-text prefix has
+  already established that you meant a command and not a letter.
+
+- **`keybindings.json` now rejects a binding that starts with a plain
+  character.** Such a binding could never fire under the new router, so it is
+  refused with an explanation — add ctrl/alt, or use a function key — rather
+  than accepted and silently ignored.
+
+- **Confirmations are unaffected.** A permission prompt that is on screen and
+  waiting for an answer is a distinct state, and its `y`/`n` quick keys consume
+  those keys and confirm exactly as before.
+
+### Changed — two shortcuts moved
+
+- **Copy last message is now `F2`, not `y`.** It remains rebindable as
+  `chat:copyLast`.
+
+- **`?` no longer opens help from an empty composer.** Help is on `F1` and
+  `/help`; `?` now always types a question mark.
+
+- **A wrong line was removed from the in-app shortcut list.** It advertised
+  `j`/`k` as scroll keys on an empty input. They never scrolled — they fell
+  through to the composer and typed — so the help text described behaviour that
+  did not exist.
+
+### Tests
+
+- A sweep over **every printable ASCII character**, unmodified and
+  Shift-modified, asserts each one is classified as text and reaches the input
+  buffer. Spot-checking `y` and `?` would have left the next letter someone
+  binds; the sweep is what keeps this from recurring on a different key.
+- Companion tests hold the boundary from the other side: modified characters
+  and non-`Char` keys stay shortcuts, terminals that deliver Enter or Tab as
+  `Char` are still routed as control keys, no shipped default binding starts
+  with a typable character, and a displayed permission prompt still confirms on
+  `y` and declines on `n`.
+
 ## [1.0.63] — displays as `v1.0.063`
 
 You can now run OSA on a ChatGPT Plus/Pro plan instead of an API key: pick the

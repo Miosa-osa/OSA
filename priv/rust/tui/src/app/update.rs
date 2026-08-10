@@ -849,6 +849,22 @@ impl App {
             return false;
         }
 
+        // A printable character belongs to the composer, always. Nothing below
+        // this line — not the keybinding map, not a hardcoded arm — may take a
+        // keystroke the user pressed in order to type. See `keys::is_typed_text`
+        // for why "the composer is empty" was never a safe licence to steal one:
+        // an empty composer is the state you are in when you START typing, so
+        // gating a bare-letter shortcut on it eats the FIRST letter of a message
+        // and only the first, which reads as the terminal dropping input.
+        //
+        // A key that is completing an armed chord is exempt: the user already
+        // committed to the chord with its (non-text) prefix, so the follow-up is
+        // not a bare keystroke. `resolve_keymap` still falls it through to the
+        // composer if it completes nothing.
+        if self.chord_pending.is_none() && crate::app::keys::is_typed_text(&key) {
+            return self.route_composer_key(key);
+        }
+
         let input_empty = self.input.is_empty();
 
         // WS10 — consult the user-configurable keybinding map first. Esc never
@@ -924,17 +940,9 @@ impl App {
                 }
                 false
             }
-            // ? on empty input — open the keyboard-shortcut / help overlay
-            // (Claude Code '?'). With text already present it inserts a literal
-            // '?' via the composer (the fall-through arm), so typing a question
-            // mark mid-message still works.
-            (KeyCode::Char('?'), m)
-                if input_empty
-                    && (m == KeyModifiers::NONE || m == KeyModifiers::SHIFT) =>
-            {
-                self.show_help();
-                false
-            }
+            // '?' no longer opens the help overlay from an empty composer: it is
+            // a printable character and now always types (see the typed-text
+            // guard above). Help stays on F1 and `/help`.
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if input_empty => {
                 self.enter_overlay(AppState::Quit);
                 false
@@ -952,21 +960,17 @@ impl App {
             // above). Ctrl+K with a non-empty composer falls through to the
             // composer's kill-to-end-of-line; paste lives in
             // App::paste_from_clipboard (keymap_dispatch.rs).
-            // / on empty input — type '/' into input to trigger inline completions
-            (KeyCode::Char('/'), KeyModifiers::NONE) if input_empty => {
-                self.input
-                    .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
-                false
-            }
+            // '/' needs no arm of its own: the typed-text guard above routes it
+            // to the composer, which raises the inline completions itself.
             // Ctrl+O expand/collapse moved to the keybinding map
             // (chat:expandTools via resolve_keymap above).
             // Chat scrolling is delegated to the host terminal's native
             // scrollback (mouse wheel / terminal keybindings). `j`/`k`/`u`/`d`,
             // Page/Home/End fall through to the input editor.
-            (KeyCode::Char('y'), KeyModifiers::NONE) if input_empty => {
-                self.copy_last_message();
-                false
-            }
+            // Copy-last-message was on a bare `y` here, gated on an empty
+            // composer — the reported bug: the first `y` of a message vanished.
+            // It now lives on F2 (and `chat:copyLast` for rebinding), which no
+            // one can type by accident.
             // Ctrl+R always reaches the composer's reverse-i-search — even from
             // an empty composer. (The old empty-composer steal expanded the last
             // tool result; that affordance stays on Ctrl+O.)
@@ -1054,6 +1058,14 @@ impl App {
         if crate::app::keys::is_permission_cycle(&key) {
             self.cycle_permission_mode();
             return false;
+        }
+
+        // Same rule as Idle: a printable character is text and goes to the
+        // composer (here, the queued-message draft). Processing has no
+        // bare-letter shortcut today; this keeps it that way, so the Idle bug
+        // cannot reappear on the mid-turn path.
+        if self.chord_pending.is_none() && crate::app::keys::is_typed_text(&key) {
+            return self.route_composer_key(key);
         }
 
         // WS10 — user-configurable keybindings (Esc stays hardcoded: cancel is
