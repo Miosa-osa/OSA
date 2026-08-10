@@ -116,7 +116,7 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   """
   @spec discover() :: [Server.t()]
   def discover do
-    if import_enabled?(), do: read_all(), else: []
+    if import_enabled?(), do: read_all(true), else: []
   end
 
   @doc """
@@ -126,16 +126,29 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   operator can see what exists in other tools' configs without OSA running any
   of it. Excluded names are still filtered out (an exclusion is a decision, not
   a suggestion).
+
+  The `mcp_import_only` allow list is deliberately NOT applied here. This list
+  is the menu you choose FROM, so filtering it by the choice already made would
+  hide every server not yet picked - including the ones you opened `/mcp` to
+  find. Use `importable?/1` to render which entries are currently active.
   """
   @spec available() :: [Server.t()]
   def available do
     kill_switch =
       Application.get_env(:optimal_system_agent, :mcp_discovery_enabled, true) != false
 
-    if kill_switch, do: read_all(), else: []
+    if kill_switch, do: read_all(false), else: []
   end
 
-  defp read_all do
+  @doc """
+  Whether a discovered server would actually be imported right now - the
+  allow-list answer for one name, so `/mcp` can mark each row active or not
+  without re-deriving the rule.
+  """
+  @spec importable?(String.t()) :: boolean()
+  def importable?(name), do: Config.import_allowed?(name)
+
+  defp read_all(apply_allow_list?) do
     native_names =
       Config.load_all()
       |> Enum.map(& &1.name)
@@ -151,8 +164,14 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     |> Map.values()
     |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
     # Deny list applies to imported servers too — killing one noisy server must
-    # not require turning the whole source off.
-    |> Enum.reject(&Config.excluded?(&1.name))
+    # not require turning the whole source off. On the import path the
+    # `mcp_import_only` allow list is folded into the same check: empty means no
+    # restriction (unchanged default), a non-empty list means ONLY those names
+    # import, and an exclusion still wins over an allow. `available/0` passes
+    # false so the menu keeps showing everything you could pick.
+    |> Enum.filter(fn s ->
+      if apply_allow_list?, do: Config.import_allowed?(s.name), else: not Config.excluded?(s.name)
+    end)
     # Imported servers keep their parsed `enabled: true` and auto-connect on
     # boot — but ONLY reach this path when the operator opted in above, so
     # nothing runs unasked. This is additionally bounded by the failure cap in
