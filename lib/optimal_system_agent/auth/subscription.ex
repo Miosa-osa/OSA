@@ -257,7 +257,7 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   def message(:device_code_timeout, name),
     do:
       "Timed out after 15 minutes waiting for #{name} sign-in to be approved. " <>
-        "Re-run setup for a fresh code, or paste an API key instead."
+        "Run /login for a fresh code, or /provider to paste an API key instead."
 
   def message(:device_code_incomplete, name),
     do:
@@ -283,10 +283,15 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   def message(:not_refreshable, name),
     do:
       "Your #{name} credential can no longer be renewed — it has no refresh token, and the one " <>
-        "OSA holds is being refused. Sign in again with `osa auth login`, or paste an API key."
+        "OSA holds is being refused. Run /login to sign in again, or /provider to paste an API key."
 
+  # Everything a user needs is reachable from inside the running session: this
+  # message is read from the TUI far more often than from a shell, and telling
+  # someone to quit and run a different program to fix the thing they are
+  # already looking at is the worst available answer. `/login` opens the
+  # provider surface in place; the CLI remains available but is not the advice.
   def message(:not_connected, name),
-    do: "Not signed in to #{name}. Run `osa setup` and choose \"Sign in\", or paste an API key."
+    do: "Not signed in to #{name}. Run /login to sign in, or /provider to paste an API key."
 
   def message(:unsupported_provider, name),
     do: "#{name} does not support account sign-in. Use an API key."

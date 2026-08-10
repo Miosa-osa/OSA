@@ -1174,7 +1174,7 @@ defmodule OptimalSystemAgent.Onboarding do
          %{
            verified: :unverified,
            error: "sign_in_expired",
-           message: "Your ChatGPT sign-in has expired. Run `osa setup` and sign in again."
+           message: "Your ChatGPT sign-in has expired. Run /login to sign in again."
          }}
 
       _ ->
@@ -1182,7 +1182,7 @@ defmodule OptimalSystemAgent.Onboarding do
          %{
            verified: :unverified,
            error: "not_connected",
-           message: "Not signed in to ChatGPT. Run `osa setup` and choose \"Sign in with ChatGPT\"."
+           message: "Not signed in to ChatGPT. Run /login and choose \"Sign in with ChatGPT\"."
          }}
     end
   end
@@ -1572,7 +1572,7 @@ defmodule OptimalSystemAgent.Onboarding do
 
   defp claude_cli_health_message(:not_connected),
     do:
-      "Not connected. Run `osa setup`, choose \"Claude subscription (via Claude Code)\" — " <>
+      "Not connected. Run /login, choose \"Claude subscription (via Claude Code)\" — " <>
         "or pick \"Anthropic\" to use an API key instead."
 
   defp claude_cli_health_message(reason),

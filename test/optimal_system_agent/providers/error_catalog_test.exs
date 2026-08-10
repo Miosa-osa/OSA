@@ -30,11 +30,20 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
   end
 
   describe "user_message/1" do
-    test "auth errors point at `osa setup`" do
-      # Was "/login" — that command no longer authenticates anything now that
-      # the Anthropic subscription sign-in is removed; OSA is API-key only.
-      assert Catalog.user_message("Anthropic returned 401: unauthorized") =~ "osa setup"
-      refute Catalog.user_message("Anthropic returned 401: unauthorized") =~ "/login"
+    test "auth errors point at an in-session command, never out to a shell" do
+      # History: this once asserted the opposite. When Anthropic subscription
+      # sign-in was removed OSA was briefly API-key-only, `/login` authenticated
+      # nothing, and `osa setup` was the honest advice. That is no longer true —
+      # `/login` now signs in to ChatGPT, Claude via CLI, Copilot, Ollama Cloud
+      # and Bedrock — and the guidance regressed into telling a user staring at
+      # the TUI to quit and run a different program to fix it.
+      #
+      # The invariant is therefore the general one, not a specific string: an
+      # auth error names a slash command, and never sends the user out to a
+      # shell. Any new message that reintroduces `osa setup` fails here.
+      msg = Catalog.user_message("Anthropic returned 401: unauthorized")
+      assert msg =~ "/login" or msg =~ "/provider"
+      refute msg =~ "osa setup"
     end
 
     test "model errors point at /model" do
@@ -78,8 +87,8 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       msg = Catalog.user_message("ANTHROPIC_API_KEY not configured")
       assert msg =~ "Anthropic"
       assert msg =~ "ANTHROPIC_API_KEY"
-      assert msg =~ "osa setup"
-      refute msg =~ "/login"
+      assert msg =~ "/provider"
+      refute msg =~ "osa setup"
       # Must NOT tell the user to "try again" as if it were transient, and must
       # not misfile a no-key error under a generic retry hint.
       refute msg =~ "switch models"
@@ -87,7 +96,7 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
 
     test "message falls back to generic guidance when no env var is present" do
       msg = Catalog.user_message("API key not configured")
-      assert msg =~ "osa setup"
+      assert msg =~ "/provider"
       assert msg =~ "No API key configured"
     end
 
@@ -106,7 +115,7 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       msg = Catalog.user_message(reason)
       assert msg =~ "Anthropic"
       assert msg =~ "ANTHROPIC_API_KEY"
-      assert msg =~ "osa setup"
+      assert msg =~ "/provider"
     end
   end
 
@@ -118,7 +127,7 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       msg = Catalog.user_message(reason)
       assert msg =~ "Ollama"
       assert msg =~ "ollama serve"
-      assert msg =~ "osa setup"
+      assert msg =~ "/provider"
       # Must not degrade to the misleading generic guidance that drops the
       # word "Ollama" entirely.
       refute msg =~ "Check your internet connection"

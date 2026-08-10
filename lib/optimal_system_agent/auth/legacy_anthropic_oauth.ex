@@ -33,7 +33,7 @@ defmodule OptimalSystemAgent.Auth.LegacyAnthropicOAuth do
   @notice "Anthropic sign-in (Claude Pro/Max) has been removed from OSA. " <>
             "Anthropic does not permit subscription credentials in third-party tools, " <>
             "and the endpoint it used no longer exists. Use an Anthropic API key instead: " <>
-            "set ANTHROPIC_API_KEY (from console.anthropic.com/settings/keys) or run `osa setup`."
+            "set ANTHROPIC_API_KEY (from console.anthropic.com/settings/keys) or run /provider."
 
   @doc "The one-line, user-facing explanation. Shown by every former entry point."
   @spec notice() :: String.t()

@@ -396,7 +396,11 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodexTest do
       codex = OptimalSystemAgent.Providers.OpenAICodex.available_models()
       openai = OptimalSystemAgent.Providers.OpenAIModels.ids()
 
-      assert "gpt-5.2-codex" in codex
+      # Pin the default rather than an arbitrary member: a catalogue that no
+      # longer contains what `default_model/0` returns hands a freshly
+      # signed-in user a model their plan does not offer, which is exactly the
+      # failure this list aged into once before.
+      assert OptimalSystemAgent.Providers.OpenAICodex.default_model() in codex
       assert Enum.all?(codex, &(&1 not in openai)) or codex != openai
     end
   end

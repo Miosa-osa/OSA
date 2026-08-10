@@ -380,7 +380,7 @@ defmodule OptimalSystemAgent.Auth.Providers.Bedrock do
         "is one Bedrock actually serves."
 
   def message(:not_connected),
-    do: "Amazon Bedrock is not connected. Run `osa setup` and choose Amazon Bedrock."
+    do: "Amazon Bedrock is not connected. Run /login and choose Amazon Bedrock."
 
   def message(other), do: OptimalSystemAgent.Auth.Subscription.message(other, @display_name)
 end

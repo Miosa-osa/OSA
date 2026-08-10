@@ -9,6 +9,58 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.69] — displays as `v1.0.069`
+
+Two things that made a signed-in account unusable: OSA told you to quit and run
+a different program to fix an error you were looking at, and it offered ChatGPT
+models your plan stopped carrying three releases ago.
+
+### Fixed — errors no longer send you out of the session
+
+- **29 user-facing strings instructed the user to run `osa setup`.** The one
+  most people hit is the *shared* `:not_connected` message in
+  `Auth.Subscription` — every subscription provider reuses it, which is why
+  this looked like a different bug on each provider and was in fact one string.
+  Auth errors now name `/login` (sign in with an account) or `/provider` (add
+  or change an API key). The CLI still exists; it is no longer the advice.
+- Same treatment for expired sign-ins, revoked tokens, 401/403, missing keys,
+  the Bedrock and Anthropic messages, the Claude-subscription entry, and the
+  "Ollama is not running" hint.
+- **A class guard was added** rather than only fixing the strings. These
+  messages are written per provider, so the next provider added would have
+  reintroduced the problem. `in_harness_guidance_test.exs` strips comments,
+  sweeps the auth/provider sources for shell-exit phrasing, and checks every
+  provider in `Subscription.supported()`.
+- Six tests asserted the old behaviour — one was named `auth errors point at
+  \`osa setup\``, with a comment explaining that `/login` had been dropped when
+  OSA was briefly API-key-only after the Anthropic sign-in removal. That
+  premise ended when account sign-in landed. They now pin the general
+  invariant: an auth error names a slash command and never names a shell.
+
+### Fixed — the ChatGPT model list was three generations stale
+
+- OSA offered `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` and
+  `gpt-5.2`. **None of those ids appear in the Codex picker any more**, so a
+  user who signed in was defaulted onto a model their plan no longer carries.
+- Replaced with the current line-up — `gpt-5.6-sol` (now the default, matching
+  Codex's own current selection), `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+  `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`.
+- The catalogue test now pins *the default model is present in the catalogue*
+  instead of one hardcoded id, so it fails when the list ages out rather than
+  passing while pointing at nothing.
+
+### Known gaps, unchanged from 1.0.67
+
+- No call has been made to a live provider endpoint from this build.
+- Stacked chrome after a terminal resize is still unreproduced. The test
+  harness does not reflow on resize; real terminals do.
+- `claude_cli` still requires Claude Code to be installed and signed in first.
+- Account/plan/quota is collected from provider response headers and shown by
+  `/usage`, but is not yet drawn in the model picker. It has nothing to draw
+  until a turn succeeds.
+
+---
+
 ## [1.0.67] — displays as `v1.0.067`
 
 You can now sign in to a provider with an account you already pay for, from

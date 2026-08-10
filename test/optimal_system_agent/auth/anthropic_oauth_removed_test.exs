@@ -262,7 +262,9 @@ defmodule OptimalSystemAgent.Auth.AnthropicOAuthRemovedTest do
       assert notice =~ "Anthropic sign-in"
       assert notice =~ "no longer"
       assert notice =~ "ANTHROPIC_API_KEY"
-      assert notice =~ "osa setup"
+      # The replacement must be reachable from where the notice is read — the
+      # running session — not by quitting and starting another program.
+      assert notice =~ "/provider"
     end
 
     test "a previously-signed-in user's next Anthropic call explains the removal", %{

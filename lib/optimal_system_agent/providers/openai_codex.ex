@@ -31,16 +31,31 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   alias OptimalSystemAgent.Auth.Providers.OpenAICodex, as: Auth
   alias OptimalSystemAgent.Providers.OpenAIResponses
 
-  @default_model "gpt-5.2-codex"
+  @default_model "gpt-5.6-sol"
 
   # The Codex-only catalogue. These ids are NOT available on api.openai.com
   # and the plain `openai` provider's list is not available here, which is a
   # second reason the two providers stay separate.
+  #
+  # Transcribed from what the Codex CLI itself offers a signed-in ChatGPT plan
+  # (its "Select Model and Effort" screen), NOT from a blog post or a guess.
+  # The previous list — gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini,
+  # gpt-5.2 — had aged out entirely: none of those ids appear in that screen
+  # any more, so OSA was defaulting a freshly signed-in user onto a model their
+  # plan no longer offers. Codex names its own current default `gpt-5.6-sol`,
+  # which is why that is the default here too.
+  #
+  # This list needs re-checking whenever OpenAI moves the Codex line. The
+  # authoritative source is the Codex CLI's own picker for a signed-in plan;
+  # `codex -m <name>` still reaches older ids that the picker has dropped.
   @models [
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-    "gpt-5.2"
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark"
   ]
 
   @spec name() :: atom()
