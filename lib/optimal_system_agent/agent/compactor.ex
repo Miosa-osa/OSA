@@ -996,7 +996,32 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Step 1 helpers: strip tool call args
   # ---------------------------------------------------------------------------
 
-  @doc false
+  @doc """
+  Test seam for `strip_tool_args_from_msg/1`.
+  """
+  @spec strip_tool_args(map()) :: map()
+  def strip_tool_args(msg), do: strip_tool_args_from_msg(msg)
+
+  # Heavy `arguments` are dropped, but the key MUST keep holding an OBJECT.
+  #
+  # This used to write the placeholder STRING `"[args stripped]"`, which poisoned
+  # the session permanently: compacted history is persisted to
+  # `~/.osa/sessions/<id>.json`, and every provider emits `arguments` verbatim —
+  # Anthropic as `tool_use.input`, Ollama/Google as a nested map, the
+  # OpenAI-compatible providers as a JSON encoding OF it. None accept a bare
+  # string:
+  #
+  #     anthropic → 400 messages.N.content.M.tool_use.input: Input should be an object
+  #     ollama    → 400 {"error":"Value looks like object, but can't find closing '}' symbol"}
+  #
+  # So one compaction made every LATER turn in that session fail on the primary
+  # provider and then again on every provider in the fallback chain — which no
+  # model switch could clear, because the corruption lived in the history rather
+  # than in the provider config.
+  #
+  # `%{}` is the smallest valid object. The call's `name` and its tool RESULT
+  # both survive compaction, which is the signal the model actually needs; the
+  # arguments were the token cost this step exists to reclaim.
   defp strip_tool_args_from_msg(msg) do
     case Map.get(msg, :tool_calls) do
       nil ->
@@ -1006,19 +1031,26 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         msg
 
       calls when is_list(calls) ->
-        stripped_calls =
-          Enum.map(calls, fn tc ->
-            # Keep name, id, strip heavy arguments — replace with a placeholder
-            tc
-            |> Map.put(:arguments, "[args stripped]")
-          end)
-
-        Map.put(msg, :tool_calls, stripped_calls)
+        Map.put(msg, :tool_calls, Enum.map(calls, &strip_one_call/1))
 
       _ ->
         msg
     end
   end
+
+  # Write back under the key shape the call already uses. A rehydrated call from
+  # a persisted session is string-keyed; putting an atom `:arguments` next to its
+  # `"arguments"` would leave BOTH — the heavy payload still on the wire under
+  # the string key, and the strip silently reclaiming nothing.
+  defp strip_one_call(tc) when is_map(tc) do
+    if Map.has_key?(tc, "arguments") and not Map.has_key?(tc, :arguments) do
+      Map.put(tc, "arguments", %{})
+    else
+      Map.put(tc, :arguments, %{})
+    end
+  end
+
+  defp strip_one_call(tc), do: tc
 
   # ---------------------------------------------------------------------------
   # Step 2 helpers: merge consecutive same-role messages

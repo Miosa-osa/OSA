@@ -598,7 +598,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     Application.get_env(:optimal_system_agent, :ollama_keep_alive, "30m")
   end
 
-  defp format_messages(messages) do
+  @doc """
+  Test seam: the Ollama wire shape for a list of OSA messages.
+  """
+  def format_messages(messages) do
     Enum.map(messages, fn
       # Assistant messages that carry tool_calls must preserve them so that
       # the 2nd+ iteration has accurate conversation history.
@@ -606,10 +609,20 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       when is_list(tool_calls) and tool_calls != [] ->
         formatted_calls =
           Enum.map(tool_calls, fn tc ->
+            # Read with Access, not `tc.id`. A tool call rehydrated from a
+            # persisted session (`~/.osa/sessions/<id>.json`) is STRING-keyed —
+            # the loader atomizes the message keys but not the nested call maps —
+            # so `tc.id` raised `KeyError: key :id not found in: %{"arguments" =>
+            # …, "id" => "toolu_…", "name" => "dir_list"}` and surfaced as
+            # `Provider error`, killing the turn before any HTTP call. Anthropic's
+            # `format_messages/1` already reads both shapes; this is the same fix.
             %{
-              "id" => tc.id,
+              "id" => tc[:id] || tc["id"],
               "type" => "function",
-              "function" => %{"name" => normalize_tool_name(tc.name), "arguments" => tc.arguments}
+              "function" => %{
+                "name" => normalize_tool_name(tc[:name] || tc["name"]),
+                "arguments" => tc[:arguments] || tc["arguments"] || %{}
+              }
             }
           end)
 

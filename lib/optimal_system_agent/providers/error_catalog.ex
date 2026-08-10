@@ -278,14 +278,24 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
   # True when the provider rejected the SHAPE of the request body rather than
   # its content — a bug on our side that no amount of retrying, rephrasing, or
   # model-switching fixes. Kept deliberately narrow: each phrase is a verbatim
-  # Anthropic 400 string.
+  # provider 400 string.
+  #
+  # The last two are the same fault seen by two parsers: a tool call in the
+  # HISTORY whose `arguments` is not an object. Anthropic names the field
+  # (`tool_use.input`), Ollama's Go decoder just fails to find the closing brace.
+  # Every provider rejects the identical body, so "/model to switch models" is
+  # the one thing guaranteed not to help — which is exactly what users tried
+  # first while the compactor was writing a string placeholder into persisted
+  # sessions.
   defp request_shape_error?(down) do
     String.contains?(down, "assistant message prefill") or
       String.contains?(down, "must end with a user message") or
       String.contains?(down, "must start with a user message") or
       String.contains?(down, "roles must alternate") or
       String.contains?(down, "unexpected role") or
-      String.contains?(down, "is not supported on this model")
+      String.contains?(down, "is not supported on this model") or
+      String.contains?(down, "input should be an object") or
+      String.contains?(down, "can't find closing '}' symbol")
   end
 
   # True when the reason describes a key that was never configured (as opposed

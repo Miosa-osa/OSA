@@ -346,8 +346,13 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       assert length(tool_msgs) > 0, "Expected tool message to survive compaction"
       call = hd(hd(tool_msgs).tool_calls)
 
-      assert Map.get(call, :arguments) == "[args stripped]",
-             "Expected tool call args to be replaced with '[args stripped]'"
+      # The replacement must stay an OBJECT. It was the string "[args stripped]"
+      # until that turned out to poison persisted sessions — every provider emits
+      # `arguments` verbatim and none accept a bare string, so one compaction made
+      # every later turn 400 on the primary provider AND on the whole fallback
+      # chain. See test/providers/tool_call_argument_normalization_test.exs.
+      assert Map.get(call, :arguments) == %{},
+             "Expected tool call args to be replaced with an empty object"
     after
       Application.delete_env(:optimal_system_agent, :max_context_tokens)
       Application.delete_env(:optimal_system_agent, :compaction_warn)
