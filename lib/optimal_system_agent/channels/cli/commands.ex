@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "model" => {"Show or switch the current model", :cmd_model},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
+    "usage" => {"Show account quota and this session's token usage", :cmd_usage},
     "context" => {"Show context window usage", :cmd_context},
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
@@ -59,8 +60,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
     "metrics" => {"Show telemetry metrics", :cmd_metrics},
-    "login" => {"Provider sign-in status (OSA uses API keys)", :cmd_login},
-    "logout" => {"Clear a provider sign-in session", :cmd_logout},
+    "login" => {"Sign in to a provider account, or show sign-in status", :cmd_login},
+    "logout" => {"Sign out of a provider account", :cmd_logout},
     "setup" => {"Re-run the setup wizard", :cmd_setup},
     "customize" => {"Make OSA yours — identity, skills, schedules, channels", :cmd_customize},
     "channels" => {"Show connected messaging channels", :cmd_channels},
@@ -216,6 +217,52 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
+  # Which credential the current provider is actually using. Without this the
+  # only difference between a plan-metered session and a pay-per-token one is
+  # invisible until the bill arrives — and the two have opposite failure modes
+  # (a window that resets vs a charge that does not).
+  #
+  # Pure read: `Subscription.status/1` never touches the network, so `/model`
+  # cannot hang on, or be failed by, a token refresh.
+  defp print_auth_mode(provider) do
+    status = OptimalSystemAgent.Auth.Subscription.status(provider)
+
+    cond do
+      status.connected? and status.expired? ->
+        IO.puts("  #{@dim}Auth:#{@reset}      account sign-in #{@dim}(expired — re-run setup)#{@reset}")
+
+      status.connected? ->
+        IO.puts("  #{@dim}Auth:#{@reset}      account sign-in#{plan_and_account(status)}")
+
+      true ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp plan_and_account(status) do
+    parts = Enum.reject([status.plan, status.account], &(is_nil(&1) or &1 == ""))
+    if parts == [], do: "", else: " #{@dim}(#{Enum.join(parts, ", ")})#{@reset}"
+  end
+
+  # For the Claude Code bridge the configured model is an ALIAS; the concrete
+  # model is chosen downstream. Show what actually ran, once it is known, so
+  # the header cannot claim a model OSA is not using.
+  defp print_resolved_model(:claude_cli, alias_name) do
+    case OptimalSystemAgent.Providers.ClaudeCli.last_resolved_model() do
+      resolved when is_binary(resolved) and resolved != alias_name ->
+        IO.puts("  #{@dim}Running:#{@reset}   #{resolved} #{@dim}(resolved by Claude Code)#{@reset}")
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp print_resolved_model(_provider, _model), do: :ok
+
   def cmd_model(args, session_id) do
     IO.puts("")
 
@@ -229,6 +276,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}Provider:#{@reset}  #{provider}")
         IO.puts("  #{@dim}Model:#{@reset}     #{model}")
         IO.puts("  #{@dim}Context:#{@reset}   #{format_context_window(ctx)} tokens")
+        print_auth_mode(provider)
+        print_resolved_model(provider, model)
 
       model_arg ->
         IO.puts("  #{@dim}Switching model...#{@reset}")
@@ -315,9 +364,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
 
     try do
-      budget = Budget.get_status()
-      cost = budget[:total_cost_usd] || 0
-      IO.puts("  #{@dim}Cost:#{@reset}      $#{:erlang.float_to_binary(cost / 1, decimals: 4)}")
+      budget = unwrap_budget(Budget.get_status())
+      cost = budget[:monthly_spent] || budget[:total_cost_usd] || 0
+      IO.puts("  #{@dim}Cost:#{@reset}      $#{fmt_usd(cost)} #{@dim}(month, OSA-measured)#{@reset}")
     rescue
       _ -> :ok
     end
@@ -346,19 +395,26 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("  #{@bold}Cost Summary#{@reset}")
 
     try do
-      budget = Budget.get_status()
-      total = budget[:total_cost_usd] || 0
-      input_tokens = budget[:input_tokens] || budget[:total_input_tokens] || 0
-      output_tokens = budget[:output_tokens] || budget[:total_output_tokens] || 0
-      sessions = budget[:sessions] || 0
+      # `Budget.get_status/0` returns `{:ok, map}`. Reading it as a bare map
+      # raised inside the `try`, so this block printed "No cost data
+      # available" unconditionally — a working ledger rendered as an empty one.
+      budget = unwrap_budget(Budget.get_status())
+      total = budget[:monthly_spent] || budget[:total_cost_usd] || 0
+      tokens = budget[:monthly_tokens] || 0
+      sessions = budget[:ledger_entries] || budget[:sessions] || 0
 
-      IO.puts("  #{@dim}├─ Input:#{@reset}    #{format_tokens(input_tokens)} tokens")
-      IO.puts("  #{@dim}├─ Output:#{@reset}   #{format_tokens(output_tokens)} tokens")
-      IO.puts("  #{@dim}├─ Sessions:#{@reset} #{sessions}")
+      IO.puts("  #{@dim}├─ Tokens:#{@reset}   #{format_tokens(tokens)} tokens this month")
+      IO.puts("  #{@dim}├─ Today:#{@reset}    $#{fmt_usd(budget[:daily_spent] || 0)}")
+      IO.puts("  #{@dim}├─ Calls:#{@reset}    #{sessions}")
+      IO.puts("  #{@dim}└─ Month:#{@reset}    $#{fmt_usd(total)}")
+
+      IO.puts("")
 
       IO.puts(
-        "  #{@dim}└─ Total:#{@reset}    $#{:erlang.float_to_binary(total / 1, decimals: 4)}"
+        "  #{@dim}This is OSA's own count of what it ran, priced from a static rate#{@reset}"
       )
+
+      IO.puts("  #{@dim}table. For what your account has left, use#{@reset} #{@cyan}/usage#{@reset}")
     rescue
       _ ->
         IO.puts("  #{@dim}  No cost data available#{@reset}")
@@ -366,6 +422,35 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
     session_id
+  end
+
+  defp unwrap_budget({:ok, map}) when is_map(map), do: map
+  defp unwrap_budget(map) when is_map(map), do: map
+  defp unwrap_budget(_), do: %{}
+
+  defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n / 1, decimals: 4)
+  defp fmt_usd(_), do: "0.0000"
+
+  @doc """
+  `/usage` — the provider's report on your account, and OSA's own measurement,
+  kept apart.
+
+  A pure read: it never refreshes a credential and never spends a metered
+  request to build the display. Where a provider reports nothing it says so
+  rather than showing a zero.
+  """
+  def cmd_usage(args, session_id) do
+    all? = String.trim(args) in ["all", "--all", "-a"]
+
+    OptimalSystemAgent.Usage.report(all: all?, session_id: session_id, probe: true)
+    |> OptimalSystemAgent.Usage.Render.lines(all: all?)
+    |> Enum.each(&IO.puts/1)
+
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: usage unavailable#{@reset}\n")
+      session_id
   end
 
   def cmd_context(_args, session_id) do
@@ -1255,43 +1340,60 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
-  # ── /login, /logout — Anthropic sign-in REMOVED ───────────────────────
+  # ── /login, /logout — real account sign-in ────────────────────────────
   #
-  # These used to run an OAuth 2.0 + PKCE flow against console.anthropic.com
-  # with Claude Code's first-party client id. Removed — see
-  # `OptimalSystemAgent.Auth.LegacyAnthropicOAuth`. The commands remain so a
-  # user who relied on them gets a clear explanation and the API-key route,
-  # rather than "unknown command".
+  # These once ran an Anthropic OAuth flow with Claude Code's first-party
+  # client id; that was removed (see `Auth.LegacyAnthropicOAuth`) and for one
+  # release the commands were left printing "no provider supports account
+  # sign-in", which stopped being true the moment the first subscription
+  # provider shipped. They now drive the real thing, and share every line of
+  # their behaviour with `osa auth` so the REPL and the terminal can never
+  # disagree about who is signed in.
 
-  def cmd_login(_args, session_id) do
-    IO.puts("")
-    IO.puts("  #{@bold}Sign in with a provider#{@reset}")
-    IO.puts("")
-    IO.puts("  #{@yellow}Anthropic sign-in is no longer available.#{@reset}")
-    IO.puts("  #{@dim}#{OptimalSystemAgent.Auth.LegacyAnthropicOAuth.notice()}#{@reset}")
-    IO.puts("")
-    IO.puts("  #{@dim}No provider currently supports account sign-in — use an API key:#{@reset}")
+  def cmd_login(args, session_id) do
+    case String.trim(args) do
+      "" ->
+        OptimalSystemAgent.CLI.Auth.status()
 
-    IO.puts(
-      "  #{@cyan}/setup#{@reset}  #{@dim}or#{@reset}  #{@cyan}ANTHROPIC_API_KEY=sk-ant-...#{@reset}"
-    )
+        IO.puts(
+          "  #{@dim}Sign in with#{@reset}  #{@cyan}/login <provider>#{@reset}  " <>
+            "#{@dim}— or paste a key with#{@reset}  #{@cyan}/setup#{@reset}"
+        )
 
-    IO.puts("")
+        IO.puts("")
+
+      provider ->
+        _ = OptimalSystemAgent.CLI.Auth.login(provider)
+    end
 
     session_id
   end
 
-  def cmd_logout(_args, session_id) do
-    IO.puts("")
-    IO.puts("  #{@dim}No account sign-in sessions exist — OSA uses API keys only.#{@reset}")
+  def cmd_logout(args, session_id) do
+    case String.trim(args) do
+      "" ->
+        # Naming the provider is required rather than guessed. Signing a user
+        # out of something they did not name is the kind of "helpful" default
+        # that costs them a re-authentication.
+        OptimalSystemAgent.CLI.Auth.status()
+
+        IO.puts("  #{@dim}Sign out with#{@reset}  #{@cyan}/logout <provider>#{@reset}")
+        IO.puts("")
+
+      "--all" ->
+        _ = OptimalSystemAgent.CLI.Auth.logout_all()
+
+      provider ->
+        _ = OptimalSystemAgent.CLI.Auth.logout(provider)
+    end
 
     if OptimalSystemAgent.Auth.LegacyAnthropicOAuth.purged?() do
       IO.puts(
         "  #{@dim}A stale ~/.osa/oauth.json from the removed Anthropic sign-in was deleted.#{@reset}"
       )
-    end
 
-    IO.puts("")
+      IO.puts("")
+    end
 
     session_id
   end

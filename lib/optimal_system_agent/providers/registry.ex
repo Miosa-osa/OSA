@@ -71,6 +71,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  # base URL, different wire protocol, different model catalogue.
                  openai_codex: Providers.OpenAICodex,
 
+                 # Claude Pro/Max plan, driven through Anthropic's own Claude
+                 # Code CLI as a subprocess — the one third-party path
+                 # Anthropic sanctions. A SEPARATE entry from :anthropic, for
+                 # the same reason codex is separate from :openai: the
+                 # transport is not the API at all.
+                 claude_cli: Providers.ClaudeCli,
+
+                 # GitHub Copilot plan, driven through GitHub's own Copilot
+                 # CLI. Separate from any Copilot API path for the same
+                 # reason as the two above: the transport is a subprocess.
+                 copilot_cli: Providers.CopilotCli,
+
+                 # Amazon Bedrock over the Converse API, signed with SigV4
+                 # against the operator's own AWS account. Not OpenAI-
+                 # compatible and not an API-key provider in the usual sense:
+                 # the credential is the AWS chain (or a Bedrock bearer key),
+                 # resolved live per request.
+                 bedrock: Providers.Bedrock,
+
                  # Native API providers (custom protocol, not OpenAI-compatible)
                  anthropic: Providers.Anthropic,
                  google: Providers.Google,
@@ -1781,6 +1800,23 @@ defmodule OptimalSystemAgent.Providers.Registry do
       key when is_binary(key) and key != "" -> true
       _ -> live_cloud_key_present?(:ollama_cloud) or provider_configured?(:ollama)
     end
+  end
+
+  # Bedrock has no `BEDROCK_API_KEY`, so the generic clause below would always
+  # answer "not configured" for it. It is configured when EITHER a Bedrock
+  # bearer key is present OR the account connection was made — the latter
+  # being a pure read of the connection marker, never a fresh AWS call, so
+  # asking "is this configured?" cannot cost a request.
+  def provider_configured?(:bedrock) do
+    case OptimalSystemAgent.Onboarding.live_env("AWS_BEARER_TOKEN_BEDROCK") do
+      v when is_binary(v) and v != "" ->
+        true
+
+      _ ->
+        OptimalSystemAgent.Auth.SubscriptionStore.connected?("bedrock")
+    end
+  rescue
+    _ -> false
   end
 
   # Boot-time `Application.get_env` is a one-shot snapshot taken when

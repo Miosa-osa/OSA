@@ -52,6 +52,15 @@ pub enum ModelPickerAction {
         base_url: Option<String>,
         api_key: Option<String>,
     },
+    /// Begin an account sign-in for a provider (no key involved).
+    ///
+    /// Non-terminal: the picker STAYS OPEN and switches to `AccountLogin`, so
+    /// a device-code grant can render its user code and poll to completion
+    /// inside the TUI. Closing the dialog here is what previously made every
+    /// browser-based sign-in a "run this in another terminal" instruction.
+    StartAccountLogin { provider: String, model: String },
+    /// Ask the backend to abandon an in-flight sign-in (Esc on the wait screen).
+    CancelAccountLogin { session_id: String },
     /// Retry the initial `/onboarding/status` catalog+detection fetch.
     /// Reachable from Providers mode any time (not just after a load
     /// failure) so a newcomer is never stuck on a stale/degraded list.
@@ -65,13 +74,29 @@ enum PickerMode {
     Providers,
     Models,
     KeyEntry,
+    /// An account sign-in is in flight. Owns the screen while it runs so the
+    /// code and URL stay on-screen for the whole grant, which for a
+    /// device-code provider is the only place the user can read them.
+    AccountLogin,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// How the user proves who they are for a provider.
+///
+/// These are the catalog's `auth_modes` and nothing else. There used to be a
+/// hardcoded per-provider match here deciding which methods a provider
+/// offered — a second capability list, disagreeing with the backend's, which
+/// is precisely the failure this codebase spent effort making unrepresentable
+/// on the Elixir side. Every account provider except Ollama Cloud was
+/// therefore invisible in this screen: the list said `PasteKey` only, for
+/// providers that have no key to paste.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AuthMethod {
     PasteKey,
-    OAuth,
-    DeviceFree,
+    /// Connect an account rather than paste a credential. Covers a local CLI
+    /// read, a signed-in daemon, an AWS credential chain and a browser device
+    /// code alike — the backend knows which, and the difference shows up as
+    /// whether a code appears to be typed.
+    Account,
 }
 
 #[derive(Clone, PartialEq)]
@@ -94,6 +119,34 @@ struct KeyEntryState {
     auth_method: AuthMethod,
     methods: Vec<AuthMethod>,
     verify: VerifyState,
+}
+
+/// What the sign-in screen is showing right now.
+///
+/// `provider_id` and `model` are carried through the whole wait so that a
+/// success can save and switch without re-deriving them — the picker has
+/// already been through provider selection at this point, and asking again
+/// after a fifteen-minute grant would be absurd.
+struct AccountLoginState {
+    provider_id: String,
+    provider_name: String,
+    model: String,
+    /// None until `POST /auth/login/start` answers. Cancel is unavailable for
+    /// that window, which is well under a second.
+    session_id: Option<String>,
+    /// "starting" | "pending" | "connected" | "failed" | "cancelled".
+    state: String,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
+    message: Option<String>,
+    /// Advances once per poll so the wait is visibly alive. A spinner that
+    /// does not move is indistinguishable from a hung process, which is the
+    /// second-worst thing after a wait you cannot cancel.
+    tick: usize,
+    /// The browser is opened at most ONCE per sign-in. The poll fires every
+    /// second for up to fifteen minutes; opening on every reading would spawn
+    /// nine hundred browser tabs.
+    browser_opened: bool,
 }
 
 impl KeyEntryState {
@@ -141,6 +194,9 @@ pub struct ModelPicker {
 
     key_entry: Option<KeyEntryState>,
 
+    /// The in-flight account sign-in, when `mode == AccountLogin`.
+    account_login: Option<AccountLoginState>,
+
     /// Rows the provider/model list can actually show — measured on every draw
     /// (via `Cell`, since `draw` takes `&self`) so handle_key scroll math
     /// matches the real dialog height instead of the MAX_H upper bound.
@@ -177,6 +233,7 @@ impl ModelPicker {
             models_provider: String::new(),
             models_base_url: None,
             key_entry: None,
+            account_login: None,
             list_viewport: Cell::new((MAX_H as usize).saturating_sub(6)),
             load_failed: false,
         }
@@ -203,7 +260,9 @@ impl ModelPicker {
                 default_model: Some("glm-5.2:cloud".to_string()),
                 base_url: Some("https://ollama.com".to_string()),
                 signup_url: Some("https://ollama.com/download".to_string()),
+                auth_modes: None,
                 models: serde_json::Value::String("dynamic".to_string()),
+                ..Default::default()
             },
             OnboardingProvider {
                 id: "anthropic".to_string(),
@@ -215,7 +274,9 @@ impl ModelPicker {
                 default_model: Some("claude-sonnet-4-20250514".to_string()),
                 base_url: None,
                 signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
+                auth_modes: None,
                 models: serde_json::Value::String("dynamic".to_string()),
+                ..Default::default()
             },
             OnboardingProvider {
                 id: "openai".to_string(),
@@ -227,7 +288,9 @@ impl ModelPicker {
                 default_model: Some("gpt-4o".to_string()),
                 base_url: Some("https://api.openai.com/v1".to_string()),
                 signup_url: Some("https://platform.openai.com/api-keys".to_string()),
+                auth_modes: None,
                 models: serde_json::Value::String("dynamic".to_string()),
+                ..Default::default()
             },
             OnboardingProvider {
                 id: "ollama_local".to_string(),
@@ -239,7 +302,9 @@ impl ModelPicker {
                 default_model: Some("llama3.2".to_string()),
                 base_url: Some("http://localhost:11434".to_string()),
                 signup_url: None,
+                auth_modes: None,
                 models: serde_json::Value::String("dynamic".to_string()),
+                ..Default::default()
             },
         ];
         let mut picker = Self::new_provider_first(providers, None, current_provider, current_model);
@@ -262,14 +327,58 @@ impl ModelPicker {
         PINNED.iter().position(|p| *p == id).unwrap_or(99)
     }
 
+    /// Rank a provider's tab. Accounts first: a plan the user already pays for
+    /// beats asking them for a new credential, and burying the free routes
+    /// among 27 key providers is exactly why they were invisible.
+    fn tab_rank(p: &OnboardingProvider) -> usize {
+        match Self::tab_of(p) {
+            "accounts" => 0,
+            _ => 1,
+        }
+    }
+
+    /// Ordering: tab, then the backend's curated `order`, then name.
+    ///
+    /// `order` is preferred over the local `priority()` table because the
+    /// latter is a second, drifting copy of a decision the catalog already
+    /// makes — the same duplication that let this screen's idea of which
+    /// providers offer sign-in diverge from the backend's. `priority()`
+    /// survives only as the tiebreak for a backend that sends no `order`.
     fn sorted_order(providers: &[OnboardingProvider]) -> Vec<usize> {
         let mut idx: Vec<usize> = (0..providers.len()).collect();
         idx.sort_by(|&a, &b| {
-            let pa = Self::priority(&providers[a].id);
-            let pb = Self::priority(&providers[b].id);
-            pa.cmp(&pb).then_with(|| providers[a].name.cmp(&providers[b].name))
+            let (pa, pb) = (&providers[a], &providers[b]);
+            Self::tab_rank(pa)
+                .cmp(&Self::tab_rank(pb))
+                .then_with(|| match (pa.order, pb.order) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    _ => Self::priority(&pa.id).cmp(&Self::priority(&pb.id)),
+                })
+                .then_with(|| pa.name.cmp(&pb.name))
         });
         idx
+    }
+
+    /// The section heading a row opens, if it is the first of its tab in the
+    /// current (filtered) view. `None` for every other row.
+    ///
+    /// Returned rather than pre-baked into the list so filtering cannot strand
+    /// a heading above zero rows — a "Connect an account" header with nothing
+    /// under it reads as a broken fetch.
+    pub(crate) fn section_heading(&self, idx: usize) -> Option<&'static str> {
+        let vis = self.visible_providers();
+        let pos = vis.iter().position(|&i| i == idx)?;
+        let this = Self::tab_of(&self.providers[idx]);
+        let prev = pos
+            .checked_sub(1)
+            .map(|p| Self::tab_of(&self.providers[vis[p]]));
+        if prev == Some(this) {
+            return None;
+        }
+        Some(match this {
+            "accounts" => "Connect an account",
+            _ => "Paste an API key",
+        })
     }
 
     fn runtime_provider(id: &str) -> String {
@@ -309,7 +418,31 @@ impl ModelPicker {
     }
 
     /// True when a provider is ready to use without further key entry.
+    ///
+    /// The backend's `auth.state` wins wherever it is present, because
+    /// `requires_key` cannot answer this question and pretending it could is
+    /// what produced the shipped defect: `openai_codex` is `requires_key:
+    /// false` (there is no key — it is sign-in only), so this returned `true`
+    /// for a provider nobody had signed into. The picker then drilled straight
+    /// into its `:dynamic` model list, and the user saw `Failed to load
+    /// models: HTTP 401` where a "connect your account" prompt belonged.
+    ///
+    /// Keyless is not the same as configured. `auth.state` is the field that
+    /// knows the difference.
     fn is_ready(&self, p: &OnboardingProvider) -> bool {
+        if let Some(auth) = p.auth.as_ref() {
+            match auth.state.as_str() {
+                "connected" | "connected_unverified" => return true,
+                // Sign-in required and not done — or done and lapsed. Either
+                // way the answer is the sign-in screen, never a model list.
+                "needs_sign_in" | "expired" => return false,
+                // "needs_key" and "unknown" fall through to key detection
+                // below, which is the pre-`auth` behaviour and still correct
+                // for the 27 key-only providers.
+                _ => {}
+            }
+        }
+
         let detected = self.detected_ids();
         match p.id.as_str() {
             // REQUIREMENT 1: Ollama Cloud is ready either with a stored key OR
@@ -326,12 +459,45 @@ impl ModelPicker {
         }
     }
 
-    /// OpenCode-style configured suffix, e.g. " (api)".
-    fn configured_suffix(&self, p: &OnboardingProvider) -> &'static str {
-        if self.detected_ids().contains(&p.id) {
-            " (api)"
+    /// The tab a provider belongs to: `"accounts"` (connect a plan) or
+    /// `"keys"` (paste a credential).
+    ///
+    /// Read from the backend's field, falling back to the derivation an older
+    /// backend implies. Grouping is the reason an account-capable provider can
+    /// no longer render as key-only: it is not in that group.
+    fn tab_of(p: &OnboardingProvider) -> &str {
+        if let Some(t) = p.tab.as_deref() {
+            return t;
+        }
+        let offers_account = p
+            .usable_auth_modes
+            .as_ref()
+            .or(p.auth_modes.as_ref())
+            .map(|m| m.iter().any(|x| x == "oauth"))
+            .unwrap_or(false);
+        if offers_account {
+            "accounts"
         } else {
-            ""
+            "keys"
+        }
+    }
+
+    /// OpenCode-style configured suffix, e.g. " (api)".
+    ///
+    /// A connected subscription is badged differently from a pasted key on
+    /// purpose: they are the same "configured" state but very different
+    /// billing, and "(api)" against an account sign-in reads as "you are
+    /// paying per token" to a user who chose the provider precisely to avoid
+    /// that. The backend already reports which it is in `source`.
+    fn configured_suffix(&self, p: &OnboardingProvider) -> &'static str {
+        match self
+            .detected
+            .as_ref()
+            .and_then(|d| d.detected.iter().find(|x| x.provider == p.id))
+        {
+            Some(d) if d.source == "subscription" => " (account)",
+            Some(_) => " (api)",
+            None => "",
         }
     }
 
@@ -365,6 +531,7 @@ impl ModelPicker {
             PickerMode::Providers => self.handle_providers_key(key),
             PickerMode::Models => self.handle_models_key(key),
             PickerMode::KeyEntry => self.handle_key_entry_key(key),
+            PickerMode::AccountLogin => self.handle_account_login_key(key),
         }
     }
 
@@ -473,21 +640,78 @@ impl ModelPicker {
         }
     }
 
-    fn open_key_entry(&mut self, p: &OnboardingProvider) {
-        // Auth methods available per provider. PasteKey is always first and the
-        // default focus. OAuth is a "coming soon" stub for providers that will
-        // support sign-in. Ollama Cloud offers a key-free device-identity path.
+    /// The auth methods a provider offers, straight from its catalog entry.
+    ///
+    /// Falls back to `PasteKey` when the backend sent no `auth_modes` at all,
+    /// which is what an older backend does. Degrading to the key prompt is
+    /// the safe direction: it is the behaviour every provider had before
+    /// account modes existed, and it can never offer a route that cannot
+    /// complete.
+    fn auth_methods(p: &OnboardingProvider) -> Vec<AuthMethod> {
+        // Three sources, most-decided first. All three are the backend's
+        // answer, never this file's — the point is that there is no second
+        // capability list here to drift.
         //
-        // Anthropic is deliberately NOT in the OAuth list: OSA's Anthropic
-        // subscription sign-in was removed (Anthropic does not permit
-        // subscription credentials in third-party tools), so advertising
-        // "Sign in (OAuth) — coming soon" for it would promise something that
-        // is never coming. Anthropic is API-key only.
-        let methods: Vec<AuthMethod> = match p.id.as_str() {
-            "ollama_cloud" => vec![AuthMethod::PasteKey, AuthMethod::DeviceFree],
-            "miosa" => vec![AuthMethod::PasteKey, AuthMethod::OAuth],
-            _ => vec![AuthMethod::PasteKey],
+        //   1. `auth.can_sign_in` / `can_paste_key`: the collapsed answer the
+        //      backend has already worked out for THIS machine and THIS
+        //      credential state. Preferred, because re-deriving it here is how
+        //      the two surfaces come to disagree.
+        //   2. `usable_auth_modes`: `auth_modes` minus anything this build
+        //      cannot actually run (no compiled client id, no installed CLI).
+        //   3. `auth_modes`: what the provider offers in principle.
+        //
+        // An older backend sends none of them, and the fallback is `PasteKey`
+        // — the behaviour every provider had before account modes existed, and
+        // one that can never offer a route that cannot complete.
+        if let Some(auth) = p.auth.as_ref() {
+            let mut out = Vec::new();
+            if auth.can_sign_in {
+                out.push(AuthMethod::Account);
+            }
+            if auth.can_paste_key {
+                out.push(AuthMethod::PasteKey);
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+
+        let modes = p
+            .usable_auth_modes
+            .as_ref()
+            .filter(|m| !m.is_empty())
+            .or(p.auth_modes.as_ref().filter(|m| !m.is_empty()));
+
+        let modes = match modes {
+            Some(m) => m,
+            None => return vec![AuthMethod::PasteKey],
         };
+
+        let mut out = Vec::new();
+        if modes.iter().any(|m| m == "oauth") {
+            out.push(AuthMethod::Account);
+        }
+        if modes.iter().any(|m| m == "api_key") {
+            out.push(AuthMethod::PasteKey);
+        }
+        if out.is_empty() {
+            out.push(AuthMethod::PasteKey);
+        }
+        out
+    }
+
+    fn open_key_entry(&mut self, p: &OnboardingProvider) {
+        // Derived from the catalog's `auth_modes` — the single capability
+        // source of truth every other surface reads — and from nothing else.
+        // A hardcoded list here is a second source that WILL drift; it already
+        // had, which is why an account provider could be selected in this
+        // screen and then only be offered a key field it has no key for.
+        //
+        // Account first, matching the order the CLI surfaces render (sign-in
+        // above paste-a-key), so the two do not disagree about which is the
+        // primary route.
+        let methods = Self::auth_methods(p);
+        let initial = *methods.first().unwrap_or(&AuthMethod::PasteKey);
         self.key_entry = Some(KeyEntryState {
             provider_id: p.id.clone(),
             provider_name: p.name.clone(),
@@ -496,7 +720,7 @@ impl ModelPicker {
             default_model: p.default_model.clone(),
             api_key: String::new(),
             masked: true,
-            auth_method: AuthMethod::PasteKey,
+            auth_method: initial,
             methods,
             verify: VerifyState::Idle,
         });
@@ -620,55 +844,15 @@ impl ModelPicker {
             .unwrap_or_else(|| "default".to_string());
 
         match ke.auth_method {
-            AuthMethod::OAuth => {
-                // Stub — must not trap. PasteKey remains reachable via Tab.
-                ke.verify = VerifyState::Error {
-                    reason: "OAuth sign-in coming soon — use Tab for Paste API key".into(),
-                };
-                None
-            }
-            AuthMethod::DeviceFree => {
-                // Ollama Cloud key-free: verify against the LOCAL daemon (device
-                // identity), no key. Uses provider="ollama_local" + localhost.
-                match &ke.verify {
-                    VerifyState::Valid { .. } => {
-                        let provider = ke.provider_id.clone();
-                        ke.verify = VerifyState::Idle;
-                        Some(ModelPickerAction::SaveKeyAndSwitch {
-                            runtime_provider: Self::runtime_provider(&provider),
-                            provider,
-                            api_key: None,
-                            model,
-                            base_url: Some("http://localhost:11434".to_string()),
-                        })
-                    }
-                    VerifyState::Verifying => None,
-                    // Hotfix: a failed/errored verify must never dead-end the
-                    // screen. A second, unmodified Enter (the user already saw
-                    // the failure reason and pressed Enter again deliberately)
-                    // saves and continues anyway — mirrors the CLI wizard's
-                    // "Continue anyway" choice for the TUI's keyboard-only flow.
-                    VerifyState::Invalid { .. } | VerifyState::Error { .. } => {
-                        let provider = ke.provider_id.clone();
-                        ke.verify = VerifyState::Idle;
-                        Some(ModelPickerAction::SaveKeyAndSwitch {
-                            runtime_provider: Self::runtime_provider(&provider),
-                            provider,
-                            api_key: None,
-                            model,
-                            base_url: Some("http://localhost:11434".to_string()),
-                        })
-                    }
-                    VerifyState::Idle => {
-                        ke.verify = VerifyState::Verifying;
-                        Some(ModelPickerAction::VerifyKey {
-                            provider: "ollama_local".to_string(),
-                            api_key: None,
-                            model,
-                            base_url: Some("http://localhost:11434".to_string()),
-                        })
-                    }
-                }
+            AuthMethod::Account => {
+                // Hand off to the backend's out-of-band sign-in and stay on
+                // screen. Whether this finishes in 50ms (a local CLI read, an
+                // AWS credential chain, a signed-in daemon) or needs a browser
+                // and a typed code is the backend's business — the picker
+                // renders whatever state comes back, so a new provider needs
+                // no new case here.
+                let provider = ke.provider_id.clone();
+                Some(ModelPickerAction::StartAccountLogin { provider, model })
             }
             AuthMethod::PasteKey => {
                 if ke.api_key.trim().is_empty() {
@@ -832,6 +1016,62 @@ impl ModelPicker {
             PickerMode::Providers => self.draw_providers(frame, inner, &theme),
             PickerMode::Models => self.draw_models(frame, inner, &theme),
             PickerMode::KeyEntry => self.draw_key_entry(frame, inner, &theme),
+            PickerMode::AccountLogin => self.draw_account_login(frame, inner, &theme),
+        }
+    }
+
+    /// The badge on a provider row, and what it is allowed to claim.
+    ///
+    /// The shipped version had exactly two outcomes — "✓ ready" or "⚠ needs
+    /// key" — and that second string is a bug for any provider with no key to
+    /// need. `ChatGPT (Codex)` is sign-in only; telling a user it "needs key"
+    /// sends them looking for an OpenAI API key, which is the one credential
+    /// that endpoint will not accept. It was the literal text of one of the
+    /// reported symptoms.
+    ///
+    /// Reads the backend's `auth.state`, so a row can never advertise a route
+    /// the backend does not have.
+    fn status_tag(
+        &self,
+        p: &OnboardingProvider,
+        theme: &crate::style::Theme,
+    ) -> (String, Style) {
+        let success = Style::default().fg(theme.colors.success);
+        let warning = Style::default().fg(theme.colors.warning);
+
+        if let Some(auth) = p.auth.as_ref() {
+            match auth.state.as_str() {
+                // Name the account when the backend knows it. "signed in" with
+                // no whom is the state a user re-checks; "signed in as x@y" is
+                // the one they trust.
+                "connected" | "connected_unverified" => {
+                    let who = auth
+                        .account
+                        .as_deref()
+                        .filter(|a| !a.is_empty())
+                        .map(|a| format!("✓ signed in as {}", a))
+                        .unwrap_or_else(|| "✓ signed in".to_string());
+                    return (who, success);
+                }
+                "expired" => return ("⚠ sign-in expired".to_string(), warning),
+                "needs_sign_in" => {
+                    // A provider that ALSO takes a key says so, so the free
+                    // route is visible without hiding the paid one.
+                    let label = if auth.can_paste_key {
+                        "→ connect account or key"
+                    } else {
+                        "→ connect account"
+                    };
+                    return (label.to_string(), Style::default().fg(theme.colors.primary));
+                }
+                _ => {}
+            }
+        }
+
+        if self.is_ready(p) {
+            ("✓ ready".to_string(), success)
+        } else {
+            ("⚠ needs key".to_string(), warning)
         }
     }
 
@@ -886,15 +1126,59 @@ impl ModelPicker {
             (list_h as usize).max(1),
         );
 
-        // Build the flat renderable row list: Default + visible providers.
-        // Row 0 is the Default (recommended) entry.
-        let total_rows = vis.len() + 1;
+        // The renderable list interleaves non-selectable section headings with
+        // the selectable rows (Default + visible providers). Navigation still
+        // indexes the SELECTABLE rows only — `prov_cursor` is untouched — so
+        // headings can never be landed on, and arrow keys do not stutter over
+        // them. `None` marks a heading; `Some(i)` is selectable index `i`.
+        let mut render_rows: Vec<(Option<usize>, &'static str)> = vec![(Some(0), "")];
+        for (n, &pi) in vis.iter().enumerate() {
+            if let Some(h) = self.section_heading(pi) {
+                render_rows.push((None, h));
+            }
+            render_rows.push((Some(n + 1), ""));
+        }
+
+        // `prov_scroll` is stored in selectable space; translate it into render
+        // space, then let the shared clamp guarantee the cursor is on screen.
+        let cursor_render = render_rows
+            .iter()
+            .position(|(s, _)| *s == Some(self.prov_cursor))
+            .unwrap_or(0);
+        let scroll_render = render_rows
+            .iter()
+            .position(|(s, _)| *s == Some(scroll))
+            .unwrap_or(0);
+        let scroll = super::clamp_scroll_to_cursor(
+            scroll_render,
+            cursor_render,
+            (list_h as usize).max(1),
+        );
+
+        let total_rows = render_rows.len();
         for rel in 0..(list_h as usize) {
-            let abs = rel + scroll;
-            if abs >= total_rows {
+            let abs_render = rel + scroll;
+            if abs_render >= total_rows {
                 break;
             }
             let ry = cy + rel as u16;
+
+            let abs = match render_rows[abs_render] {
+                (None, heading) => {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            format!("  {}", heading),
+                            Style::default()
+                                .fg(theme.colors.secondary)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Rect::new(inner.x, ry, inner.width, 1),
+                    );
+                    continue;
+                }
+                (Some(i), _) => i,
+            };
+
             let is_selected = abs == self.prov_cursor;
             let cursor_char = if is_selected { "▸" } else { " " };
             let row_style = if is_selected {
@@ -923,12 +1207,7 @@ impl ModelPicker {
             }
 
             let p = &self.providers[vis[abs - 1]];
-            let ready = self.is_ready(p);
-            let (tag, tag_style) = if ready {
-                ("✓ ready", Style::default().fg(theme.colors.success))
-            } else {
-                ("⚠ needs key", Style::default().fg(theme.colors.warning))
-            };
+            let (tag, tag_style) = self.status_tag(p, theme);
             let suffix = self.configured_suffix(p);
 
             let mut spans = vec![
@@ -944,21 +1223,39 @@ impl ModelPicker {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(tag, tag_style));
 
+            // The name+status column is sized to what it actually needs, and
+            // the description takes whatever is genuinely left over.
+            //
+            // It was a hard 46 columns, sized back when the tag was only
+            // "✓ ready" or "⚠ needs key". The tag now carries the answer to
+            // the question this screen exists to answer — "✓ signed in as
+            // someone@example.com" — and beside a long provider name that
+            // truncated to "✓ sig". A status the user cannot read is the same
+            // as no status, whereas a clipped description costs nothing: it
+            // repeats the provider's marketing line.
+            //
+            // So the priority is explicit — name and status first, description
+            // last — rather than implied by a fixed split that happened to fit
+            // the strings of the day.
+            use unicode_width::UnicodeWidthStr;
+            let needed: usize = spans.iter().map(|s| s.content.width()).sum();
+            let name_w = (needed as u16 + 2).min(inner.width);
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
-                Rect::new(inner.x, ry, inner.width.min(46), 1),
+                Rect::new(inner.x, ry, name_w, 1),
             );
 
-            // Dim capability hint on the right side of the row.
-            if !p.description.is_empty() && inner.width > 48 {
+            // Dim capability hint on the right side of the row — only when
+            // there is a readable amount of room after the columns that matter.
+            let hint_w = inner.width.saturating_sub(name_w);
+            if !p.description.is_empty() && hint_w >= 14 {
                 let hint = format!("{}  ", p.description);
-                let hint_w = inner.width.saturating_sub(48);
                 let para = Paragraph::new(Span::styled(
                     hint,
                     Style::default().fg(theme.colors.dim),
                 ))
                 .alignment(Alignment::Right);
-                frame.render_widget(para, Rect::new(inner.x + 48, ry, hint_w, 1));
+                frame.render_widget(para, Rect::new(inner.x + name_w, ry, hint_w, 1));
             }
         }
 
@@ -1100,6 +1397,269 @@ impl ModelPicker {
         );
     }
 
+    // ── Account sign-in ──────────────────────────────────────────────────
+
+    /// Enter the wait screen. Called by the app the moment it dispatches the
+    /// start request, so there is never a frame where the user pressed Enter
+    /// and nothing changed.
+    pub fn begin_account_login(&mut self, provider_id: String, model: String) {
+        let provider_name = self
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| provider_id.clone());
+
+        self.account_login = Some(AccountLoginState {
+            provider_id,
+            provider_name,
+            model,
+            session_id: None,
+            state: "starting".to_string(),
+            user_code: None,
+            verification_uri: None,
+            message: None,
+            tick: 0,
+            browser_opened: false,
+        });
+        self.mode = PickerMode::AccountLogin;
+    }
+
+    /// Fold one poll result into the wait screen.
+    ///
+    /// Returns the action to take when the sign-in has reached a terminal
+    /// state, so the caller does not have to re-derive it: `Some(...)` means
+    /// "we are done, do this". A still-running sign-in returns `None` and the
+    /// screen keeps waiting.
+    pub fn apply_account_login(
+        &mut self,
+        session: &crate::client::types::LoginSessionResponse,
+    ) -> Option<ModelPickerAction> {
+        let al = self.account_login.as_mut()?;
+        al.tick = al.tick.wrapping_add(1);
+        al.state = session.state.clone();
+        if !session.id.is_empty() {
+            al.session_id = Some(session.id.clone());
+        }
+        if session.user_code.is_some() {
+            al.user_code = session.user_code.clone();
+        }
+        // Prefer the URL that already embeds the code: it is one fewer thing
+        // for the user to type, and providers that offer it do so precisely
+        // because typing a code in a browser is the step people get wrong.
+        if session.verification_uri_complete.is_some() || session.verification_uri.is_some() {
+            al.verification_uri = session
+                .verification_uri_complete
+                .clone()
+                .or_else(|| session.verification_uri.clone());
+        }
+        al.message = session.message.clone();
+
+        if session.state == "connected" {
+            let provider = al.provider_id.clone();
+            let model = al.model.clone();
+            return Some(ModelPickerAction::SaveKeyAndSwitch {
+                runtime_provider: Self::runtime_provider(&provider),
+                provider,
+                // No key: the credential lives in the backend's own store (or
+                // in the vendor client that owns it). Sending an empty string
+                // here would write a blank entry into `.env` and shadow the
+                // real credential on the next turn.
+                api_key: None,
+                model,
+                base_url: None,
+            });
+        }
+        None
+    }
+
+    /// The verification URL, the first time there is one to open.
+    ///
+    /// Opening the browser is the CLIENT's job, not the backend's: a gateway
+    /// serving a remote TUI that opened a browser would open it on the wrong
+    /// machine. It is also the one departure from "everything happens in the
+    /// TUI" that is unavoidable — the consent screen belongs to the provider.
+    ///
+    /// Returns `Some` exactly once, and the URL stays on screen either way, so
+    /// a machine with no browser (a bare SSH session) loses nothing.
+    pub fn take_url_to_open(&mut self) -> Option<String> {
+        let al = self.account_login.as_mut()?;
+        if al.browser_opened {
+            return None;
+        }
+        let uri = al.verification_uri.clone()?;
+        al.browser_opened = true;
+        Some(uri)
+    }
+
+    /// The session id to cancel, if the wait screen owns one.
+    pub fn account_login_session_id(&self) -> Option<String> {
+        self.account_login.as_ref().and_then(|al| al.session_id.clone())
+    }
+
+    fn handle_account_login_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        match key.code {
+            KeyCode::Esc => {
+                // Esc always leaves, whether or not the backend can be told.
+                // A wait screen that traps the user because a cancel request
+                // failed is worse than an orphaned grant, which the backend
+                // abandons on its own deadline anyway.
+                let id = self.account_login_session_id();
+                self.account_login = None;
+                self.mode = PickerMode::Providers;
+                id.map(|session_id| ModelPickerAction::CancelAccountLogin { session_id })
+            }
+            KeyCode::Enter => {
+                // On a terminal failure Enter goes back to the provider list
+                // rather than retrying blindly — the message on screen usually
+                // names something the user has to fix elsewhere first.
+                let terminal = self
+                    .account_login
+                    .as_ref()
+                    .map(|al| al.state == "failed" || al.state == "cancelled")
+                    .unwrap_or(false);
+                if terminal {
+                    self.account_login = None;
+                    self.mode = PickerMode::Providers;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn draw_account_login(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+        let al = match &self.account_login {
+            Some(a) => a,
+            None => return,
+        };
+        let mut cy = inner.y + 1;
+
+        frame.render_widget(
+            Paragraph::new(format!("Connect {}", al.provider_name))
+                .style(theme.dialog_title())
+                .alignment(Alignment::Center),
+            Rect::new(inner.x, cy, inner.width, 1),
+        );
+        cy += 2;
+
+        match al.state.as_str() {
+            "failed" | "cancelled" => {
+                let text = al
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Sign-in did not complete.".to_string());
+                for line in wrap_text(&text, inner.width.saturating_sub(4) as usize) {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(theme.colors.warning),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 1;
+                }
+                cy += 1;
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  Enter or Esc to go back — you can pick another provider.",
+                        Style::default().fg(theme.colors.dim),
+                    )),
+                    Rect::new(inner.x, cy, inner.width, 1),
+                );
+            }
+            _ => {
+                // The code, big and alone on its line. This is the single most
+                // important string on the screen: the user is about to
+                // transcribe it into a browser, and burying it in a sentence
+                // is how it gets mistyped.
+                if let Some(code) = &al.user_code {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "  1. Open this page in your browser:",
+                            Style::default().fg(theme.colors.secondary),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 1;
+
+                    if let Some(uri) = &al.verification_uri {
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                format!("     {}", uri),
+                                Style::default()
+                                    .fg(theme.colors.primary)
+                                    .add_modifier(Modifier::UNDERLINED),
+                            )),
+                            Rect::new(inner.x, cy, inner.width, 1),
+                        );
+                        cy += 2;
+                    }
+
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "  2. Enter this code:",
+                            Style::default().fg(theme.colors.secondary),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 1;
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            format!("     {}", code),
+                            Style::default()
+                                .fg(theme.colors.primary)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 2;
+
+                    // Codex's anti-phishing line, verbatim in intent: a device
+                    // code is exactly the shape of a credential-theft lure, and
+                    // the only defence is telling the user who should have
+                    // started this.
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "  Continue only if you started this sign-in. If someone sent you",
+                            Style::default().fg(theme.colors.dim),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 1;
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "  this code, press Esc.",
+                            Style::default().fg(theme.colors.dim),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 2;
+                } else {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "  Connecting…",
+                            Style::default().fg(theme.colors.secondary),
+                        )),
+                        Rect::new(inner.x, cy, inner.width, 1),
+                    );
+                    cy += 2;
+                }
+
+                const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("  {} Waiting for approval…", FRAMES[al.tick % FRAMES.len()]),
+                        Style::default().fg(theme.colors.dim),
+                    )),
+                    Rect::new(inner.x, cy, inner.width, 1),
+                );
+            }
+        }
+
+        self.draw_help(frame, inner, theme, &[("Esc", "cancel")]);
+    }
+
     fn draw_key_entry(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
         let ke = match &self.key_entry {
             Some(k) => k,
@@ -1122,8 +1682,7 @@ impl ModelPicker {
             for (i, m) in ke.methods.iter().enumerate() {
                 let label = match m {
                     AuthMethod::PasteKey => "Paste API key",
-                    AuthMethod::OAuth => "Sign in (OAuth)",
-                    AuthMethod::DeviceFree => "Use key-free (device identity)",
+                    AuthMethod::Account => "Connect account",
                 };
                 let selected = *m == ke.auth_method;
                 let style = if selected {
@@ -1158,21 +1717,11 @@ impl ModelPicker {
         }
 
         match ke.auth_method {
-            AuthMethod::DeviceFree => {
+            AuthMethod::Account => {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
-                        "  Uses your signed-in local Ollama (no API key needed).",
+                        "  Uses your existing account — no API key needed. Enter to connect.",
                         Style::default().fg(theme.colors.secondary),
-                    )),
-                    Rect::new(inner.x, cy, inner.width, 1),
-                );
-                cy += 2;
-            }
-            AuthMethod::OAuth => {
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        "  OAuth sign-in is coming soon — press Tab to paste a key.",
-                        Style::default().fg(theme.colors.warning),
                     )),
                     Rect::new(inner.x, cy, inner.width, 1),
                 );
@@ -1319,6 +1868,11 @@ mod hotfix_tests {
             default_model: Some("glm-5.2:cloud".to_string()),
             base_url: Some("https://ollama.com".to_string()),
             signup_url: None,
+            auth_modes: None,
+            usable_auth_modes: None,
+            tab: None,
+            order: None,
+            auth: None,
             models: serde_json::Value::String("dynamic".to_string()),
         }
     }
@@ -1396,22 +1950,147 @@ mod hotfix_tests {
         ));
     }
 
-    // ── DeviceFree (keyless ollama_cloud): same guarantee ────────────────────
+    // ── Account sign-in: reachable, non-terminal, cancellable ───────────────
 
     #[test]
-    fn device_free_verify_error_second_enter_saves_anyway() {
+    fn account_method_starts_a_sign_in_instead_of_asking_for_a_key() {
+        // The whole point of the mode. Previously this branch printed
+        // "OAuth sign-in coming soon" and every account provider was a dead
+        // end in this screen.
         let mut picker = picker_with_key_entry();
-        picker.key_entry.as_mut().unwrap().auth_method = AuthMethod::DeviceFree;
+        picker.key_entry.as_mut().unwrap().auth_method = AuthMethod::Account;
 
-        let first = picker.key_entry_submit();
-        assert!(matches!(first, Some(ModelPickerAction::VerifyKey { .. })));
-
-        picker.set_verify_error("no local daemon reachable".to_string());
-        let second = picker.key_entry_submit();
         assert!(matches!(
-            second,
-            Some(ModelPickerAction::SaveKeyAndSwitch { api_key: None, .. })
+            picker.key_entry_submit(),
+            Some(ModelPickerAction::StartAccountLogin { .. })
         ));
+    }
+
+    #[test]
+    fn beginning_a_sign_in_keeps_the_picker_open() {
+        // A device-code grant has to render its code SOMEWHERE. Closing the
+        // dialog on start is exactly what forced "run this in another
+        // terminal" as the only way in.
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "m".to_string());
+
+        assert!(matches!(picker.mode, PickerMode::AccountLogin));
+    }
+
+    #[test]
+    fn a_pending_session_shows_the_code_and_url_and_does_not_finish() {
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "m".to_string());
+
+        let action = picker.apply_account_login(&session("pending", Some("ABCD-1234")));
+
+        assert!(action.is_none(), "a pending sign-in must not save anything");
+        let al = picker.account_login.as_ref().unwrap();
+        assert_eq!(al.user_code.as_deref(), Some("ABCD-1234"));
+        assert_eq!(al.verification_uri.as_deref(), Some("https://example.test/device"));
+        assert_eq!(picker.account_login_session_id().as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn a_connected_session_saves_and_switches_with_no_key() {
+        // `api_key: None` is load-bearing: an empty string would write a blank
+        // entry into .env and shadow the real credential on the next turn.
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "glm".to_string());
+
+        let action = picker.apply_account_login(&session("connected", None));
+
+        match action {
+            Some(ModelPickerAction::SaveKeyAndSwitch {
+                provider,
+                api_key,
+                model,
+                ..
+            }) => {
+                assert_eq!(provider, "ollama_cloud");
+                assert_eq!(model, "glm");
+                assert!(api_key.is_none());
+            }
+            other => panic!("expected a save, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn esc_cancels_the_sign_in_and_returns_to_the_provider_list() {
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "m".to_string());
+        let _ = picker.apply_account_login(&session("pending", Some("CODE")));
+
+        let action = picker.handle_key(key(KeyCode::Esc));
+
+        assert!(matches!(
+            action,
+            Some(ModelPickerAction::CancelAccountLogin { .. })
+        ));
+        assert!(matches!(picker.mode, PickerMode::Providers));
+    }
+
+    #[test]
+    fn esc_before_the_session_id_arrives_still_leaves_the_screen() {
+        // The window between "Enter pressed" and "backend answered" is short
+        // but real, and a wait screen the user cannot leave is worse than an
+        // orphaned grant — which the backend abandons on its own deadline.
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "m".to_string());
+
+        assert!(picker.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(matches!(picker.mode, PickerMode::Providers));
+    }
+
+    #[test]
+    fn a_failed_sign_in_shows_its_message_and_is_not_a_dead_end() {
+        let mut picker = picker_with_key_entry();
+        picker.begin_account_login("ollama_cloud".to_string(), "m".to_string());
+
+        let mut failed = session("failed", None);
+        failed.message = Some("Ollama is not signed in. Run `ollama signin`.".to_string());
+        assert!(picker.apply_account_login(&failed).is_none());
+
+        // Enter on a terminal failure goes back rather than retrying blindly:
+        // the message names something to fix elsewhere first.
+        assert!(picker.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(picker.mode, PickerMode::Providers));
+    }
+
+    #[test]
+    fn auth_methods_come_from_the_catalog_and_never_from_a_list_here() {
+        let mut p = ollama_cloud_provider();
+
+        p.auth_modes = None;
+        assert_eq!(ModelPicker::auth_methods(&p).len(), 1, "older backend → key only");
+
+        p.auth_modes = Some(vec!["api_key".into(), "oauth".into()]);
+        let methods = ModelPicker::auth_methods(&p);
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0], AuthMethod::Account, "sign-in is offered first");
+
+        // A provider with no key path must not be offered a key field.
+        p.auth_modes = Some(vec!["oauth".into()]);
+        assert_eq!(ModelPicker::auth_methods(&p), vec![AuthMethod::Account]);
+
+        // `usable_auth_modes` wins: a sign-in this build cannot run is dropped
+        // upstream, and offering it anyway is a route that cannot complete.
+        p.auth_modes = Some(vec!["api_key".into(), "oauth".into()]);
+        p.usable_auth_modes = Some(vec!["api_key".into()]);
+        assert_eq!(ModelPicker::auth_methods(&p), vec![AuthMethod::PasteKey]);
+    }
+
+    fn session(state: &str, user_code: Option<&str>) -> crate::client::types::LoginSessionResponse {
+        crate::client::types::LoginSessionResponse {
+            id: "sess-1".to_string(),
+            provider: "ollama_cloud".to_string(),
+            state: state.to_string(),
+            user_code: user_code.map(|c| c.to_string()),
+            verification_uri: Some("https://example.test/device".to_string()),
+            verification_uri_complete: None,
+            message: None,
+            error: None,
+        }
     }
 
     // ── Load-path hardening: failed initial fetch is never a dead end ───────
@@ -1460,4 +2139,34 @@ mod clean_key_tests {
         let _ = clean_pasted_key(&"\u{20ac}".repeat(30));
         let _ = clean_pasted_key("\"\u{4e2d}\u{6587}\"");
     }
+}
+
+/// Greedy word wrap for the sign-in screen's message line.
+///
+/// Failure messages here are full sentences that name a command or a URL, and
+/// truncating one at the dialog edge removes exactly the part the user needs.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }

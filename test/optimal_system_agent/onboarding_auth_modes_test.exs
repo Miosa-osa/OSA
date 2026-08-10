@@ -31,7 +31,37 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
   # routing that makes it usable — never before it (the BYOK suite enforces
   # exactly that: "a provider you can select but never use is worse than one
   # that is absent"). Everything NOT listed here must be untouched.
-  @new_provider_ids ["openai_codex"]
+  @new_provider_ids ["openai_codex", "claude_cli", "copilot_cli", "bedrock"]
+
+  # Pre-existing providers that have since GAINED a second auth mode in place,
+  # rather than being split into a second entry. Only `ollama_cloud`: its
+  # account mode (a signed-in local daemon) and its key mode reach the same
+  # models, so nothing but the credential differs and a split would be a lie.
+  #
+  # These are still held to the baseline — everything about the entry except
+  # the two fields the fork adds must be unchanged, which is what says the key
+  # path still works exactly as it did. What they are exempt from is the
+  # "declares key-only auth" assertion, which is the thing that deliberately
+  # changed.
+  @dual_mode_ids ["ollama_cloud"]
+
+  # The fields a dual-mode upgrade is allowed to add to an existing entry.
+  @fork_fields [:auth_modes, :subscription]
+
+  # Presentation-only fields every entry now carries: which tab a setup surface
+  # files it under, and its position within that tab.
+  #
+  # Stripped alongside `:auth_modes` for the same reason and with the same
+  # force: this test's claim is that the pre-existing providers are
+  # BEHAVIOURALLY unchanged, and grouping metadata changes where a row is
+  # drawn, not what happens when it is chosen. Both are derived — `tab` from
+  # `auth_modes`, `order` from catalog position — so neither can encode a
+  # decision the rest of the entry does not already make.
+  #
+  # They are listed explicitly rather than the assertion being loosened to a
+  # subset match, so the next field added to the catalog still fails this test
+  # and has to argue for itself here.
+  @grouping_fields [:tab, :order]
 
   defp baseline do
     {list, _} = Code.eval_file(@baseline_path)
@@ -40,6 +70,10 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
 
   defp preexisting do
     Enum.reject(Onboarding.providers_list(), &(&1.id in @new_provider_ids))
+  end
+
+  defp key_only do
+    Enum.reject(preexisting(), &(&1.id in @dual_mode_ids))
   end
 
   # A synthetic dual-mode provider. Stage 1 is the machinery, not a
@@ -70,7 +104,17 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       # `:auth_modes` is the ONLY field the refactor added to existing entries.
       # Remove it and what remains must be byte-identical to what the previous
       # implementation produced — same entries, same order, same values.
-      stripped = Enum.map(preexisting(), &Map.delete(&1, :auth_modes))
+      # `:subscription` is stripped too, for the one entry that gained a second
+      # mode in place. Everything else about that entry — env var, base URL,
+      # key affordance, model catalog — must still match, which is exactly the
+      # claim "the API-key path is unchanged" rests on.
+      stripped =
+        Enum.map(preexisting(), fn p ->
+          drop =
+            if(p.id in @dual_mode_ids, do: @fork_fields, else: [:auth_modes]) ++ @grouping_fields
+
+          Map.drop(p, drop)
+        end)
 
       assert stripped == baseline()
     end
@@ -81,10 +125,22 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
     end
 
     test "every one of them declares key-only auth" do
-      for p <- preexisting() do
+      for p <- key_only() do
         assert p.auth_modes == [:api_key],
                "#{p.id} unexpectedly declares #{inspect(p.auth_modes)}; " <>
                  "adding a mode here changes its setup flow"
+      end
+    end
+
+    test "the one dual-mode upgrade is deliberate and still offers its key" do
+      # Held explicitly so that gaining a second mode is a decision somebody
+      # wrote down, not something a catalog edit can do by accident.
+      for id <- @dual_mode_ids do
+        entry = Enum.find(preexisting(), &(&1.id == id))
+        assert entry.auth_modes == [:api_key, :oauth]
+        assert :api_key in Onboarding.usable_auth_modes(id)
+        assert Onboarding.auth_route(id, :api_key) == :api_key
+        assert Onboarding.auth_route(id, nil) == :api_key
       end
     end
 
@@ -92,7 +148,7 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       # `auth_options/1` returning [] is what makes the CLI take the identical
       # branch it took before: straight to the key prompt, no extra question,
       # no extra keystroke.
-      for p <- preexisting() do
+      for p <- key_only() do
         assert Onboarding.auth_options(p.id) == [],
                "#{p.id} would now show an auth-method menu it did not show before"
       end
@@ -102,7 +158,7 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       # Defence in depth: a stale TUI client, a scripted run or a bug passing
       # `:oauth` for a key-only provider must resolve to the key path rather
       # than dispatching into a sign-in implementation that does not exist.
-      for p <- preexisting() do
+      for p <- key_only() do
         assert Onboarding.auth_route(p.id, :oauth) == :api_key
         assert Onboarding.auth_route(p.id, nil) == :api_key
         assert Onboarding.auth_route(p.id, :api_key) == :api_key
@@ -213,7 +269,21 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       codex = Enum.find(decoded, &(&1["id"] == "openai_codex"))
       assert codex["auth_modes"] == ["oauth"], "the TUI must learn about sign-in from this field alone"
 
-      for entry <- decoded, entry["id"] not in ["openai_codex"] do
+      claude = Enum.find(decoded, &(&1["id"] == "claude_cli"))
+
+      assert claude["auth_modes"] == ["oauth"],
+             "the Claude Code bridge must reach the TUI through the same field, not a second list"
+
+      copilot = Enum.find(decoded, &(&1["id"] == "copilot_cli"))
+      assert copilot["auth_modes"] == ["oauth"]
+
+      # The dual-mode upgrade reaches the TUI through the same field — both
+      # options, in the catalog's canonical order.
+      ollama = Enum.find(decoded, &(&1["id"] == "ollama_cloud"))
+      assert ollama["auth_modes"] == ["api_key", "oauth"]
+      assert ollama["subscription"]["kind"] == "local_daemon"
+
+      for entry <- decoded, entry["id"] not in @new_provider_ids ++ @dual_mode_ids do
         assert entry["auth_modes"] == ["api_key"]
       end
     end

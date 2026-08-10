@@ -627,7 +627,11 @@ pub struct OnboardingModel {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Default` is derived so the offline fallback catalog (and tests) can build
+/// an entry with `..Default::default()` instead of restating every field. Each
+/// new field the backend grows would otherwise break every literal in the
+/// crate, which is a strong incentive not to model the payload honestly.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct OnboardingProvider {
     pub id: String,
     pub name: String,
@@ -645,8 +649,78 @@ pub struct OnboardingProvider {
     pub base_url: Option<String>,
     #[serde(default)]
     pub signup_url: Option<String>,
+    /// The auth modes this provider offers, in the catalog's canonical order
+    /// (`api_key` first). Absent on an older backend, which is why it is an
+    /// `Option` rather than defaulting to `["api_key"]`: "the backend did not
+    /// say" and "the backend said key-only" are the same rendering here, but
+    /// not the same fact.
+    #[serde(default)]
+    pub auth_modes: Option<Vec<String>>,
+    /// `auth_modes` filtered down to what THIS machine can actually run — a
+    /// sign-in whose client id is not compiled into this build, or whose CLI
+    /// is not installed, is dropped. Render from this, never from
+    /// `auth_modes`: offering a route that cannot complete is worse than not
+    /// offering it.
+    #[serde(default)]
+    pub usable_auth_modes: Option<Vec<String>>,
+    /// Which question this provider answers: `"accounts"` (connect a plan you
+    /// already pay for) or `"keys"` (paste a credential). A field rather than
+    /// something derived from `auth_modes`, because the two come apart — see
+    /// `Onboarding.normalize_grouping/2`.
+    #[serde(default)]
+    pub tab: Option<String>,
+    /// Position within the tab. Catalog order, which is already curated.
+    #[serde(default)]
+    pub order: Option<i64>,
+    /// Live connection state. `None` on an older backend, which is why the
+    /// picker still falls back to key-detection for readiness.
+    #[serde(default)]
+    pub auth: Option<ProviderAuthState>,
     #[serde(default)]
     pub models: serde_json::Value,
+}
+
+/// What a provider row is allowed to say about itself.
+///
+/// `connected` and `verified` are separate upstream for a reason (OSA holding
+/// a marker is not evidence the sign-in is live), and `state` is the collapsed
+/// answer the backend has already decided — the TUI must not re-derive it.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProviderAuthState {
+    /// `connected` · `connected_unverified` · `expired` · `needs_sign_in` ·
+    /// `needs_key` · `unknown`
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub can_sign_in: bool,
+    #[serde(default)]
+    pub can_paste_key: bool,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+}
+
+/// A sign-in in flight, as `Auth.LoginBroker` reports it. Carries the code and
+/// URL a human must act on and nothing else — no token ever crosses this.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoginSessionResponse {
+    pub id: String,
+    #[serde(default)]
+    pub provider: String,
+    /// `starting` · `pending` · `connected` · `failed` · `cancelled`
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub user_code: Option<String>,
+    #[serde(default)]
+    pub verification_uri: Option<String>,
+    #[serde(default)]
+    pub verification_uri_complete: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -856,3 +930,4 @@ mod health_update_parse_tests {
         assert!(h.update.is_none());
     }
 }
+

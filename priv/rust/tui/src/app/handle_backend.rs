@@ -1324,6 +1324,69 @@ impl App {
                 }
             }
 
+            // === Provider-first picker: account sign-in progress ===
+            BackendEvent::AccountLoginUpdate(result) => {
+                match result {
+                    Ok(session) => {
+                        // The picker decides what a reading MEANS; this arm
+                        // only routes it. `apply_account_login` answers with
+                        // an action when the sign-in reached a terminal state.
+                        let (action, url) = match self.model_picker.as_mut() {
+                            Some(picker) => {
+                                let action = picker.apply_account_login(&session);
+                                (action, picker.take_url_to_open())
+                            }
+                            None => (None, None),
+                        };
+
+                        // The provider's consent page. Best-effort and never
+                        // reported: the URL is on screen regardless, so a box
+                        // with no browser is inconvenienced, not blocked.
+                        if let Some(url) = url {
+                            crate::app::open_in_browser(&url);
+                        }
+
+                        if let Some(crate::dialogs::model_picker::ModelPickerAction::SaveKeyAndSwitch {
+                            provider,
+                            runtime_provider,
+                            api_key,
+                            model,
+                            base_url,
+                        }) = action
+                        {
+                            self.exit_overlay();
+                            self.model_picker = None;
+                            self.save_provider_key_and_switch(
+                                provider,
+                                runtime_provider,
+                                api_key,
+                                model,
+                                base_url,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Could not even start. Report it on the sign-in
+                        // screen rather than as a toast behind a dialog the
+                        // user is still looking at.
+                        if let Some(picker) = self.model_picker.as_mut() {
+                            let _ = picker.apply_account_login(
+                                &crate::client::types::LoginSessionResponse {
+                                    id: String::new(),
+                                    provider: String::new(),
+                                    state: "failed".to_string(),
+                                    user_code: None,
+                                    verification_uri: None,
+                                    verification_uri_complete: None,
+                                    message: Some(e),
+                                    error: Some("start_failed".to_string()),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
             // === Provider-first picker: dynamic model list loaded ===
             BackendEvent::ProviderModelsLoaded(result) => {
                 if let Some(picker) = self.model_picker.as_mut() {

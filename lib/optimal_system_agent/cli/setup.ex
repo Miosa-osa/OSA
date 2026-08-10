@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   """
 
   alias OptimalSystemAgent.CLI.Prompt
+  alias OptimalSystemAgent.Auth.LoginSession
   alias OptimalSystemAgent.Auth.Subscription
   alias OptimalSystemAgent.Onboarding
 
@@ -117,7 +118,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
                 :lmstudio,
                 :llamacpp,
                 :custom,
-                :openai_codex
+                :openai_codex,
+                # Credential lives in the vendor's own CLI, not in OSA at all.
+                :claude_cli,
+                :copilot_cli
               ]) do
         Prompt.outro("Setup cancelled")
         :skip
@@ -133,7 +137,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
         # have NO model-selection step at all; the config it wrote always
         # fell back to the provider's runtime default with no way to pick a
         # specific model, e.g. the recommended glm-5.2:cloud on Ollama Cloud).
-        model = select_model(provider, api_key)
+        model = select_model(provider, api_key, base_url)
 
         # Step 5: Channel setup (optional)
         channel = Prompt.select("Connect a messaging channel?", @channels)
@@ -222,36 +226,36 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # before ever demanding an Ollama Cloud API key — mirrored here via the
   # shared `Onboarding.ollama_cloud_route/3` decision table so both entry
   # points make the exact same choice.
+  # Now driven off the catalog's `auth_modes` like every other dual-mode
+  # provider, so the account route is a real, verified sign-in rather than a
+  # bespoke "is a daemon listening?" branch. Two things changed:
+  #
+  #   * the account option is offered even when no daemon is answering, and
+  #     `Auth.Providers.OllamaAccount.login/1` names the command that fixes it
+  #     (`ollama serve` / `ollama signin`). The old branch hid the option, so a
+  #     user with the daemon stopped was silently told the only way in was a key.
+  #   * choosing it now VERIFIES the daemon is signed in and records a marker,
+  #     instead of assuming that a reachable daemon is an authenticated one.
+  #
+  # The key half is untouched: same prompt, same `ollama_cloud_route/3`
+  # decision, same `https://ollama.com` endpoint.
   defp get_auth(:ollama_cloud) do
-    local = Onboarding.probe_ollama_local()
+    id = "ollama_cloud"
+    modes = Onboarding.usable_auth_modes(id)
 
-    if local.reachable do
-      choice =
-        Prompt.select("Ollama Cloud connection", [
-          %{
-            value: :local,
-            label: "Use signed-in local Ollama (no key)",
-            hint: "detected at #{local.url} — proxies :cloud models via device identity"
-          },
-          %{
-            value: :key,
-            label: "Enter an Ollama Cloud API key",
-            hint: "for a different account or a headless setup"
-          }
-        ])
-
-      case choice do
-        :local ->
-          Prompt.completed("Credentials", "using signed-in local Ollama (no key)")
-          Onboarding.ollama_cloud_route(true, true, nil)
-
-        _ ->
-          key = ask_ollama_cloud_key()
-          Onboarding.ollama_cloud_route(true, false, key)
+    choice =
+      case Onboarding.auth_options(id) do
+        [] -> nil
+        options -> Prompt.select("How do you want to connect?", options)
       end
-    else
-      key = ask_ollama_cloud_key()
-      Onboarding.ollama_cloud_route(false, false, key)
+
+    case Onboarding.auth_route_for(modes, choice) do
+      :oauth ->
+        sign_in(id, modes, :ollama_cloud)
+
+      :api_key ->
+        key = ask_ollama_cloud_key()
+        Onboarding.ollama_cloud_route(false, false, key)
     end
   end
 
@@ -315,22 +319,55 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp sign_in(id, modes, provider) do
     name = provider_display_name(id)
 
-    case Subscription.login(id, io: &IO.puts/1) do
-      {:ok, _entry} ->
+    # `on_tick` is what makes the wait cancellable and visibly alive. Without
+    # it a device-code poll blocks this process in silence for up to fifteen
+    # minutes, Esc does nothing, and Ctrl-C takes down the VM rather than the
+    # sign-in. `with_cancellation/2` scopes the SIGINT trap to this call.
+    result =
+      LoginSession.with_cancellation(id, fn ->
+        Subscription.login(id, io: &IO.puts/1, on_tick: LoginSession.on_tick(id))
+      end)
+
+    case result do
+      {:ok, entry} ->
         Prompt.completed("Credentials", "signed in to #{name}")
-        {nil, subscription_base_url(id)}
+        {nil, connected_base_url(entry, id)}
 
       {:error, reason} ->
         IO.puts("")
         IO.puts("\e[33m  #{Subscription.message(reason, name)}\e[0m")
 
         if :api_key in modes and Prompt.confirm("Use an API key instead?") do
-          ask_api_key(provider)
+          ask_key_for(provider)
         else
           :cancelled
         end
     end
   end
+
+  # The endpoint the sign-in itself pinned, if it pinned one. `ollama_cloud`
+  # does: its account mode talks to the LOCAL daemon, which is a different
+  # endpoint from the catalog `base_url` the keyed mode uses, and which one is
+  # correct is decided by the mode — not by the entry. Providers that pin
+  # nothing fall back to the catalog exactly as before.
+  defp connected_base_url(entry, id) when is_map(entry) do
+    case Map.get(entry, "base_url") do
+      url when is_binary(url) and url != "" -> url
+      _ -> subscription_base_url(id)
+    end
+  end
+
+  defp connected_base_url(_entry, id), do: subscription_base_url(id)
+
+  # Ollama Cloud's key prompt is its own (it names the product and resolves the
+  # keyed endpoint), so the "use a key instead" escape hatch after a failed
+  # sign-in must land on the same prompt the key mode uses — not a generic one
+  # that would leave the base URL unset.
+  defp ask_key_for(:ollama_cloud) do
+    Onboarding.ollama_cloud_route(false, false, ask_ollama_cloud_key())
+  end
+
+  defp ask_key_for(provider), do: ask_api_key(provider)
 
   defp provider_display_name(id) do
     case Enum.find(Onboarding.providers_list(), &(&1.id == id)) do
@@ -343,6 +380,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # resolved later from the settings cascade.
   defp subscription_base_url(id) do
     case Enum.find(Onboarding.providers_list(), &(&1.id == id)) do
+      # A dual-mode provider whose two modes have different endpoints declares
+      # the sign-in one under `:subscription`; `:base_url` on the entry is the
+      # key mode's and would be the wrong answer here.
+      %{subscription: %{base_url: url}} when is_binary(url) and url != "" -> url
       %{base_url: url} when is_binary(url) -> url
       _ -> nil
     end
@@ -379,10 +420,14 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # provider's model list. Returns `nil` (no explicit model — the provider's
   # runtime default applies) when there's nothing to pick from, so this never
   # blocks setup on providers we don't have a catalog for (groq, deepseek).
-  defp select_model(provider, api_key) do
+  # `base_url` is passed through because for `ollama_cloud` it is what says
+  # WHICH mode was taken: a loopback URL means the account route, and the
+  # daemon then answers authoritatively which cloud models that account can
+  # reach. Every other provider ignores it exactly as before.
+  defp select_model(provider, api_key, base_url) do
     onboarding_id = onboarding_provider_id(provider)
 
-    case Onboarding.model_list(onboarding_id, api_key: api_key) do
+    case Onboarding.model_list(onboarding_id, api_key: api_key, base_url: base_url) do
       {:ok, []} ->
         nil
 
@@ -452,7 +497,15 @@ defmodule OptimalSystemAgent.CLI.Setup do
           ])
 
         if choice == :retry do
-          {new_key, _base_url} = get_auth(provider)
+          # `get_auth/1` can answer `:cancelled` for a dual-mode provider whose
+          # sign-in failed and whose key offer was declined. Keep the key we
+          # already have rather than crashing the wizard on a match.
+          new_key =
+            case get_auth(provider) do
+              {k, _base_url} -> k
+              _ -> nil
+            end
+
           validate_with_retry(provider, new_key || key, attempts_left - 1)
         else
           Prompt.completed("Connection", "not verified — saved anyway")
@@ -583,7 +636,15 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # two-thirds of the catalog.
   def test_provider(provider, key, opts) do
     params =
-      %{"provider" => onboarding_provider_id(provider), "api_key" => key}
+      %{
+        "provider" => onboarding_provider_id(provider),
+        "api_key" => key,
+        # This is the verify step of a setup run the user is sitting in front
+        # of, so the externally-managed providers may create their connection
+        # marker here. See `Onboarding.during_setup?/1` for why every caller
+        # has to say so explicitly.
+        "during_setup" => true
+      }
       |> then(fn p ->
         case Keyword.get(opts, :plug) do
           nil -> p

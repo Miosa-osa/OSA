@@ -9,6 +9,119 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.67] — displays as `v1.0.067`
+
+You can now sign in to a provider with an account you already pay for, from
+inside OSA, and use it. Before this release you could not: clicking any
+provider answered `Failed to load models: HTTP 401`, `/login` did nothing, and
+providers that have no API key to paste were labelled "needs key" — a dead end.
+Three separate bugs produced that one experience, and all three are fixed.
+
+The picker is now organised the way the choice actually divides: **Connect an
+account** for providers you sign in to, **Paste an API key** for providers you
+hand a credential. A provider offering both lets you switch between them.
+
+### Fixed — every provider returned HTTP 401 when listing models
+
+- **The models route rejected requests it was supposed to sanitise.** The
+  handler's own comment said it strips credential parameters once setup is
+  complete; the code rejected the whole request instead. Because the TUI reads
+  this route without auth, every provider with a dynamic model catalog answered
+  `401` on every set-up machine. This was never specific to ChatGPT — the same
+  call failed identically for `anthropic`, `miosa` and `ollama_local`.
+- **The same branch could answer with another request's body.** It discarded
+  the result of `Plug.Conn.halt/1` and then sent a second response on a conn
+  that had already been sent, so concurrent probes could return the *previous*
+  request's payload.
+- **A keyless provider was treated as a configured one.** Sign-in-only
+  providers declare `requires_key: false`, which the picker read as "ready",
+  then drilled into a model list for an account nobody had signed into.
+  Readiness now comes from the backend's auth state. Keyless is not configured.
+
+### Fixed — a signed-in ChatGPT account silently ran against local Ollama
+
+- **`config/runtime.exs` had no provider-map entry for the account
+  providers.** `openai_codex`, `claude_cli`, `copilot_cli` and `bedrock` were
+  all absent, and the lookup fell back to `:ollama`. So you could sign in,
+  select `gpt-5.2-codex`, restart OSA, and have it ask your local Ollama daemon
+  for a model that daemon has never heard of.
+
+### Fixed — reasoning effort did nothing on the Codex transport
+
+- **Only three literal values were accepted.** `low|medium|high` passed;
+  `:fast`, `:xhigh` and `:ultra` were dropped silently. Nothing on the turn
+  path passed the option through in the first place.
+- **Every GPT-5.x model was classified as non-reasoning.** The fallback check
+  matched o-series prefixes only, despite a comment claiming GPT-5.x was
+  covered — so models whose ids begin with `gpt` answered `false` and were sent
+  `temperature` instead of `reasoning_effort`.
+
+### Added — sign in from the TUI
+
+- **`PickerMode::AccountLogin`** renders the verification URL and the device
+  code on their own lines, with a live spinner, the provider's anti-phishing
+  warning, and Esc-to-cancel that works even before a session id exists.
+- **`Auth.LoginBroker`** runs sign-in out of band so the interface never
+  blocks: start returns in milliseconds, status polls, cancel goes through the
+  existing cooperative cancellation flag. One in-flight sign-in per provider.
+  It publishes the user code and URL only — never a token.
+- **`OpenAICodex.login/1` gained an `on_verification` callback.** The device
+  code was previously recoverable only by scraping it out of console text,
+  which is why sign-in worked from `osa setup` and from nowhere else.
+- **`/login` opens the provider surface**, `/logout` shares one implementation
+  with the CLI, and **`/provider`** now exists.
+- **A second, hardcoded capability list was removed.** The Rust picker decided
+  auth methods with a `match` on provider id defaulting to "paste a key",
+  disagreeing with the backend. Auth methods now derive from `auth_modes`.
+
+### Added — AWS Bedrock
+
+- Sign in with the AWS credentials you already have: environment, or
+  `~/.aws/credentials` with `AWS_PROFILE`. A bearer token
+  (`AWS_BEARER_TOKEN_BEDROCK`) is the second mode on the same entry.
+- **SigV4 is implemented on `:crypto` with no new dependency, and verified
+  byte-for-byte against AWS's published `get-vanilla` test vector.**
+- **OSA stores no AWS secret.** The marker holds the source, region, pinned
+  base URL and the last four characters of the (non-secret) key id;
+  credentials are re-read per request, so revoking them ends OSA's access.
+- Every credential source is named when resolution fails, including the case
+  where a profile uses SSO, `credential_process` or `role_arn` — which OSA
+  does not implement — with the command that exports usable credentials.
+  A missing region is a hard failure, never a guessed `us-east-1`.
+- Uses Bedrock's `Converse` API rather than per-family `invoke` bodies, so one
+  request shape covers every model family. Streaming is deliberately not yet
+  implemented and falls back to sync.
+
+### Added — Ollama Cloud as an account
+
+- **Selecting Ollama Cloud without a key used to write an unusable config.**
+  It set the base URL to `https://ollama.com` with no credential, which fails
+  authentication on the first turn. Account mode now resolves to the local
+  daemon, so leaving the key blank works.
+- The model list comes from the signed-in daemon rather than the shipped
+  catalog, because the daemon knows what your account can actually reach.
+- OSA reads no private key and signs nothing itself; the daemon remains the
+  holder of that credential. `osa` forgetting the account leaves
+  `ollama signout` untouched.
+
+### Known gaps in this release
+
+- **No call has been made to a live provider endpoint from this build.** The
+  flows, credential shapes and request bodies are verified against stubs and
+  recorded fixtures. A completed turn against a real signed-in account is not
+  among the evidence.
+- **Stacked chrome after a terminal resize is not fixed.** A regression test
+  reproducing the reported shape was added and it passes, because the test
+  harness does not reflow on resize while real terminals do. Unreproduced,
+  not repaired.
+- **`claude_cli` still requires Claude Code to be installed and signed in
+  beforehand.** Driving that login from inside OSA needs a PTY-backed
+  subprocess pane and is not built yet.
+- Reversibility — signing out and back in, switching a provider between key
+  and account — is not yet exercised end to end.
+
+---
+
 ## [1.0.64] — displays as `v1.0.064`
 
 Typing a message that began with the letter `y` lost that letter. So did a

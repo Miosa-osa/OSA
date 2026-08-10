@@ -22,6 +22,9 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       OptimalSystemAgent.Agent.Memory.Episodic,
       OptimalSystemAgent.Agent.Tasks,
       OptimalSystemAgent.Budget,
+      # Remembers the quota windows providers report on their own responses,
+      # so `/usage` can show them without spending a request to re-read them.
+      OptimalSystemAgent.Usage.RateLimits,
       OptimalSystemAgent.Agent.Progress,
       OptimalSystemAgent.Agent.Hooks,
       OptimalSystemAgent.Agent.Scheduler,

@@ -454,6 +454,10 @@ pub enum BackendEvent {
     ProviderPickerData(Result<OnboardingStatusResponse, String>),
     /// Result of verifying a candidate provider key from the key screen.
     ModelPickerKeyVerified(Result<OnboardingHealthCheckResponse, String>),
+    /// One poll of an in-flight account sign-in (`/auth/login/status/:id`).
+    /// Carries the whole session so the picker can render code + URL + state
+    /// from a single source rather than reassembling it from several events.
+    AccountLoginUpdate(Result<crate::client::types::LoginSessionResponse, String>),
     /// A provider's dynamic model list loaded → switch picker to Models mode.
     ProviderModelsLoaded(Result<OnboardingModelsResponse, String>),
 

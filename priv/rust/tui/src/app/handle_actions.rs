@@ -1005,6 +1005,84 @@ impl App {
         });
     }
 
+    /// Start an account sign-in and poll it to completion.
+    ///
+    /// The poll lives here rather than in the dialog because the dialog is
+    /// redrawn synchronously and must never block. One task owns the whole
+    /// grant: it starts the sign-in, then re-reads its state on a fixed
+    /// interval and pushes each reading in as an event. The dialog is a pure
+    /// renderer of those readings.
+    ///
+    /// Bounded at 15 minutes to match the backend's own deadline, so the task
+    /// cannot outlive the thing it is watching — an orphaned poller against a
+    /// swept session would spin on 404s for ever.
+    pub(crate) fn start_account_login(&mut self, provider: String, model: String) {
+        if let Some(picker) = self.model_picker.as_mut() {
+            picker.begin_account_login(provider.clone(), model);
+        }
+
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let session = match client.auth_login_start(&provider).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Event::Backend(BackendEvent::AccountLoginUpdate(Err(
+                        e.to_string()
+                    ))));
+                    return;
+                }
+            };
+
+            let id = session.id.clone();
+            let terminal = |state: &str| {
+                matches!(state, "connected" | "failed" | "cancelled")
+            };
+            let done = terminal(&session.state);
+            let _ = tx.send(Event::Backend(BackendEvent::AccountLoginUpdate(Ok(session))));
+            if done || id.is_empty() {
+                return;
+            }
+
+            // One second: fast enough that the spinner reads as live and the
+            // success is felt as immediate, slow enough that a fifteen-minute
+            // grant is 900 cheap local requests rather than a busy loop.
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(900);
+
+            loop {
+                ticker.tick().await;
+                if tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+                match client.auth_login_status(&id).await {
+                    Ok(s) => {
+                        let done = terminal(&s.state);
+                        let _ = tx.send(Event::Backend(BackendEvent::AccountLoginUpdate(Ok(s))));
+                        if done {
+                            return;
+                        }
+                    }
+                    // A single failed poll is not a failed sign-in — the grant
+                    // is running on the backend and one dropped request must
+                    // not throw it away. Keep polling; the deadline bounds it.
+                    Err(_) => continue,
+                }
+            }
+        });
+    }
+
+    /// Best-effort cancel of an in-flight sign-in. Never reported to the user:
+    /// the dialog has already closed, and the backend gives up on its own
+    /// deadline regardless.
+    pub(crate) fn cancel_account_login(&self, session_id: String) {
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.auth_login_cancel(&session_id).await;
+        });
+    }
+
     /// Persist a verified key (merging into .env) then switch to it.
     pub(crate) fn save_provider_key_and_switch(
         &self,

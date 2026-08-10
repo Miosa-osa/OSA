@@ -300,6 +300,14 @@ defmodule OptimalSystemAgent.Application do
           # General-purpose Task.Supervisor for fire-and-forget async work
           # (HTTP message dispatch, background learning, etc.)
           {Task.Supervisor, name: OptimalSystemAgent.TaskSupervisor},
+
+          # Out-of-band account sign-ins. Needed by any surface that cannot
+          # block for the length of a device-code grant — which is every
+          # surface except a terminal that owns stdin. Started here, right
+          # after its Task.Supervisor, because it holds no state worth
+          # preserving across a restart: an in-flight sign-in that dies with
+          # the node is one the user re-runs.
+          OptimalSystemAgent.Auth.LoginBroker,
           OptimalSystemAgent.Supervisors.Infrastructure,
           OptimalSystemAgent.Supervisors.Sessions,
           OptimalSystemAgent.Supervisors.AgentServices,

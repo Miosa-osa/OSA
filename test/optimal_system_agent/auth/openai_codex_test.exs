@@ -187,7 +187,15 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodexTest do
       assert stored["account_id"] == "acct_9"
     end
 
-    test "a revoked grant signs out locally rather than retrying every message" do
+    # Deliberately TWO strikes, not one. Deleting the credential is
+    # irreversible from the user's side — they must run the whole sign-in
+    # again — and providers do return `invalid_grant` for transient reasons.
+    # One bad minute signing someone out mid-conversation is a worse outcome
+    # than one extra failed turn, so the first rejection is survived and the
+    # second is believed.
+    test "a revoked grant signs out locally, but only after a second consecutive rejection" do
+      OpenAICodex.reset_refresh_failures()
+
       SubscriptionStore.put("openai_codex", %{
         "access_token" => "old",
         "refresh_token" => "rt",
@@ -197,7 +205,91 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodexTest do
       stub(%{"/oauth/token" => {400, %{"error" => "invalid_grant"}}})
 
       assert {:error, :refresh_token_invalid} = OpenAICodex.access_token()
-      refute OpenAICodex.status().connected?
+
+      assert OpenAICodex.status().connected?,
+             "one invalid_grant may be transient; the credential is kept"
+
+      assert {:error, :refresh_token_invalid} = OpenAICodex.access_token()
+
+      refute OpenAICodex.status().connected?,
+             "twice in a row is a revoked grant, not a blip"
+    end
+
+    test "a success between two rejections resets the strike count" do
+      OpenAICodex.reset_refresh_failures()
+
+      SubscriptionStore.put("openai_codex", %{
+        "access_token" => "old",
+        "refresh_token" => "rt",
+        "expires_at" => System.system_time(:second) + 10
+      })
+
+      stub(%{"/oauth/token" => {400, %{"error" => "invalid_grant"}}})
+      assert {:error, :refresh_token_invalid} = OpenAICodex.access_token()
+
+      stub(%{
+        "/oauth/token" =>
+          {200, %{"access_token" => "fresh", "refresh_token" => "rt2", "expires_in" => 3600}}
+      })
+
+      assert {:ok, "fresh"} = OpenAICodex.access_token()
+
+      # Back to a clean slate: the next single failure must not sign the user
+      # out on what would otherwise be strike two.
+      SubscriptionStore.put("openai_codex", %{
+        "access_token" => "fresh",
+        "refresh_token" => "rt2",
+        "expires_at" => System.system_time(:second) + 10
+      })
+
+      stub(%{"/oauth/token" => {400, %{"error" => "invalid_grant"}}})
+      assert {:error, :refresh_token_invalid} = OpenAICodex.access_token()
+      assert OpenAICodex.status().connected?
+    end
+
+    # The reactive path: a token that looks fine to the clock but is rejected
+    # by the server. Proactive refresh alone can never catch this — clock
+    # skew, server-side revocation, and a credential with no `expires_at` at
+    # all all produce it — and before this it surfaced as the dead-end string
+    # "HTTP 401: ..." with nothing behind it.
+    test "force_refresh/1 renews a token the server rejected even though it had not expired" do
+      OpenAICodex.reset_refresh_failures()
+
+      SubscriptionStore.put("openai_codex", %{
+        "access_token" => "rejected",
+        "refresh_token" => "rt",
+        # An hour of validity left by the clock's reckoning.
+        "expires_at" => System.system_time(:second) + 3600
+      })
+
+      refute OpenAICodex.needs_refresh?(SubscriptionStore.fetch("openai_codex")),
+             "the proactive path has no reason to act here, which is the whole problem"
+
+      stub(%{
+        "/oauth/token" =>
+          {200, %{"access_token" => "renewed", "refresh_token" => "rt2", "expires_in" => 3600}}
+      })
+
+      assert {:ok, "renewed"} = OpenAICodex.force_refresh("rejected")
+      assert SubscriptionStore.fetch("openai_codex")["access_token"] == "renewed"
+    end
+
+    test "force_refresh/1 adopts a peer's rotated token instead of spending the refresh token again" do
+      OpenAICodex.reset_refresh_failures()
+
+      # The state after another OSA process has already refreshed: the token
+      # on disk is no longer the one that got the 401.
+      SubscriptionStore.put("openai_codex", %{
+        "access_token" => "already-rotated-by-a-peer",
+        "refresh_token" => "rt2",
+        "expires_at" => System.system_time(:second) + 3600
+      })
+
+      # Any network call at all would be a double-spend of a single-use
+      # rotating refresh token, which invalidates the whole grant.
+      stub(%{"/oauth/token" => {500, %{"error" => "must_not_be_called"}}})
+
+      assert {:ok, "already-rotated-by-a-peer"} = OpenAICodex.force_refresh("rejected")
     end
 
     test "credential/0 returns token, account and base URL as one consistent value" do

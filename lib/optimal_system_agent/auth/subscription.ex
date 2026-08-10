@@ -22,13 +22,33 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   `access_token/1` MAY refresh, and is the only function that may.
   """
 
+  alias OptimalSystemAgent.Auth.Providers.Bedrock
+  alias OptimalSystemAgent.Auth.Providers.ClaudeCli
   alias OptimalSystemAgent.Auth.Providers.Copilot
+  alias OptimalSystemAgent.Auth.Providers.CopilotCli
+  alias OptimalSystemAgent.Auth.Providers.OllamaAccount
   alias OptimalSystemAgent.Auth.Providers.OpenAICodex
   alias OptimalSystemAgent.Auth.SubscriptionStore
 
-  @typedoc "Everything a caller needs to display connection state, with no secrets in it."
+  @typedoc """
+  Everything a caller needs to display connection state, with no secrets in it.
+
+  `connected?` and `verified?` are **not** the same question, and collapsing
+  them is how a status screen ends up lying:
+
+    * `connected?` — the user asked OSA to use this provider and a marker
+      exists. It is a statement about OSA's own records.
+    * `verified?` — OSA has positive evidence the underlying sign-in is real.
+      For `openai_codex` that is a token OSA holds; for `claude_cli` it is
+      `claude auth status` having answered "signed in". For `copilot_cli` it is
+      often **false while `connected?` is true**, because Copilot offers no way
+      to confirm a sign-in offline and OSA will not spend a metered request to
+      find out. That combination is the honest answer, not a bug, and a
+      surface that renders only `connected?` presents a guess as a fact.
+  """
   @type status :: %{
           connected?: boolean(),
+          verified?: boolean(),
           provider: String.t(),
           account: String.t() | nil,
           plan: String.t() | nil,
@@ -50,7 +70,23 @@ defmodule OptimalSystemAgent.Auth.Subscription do
 
   # Provider id (as it appears in the onboarding catalog) → implementation.
   @implementations %{
+    # Not an OAuth client either, and not a bring-your-own-CLI: `bedrock`
+    # connects the AWS credential chain the machine already has and signs
+    # every request with SigV4. Like the CLI-backed entries it holds no
+    # token — the AWS secret stays where AWS put it and is re-read live.
+    "bedrock" => Bedrock,
+    # Not an OAuth client: `claude_cli` verifies an existing Claude Code
+    # sign-in and holds no credential. It implements this behaviour anyway so
+    # every surface asks the same question of every subscription provider.
+    "claude_cli" => ClaudeCli,
     "copilot" => Copilot,
+    # Same bring-your-own-CLI shape as claude_cli: no client id, no token held.
+    "copilot_cli" => CopilotCli,
+    # The one entry that is a SECOND mode on an existing key provider rather
+    # than a provider of its own: `ollama_cloud` keeps its API key path
+    # untouched and gains "use my signed-in local daemon" beside it. No token
+    # is held here either — the daemon owns the device key.
+    "ollama_cloud" => OllamaAccount,
     "openai_codex" => OpenAICodex
   }
 
@@ -146,6 +182,7 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   def disconnected(provider_id) do
     %{
       connected?: false,
+      verified?: false,
       provider: to_string(provider_id),
       account: nil,
       plan: nil,
@@ -240,11 +277,29 @@ defmodule OptimalSystemAgent.Auth.Subscription do
       "Account sign-in for #{name} is not available in this build: OSA has no registered OAuth client id for it. " <>
         "Paste an API key instead."
 
+  # A credential with no expiry and no refresh token that the server has
+  # started refusing. There is genuinely nothing to renew, so this is the one
+  # 401-shaped case where "sign in again" is the correct and only advice.
+  def message(:not_refreshable, name),
+    do:
+      "Your #{name} credential can no longer be renewed — it has no refresh token, and the one " <>
+        "OSA holds is being refused. Sign in again with `osa auth login`, or paste an API key."
+
   def message(:not_connected, name),
     do: "Not signed in to #{name}. Run `osa setup` and choose \"Sign in\", or paste an API key."
 
   def message(:unsupported_provider, name),
     do: "#{name} does not support account sign-in. Use an API key."
+
+  # Not a credential problem and not a user error: another OSA process held the
+  # store's lock long enough to be judged dead, took it over, and this process
+  # correctly abandoned its own write rather than clobbering the newer
+  # credential. Retrying re-reads whatever the winner wrote, which is normally
+  # a perfectly good token — so this must not send anyone to a re-auth.
+  def message(:lock_lost, name),
+    do:
+      "Another OSA process finished updating #{name} credentials first, so this update was " <>
+        "discarded rather than overwriting it. Retry — your sign-in is intact."
 
   def message(:lock_timeout, name),
     do:
@@ -259,6 +314,71 @@ defmodule OptimalSystemAgent.Auth.Subscription do
 
   def message({:oauth_error, detail}, name),
     do: "#{name} rejected the sign-in: #{detail}. Retry, or paste an API key."
+
+  # ── Externally-managed credentials (Claude Code) ────────────────────────
+  #
+  # These are not sign-in failures in the usual sense: the credential lives in
+  # another vendor's client, so the remedy is a command in THAT client, not a
+  # retry in OSA. Saying "re-run setup" here would send the user in a circle.
+  def message(:cli_not_installed, name),
+    do:
+      "#{name} needs the Claude Code CLI, which is not installed or not on PATH. " <>
+        "Install it from https://claude.com/product/claude-code (or set OSA_CLAUDE_CLI_BIN to its full path), " <>
+        "then re-run setup. The Anthropic provider with an API key works without it."
+
+  def message(:cli_not_signed_in, name),
+    do:
+      "Claude Code is installed but not signed in, so #{name} cannot be used yet. " <>
+        "Run `claude auth login` (or `claude setup-token` on a headless machine), then re-run setup. " <>
+        "OSA cannot perform that sign-in for you — Anthropic permits you to point your own Claude Code " <>
+        "at a third-party tool, but not a third-party tool to offer Claude login."
+
+  def message({:cli_too_old, version}, name),
+    do:
+      "Your Claude Code CLI (#{version || "unknown version"}) is older than #{name} requires. " <>
+        "Run `claude update` and try again."
+
+  def message(:cli_status_unreadable, _name),
+    do:
+      "Could not read `claude auth status`. Run it yourself to see what it says; if it works there, " <>
+        "please report this."
+
+  def message({:cli_error, detail}, _name),
+    do: "Claude Code could not report its authentication status: #{detail}"
+
+  def message(:externally_managed, name),
+    do:
+      "#{name} has no token for OSA to use — the credential is held by the client that owns it " <>
+        "(the Claude Code CLI, or your local Ollama daemon), not by OSA. If you are seeing this, " <>
+        "something asked for a token it should not need."
+
+  # ── Externally-managed credentials (the local Ollama daemon) ────────────
+  #
+  # Same shape as the Claude Code cases above: the credential is the machine's
+  # own Ed25519 key, held by Ollama's daemon, so every remedy is a command in
+  # THAT client. "Re-run setup" alone would send the user in a circle.
+  def message(:ollama_daemon_unreachable, name),
+    do:
+      "No local Ollama daemon answered, so #{name} cannot use your account. " <>
+        "Start it with `ollama serve` (or launch the Ollama app), then re-run setup. " <>
+        "An Ollama Cloud API key works without a local daemon."
+
+  def message(:ollama_not_signed_in, name),
+    do:
+      "Your local Ollama daemon is running but not signed in, so #{name} has no account to use. " <>
+        "Run `ollama signin`, then re-run setup. OSA cannot do it for you — signing in registers " <>
+        "this machine's key with your ollama.com account, and only Ollama's own client can."
+
+  def message({:ollama_host_remote, url}, name),
+    do:
+      "OLLAMA_HOST points at #{url}, which is not a local daemon, so #{name}'s account mode is " <>
+        "unavailable. OSA will not send an account probe to a remote host. Unset OLLAMA_HOST to " <>
+        "use the local daemon, or paste an Ollama Cloud API key."
+
+  def message({:ollama_http, status}, name),
+    do:
+      "The local Ollama daemon answered HTTP #{status} when #{name} asked which account it is " <>
+        "signed in as. Check `ollama serve` is healthy, or paste an Ollama Cloud API key."
 
   def message(other, name),
     do: "#{name} sign-in failed: #{inspect(other)}. You can paste an API key instead."

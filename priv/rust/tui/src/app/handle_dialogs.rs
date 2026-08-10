@@ -95,6 +95,18 @@ impl App {
                 } => {
                     self.verify_provider_key(provider, api_key, model, base_url);
                 }
+                // Non-terminal: the picker STAYS OPEN and shows the sign-in
+                // screen. Closing it here is what made a browser-based
+                // sign-in impossible from the TUI — the code and URL had
+                // nowhere to be drawn.
+                ModelPickerAction::StartAccountLogin { provider, model } => {
+                    self.start_account_login(provider, model);
+                }
+                ModelPickerAction::CancelAccountLogin { session_id } => {
+                    self.exit_overlay();
+                    self.model_picker = None;
+                    self.cancel_account_login(session_id);
+                }
                 ModelPickerAction::LoadProviderModels {
                     provider,
                     base_url,

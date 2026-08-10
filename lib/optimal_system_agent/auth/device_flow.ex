@@ -27,9 +27,15 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
        embedding a client secret in the binary — strictly worse than either
        option above.
 
-  PKCE (`Auth.PKCE`) is therefore not part of *this* grant — there is no
-  authorization code redirected through a user agent to protect. It is
-  retained for the authorization-code providers that need it.
+  PKCE is therefore not part of *this* grant — there is no authorization code
+  redirected through a user agent to protect. (This paragraph previously
+  pointed at an `Auth.PKCE` module "retained for the authorization-code
+  providers that need it". No such module exists, and none has ever existed:
+  the only `code_verifier` in the tree is **server-supplied** by OpenAI's
+  deviceauth endpoint, which is PKCE in shape only. The reference is removed
+  rather than left as a promise, because the first provider that genuinely
+  needs a client-generated S256 challenge — MiniMax — must build it, not
+  discover it missing.)
 
   ## Secret handling
 
@@ -49,6 +55,29 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
   @min_interval_s 1
   # RFC 8628 says back off by "at least 5 seconds" on slow_down.
   @slow_down_bump_s 5
+
+  # An independent ceiling on the whole poll, measured on the MONOTONIC clock.
+  #
+  # Two separate bugs are closed by this pair. Trusting the server's
+  # `expires_in` alone means a buggy or hostile value pins the CLI for its
+  # whole duration with no way out; and measuring the deadline on
+  # `System.system_time/1` means an NTP step backwards during the wait
+  # silently extends it, potentially forever. The provider's expiry is still
+  # honoured — whichever limit trips first wins — this is only a floor under
+  # how wrong that can go.
+  @max_wait_s 900
+
+  # How many CONSECUTIVE transport failures end the poll.
+  #
+  # The failure this prevents is the worst-feeling one in the whole flow: the
+  # user has already opened the browser, typed the code and approved it, and a
+  # single dropped packet on the next poll throws all of that away and demands
+  # a fresh code. A transport error mid-poll says nothing about the grant,
+  # which is sitting approved on the provider's side waiting to be collected.
+  # So they are treated as transient and retried at the normal interval, with
+  # a bound so a genuinely severed network still terminates rather than
+  # spinning to the deadline.
+  @max_consecutive_transport_errors 5
 
   defmodule Session do
     @moduledoc "A pending device-authorization grant."
@@ -147,13 +176,20 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
   @spec poll(config(), Session.t(), (-> :continue | :cancel)) ::
           {:ok, map()} | {:error, term()}
   def poll(config, %Session{} = session, on_tick \\ fn -> :continue end) do
-    do_poll(config, session, session.interval_s, on_tick)
+    deadline = System.monotonic_time(:second) + max_wait_s()
+    do_poll(config, session, session.interval_s, on_tick, deadline, 0)
   end
 
-  defp do_poll(config, session, interval_s, on_tick) do
+  defp do_poll(config, session, interval_s, on_tick, deadline, transport_errors) do
     cond do
+      # Both clocks are consulted, and they answer different questions. The
+      # server's `expires_at` is when the GRANT dies; the monotonic deadline is
+      # how long OSA is willing to wait regardless of what the server claimed.
       System.system_time(:second) >= session.expires_at ->
         {:error, :device_code_expired}
+
+      System.monotonic_time(:second) >= deadline ->
+        {:error, :device_code_timeout}
 
       on_tick.() == :cancel ->
         {:error, :cancelled}
@@ -172,11 +208,11 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
             {:ok, body}
 
           {:ok, %{"error" => "authorization_pending"}} ->
-            do_poll(config, session, interval_s, on_tick)
+            do_poll(config, session, interval_s, on_tick, deadline, 0)
 
           {:ok, %{"error" => "slow_down"} = body} ->
             next = max(as_int(body["interval"]) || interval_s + @slow_down_bump_s, interval_s + 1)
-            do_poll(config, session, next, on_tick)
+            do_poll(config, session, next, on_tick, deadline, 0)
 
           {:ok, %{"error" => error} = body} ->
             {:error, classify(error, body)}
@@ -184,11 +220,30 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
           {:ok, _} ->
             {:error, :malformed_token_response}
 
+          # A network blip is not a verdict on the grant. Keep polling; the
+          # counter resets on the first response of any kind, so this tolerates
+          # a flapping connection without tolerating a severed one.
+          {:error, {:transport_error, _} = reason} ->
+            if transport_errors + 1 >= @max_consecutive_transport_errors do
+              {:error, reason}
+            else
+              do_poll(config, session, interval_s, on_tick, deadline, transport_errors + 1)
+            end
+
           {:error, reason} ->
             {:error, reason}
         end
     end
   end
+
+  @doc false
+  @spec max_wait_s() :: pos_integer()
+  def max_wait_s,
+    do: Application.get_env(:optimal_system_agent, :device_flow_max_wait_s, @max_wait_s)
+
+  @doc false
+  @spec max_consecutive_transport_errors() :: pos_integer()
+  def max_consecutive_transport_errors, do: @max_consecutive_transport_errors
 
   @doc """
   Exchange a refresh token for a fresh access token.

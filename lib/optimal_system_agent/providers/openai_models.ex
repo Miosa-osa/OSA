@@ -213,8 +213,22 @@ defmodule OptimalSystemAgent.Providers.OpenAIModels do
   True when this model is a reasoning model — it rejects `temperature` and
   accepts `reasoning_effort`.
 
-  Unknown ids fall back to the historical o-series prefix heuristic so a
-  brand-new `o5-*` still behaves correctly before this table is updated.
+  Unknown ids fall back to a prefix heuristic so a model that ships before
+  this table is updated still behaves correctly.
+
+  The heuristic covers `gpt-5*` as well as the o-series, and that is not
+  cosmetic. `OpenAICompat` already carries a comment saying the o-series-only
+  scan "silently missed the GPT-5.x reasoning models — whose names begin with
+  gpt" — but the fix landed only in the *call site*, which then delegated back
+  to a function that still had the o-series-only fallback. Every GPT-5.x id
+  this table does not list (`gpt-5.1`, `gpt-5.2`, and the whole Codex
+  line-up — `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`) still
+  answered `false`, so OSA kept sending them `temperature`, which they reject,
+  and never sent an effort.
+
+  Deliberately NOT `gpt-4*` or a bare `gpt` prefix: those are the
+  non-reasoning models, and a heuristic that swept them in would suppress
+  `temperature` on models that need it.
   """
   @spec reasoning?(String.t() | nil) :: boolean()
   def reasoning?(id) when is_binary(id) do
@@ -223,7 +237,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIModels do
         m = String.downcase(id)
 
         String.starts_with?(m, "o1") or String.starts_with?(m, "o3") or
-          String.starts_with?(m, "o4")
+          String.starts_with?(m, "o4") or String.starts_with?(m, "gpt-5")
 
       model ->
         model.reasoning

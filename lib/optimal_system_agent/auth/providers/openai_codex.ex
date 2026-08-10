@@ -140,6 +140,7 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
 
     with {:ok, %{user_code: user_code, device_auth_id: id, interval: interval}} <-
            request_user_code(),
+         :ok <- announce(user_code, interval, opts),
          :ok <- present(user_code, io, opts),
          {:ok, %{"authorization_code" => code, "code_verifier" => verifier}} <-
            poll_for_code(id, user_code, interval, on_tick),
@@ -189,6 +190,48 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
     e -> {:error, {:transport_error, Exception.message(e)}}
   end
 
+  @doc """
+  The verification URL the user must open. Public so a non-terminal surface
+  can render it without reconstructing OpenAI's URL shape itself.
+  """
+  @spec verification_uri() :: String.t()
+  def verification_uri, do: "#{issuer()}/codex/device"
+
+  # Hand the code and URL to a structured consumer BEFORE the poll begins.
+  #
+  # `io` is a line printer, which is the right shape for a terminal and the
+  # wrong shape for everything else: the TUI has to draw the code in a panel,
+  # and a gateway whose stdout is a JSON-RPC pipe cannot print at all. Without
+  # this callback the only way to learn the user code was to scrape it out of
+  # a formatted English sentence, which is why the flow was reachable from
+  # `osa setup` and from nowhere else.
+  #
+  # It fires before `present/3` so a caller that supplies both gets the
+  # structured copy first, and a caller that supplies neither is unchanged.
+  defp announce(user_code, interval, opts) do
+    case Keyword.get(opts, :on_verification) do
+      fun when is_function(fun, 1) ->
+        fun.(%{
+          user_code: user_code,
+          verification_uri: verification_uri(),
+          # OpenAI's device endpoint has no `verification_uri_complete`: the
+          # code is typed, not embedded. Reported as nil rather than as a
+          # fabricated URL with the code appended, which would 404.
+          verification_uri_complete: nil,
+          interval: interval,
+          expires_in: @max_wait_s
+        })
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    # A rendering callback must never be able to fail a sign-in.
+    _ -> :ok
+  end
+
   defp present(user_code, io, opts) do
     url = "#{issuer()}/codex/device"
 
@@ -207,10 +250,10 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
 
   defp poll_for_code(device_auth_id, user_code, interval, on_tick) do
     deadline = System.monotonic_time(:second) + @max_wait_s
-    do_poll(device_auth_id, user_code, interval, on_tick, deadline)
+    do_poll(device_auth_id, user_code, interval, on_tick, deadline, 0)
   end
 
-  defp do_poll(device_auth_id, user_code, interval, on_tick, deadline) do
+  defp do_poll(device_auth_id, user_code, interval, on_tick, deadline, transport_errors) do
     cond do
       System.monotonic_time(:second) >= deadline ->
         {:error, :device_code_timeout}
@@ -237,7 +280,7 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
           # entirely, since they are what the endpoint returns for most of the
           # sign-in's duration.
           {:ok, %{status: status}} when status in [403, 404] ->
-            do_poll(device_auth_id, user_code, interval, on_tick, deadline)
+            do_poll(device_auth_id, user_code, interval, on_tick, deadline, 0)
 
           {:ok, %{status: 200}} ->
             {:error, :device_code_incomplete}
@@ -245,8 +288,19 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
           {:ok, %{status: status}} ->
             {:error, {:http_error, status}}
 
+          # Transient by assumption, bounded by count. The user has already
+          # approved this grant in their browser; throwing it away over one
+          # dropped packet and demanding a fresh code is the most avoidable
+          # failure in the flow. See `DeviceFlow`'s equivalent, which this
+          # deliberately mirrors.
           {:error, e} ->
-            {:error, {:transport_error, Exception.message(e)}}
+            reason = {:transport_error, Exception.message(e)}
+
+            if transport_errors + 1 >= DeviceFlow.max_consecutive_transport_errors() do
+              {:error, reason}
+            else
+              do_poll(device_auth_id, user_code, interval, on_tick, deadline, transport_errors + 1)
+            end
         end
     end
   end
@@ -360,6 +414,8 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
       entry ->
         %{
           connected?: true,
+          # A token OSA holds and can refresh is direct evidence.
+          verified?: true,
           provider: @provider_id,
           account: entry["account_id"],
           plan: entry["plan_type"],
@@ -423,7 +479,33 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
     end
   end
 
-  defp refresh_and_get do
+  @doc """
+  Refresh **because a request came back 401**, not because the clock said so.
+
+  Proactive refresh alone is not enough, and the gap is not theoretical. All
+  three of these produce a valid-looking token that the server rejects:
+
+    * clock skew larger than the 5-minute window — nothing in OSA corrects for
+      it, and `expires_at` is necessarily a wall-clock instant;
+    * revocation from the provider's own UI between the skew check and the
+      request;
+    * any token whose `expires_at` is absent, which makes `expired?/1` and
+      `needs_refresh?/1` permanently false — a dead credential with no exit.
+
+  The argument is the token that was rejected, and it is what makes this safe
+  to call concurrently. The predicate is "is the stored token still the one
+  that just failed?" — so if a peer process already rotated it while this
+  request was in flight, the fresh token is **adopted without a network call**
+  and the rotating refresh token is never double-spent. That is the same
+  single-spend guarantee `refresh_within_lock/3` gives the proactive path,
+  expressed for a trigger that is a response rather than a deadline.
+  """
+  @spec force_refresh(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def force_refresh(rejected_token) when is_binary(rejected_token) do
+    refresh_and_get(fn entry -> entry["access_token"] == rejected_token end)
+  end
+
+  defp refresh_and_get(needs_refresh? \\ &needs_refresh?/1) do
     result =
       SubscriptionStore.refresh_within_lock(
         @provider_id,
@@ -459,21 +541,69 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
               {:error, {:transport_error, Exception.message(e)}}
           end
         end,
-        &needs_refresh?/1
+        needs_refresh?
       )
 
     case result do
       {:ok, entry} ->
+        clear_refresh_failures()
         {:ok, entry["access_token"]}
 
       {:error, :refresh_token_invalid} = err ->
-        Logger.warning("[Auth] #{@display_name} sign-in is no longer valid; signing out locally.")
-        _ = SubscriptionStore.delete(@provider_id)
-        err
+        # Deleting a credential is destructive and irreversible from the
+        # user's side — they have to run the whole sign-in again — so it takes
+        # TWO consecutive rejections, not one. Providers do return
+        # `invalid_grant` for transient reasons, and a single bad minute
+        # signing someone out mid-conversation is a worse outcome than one
+        # extra failed turn. `refresh_token_reused` is not in this branch and
+        # never should be: reuse detection is definitive and is handled as a
+        # terminal error immediately.
+        if record_refresh_failure() >= 2 do
+          Logger.warning(
+            "[Auth] #{@display_name} rejected the refresh token twice in a row; signing out locally."
+          )
+
+          _ = SubscriptionStore.delete(@provider_id)
+          clear_refresh_failures()
+          err
+        else
+          Logger.warning(
+            "[Auth] #{@display_name} rejected a token refresh. Keeping the credential — " <>
+              "a second consecutive rejection will sign you out."
+          )
+
+          err
+        end
 
       err ->
         err
     end
+  end
+
+  # Consecutive `invalid_grant` count, in `:persistent_term` because it must
+  # survive across turns within an OS process but is worthless across a
+  # restart — a fresh process re-testing the credential once is exactly the
+  # right behaviour.
+  defp record_refresh_failure do
+    n = :persistent_term.get({__MODULE__, :refresh_failures}, 0) + 1
+    :persistent_term.put({__MODULE__, :refresh_failures}, n)
+    n
+  end
+
+  defp clear_refresh_failures, do: reset_refresh_failures()
+
+  @doc """
+  Forget the consecutive-refresh-failure count.
+
+  Public so a test can establish a known starting point — the counter is
+  process-global by design (it must survive across turns) and would otherwise
+  leak between tests, which is a good way to make a two-strike rule look like
+  a one-strike rule intermittently.
+  """
+  @spec reset_refresh_failures() :: :ok
+  def reset_refresh_failures do
+    :persistent_term.put({__MODULE__, :refresh_failures}, 0)
+    :ok
   end
 
   @impl true

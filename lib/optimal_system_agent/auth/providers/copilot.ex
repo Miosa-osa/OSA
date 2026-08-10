@@ -258,6 +258,8 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
       entry ->
         %{
           connected?: true,
+          # A token OSA holds and can refresh is direct evidence.
+          verified?: true,
           provider: @provider_id,
           account: entry["account"],
           plan: entry["plan"],
@@ -308,7 +310,43 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
     end
   end
 
-  defp refresh_and_get do
+  @doc """
+  Refresh **because a request came back 401**, not because the clock said so.
+
+  Necessary here for a reason specific to this provider, and the reason is a
+  trap: a GitHub OAuth App token can have **no expiry at all**. When
+  `expires_at` is `nil`, `expired?/1` is permanently false and
+  `needs_refresh?/1` is permanently false — so a token that has been *revoked*
+  from the user's GitHub settings page is handed out unchanged on every
+  request, forever, with no path out except deleting the store by hand. The
+  proactive path cannot fix that, because from its point of view nothing is
+  wrong.
+
+  The rejected token is the argument, and that is what makes concurrent calls
+  safe: the predicate is "is the stored token still the one that just failed?",
+  so a peer that already rotated it is adopted with no network call and the
+  single-use refresh token is never double-spent.
+
+  Returns `{:error, :not_refreshable}` when there is nothing to refresh WITH.
+  That is the honest answer for a non-expiring token with no refresh token —
+  the credential is simply dead, and the caller should say "sign in again"
+  rather than retrying a refresh that cannot exist.
+  """
+  @spec force_refresh(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def force_refresh(rejected_token) when is_binary(rejected_token) do
+    case SubscriptionStore.fetch(@provider_id) do
+      %{"refresh_token" => rt} when is_binary(rt) and rt != "" ->
+        refresh_and_get(fn entry -> entry["access_token"] == rejected_token end)
+
+      nil ->
+        {:error, :not_connected}
+
+      _ ->
+        {:error, :not_refreshable}
+    end
+  end
+
+  defp refresh_and_get(needs_refresh? \\ &needs_refresh?/1) do
     cfg = config()
 
     result =
@@ -339,7 +377,7 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
               err
           end
         end,
-        &needs_refresh?/1
+        needs_refresh?
       )
 
     case result do

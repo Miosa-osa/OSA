@@ -218,9 +218,18 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       safe_call(fn -> File.exists?(Path.expand("~/.osa/BOOTSTRAP.md")) end, false)
 
     system_info = safe_call(fn -> Onboarding.detect_system() end, %{})
-    # providers_list/0 is static data (no I/O), but still isolated: a future
-    # change to it must never be able to blank the whole picker.
-    providers = safe_call(fn -> Onboarding.providers_list() end, [])
+    # `provider_ui_entries/0` is the catalog plus grouping (`tab`/`order`), the
+    # modes this machine can actually run, and each provider's current
+    # connection state — everything a picker needs to render "signed in as X"
+    # / "connect your account" / "needs key" without inventing its own opinion
+    # about which providers can be signed into. Still isolated, and it degrades
+    # to the undecorated catalog rather than to nothing: a picker with rows it
+    # cannot badge beats a picker with no rows.
+    providers =
+      safe_call(
+        fn -> Onboarding.provider_ui_entries() end,
+        safe_call(fn -> Onboarding.providers_list() end, [])
+      )
 
     detected =
       safe_call(fn -> Onboarding.detect_existing() end, %{
@@ -254,51 +263,47 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     conn = Plug.Conn.fetch_query_params(conn)
     provider = conn.query_params["provider"] || "ollama_local"
 
-    # Once setup is complete, strip caller-supplied credentials to prevent
+    # Once setup is complete, STRIP caller-supplied credentials to prevent
     # unauthenticated SSRF/key-probing. Authenticated callers may still pass
     # them through.
+    #
+    # Stripping, not rejecting. The previous version answered 401 to the whole
+    # request, which turned "you may not probe an arbitrary endpoint" into
+    # "nobody may list any model at all" — the TUI's provider picker calls this
+    # with no bearer (`get_no_auth`), so on every set-up machine every provider
+    # with a dynamic catalog answered `Failed to load models: HTTP 401`, and
+    # `openai_codex` (catalog `models: :dynamic`) could not be opened at all.
+    # The model list itself is public information: it is the same catalog the
+    # unauthenticated `/onboarding/status` already ships. Only the *passthrough
+    # credential params* were ever sensitive, and dropping them removes the
+    # SSRF surface completely while leaving the endpoint usable.
+    #
+    # The old branch was also structurally broken independent of the policy:
+    # `Plug.Conn.halt/1` returns a new conn and its result was discarded, so
+    # the outer `conn.halted` stayed false and the handler sent a SECOND
+    # response on an already-sent conn. That raised `Plug.Conn.AlreadySentError`
+    # mid-response and desynchronised keep-alive connections, which is why
+    # concurrent probes came back answering the *previous* request's body.
     {base_url, api_key} =
-      if setup_completed?() do
-        case verify_bearer(conn) do
-          {:ok, _claims} ->
-            {conn.query_params["base_url"], conn.query_params["api_key"]}
-
-          {:error, _} ->
-            # Setup done, no valid JWT → reject credential params outright.
-            conn =
-              conn
-              |> put_resp_content_type("application/json")
-              |> send_resp(
-                401,
-                Jason.encode!(%{
-                  error: "unauthorized",
-                  message: "Authentication required after initial setup."
-                })
-              )
-
-            Plug.Conn.halt(conn)
-            # Unreachable but satisfies the compiler for the tuple match
-            {nil, nil}
-        end
+      if setup_completed?() and match?({:error, _}, verify_bearer(conn)) do
+        {nil, nil}
       else
         {conn.query_params["base_url"], conn.query_params["api_key"]}
       end
 
-    unless conn.halted do
-      case OptimalSystemAgent.Onboarding.model_list(provider,
-             base_url: base_url,
-             api_key: api_key
-           ) do
-        {:ok, models} ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(200, Jason.encode!(%{models: models}))
+    case OptimalSystemAgent.Onboarding.model_list(provider,
+           base_url: base_url,
+           api_key: api_key
+         ) do
+      {:ok, models} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, Jason.encode!(%{models: models}))
 
-        {:error, reason} ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(502, Jason.encode!(%{error: "model_fetch_failed", message: reason}))
-      end
+      {:error, reason} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(502, Jason.encode!(%{error: "model_fetch_failed", message: reason}))
     end
   end
 
@@ -307,6 +312,20 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       {:ok, raw, conn} ->
         case Jason.decode(raw) do
           {:ok, params} ->
+            # `during_setup` is decided HERE and the request body never gets a
+            # vote — see `Onboarding.during_setup?/1`. It gates whether the
+            # externally-managed providers may create a connection marker, so
+            # letting a client set it would let any authenticated status poll
+            # resurrect a sign-in the user had just removed.
+            #
+            # The two branches below already encode the answer: the
+            # unauthenticated path only exists before setup completes and is
+            # first-run onboarding by construction, while the authenticated
+            # path is the post-onboarding candidate-provider probe, which is
+            # asking, not connecting. Reconnecting after a sign-out is
+            # `osa auth login <provider>` or `/setup`.
+            params = Map.delete(params, "during_setup")
+
             # Security: once setup is complete, require auth and ignore
             # caller-supplied base_url / api_key to close the SSRF proxy.
             params =
@@ -336,7 +355,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
                 if provider not in allowed_health_check_providers() do
                   :reject
                 else
-                  params
+                  Map.put(params, "during_setup", true)
                 end
               end
 
@@ -393,6 +412,196 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         |> put_resp_content_type("application/json")
         |> send_resp(400, ~s({"error":"read_failed"}))
     end
+  end
+
+  # ── Account sign-in from the TUI ──────────────────────────────────────
+  #
+  # `POST /onboarding/health-check` deliberately refuses to CREATE a
+  # connection marker once setup is complete: it is a status surface, and a
+  # status poll that connects would resurrect a sign-in the user had just
+  # removed. That is correct, and it is also why it cannot be the route the
+  # TUI's `/model` picker uses to connect an account — leaving every account
+  # provider signable-in from the two CLI surfaces and from neither TUI one.
+  #
+  # This route is the missing half: an EXPLICIT connect, which is a different
+  # act from a status check and is allowed to persist. The distinction is
+  # carried by the route, not by a flag in the body, for the same reason
+  # `during_setup` is: a client must not be able to talk a status endpoint
+  # into connecting by adding a JSON field.
+  #
+  # Restricted to `Auth.Subscription.supported()` — a strictly smaller set
+  # than the health-check allowlist, and one that cannot drift from the
+  # implementations, because it IS the implementation map's key set.
+  post "/auth/login/start" do
+    with_auth_body(conn, fn params, conn ->
+      provider = Map.get(params, "provider", "")
+
+      case OptimalSystemAgent.Auth.LoginBroker.start_login(provider) do
+        {:ok, session} ->
+          json(conn, 200, session)
+
+        {:error, :unsupported_provider} ->
+          json(conn, 400, %{
+            error: "unsupported_provider",
+            message: "#{provider} does not support account sign-in."
+          })
+
+        {:error, :not_configured} ->
+          json(conn, 400, %{
+            error: "not_configured",
+            message:
+              OptimalSystemAgent.Auth.Subscription.message(
+                :not_configured,
+                provider_display_name(provider)
+              )
+          })
+
+        {:error, reason} ->
+          json(conn, 500, %{error: "start_failed", message: inspect(reason)})
+      end
+    end)
+  end
+
+  get "/auth/login/status/:id" do
+    case verify_bearer_when_required(conn) do
+      :ok ->
+        case OptimalSystemAgent.Auth.LoginBroker.status(id) do
+          nil ->
+            # A session is swept a couple of minutes after it finishes. Saying
+            # "expired" rather than "not found" is the difference between a
+            # poller that reports a bug and one that reports the truth: the
+            # sign-in ended, this handle is simply no longer readable.
+            json(conn, 404, %{
+              error: "session_expired",
+              message: "That sign-in is no longer being tracked. Check `osa auth status`."
+            })
+
+          session ->
+            json(conn, 200, session)
+        end
+
+      :unauthorized ->
+        json(conn, 401, %{error: "unauthorized"})
+    end
+  end
+
+  post "/auth/login/cancel" do
+    with_auth_body(conn, fn params, conn ->
+      case OptimalSystemAgent.Auth.LoginBroker.cancel(Map.get(params, "session_id", "")) do
+        :ok ->
+          json(conn, 200, %{status: "cancelling"})
+
+        {:error, :not_found} ->
+          json(conn, 404, %{error: "session_expired"})
+      end
+    end)
+  end
+
+  # Sign out over the same authenticated surface, so the TUI is not the one
+  # place a user can connect but not disconnect. Idempotent, and honest: a
+  # provider that was not connected reports that rather than a bare success.
+  post "/auth/logout" do
+    with_auth_body(conn, fn params, conn ->
+      provider = Map.get(params, "provider", "")
+
+      if provider in OptimalSystemAgent.Auth.Subscription.supported() do
+        was_connected? = OptimalSystemAgent.Auth.Subscription.status(provider).connected?
+        _ = OptimalSystemAgent.Auth.Subscription.logout(provider)
+
+        json(conn, 200, %{
+          status: "signed_out",
+          was_connected: was_connected?,
+          message:
+            if was_connected? do
+              "Signed out of #{provider_display_name(provider)}."
+            else
+              "#{provider_display_name(provider)} was not connected — nothing to sign out of."
+            end
+        })
+      else
+        json(conn, 400, %{
+          error: "unsupported_provider",
+          message: "#{provider} does not support account sign-in."
+        })
+      end
+    end)
+  end
+
+  # A pure read of every sign-in-capable provider, for a status pane. Never
+  # refreshes and never dials out — `Subscription.status/1`'s contract — so
+  # drawing this screen can neither cost a metered request nor report a
+  # refresh failure as a connection failure.
+  get "/auth/status" do
+    case verify_bearer_when_required(conn) do
+      :ok -> json(conn, 200, %{providers: OptimalSystemAgent.Auth.Subscription.status_all()})
+      :unauthorized -> json(conn, 401, %{error: "unauthorized"})
+    end
+  end
+
+  # Authentication is required once setup is complete, and not before — the
+  # same rule the onboarding routes follow, and for the same reason: during
+  # first-run there is no token to present, and the sign-in screen has to work
+  # then above all.
+  defp verify_bearer_when_required(conn) do
+    if setup_completed?() do
+      case verify_bearer(conn) do
+        {:ok, _} -> :ok
+        {:error, _} -> :unauthorized
+      end
+    else
+      :ok
+    end
+  end
+
+  defp provider_display_name(provider) do
+    case Enum.find(OptimalSystemAgent.Onboarding.providers_list(), &(&1.id == provider)) do
+      %{name: name} -> name
+      _ -> provider
+    end
+  rescue
+    _ -> provider
+  end
+
+  # Shared preamble for the authenticated auth routes: read the body, decode
+  # it, and require a bearer token once setup is complete. Before setup
+  # completes there is no token to present and the first-run onboarding path
+  # is already unauthenticated by construction.
+  defp with_auth_body(conn, fun) do
+    case Plug.Conn.read_body(conn) do
+      {:ok, raw, conn} ->
+        case Jason.decode(raw) do
+          {:ok, params} when is_map(params) ->
+            if setup_completed?() do
+              case verify_bearer(conn) do
+                {:ok, _} ->
+                  fun.(params, conn)
+
+                {:error, _} ->
+                  json(conn, 401, %{
+                    error: "unauthorized",
+                    message: "Authentication required after initial setup."
+                  })
+              end
+            else
+              fun.(params, conn)
+            end
+
+          _ ->
+            json(conn, 400, %{error: "invalid_json"})
+        end
+
+      {:more, _partial, conn} ->
+        json(conn, 413, %{error: "payload_too_large"})
+
+      {:error, _} ->
+        json(conn, 400, %{error: "read_failed"})
+    end
+  end
+
+  defp json(conn, status, body) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, Jason.encode!(body))
   end
 
   # ── Anthropic sign-in: REMOVED ───────────────────────────────────────

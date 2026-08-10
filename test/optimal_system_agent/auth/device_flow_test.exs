@@ -229,6 +229,106 @@ defmodule OptimalSystemAgent.Auth.DeviceFlowTest do
     end
   end
 
+  describe "a dropped packet must not destroy an approved grant" do
+    # The worst-feeling failure in the whole flow: the user has already opened
+    # the browser, typed the code and approved it, and one blip on the next
+    # poll throws all of that away and demands a fresh code. A transport error
+    # says nothing about the grant, which is sitting approved on the
+    # provider's side waiting to be collected.
+    test "transport errors mid-poll are retried, and the sign-in still completes" do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+      plug = fn conn ->
+        n = Agent.get_and_update(agent, &{&1, &1 + 1})
+
+        cond do
+          conn.request_path == "/device/code" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(@authorization))
+
+          # Three consecutive failures — under the bound — then success.
+          n <= 3 ->
+            raise %Req.TransportError{reason: :closed}
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"access_token" => "tok"}))
+        end
+      end
+
+      Application.put_env(:optimal_system_agent, :auth_req_options, plug: plug, retry: false)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :auth_req_options) end)
+
+      {:ok, session} = DeviceFlow.start(@config)
+
+      assert {:ok, %{"access_token" => "tok"}} = DeviceFlow.poll(@config, session),
+             "a grant the user already approved must survive a few dropped packets"
+    end
+
+    test "a severed network still terminates instead of spinning to the deadline" do
+      plug = fn conn ->
+        if conn.request_path == "/device/code" do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(@authorization))
+        else
+          raise %Req.TransportError{reason: :nxdomain}
+        end
+      end
+
+      Application.put_env(:optimal_system_agent, :auth_req_options, plug: plug, retry: false)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :auth_req_options) end)
+
+      {:ok, session} = DeviceFlow.start(@config)
+
+      assert {:error, {:transport_error, _}} = DeviceFlow.poll(@config, session)
+    end
+
+    test "the retry budget is bounded, not unlimited" do
+      assert DeviceFlow.max_consecutive_transport_errors() > 1
+      assert DeviceFlow.max_consecutive_transport_errors() < 50
+    end
+  end
+
+  describe "the wait is bounded by OSA's own clock, not only the server's" do
+    # Two independent bugs, one pair of fixes. Trusting the server's
+    # `expires_in` alone lets a buggy or hostile value pin the CLI for its
+    # whole duration; measuring the deadline on the wall clock lets an NTP
+    # step backwards extend the wait silently.
+    test "an absurd server-supplied expiry does not pin the CLI for its whole duration" do
+      Application.put_env(:optimal_system_agent, :device_flow_max_wait_s, 0)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :device_flow_max_wait_s) end)
+
+      stub(%{
+        "/device/code" =>
+          {200,
+           Map.merge(@authorization, %{
+             # Ten years. The grant claims to be valid; OSA's own ceiling is
+             # what has to stop this.
+             "expires_in" => 315_360_000
+           })},
+        "/oauth/token" => {200, %{"error" => "authorization_pending"}}
+      })
+
+      {:ok, session} = DeviceFlow.start(@config)
+
+      assert {:error, :device_code_timeout} = DeviceFlow.poll(@config, session)
+    end
+
+    test "the cancel callback is honoured and reported as cancelled, not as a failure" do
+      stub(%{
+        "/device/code" => {200, @authorization},
+        "/oauth/token" => {200, %{"error" => "authorization_pending"}}
+      })
+
+      {:ok, session} = DeviceFlow.start(@config)
+
+      assert {:error, :cancelled} = DeviceFlow.poll(@config, session, fn -> :cancel end)
+    end
+  end
+
   describe "user agent" do
     test "identifies OSA honestly" do
       # A tool that has to disguise itself to keep working has its answer about

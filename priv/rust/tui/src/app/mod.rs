@@ -1313,3 +1313,40 @@ mod modal_overlay_tests {
         );
     }
 }
+
+/// Open a URL in the user's default browser, best-effort.
+///
+/// Deliberately dependency-free: this is three `Command`s, and the failure
+/// mode of a browser that will not open is that the user reads the URL off
+/// the screen, which they can already do. Errors are swallowed for the same
+/// reason — a sign-in must not fail because `xdg-open` is missing, which is
+/// the normal state of a container or a bare SSH session.
+///
+/// The URL is passed as a single argv element, never through a shell, so a
+/// hostile verification URL cannot become a command.
+pub fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let candidates: [&str; 1] = ["open"];
+    #[cfg(target_os = "windows")]
+    let candidates: [&str; 1] = ["explorer"];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let candidates: [&str; 3] = ["xdg-open", "gio", "wslview"];
+
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        for bin in candidates {
+            let mut cmd = std::process::Command::new(bin);
+            if bin == "gio" {
+                cmd.arg("open");
+            }
+            let spawned = cmd
+                .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if spawned.is_ok() {
+                return;
+            }
+        }
+    });
+}

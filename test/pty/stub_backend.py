@@ -46,6 +46,85 @@ _LOGIN = {
 }
 
 
+# Four Codex models, as `Onboarding.model_list("openai_codex")` answers them.
+# Static — no network call is needed to know them, which is why an
+# unauthenticated model list is not a credential question.
+_CODEX_MODELS = [
+    {"id": "gpt-5.2-codex", "name": "gpt-5.2-codex", "ctx": 400000, "tools": True},
+    {"id": "gpt-5.1-codex-max", "name": "gpt-5.1-codex-max", "ctx": 400000, "tools": True},
+]
+
+# A cut-down `/onboarding/status`, carrying the fields the provider surface
+# renders from: the accounts/keys `tab`, the curated `order`, and the live
+# `auth` state. One account provider that is NOT signed in (the exact row that
+# used to answer HTTP 401), one that is, and one key-only provider.
+_ONBOARDING_STATUS = {
+    "needs_onboarding": False,
+    "needs_bootstrap": False,
+    "system_info": {},
+    "detected": {"detected": [], "ollama_local": {"reachable": False, "url": "", "model_count": 0}},
+    "providers": [
+        {
+            "id": "openai_codex",
+            "name": "ChatGPT (Codex)",
+            "description": "Use your ChatGPT Plus/Pro plan",
+            "group": "recommended",
+            "requires_key": False,
+            "tab": "accounts",
+            "order": 6,
+            "auth_modes": ["oauth"],
+            "usable_auth_modes": ["oauth"],
+            "auth": {
+                "state": "needs_sign_in",
+                "can_sign_in": True,
+                "can_paste_key": False,
+                "account": None,
+                "plan": None,
+            },
+            "models": "dynamic",
+        },
+        {
+            "id": "claude_cli",
+            "name": "Claude subscription (via Claude Code)",
+            "description": "Use your Claude Pro/Max plan",
+            "group": "recommended",
+            "requires_key": False,
+            "tab": "accounts",
+            "order": 7,
+            "auth_modes": ["oauth"],
+            "usable_auth_modes": ["oauth"],
+            "auth": {
+                "state": "connected",
+                "can_sign_in": True,
+                "can_paste_key": False,
+                "account": "someone@example.com",
+                "plan": "max",
+            },
+            "models": [{"id": "sonnet", "name": "sonnet", "ctx": 0, "tools": True}],
+        },
+        {
+            "id": "anthropic",
+            "name": "Anthropic",
+            "description": "Claude models",
+            "group": "bring_your_own",
+            "requires_key": True,
+            "tab": "keys",
+            "order": 4,
+            "auth_modes": ["api_key"],
+            "usable_auth_modes": ["api_key"],
+            "auth": {
+                "state": "needs_key",
+                "can_sign_in": False,
+                "can_paste_key": True,
+                "account": None,
+                "plan": None,
+            },
+            "models": "dynamic",
+        },
+    ],
+}
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Silence the default per-request stderr logging: the harness's own output
     # is the signal, and a boot storms this with a dozen lines.
@@ -99,6 +178,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"sessions": []})
         if path == "/api/v1/permission-rules":
             return self._json({"rules": []})
+        if path == "/onboarding/status":
+            return self._json(_ONBOARDING_STATUS)
+        if path == "/onboarding/models":
+            # The shape the real backend answers with. Note the STATUS: 200.
+            # The shipped defect answered 401 here for every provider once
+            # setup was complete, and the TUI surfaced it verbatim as
+            # "Failed to load models: HTTP 401".
+            return self._json({"models": _CODEX_MODELS})
         # Everything else: a well-formed empty object beats a 404, because a
         # 404 can raise a toast and a toast is a BAND.
         return self._json({})

@@ -193,25 +193,49 @@ defmodule OptimalSystemAgent.Auth.AnthropicOAuthRemovedTest do
     end
   end
 
-  describe "REPL /login and /logout explain instead of authenticating" do
-    test "/login says Anthropic sign-in is gone and points at an API key" do
+  # These two commands used to print a fixed apology for the removed Anthropic
+  # OAuth flow. That was correct for exactly one release: as soon as the first
+  # subscription provider shipped, "/logout" was telling users "no account
+  # sign-in sessions exist" while three of them were live in the catalog, and
+  # `Subscription.logout/1` had no callers anywhere. They now drive the real
+  # `CLI.Auth` surface. What must NOT come back is any suggestion that OSA can
+  # sign a user in to Anthropic.
+  describe "REPL /login and /logout drive the real sign-in surface" do
+    test "/login anthropic says it has no account sign-in, and never offers to open a browser" do
       out =
         ExUnit.CaptureIO.capture_io(fn ->
           OptimalSystemAgent.Channels.CLI.Commands.cmd_login("anthropic", "sess")
         end)
 
-      assert out =~ "no longer available"
-      assert out =~ "API key"
+      assert out =~ "does not support account sign-in"
       refute out =~ "Opening your browser"
+      refute out =~ "console.anthropic.com/oauth"
+
+      # The remaining Anthropic route is an API key, and the providers that DO
+      # support sign-in are named rather than left to be guessed at.
+      assert out =~ "claude_cli"
     end
 
-    test "/logout does not pretend a session existed" do
+    test "/logout anthropic reports honestly that there was nothing to clear" do
       out =
         ExUnit.CaptureIO.capture_io(fn ->
           OptimalSystemAgent.Channels.CLI.Commands.cmd_logout("anthropic", "sess")
         end)
 
-      assert out =~ "API keys only"
+      assert out =~ "was not connected"
+
+      refute out =~ "API keys only",
+             "the old blanket claim that OSA has no account sign-ins is now false"
+    end
+
+    test "/logout with no argument lists what is connected instead of guessing one" do
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          OptimalSystemAgent.Channels.CLI.Commands.cmd_logout("", "sess")
+        end)
+
+      assert out =~ "Account sign-ins"
+      assert out =~ "/logout <provider>"
     end
   end
 

@@ -229,5 +229,130 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       # A lock leaked by a crash would wedge every later refresh.
       assert SubscriptionStore.with_lock(fn -> :ok end) == :ok
     end
+
+    # The test above runs 20 tasks in ONE BEAM, which proves in-process
+    # serialisation and nothing else — the module's headline claim is that the
+    # lock holds across separate OS processes, because OSA genuinely runs as a
+    # daemon plus a CLI plus mix tasks against one home directory, and an
+    # in-VM mutex would not help there at all.
+    #
+    # This spawns real `elixir` processes. It is skipped rather than failed
+    # when no `elixir` binary is reachable (some packaged CI images run the
+    # suite from a release), because an unrunnable test that fails is
+    # indistinguishable from a broken lock.
+    @tag :tmp_dir
+    test "the lock genuinely excludes a SEPARATE OS PROCESS", %{dir: dir} do
+      elixir = System.find_executable("elixir")
+
+      if is_nil(elixir) do
+        # Recorded explicitly: silence here would look like a pass.
+        IO.puts("\n  [skip] no `elixir` on PATH — cross-OS-process lock test not run")
+      else
+        lock = SubscriptionStore.path() <> ".lock"
+        File.mkdir_p!(Path.dirname(lock))
+        marker = Path.join(dir, "peer-entered")
+
+        # A second OS process that takes the lock the same way this module
+        # does — O_CREAT|O_EXCL on the same path — holds it, then releases.
+        script = Path.join(dir, "peer.exs")
+
+        File.write!(script, """
+        lock = #{inspect(lock)}
+        marker = #{inspect(marker)}
+
+        case File.open(lock, [:write, :exclusive]) do
+          {:ok, io} ->
+            IO.binwrite(io, "peer-token 0 peer")
+            File.close(io)
+            File.write!(marker, "held")
+            Process.sleep(1500)
+            File.rm(lock)
+
+          {:error, reason} ->
+            File.write!(marker, "failed: " <> inspect(reason))
+        end
+        """)
+
+        peer = Task.async(fn -> System.cmd(elixir, [script], stderr_to_stdout: true) end)
+
+        # Wait for the peer to actually hold it before racing for it.
+        wait_for = fn wait_for, n ->
+          cond do
+            File.exists?(marker) -> :ok
+            n > 200 -> :timeout
+            true -> Process.sleep(25) && wait_for.(wait_for, n + 1)
+          end
+        end
+
+        assert wait_for.(wait_for, 0) == :ok, "peer process never acquired the lock"
+        assert File.read!(marker) == "held"
+
+        started = System.monotonic_time(:millisecond)
+        assert SubscriptionStore.with_lock(fn -> :entered end) == :entered
+        waited = System.monotonic_time(:millisecond) - started
+
+        assert waited > 500,
+               "acquired the lock while another OS PROCESS held it — the lock is not " <>
+                 "cross-process at all (waited only #{waited}ms)"
+
+        Task.await(peer, 30_000)
+      end
+    end
+
+    # The stale-lock breaker is necessary (a crashed holder must not wedge every
+    # future refresh) but on its own it is unsafe: if the holder was slow rather
+    # than dead, breaking its lock creates two live holders and the loser
+    # overwrites the winner — with the OLDER credential, which can resurrect a
+    # token the winner already rotated away. The ownership token is what turns
+    # that silent clobber into a clean, reportable failure.
+    test "a holder whose lock was broken abandons its write instead of clobbering the winner" do
+      :ok = SubscriptionStore.put("copilot", %{"access_token" => "original"})
+
+      result =
+        SubscriptionStore.with_lock(fn token ->
+          assert SubscriptionStore.still_holding?(token)
+
+          # Simulate exactly what the stale-breaker does to a slow holder: the
+          # lock is taken over by somebody else mid-flight.
+          File.write!(SubscriptionStore.path() <> ".lock", "somebody-elses-token 0 999")
+
+          refute SubscriptionStore.still_holding?(token),
+                 "a holder must be able to detect that its lock was taken"
+
+          :observed
+        end)
+
+      assert result == :observed
+
+      # The impostor lock is still there, and that is correct: removing a lock
+      # this process no longer owns would hand a third process a lock the
+      # second still believes it holds. Clear it here so the next assertion
+      # starts from a clean slate rather than a `:lock_timeout`.
+      File.rm(SubscriptionStore.path() <> ".lock")
+
+      # And the refresh path acts on that detection rather than writing anyway.
+      outcome =
+        SubscriptionStore.refresh_within_lock(
+          "copilot",
+          fn entry ->
+            File.write!(SubscriptionStore.path() <> ".lock", "stolen-by-a-peer 0 999")
+            {:ok, Map.put(entry, "access_token", "stale-loser-value")}
+          end,
+          fn _ -> true end
+        )
+
+      assert outcome == {:error, :lock_lost}
+
+      assert SubscriptionStore.fetch("copilot")["access_token"] == "original",
+             "the losing write must not land"
+
+      # And it is reported as what it is — a retryable race, never as a
+      # credential problem that sends the user back through a sign-in.
+      message = OptimalSystemAgent.Auth.Subscription.message(:lock_lost, "GitHub Copilot")
+      assert message =~ "Retry"
+      refute message =~ "sign in again"
+
+      File.rm(SubscriptionStore.path() <> ".lock")
+    end
   end
 end

@@ -157,6 +157,22 @@ defmodule OptimalSystemAgent.PermissionsRulesTest do
       assert Permissions.bypass_immune_ask("file_read", %{"path" => ".git/config"}) == nil
     end
 
+    test "the subscription credential store always prompts on write, in every mode" do
+      assert is_binary(
+               Permissions.bypass_immune_ask("file_write", %{
+                 "path" => Path.expand("~/.osa/subscriptions.json")
+               })
+             ),
+             "rewriting this file swaps a paid account's token or redirects its pinned base_url; " <>
+               "the agent has no legitimate reason to do either, so overdrive must not skip the prompt"
+    end
+
+    test "the subscription credential store is unreadable by the file tool" do
+      assert ".osa/subscriptions.json" in
+               OptimalSystemAgent.Tools.Builtins.FileRead.Constants.sensitive_paths(),
+             "an agent that can read its own credential store is an exfiltration primitive"
+    end
+
     test "out_of_scope_write flags foreign paths for mutating tools only" do
       assert Permissions.out_of_scope_write("file_write", %{"path" => "/etc/hosts"}) ==
                "/etc/hosts"

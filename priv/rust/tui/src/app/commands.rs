@@ -15,6 +15,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("clear", "Clear the conversation view"),
     ("model", "Switch the active model"),
     ("models", "Browse and pick a model"),
+    ("provider", "Choose a provider — connect an account or paste a key"),
     ("sessions", "Browse sessions"),
     ("resume", "Resume a past session"),
     ("continue", "Resume this folder's last session"),
@@ -32,7 +33,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("context", "Show the token-usage breakdown"),
     ("cost", "Show cost & token accounting"),
     ("status", "Show model, tools, context, session"),
-    ("usage", "Show session context usage"),
+    ("usage", "Show account quota and token usage"),
     ("tools", "Show how many tools are available"),
     ("version", "Show the OSA version"),
     ("update", "Update OSA to the latest version"),
@@ -58,8 +59,8 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("undo", "Drop the last exchange"),
     ("setup", "Re-run the setup wizard"),
     ("a11y", "Toggle screen-reader mode"),
-    ("login", "Authenticate with the backend"),
-    ("logout", "Sign out"),
+    ("login", "Connect a provider account"),
+    ("logout", "Sign out of a provider account"),
     ("voice", "Show the voice provider"),
     ("exit", "Quit OSA"),
     ("quit", "Quit OSA"),
@@ -261,16 +262,36 @@ impl App {
                     self.switch_session(arg);
                 }
             }
-            "/login" => {
-                let user_id = if arg.is_empty() { None } else { Some(arg) };
-                self.do_login_with_user(user_id);
+            // `/provider` is an ALIAS for the `/model` surface, not a second
+            // dialog. The picker is already provider-first — you choose a
+            // provider, then a model — so a distinct command would be a near
+            // duplicate of the same screen and a second thing to keep in sync.
+            // It exists because "provider" is the word users reach for when
+            // they want to change *who* is serving the model rather than
+            // which model, and a capability nobody can name is not shipped.
+            "/provider" | "/providers" => {
+                self.load_models();
             }
+            // `/login` opens the provider surface — the place account sign-in
+            // actually happens — instead of the backend's JWT handshake.
+            //
+            // The JWT login is machinery: the TUI performs it automatically at
+            // boot, and a user typing `/login` has never once meant "re-issue
+            // my local API token". They mean "sign in to a provider", and
+            // pointing the verb at the internal handshake is why `/login`
+            // read as doing nothing. With a provider named, go straight to it.
+            "/login" => {
+                if arg.is_empty() {
+                    self.load_models();
+                } else {
+                    self.execute_backend_command("login", arg);
+                }
+            }
+            // Routed to the backend so the REPL, `osa auth logout` and this
+            // share one implementation (`CLI.Auth`) and cannot disagree about
+            // who is signed in. `--all` is handled there too.
             "/logout" => {
-                self.do_logout();
-                self.toasts.push(
-                    "Signed out".into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                self.execute_backend_command("logout", arg);
             }
             "/bg" => {
                 // List backgrounded turns with live/done status. Backgrounding
@@ -418,14 +439,12 @@ impl App {
                 self.open_tools_browser();
             }
             "/usage" => {
-                self.toasts.push(
-                    format!(
-                        "Session: {} | Context: {:.0}%",
-                        self.session_id,
-                        self.status.context_utilization() * 100.0,
-                    ),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                // Account quota + OSA's own token count, rendered by the
+                // backend into chat. This used to be a toast showing context
+                // utilisation, which is a different number entirely: context
+                // is how full this conversation is, not what the plan has
+                // left. `/context` is still the command for the former.
+                self.execute_backend_command("usage", arg);
             }
             "/retry" => {
                 if let Some(last) = self.chat.last_user_message() {

@@ -813,8 +813,45 @@ impl ApiClient {
         if let Some(ak) = api_key {
             url.push_str(&format!("&api_key={}", Self::percent_encode(ak)));
         }
-        let resp = self.get_no_auth(&url).await?;
+        // Authenticated `get`, not `get_no_auth`. The backend strips
+        // caller-supplied `base_url`/`api_key` from an unauthenticated caller
+        // (SSRF surface) and honours them from an authenticated one — the
+        // picker's whole purpose is passing a CANDIDATE endpoint, so sending
+        // the token is the difference between listing the models the user is
+        // about to configure and listing the ones they already have.
+        // `get` attaches a Bearer only when a token exists, so first-run
+        // onboarding (no token yet) is unchanged.
+        let resp = self.get(&url).await?;
         Ok(resp.json().await?)
+    }
+
+    // -- Account sign-in (Auth.LoginBroker) --
+
+    /// POST /auth/login/start — begin, or re-attach to, a provider sign-in.
+    ///
+    /// Returns immediately with a session handle. A device-code provider comes
+    /// back `pending` with the code to render; a verification-style provider
+    /// is often already `connected`. The caller polls either way, which is
+    /// what lets the TUI have one sign-in screen instead of one per provider.
+    pub async fn auth_login_start(&self, provider: &str) -> Result<LoginSessionResponse> {
+        let body = serde_json::json!({ "provider": provider });
+        let resp = self.post("/auth/login/start", &body).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /auth/login/status/:id
+    pub async fn auth_login_status(&self, id: &str) -> Result<LoginSessionResponse> {
+        let resp = self
+            .get(&format!("/auth/login/status/{}", Self::percent_encode(id)))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /auth/login/cancel
+    pub async fn auth_login_cancel(&self, id: &str) -> Result<()> {
+        let body = serde_json::json!({ "session_id": id });
+        let _ = self.post("/auth/login/cancel", &body).await?;
+        Ok(())
     }
 
     /// POST /onboarding/health-check

@@ -214,6 +214,27 @@ defmodule OptimalSystemAgent.Onboarding do
         default_model: "glm-5.2:cloud",
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
+        # The only entry with BOTH modes, and the only one where `:oauth` is a
+        # second way into an existing provider rather than a provider of its
+        # own (pattern A, as opposed to the `openai`/`openai_codex` split):
+        # both modes reach the same Ollama Cloud models, so nothing but the
+        # credential differs. The API-key half below is untouched — same
+        # `env_var`, same `base_url`, same catalog — so a user who pastes a key
+        # takes exactly the path they took before this field existed.
+        #
+        # `subscription.base_url` is the account mode's endpoint: the LOCAL
+        # daemon, which proxies `:cloud` tags with this machine's device key.
+        # It is separate from the entry's `base_url` (ollama.com, the keyed
+        # endpoint) precisely because the two modes do not share one.
+        auth_modes: [:api_key, :oauth],
+        subscription: %{
+          kind: :local_daemon,
+          label: "Use my signed-in Ollama account",
+          hint: "Your local Ollama daemon proxies cloud models — no key, uses your Ollama plan",
+          key_label: "Paste an Ollama Cloud API key",
+          key_hint: "Pay-per-token billing against ollama.com",
+          base_url: "http://127.0.0.1:11434"
+        },
         # Current Ollama Cloud catalog. All run with no local GPU/download —
         # Ollama offloads to its cloud. `:cloud` tags require either an Ollama
         # Cloud key or a signed-in device identity.
@@ -346,6 +367,128 @@ defmodule OptimalSystemAgent.Onboarding do
         },
         models: :dynamic
       },
+      # Claude Pro/Max plan through Anthropic's own CLI. A separate entry from
+      # `anthropic` because nothing about it is the same call: the transport
+      # is a subprocess, not HTTPS, and the model names are Claude Code's
+      # aliases rather than API model ids. `anthropic` is untouched and
+      # remains the pay-per-token, API-key route sitting next to this one.
+      #
+      # `auth_modes: [:oauth]` describes the *shape of the question* the setup
+      # surfaces ask ("connect an account" vs "paste a key"), not the
+      # mechanism: there is no OAuth client here and OSA never holds a
+      # credential. `usable_auth_modes_for/1` drops the option entirely on a
+      # machine with no `claude` binary, so the picker never offers a path
+      # that cannot complete.
+      %{
+        id: "claude_cli",
+        name: "Claude subscription (via Claude Code)",
+        description: "Use your Claude Pro/Max plan — runs Anthropic's CLI locally",
+        group: "recommended",
+        requires_key: false,
+        env_var: nil,
+        default_model: OptimalSystemAgent.Providers.ClaudeCli.default_model(),
+        base_url: nil,
+        signup_url: "https://claude.com/product/claude-code",
+        auth_modes: [:oauth],
+        subscription: %{
+          kind: :external_cli,
+          label: "Use my Claude Code sign-in",
+          hint: "Requires the Claude Code CLI; OSA runs it and never sees your credential"
+        },
+        # Aliases, not dated model ids — the CLI decides which concrete model
+        # an alias resolves to, and OSA reports that back after the first
+        # call rather than claiming to know it up front. `ctx: 0` is not a
+        # placeholder for a number nobody filled in: it is how the picker is
+        # told there is no context window to display, which is the truthful
+        # answer for a model whose identity is chosen downstream.
+        models: [
+          %{
+            id: "sonnet",
+            name: "Sonnet",
+            ctx: 0,
+            tools: true,
+            recommended?: true,
+            note: "Balanced — Claude Code's default"
+          },
+          %{id: "opus", name: "Opus", ctx: 0, tools: true, recommended?: false, note: "Most capable"},
+          %{id: "haiku", name: "Haiku", ctx: 0, tools: true, recommended?: false, note: "Fastest, cheapest against your plan"}
+        ]
+      },
+      # GitHub Copilot plan, driven through GitHub's own CLI. Separate entry
+      # for the same reason as `claude_cli`: the transport is a subprocess,
+      # not an HTTP API, and the model catalogue is per-account.
+      #
+      # `models: :dynamic` and a default of "auto" are load-bearing, not
+      # laziness — Copilot's router picks the model, its catalogue differs per
+      # account, and the `--model` flag validates against a DIFFERENT list
+      # than the router uses (see `Providers.CopilotCli`).
+      %{
+        id: "copilot_cli",
+        name: "GitHub Copilot (via Copilot CLI)",
+        description: "Use your Copilot plan — runs GitHub's CLI locally",
+        group: "recommended",
+        requires_key: false,
+        env_var: nil,
+        default_model: OptimalSystemAgent.Providers.CopilotCli.default_model(),
+        base_url: nil,
+        signup_url: "https://github.com/features/copilot",
+        auth_modes: [:oauth],
+        subscription: %{
+          kind: :external_cli,
+          label: "Use my Copilot CLI sign-in",
+          hint: "Requires GitHub's Copilot CLI; OSA runs it and never sees your credential"
+        },
+        models: :dynamic
+      },
+      # Amazon Bedrock. ONE entry with BOTH modes (pattern A), not a split
+      # pair, and the test for which pattern applies is whether anything
+      # besides the credential differs: here nothing does. Same host, same
+      # model ids, same Converse request, same catalogue — a bearer key and a
+      # SigV4-signed AWS identity are two ways to prove who you are to the
+      # identical endpoint. Contrast `openai`/`openai_codex`, which are split
+      # precisely because the base URL, the wire protocol and the model list
+      # all change with the credential.
+      #
+      # `requires_key: true` with `key_optional: true` is the SAME pairing
+      # `ollama_cloud` uses, and it is what makes the account mode reachable
+      # from the TUI. The TUI's onboarding dialog decides whether to render a
+      # credential field from `requires_key` alone; `requires_key: false`
+      # would skip that screen entirely and take the bearer-key mode away from
+      # TUI users. With the field present, `auth_modes` containing `:oauth`
+      # makes it render "leave blank to use your signed-in account instead",
+      # which is how the account mode is chosen there. Both CLI surfaces are
+      # unaffected — they fork on `auth_modes` before any key is requested.
+      %{
+        id: "bedrock",
+        name: "Amazon Bedrock",
+        description: "Claude, Nova and Llama billed to your own AWS account",
+        group: "bring_your_own",
+        requires_key: true,
+        key_optional: true,
+        # AWS's own variable name, not a `BEDROCK_API_KEY` of OSA's invention
+        # — a user who exported it for the AWS CLI should not have to export
+        # it again under a second name.
+        env_var: "AWS_BEARER_TOKEN_BEDROCK",
+        default_model: OptimalSystemAgent.Providers.Bedrock.default_model(),
+        # Region-dependent, so there is no single correct value to put here.
+        # The real endpoint is pinned into the connection marker at connect
+        # time from the resolved region; this is only what the picker shows.
+        base_url: nil,
+        signup_url: "https://console.aws.amazon.com/bedrock/home#/modelaccess",
+        auth_modes: [:api_key, :oauth],
+        subscription: %{
+          kind: :aws_credential_chain,
+          label: "Use my AWS credentials",
+          hint: "Signs with the same credentials as the AWS CLI — OSA never stores them",
+          key_label: "Paste an Amazon Bedrock API key",
+          key_hint: "A bearer token from the Bedrock console; needs AWS_REGION set"
+        },
+        # From the account's own ListFoundationModels, so the picker can only
+        # offer models this account has actually been granted. A hardcoded
+        # list would advertise models that 403 on first use, several screens
+        # away from the mistake.
+        models: :dynamic
+      },
       %{
         id: "custom",
         name: "Custom Endpoint",
@@ -361,6 +504,36 @@ defmodule OptimalSystemAgent.Onboarding do
     ]
     |> Kernel.++(additional_providers())
     |> Enum.map(&normalize_auth_modes/1)
+    |> Enum.with_index()
+    |> Enum.map(fn {entry, idx} -> normalize_grouping(entry, idx) end)
+  end
+
+  # ── tab/order: how a setup surface GROUPS the catalog ─────────────────────
+  #
+  # `auth_modes` says what a provider *can* do; `tab` says which of the two
+  # questions a user is answering when they look at it — "connect an account"
+  # or "paste a key". A flat list of 31 providers is why account-capable
+  # entries were indistinguishable from key-only ones on screen, and why a
+  # provider that offers ONLY sign-in (`openai_codex`) could read as "needs
+  # key".
+  #
+  # It is a FIELD, not a derivation, because the two do come apart: a provider
+  # can be keyless (an ambient machine credential, e.g. `bedrock`'s AWS chain)
+  # and still belong under "keys" because the user is not being asked to
+  # connect anything. Deriving it from `auth_modes` would make that
+  # unrepresentable. The default below is the derivation, so no existing entry
+  # has to say anything; an entry that disagrees just sets `tab:` itself.
+  #
+  # `order` defaults to catalog position, which is already curated (the
+  # recommended entries lead), so a UI can sort by it without reproducing a
+  # second, drifting priority list of its own.
+  defp normalize_grouping(entry, idx) when is_map(entry) do
+    default_tab =
+      if :oauth in Map.get(entry, :auth_modes, [:api_key]), do: "accounts", else: "keys"
+
+    entry
+    |> Map.put_new(:tab, default_tab)
+    |> Map.put_new(:order, idx)
   end
 
   # ── auth_modes: the SINGLE capability source of truth ─────────────────────
@@ -406,6 +579,43 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   rescue
     _ -> [:api_key]
+  end
+
+  @doc """
+  The shape of a provider's account sign-in, from the catalog, or `nil`.
+
+  `:device_code` and `:auth_code` are interactive — the user has to visit a
+  URL and approve something. `:external_cli`, `:local_daemon` and
+  `:aws_credential_chain` are not: they complete from a local read.
+
+  Declared on the catalog entry rather than inferred from the implementation
+  module, so it stays one field on one row that every surface reads — the same
+  rule `auth_modes` follows, and for the same reason.
+  """
+  @spec subscription_kind(String.t() | atom()) :: atom() | nil
+  def subscription_kind(provider_id) do
+    id = to_string(provider_id)
+
+    case Enum.find(providers_list(), &(&1.id == id)) do
+      %{subscription: %{kind: kind}} -> kind
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  True when signing in requires the user to leave OSA and come back.
+
+  The distinction is what lets a request/response surface decline a flow it
+  cannot finish. Starting a device grant inside an HTTP request and then
+  writing the response abandons the poll: the user is shown a code that
+  nothing is waiting on, which looks exactly like a broken sign-in. Declining
+  it, and naming the command that does work, is the honest answer.
+  """
+  @spec interactive_sign_in?(String.t() | atom()) :: boolean()
+  def interactive_sign_in?(provider_id) do
+    subscription_kind(provider_id) in [:device_code, :auth_code, :pkce_user_code]
   end
 
   @doc """
@@ -631,6 +841,28 @@ defmodule OptimalSystemAgent.Onboarding do
           fetch_openai_models(base_url, api_key)
         else
           {:ok, []}
+        end
+
+      "ollama_cloud" ->
+        # ACCOUNT MODE ONLY — signalled by a loopback `base_url` with no key,
+        # which is exactly what the account route produces and what the keyed
+        # route never does. With a key, this falls through to the shipped
+        # catalog unchanged.
+        #
+        # The daemon is authoritative about what THIS account can reach:
+        # `/api/tags` lists every hosted tag with a `remote_host`, and the
+        # shipped catalog can legitimately contain a model a given plan cannot
+        # use. So the catalog supplies names, notes and pricing and the daemon
+        # decides membership — the same "narrow, never invent" rule the
+        # openai/anthropic branch below follows.
+        api_key = Keyword.get(opts, :api_key)
+        base_url = Keyword.get(opts, :base_url)
+
+        if (is_nil(api_key) or api_key == "") and
+             OptimalSystemAgent.Auth.Providers.OllamaAccount.loopback?(base_url) do
+          ollama_account_models(base_url, static_models("ollama_cloud"))
+        else
+          {:ok, static_models("ollama_cloud")}
         end
 
       "openrouter" ->
@@ -955,12 +1187,170 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
+  # `claude_cli` is the one provider whose credential lives outside OSA, so
+  # the honest check is not "what did we store?" but "what does the CLI say
+  # right now?". A user who ran `claude auth logout` in another terminal has
+  # a stored marker that is already wrong, and a green tick over a signed-out
+  # CLI is worse than a slower check. The probe is a LOCAL read of Claude
+  # Code's own store — no network call, and nothing here can refresh a token,
+  # so the read-only-resolve contract still holds.
+  def health_check(%{"provider" => "claude_cli"} = params) do
+    alias OptimalSystemAgent.Auth.Providers.ClaudeCli
+
+    # `connect/0` CREATES the marker; `live_status/0` refuses to. Which one
+    # runs is decided by `during_setup?/1` and never by the provider module,
+    # because the same function is reached from two kinds of caller with
+    # opposite requirements:
+    #
+    #   * a **setup** surface (`osa setup`, the wizard, first-run onboarding)
+    #     is the user saying "connect this" — creating the marker is the
+    #     entire point, and for a provider whose sign-in is a local file read
+    #     there is nothing else to confirm.
+    #   * a **status** surface (the post-onboarding candidate-provider probe
+    #     over `POST /onboarding/health-check`) is only asking. If that path
+    #     created a marker, signing out would appear to do nothing the moment
+    #     any screen refreshed — which is exactly the bug `live_status/0` was
+    #     written to prevent and which reappeared here by calling through it.
+    result = if during_setup?(params), do: ClaudeCli.connect(), else: ClaudeCli.live_status()
+
+    case result do
+      {:ok, account} ->
+        {:ok,
+         %{
+           status: "connected",
+           verified: true,
+           auth_mode: "subscription",
+           plan: account.plan,
+           account: account.email,
+           message:
+             "Using your Claude subscription through Claude Code" <>
+               if(account.plan, do: " (#{account.plan} plan)", else: "") <> "."
+         }}
+
+      {:error, reason} ->
+        {:error,
+         %{
+           verified: :unverified,
+           error: health_error_code(reason),
+           message: claude_cli_health_message(reason)
+         }}
+    end
+  end
+
+  # Copilot's health check is the same "setup verify == connect" step as
+  # claude_cli's, with one difference that drives the whole design: there is
+  # no offline way to confirm a Copilot sign-in, and confirming it online
+  # would spend the operator's metered quota on drawing a screen. So a
+  # positive answer here means "OSA found a usable credential signal", and an
+  # unconfirmed one says exactly that rather than guessing either way.
+  def health_check(%{"provider" => "copilot_cli"} = params) do
+    alias OptimalSystemAgent.Auth.Providers.CopilotCli
+
+    # Same setup-vs-status split as `claude_cli` above, and it matters more
+    # here: `CopilotCli.probe/0` answers "unverified but present" for nothing
+    # more than the `copilot` binary being on PATH, so a status surface
+    # calling `connect/0` would manufacture a "connected" entry out of an
+    # `ls` — with no sign-in evidence whatsoever — for a user who had just
+    # signed out.
+    result = if during_setup?(params), do: CopilotCli.connect(), else: CopilotCli.live_status()
+
+    case result do
+      {:ok, %{"verified" => true} = entry} ->
+        {:ok,
+         %{
+           status: "connected",
+           verified: true,
+           auth_mode: "subscription",
+           account: entry["account_id"],
+           message: "Using your GitHub Copilot plan through the Copilot CLI (via #{entry["auth_source"]})."
+         }}
+
+      {:ok, _entry} ->
+        # NOT an error: the CLI is installed and may well be signed in. OSA
+        # reports what it actually knows, and `verified: :unverified` is the
+        # existing vocabulary for exactly that.
+        {:ok,
+         %{
+           status: "connected",
+           verified: :unverified,
+           auth_mode: "subscription",
+           message:
+             "Copilot CLI found. OSA cannot confirm your sign-in offline and will not make a " <>
+               "billed request to check — if the first turn fails on auth, run `copilot login`."
+         }}
+
+      {:error, reason} ->
+        {:error,
+         %{
+           verified: :unverified,
+           error: health_error_code(reason),
+           message: OptimalSystemAgent.Auth.Subscription.message(reason, "the Copilot CLI")
+         }}
+    end
+  end
+
+  # Bedrock's check is free, which is what lets it be a REAL check rather than
+  # a stored-marker read. `ListFoundationModels` lives on the control plane —
+  # it is not inference, is not metered per token, and returns the account's
+  # actual model catalogue — so one request proves the signature is valid,
+  # proves the region exists, and proves the identity has Bedrock permissions.
+  # An `/invoke` probe would have charged the operator for drawing a screen,
+  # which is the line this codebase does not cross.
+  #
+  # Same setup-vs-status split as the other account providers: only a setup
+  # surface may create the connection marker.
+  def health_check(%{"provider" => "bedrock"} = params) do
+    alias OptimalSystemAgent.Auth.Providers.Bedrock
+
+    api_key = Map.get(params, "api_key")
+
+    if is_binary(api_key) and String.trim(api_key) != "" do
+      bedrock_key_health(String.trim(api_key))
+    else
+      result = if during_setup?(params), do: Bedrock.connect(), else: Bedrock.live_status()
+
+      case result do
+        {:ok, entry} ->
+          {:ok,
+           %{
+             status: "connected",
+             verified: true,
+             auth_mode: "subscription",
+             account: entry["access_key_hint"] && "…#{entry["access_key_hint"]}",
+             plan: entry["region"],
+             message:
+               "Using your AWS account in #{entry["region"]} via #{entry["source"]} — " <>
+                 "#{entry["model_count"]} foundation models available."
+           }}
+
+        {:error, reason} ->
+          {:error,
+           %{
+             verified: :unverified,
+             error: health_error_code(reason),
+             message: Bedrock.message(reason)
+           }}
+      end
+    end
+  end
+
   def health_check(%{"provider" => "ollama_cloud"} = params) do
     api_key = Map.get(params, "api_key")
     model = Map.get(params, "model")
     req_opts = req_opts(params)
 
     cond do
+      # ACCOUNT MODE. Only reached when the user actually chose it — either
+      # this call says so, or a connection marker already exists from a
+      # previous run. Without one of those the two branches below are
+      # byte-for-byte the behaviour they had before account mode existed, which
+      # is what keeps the API-key path unchanged.
+      #
+      # A key still wins if one was supplied: an explicitly-typed credential is
+      # never shadowed by an auto-discovered one.
+      (is_nil(api_key) or api_key == "") and ollama_account_mode?(params) ->
+        ollama_account_health(params)
+
       is_binary(api_key) and api_key != "" ->
         # The user explicitly picked **Ollama Cloud** and supplied a key: verify
         # against ollama.com with the Bearer key. This is the whole point of the
@@ -993,6 +1383,7 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
+
   def health_check(params) do
     provider = Map.get(params, "provider", "ollama")
     api_key = Map.get(params, "api_key")
@@ -1001,6 +1392,202 @@ defmodule OptimalSystemAgent.Onboarding do
 
     run_health_request(provider, api_key, model, base_url, req_opts(params))
   end
+
+  # The bearer-key half. Verified against the same free control-plane call, so
+  # a pasted key that is valid-looking but wrong is caught here rather than at
+  # the user's first turn. The key is NOT persisted by this function — the
+  # setup surfaces write it to `~/.osa/.env` under AWS's own variable name,
+  # exactly as they do for every other keyed provider.
+  defp bedrock_key_health(api_key) do
+    alias OptimalSystemAgent.Auth.Providers.Bedrock
+
+    case OptimalSystemAgent.Auth.AwsCredentials.region() do
+      {:error, reason} ->
+        {:error,
+         %{
+           verified: :unverified,
+           error: "no_region",
+           message:
+             "An Amazon Bedrock API key needs a region alongside it — Bedrock has no global " <>
+               "endpoint. " <> OptimalSystemAgent.Auth.AwsCredentials.explain(reason)
+         }}
+
+      {:ok, region} ->
+        url = Bedrock.control_url(region) <> "/foundation-models"
+
+        case Req.get(
+               url: url,
+               headers: [{"authorization", "Bearer #{api_key}"}, {"accept", "application/json"}],
+               receive_timeout: 15_000,
+               retry: false
+             ) do
+          {:ok, %{status: 200}} ->
+            {:ok,
+             %{
+               status: "connected",
+               verified: true,
+               auth_mode: "api_key",
+               plan: region,
+               message: "Amazon Bedrock API key accepted in #{region}."
+             }}
+
+          {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+            {:error,
+             %{
+               verified: :unverified,
+               error: "key_rejected",
+               message: "Amazon Bedrock rejected that API key: #{Bedrock.aws_message(body)}"
+             }}
+
+          {:ok, %{status: status, body: body}} ->
+            {:error,
+             %{
+               verified: :unverified,
+               error: "http_error",
+               message: "Amazon Bedrock returned HTTP #{status}: #{Bedrock.aws_message(body)}"
+             }}
+
+          # A transport failure is NOT evidence the key is bad, and saying so
+          # would send the user to rotate a perfectly good credential.
+          {:error, e} ->
+            {:error,
+             %{
+               verified: :unverified,
+               error: "unreachable",
+               message:
+                 "Could not reach Amazon Bedrock in #{region} (#{Exception.message(e)}). " <>
+                   "The key was not checked — this is a network or region problem."
+             }}
+        end
+    end
+  end
+
+
+  # The TUI's onboarding dialog has one credential field and no auth-mode
+  # menu, so "Ollama Cloud with the key left blank" is how a user asks for the
+  # account route there. Without this it wrote `OLLAMA_URL=https://ollama.com`
+  # with no key — a config that 401s on the first turn — because the keyed
+  # endpoint is the entry's declared `base_url`.
+  #
+  # Deliberately narrow: only when the provider is ollama_cloud, only when NO
+  # key was supplied, only when the caller named no URL of its own, and only
+  # when a local daemon actually answers with an account. Anything else keeps
+  # the previous value, so the keyed path is untouched.
+  defp resolve_ollama_account_url("ollama_cloud", api_key, nil)
+       when is_nil(api_key) or api_key == "" do
+    alias OptimalSystemAgent.Auth.Providers.OllamaAccount
+
+    case OllamaAccount.connect() do
+      {:ok, %{daemon_url: url}} -> url
+      _ -> nil
+    end
+  end
+
+  defp resolve_ollama_account_url(_provider, _api_key, base_url), do: base_url
+
+  # True when the *account* half of `ollama_cloud` is what is being asked
+  # about. Deliberately NOT inferred from "a local daemon happens to be
+  # running": a box with a signed-in daemon and a pasted key is an API-key
+  # user, and answering about their daemon would be answering a question they
+  # did not ask.
+  defp ollama_account_mode?(params) do
+    Map.get(params, "auth_mode") in ["oauth", :oauth] or
+      Map.get(params, :auth_mode) in ["oauth", :oauth] or
+      OptimalSystemAgent.Auth.SubscriptionStore.connected?("ollama_cloud")
+  rescue
+    _ -> false
+  end
+
+  # The connect/live_status split, for the same reason it exists on
+  # `claude_cli` — and it is load-bearing here too: this function is reachable
+  # over HTTP from `POST /onboarding/health-check`, so a status surface that
+  # called `connect/0` would re-create the marker a user had just removed with
+  # `osa logout`, and signing out would appear to do nothing.
+  #
+  # Both branches cost nothing: the probe is an unauthenticated loopback read
+  # of `/api/me`. No token is spent, no request leaves the machine.
+  defp ollama_account_health(params) do
+    alias OptimalSystemAgent.Auth.Providers.OllamaAccount
+
+    result = if during_setup?(params), do: OllamaAccount.connect(), else: OllamaAccount.live_status()
+
+    case result do
+      {:ok, account} ->
+        {:ok,
+         %{
+           status: "connected",
+           verified: true,
+           auth_mode: "subscription",
+           plan: account.plan,
+           account: account.account_id,
+           message:
+             "Using your Ollama account" <>
+               if(account.plan, do: " (#{account.plan} plan)", else: "") <>
+               " through the local daemon at #{account.daemon_url}."
+         }}
+
+      {:error, reason} ->
+        # Reported honestly rather than falling through to the keyed check: a
+        # user in account mode has no key to verify, and "couldn't reach
+        # ollama.com" would name the wrong problem.
+        {:error,
+         %{
+           verified: :unverified,
+           error: health_error_code(reason),
+           message: OptimalSystemAgent.Auth.Subscription.message(reason, "Ollama Cloud")
+         }}
+    end
+  end
+
+  # The generic subscription copy ends every message with "or paste an API
+  # key", which is wrong here: this provider has no key path, and the key
+  # route is the separate `anthropic` entry. Naming that explicitly is the
+  # difference between a dead end and a redirect.
+  @doc """
+  True when this health check is the *verify* step of a setup flow, rather
+  than a status surface asking a question.
+
+  Only the externally-managed providers (`claude_cli`, `copilot_cli`) consult
+  it, and only to decide whether creating a connection marker is permitted.
+  The distinction cannot be inferred from the provider, the parameters or the
+  transport — it is a property of **who called**, so every caller states it.
+
+  Two deliberate properties:
+
+    * The default is `false`. A caller that has not thought about it gets the
+      safe answer: report state, never create it.
+    * `channels/http.ex` sets this itself and **discards whatever the request
+      body said**. A remote caller must not be able to talk a status route
+      into re-creating a credential marker by adding a JSON field; the
+      unauthenticated first-run onboarding path is setup by construction and
+      the authenticated post-onboarding probe is not, so the transport
+      already knows the answer without asking the client.
+  """
+  @spec during_setup?(map()) :: boolean()
+  def during_setup?(params) when is_map(params) do
+    Map.get(params, "during_setup") == true or Map.get(params, :during_setup) == true
+  end
+
+  def during_setup?(_), do: false
+
+  defp claude_cli_health_message(:not_connected),
+    do:
+      "Not connected. Run `osa setup`, choose \"Claude subscription (via Claude Code)\" — " <>
+        "or pick \"Anthropic\" to use an API key instead."
+
+  defp claude_cli_health_message(reason),
+    do: OptimalSystemAgent.Auth.Subscription.message(reason, "Claude Code")
+
+  defp health_error_code(:cli_not_installed), do: "cli_not_installed"
+  defp health_error_code(:cli_not_signed_in), do: "not_connected"
+  defp health_error_code(:not_connected), do: "not_connected"
+  defp health_error_code({:cli_too_old, _}), do: "cli_too_old"
+  # Distinct codes so a client can tell "start the daemon" from "sign in" from
+  # "you pointed me at a remote host" without parsing the message text.
+  defp health_error_code(:ollama_daemon_unreachable), do: "no_local_daemon"
+  defp health_error_code(:ollama_not_signed_in), do: "not_signed_in"
+  defp health_error_code({:ollama_host_remote, _}), do: "remote_ollama_host"
+  defp health_error_code(_), do: "not_connected"
 
   # Shared verification request + three-way classification, used both by the
   # generic provider path and by ollama_cloud's local-first / keyed-fallback
@@ -1193,6 +1780,7 @@ defmodule OptimalSystemAgent.Onboarding do
     model = Map.get(params, :model) || Map.get(params, "model")
     api_key = Map.get(params, :api_key) || Map.get(params, "api_key")
     base_url = Map.get(params, :base_url) || Map.get(params, "base_url")
+    base_url = resolve_ollama_account_url(provider, api_key, base_url)
     channel_tokens = Map.get(params, :channel_tokens) || Map.get(params, "channel_tokens") || %{}
 
     user_name = Map.get(params, :user_name) || Map.get(params, "user_name")
@@ -2181,6 +2769,59 @@ defmodule OptimalSystemAgent.Onboarding do
     e -> {:error, "Ollama fetch failed: #{Exception.message(e)}"}
   end
 
+  # The cloud tags a signed-in daemon reports it can proxy, enriched from the
+  # shipped catalog where the two agree.
+  #
+  # Three outcomes, and the middle one is the point:
+  #
+  #   * daemon lists hosted tags -> those, and only those
+  #   * daemon reachable but lists none -> `{:ok, []}`. Showing the full
+  #     catalog here would be inventing a list: the account demonstrably
+  #     cannot reach any of it, and an empty picker is the honest answer.
+  #   * daemon unreachable / unreadable -> the shipped catalog, i.e. exactly
+  #     what every caller got before this existed. Not knowing is not the same
+  #     as knowing the answer is empty.
+  defp ollama_account_models(base_url, catalog) do
+    # `retry: false`: a daemon that is not there is not going to be there in
+    # four seconds, and this runs while a user waits at a picker.
+    case Req.get("#{base_url}/api/tags", receive_timeout: 5_000, retry: false) do
+      {:ok, %{status: 200, body: %{"models" => models}}} when is_list(models) ->
+        by_id = Map.new(catalog, &{&1.id, &1})
+
+        {:ok,
+         models
+         |> Enum.filter(&hosted_ollama_model?/1)
+         |> Enum.map(fn m ->
+           id = m["name"] || m["model"]
+
+           Map.get(by_id, id) ||
+             %{
+               id: id,
+               name: id,
+               ctx: get_in(m, ["details", "context_length"]) || 0,
+               tools: "tools" in (m["capabilities"] || []),
+               recommended: false,
+               note: "reported by your Ollama daemon"
+             }
+         end)
+         |> Enum.reject(&is_nil(&1.id))}
+
+      _ ->
+        {:ok, catalog}
+    end
+  rescue
+    _ -> {:ok, catalog}
+  end
+
+  # A hosted tag is one the daemon says it proxies (`remote_host`), with the
+  # naming convention as a fallback for daemons that do not report it.
+  defp hosted_ollama_model?(m) do
+    remote = m["remote_host"]
+
+    (is_binary(remote) and remote != "") or
+      OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(m["name"] || m["model"] || "")
+  end
+
   defp fetch_openai_models(base_url, api_key) do
     headers =
       if api_key do
@@ -2391,6 +3032,81 @@ defmodule OptimalSystemAgent.Onboarding do
   @spec auth_route(String.t() | atom(), :api_key | :oauth | nil) :: :api_key | :oauth
   def auth_route(provider_id, choice) do
     auth_route_for(usable_auth_modes(provider_id), choice)
+  end
+
+  @doc """
+  The catalog as a *setup surface* needs it: every entry decorated with the
+  grouping, the modes this machine can actually run, the labelled options for
+  the fork, and the provider's current connection state.
+
+  One function, because the alternative is what shipped: the TUI hardcoded its
+  own idea of which providers offer sign-in (`ollama_cloud` and `miosa`, in a
+  `match` on provider id), which disagreed with `auth_modes` the moment
+  `openai_codex`, `claude_cli`, `copilot_cli` and `bedrock` were added. Every
+  one of them rendered as "needs key". A surface that reads this function
+  cannot hold that opinion.
+
+  Pure read. `Auth.Subscription.status/1` never dials out and never refreshes,
+  so drawing a picker can neither spend a rotating refresh token nor bill a
+  metered request.
+  """
+  @spec provider_ui_entries() :: [map()]
+  def provider_ui_entries do
+    Enum.map(providers_list(), &decorate_for_ui/1)
+  end
+
+  @doc "`provider_ui_entries/0` for a single entry already in hand."
+  @spec decorate_for_ui(map()) :: map()
+  def decorate_for_ui(entry) when is_map(entry) do
+    id = Map.get(entry, :id)
+    usable = usable_auth_modes_for(entry)
+
+    entry
+    |> Map.put(:usable_auth_modes, usable)
+    |> Map.put(:auth_options, auth_options_for(entry))
+    |> Map.put(:auth, auth_state(id, usable))
+  end
+
+  # The three things a row has to be able to say, and the reason they are
+  # separate: "OSA holds a record" (`connected`), "OSA has evidence behind it"
+  # (`verified`) and "this machine could sign in if asked" (`can_sign_in`).
+  # Collapsing the first two is how a status row presents a guess as a fact —
+  # see the `Auth.Subscription` moduledoc on Copilot.
+  defp auth_state(nil, _usable), do: %{state: "unknown"}
+
+  defp auth_state(id, usable) do
+    sub =
+      if :oauth in usable do
+        safe_status(id)
+      else
+        nil
+      end
+
+    state =
+      cond do
+        sub && sub.connected? && sub.expired? -> "expired"
+        sub && sub.connected? && sub.verified? -> "connected"
+        sub && sub.connected? -> "connected_unverified"
+        :oauth in usable -> "needs_sign_in"
+        true -> "needs_key"
+      end
+
+    %{
+      state: state,
+      can_sign_in: :oauth in usable,
+      can_paste_key: :api_key in usable,
+      account: sub && sub.account,
+      plan: sub && sub.plan,
+      expires_at: sub && sub.expires_at
+    }
+  end
+
+  defp safe_status(id) do
+    OptimalSystemAgent.Auth.Subscription.status(id)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
   end
 
   @doc """

@@ -54,7 +54,8 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
       ] ++ Keyword.get(opts, :req_options, [])
 
     case Req.post(options) do
-      {:ok, %{status: 200, body: resp}} when is_map(resp) ->
+      {:ok, %{status: 200, body: resp} = http} when is_map(resp) ->
+        record_quota(http)
         {:ok, parse_response(resp, messages)}
 
       {:ok, %{status: 429} = resp} ->
@@ -62,6 +63,13 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
       {:ok, %{status: 403, body: resp}} ->
         {:error, forbidden_reason(resp)}
+
+      # 401 is returned as a TAGGED reason, not a formatted string, because it
+      # is the one status a caller can act on: a subscription transport can
+      # refresh and retry. Formatting it here was how "HTTP 401: …" became a
+      # dead end with no reactive refresh anywhere behind it.
+      {:ok, %{status: 401, body: resp}} ->
+        {:error, {:unauthorized, error_message(resp)}}
 
       {:ok, %{status: status, body: resp}} ->
         {:error, "HTTP #{status}: #{error_message(resp)}"}
@@ -103,7 +111,8 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
         ] ++ Keyword.get(opts, :req_options, [])
 
       case Req.post(options) do
-        {:ok, %{status: 200}} ->
+        {:ok, %{status: 200} = http} ->
+          record_quota(http)
           final = Agent.get(agent, & &1)
           callback.({:done, finalize(final, messages)})
           :ok
@@ -113,6 +122,12 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
         {:ok, %{status: 403, body: resp}} ->
           {:error, forbidden_reason(resp)}
+
+        # See the non-streaming clause. A 401 on the streaming path is
+        # retryable in exactly the same way, and must be reported the same way
+        # or the retry only ever covers half the requests OSA makes.
+        {:ok, %{status: 401, body: resp}} ->
+          {:error, {:unauthorized, error_message(resp)}}
 
         {:ok, %{status: status, body: resp}} ->
           {:error, "HTTP #{status}: #{error_message(resp)}"}
@@ -139,7 +154,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     %{model: model, input: input, stream: stream?}
     |> put_unless_nil(:instructions, instructions)
     |> maybe_put_tools(opts)
-    |> maybe_put_reasoning(opts)
+    |> maybe_put_reasoning(model, opts)
     |> maybe_put_max_tokens(opts)
   end
 
@@ -248,14 +263,71 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     end
   end
 
-  defp maybe_put_reasoning(body, opts) do
-    case Keyword.get(opts, :reasoning_effort) do
-      e when e in ["low", "medium", "high", :low, :medium, :high] ->
-        Map.put(body, :reasoning, %{effort: to_string(e)})
+  # Effort on the Responses transport, resolved exactly the way the
+  # chat/completions transport resolves it.
+  #
+  # What was here before accepted only a literal "low"/"medium"/"high" and
+  # dropped everything else on the floor. Two consequences, both silent:
+  #
+  #   * OSA's effort ladder is `:fast | :medium | :high | :xhigh | :ultra`.
+  #     Three of those five are not in the accepted set, so choosing `xhigh`
+  #     on a Codex model sent NO reasoning field and the model ran at its own
+  #     default. The `openai_compat` path has mapped the full ladder down for
+  #     a long time (`openai_reasoning_effort/1`); this path never learned.
+  #   * Nothing on the normal turn path passes `:reasoning_effort` at all —
+  #     `openai_compat` reads `Agent.Effort.current()` itself. So on Codex the
+  #     setting was inert end to end: `/effort high` changed the status bar
+  #     and nothing else.
+  #
+  # Gated on `OpenAIModels.reasoning?/1`, the single source of truth for
+  # "does this model take reasoning_effort instead of temperature". It is a
+  # catalog lookup, NOT a prefix scan — the GPT-5.x reasoning models (Codex's
+  # entire line-up) have ids beginning `gpt`, which a prefix scan misses.
+  defp maybe_put_reasoning(body, model, opts) do
+    effort =
+      Keyword.get(opts, :reasoning_effort) ||
+        Keyword.get(opts, :effort) ||
+        current_effort()
 
-      _ ->
-        body
+    with true <- reasoning_model?(model),
+         level when is_binary(level) <- normalize_effort(effort) do
+      Map.put(body, :reasoning, %{effort: level})
+    else
+      _ -> body
     end
+  end
+
+  defp reasoning_model?(model) do
+    OptimalSystemAgent.Providers.OpenAIModels.reasoning?(String.downcase(to_string(model)))
+  rescue
+    _ -> false
+  end
+
+  # Same ladder mapping as `OpenAICompat.openai_reasoning_effort/1`. An
+  # explicit off/none omits the field; an unrecognised/corrupt value falls back
+  # to the model's own default rather than disabling reasoning — a garbage
+  # setting must not silently turn a reasoning model into a non-reasoning one.
+  defp normalize_effort(effort) do
+    case effort |> to_string() |> String.trim() |> String.downcase() do
+      "off" -> nil
+      "none" -> nil
+      "fast" -> "low"
+      "low" -> "low"
+      "medium" -> "medium"
+      "high" -> "high"
+      "xhigh" -> "high"
+      "max" -> "high"
+      "ultra" -> "high"
+      _ -> "medium"
+    end
+  end
+
+  defp current_effort do
+    OptimalSystemAgent.Agent.Effort.current()
+  rescue
+    _ -> "medium"
+  catch
+    _, _ -> "medium"
   end
 
   defp maybe_put_max_tokens(body, opts) do
@@ -482,6 +554,24 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   end
 
   defp retry_after(_), do: nil
+
+  # The `x-codex-*` headers are the only place OpenAI reports how much of the
+  # plan's rate-limit window is gone, and they ride along on responses OSA was
+  # already paying for. Remembering them here is what lets `/usage` answer
+  # "what does my account have left" without spending a request to find out —
+  # so this is deliberately fire-and-forget and can never fail a turn.
+  defp record_quota(%{headers: headers}) do
+    OptimalSystemAgent.Usage.RateLimits.record(
+      "openai_codex",
+      OptimalSystemAgent.Providers.OpenAICodex.rate_limit_info(headers)
+    )
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp record_quota(_), do: :ok
 
   # ── small helpers ───────────────────────────────────────────────────────
 

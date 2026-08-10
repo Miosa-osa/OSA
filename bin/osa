@@ -22,6 +22,9 @@
 #   osa update --rollback  Swap $OSA_HOME/current back to the previous version
 #   osa update --dry-run   Print the staged-update plan; change nothing
 #   osa doctor             Run backend health checks
+#   osa auth               Show account sign-ins (status/login/logout)
+#   osa usage [all]        Account quota + this session's token usage
+#   osa logout [provider]  Sign out of a provider account
 #   osa serve              Run the backend in the foreground (headless API)
 #   osa version            Print version
 #   osa help               Show this help
@@ -576,6 +579,9 @@ print_help() {
   echo -e "    ${CYAN}osa update --staged${RESET}  ${DIM}Rollback-safe: stage, build, boot-probe, atomic-swap${RESET}"
   echo -e "    ${CYAN}osa update --rollback${RESET} ${DIM}Swap back to the previous staged version${RESET}"
   echo -e "    ${CYAN}osa doctor${RESET}           Run backend health checks"
+  echo -e "    ${CYAN}osa auth${RESET}             Show account sign-ins ${DIM}(status / login / logout)${RESET}"
+  echo -e "    ${CYAN}osa usage${RESET} ${DIM}[all]${RESET}      Account quota ${DIM}+ this session's token usage${RESET}"
+  echo -e "    ${CYAN}osa logout${RESET} ${DIM}[provider]${RESET} Sign out of a provider account"
   echo -e "    ${CYAN}osa serve${RESET}            Run the backend in the foreground ${DIM}(headless API)${RESET}"
   echo -e "    ${CYAN}osa version${RESET}          Print version"
   echo -e "    ${CYAN}osa help${RESET}             Show this help"
@@ -1390,6 +1396,64 @@ case "${1:-}" in
     (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run()" 2>/dev/null) || \
       echo "Doctor command not available. Try: osa then type /doctor"
     exit 0
+    ;;
+
+  # `osa auth` / `osa logout` — the supported way OUT of an account sign-in.
+  # `--no-start` because every one of these is a local file operation or a
+  # sign-in flow; none of them needs the daemon, and booting the full OTP tree
+  # to print a status table would make `osa auth status` slower than the thing
+  # it reports on. The exit code is propagated so a scripted
+  # `osa auth logout <provider>` that did nothing cannot look like a success.
+  auth)
+    shift
+    (cd "$ROOT" && mix run --no-start -e "
+      case OptimalSystemAgent.CLI.Auth.run(System.argv()) do
+        :ok -> :ok
+        _ -> System.halt(1)
+      end" -- "$@" 2>/dev/null) || _rc=$?
+    # stderr is dropped for the same reason `doctor` above drops it: on a
+    # source checkout the first invocation after an edit recompiles, and a
+    # hundred lines of dependency warnings on top of a four-line status table
+    # makes the answer unreadable. A build FAILURE still surfaces — the Elixir
+    # side never runs, so the exit code is >1 and is reported here rather than
+    # swallowed.
+    if [ "${_rc:-0}" -gt 1 ]; then
+      echo "osa auth is unavailable — the backend failed to build. Run: osa doctor" >&2
+    fi
+    exit ${_rc:-0}
+    ;;
+
+  # `osa usage` — account quota + OSA's own token count. `--no-start` for the
+  # same reason as `osa auth`: every source it reads is a local file or a free
+  # loopback call, so booting the OTP tree would make the status screen slower
+  # than the thing it reports on.
+  usage)
+    shift
+    (cd "$ROOT" && mix run --no-start -e "
+      case OptimalSystemAgent.CLI.Usage.run(System.argv()) do
+        :ok -> :ok
+        {:error, msg} -> IO.puts(:stderr, to_string(msg)); System.halt(1)
+      end" -- "$@")
+    exit $?
+    ;;
+
+  logout)
+    shift
+    (cd "$ROOT" && mix run --no-start -e "
+      case OptimalSystemAgent.CLI.Auth.run([\"logout\" | System.argv()]) do
+        :ok -> :ok
+        _ -> System.halt(1)
+      end" -- "$@" 2>/dev/null) || _rc=$?
+    # stderr is dropped for the same reason `doctor` above drops it: on a
+    # source checkout the first invocation after an edit recompiles, and a
+    # hundred lines of dependency warnings on top of a four-line status table
+    # makes the answer unreadable. A build FAILURE still surfaces — the Elixir
+    # side never runs, so the exit code is >1 and is reported here rather than
+    # swallowed.
+    if [ "${_rc:-0}" -gt 1 ]; then
+      echo "osa logout is unavailable — the backend failed to build. Run: osa doctor" >&2
+    fi
+    exit ${_rc:-0}
     ;;
 
   opencomputers)

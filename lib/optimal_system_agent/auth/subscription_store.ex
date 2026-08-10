@@ -57,7 +57,15 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   # the lock longer than this it has almost certainly died mid-refresh, so we
   # break the lock rather than wedging the user's session forever.
   @lock_timeout_ms 30_000
-  @lock_stale_ms 60_000
+
+  # Deliberately larger than the worst case a LIVE holder can take, which is
+  # what it was not before: a refresh POST carries `receive_timeout: 30_000`
+  # and may be retried, so a perfectly healthy holder could exceed 60s and
+  # have its lock stolen mid-flight — and a stolen lock during a refresh is
+  # exactly the double-spend of a single-use rotating refresh token that this
+  # whole module exists to prevent. Stealing is still possible for a genuinely
+  # dead holder, just no longer possible for a slow one.
+  @lock_stale_ms 180_000
   @lock_poll_ms 50
 
   @type entry :: %{optional(String.t()) => term()}
@@ -246,21 +254,49 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
 
   Implemented as an exclusively-created lockfile beside the store, which is
   the one primitive that behaves consistently across the filesystems OSA runs
-  on. A lock older than #{@lock_stale_ms}ms is broken and taken: a stale lock
-  is always the corpse of a crashed process, and the alternative — refusing to
-  refresh forever — is a worse outcome than a rare double refresh.
+  on. `fun` receives the lock's **ownership token** — an opaque string that is
+  also the lockfile's contents — so a long-running body can ask
+  `still_holding?/1` before it writes.
+
+  ## Breaking a stale lock, and why that needs a second mechanism
+
+  A lock older than #{@lock_stale_ms}ms is broken and taken, because a stale
+  lock is normally the corpse of a crashed process and refusing to refresh
+  forever is worse than a rare double refresh.
+
+  But "normally" is doing real work in that sentence, and on its own it is not
+  safe: if the original holder is merely slow rather than dead, breaking its
+  lock produces two live holders, and the loser then overwrites the winner —
+  silently, with the older of the two credentials. That is worse than the
+  deadlock it was avoiding, because the losing write can resurrect a token the
+  winner has already had rotated out from under it.
+
+  So the lock is **re-validated before every write**, not only acquired. The
+  holder stamps a token nobody else can guess into the lockfile;
+  `still_holding?/1` re-reads it, and a mismatch means the lock was broken and
+  this process must abandon its write rather than complete it. The window is
+  not eliminated — that would need a filesystem primitive not portably
+  available — but it is narrowed from "the whole body" to "between the check
+  and the rename", and the failure mode changes from silent clobber to a clean
+  `{:error, :lock_lost}` the caller can report and retry.
   """
-  @spec with_lock((-> result)) :: result | {:error, :lock_timeout} when result: term()
-  def with_lock(fun) when is_function(fun, 0) do
+  @spec with_lock((-> result) | (String.t() -> result)) ::
+          result | {:error, :lock_timeout} when result: term()
+  def with_lock(fun) when is_function(fun, 0) or is_function(fun, 1) do
     lock = lock_path()
     File.mkdir_p!(Path.dirname(lock))
 
-    case acquire(lock, System.monotonic_time(:millisecond)) do
+    token = mint_token()
+
+    case acquire(lock, token, System.monotonic_time(:millisecond)) do
       :ok ->
         try do
-          fun.()
+          if is_function(fun, 1), do: fun.(token), else: fun.()
         after
-          _ = File.rm(lock)
+          # Only remove a lock we still own. Removing one that has been broken
+          # and re-taken would hand a third process a lock the second still
+          # thinks it holds.
+          if still_holding?(token), do: File.rm(lock)
         end
 
       {:error, _} = err ->
@@ -268,12 +304,35 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
     end
   end
 
-  defp acquire(lock, started_at) do
+  @doc """
+  True when the lockfile still contains this process's ownership token.
+
+  Cheap (one small read) and meant to be called immediately before a write, so
+  a holder whose lock was broken as stale aborts instead of overwriting
+  whoever took it.
+  """
+  @spec still_holding?(String.t()) :: boolean()
+  def still_holding?(token) when is_binary(token) do
+    case File.read(lock_path()) do
+      {:ok, contents} -> String.contains?(contents, token)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  # 128 bits of CSPRNG. Not a secret — the lockfile is 0600-adjacent and holds
+  # nothing sensitive — but it must be unguessable enough that two holders
+  # cannot collide, and a pid is not: pids are reused, and OSA runs in
+  # containers where two processes genuinely can share one.
+  defp mint_token, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+
+  defp acquire(lock, token, started_at) do
     case File.open(lock, [:write, :exclusive]) do
       {:ok, io} ->
-        # Record the holder so a human debugging a wedged lock can see who has
-        # it. No secrets — pid and timestamp only.
-        IO.binwrite(io, "#{System.system_time(:second)} #{System.pid()}")
+        # Ownership token first, then human-readable provenance so somebody
+        # debugging a wedged lock can see who has it. No secrets.
+        IO.binwrite(io, "#{token} #{System.system_time(:second)} #{System.pid()}")
         File.close(io)
         :ok
 
@@ -281,14 +340,14 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
         cond do
           stale?(lock) ->
             _ = File.rm(lock)
-            acquire(lock, started_at)
+            acquire(lock, token, started_at)
 
           System.monotonic_time(:millisecond) - started_at > @lock_timeout_ms ->
             {:error, :lock_timeout}
 
           true ->
             Process.sleep(@lock_poll_ms)
-            acquire(lock, started_at)
+            acquire(lock, token, started_at)
         end
 
       {:error, reason} ->
@@ -296,6 +355,12 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
     end
   end
 
+  # Judged on mtime, which is a wall-clock quantity and therefore vulnerable to
+  # a backwards clock step making a stale lock look fresh forever. That is
+  # survivable ONLY because `@lock_timeout_ms` bounds how long a waiter blocks
+  # regardless — a waiter that never sees the lock go stale still gives up with
+  # `:lock_timeout` rather than waiting indefinitely. There is no portable
+  # monotonic timestamp to put on a file.
   defp stale?(lock) do
     case File.stat(lock, time: :posix) do
       {:ok, %File.Stat{mtime: mtime}} ->
@@ -335,7 +400,7 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           {:ok, entry()} | {:error, term()}
   def refresh_within_lock(provider_id, refresh_fun, needs_refresh?)
       when is_function(refresh_fun, 1) and is_function(needs_refresh?, 1) do
-    with_lock(fn ->
+    with_lock(fn token ->
       case fetch(provider_id) do
         nil ->
           {:error, :not_connected}
@@ -344,12 +409,21 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           if needs_refresh?.(fresh) do
             case refresh_fun.(fresh) do
               {:ok, updated} ->
-                all = read_all()
-                merged = Map.put(all, to_string(provider_id), stringify(updated))
+                # The refresh POST is the slow part, and the only part long
+                # enough for this process's lock to have been broken as stale
+                # underneath it. Check before writing: a lock we no longer hold
+                # means somebody else has taken over and our copy is the older
+                # one, so writing it would undo their work.
+                if still_holding?(token) do
+                  all = read_all()
+                  merged = Map.put(all, to_string(provider_id), stringify(updated))
 
-                case write_all(merged) do
-                  :ok -> {:ok, updated}
-                  err -> err
+                  case write_all(merged) do
+                    :ok -> {:ok, updated}
+                    err -> err
+                  end
+                else
+                  {:error, :lock_lost}
                 end
 
               {:error, _} = err ->

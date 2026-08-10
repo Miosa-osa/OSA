@@ -407,8 +407,24 @@ defmodule OptimalSystemAgent.OnboardingByokTest do
       # no API key at all. Its credential is a subscription token that is only
       # ever read from the credential store and sent to the base URL pinned
       # into that store at sign-in, so there is no key here that COULD be sent
-      # to the wrong host.
-      for %{id: id} <- Onboarding.providers_list(), id not in ~w(custom openai miosa openai_codex) do
+      # to the wrong host. `claude_cli` is exempt for the strongest reason of
+      # all: OSA never makes the request. It spawns Anthropic's own CLI, which
+      # holds the credential and chooses the host, so OSA has neither a key
+      # nor a URL to get wrong. `copilot_cli` is exempt for the same reason:
+      # GitHub's CLI makes the request and picks the host.
+      #
+      # `bedrock` is exempt because it has no fixed host at all: the endpoint
+      # is `bedrock.<region>.amazonaws.com`, built from the resolved AWS
+      # region, and with no region resolvable the check refuses to run rather
+      # than guessing one. That refusal is the correct behaviour — Bedrock has
+      # no global endpoint, and guessing `us-east-1` for an account whose
+      # models live elsewhere names the wrong problem — but it leaves no
+      # request to observe here. The property is covered for bedrock directly
+      # in `providers/bedrock_test.exs`, which asserts the host is
+      # `bedrock-runtime.<region>.amazonaws.com` and that the SigV4 credential
+      # scope names the same region.
+      for %{id: id} <- Onboarding.providers_list(),
+          id not in ~w(custom openai miosa openai_codex claude_cli copilot_cli bedrock) do
         name = stub_name(:host)
         parent = self()
 

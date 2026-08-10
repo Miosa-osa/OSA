@@ -59,7 +59,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
 
   @spec chat(list(), keyword()) :: {:ok, map()} | {:error, term()}
   def chat(messages, opts \\ []) do
-    with {:ok, cred} <- Auth.credential() do
+    with_reauth(fn cred ->
       OpenAIResponses.chat(
         cred.base_url,
         cred.access_token,
@@ -67,14 +67,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
         messages,
         request_opts(cred, opts)
       )
-    else
-      {:error, reason} -> {:error, auth_error(reason)}
-    end
+    end)
   end
 
   @spec chat_stream(list(), function(), keyword()) :: :ok | {:error, term()}
   def chat_stream(messages, callback, opts \\ []) do
-    with {:ok, cred} <- Auth.credential() do
+    with_reauth(fn cred ->
       OpenAIResponses.chat_stream(
         cred.base_url,
         cred.access_token,
@@ -83,10 +81,86 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
         callback,
         request_opts(cred, opts)
       )
-    else
-      {:error, reason} -> {:error, auth_error(reason)}
+    end)
+  end
+
+  @doc false
+  # Reactive re-authentication: run the request, and if the server says 401,
+  # refresh once and run it exactly once more.
+  #
+  # ## Why "exactly once", and why it is safe to retry at all
+  #
+  # A 401 means the token OSA presented was not accepted, so the request never
+  # reached the model — nothing was generated, nothing was billed, and no
+  # partial output was streamed to the caller (the transport reports the status
+  # before any body is consumed). That makes it one of the very few errors
+  # where re-sending is not a duplicate.
+  #
+  # The retry is capped at one because a second 401 after a successful refresh
+  # is not a token problem: the account has lost entitlement, or the request
+  # itself is being rejected, and re-refreshing would loop while burning a
+  # rotating refresh token each time. If the refresh itself fails, its reason
+  # is surfaced — `Auth.Subscription.message/2` already distinguishes
+  # "revoked, sign in again" from "quota exhausted, your sign-in is fine", and
+  # this is precisely the path that used to flatten both into "HTTP 401".
+  @spec with_reauth((map() -> result)) :: result | {:error, String.t()} when result: term()
+  def with_reauth(run) when is_function(run, 1) do
+    case Auth.credential() do
+      {:ok, cred} ->
+        case run.(cred) do
+          {:error, {:unauthorized, detail}} -> retry_after_refresh(cred, run, detail)
+          other -> other
+        end
+
+      {:error, reason} ->
+        {:error, auth_error(reason)}
     end
   end
+
+  defp retry_after_refresh(cred, run, detail) do
+    Logger.info("[Codex] Request rejected as unauthorized; refreshing the token and retrying once.")
+
+    # Scoped to the token that was actually rejected: if another process
+    # already rotated it, the fresh one is adopted with no network call and no
+    # second spend of the refresh token. See `Auth.Providers.OpenAICodex.force_refresh/1`.
+    case Auth.force_refresh(cred.access_token) do
+      {:ok, _token} ->
+        case Auth.credential() do
+          {:ok, fresh} ->
+            case run.(fresh) do
+              # Still refused with a token minted seconds ago. This is not a
+              # credential problem any more, and saying "sign in again" here
+              # would be the misleading advice the error catalogue exists to
+              # prevent.
+              {:error, {:unauthorized, second}} ->
+                {:error,
+                 "#{Auth.display_name()} refused the request even after a successful token refresh " <>
+                   "(#{describe(second)}). Your sign-in is valid; the account may have lost access to " <>
+                   "this model or plan."}
+
+              other ->
+                other
+            end
+
+          {:error, reason} ->
+            {:error, auth_error(reason)}
+        end
+
+      {:error, reason} ->
+        Logger.warning("[Codex] Token refresh after a 401 failed: #{inspect(reason)}")
+        {:error, auth_error(reason) <> refusal_suffix(detail)}
+    end
+  end
+
+  defp describe(detail) when is_binary(detail) and detail != "", do: detail
+  defp describe(_), do: "no detail given"
+
+  # Keep the server's own words, which are frequently more specific than
+  # anything OSA can infer, without letting them replace the actionable line.
+  defp refusal_suffix(detail) when is_binary(detail) and detail != "",
+    do: " (the server said: #{detail})"
+
+  defp refusal_suffix(_), do: ""
 
   defp model(opts), do: Keyword.get(opts, :model) || default_model()
 

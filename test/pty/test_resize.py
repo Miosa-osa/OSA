@@ -133,7 +133,129 @@ def test_small_viewport(backend: StubBackend) -> None:
         assert_single_live_region(s, "after growing back to 80x24")
 
 
-TESTS = [test_resize_sweep, test_height_resize, test_small_viewport]
+def test_provider_surface(backend: StubBackend) -> None:
+    """`/provider` opens a grouped provider surface, and an account provider
+    that is not signed in does NOT surface an HTTP error.
+
+    This is the harness half of the reported bug. The symptoms were:
+
+      * "Failed to load models — HTTP 401" on clicking a provider;
+      * no `/provider` command at all;
+      * account providers reading as "needs key".
+
+    All three are screen facts, and all three were invisible to the Rust suite:
+    the picker's unit tests construct a `ModelPicker` directly and never go
+    near the HTTP client or the command dispatcher. So this drives the real
+    binary: type the command a user types, and read the screen.
+    """
+    with PtySession(backend.base_url, cols=110, rows=34) as s:
+        s.boot()
+
+        # Typed, then submitted separately: with a `/` prefix the composer
+        # opens a completion popup that consumes the first Enter to accept the
+        # highlighted entry, so a single `"/provider\r"` write leaves the text
+        # sitting in the composer. That is real behaviour, not a harness
+        # artefact — a user presses Enter twice too.
+        s.write(b"/provider")
+        s.pump(SETTLE)
+        for _ in range(2):
+            s.write(b"\r")
+            s.pump(SETTLE)
+            if "ChatGPT (Codex)" in "\n".join(s.lines()):
+                break
+        s.pump(SETTLE)
+
+        screen = "\n".join(s.lines())
+
+        # 1. The command exists. An unknown slash command leaves the composer
+        #    holding the text (or toasts) rather than opening a dialog.
+        if "ChatGPT (Codex)" not in screen:
+            raise AssertionError(
+                "/provider did not open a provider surface listing the catalog.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # 2. Grouped. The accounts heading has to be on screen, above the keys
+        #    one — a flat list of 31 rows is why account providers were
+        #    indistinguishable from key-only ones.
+        if "Connect an account" not in screen:
+            raise AssertionError(
+                "provider surface is not grouped: no 'Connect an account' "
+                f"section heading.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        # 3. No raw HTTP error anywhere. The 401 arrived as a toast reading
+        #    "Failed to load models: HTTP 401 …", so the string is the assertion.
+        for bad in ("Failed to load models", "HTTP 401", "401 Unauthorized"):
+            if bad in screen:
+                raise AssertionError(
+                    f"provider surface surfaced a raw transport error ({bad!r}).\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+        # 4. Esc gets back out. Reversibility is part of the contract: every
+        #    step of this flow has to be exitable, or a user who opens the
+        #    wrong provider is stuck.
+        s.write(b"\x1b")
+        s.pump(SETTLE)
+        assert_single_live_region(s, "after Esc out of the provider surface")
+
+
+def test_resize_with_transcript(backend: StubBackend) -> None:
+    """A width drag with REAL transcript content in scrollback.
+
+    `test_resize_sweep` drags an empty screen. The user's report is a drag on a
+    session that has already produced output, and it corrupts the transcript as
+    well as the chrome — five stacked copies of composer + hint + status, each
+    with a progressively wider separator (one per intermediate width).
+
+    Transcript content is not incidental to that. Finalized lines reach the
+    terminal's real scrollback through `terminal.insert_before`, which is a
+    full viewport rebuild and re-anchors exactly like a draw does. A drag on an
+    empty screen never exercises it. This test fills scrollback first, then
+    drags, which is the reported shape.
+    """
+    with PtySession(backend.base_url, cols=120, rows=30) as s:
+        s.boot()
+
+        # Fill scrollback with committed transcript lines. `/help` is
+        # client-side, so it needs no model and no backend behaviour, and its
+        # output is finalized content that goes through the same commit path
+        # as a model reply.
+        # NOT `/help` — that opens the command palette, an overlay, rather than
+        # committing anything to the transcript.
+        for _ in range(4):
+            s.write(b"/version")
+            s.pump(0.3)
+            s.write(b"\r")
+            s.pump(0.2)
+            s.write(b"\r")
+            s.pump(0.4)
+            s.write(b"\x1b")
+            s.pump(0.2)
+        s.pump(SETTLE)
+        assert_single_live_region(s, "after filling the transcript at 120x30")
+
+        for width in range(115, 79, -5):
+            s.resize(width, 30)
+            s.pump(0.05)
+        s.pump(SETTLE * 2)
+        assert_single_live_region(s, "after narrowing sweep WITH transcript")
+
+        for width in range(85, 125, 5):
+            s.resize(width, 30)
+            s.pump(0.05)
+        s.pump(SETTLE * 2)
+        assert_single_live_region(s, "after widening sweep WITH transcript")
+
+
+TESTS = [
+    test_resize_sweep,
+    test_resize_with_transcript,
+    test_height_resize,
+    test_small_viewport,
+    test_provider_surface,
+]
 
 
 def main() -> int:

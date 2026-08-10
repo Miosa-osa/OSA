@@ -217,6 +217,16 @@ impl OnboardingWizard {
             .unwrap_or(false)
     }
 
+    /// True when the selected provider declares a non-key auth mode alongside
+    /// its key. Read from the catalog's `auth_modes`, which is the single
+    /// source of truth every surface reads — never a second list here.
+    fn provider_offers_account(&self) -> bool {
+        self.current_provider()
+            .and_then(|p| p.auth_modes.as_ref())
+            .map(|modes| modes.iter().any(|m| m == "oauth"))
+            .unwrap_or(false)
+    }
+
     fn provider_needs_url(&self) -> bool {
         self.current_provider()
             .map(|p| p.id == "custom" || p.id == "ollama_local")
@@ -1188,6 +1198,19 @@ impl OnboardingWizard {
                 Rect::new(area.x, cy, area.width, 1),
             );
             cy += 2;
+
+            // A provider that also offers account sign-in accepts an empty key
+            // here: the backend then connects the signed-in local client
+            // instead. Without this line the field looks mandatory and the
+            // free route is invisible in this surface, which is how it stayed
+            // unreachable from the TUI for so long.
+            if self.provider_offers_account() {
+                put(frame,
+                    Paragraph::new("  Leave blank to use your signed-in account instead")
+                        .style(Style::default().fg(theme.colors.dim)),
+                    Rect::new(area.x, cy - 1, area.width, 1),
+                );
+            }
         }
 
         if self.provider_needs_url() {

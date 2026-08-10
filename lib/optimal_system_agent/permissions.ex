@@ -748,6 +748,15 @@ defmodule OptimalSystemAgent.Permissions do
       ".osa" in segments and base in ["settings.json", "settings.local.json", "permissions.json"] ->
         "modifies OSA settings / permission rules"
 
+      # The credential store for the operator's paid accounts. Reads are
+      # denied outright by `file_read`'s sensitive-path list; writes prompt in
+      # every mode, overdrive included, because a rewrite is how a
+      # subscription token gets swapped for an attacker's or its pinned
+      # `base_url` gets redirected — neither of which the agent has any
+      # legitimate reason to do.
+      ".osa" in segments and base == "subscriptions.json" ->
+        "modifies OSA's subscription credential store"
+
       true ->
         nil
     end

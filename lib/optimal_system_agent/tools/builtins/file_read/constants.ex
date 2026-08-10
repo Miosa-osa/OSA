@@ -21,6 +21,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Constants do
     ".gnupg/",
     ".aws/credentials",
     ".env",
+    # Subscription bearer tokens for the operator's paid accounts. An agent
+    # that can read its own credential store is an exfiltration primitive:
+    # one prompt-injected instruction in a file it was asked to summarise is
+    # enough to get the token into a tool call. Denied by name, alongside the
+    # other credential stores above.
+    ".osa/subscriptions.json",
     "/etc/shadow",
     "/etc/sudoers",
     "/etc/master.passwd",

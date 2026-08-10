@@ -178,7 +178,23 @@ provider_map = %{
   "glm" => :zhipu,
   "volcengine" => :volcengine,
   "baichuan" => :baichuan,
-  "ollama_cloud" => :ollama_cloud
+  "ollama_cloud" => :ollama_cloud,
+  # The account/subscription providers. Their absence here was silent and
+  # total: `Map.get(provider_map, env, :ollama)` turned a `.env` saying
+  # `OSA_DEFAULT_PROVIDER=openai_codex` into `:ollama` on the next boot, so a
+  # user who connected their ChatGPT plan and picked `gpt-5.2-codex` had OSA
+  # ask the local Ollama daemon for a model it has never heard of. The
+  # sign-in worked, the config was written correctly, and the routing threw
+  # it away — the "I connected it and it still fails" shape.
+  #
+  # All four are registered providers (`Providers.Registry.list_providers/0`
+  # returns them); only this lookup table had not been updated when they
+  # shipped. They hold no key here on purpose: their credential lives in
+  # `~/.osa/subscriptions.json` or in the vendor's own CLI, never in `.env`.
+  "openai_codex" => :openai_codex,
+  "claude_cli" => :claude_cli,
+  "copilot_cli" => :copilot_cli,
+  "bedrock" => :bedrock
 }
 
 default_provider =
@@ -222,6 +238,12 @@ config :optimal_system_agent,
   hyperbolic_api_key: System.get_env("HYPERBOLIC_API_KEY"),
   lmstudio_api_key: System.get_env("LMSTUDIO_API_KEY"),
   llamacpp_api_key: System.get_env("LLAMACPP_API_KEY"),
+  # Bedrock's key mode uses AWS's own variable name rather than a
+  # `BEDROCK_API_KEY` of OSA's invention, so a user who already exported it
+  # for the AWS CLI or an SDK does not have to export it twice under a second
+  # name. Its account mode needs nothing here: the AWS credential chain is
+  # read live per request, never snapshotted at boot.
+  bedrock_api_key: System.get_env("AWS_BEARER_TOKEN_BEDROCK"),
 
   # LLM Providers — model overrides (per-provider, takes precedence over OSA_MODEL)
   google_model: System.get_env("GOOGLE_MODEL"),
@@ -238,6 +260,7 @@ config :optimal_system_agent,
   volcengine_model: System.get_env("VOLCENGINE_MODEL"),
   baichuan_model: System.get_env("BAICHUAN_MODEL"),
   xai_model: System.get_env("XAI_MODEL"),
+  bedrock_model: System.get_env("BEDROCK_MODEL"),
   cerebras_model: System.get_env("CEREBRAS_MODEL"),
   sambanova_model: System.get_env("SAMBANOVA_MODEL"),
   hyperbolic_model: System.get_env("HYPERBOLIC_MODEL"),

@@ -177,7 +177,7 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
 
     {api_key, base_url} = collect_credentials(provider_id, detected)
 
-    model = select_model(provider_id, api_key)
+    model = select_model(provider_id, api_key, base_url)
 
     case run_health_check(provider_id, api_key, model, base_url) do
       :cancel ->
@@ -231,36 +231,27 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   # keyless local route as the default; only fall through to a key prompt
   # when there's no local daemon, or the user explicitly wants a key (e.g.
   # a different account, or a headless box).
+  # Now driven off the catalog's `auth_modes` through the same pure decision
+  # functions as every other dual-mode provider — see the matching note in
+  # `OptimalSystemAgent.CLI.Setup.get_auth/1` for what changed and why. The key
+  # half is untouched: same detected-key reuse, same prompt, same
+  # `ollama_cloud_credentials/3` endpoint decision.
   defp collect_credentials("ollama_cloud", detected) do
-    local = Onboarding.probe_ollama_local()
+    modes = Onboarding.usable_auth_modes("ollama_cloud")
 
-    if local.reachable do
-      choice =
-        Prompt.select("Ollama Cloud connection", [
-          %{
-            value: :local,
-            label: "Use signed-in local Ollama (no key)",
-            hint: "detected at #{local.url} — proxies :cloud models via device identity"
-          },
-          %{
-            value: :key,
-            label: "Enter an Ollama Cloud API key",
-            hint: "for a different account or a headless setup"
-          }
-        ])
-
-      case choice do
-        :local ->
-          Prompt.completed("Credentials", "using signed-in local Ollama (no key)")
-          ollama_cloud_credentials(true, true, nil)
-
-        _ ->
-          {key, _base_url} = collect_ollama_cloud_key(detected)
-          ollama_cloud_credentials(true, false, key)
+    choice =
+      case Onboarding.auth_options("ollama_cloud") do
+        [] -> nil
+        options -> Prompt.select("How do you want to connect?", options)
       end
-    else
-      {key, _base_url} = collect_ollama_cloud_key(detected)
-      ollama_cloud_credentials(false, false, key)
+
+    case Onboarding.auth_route_for(modes, choice) do
+      :oauth ->
+        wizard_sign_in("ollama_cloud", modes, detected)
+
+      :api_key ->
+        {key, _base_url} = collect_ollama_cloud_key(detected)
+        ollama_cloud_credentials(false, false, key)
     end
   end
 
@@ -302,10 +293,22 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     entry = catalog_entry(provider_id)
     name = (entry && entry.name) || provider_id
 
-    case OptimalSystemAgent.Auth.Subscription.login(provider_id, io: &IO.puts/1) do
-      {:ok, _} ->
+    alias OptimalSystemAgent.Auth.LoginSession
+
+    # See `CLI.Setup.sign_in/3` — same reason, same shape. Both surfaces must
+    # pass `on_tick` or the flows' cancel path is unreachable.
+    result =
+      LoginSession.with_cancellation(provider_id, fn ->
+        OptimalSystemAgent.Auth.Subscription.login(provider_id,
+          io: &IO.puts/1,
+          on_tick: LoginSession.on_tick(provider_id)
+        )
+      end)
+
+    case result do
+      {:ok, stored} ->
         Prompt.completed("Credentials", "signed in to #{name}")
-        {nil, entry && entry.base_url}
+        {nil, connected_base_url(stored, entry)}
 
       {:error, reason} ->
         IO.puts("")
@@ -316,8 +319,22 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
         if :api_key in modes and Prompt.confirm("Use an API key instead?") do
           collect_api_key(provider_id, detected)
         else
-          {nil, entry && entry.base_url}
+          {nil, connected_base_url(nil, entry)}
         end
+    end
+  end
+
+  # See `CLI.Setup.connected_base_url/2` — same rule, same reason: the endpoint
+  # a sign-in pinned wins over the catalog's, because for a provider whose two
+  # modes have different endpoints (`ollama_cloud`: the local daemon vs
+  # ollama.com) the catalog's is the key mode's.
+  defp connected_base_url(stored, entry) do
+    pinned = is_map(stored) && Map.get(stored, "base_url")
+
+    cond do
+      is_binary(pinned) and pinned != "" -> pinned
+      is_map(entry) and is_binary(get_in(entry, [:subscription, :base_url])) -> entry.subscription.base_url
+      true -> entry && entry.base_url
     end
   end
 
@@ -393,8 +410,11 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
 
   # ── Model Selection ───────────────────────────────────────────
 
-  defp select_model(provider_id, api_key) do
-    case Onboarding.model_list(provider_id, api_key: api_key) do
+  # `base_url` is threaded through because for `ollama_cloud` it says which
+  # auth mode was taken — a loopback URL means the account route, and the
+  # daemon is then authoritative about which cloud models the account reaches.
+  defp select_model(provider_id, api_key, base_url) do
+    case Onboarding.model_list(provider_id, api_key: api_key, base_url: base_url) do
       {:ok, []} ->
         prompt_for_model(provider_id)
 
@@ -465,7 +485,10 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
       "provider" => provider_id,
       "api_key" => api_key,
       "model" => model,
-      "base_url" => base_url
+      "base_url" => base_url,
+      # Setup surface — may create a connection marker. See
+      # `Onboarding.during_setup?/1`.
+      "during_setup" => true
     }
 
     case Onboarding.health_check(params) do

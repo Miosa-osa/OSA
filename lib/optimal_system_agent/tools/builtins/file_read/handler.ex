@@ -255,7 +255,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   defp sensitive?(expanded_path) do
     Enum.any?(Constants.sensitive_paths(), fn pattern ->
       String.contains?(expanded_path, pattern)
-    end)
+    end) or expanded_path == subscription_store_path()
+  end
+
+  # The literal patterns above assume the credential store lives under a
+  # directory named `.osa`. It usually does — but `OSA_HOME` can move it
+  # anywhere, and a substring deny that silently stops applying when a user
+  # relocates their config is worse than no deny at all, because nothing
+  # announces it. Ask the store where it actually is.
+  defp subscription_store_path do
+    OptimalSystemAgent.Auth.SubscriptionStore.path()
+  rescue
+    _ -> "\0"
   end
 
   defp allowed?(expanded_path) do
