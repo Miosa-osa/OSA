@@ -60,12 +60,23 @@ config :optimal_system_agent,
   skills_dir: Path.join(config_dir, "skills"),
   episodic_dir: Path.join(config_dir, "memory/episodic"),
   mcp_config_path: Path.join(config_dir, "mcp.json"),
-  bootstrap_dir: config_dir,
   data_dir: Path.join(config_dir, "data"),
   sessions_dir: Path.join(config_dir, "sessions")
 
-config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
-  database: Path.join(config_dir, "osa.db")
+# `bootstrap_dir` and Store.Repo's `database` are the two keys config/test.exs
+# deliberately owns, and runtime.exs is loaded AFTER it. Setting them here
+# unconditionally would silently overwrite that isolation with a value test.exs
+# never chose — the same class of bug this file is fixing, just pointed at the
+# suite instead of the operator. Under :test they are already isolated under
+# tmp (with their own fresh-per-run and stale-sweep handling), so leave them
+# alone and only re-resolve them where the frozen compile-time path is the
+# actual problem.
+if config_env() != :test do
+  config :optimal_system_agent, bootstrap_dir: config_dir
+
+  config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
+    database: Path.join(config_dir, "osa.db")
+end
 
 # ── Logger level override via env var ────────────────────────────────────
 case System.get_env("LOGGER_LEVEL") do
