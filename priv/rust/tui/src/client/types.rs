@@ -70,6 +70,14 @@ pub struct McpServerDto {
     pub status: String,
     #[serde(default)]
     pub tool_count: i64,
+    /// Which tool's config this came from: "osa" for the operator's own
+    /// mcp.json, otherwise the tool it was inherited from.
+    #[serde(default)]
+    pub source: String,
+    /// Whether `/mcp` may switch this server on and off. False for OSA's own
+    /// entries, which are edited in mcp.json rather than through the allow list.
+    #[serde(default)]
+    pub toggleable: bool,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServersResponse {

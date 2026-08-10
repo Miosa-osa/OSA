@@ -553,6 +553,27 @@ impl App {
         self.fetch_mcp_servers(false);
     }
 
+    /// Switch an inherited MCP server on or off from the `/mcp` dialog.
+    ///
+    /// The backend edits the `mcp_import_only` allow list and reloads its MCP
+    /// client, so the only thing to do afterwards is refetch. Deliberately no
+    /// optimistic local flip: a server can refuse to start, and a row that
+    /// says "on" while nothing is running is worse than a brief delay. On
+    /// failure we still refetch, so the list falls back to the truth.
+    pub(crate) fn toggle_mcp_server(&mut self, name: String) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let _ = client.toggle_mcp_server(&name).await;
+            let ev = match client.get_mcp_servers().await {
+                Ok(r) => crate::event::backend::BackendEvent::McpServersLoaded(Ok(r), true),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::McpServersLoaded(Err(e.to_string()), true)
+                }
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
     /// Shared fetch for both the `/mcp` dialog and the background chip refresh.
     /// `open` routes the result: `true` opens the dialog, `false` only updates
     /// the chip count.
