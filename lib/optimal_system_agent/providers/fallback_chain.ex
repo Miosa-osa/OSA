@@ -77,13 +77,29 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
 
   # ── Private ──────────────────────────────────────────────────────────
 
+  # Both chains are built as `[primary | fallbacks]`, and `opts[:model]` was
+  # resolved for the PRIMARY. The head must keep it — that is the model the user
+  # actually asked for. Every later hop is a different provider, and forwarding
+  # the primary's tag there asks e.g. Ollama for `claude-sonnet-5`, a tag its
+  # daemon has never heard of. The hop then fails for a reason that has nothing
+  # to do with the original fault, and because the chain reports the LAST error,
+  # that impostor is the one the user sees.
+  #
+  # `errors == []` is exactly "no provider has been tried yet", i.e. the head.
+  # Public as a test seam, like `Ollama.format_messages/1`: asserting this
+  # mapping directly is far cheaper than standing up real provider HTTP.
+  @doc false
+  @spec hop_opts(keyword(), list()) :: keyword()
+  def hop_opts(opts, []), do: opts
+  def hop_opts(opts, _errors), do: Providers.cross_provider_opts(opts)
+
   defp try_providers([], _messages, _opts, errors) do
     error_summary = Enum.map(errors, fn {p, e} -> "#{p}: #{inspect(e)}" end) |> Enum.join("; ")
     {:error, "All providers failed: #{error_summary}"}
   end
 
   defp try_providers([provider | rest], messages, opts, errors) do
-    opts_with_provider = Keyword.put(opts, :provider, provider)
+    opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
 
     case Providers.chat(messages, opts_with_provider) do
       {:ok, result} ->
@@ -114,7 +130,7 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   end
 
   defp try_stream_providers([provider | rest], messages, callback, opts, errors) do
-    opts_with_provider = Keyword.put(opts, :provider, provider)
+    opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
 
     case Providers.chat_stream(messages, callback, opts_with_provider) do
       {:ok, result} ->

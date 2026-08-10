@@ -620,7 +620,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
               "id" => tc[:id] || tc["id"],
               "type" => "function",
               "function" => %{
-                "name" => normalize_tool_name(tc[:name] || tc["name"]),
+                # `|| ""` for the same reason `arguments` has `|| %{}`: this
+                # runs on rehydrated session data, and `normalize_tool_name/1`
+                # raises on nil. A malformed call must not kill the turn before
+                # the request is even built.
+                "name" => normalize_tool_name(tc[:name] || tc["name"] || ""),
                 "arguments" => tc[:arguments] || tc["arguments"] || %{}
               }
             }

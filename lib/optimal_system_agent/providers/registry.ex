@@ -265,8 +265,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
         end
       end)
 
+    # Every provider reached through this function is a hop AWAY from the one
+    # the turn resolved its model for — both callers (`try_fallback_chain/4` and
+    # the `should_fallback?` branch of `chat/2`) pass a chain with the failed
+    # provider already dropped. Carrying `opts[:model]` here asks each of them
+    # for a tag only the original provider serves.
+    hop_opts = cross_provider_opts(opts)
+
     Enum.reduce_while(available_chain, {:error, "No providers in chain"}, fn provider, _acc ->
-      case chat(messages, Keyword.put(opts, :provider, provider)) do
+      case chat(messages, Keyword.put(hop_opts, :provider, provider)) do
         {:ok, _} = result ->
           emit_serving_provider(provider, opts)
           {:halt, result}
@@ -369,7 +376,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # actual fault, and that bogus error is the one the chain reported. Dropping the
   # key lets each provider resolve its own configured default (`OLLAMA_MODEL`,
   # `OPENAI_MODEL`, …), which is the only model it can actually serve.
-  defp cross_provider_opts(opts), do: Keyword.drop(opts, [:model])
+  #
+  # Public because the same hop happens in `FallbackChain`, which drives the
+  # chain the agent loop actually uses. Applying this at only one of the hop
+  # sites fixes the symptom on one path and leaves it on the others.
+  @doc false
+  @spec cross_provider_opts(keyword()) :: keyword()
+  def cross_provider_opts(opts), do: Keyword.drop(opts, [:model])
 
   # ── Outbound message normalization (the second provider boundary) ─────────
   #
@@ -457,12 +470,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # Compactor does: a rehydrated call from a persisted session is string-keyed,
   # and an atom `:arguments` added beside its `"arguments"` would leave the
   # invalid value still sitting on the wire under the string key.
+  #
+  # The early-return must test the SAME key `invalid_tool_args?/1` judged, which
+  # is `tc[:arguments] || tc["arguments"]` — atom first. A call carrying a bad
+  # atom `:arguments` beside a good string `"arguments"` is flagged invalid, and
+  # returning it unchanged because the string side happens to be a map would
+  # leave the bad atom value on the wire: Anthropic and Google read the atom key
+  # first too, so it is the one that would be serialized.
   defp coerce_tool_call_args(tc) when is_map(tc) do
     cond do
       is_map(Map.get(tc, :arguments)) ->
         tc
 
-      is_map(Map.get(tc, "arguments")) ->
+      is_map(Map.get(tc, "arguments")) and not Map.has_key?(tc, :arguments) ->
         tc
 
       Map.has_key?(tc, "arguments") and not Map.has_key?(tc, :arguments) ->

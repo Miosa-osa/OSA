@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Providers.ToolCallArgumentNormalizationTest do
 
   alias OptimalSystemAgent.Agent.Compactor
   alias OptimalSystemAgent.Providers
+  alias OptimalSystemAgent.Providers.ErrorCatalog
   alias OptimalSystemAgent.Providers.Ollama
   alias OptimalSystemAgent.Providers.Registry
 
@@ -218,6 +219,49 @@ defmodule OptimalSystemAgent.Providers.ToolCallArgumentNormalizationTest do
              "an atom :arguments alongside \"arguments\" makes the stripped value unreachable"
 
       assert call["arguments"] == %{}
+    end
+  end
+
+  describe "mixed-key tool calls" do
+    # `invalid_tool_args?/1` judges `tc[:arguments] || tc["arguments"]` — atom
+    # first. So a call whose atom key is the bad one is correctly flagged, and
+    # the coercion must act on THAT key. Returning the call unchanged because
+    # the string key happens to hold a map would leave the placeholder on the
+    # wire: Anthropic and Google read the atom key first too.
+    test "a bad atom :arguments is coerced even when \"arguments\" is a valid map" do
+      messages = [
+        %{
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            %{:id => "t1", :name => "x", :arguments => "[args stripped]", "arguments" => %{"a" => 1}}
+          ]
+        }
+      ]
+
+      [%{tool_calls: [call]}] = Registry.normalize_tool_call_arguments(messages)
+
+      assert is_map(call[:arguments]),
+             "the atom key is the one providers serialize; it must not stay a string"
+
+      assert call[:arguments] == %{}
+    end
+  end
+
+  describe "error catalog classification" do
+    # Both 400s are the SAME fault seen by two parsers. Classifying them as
+    # :request_shape is what stops OSA telling the user to switch models, which
+    # is the one thing guaranteed not to help.
+    test "the two 400 strings this fault produces classify as :request_shape" do
+      assert ErrorCatalog.classify(
+               {:http_error, 400,
+                "messages.3.content.1.tool_use.input: Input should be an object"}
+             ) == :request_shape
+
+      assert ErrorCatalog.classify(
+               {:http_error, 400,
+                ~s({"error":"Value looks like object, but can't find closing '}' symbol"})}
+             ) == :request_shape
     end
   end
 end
