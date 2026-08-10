@@ -44,41 +44,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   ## Public API
 
-      maybe_compact/4         — inspect and possibly compact a message list
-      stats/0                 — compaction metrics from the GenServer
-      start_link/1            — GenServer lifecycle
-      utilization_percent/2   — context-window utilization, 0.0-100.0 PERCENT
-      estimate_tokens/1       — token estimate for a string or message list
-      micro_compact/1         — P5 token-protected prune tier, standalone
-      format_for_summary/1    — P6 media-strip + tool-output-cap text formatter
-
-  ## Context window resolution (NO hardcoded default)
-
-  Every decision this module makes is measured against the REAL context window
-  of the model currently in use, threaded in by the caller as
-  `context_window: Registry.effective_context_window_info(model, provider)`.
-
-  There is deliberately **no** `max_tokens/0` accessor with a built-in default
-  any more. A hardcoded 128k default silently won over real data and made OSA
-  summarize a 1M-window model at ~11% occupancy, destroying fidelity on every
-  long session. When the window cannot be resolved the answer is `:unknown` and
-  compaction is DEFERRED (see `maybe_compact/4`), never guessed.
-
-  The `:max_context_tokens` application env is honoured only as an EXPLICIT
-  operator/test override, and only when the caller did not supply a window. It
-  has no default — unset means `:unknown`, not 128k.
-
-  ## Thresholds
-
-  "How full is too full" has exactly one definition, shared with
-  `Agent.Loop.ProactiveCompaction`:
-  `OptimalSystemAgent.Agent.Loop.CompactionThresholds` (reserve-based, Claude
-  Code parity). The three severity tiers are derived from it:
-
-      tokens >= block_at(window)   → :emergency
-      tokens >= compact_at(window) → :aggressive
-      tokens >= warn_at(window)    → :background
-      otherwise                    → :none
+      maybe_compact/1       — inspect and possibly compact a message list
+      stats/0               — compaction metrics from the GenServer
+      start_link/1          — GenServer lifecycle
+      utilization/1         — context-window utilization percentage
+      estimate_tokens/1     — token estimate for a string or message list
+      micro_compact/1       — P5 token-protected prune tier, standalone
+      format_for_summary/1  — P6 media-strip + tool-output-cap text formatter
   """
 
   use GenServer
@@ -89,10 +61,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.PromptLoader
   alias OptimalSystemAgent.Agent.CompactionSafety
-  alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
 
-  @type window_input :: {:ok, pos_integer()} | :unknown | pos_integer() | nil
-  @type severity :: :none | :background | :aggressive | :emergency
+  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+  defp tier1_threshold, do: Application.get_env(:optimal_system_agent, :compaction_warn, 0.85)
+
+  defp tier2_threshold,
+    do: Application.get_env(:optimal_system_agent, :compaction_aggressive, 0.85)
+
+  defp tier3_threshold,
+    do: Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
 
   # Zone boundaries (counted from the end of the non-system message list).
   # @hot_zone_size is now only a FALLBACK for the token-budgeted tail
@@ -148,97 +125,30 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   @doc """
-  Inspects the given message list and compacts it if usage has crossed the
-  shared `CompactionThresholds` for the CURRENT MODEL'S context window.
-  Returns the (possibly compacted) message list.
+  Inspects the given message list and compacts it if any usage threshold is
+  exceeded. Returns the (possibly compacted) message list.
 
   `known_tokens` is an optional REAL, provider-reported input-token count for
   the current context (from `Loop.Accounting` / the budget stage). When it is a
-  positive integer it drives the compaction *decision* instead of the
-  word-count heuristic — the heuristic under-counts because it ignores the
+  positive integer it drives the compaction *decision* (usage ratio) instead of
+  the word-count heuristic — the heuristic under-counts because it ignores the
   system prompt + tool schemas that also consume the window. `nil`/`0` falls
-  back to the estimate.
-
-  ## Options
-
-    * `:context_window` — the model's real window. Accepts the
-      `{:ok, tokens} | :unknown` shape returned by
-      `Providers.Registry.effective_context_window_info/2` (preferred), a bare
-      positive integer, or `nil`/omitted to fall back to the explicit
-      `:max_context_tokens` operator override. NEVER defaults to a guess.
-
-    * `:force` — when `true`, compact regardless of the resolved window (used
-      by the reactive overflow-recovery path, which already has a hard
-      provider-reported context-length error as its signal). Defaults to
-      `false`.
-
-  ## Unknown windows
-
-  When the window resolves to `:unknown` and `:force` is not set, this function
-  **does nothing and returns the messages unchanged**. Compacting against a
-  guessed denominator is exactly the defect this design exists to prevent: a
-  wrong guess destroys conversation fidelity irreversibly and silently, while
-  deferring is fully recoverable — the provider will return a context-length
-  error, `Loop.ContextCollapse` withholds large tool results first, and the
-  overflow path then calls back in with `force: true`. Losing a turn to one
-  overflow retry is cheap; losing the conversation is not.
+  back to the estimate, preserving the original `maybe_compact/1` behaviour.
 
   This function is safe — it never raises. On any unexpected error it returns
   the original messages unchanged.
   """
-  @spec maybe_compact([map()], non_neg_integer() | nil, String.t() | nil, keyword()) :: [map()]
+  @spec maybe_compact([map()], non_neg_integer() | nil, String.t() | nil) :: [map()]
   @impl OptimalSystemAgent.Agent.ContextEngine
-  def maybe_compact(messages, known_tokens \\ nil, session_id \\ nil, opts \\ []) do
+  def maybe_compact(messages, known_tokens \\ nil, session_id \\ nil) do
     try do
-      do_maybe_compact(messages, known_tokens, session_id, opts)
+      do_maybe_compact(messages, known_tokens, session_id)
     rescue
       e ->
         Logger.error("Compactor.maybe_compact crashed: #{Exception.message(e)}")
         messages
     end
   end
-
-  @doc """
-  Resolve a caller-supplied context window into `{:ok, tokens} | :unknown`.
-
-  Accepts the `Registry.effective_context_window_info/2` shape directly, a bare
-  positive integer, or `nil`.
-
-  A genuinely known window always wins. Only when the window is unknown or
-  absent does this consult the explicit `:max_context_tokens` operator
-  override — which has NO default, so an unset override yields `:unknown`,
-  never a fabricated 128k.
-  """
-  @spec resolve_window(window_input()) :: {:ok, pos_integer()} | :unknown
-  def resolve_window({:ok, n}) when is_integer(n) and n > 0, do: {:ok, n}
-  def resolve_window(n) when is_integer(n) and n > 0, do: {:ok, n}
-
-  def resolve_window(_unknown_or_nil) do
-    case Application.get_env(:optimal_system_agent, :max_context_tokens) do
-      n when is_integer(n) and n > 0 -> {:ok, n}
-      _ -> :unknown
-    end
-  end
-
-  @doc """
-  The compaction severity for `tokens` used out of a `context_window`, derived
-  entirely from the shared reserve-based `CompactionThresholds` — the SAME
-  definition `Loop.ProactiveCompaction` uses. There is no second ratio ladder.
-
-  Public so the window→decision link is directly assertable in tests.
-  """
-  @spec severity_for(non_neg_integer(), pos_integer()) :: severity()
-  def severity_for(tokens, cw)
-      when is_integer(tokens) and tokens >= 0 and is_integer(cw) and cw > 0 do
-    cond do
-      tokens >= CompactionThresholds.block_at(cw) -> :emergency
-      tokens >= CompactionThresholds.compact_at(cw) -> :aggressive
-      tokens >= CompactionThresholds.warn_at(cw) -> :background
-      true -> :none
-    end
-  end
-
-  def severity_for(_tokens, _cw), do: :none
 
   @doc """
   Run micro-compaction independently — clears old tool results without LLM call.
@@ -249,37 +159,19 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   def micro_compact(messages) do
     {system_msgs, non_system} = split_system(messages)
     annotated = annotate_importance(non_system)
-    {compacted, _, _} = apply_step(:micro_compact, annotated, system_msgs, 0, :unknown)
+    {compacted, _, _} = apply_step(:micro_compact, annotated, system_msgs, 0)
     system_msgs ++ strip_annotations(compacted)
   rescue
     _ -> messages
   end
 
   @doc """
-  Context window utilization as a **PERCENT in 0.0..100.0** — not a 0.0..1.0
-  fraction. The unit is in the name on purpose: the old `utilization/1`
-  returned a percentage while at least one behaviour doc described the same
-  concept as a fraction, and an off-by-100 here means OSA either never compacts
-  or compacts constantly.
-
-  Measured with `CompactionThresholds.used_percent/2`, the same denominator the
-  status bar uses (window minus output reserve), so the displayed meter and the
-  compaction decision can never drift apart.
-
-  `context_window` takes the same shapes as `maybe_compact/4`'s
-  `:context_window` option. Returns `:unknown` — never a number — when the
-  window cannot be resolved, because a percentage of a fabricated denominator
-  is worse than no percentage at all.
+  Returns context window utilization as a percentage (0.0 — 100.0).
   """
-  @spec utilization_percent([map()], window_input()) :: float() | :unknown
-  @impl OptimalSystemAgent.Agent.ContextEngine
-  def utilization_percent(messages, context_window \\ nil)
-
-  def utilization_percent(messages, context_window) when is_list(messages) do
-    case resolve_window(context_window) do
-      {:ok, cw} -> CompactionThresholds.used_percent(estimate_tokens(messages), cw)
-      :unknown -> :unknown
-    end
+  @spec utilization([map()]) :: float()
+  def utilization(messages) when is_list(messages) do
+    tokens = estimate_tokens(messages)
+    Float.round(tokens / max_tokens() * 100, 1)
   end
 
   @doc """
@@ -292,7 +184,6 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   words * 1.3 + punctuation * 0.5.
   """
   @spec estimate_tokens([map()] | String.t() | nil) :: non_neg_integer()
-  @impl OptimalSystemAgent.Agent.ContextEngine
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
       content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
@@ -337,7 +228,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @impl true
   def init(%__MODULE__{} = state) do
-    Logger.info("Compactor started (context window is resolved per-model, per-call)")
+    Logger.info("Compactor started (max_tokens=#{max_tokens()})")
     {:ok, state}
   end
 
@@ -373,7 +264,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp do_maybe_compact(messages, known_tokens, session_id, opts) do
+  defp do_maybe_compact(messages, known_tokens, session_id) do
     # Message-only heuristic estimate — used for the pipeline's savings math so
     # before/after token counts stay in the same unit.
     estimated = estimate_tokens(messages)
@@ -387,44 +278,26 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         _ -> estimated
       end
 
-    force? = Keyword.get(opts, :force, false) == true
+    max_tok = max_tokens()
+    usage_ratio = decision_tokens / max_tok
 
-    case resolve_window(Keyword.get(opts, :context_window)) do
-      {:ok, cw} ->
-        case severity_for(decision_tokens, cw) do
-          :none ->
-            messages
-
-          severity ->
-            Logger.info(
-              "Compactor: #{decision_tokens}/#{cw} tokens " <>
-                "(#{CompactionThresholds.used_percent(decision_tokens, cw)}% of usable window) " <>
-                "— running #{severity} pipeline"
-            )
-
-            run_pipeline(messages, estimated, severity, cw, session_id)
-        end
-
-      :unknown when force? ->
-        # A real provider-reported context-length error is the signal; there is
-        # no window to measure against, so compact as hard as the pipeline can.
+    cond do
+      usage_ratio > tier3_threshold() ->
         Logger.warning(
-          "Compactor: context window unknown but compaction was FORCED " <>
-            "(provider reported overflow) — running emergency pipeline"
+          "Compactor: usage at #{pct(usage_ratio)} — running full pipeline (emergency)"
         )
 
-        run_pipeline(messages, estimated, :emergency, :unknown, session_id)
+        run_pipeline(messages, estimated, :emergency, max_tok, session_id)
 
-      :unknown ->
-        # DEFER. See maybe_compact/4's "Unknown windows" section: guessing a
-        # denominator here is what made OSA summarize 1M-window models at ~11%
-        # occupancy. Losing a turn to an overflow retry is recoverable; losing
-        # conversation fidelity is not.
-        Logger.debug(
-          "Compactor: context window unknown — deferring compaction until a real " <>
-            "overflow signal (#{decision_tokens} tokens in history)"
-        )
+      usage_ratio > tier2_threshold() ->
+        Logger.info("Compactor: usage at #{pct(usage_ratio)} — running aggressive pipeline")
+        run_pipeline(messages, estimated, :aggressive, max_tok, session_id)
 
+      usage_ratio > tier1_threshold() ->
+        Logger.info("Compactor: usage at #{pct(usage_ratio)} — running background pipeline")
+        run_pipeline(messages, estimated, :background, max_tok, session_id)
+
+      true ->
         messages
     end
   end
@@ -434,7 +307,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp run_pipeline(messages, tokens_before, severity, cw, session_id) do
+  defp run_pipeline(messages, tokens_before, severity, max_tok, session_id) do
     # PreCompact hook — SYNCHRONOUS (CC parity). Command hooks receive the
     # full event on stdin and can contribute custom summarization
     # instructions (additionalContext / exit-0 stdout), threaded into every
@@ -476,11 +349,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       Process.put(:osa_compact_instructions, compact_instructions)
     end
 
-    # Target: get back OUT of the warning band, i.e. below the shared
-    # `warn_at/1` threshold — the same reserve-based definition that decided we
-    # were too full in the first place. `:emergency` (or a forced compaction
-    # with no resolvable window) goes deeper so a hard overflow actually clears.
-    target_tokens = target_tokens(severity, cw)
+    # Determine target: bring usage to 70% for background, 60% for aggressive/emergency
+    target_tokens =
+      case severity do
+        :background -> round(max_tok * 0.70)
+        :aggressive -> round(max_tok * 0.60)
+        :emergency -> round(max_tok * 0.50)
+      end
 
     {system_msgs, non_system} = split_system(messages)
 
@@ -491,12 +366,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     # Step 0 (micro-compact) is the cheapest — no LLM call, just truncates old tool results
     result =
       {annotated, system_msgs, :none}
-      |> pipeline_step(:micro_compact, target_tokens, cw)
-      |> pipeline_step(:strip_tool_args, target_tokens, cw)
-      |> pipeline_step(:merge_consecutive, target_tokens, cw)
-      |> pipeline_step(:summarize_warm, target_tokens, cw)
-      |> pipeline_step(:compress_cold, target_tokens, cw)
-      |> pipeline_step(:emergency_truncate, target_tokens, cw)
+      |> pipeline_step(:micro_compact, target_tokens)
+      |> pipeline_step(:strip_tool_args, target_tokens)
+      |> pipeline_step(:merge_consecutive, target_tokens)
+      |> pipeline_step(:summarize_warm, target_tokens)
+      |> pipeline_step(:compress_cold, target_tokens)
+      |> pipeline_step(:emergency_truncate, target_tokens)
 
     {final_annotated, final_system, last_step} = result
     final_messages = final_system ++ strip_annotations(final_annotated)
@@ -552,24 +427,9 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     final_messages
   end
 
-  # Post-compaction token target for a severity tier, derived from the shared
-  # reserve-based thresholds (no second ratio ladder). With no resolvable
-  # window (a FORCED compaction after a provider overflow error) there is
-  # nothing to measure against, so the target is 0 — run every step.
-  @doc false
-  @spec target_tokens(severity(), pos_integer() | :unknown) :: non_neg_integer()
-  def target_tokens(_severity, :unknown), do: 0
-
-  def target_tokens(severity, cw) when is_integer(cw) and cw > 0 do
-    case severity do
-      :emergency -> div(CompactionThresholds.warn_at(cw), 2)
-      _ -> CompactionThresholds.warn_at(cw)
-    end
-  end
-
   # Pipeline step dispatcher — skips if already under budget
   @doc false
-  defp pipeline_step({annotated, system_msgs, prev_step}, step, target_tokens, cw) do
+  defp pipeline_step({annotated, system_msgs, prev_step}, step, target_tokens) do
     current_tokens =
       estimate_tokens(system_msgs) + estimate_tokens(strip_annotations(annotated))
 
@@ -577,7 +437,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # Already under budget — skip remaining steps
       {annotated, system_msgs, prev_step}
     else
-      apply_step(step, annotated, system_msgs, target_tokens, cw)
+      apply_step(step, annotated, system_msgs, target_tokens)
     end
   end
 
@@ -658,7 +518,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp pruned_marker?(_), do: false
 
   @doc false
-  defp apply_step(:micro_compact, annotated, system_msgs, _target, _cw) do
+  defp apply_step(:micro_compact, annotated, system_msgs, _target) do
     protect_budget = prune_protect_tokens()
     min_savings = prune_minimum_tokens()
     protected = prune_protected_tools()
@@ -731,7 +591,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   # Step 1: Strip tool-call argument details, keep name + result only
   @doc false
-  defp apply_step(:strip_tool_args, annotated, system_msgs, _target, _cw) do
+  defp apply_step(:strip_tool_args, annotated, system_msgs, _target) do
     stripped =
       Enum.map(annotated, fn {msg, importance} ->
         msg = strip_tool_args_from_msg(msg)
@@ -742,7 +602,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   # Step 2: Merge consecutive same-role messages
-  defp apply_step(:merge_consecutive, annotated, system_msgs, _target, _cw) do
+  defp apply_step(:merge_consecutive, annotated, system_msgs, _target) do
     merged = merge_consecutive_same_role(annotated)
     {merged, system_msgs, :merge_consecutive}
   end
@@ -767,11 +627,11 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   #      (threaded through as a plain integer the whole way), not the old
   #      dead-clause sort that collapsed every surviving message to a single
   #      shared key and destroyed chronology.
-  defp apply_step(:summarize_warm, annotated, system_msgs, _target, cw) do
+  defp apply_step(:summarize_warm, annotated, system_msgs, _target) do
     total = length(annotated)
 
     msgs = strip_annotations(annotated)
-    hot_start = compute_hot_start(msgs, cw)
+    hot_start = compute_hot_start(msgs)
 
     if hot_start >= total do
       # Token-budgeted tail selection kept everything hot — nothing to summarize
@@ -853,7 +713,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   # Step 4: Compress cold zone to key facts
-  defp apply_step(:compress_cold, annotated, system_msgs, _target, _cw) do
+  defp apply_step(:compress_cold, annotated, system_msgs, _target) do
     total = length(annotated)
     cold_end = max(total - @warm_zone_end, 0)
 
@@ -915,7 +775,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   # Step 5: Emergency truncate — no LLM call
-  defp apply_step(:emergency_truncate, annotated, system_msgs, _target, cw) do
+  defp apply_step(:emergency_truncate, annotated, system_msgs, _target) do
     total = length(annotated)
     msgs = strip_annotations(annotated)
 
@@ -927,7 +787,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # applies tool-pair-safe snapping internally, but we re-snap the final
       # candidate here too — defensive, since this is the "no LLM, no
       # further correction" last-resort step.
-      candidate = compute_hot_start(msgs, cw)
+      candidate = compute_hot_start(msgs)
       snapped = CompactionSafety.safe_split_index(msgs, candidate)
       split = if snapped >= total, do: candidate, else: snapped
 
@@ -1525,27 +1385,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # 25% of the usable context window, clamped to [2_000, 8_000] tokens.
   # Operator-overridable via :compaction_preserve_recent_tokens.
   @doc false
-  defp preserve_recent_budget(cw) do
+  defp preserve_recent_budget do
     case Application.get_env(:optimal_system_agent, :compaction_preserve_recent_tokens) do
       n when is_integer(n) and n > 0 ->
         n
 
       _ ->
-        case cw do
-          n when is_integer(n) and n > 0 ->
-            n
-            |> Kernel.*(0.25)
-            |> trunc()
-            |> max(@min_preserve_recent_tokens)
-            |> min(@max_preserve_recent_tokens)
-
-          # No resolvable window (forced overflow compaction). The clamp caps
-          # this at 8k for every window >= 32k anyway, so the upper bound is
-          # the only non-arbitrary choice: preserve as much recent context as
-          # the clamp ever allows rather than inventing a window to scale from.
-          _ ->
-            @max_preserve_recent_tokens
-        end
+        max_tokens()
+        |> Kernel.*(0.25)
+        |> trunc()
+        |> max(@min_preserve_recent_tokens)
+        |> min(@max_preserve_recent_tokens)
     end
   end
 
@@ -1603,7 +1453,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # message-count boundary when no turn structure can be found at all (e.g.
   # a pure tool/system message stream with no `role: "user"` messages).
   @doc false
-  defp compute_hot_start(messages, cw) do
+  defp compute_hot_start(messages) do
     total = length(messages)
 
     case build_turns(messages) do
@@ -1611,7 +1461,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         max(total - @hot_zone_size, 0)
 
       turns ->
-        budget = preserve_recent_budget(cw)
+        budget = preserve_recent_budget()
 
         case select_turn_tail(messages, Enum.reverse(turns), budget) do
           nil -> max(total - @hot_zone_size, 0)
@@ -1708,7 +1558,6 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   an internal pipeline step for the same reason.
   """
   @spec format_for_summary([map()]) :: String.t()
-  @impl OptimalSystemAgent.Agent.ContextEngine
   def format_for_summary(messages) do
     messages
     |> Enum.map(fn msg ->
@@ -1820,6 +1669,9 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       GenServer.cast(__MODULE__, {:record_compaction, tokens_saved, step})
     end
   end
+
+  @doc false
+  defp pct(ratio), do: "#{Float.round(ratio * 100, 1)}%"
 
   defp safe_to_string(val),
     do: OptimalSystemAgent.Utils.Text.safe_to_string(val)

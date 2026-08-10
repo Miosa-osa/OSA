@@ -27,12 +27,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Compactor
-  alias OptimalSystemAgent.Agent.Loop.ContextWindow
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.GenreRouter
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.Limits
-  alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Store.SessionTranscript
 
   @cancel_table :osa_cancel_flags
@@ -109,7 +107,6 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
        %{
          type: :agent_response,
          session_id: state.session_id,
-         message_id: LLMClient.current_message_id(),
          response: text,
          response_type: "agent"
        }}
@@ -215,12 +212,6 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # assistant side (see Hooks.Handlers.save_transcript/1).
     persist_user_turn(state.session_id, message)
 
-    # Drop the previous turn's assistant-message id. A turn that never reaches
-    # an LLM call (genre reply, early error frame) would otherwise finalize
-    # carrying the LAST turn's id, which the client reads as a repeat of an
-    # already-finalized message and discards.
-    LLMClient.reset_message_id()
-
     signal_weight = Keyword.get(opts, :signal_weight, nil)
 
     # Mint a per-turn correlation id (prompt.id-style) and emit turn_start so the
@@ -243,7 +234,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     |> reset_per_turn_fields()
   end
 
-  # Run `Compactor.maybe_compact/4` against `state.messages` and, when it
+  # Run `Compactor.maybe_compact/3` against `state.messages` and, when it
   # actually shrank history, immediately refresh `:last_input_tokens` to
   # match.
   #
@@ -266,11 +257,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       Compactor.maybe_compact(
         original_messages,
         Map.get(state, :last_input_tokens, 0),
-        state.session_id,
-        # Real per-model window (`effective_context_window_info/2`). Without
-        # this the compactor budgeted every model against a flat 128k and
-        # summarized 1M-window sessions at ~11% occupancy on every turn.
-        context_window: ContextWindow.resolve(state)
+        state.session_id
       ) || original_messages
 
     state =
@@ -333,13 +320,6 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # exhausts its runs.
       goal_verifier_runs: 0,
       goal_verifier_stall_count: 0,
-      # Blocker streak + auto-pause latch (goal_verifier.ex triage gate). Fresh
-      # user input is a fresh chance: the user has now seen the "I'm blocked on
-      # X" handoff and may well have cleared X, so a new turn must not start
-      # already paused, nor 2/3 of the way into a stale blocker streak.
-      goal_verifier_blocker_key: nil,
-      goal_verifier_blocker_streak: 0,
-      goal_verifier_paused: false,
       # Reset the token-target "work to target" continue counter each new
       # user turn — otherwise it leaks across turns and the feature dies
       # after the first turn that used it up.

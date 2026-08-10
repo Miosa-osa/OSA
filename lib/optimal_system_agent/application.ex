@@ -88,21 +88,9 @@ defmodule OptimalSystemAgent.Application do
     # and when it does, config.toml wins (documented defaults < config.json < toml).
     # config.json remains the user's PERSISTED selection (onboarding + in-TUI
     # /switch write it) so it still beats a possibly-stale OLLAMA_MODEL env var.
-    #
-    # Both file/env model sources are PROVIDER-SCOPED (see model_for_provider/3
-    # and ollama_env_model/2): a model persisted for provider X must never be
-    # stapled onto provider Y. Without that gate the provider half and the model
-    # half of the same selection came from different places, which is exactly how
-    # `/health` — and therefore the status bar, the startup banner, `osa doctor`
-    # and the agent's own context line — reported the impossible pair
-    # "anthropic / llama3.2:latest".
     resolved_model =
-      model_for_provider(
-        provider,
-        OptimalSystemAgent.ConfigFile.model_name(),
-        OptimalSystemAgent.ConfigFile.provider()
-      ) ||
-        ollama_env_model(provider, System.get_env("OLLAMA_MODEL")) ||
+      OptimalSystemAgent.ConfigFile.model_name() ||
+        System.get_env("OLLAMA_MODEL") ||
         Application.get_env(:optimal_system_agent, :"#{provider}_model") ||
         Application.get_env(:optimal_system_agent, :default_model)
 
@@ -141,15 +129,6 @@ defmodule OptimalSystemAgent.Application do
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
-
-    # ETS table for channel-tracked sessions (SessionManager.track_session/2) —
-    # sessions a client has announced but whose Loop has not started yet.
-    # It was only ever created LAZILY by the first caller, which is usually a
-    # transient HTTP request process; when that process finished, the table it
-    # owned was destroyed and every tracked session vanished with it. Owning it
-    # here (app master, lives as long as the node) makes tracking durable, which
-    # is what lets a pre-first-turn model switch resolve its session.
-    :ets.new(:osa_runtime_sessions, [:named_table, :public, :set])
 
     # ETS table for read-before-write tracking — tracks which files have been read
     # per session so the pre_tool_use hook can nudge when writing unread files.
@@ -237,21 +216,6 @@ defmodule OptimalSystemAgent.Application do
     # not lost when the transient task that first touched it exits.
     OptimalSystemAgent.Agent.RunStore.init_store()
 
-    # Shared row-cap bookkeeping for every bounded ETS table (healing,
-    # speculative, peer, reminders) and the memory vector cache's LRU tables.
-    # Created here, from the long-lived app master, for the same reason as
-    # RunStore above: lazily created named tables are owned by whatever
-    # transient process inserted first, and losing them mid-run inverts
-    # eviction order instead of failing loudly. See the @doc on each.
-    OptimalSystemAgent.Infra.BoundedTable.init_tables()
-    OptimalSystemAgent.Memory.Search.init_tables()
-
-    # Cross-turn goal state (status/phase, run cap, stall breaker). Same
-    # reasoning again: the loop's goal table was created lazily by whichever
-    # TRANSIENT process anchored a goal first, so it died with that process and
-    # took every autonomous run's circuit breaker with it.
-    OptimalSystemAgent.Agent.Loop.GoalTracker.init_table()
-
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 
@@ -324,29 +288,11 @@ defmodule OptimalSystemAgent.Application do
         # Run pending Ecto migrations (session_transcripts FTS5, etc.)
         run_migrations()
 
-        # Bound the session_transcripts archive (age + row cap). MUST run here
-        # rather than next to SessionPersistence.purge_expired/0 in
-        # Supervisors.Sessions: that runs during supervisor init, before the
-        # migrations above, so the table may not exist yet. Compaction shrinks
-        # the model's context and does nothing to these rows, so this sweep is
-        # the only thing bounding the table. Best-effort — never blocks boot.
-        OptimalSystemAgent.Store.SessionTranscript.purge_expired()
-
-        # Sweep background-task output files (<tmp>/osa/<session>/tasks/*.out)
-        # orphaned by a previous daemon that died before its retirement timers
-        # fired. Age-gated so a second OSA instance's live files are untouched.
-        OptimalSystemAgent.Shell.TaskOutput.sweep_orphans()
-
         # Load agent definitions (needs Tools.Registry running)
         OptimalSystemAgent.Agents.Registry.load()
 
-        # Load user plugins from ~/.osa/plugins/*.exs.
-        # OFF unless explicitly enabled — plugin files are arbitrary Elixir run
-        # in this VM. See Plugins.Loader for the opt-in and the file checks.
+        # Load user plugins from ~/.osa/plugins/*.exs
         OptimalSystemAgent.Plugins.Loader.load()
-
-        # Enforce trajectory retention (no-op when recording is disabled)
-        OptimalSystemAgent.Agent.Trajectory.maybe_prune()
 
         # Auto-detect best Ollama model + tier assignments
         # Guarded — if Ollama is unreachable, log and continue without spinning
@@ -463,51 +409,6 @@ defmodule OptimalSystemAgent.Application do
   end
 
   @doc false
-  # The config-file model, but ONLY when it belongs to the provider that won.
-  #
-  # `~/.osa/config.json` is written as a PAIR — `{"provider": ..., "model": ...}`
-  # — by onboarding, the model picker and `POST /models/switch`. Provider
-  # resolution above deliberately does NOT read that file (config.toml and
-  # `OSA_DEFAULT_PROVIDER` decide), so the pair can be split: an env-selected
-  # provider wins while the file's model is still applied to it. That is how the
-  # startup banner came to read "anthropic / llama3.2:latest" — an Ollama
-  # selection stapled onto Anthropic.
-  #
-  # A model persisted for provider X is not a model for provider Y. Dropping it
-  # leaves `:default_model` unset, and `Runtime.Identity.model/0` then falls back
-  # to the provider's own catalog default — so the displayed pair is coherent by
-  # construction instead of merely being coherent by luck. A config file that
-  # names no provider keeps the old behaviour untouched.
-  @spec model_for_provider(atom(), String.t() | nil, String.t() | nil) :: String.t() | nil
-  def model_for_provider(provider, model, config_provider)
-
-  def model_for_provider(_provider, model, _config_provider)
-      when not is_binary(model) or model == "",
-      do: nil
-
-  def model_for_provider(_provider, model, config_provider)
-      when not is_binary(config_provider) or config_provider == "",
-      do: model
-
-  def model_for_provider(provider, model, config_provider) do
-    if String.downcase(String.trim(config_provider)) == to_string(provider),
-      do: model,
-      else: nil
-  end
-
-  @doc false
-  # `OLLAMA_MODEL` is provider-scoped by its very name. `config/runtime.exs`
-  # already refuses to seed `:default_model` from it unless the active provider
-  # is Ollama; this mirrors that gate at boot so the two cannot disagree (before,
-  # an OLLAMA_MODEL left over in `~/.osa/.env` would be handed to Anthropic).
-  @spec ollama_env_model(atom(), String.t() | nil) :: String.t() | nil
-  def ollama_env_model(provider, model)
-      when is_binary(model) and model != "" and provider in [:ollama, :ollama_cloud],
-      do: model
-
-  def ollama_env_model(_provider, _model), do: nil
-
-  @doc false
   # Pure effort resolution — normalizes a config.toml [model].effort string to a
   # known level atom (:fast | :medium | :high | :xhigh | :ultra), or nil for
   # absent/invalid. Legacy "low"/"max" are accepted and mapped (low→fast,
@@ -517,15 +418,9 @@ defmodule OptimalSystemAgent.Application do
     e = effort |> String.trim() |> String.downcase()
 
     cond do
-      e in ~w(fast medium high xhigh ultra) ->
-        String.to_atom(e)
-
-      e == "low" ->
-        :fast
-
-      e == "max" ->
-        :xhigh
-
+      e in ~w(fast medium high xhigh ultra) -> String.to_atom(e)
+      e == "low" -> :fast
+      e == "max" -> :xhigh
       true ->
         Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
         nil

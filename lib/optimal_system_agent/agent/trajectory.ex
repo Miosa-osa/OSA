@@ -25,26 +25,8 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
       [trajectory]
       enabled = true
       max_field_chars = 2000
-      retention_days = 30
 
   Disabled by default. Enable via config to start recording.
-
-  ## Secret redaction
-
-  Tool-call arguments, tool results and assistant responses are the places
-  where API keys, `.env` contents and `Authorization` headers actually show
-  up. Every such field is passed through `redact/1` before it is written, so
-  known secret shapes (provider `sk-` keys, GitHub/Slack tokens, AWS key ids,
-  Google keys, JWTs, `Bearer`/`Basic` headers and `KEY=value` pairs whose key
-  looks like a credential) are replaced with a `[REDACTED]` marker. Redaction
-  is pattern-based, not a guarantee: a trajectory file is still a transcript
-  of the session and is written with the process umask. Treat
-  `~/.osa/trajectories/` as sensitive.
-
-  ## Retention
-
-  `maybe_prune/0` is called at boot when recording is enabled and deletes
-  trajectory files older than `retention_days` (default 30).
 
   ## Usage
 
@@ -62,24 +44,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
 
   @trajectory_dir "trajectories"
   @default_max_field_chars 2_000
-  @default_retention_days 30
-
-  # Ordered highest-signal-first. Each entry is `{pattern, replacement}` and is
-  # applied to every free-text field before it is written to disk.
-  @secret_patterns [
-    {~r/\bsk-[A-Za-z0-9_\-]{16,}/, "sk-[REDACTED]"},
-    {~r/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/, "[REDACTED_GITHUB_TOKEN]"},
-    {~r/\bgithub_pat_[A-Za-z0-9_]{20,}/, "[REDACTED_GITHUB_TOKEN]"},
-    {~r/\bxox[abprs]-[A-Za-z0-9\-]{10,}/, "[REDACTED_SLACK_TOKEN]"},
-    {~r/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/, "[REDACTED_AWS_KEY_ID]"},
-    {~r/\bAIza[0-9A-Za-z_\-]{35}\b/, "[REDACTED_GOOGLE_KEY]"},
-    {~r/\bey[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}/, "[REDACTED_JWT]"},
-    {~r/\b(Bearer|Basic)\s+[A-Za-z0-9_\-\.=\+\/]{12,}/i, "\\1 [REDACTED]"},
-    # `KEY=value`, `"key": "value"`, `key = value` where the key name looks
-    # like a credential. Covers .env dumps and JSON tool arguments alike.
-    {~r/("?[A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|password|passwd|credential|private[_\-]?key)[A-Za-z0-9_\-]*"?)(\s*[:=]\s*)("?)([^"\s,}\n]{4,})/i,
-     "\\1\\2\\3[REDACTED]"}
-  ]
 
   @type entry :: %{
           timestamp: String.t(),
@@ -155,20 +119,8 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   """
   @spec record(map()) :: :ok | {:error, term()}
   def record(%{session_id: session_id} = entry) when is_binary(session_id) do
-    # `unless enabled?(), do: :ok` does NOT return early — Elixir has no early
-    # return, so the expression was evaluated, discarded, and the write ran
-    # unconditionally. Trajectory recording is documented as opt-in and writes
-    # raw conversation content to disk, so the guard has to actually branch.
-    if enabled?() do
-      do_record(session_id, entry)
-    else
-      :ok
-    end
-  end
+    unless enabled?(), do: :ok
 
-  def record(_), do: :ok
-
-  defp do_record(session_id, entry) do
     path = session_path(session_id)
 
     try do
@@ -187,6 +139,8 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
         {:error, {kind, reason}}
     end
   end
+
+  def record(_), do: :ok
 
   @doc "Read all trajectory entries for a session."
   @spec read(String.t()) :: [map()]
@@ -221,52 +175,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
       {:error, _} ->
         []
     end
-  end
-
-  @doc """
-  Days to keep trajectory files before `maybe_prune/0` deletes them.
-  """
-  @spec retention_days() :: pos_integer()
-  def retention_days do
-    Application.get_env(:optimal_system_agent, :trajectory_retention_days) ||
-      toml_retention_days() ||
-      @default_retention_days
-  end
-
-  defp toml_retention_days do
-    case ConfigFile.get(["trajectory", "retention_days"]) do
-      n when is_integer(n) and n > 0 -> n
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  @doc """
-  Prune expired trajectory files. Called at boot from `Application.start/2`.
-
-  A no-op when recording is disabled — nothing new is being written, and
-  deleting a disabled operator's archive is not this function's call. Returns
-  the number of files removed.
-  """
-  @spec maybe_prune() :: non_neg_integer()
-  def maybe_prune do
-    if enabled?() do
-      days = retention_days()
-      removed = prune(days)
-
-      if removed > 0 do
-        Logger.info("Trajectory: pruned #{removed} trajectory file(s) older than #{days}d")
-      end
-
-      removed
-    else
-      0
-    end
-  rescue
-    e ->
-      Logger.warning("Trajectory.maybe_prune failed: #{Exception.message(e)}")
-      0
   end
 
   @doc "Delete trajectory files older than `max_age_days`."
@@ -326,9 +234,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   defp truncate(nil), do: ""
 
   defp truncate(s) when is_binary(s) do
-    # Redact BEFORE truncating: truncation must never be the thing that decides
-    # whether a key made it to disk, and a half-truncated key is still a leak.
-    s = redact(s)
     max = max_field_chars()
 
     if byte_size(s) > max do
@@ -339,27 +244,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   end
 
   defp truncate(v), do: truncate(to_string(v))
-
-  @doc """
-  Replace known secret shapes in `text` with `[REDACTED]` markers.
-
-  Applied to every tool-call argument, tool result and assistant response
-  before it is written. Pattern-based and therefore best-effort — it catches
-  the shapes that actually leak (provider keys, GitHub/Slack tokens, AWS key
-  ids, Google keys, JWTs, `Authorization` headers, and `KEY=value` pairs whose
-  key name reads like a credential) but cannot catch an opaque secret with no
-  distinguishing shape.
-  """
-  @spec redact(String.t()) :: String.t()
-  def redact(text) when is_binary(text) do
-    Enum.reduce(@secret_patterns, text, fn {pattern, replacement}, acc ->
-      Regex.replace(pattern, acc, replacement)
-    end)
-  rescue
-    _ -> text
-  end
-
-  def redact(other), do: other
 
   defp truncate_list(list) when is_list(list) do
     Enum.map(list, &truncate/1)

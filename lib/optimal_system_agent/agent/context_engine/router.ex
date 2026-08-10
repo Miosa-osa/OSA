@@ -67,38 +67,16 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
     Map.to_list(@builtins) ++ plugin_engines()
   end
 
-  @doc "The reserved built-in engine ids. Plugins may not claim these."
-  @spec builtin_names() :: [atom()]
-  def builtin_names, do: Map.keys(@builtins)
-
-  @doc """
-  Register a plugin engine at boot.
-
-  Refuses ids that are already claimed by a built-in engine. A plugin that
-  registered as `:compactor` would otherwise silently take over the default
-  context engine for the whole agent, so the collision is rejected and logged
-  rather than merged.
-  """
-  @spec register(atom(), module()) :: :ok | {:error, {:builtin_conflict, atom()}}
+  @doc "Register a plugin engine at boot."
+  @spec register(atom(), module()) :: :ok
   def register(name, mod) when is_atom(name) and is_atom(mod) do
-    cond do
-      Map.has_key?(@builtins, name) ->
-        Logger.warning(
-          "ContextEngine.Router: refused plugin engine #{inspect(mod)} — id :#{name} is a " <>
-            "built-in engine and cannot be overridden by a plugin"
-        )
+    existing = plugin_engines()
 
-        {:error, {:builtin_conflict, name}}
-
-      true ->
-        existing = plugin_engines()
-
-        unless List.keymember?(existing, name, 0) do
-          :persistent_term.put({__MODULE__, :plugin_engines}, [{name, mod} | existing])
-        end
-
-        :ok
+    unless List.keymember?(existing, name, 0) do
+      :persistent_term.put({__MODULE__, :plugin_engines}, [{name, mod} | existing])
     end
+
+    :ok
   end
 
   defp plugin_engines do
@@ -145,11 +123,7 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
   end
 
   defp lookup(name) do
-    # Built-ins win. `Map.merge(@builtins, plugins)` had the plugin side as the
-    # override, so a plugin registering `:compactor` silently replaced the
-    # default context engine. Registration already refuses built-in ids; this is
-    # the second line of defence for anything that got in another way.
-    all = Map.merge(Map.new(plugin_engines()), @builtins)
+    all = Map.merge(@builtins, Map.new(plugin_engines()))
 
     case Map.fetch(all, name) do
       {:ok, mod} -> {:ok, mod}
@@ -159,19 +133,9 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
 
   # --- Delegation ---
 
-  @doc """
-  Delegate `maybe_compact/4` to the active engine.
-
-  `opts` is forwarded VERBATIM. It carries `:context_window` (the honest
-  per-model window) and `:force` (the provider already returned a
-  context-length error), and dropping either is not a cosmetic loss: without
-  `:context_window` an engine falls back to a fabricated denominator and
-  compacts a 1M-token session at ~11% occupancy; without `:force` the
-  overflow-retry path cannot compact at all when the window is unresolvable.
-  A router that swallowed `opts` would silently reintroduce both.
-  """
-  def maybe_compact(messages, known_tokens \\ nil, session_id \\ nil, opts \\ []) do
-    ContextEngine.Router.active().maybe_compact(messages, known_tokens, session_id, opts)
+  @doc "Delegate `maybe_compact/3` to the active engine."
+  def maybe_compact(messages, known_tokens \\ 0, session_id \\ nil) do
+    ContextEngine.Router.active().maybe_compact(messages, known_tokens, session_id)
   end
 
   @doc "Delegate `estimate_tokens/1` to the active engine."
@@ -179,22 +143,9 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
     ContextEngine.Router.active().estimate_tokens(input)
   end
 
-  @doc """
-  Delegate `utilization_percent/2` to the active engine (optional).
-
-  Returns a PERCENT in 0.0..100.0, or `:unknown` when the window cannot be
-  resolved — including when the engine does not implement the callback. It
-  never invents a denominator to produce a number.
-  """
-  @spec utilization_percent([map()], term()) :: float() | :unknown
-  def utilization_percent(messages, context_window \\ nil) do
-    mod = ContextEngine.Router.active()
-
-    if function_exported?(mod, :utilization_percent, 2) do
-      mod.utilization_percent(messages, context_window)
-    else
-      :unknown
-    end
+  @doc "Delegate `utilization/1` to the active engine."
+  def utilization(messages) do
+    ContextEngine.Router.active().utilization(messages)
   end
 
   @doc "Delegate `micro_compact/1` to the active engine (optional)."
@@ -209,19 +160,13 @@ defmodule OptimalSystemAgent.Agent.ContextEngine.Router do
   end
 
   @doc "Delegate `format_for_summary/1` to the active engine (optional)."
-  @spec format_for_summary([map()]) :: String.t()
   def format_for_summary(messages) do
     mod = ContextEngine.Router.active()
 
     if function_exported?(mod, :format_for_summary, 1) do
       mod.format_for_summary(messages)
     else
-      # The callback returns a flattened text blob, not a message list. Falling
-      # back to `messages` here would hand a list to callers that interpolate
-      # the result into a summarization prompt, so render a plain transcript.
-      Enum.map_join(messages, "\n", fn msg ->
-        "[#{Map.get(msg, :role, "unknown")}] #{Map.get(msg, :content, "")}"
-      end)
+      messages
     end
   end
 

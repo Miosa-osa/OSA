@@ -48,12 +48,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
 
-  alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
   alias OptimalSystemAgent.Agent.Loop.DurableLog
-  alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Loop.Steer
@@ -1097,14 +1095,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call(:compact, _from, state) do
-    # The window MUST come from the registry's honest per-model resolver — the
-    # compactor no longer has (and must never regrow) a hardcoded default.
     compacted =
       OptimalSystemAgent.Agent.Compactor.maybe_compact(
         state.messages,
         Map.get(state, :last_input_tokens, 0),
-        state.session_id,
-        context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state)
+        state.session_id
       )
 
     {:reply, :ok, %{state | messages: compacted}}
@@ -1194,19 +1189,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:get_strategy, _from, state) do
     {:reply, {:ok, :none, %{}}, state}
-  end
-
-  # Durable session save, serialized by THIS process' mailbox.
-  #
-  # `SessionPersistence.auto_save/1` (the :post_response hook) used to reach in
-  # with `:sys.get_state/1` from the hook process; a busy loop made that call
-  # time out and the entire save was silently dropped. A cast is queued instead,
-  # so a busy loop DEFERS the save rather than losing it, and the state written
-  # is the loop's own — never a scraped snapshot.
-  @impl true
-  def handle_cast({:persist_session, session_id}, state) do
-    _ = OptimalSystemAgent.Agent.SessionPersistence.save_from_state(session_id, state)
-    {:noreply, state}
   end
 
   @impl true
@@ -1354,11 +1336,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp dispatch_message(state, skip_plan) do
     if not skip_plan and should_plan?(state) do
       state = %{state | plan_mode: true}
-      # Plan mode runs a full investigative ReactLoop of its own, so it spends
-      # real tokens. Snapshot before the call for the same delta the reply path
-      # takes — otherwise every plan row in the transcript reads 0 tokens for
-      # what is often the most expensive turn in a session.
-      plan_tokens_before = token_counters(state)
 
       case MessageHandler.run_plan_mode(state) do
         {:ok, plan_text, state} ->
@@ -1368,18 +1345,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
           # :post_response fires — persist the plan here (tool_name "plan")
           # so it appears in /sessions resume, transcript, and recap. The
           # user turn was already saved at ingestion by TurnPipeline.
-          plan_tokens =
-            plan_tokens_before
-            |> token_delta(token_counters(state))
-            |> Map.values()
-            |> Enum.sum()
-
           OptimalSystemAgent.Store.SessionTranscript.save_turn(
             state.session_id,
             "assistant",
             plan_text,
-            tool_name: "plan",
-            tokens: plan_tokens
+            tool_name: "plan"
           )
 
           Telemetry.emit_context_pressure(state)
@@ -1400,30 +1370,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
-  # The four running token counters `Loop.Accounting.record/2` maintains on the
-  # loop state. Read as a tuple so a turn's cost is one subtraction, and so a
-  # new counter cannot be added to accounting and silently missed here.
-  defp token_counters(state) do
-    {
-      Map.get(state, :session_input_tokens, 0) || 0,
-      Map.get(state, :session_output_tokens, 0) || 0,
-      Map.get(state, :session_cache_creation_tokens, 0) || 0,
-      Map.get(state, :session_cache_read_tokens, 0) || 0
-    }
-  end
-
-  # Per-turn delta, as the payload keys the `save_transcript` hook reads.
-  # Clamped at 0: a session resumed from a checkpoint can restore counters that
-  # are lower than the live ones, and a negative "cost" is never meaningful.
-  defp token_delta({i0, o0, cw0, cr0}, {i1, o1, cw1, cr1}) do
-    %{
-      turn_input_tokens: max(i1 - i0, 0),
-      turn_output_tokens: max(o1 - o0, 0),
-      turn_cache_creation_tokens: max(cw1 - cw0, 0),
-      turn_cache_read_tokens: max(cr1 - cr0, 0)
-    }
-  end
-
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
@@ -1434,19 +1380,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # any earlier turn ever used.
     msg_len_before = length(state.messages)
     tool_calls_before = Map.get(state, :total_tool_calls, 0)
-    # Same reasoning for tokens: `Loop.Accounting` accumulates its four counters
-    # for the whole session, so this turn's cost is the difference across the
-    # ReactLoop call. The snapshot is taken here and the delta computed after
-    # `ReactLoop.run/1` returns, so every re-entry branch inside it (tool cycles,
-    # mid-turn compaction, continuation) falls within the window.
-    tokens_before = token_counters(state)
-
-    # Scope the partial-accounting stash to THIS turn. `Accounting.record/2`
-    # mirrors each round-trip's absolute counters into the process dictionary so
-    # the crash arms below can recover spend that the immutable state thread
-    # takes with it on an unwind; clearing it here stops a turn that crashes
-    # before its first round-trip from adopting the previous turn's numbers.
-    Accounting.forget_partial()
 
     {response, state} =
       try do
@@ -1457,14 +1390,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
             "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
           )
 
-          {"I hit an error processing that request. Check the logs for details.",
-           Accounting.adopt_partial(state)}
+          {"I hit an error processing that request. Check the logs for details.", state}
       catch
         :exit, reason ->
           Logger.error("[loop] EXIT in ReactLoop: #{inspect(reason)}")
 
           {"I hit a timeout or process error. This usually means the LLM connection dropped — try again.",
-           Accounting.adopt_partial(state)}
+           state}
       end
 
     response = maybe_scrub_prompt_leak(response)
@@ -1524,43 +1456,23 @@ defmodule OptimalSystemAgent.Agent.Loop do
       Observability.annotate(state, source: "agent.loop")
     )
 
-    # Fire post_response hooks (async, non-blocking).
-    #
-    # The crash/exit arms above return the PRE-ReactLoop `state` — an unwind
-    # takes the immutable state thread with it — but they now merge back the
-    # accounting `Accounting.record/2` stashed outside that thread, so a turn
-    # that billed three round-trips and crashed on the fourth reports those
-    # three here instead of a flat 0. Only accounting is recovered, not the
-    # message history; see `Accounting.adopt_partial/1` for why.
-    turn_tokens = token_delta(tokens_before, token_counters(state))
-
+    # Fire post_response hooks (async, non-blocking)
     try do
-      Hooks.run_async(
-        :post_response,
-        Map.merge(
-          %{
-            session_id: state.session_id,
-            response: response,
-            input: state.current_input || "",
-            turn_count: state.turn_count,
-            iteration: state.iteration,
-            tools_used: Map.get(state.last_meta, :tools_used, []),
-            total_tool_calls: state.total_tool_calls
-          },
-          turn_tokens
-        )
-      )
+      Hooks.run_async(:post_response, %{
+        session_id: state.session_id,
+        response: response,
+        input: state.current_input || "",
+        turn_count: state.turn_count,
+        iteration: state.iteration,
+        tools_used: Map.get(state.last_meta, :tools_used, []),
+        total_tool_calls: state.total_tool_calls
+      })
     rescue
       _ -> :ok
     catch
       :exit, _ -> :ok
     end
 
-    # `message_id` identifies WHICH assistant message this finalizes: the last
-    # generation of the turn (`LLMClient.current_message_id/0`, minted per LLM
-    # round-trip in this same process). The client uses it to replace exactly
-    # that generation's streamed accumulation — and to drop a repeat delivery
-    # of the same finalization instead of appending it a second time.
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:session:#{state.session_id}",
@@ -1568,7 +1480,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
        %{
          type: :agent_response,
          session_id: state.session_id,
-         message_id: LLMClient.current_message_id(),
          response: response,
          response_type: "agent"
        }}
