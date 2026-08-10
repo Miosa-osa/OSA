@@ -118,19 +118,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
     if existing do
       # A directory-scoped resume must also bring the loop back up, exactly like
-      # the create path below — otherwise the resumed session has no live Loop and
-      # every message / slash command 404s with :session_not_found.
-      SessionManager.ensure_loop(existing,
-        user_id: user_id,
-        channel: :http,
-        working_dir: working_dir
-      )
+      # the create path below — otherwise the resumed session has no live Loop.
+      #
+      # Messages themselves survive this: orchestrate_routes calls ensure_loop
+      # on its own, so the message path self-heals. What breaks is every route
+      # gated on a LIVE loop — GET /:id/context 404s (the TUI's context meter
+      # dies the moment it reattaches) and POST /:id/steer 404s via
+      # live_session?/1. The TUI attaches to its cwd, so that is the normal
+      # reattach path, not an edge case.
+      #
+      # Answering 200 "resumed" when the loop did not come up would report
+      # success while reproducing the exact symptom this fixes, so the failure
+      # is surfaced rather than swallowed.
+      case SessionManager.ensure_loop(existing,
+             user_id: user_id,
+             channel: :http,
+             working_dir: working_dir
+           ) do
+        :ok ->
+          body = Jason.encode!(%{id: existing, status: "resumed", working_dir: working_dir})
 
-      body = Jason.encode!(%{id: existing, status: "resumed", working_dir: working_dir})
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, body)
 
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(200, body)
+        {:error, _reason} ->
+          json_error(
+            conn,
+            500,
+            "session_resume_failed",
+            "An internal error occurred while resuming the session"
+          )
+      end
     else
       case SessionManager.create_session(
              user_id: user_id,

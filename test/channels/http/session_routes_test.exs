@@ -433,6 +433,41 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
     end
   end
 
+  # ── POST /sessions (directory-scoped resume) ──────────────────────────
+
+  describe "POST /sessions with a working_dir that already has a session" do
+    # The resume branch returned `"resumed"` without calling `ensure_loop`, so
+    # the session came back with NO live Loop.
+    #
+    # Messages hid it — orchestrate_routes calls `ensure_loop` itself, so that
+    # path self-heals. What broke is every route gated on a live loop:
+    # `GET /:id/context` and `POST /:id/steer` both 404. The TUI attaches to its
+    # cwd, so this is the ordinary reattach path, and the context meter died the
+    # moment it reconnected.
+    #
+    # Asserting on `live_session?/1` rather than the response body is the point:
+    # the old code returned exactly the same 200 `"resumed"` JSON.
+    test "resumes the existing session AND brings its loop back up" do
+      working_dir = Path.join(System.tmp_dir!(), "osa-resume-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(working_dir)
+      on_exit(fn -> File.rm_rf(working_dir) end)
+
+      seeded = "resume-dir-#{System.unique_integer([:positive])}"
+      :ok = OptimalSystemAgent.Agent.SessionPersistence.save(seeded, [], working_dir)
+      on_exit(fn -> OptimalSystemAgent.Agent.SessionPersistence.delete(seeded) end)
+
+      conn = json_post("/", %{"working_dir" => working_dir})
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["status"] == "resumed"
+      assert body["id"] == seeded
+
+      assert OptimalSystemAgent.Runtime.SessionManager.live_session?(seeded),
+             "a directory-scoped resume must leave a LIVE loop, or /context and /steer 404"
+    end
+  end
+
   # ── POST /sessions/:id/fork (fork-at-turn, primitive #34) ─────────────
 
   defp seed_transcript(n) do
