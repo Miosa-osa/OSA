@@ -22,6 +22,46 @@ fi
 CURRENT=$(cat "$VERSION_FILE" | tr -d '[:space:]')
 BUMP="${1:-patch}"
 
+# ── Concurrency guards ──────────────────────────────────────────────────
+#
+# The next version is computed from the LOCAL VERSION file, which is only
+# correct if this checkout is actually current. When two machines release the
+# same day that assumption breaks, and it breaks silently: a `git pull` that
+# aborted on a dirty file leaves VERSION stale, the bump lands on a number
+# another machine already published, and you find out when the tag push
+# collides — or worse, when it does not.
+#
+# Each check below refuses rather than guesses. Override with FORCE=1 when you
+# genuinely mean it.
+cd "$ROOT"
+
+if [ "${FORCE:-0}" != "1" ]; then
+  # 1. A dirty tree means VERSION may not reflect what is committed, and it is
+  #    what makes `git pull` abort in the first place.
+  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    echo "error: working tree is dirty — commit or stash first (FORCE=1 to override)." >&2
+    git status --short --untracked-files=no >&2
+    exit 1
+  fi
+
+  git fetch --quiet --tags origin 2>/dev/null || true
+
+  BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+  UPSTREAM="origin/${BRANCH}"
+
+  # 2. Behind the remote = bumping a stale VERSION. This is the exact shape of
+  #    the near-miss that motivated these guards.
+  if git rev-parse --verify --quiet "$UPSTREAM" >/dev/null 2>&1; then
+    BEHIND="$(git rev-list --count "HEAD..${UPSTREAM}" 2>/dev/null || echo 0)"
+    if [ "${BEHIND:-0}" -gt 0 ]; then
+      echo "error: ${BRANCH} is ${BEHIND} commit(s) behind ${UPSTREAM}." >&2
+      echo "       VERSION here is ${CURRENT}, which is probably not the latest." >&2
+      echo "       Run: git pull --ff-only origin ${BRANCH}   (FORCE=1 to override)" >&2
+      exit 1
+    fi
+  fi
+fi
+
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
 
 case "$BUMP" in
@@ -44,6 +84,25 @@ case "$BUMP" in
 esac
 
 NEW="${MAJOR}.${MINOR}.${PATCH}"
+
+# 3. The decisive check: does the tag we are about to mint already exist?
+#    Local AND remote, because the collision that matters is the one another
+#    machine already pushed. Done before anything is written, so a refusal
+#    leaves the tree untouched.
+CANDIDATE_TAG="v${MAJOR}.${MINOR}.$(printf '%03d' "$PATCH")"
+
+if [ "${FORCE:-0}" != "1" ]; then
+  if git rev-parse --verify --quiet "refs/tags/${CANDIDATE_TAG}" >/dev/null 2>&1; then
+    echo "error: tag ${CANDIDATE_TAG} already exists locally. Another release already used ${NEW}." >&2
+    exit 1
+  fi
+
+  if git ls-remote --exit-code --tags origin "refs/tags/${CANDIDATE_TAG}" >/dev/null 2>&1; then
+    echo "error: tag ${CANDIDATE_TAG} is already published on origin." >&2
+    echo "       Another machine released ${NEW}. Pull, then bump again." >&2
+    exit 1
+  fi
+fi
 
 echo "$NEW" > "$VERSION_FILE"
 
