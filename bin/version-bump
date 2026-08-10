@@ -63,7 +63,18 @@ TAG="v${MAJOR}.${MINOR}.${PADDED_PATCH}"
 echo "$CURRENT → $NEW  (tag ${TAG})"
 
 cd "$ROOT"
+# Keep Cargo.lock in step too. It records osa-tui's own version, so bumping
+# only Cargo.toml leaves the lock stale and the tree dirty after every release.
+# That dirt is what `osa update` auto-stashes and later reapplies over newer
+# code, so an uncommitted lockfile is not cosmetic - it is how a release
+# quietly resurrects old source.
+CARGO_LOCK="$ROOT/priv/rust/tui/Cargo.lock"
+if [ -f "$CARGO_LOCK" ] && command -v cargo >/dev/null 2>&1; then
+  (cd "$ROOT/priv/rust/tui" && cargo update --offline --workspace >/dev/null 2>&1) || true
+fi
+
 git add VERSION "$CARGO_TOML"
+[ -f "$CARGO_LOCK" ] && git add "$CARGO_LOCK"
 git commit -m "bump: ${TAG}"
 git tag "$TAG"
 
