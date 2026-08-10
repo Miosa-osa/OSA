@@ -9,6 +9,107 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.62] — displays as `v1.0.062`
+
+A community release: three outside contributors found and fixed real bugs. A
+fresh install of a prebuilt release now boots against your own home directory
+instead of the machine that built it, a session that hit a context compaction
+stops failing on every provider forever after, and slash commands work again
+over HTTP and in the TUI.
+
+### Fixed — a prebuilt install pointed at the build machine's home
+
+- **Every `~/.osa` path except `config_dir` was frozen at build time.** Found
+  and fixed by [@scottlibrando2020](https://github.com/scottlibrando2020) in
+  [#99](https://github.com/Miosa-osa/OSA/pull/99). `config/config.exs` derives
+  `skills_dir`, `episodic_dir`, `mcp_config_path`, `bootstrap_dir`, `data_dir`,
+  `sessions_dir` and the SQLite database path from `Path.expand("~/.osa/...")`,
+  which is evaluated during `mix release` on the build host.
+  `config/runtime.exs` re-resolved only `config_dir`, so the other seven kept
+  the CI runner's home on every install: Exqlite failed to open the database
+  with `enoent`, the backend crash-looped before it could persist anything from
+  onboarding, and `osa doctor` reported seeded workspace files as missing
+  because it was looking in the wrong place. All of them are now derived from
+  the same runtime-resolved `config_dir`.
+
+- **The same bug had the test suite writing into your real `~/.osa`.** With
+  `config_dir` pointed at a per-run tmp home but `sessions_dir` still frozen to
+  `~/.osa/sessions`, every run wrote real session ledgers, briefs and plans into
+  the operator's actual home — thousands of files on a developer box. Because
+  those files are keyed by an integer unique only within one VM, a later run
+  could collide with a leftover ledger and read back a goal it never set, which
+  is a genuine cross-run flake source rather than only a tidiness problem.
+
+### Fixed — one context compaction could break a session permanently
+
+- **Compaction wrote a string where every provider requires an object.** Found
+  and fixed by [@700steven-png](https://github.com/700steven-png) in
+  [#100](https://github.com/Miosa-osa/OSA/pull/100). The compactor stripped
+  heavy tool-call arguments by replacing the arguments map with the literal
+  string `[args stripped]`. Compacted history is persisted, so the damage was
+  permanent and provider-independent: Anthropic answered
+  `tool_use.input: Input should be an object`, Ollama answered
+  `Value looks like object, but can't find closing '}' symbol`, and because the
+  primary provider failed and then every provider in the fallback chain failed
+  on the same message, the only error shown was the last hop's — an Ollama parse
+  error on a session configured for Anthropic, which switching models could not
+  clear.
+
+- **Fixed at the source and at the boundary.** The compactor now writes an empty
+  object, and the provider boundary coerces a non-object `arguments` on the way
+  out, so sessions already carrying the placeholder on disk heal when they are
+  next loaded rather than staying bricked.
+
+- **A fallback hop no longer asks the wrong provider for the wrong model.**
+  `opts[:model]` is resolved for the provider the turn started on; forwarding it
+  across a hop asked Ollama for `claude-sonnet-5`, so the hop failed for a
+  reason unrelated to the original fault — and that impostor was the error
+  reported. The model is now dropped on every cross-provider hop while the head
+  of the chain keeps it.
+
+- **Ollama no longer crashes on a resumed session's tool calls.** Its message
+  formatter used struct-style dot access, which raises `KeyError` on the
+  string-keyed tool calls that come back from a persisted session, killing the
+  turn before any HTTP request was made.
+
+- **The streaming fallback chain now honours the same non-transient policy as
+  the sync path.** An invalid request, bad request shape, auth failure or
+  model-not-found is not provider-specific, so re-sending it only produces a
+  second, unrelated error from the next provider.
+
+### Fixed — slash commands 500'd over HTTP and in the TUI
+
+- **Every slash command over HTTP crashed.** Found and fixed by
+  [@PAMF2](https://github.com/PAMF2) in
+  [#98](https://github.com/Miosa-osa/OSA/pull/98). `StringIO.close/1` returns
+  `{:ok, {input, output}}`, and the command handler destructured it as
+  `{_, captured}`. That matches — `_` binds `:ok` and `captured` binds the inner
+  tuple — so nothing failed at the match; it failed one line later in
+  `String.replace/4`, which sits outside the surrounding `try/rescue` and so
+  escaped as a 500 rather than being converted to an error message. The TUI
+  posts every command it does not handle locally to this endpoint.
+
+- **Reattaching to a folder left the session without a live loop.** Also from
+  [@PAMF2](https://github.com/PAMF2) in
+  [#98](https://github.com/Miosa-osa/OSA/pull/98). A directory-scoped resume
+  returned the saved session as `resumed` without starting its loop. Messages
+  self-healed, but every route gated on a live loop did not: `GET /:id/context`
+  and `POST /:id/steer` both 404'd, so the TUI's context meter died the moment
+  it reconnected to its own working directory. The resume path now starts the
+  loop, and reports a failure to do so instead of answering `resumed` anyway.
+
+### Fixed — the port preflight's own regression test could never pass
+
+- **The `TIME_WAIT` test from v1.0.60 asserted something the kernel never
+  promised.** Linux only lets a bind step over a `TIME_WAIT` when `SO_REUSEADDR`
+  is set on both the socket binding now and the socket that left the `TIME_WAIT`
+  behind. The fixture created its listener without it, so it failed regardless
+  of whether `Port.available?/1` was correct. It now mirrors ThousandIsland,
+  which hard-defaults `reuseaddr: true` — the actual production condition — and
+  the assertion discriminates: it passes with the fix and fails without it.
+
+---
+
 ## [1.0.59] — displays as `v1.0.059`
 
 An idle OSA now costs essentially nothing. Leaving the daemon running no longer

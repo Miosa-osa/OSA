@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.059-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.062-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-82-blue.svg)](#built-in-tools)
@@ -48,7 +48,7 @@ setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.059` (`$env:OSA_VERSION = "v1.0.059"` on
+specific release with `OSA_VERSION=v1.0.062` (`$env:OSA_VERSION = "v1.0.062"` on
 Windows). On any other platform (macOS Intel, Linux arm64) the installer stops
 and points you at the from-source script below.
 
