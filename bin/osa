@@ -402,6 +402,15 @@ daemon_pid() {
   fi
 }
 
+# Every PID holding a LISTEN socket on :$PORT, newline-separated, or nothing.
+# Unlike `daemon_pid` this ignores the pidfile and ignores lineage: it answers
+# "who would the next bind collide with", which is the only question the
+# stop/restart path actually needs. Empty when lsof is unavailable.
+_port_owners() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  lsof -ti ":${PORT}" -sTCP:LISTEN 2>/dev/null || true
+}
+
 clear_stale_pid() {
   # Drop a pidfile whose process is gone and whose port is dead.
   if [ -f "$PID_FILE" ]; then
@@ -459,6 +468,41 @@ _stop_backend_confirmed() {
     sleep 0.25
     n=$((n + 1))
   done
+
+  # Escalate to whatever still OWNS the socket. `stop_daemon` signals the
+  # pidfile PID's process group, but the BEAM child does not always stay in
+  # that group: `mix` can re-exec `beam.smp` into a group of its own, so the
+  # launcher dies, the group kill finds nothing left to reap, and the BEAM
+  # keeps :$PORT open. That is the "backend stopped / would not stop" pair
+  # users see — both lines are true, they are just about different processes.
+  # The PORT is the contract (see above), so reclaim it by port ownership
+  # rather than by lineage. No-op when the port is already free.
+  if command -v lsof >/dev/null 2>&1; then
+    local sig
+    for sig in TERM KILL; do
+      [ -z "$(_port_owners)" ] && break
+      # shellcheck disable=SC2086
+      kill -"$sig" $(_port_owners) 2>/dev/null || true
+      n=0
+      while [ $n -lt 20 ] && [ -n "$(_port_owners)" ]; do
+        sleep 0.25; n=$((n + 1))
+      done
+    done
+    rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+  fi
+
+  # Wait for the LISTEN socket itself to go, not just for /health to stop
+  # answering. A shutting-down BEAM stops serving requests well before it
+  # closes the listener, so a health-only check reports "stopped" while the
+  # port is still bound — and the relaunch then dies with "Port 9089 is in
+  # use by another process". The socket is the thing the next bind contends
+  # for, so the socket is the thing we wait on.
+  n=0
+  while [ $n -lt 40 ] && [ -n "$(_port_owners)" ]; do
+    sleep 0.25; n=$((n + 1))
+  done
+
+  [ -n "$(_port_owners)" ] && return 1
   if backend_healthy; then return 1; fi
   return 0
 }

@@ -68,6 +68,44 @@ defmodule OptimalSystemAgent.Net.PortTest do
     test "port 0 (ephemeral) is always available" do
       assert Port.available?(0)
     end
+
+    # Regression: the preflight must mirror Bandit's bind, not be stricter than
+    # it. ThousandIsland.Transports.TCP hard-defaults `reuseaddr: true`, so a
+    # TIME_WAIT left behind by a closed CLIENT connection does NOT stop Bandit
+    # from binding. When `available?/1` omitted `reuseaddr` it reported such a
+    # port as occupied, and boot aborted with "Port 9089 is in use by another
+    # process" seconds after a restart, with nothing listening at all.
+    test "a TIME_WAIT from a closed client connection does not mark the port occupied" do
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, port} = :inet.port(listener)
+
+      {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+      {:ok, accepted} = :gen_tcp.accept(listener, 1_000)
+
+      # The SERVER side must close first. TIME_WAIT lands on whichever peer
+      # performs the active close, and it is the dying backend that closes its
+      # accepted sockets - which is why the real netstat shows the lingering
+      # entry on local port 9089 rather than on the client's ephemeral port.
+      :gen_tcp.close(accepted)
+      :gen_tcp.close(listener)
+      :gen_tcp.close(client)
+
+      assert Port.available?(port),
+             "expected port #{port} to be bindable despite a lingering TIME_WAIT"
+    end
+
+    # The other half of the same contract: `reuseaddr` must not make the check
+    # blind. SO_REUSEADDR never permits binding over an actively LISTENing
+    # socket, so a genuinely occupied port is still reported occupied.
+    test "reuseaddr does not hide an actively listening socket" do
+      {:ok, holder} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, port} = :inet.port(holder)
+
+      refute Port.available?(port),
+             "expected an actively listening port #{port} to still be detected"
+
+      :gen_tcp.close(holder)
+    end
   end
 
   describe "holder_kind/1" do

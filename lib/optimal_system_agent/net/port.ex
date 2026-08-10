@@ -59,9 +59,18 @@ defmodule OptimalSystemAgent.Net.Port do
   """
   @spec available?(non_neg_integer()) :: boolean()
   def available?(port) when is_integer(port) and port >= 0 do
-    # Mirror Bandit/ThousandIsland's loopback bind. No `reuseaddr` so that an
-    # already-listening socket reliably surfaces `:eaddrinuse`.
-    case :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, active: false]) do
+    # Mirror Bandit/ThousandIsland's loopback bind EXACTLY, `reuseaddr` and all
+    # (ThousandIsland.Transports.TCP hard-defaults it to true).
+    #
+    # Omitting it does not make the check stricter in a useful way, it makes it
+    # WRONG: `SO_REUSEADDR` does not allow binding over a socket that is
+    # actively LISTENing, so a live server is still detected either way. What it
+    # does allow is binding past a `TIME_WAIT` left by a closed CLIENT
+    # connection to this port. Those linger ~30s after every restart, so a
+    # freshly stopped backend with a TUI still attached looked "occupied" while
+    # Bandit would have bound fine, and startup aborted with
+    # "Port 9089 is in use by another process" when nothing was listening at all.
+    case :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true]) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
