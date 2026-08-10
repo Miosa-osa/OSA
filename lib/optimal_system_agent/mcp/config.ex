@@ -162,6 +162,54 @@ defmodule OptimalSystemAgent.MCP.Config do
   def excluded?(name) when is_binary(name), do: MapSet.member?(exclusions(), sanitize_name(name))
   def excluded?(_), do: false
 
+  @doc """
+  Sanitized names on the MCP import ALLOW list, or an empty set for "no
+  restriction".
+
+  Sources, unioned, mirroring `exclusions/0`: the settings cascade key
+  `"mcp_import_only"` and `config :optimal_system_agent, :mcp_import_only`.
+
+  This exists because the deny list is the wrong shape for foreign import.
+  `mcp_import_foreign` is one switch over every server in every other tool's
+  config — on this machine that is six config files and roughly twenty servers
+  — so choosing the two you actually want means enumerating the eighteen you
+  do not, and re-editing that list every time another tool gains a server. The
+  allow list inverts it: name what you want, and anything discovered later
+  stays out until you say otherwise.
+
+  Applies ONLY to servers imported from other tools. OSA's own configs are
+  servers the operator deliberately gave OSA, and are unaffected.
+  """
+  @spec import_only() :: MapSet.t(String.t())
+  def import_only do
+    from_settings = normalize_exclusions(settings_get("mcp_import_only"))
+
+    from_env =
+      normalize_exclusions(Application.get_env(:optimal_system_agent, :mcp_import_only, []))
+
+    MapSet.union(from_settings, from_env)
+  end
+
+  @doc """
+  Whether an imported server named `name` may load.
+
+  An empty allow list means no restriction, so the default behaviour is
+  unchanged. The deny list still wins: excluding a server is an explicit
+  decision, and allowing it elsewhere must not quietly override that.
+  """
+  @spec import_allowed?(String.t()) :: boolean()
+  def import_allowed?(name) when is_binary(name) do
+    allow = import_only()
+
+    cond do
+      excluded?(name) -> false
+      MapSet.size(allow) == 0 -> true
+      true -> MapSet.member?(allow, sanitize_name(name))
+    end
+  end
+
+  def import_allowed?(_), do: false
+
   defp normalize_exclusions(list) when is_list(list) do
     list
     |> Enum.filter(&is_binary/1)

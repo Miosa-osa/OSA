@@ -12,7 +12,8 @@ defmodule OptimalSystemAgent.MCP.DiscoveryTest do
     :config_dir,
     :mcp_discovery_enabled,
     :mcp_import_foreign,
-    :mcp_exclude
+    :mcp_exclude,
+    :mcp_import_only
   ]
 
   # Build a fresh fake HOME under tmp, point discovery + native config at it,
@@ -42,6 +43,12 @@ defmodule OptimalSystemAgent.MCP.DiscoveryTest do
     )
 
     Application.put_env(:optimal_system_agent, :mcp_exclude, Keyword.get(opts, :exclude, []))
+
+    Application.put_env(
+      :optimal_system_agent,
+      :mcp_import_only,
+      Keyword.get(opts, :import_only, [])
+    )
 
     on_exit(fn ->
       File.rm_rf(home)
@@ -323,6 +330,87 @@ defmodule OptimalSystemAgent.MCP.DiscoveryTest do
 
       refute Config.excluded?("claude_only")
       assert "claude_only" in Enum.map(Discovery.discover(), & &1.name)
+    end
+  end
+
+  describe "mcp_import_only allow list" do
+    alias OptimalSystemAgent.MCP.Config
+
+    test "an empty allow list is no restriction, so the default is unchanged" do
+      home = fake_home(import: true, import_only: [])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      names = Enum.map(Discovery.discover(), & &1.name)
+      assert "claude_only" in names
+      assert "shared" in names
+    end
+
+    test "a non-empty allow list imports ONLY those names" do
+      home = fake_home(import: true, import_only: ["claude_only"])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      names = Enum.map(Discovery.discover(), & &1.name)
+      assert "claude_only" in names
+      refute "shared" in names
+    end
+
+    test "the allow list matches after name sanitization, like the deny list" do
+      home = fake_home(import: true, import_only: ["Claude-Only"])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      assert Config.import_allowed?("claude_only")
+      assert "claude_only" in Enum.map(Discovery.discover(), & &1.name)
+    end
+
+    test "the deny list wins over the allow list" do
+      home = fake_home(import: true, import_only: ["claude_only"], exclude: ["claude_only"])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      refute Config.import_allowed?("claude_only")
+      refute "claude_only" in Enum.map(Discovery.discover(), & &1.name)
+    end
+
+    test "the allow list is also readable from ~/.osa/settings.json" do
+      home = fake_home(import: true, import_only: [])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      write(
+        home,
+        [".osa", "settings.json"],
+        Jason.encode!(%{"mcp_import_only" => ["claude_only"]})
+      )
+
+      OptimalSystemAgent.Settings.reset_cache()
+
+      assert Config.import_allowed?("claude_only")
+      refute Config.import_allowed?("shared")
+      refute "shared" in Enum.map(Discovery.discover(), & &1.name)
+    end
+
+    # The regression that matters: `available/0` is the menu you choose FROM.
+    # If the allow list filtered it, picking one server would hide every server
+    # you had not picked yet - including the ones you opened `/mcp` to find.
+    test "available/0 still lists everything, so the menu does not collapse" do
+      home = fake_home(import: true, import_only: ["claude_only"])
+      write(home, [".claude", "mcp.json"], claude_mcp_json())
+
+      available = Enum.map(Discovery.available(), & &1.name)
+      assert "claude_only" in available
+      assert "shared" in available, "the allow list must not hide unpicked servers from the menu"
+
+      # ...while the import path still honours the choice.
+      refute "shared" in Enum.map(Discovery.discover(), & &1.name)
+      # And /mcp can mark each row without re-deriving the rule.
+      assert Discovery.importable?("claude_only")
+      refute Discovery.importable?("shared")
+    end
+
+    test "OSA's own servers are unaffected by the allow list" do
+      home = fake_home(import: false, import_only: ["nothing_matches_this"])
+      write(home, [".osa", "mcp.json"], native_json())
+
+      # A native server the operator gave OSA deliberately still starts.
+      assert Enum.any?(Config.load_startup(), &(&1.name == "collide"))
     end
   end
 
