@@ -9,6 +9,61 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.70] — displays as `v1.0.070`
+
+The provider and model pickers now tell you what you are actually looking at:
+which models your plan can run, which concrete model an alias resolves to, and
+why a sign-in was refused.
+
+### Fixed — a model your Claude plan can run was never offered
+
+- **`fable` was missing from the Claude Code model list.** `claude --help`
+  names its own aliases as "'fable', 'opus', or 'sonnet'"; OSA carried
+  `sonnet`, `opus`, `haiku`. A subscriber could run Fable and OSA never showed
+  it. Read back off the installed binary, which is the only source that cannot
+  disagree with the CLI actually present.
+
+### Fixed — provider descriptions silently disappeared
+
+- **The picker was pinned to 82 columns** regardless of terminal width, and its
+  rows are two-column (name + status on the left, description right-aligned)
+  with the description dropped when what remains is too narrow to read. On a
+  long row — "Claude subscription (via Claude Code)  ✓ signed in as
+  you@example.com" — the description vanished with no ellipsis while 60 columns
+  of screen sat unused beside the dialog. The dialog now grows to 120 columns.
+  The drop is still by design (a truncated status is worse than a missing
+  description) but is now a last resort on a genuinely narrow terminal.
+
+### Added — the picker names the concrete model
+
+- Claude Code resolves an alias downstream and reports the real id back on the
+  first call. That was recorded and shown only in the CLI header, never in the
+  TUI, so `/model` said "Opus" and nothing more. The alias row now reads
+  "Most capable · now claude-opus-4-5-20260101" once known. Only the alias that
+  actually resolved is annotated, and the resolved id is never substituted into
+  the model `id` — the alias is what the CLI accepts.
+
+### Fixed — a refused sign-in explains itself
+
+- The device-code endpoint's error body was discarded, leaving a bare status
+  number. Device code authorization is an account/organization security setting
+  that ships **off** for some ChatGPT accounts, and when it is off the endpoint
+  refuses before any code exists — so the user saw a number and had no way to
+  learn that a checkbox in their own settings was the entire problem. The
+  provider's reason is now surfaced, along with what to enable.
+- Deliberately NOT repeated: the provider's verification page says to re-run
+  *its own CLI* afterwards. That instruction is wrong inside OSA. The setting
+  is the actionable half and is the same setting whichever tool asks.
+
+### Note on 1.0.69
+
+That release went out with a red Rust test: `VERSION` was bumped after the Rust
+suite had already run, so the Cargo.toml drift guard fired one release late.
+Both version files are now bumped together and the suite re-run afterwards,
+which is the order that guard requires to be useful.
+
+---
+
 ## [1.0.69] — displays as `v1.0.069`
 
 Two things that made a signed-in account unusable: OSA told you to quit and run

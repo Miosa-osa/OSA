@@ -77,7 +77,13 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
   # `claude-…-20250101` here would be a confident lie the first time Anthropic
   # ships a new one. The real id is reported back from `message_start` after
   # the first call — see `last_resolved_model/0`.
-  @models ["sonnet", "opus", "haiku"]
+  #
+  # `fable` was missing until it was read back off `claude --help`, which names
+  # "'fable', 'opus', or 'sonnet'" as its examples. A subscriber could run it
+  # and OSA never offered it — the same way the Codex catalogue silently aged
+  # out. Re-check this against `claude --help` when the CLI updates; it is the
+  # only source that cannot disagree with the binary actually installed.
+  @models ["fable", "opus", "sonnet", "haiku"]
 
   # The tool-call marker OSA asks for. `<tool_call>` is what
   # `ToolCallParsers.parse_hermes/1` reads, so this reuses a parser that is

@@ -401,7 +401,18 @@ defmodule OptimalSystemAgent.Onboarding do
         # placeholder for a number nobody filled in: it is how the picker is
         # told there is no context window to display, which is the truthful
         # answer for a model whose identity is chosen downstream.
+        # `fable` was absent until `claude --help` was read back — it names
+        # "'fable', 'opus', or 'sonnet'" as its own examples, so a subscriber
+        # could run it and OSA never offered it.
         models: [
+          %{
+            id: "fable",
+            name: "Fable",
+            ctx: 0,
+            tools: true,
+            recommended?: false,
+            note: "Newest — resolves to the current claude-fable-*"
+          },
           %{
             id: "sonnet",
             name: "Sonnet",
@@ -580,6 +591,36 @@ defmodule OptimalSystemAgent.Onboarding do
   rescue
     _ -> [:api_key]
   end
+
+  # The concrete model Claude Code last resolved an alias to, or nil before any
+  # call. Isolated so a transport that never recorded one degrades to "not
+  # known yet" rather than failing the whole model list.
+  defp claude_cli_resolved do
+    OptimalSystemAgent.Providers.ClaudeCli.last_resolved_model()
+  rescue
+    _ -> nil
+  end
+
+  # Append the resolved id to the note of the alias it belongs to.
+  #
+  # Matching is a substring test on the concrete id (`opus` → `claude-opus-…`),
+  # which is how Anthropic names them. The resolved id is only ever ADDED to a
+  # note, never substituted into `id`: `id` is what gets handed back to the
+  # CLI, and the alias is what the CLI accepts.
+  defp annotate_resolved(models, resolved) when is_binary(resolved) do
+    Enum.map(models, fn m ->
+      id = to_string(Map.get(m, :id) || Map.get(m, "id") || "")
+
+      if id != "" and String.contains?(resolved, id) do
+        note = Map.get(m, :note) || Map.get(m, "note") || ""
+        Map.put(m, :note, String.trim("#{note} · now #{resolved}"))
+      else
+        m
+      end
+    end)
+  end
+
+  defp annotate_resolved(models, _), do: models
 
   @doc """
   The shape of a provider's account sign-in, from the catalog, or `nil`.
@@ -832,6 +873,16 @@ defmodule OptimalSystemAgent.Onboarding do
         # provider can list its models without re-supplying the key.
         api_key = Keyword.get(opts, :api_key) || System.get_env("MIOSA_API_KEY")
         fetch_openai_models("https://optimal.miosa.ai/v1", api_key)
+
+      # The rows are aliases, and an alias alone does not answer "which model
+      # am I actually running" — the question the picker exists to answer.
+      # Claude Code resolves the alias downstream and reports the concrete id
+      # back on the first call; annotate the row it belongs to once that is
+      # known, rather than leaving the user to infer it or read the CLI
+      # header. Before any call the notes are unchanged, because inventing a
+      # dated id here is the exact confident lie the alias design avoids.
+      "claude_cli" ->
+        {:ok, annotate_resolved(static_models("claude_cli"), claude_cli_resolved())}
 
       "custom" ->
         base_url = Keyword.get(opts, :base_url)

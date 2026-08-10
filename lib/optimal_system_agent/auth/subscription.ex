@@ -259,6 +259,26 @@ defmodule OptimalSystemAgent.Auth.Subscription do
       "Timed out after 15 minutes waiting for #{name} sign-in to be approved. " <>
         "Run /login for a fresh code, or /provider to paste an API key instead."
 
+  # The provider refused to issue a device code at all. Overwhelmingly this is
+  # a security setting on the user's own account rather than anything wrong
+  # with OSA or the request: ChatGPT ships "device code authorization" off for
+  # some accounts and organisations, and the endpoint declines before any code
+  # exists. The provider's verification page says to re-run *its own CLI*
+  # afterwards, which is not the right instruction here, so the setting is
+  # named and the tool is not.
+  def message({:device_auth_refused, status, reason}, name) do
+    base =
+      "#{name} would not start a sign-in (HTTP #{status}). This is usually an account setting " <>
+        "rather than a fault: device code authorization has to be enabled for your account or " <>
+        "organization before any tool can request a code. Turn it on in your #{name} security " <>
+        "settings, then run /login again."
+
+    case reason do
+      r when is_binary(r) -> base <> "\n\n#{name} said: #{r}"
+      _ -> base
+    end
+  end
+
   def message(:device_code_incomplete, name),
     do:
       "#{name} returned an incomplete sign-in response. Retry, and if it persists please report it — " <>

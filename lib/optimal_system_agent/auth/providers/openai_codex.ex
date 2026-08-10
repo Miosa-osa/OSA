@@ -180,8 +180,20 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
       {:ok, %{status: 429}} ->
         {:error, :login_rate_limited}
 
-      {:ok, %{status: status}} ->
-        {:error, {:http_error, status}}
+      # Device-code auth is an account/org security setting on the ChatGPT
+      # side, and it is off by default for some accounts. When it is off this
+      # endpoint refuses before any code is ever issued, and the reason is in
+      # the body — which this clause used to discard, leaving the user with a
+      # bare status number and no way to know that a checkbox in someone
+      # else's settings page was the whole problem.
+      #
+      # Surface the server's own words. Note the verification page OpenAI
+      # serves says "…then run `codex login --device-auth` again", naming
+      # their CLI; that instruction is wrong here and is deliberately not
+      # repeated. The setting is the actionable half, and it is the same
+      # setting whichever tool asks for the code.
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:device_auth_refused, status, server_reason(body)}}
 
       {:error, e} ->
         {:error, {:transport_error, Exception.message(e)}}
@@ -189,6 +201,39 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
   rescue
     e -> {:error, {:transport_error, Exception.message(e)}}
   end
+
+  # Pull a human-readable reason out of whatever shape the endpoint returned.
+  # Nested `error.message` first (the documented shape), then the flat
+  # variants, then a short raw string. Returns nil rather than inventing a
+  # reason, so the caller can fall back to naming the status alone.
+  defp server_reason(body) when is_map(body) do
+    candidates = [
+      get_in(body, ["error", "message"]),
+      body["error_description"],
+      body["message"],
+      body["detail"],
+      if(is_binary(body["error"]), do: body["error"])
+    ]
+
+    Enum.find_value(candidates, fn
+      s when is_binary(s) -> if String.trim(s) != "", do: String.trim(s)
+      _ -> nil
+    end)
+  end
+
+  defp server_reason(body) when is_binary(body) do
+    trimmed = String.trim(body)
+
+    # A refusal page can come back as HTML; a wall of markup helps nobody.
+    cond do
+      trimmed == "" -> nil
+      String.starts_with?(trimmed, "<") -> nil
+      String.length(trimmed) > 300 -> String.slice(trimmed, 0, 300) <> "…"
+      true -> trimmed
+    end
+  end
+
+  defp server_reason(_), do: nil
 
   @doc """
   The verification URL the user must open. Public so a non-terminal surface

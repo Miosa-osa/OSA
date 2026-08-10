@@ -16,7 +16,15 @@ use ratatui::{
 
 use crate::client::types::{DetectedProvidersResponse, OnboardingModel, OnboardingProvider};
 
-const MAX_W: u16 = 82;
+/// Narrowest the dialog is allowed to get before it simply takes the whole
+/// terminal. Also the width it used to be pinned at, unconditionally.
+const MIN_W: u16 = 82;
+
+/// Widest it may grow. Past roughly this, a centred box stops reading as a
+/// dialog and the eye has too far to travel between a provider's name on the
+/// left and its description on the right.
+const MAX_W: u16 = 120;
+
 const MAX_H: u16 = 30;
 
 // ── Action ──────────────────────────────────────────────────────────────────
@@ -987,7 +995,25 @@ impl ModelPicker {
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = crate::style::theme();
 
-        let w = MAX_W.min(area.width);
+        // Grow with the terminal instead of sitting at a fixed 82 columns.
+        //
+        // The rows here are two-column — name + status on the left, the
+        // provider's description right-aligned — and the description is
+        // dropped entirely when what remains is too narrow to read. Pinning
+        // the dialog at 82 meant a wide terminal changed nothing: a long row
+        // ("Claude subscription (via Claude Code)  ✓ signed in as
+        // someone@example.com") consumed the line, its description silently
+        // vanished, and the user was looking at 60 columns of unused screen
+        // beside a box that had run out of room. The drop is by design — a
+        // truncated status is worse than a missing description — but it should
+        // be a last resort on a genuinely narrow terminal, not the normal case
+        // on a wide one.
+        let w = area
+            .width
+            .saturating_sub(8)
+            .max(MIN_W)
+            .min(MAX_W)
+            .min(area.width);
         let h = MAX_H.min(area.height);
         let x = area.x + area.width.saturating_sub(w) / 2;
         let y = area.y + area.height.saturating_sub(h) / 2;
