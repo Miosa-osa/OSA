@@ -1,0 +1,158 @@
+name: CI
+
+# The test gate. Until this existed, NOTHING ran the test suites in CI:
+# `labeler` labels PRs, `pty-layout` runs only the PTY harness (and only when
+# TUI/harness paths change), and `release` builds artifacts on a version tag
+# without running a single test. v1.0.069 was published with a red Rust test
+# and CI reported success, because no lane was looking.
+#
+# Two independent suites, deliberately in SEPARATE jobs rather than one:
+#   * they have no dependency on each other, so they run concurrently;
+#   * a red Elixir suite still tells you whether Rust is healthy;
+#   * running them in one job risks the CPU contention that produces phantom
+#     failures locally (timing assertions in the Elixir suite fail when a
+#     release-profile cargo build is saturating the cores beside them).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Kept in lockstep with release.yml — a suite that passes on a toolchain the
+  # release never uses is not a gate.
+  ELIXIR_VERSION: "1.17.3"
+  OTP_VERSION: "26.2.5"
+
+jobs:
+  elixir:
+    name: Elixir suite
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      # ADVISORY, not blocking — and deliberately so, for now.
+      #
+      # The tree does not currently pass either of these: there are existing
+      # compiler warnings, and `mix format --check-formatted` exits 1. Landing
+      # them as blocking would make this workflow red on its first run, and a
+      # gate that is always red is a gate everyone learns to ignore — which is
+      # worse than no gate, because it looks like coverage.
+      #
+      # They run and are visible in the log. Promote each to blocking (drop
+      # `continue-on-error`, and add `--warnings-as-errors` to the compile
+      # above) in the same change that cleans up the backlog it is guarding.
+      - name: Compiler warnings (advisory)
+        continue-on-error: true
+        run: mix compile --force --warnings-as-errors
+
+      - name: Formatting (advisory)
+        continue-on-error: true
+        run: mix format --check-formatted
+
+      # A unique port, for the same reason every local run needs one: the
+      # default 9089 is a developer's live daemon, and a suite that binds it
+      # fails in a way that looks like a code defect.
+      - name: Run test suite
+        run: mix test
+        env:
+          OSA_HTTP_PORT: "19087"
+
+  rust:
+    name: Rust TUI suite
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Identical to the list in release.yml and pty-layout.yml. The TUI links
+      # xcb (clipboard), alsa (bell), oniguruma (syntect) and openssl; without
+      # them the build dies in `alsa-sys` before a single test runs.
+      - name: Install Rust TUI build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            pkg-config build-essential libssl-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev libonig-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            priv/rust/tui/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Advisory for the same reason as the Elixir side: `cargo fmt --check`
+      # currently exits 1 on this tree. Visible in the log, promoted to
+      # blocking by whoever does the formatting pass.
+      - name: Formatting (advisory)
+        continue-on-error: true
+        working-directory: priv/rust/tui
+        run: cargo fmt --check
+
+      # `--release`, matching how it is run locally and how the binary ships.
+      # The debug profile has different timing and different overflow
+      # behaviour, so a debug-only gate would not be testing what users get.
+      #
+      # This is also the lane that catches version drift: the suite contains a
+      # guard asserting priv/rust/tui/Cargo.toml agrees with the repo VERSION
+      # file. That guard is why the release checklist is "bump both files,
+      # THEN run the suite" — run in the other order it fires a release late,
+      # which is exactly how it was missed once.
+      - name: Run test suite
+        working-directory: priv/rust/tui
+        run: cargo test --release
+
+  # A single required-status target, so branch protection has one check to
+  # point at instead of a list that must be edited whenever a job is added.
+  ci:
+    name: CI
+    runs-on: ubuntu-22.04
+    needs: [elixir, rust]
+    if: always()
+    steps:
+      - name: Verify both suites passed
+        run: |
+          echo "elixir: ${{ needs.elixir.result }}"
+          echo "rust:   ${{ needs.rust.result }}"
+          if [ "${{ needs.elixir.result }}" != "success" ] || \
+             [ "${{ needs.rust.result }}" != "success" ]; then
+            echo "::error::a test suite did not pass"
+            exit 1
+          fi

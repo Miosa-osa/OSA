@@ -26,6 +26,13 @@ defmodule OptimalSystemAgent.Application do
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
+    # Separate from :start_time (wall-clock seconds, used for /health uptime):
+    # a monotonic reading so the "boot complete" line can report MILLISECONDS.
+    # At second granularity the difference between a 400ms boot and a 1400ms one
+    # is invisible, which is precisely the resolution a startup regression hides
+    # in. See Supervisors.BootTiming for the per-child breakdown.
+    boot_started_at = System.monotonic_time(:millisecond)
+
     # Capture the user's launch directory as the single cwd source of truth
     # (mirrors CC setOriginalCwd). Prefers OSA_ORIGINAL_CWD (exported by the TUI
     # from its launch dir) over File.cwd!(), which under `mix osa.serve` is the
@@ -146,6 +153,11 @@ defmodule OptimalSystemAgent.Application do
     OptimalSystemAgent.PromptLoader.load()
 
     # ── Phase 2: ETS Tables (must exist before GenServers start) ────────
+    # Per-child supervisor start timings (see Supervisors.BootTiming). Created
+    # first so every subsystem supervisor below can record into it. Owned by the
+    # app master for the same reason as every other table here.
+    OptimalSystemAgent.Supervisors.BootTiming.init_table()
+
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
@@ -281,8 +293,15 @@ defmodule OptimalSystemAgent.Application do
     # Workspace session tracking table
     OptimalSystemAgent.Workspace.Session.init_table()
 
-    # Workspace SQLite tables (workspaces + task_journals)
-    OptimalSystemAgent.Workspace.Store.init()
+    # NOTE: `Workspace.Store.init/0` used to be here, and it could never have
+    # worked. It issues CREATE TABLE against `Store.Repo`, and the Repo is a
+    # child of `Supervisors.Infrastructure` — which does not start until the
+    # supervision tree comes up, well after this phase. So every boot logged
+    # `[Workspace.Store] init/0 exception: could not lookup Ecto repo … it was
+    # not started` and carried on, because the function rescues and returns
+    # `{:error, :repo_unavailable}`. A rescue that turns "this never ran" into
+    # a warning is how a failure survives being visible in every single boot
+    # log. It now runs in Phase 4 beside the other post-Repo work.
 
     # ── Phase 2.5: HTTP port preflight ───────────────────────────────────
     # BEFORE the supervision tree starts Bandit: if the configured HTTP port
@@ -321,6 +340,10 @@ defmodule OptimalSystemAgent.Application do
           {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
         ]
 
+    # Time every top-level child too, so the four subsystem supervisors show up
+    # as roll-ups next to Bandit / Channels.Starter in the boot budget.
+    children = OptimalSystemAgent.Supervisors.BootTiming.wrap(children, "Root")
+
     # max_restarts: 10 in 60s prevents infinite crash loops from burning CPU
     opts = [
       strategy: :rest_for_one,
@@ -339,6 +362,11 @@ defmodule OptimalSystemAgent.Application do
 
         # Run pending Ecto migrations (session_transcripts FTS5, etc.)
         run_migrations()
+
+        # Workspace SQLite tables (workspaces + task_journals). Moved here from
+        # Phase 2 — see the note at that site. It needs `Store.Repo`, which is
+        # an Infrastructure child, so it could not run before the tree was up.
+        OptimalSystemAgent.Workspace.Store.init()
 
         # Bound the session_transcripts archive (age + row cap). MUST run here
         # rather than next to SessionPersistence.purge_expired/0 in
@@ -389,8 +417,13 @@ defmodule OptimalSystemAgent.Application do
         # Signal boot complete
         Application.put_env(:optimal_system_agent, :boot_complete, true)
 
+        # One-line boot budget: total supervised start time + slowest children.
+        # A startup regression should be visible in the next boot log rather
+        # than needing to be bisected by hand.
+        OptimalSystemAgent.Supervisors.BootTiming.log_summary()
+
         Logger.info(
-          "OSA boot complete (#{System.system_time(:second) - Application.get_env(:optimal_system_agent, :start_time, 0)}s)"
+          "OSA boot complete (#{System.monotonic_time(:millisecond) - boot_started_at}ms)"
         )
 
         {:ok, pid}
