@@ -289,4 +289,103 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       refute Resilience.overloaded?({:rate_limited, 5})
     end
   end
+
+  # Bytes reaching the user are a one-way door. A same-provider retry re-invokes
+  # the request against the SAME live stream callback, so anything already
+  # rendered would be emitted a second time and the user watches a paragraph
+  # appear twice. Once output is observed the effective retry budget is zero.
+  describe "observed output suppresses retries" do
+    setup do
+      Resilience.reset_output_observed()
+      on_exit(&Resilience.reset_output_observed/0)
+      :ok
+    end
+
+    test "a text-only mid-stream error retries when NOTHING was streamed yet" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      result =
+        Resilience.with_retry(
+          fn ->
+            Agent.update(counter, &(&1 + 1))
+            {:error, {:stream_error, "connection reset", %{content: "", tool_calls: []}}}
+          end,
+          sleep: no_sleep(),
+          max_attempts: 4
+        )
+
+      assert {:error, {:stream_error, _, _}} = result
+      assert Agent.get(counter, & &1) == 4
+    end
+
+    test "the SAME error is not retried once a token has been streamed" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      result =
+        Resilience.with_retry(
+          fn ->
+            Agent.update(counter, &(&1 + 1))
+            # What a provider does mid-stream: hand a delta to the live callback
+            # (which marks the door as passed), then fail.
+            Resilience.mark_output_observed()
+            {:error, {:stream_error, "connection reset", %{content: "Hello ", tool_calls: []}}}
+          end,
+          sleep: no_sleep(),
+          max_attempts: 4
+        )
+
+      assert {:error, {:stream_error, _, _}} = result
+
+      assert Agent.get(counter, & &1) == 1,
+             "a retry after streamed output would duplicate the text on the user's screen"
+    end
+
+    test "observed output overrides even a retryable HTTP status" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      Resilience.with_retry(
+        fn ->
+          Agent.update(counter, &(&1 + 1))
+          Resilience.mark_output_observed()
+          {:error, {:http_error, 503, "service unavailable"}}
+        end,
+        sleep: no_sleep(),
+        max_attempts: 5
+      )
+
+      assert Agent.get(counter, & &1) == 1
+    end
+
+    test "the flag never leaks into the NEXT request" do
+      Resilience.mark_output_observed()
+      assert Resilience.output_observed?()
+
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      Resilience.with_retry(
+        fn ->
+          Agent.update(counter, &(&1 + 1))
+          {:error, {:http_error, 503, "service unavailable"}}
+        end,
+        sleep: no_sleep(),
+        max_attempts: 3
+      )
+
+      assert Agent.get(counter, & &1) == 3
+      refute Resilience.output_observed?()
+    end
+
+    test "a request that streams output and then SUCCEEDS is untouched" do
+      result =
+        Resilience.with_retry(
+          fn ->
+            Resilience.mark_output_observed()
+            {:ok, %{content: "done"}}
+          end,
+          sleep: no_sleep()
+        )
+
+      assert result == {:ok, %{content: "done"}}
+    end
+  end
 end

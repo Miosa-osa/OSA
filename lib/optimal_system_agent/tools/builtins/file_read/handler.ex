@@ -12,9 +12,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   in Phase 1 — just relocation + permission/validation split.
   """
 
+  import Bitwise, only: [band: 2]
+
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Constants
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Lines
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Magic
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Messages
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.PathResolve
   alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
+
+  # POSIX st_mode file-type mask and the type bits it selects. Used to refuse
+  # FIFOs, sockets and device nodes from `stat` alone — see `special_kind/1`.
+  @s_ifmt 0o170000
+  @s_ififo 0o010000
+  @s_ifchr 0o020000
+  @s_ifblk 0o060000
+  @s_ifsock 0o140000
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
@@ -60,67 +74,183 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     # FileState re-stats the path, so a directory/enoent that slipped through is
     # a harmless no-op.
     if match?({:ok, _}, result) do
-      expanded = path |> Path.expand() |> resolve_real_path()
-      FileState.record_read(session_id(ctx), expanded)
+      FileState.record_read(session_id(ctx), resolve_target(path))
     end
 
     result
   end
 
+  # Single source of truth for "which path on disk does this input name?".
+  #
+  # `execute/2` and `do_read/1` must agree, or a read rescued by Unicode
+  # normalisation would be recorded against the un-normalised name and the
+  # subsequent `file_edit` would be rejected as unread. Symlinks are resolved
+  # both before and after normalisation: before, so security checks see the real
+  # target; after, because the rescued name may itself be a symlink.
+  defp resolve_target(path) do
+    path
+    |> Path.expand()
+    |> resolve_real_path()
+    |> PathResolve.resolve()
+    |> resolve_real_path()
+  end
+
   defp do_read(%{"path" => path} = input) do
-    expanded = path |> Path.expand() |> resolve_real_path()
+    literal = path |> Path.expand() |> resolve_real_path()
+    expanded = resolve_target(path)
     offset = input["offset"]
     limit = input["limit"]
     ext = expanded |> Path.extname() |> String.downcase()
 
     cond do
+      # A Unicode-normalisation rescue must not become an allowlist bypass:
+      # `check_permissions/2` vetted the literal path, so anything the rescue
+      # resolved to gets vetted here too before a single byte is read.
+      expanded != literal and (sensitive?(expanded) or not allowed?(expanded)) ->
+        {:error, Messages.denied_after_normalisation(path, expanded)}
+
       # Pre-flight: surface a clear actionable error when the model points
       # `file_read` at a directory or a non-existent path. Without this,
       # the model gets back raw `:eisdir` / `:enoent` and tends to retry the
       # same failing call instead of switching tools.
       File.dir?(expanded) ->
-        {:error,
-         "#{path} is a directory, not a file. Use `dir_list` with `path: \"#{path}\"` to list its contents, or use `file_glob`/`file_grep` to search inside it."}
+        {:error, Messages.directory(path)}
 
       not File.exists?(expanded) ->
-        {:error,
-         "#{path} does not exist. Use `dir_list` on its parent directory or `file_glob` to find the right path."}
+        {:error, Messages.missing(path, literal)}
+
+      # Stat-based, before any `open`. A FIFO with no writer blocks forever,
+      # which presents as a hung agent rather than a failed tool call — the one
+      # outcome that carries no diagnostic whatsoever.
+      kind = special_kind(expanded) ->
+        {:error, Messages.special_file(path, kind)}
+
+      # "Empty" and "offset past the end" both look like "nothing here" if they
+      # share a message. They do not share one.
+      empty?(expanded) ->
+        {:ok, Messages.empty_file(path)}
 
       ext in Constants.image_extensions() ->
         read_image(expanded, path, ext)
+
+      binary_verdict = binary_verdict(expanded) ->
+        {:error, Messages.binary(path, binary_verdict)}
 
       offset || limit ->
         read_with_range(expanded, path, offset, limit)
 
       too_large?(expanded) ->
         {mb, cap_mb} = size_report(expanded)
-
-        {:error,
-         "#{path} is too large to read whole (#{mb} MB, cap #{cap_mb} MB). " <>
-           "Read a slice with `offset`/`limit`, or use `file_grep` to search inside it."}
+        {:error, Messages.too_large(path, mb, cap_mb)}
 
       true ->
-        case File.read(expanded) do
-          {:ok, content} ->
-            if String.valid?(content) do
-              {:ok, content}
-            else
-              {:error,
-               "#{path} appears to be a binary or non-UTF-8 file; file_read only returns text and images. Use `shell_execute` with an appropriate tool if you need its bytes."}
-            end
-
-          {:error, :eisdir} ->
-            {:error,
-             "#{path} is a directory, not a file. Use `dir_list` instead."}
-
-          {:error, :enoent} ->
-            {:error,
-             "#{path} does not exist. Use `dir_list` or `file_glob` to find the right path."}
-
-          {:error, reason} ->
-            {:error, "Error reading file #{path}: #{reason}"}
-        end
+        read_whole(expanded, path)
     end
+  end
+
+  defp read_whole(expanded, display_path) do
+    case File.read(expanded) do
+      {:ok, content} ->
+        if String.valid?(content) do
+          {:ok, Lines.clamp(content)}
+        else
+          # `binary_verdict/1` only sniffs the head, so a file that turns to
+          # binary further in still lands here. Identify it from what we now
+          # hold rather than falling back to "appears to be binary".
+          {:error, Messages.binary(display_path, Magic.identify(sniff_slice(content)))}
+        end
+
+      {:error, :eisdir} ->
+        {:error, Messages.directory(display_path)}
+
+      {:error, :enoent} ->
+        {:error, Messages.missing(display_path, expanded)}
+
+      {:error, reason} ->
+        {:error,
+         "Cannot read #{display_path}: #{:file.format_error(reason)} (#{inspect(reason)}). " <>
+           "Check the file's permissions with `shell_execute` and `ls -l #{display_path}`, " <>
+           "then retry or read a different path."}
+    end
+  end
+
+  # ── Stat-based guards ─────────────────────────────────────────────────
+
+  # Returns `:fifo` / `:socket` / `:character_device` / `:block_device` /
+  # `:special` for anything that is not a regular file, and `nil` otherwise.
+  # `File.stat/1` follows symlinks, so a symlink to a regular file is regular
+  # and a symlink to a FIFO is correctly refused.
+  @spec special_kind(String.t()) :: atom() | nil
+  defp special_kind(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        nil
+
+      {:ok, %File.Stat{type: :directory}} ->
+        nil
+
+      {:ok, %File.Stat{mode: mode} = stat} when is_integer(mode) and mode > 0 ->
+        from_mode(band(mode, @s_ifmt)) || from_type(stat.type)
+
+      {:ok, stat} ->
+        from_type(stat.type)
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp from_mode(@s_ififo), do: :fifo
+  defp from_mode(@s_ifsock), do: :socket
+  defp from_mode(@s_ifchr), do: :character_device
+  defp from_mode(@s_ifblk), do: :block_device
+  defp from_mode(_), do: nil
+
+  # Fallback for filesystems/ports that do not report POSIX mode bits: Erlang
+  # collapses FIFOs and sockets into `:other` and devices into `:device`.
+  defp from_type(:device), do: :character_device
+  defp from_type(:other), do: :special
+  defp from_type(_), do: nil
+
+  defp empty?(path) do
+    match?({:ok, %File.Stat{size: 0}}, File.stat(path))
+  end
+
+  # Reads only the head of the file, so identifying a 2 GB core dump costs one
+  # 4 KB read. Returns `nil` when the head looks like text.
+  defp binary_verdict(path) do
+    case sniff(path) do
+      {:ok, head} ->
+        case Magic.identify(head) do
+          :text -> nil
+          verdict -> verdict
+        end
+
+      :error ->
+        nil
+    end
+  end
+
+  defp sniff(path) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, io} ->
+        try do
+          case IO.binread(io, Constants.sniff_bytes()) do
+            data when is_binary(data) -> {:ok, data}
+            :eof -> {:ok, ""}
+            _ -> :error
+          end
+        after
+          File.close(io)
+        end
+
+      {:error, _reason} ->
+        :error
+    end
+  end
+
+  defp sniff_slice(content) do
+    binary_part(content, 0, min(Constants.sniff_bytes(), byte_size(content)))
   end
 
   # True when a whole-file read would exceed the byte cap. Slices (offset/limit)
@@ -150,12 +280,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   defp read_with_range(expanded, display_path, offset, limit) do
     cond do
       File.dir?(expanded) ->
-        {:error,
-         "#{display_path} is a directory, not a file. Use `dir_list` to list contents."}
+        {:error, Messages.directory(display_path)}
 
       not File.exists?(expanded) ->
-        {:error,
-         "#{display_path} does not exist. Use `dir_list` on its parent directory or `file_glob` to find the right path."}
+        {:error, Messages.missing(display_path, expanded)}
 
       true ->
         read_with_range_inner(expanded, display_path, offset, limit)
@@ -176,15 +304,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       |> Stream.with_index(start_line)
       |> Enum.map(fn {line, line_num} ->
         num_str = line_num |> Integer.to_string() |> String.pad_leading(5)
-        "#{num_str}| #{String.trim_trailing(line, "\n")}"
+        clamped = line |> String.trim_trailing("\n") |> Lines.clamp_line(line_num)
+        "#{num_str}| #{clamped}"
       end)
       |> Enum.join("\n")
 
     if lines == "" do
-      {:error, "No lines in range for #{display_path}"}
+      # The empty file case is caught earlier and answered separately, so
+      # reaching here means the file has content and the window missed it.
+      # Counting is a second pass, but only on the failure path, and it turns
+      # "no lines in range" into a bounded range the caller can actually use.
+      {:error, Messages.past_eof(display_path, start_line, count_lines(expanded))}
     else
       {:ok, lines}
     end
+  end
+
+  defp count_lines(expanded) do
+    expanded
+    |> File.stream!()
+    |> Enum.count()
+  rescue
+    _ -> 0
   end
 
   defp read_image(expanded, display_path, ext) do
@@ -207,10 +348,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         end
 
       {:error, :enoent} ->
-        {:error, "File not found: #{display_path}"}
+        {:error, Messages.missing(display_path, expanded)}
 
       {:error, reason} ->
-        {:error, "Cannot stat #{display_path}: #{reason}"}
+        {:error,
+         "Cannot stat #{display_path}: #{:file.format_error(reason)} (#{inspect(reason)}). " <>
+           "Check it with `shell_execute` and `ls -l #{display_path}`, then retry or read a " <>
+           "different path."}
     end
   end
 

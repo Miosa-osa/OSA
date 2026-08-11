@@ -37,6 +37,28 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
       load-bearing. The account email IS written, so it is still not something
       to leave world-readable.
 
+  ## Driving the vendor CLI's own login, from inside OSA
+
+  Holding no credential does not have to mean sending the user away. The
+  prohibited act is OSA *offering* a Claude login; running Anthropic's own
+  client, with Anthropic's own login, on a pty OSA happens to be drawing is
+  the sanctioned route — it is the same act as typing `claude auth login`
+  into a terminal, and the credential still lands in Claude Code's store and
+  nowhere else.
+
+  So this module also answers the two questions a caller needs in order to do
+  that without guessing:
+
+    * `install_argv/0` — the one command that installs the CLI, for the case
+      where the binary is simply absent. "Install Claude Code" with no command
+      is a dead end; the command is the whole remedy.
+    * `login_argv/0` — *which* login subcommand THIS installation supports,
+      read out of its own `--help` rather than assumed. The CLI has shipped
+      `claude login`, `claude auth login` and `claude setup-token` at
+      different points; picking one by version guesswork is how a user gets
+      `unknown command` from a binary that was perfectly capable of signing
+      them in.
+
   ## What is checked, and what a failure means
 
   `probe/0` shells out to `claude auth status --json` — a **local** read of
@@ -208,6 +230,164 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
     end
   end
 
+  # ── Driving the CLI's own login ─────────────────────────────────────────
+
+  # npm because that is the install route Anthropic documents and the one that
+  # works on every platform OSA runs on. It is deliberately a bare argv rather
+  # than a shell string: whatever runs this is spawning a process, not
+  # evaluating a line, and a command that has to survive a shell is a command
+  # that can be made to mean something else.
+  @install_argv ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+
+  @doc """
+  The one command that installs the Claude Code CLI, as an argv.
+
+  Surfaced so a "not installed" screen can *offer to run it* rather than print
+  a sentence and stop.
+  """
+  @spec install_argv() :: [String.t()]
+  def install_argv, do: @install_argv
+
+  @doc """
+  The argv that starts an interactive sign-in for the installed CLI.
+
+  Detected from the binary's own `--help`, never from its version number.
+  Returns `{:error, :cli_not_installed}` when there is nothing to ask, and
+  `{:error, {:no_login_subcommand, help}}` when the binary answered but named
+  none of the login subcommands we know — which is a real possibility for a
+  future CLI, and is reported with the help text so the user can see what it
+  *did* offer instead of being told "try again".
+  """
+  @spec login_argv() :: {:ok, [String.t()]} | {:error, term()}
+  def login_argv do
+    case binary() do
+      nil ->
+        {:error, :cli_not_installed}
+
+      bin ->
+        top = help_text(bin, [])
+        # `claude auth login` is a subcommand of a subcommand, so the top-level
+        # help only proves `auth` exists. Ask `auth` itself what it offers
+        # before claiming `login` is under it.
+        auth = if mentions_subcommand?(top, "auth"), do: help_text(bin, ["auth"]), else: ""
+        login_argv_from_help(top, auth)
+    end
+  end
+
+  @doc """
+  The pure half of `login_argv/0`: choose a subcommand from help text.
+
+  Ordering is interactive-first. `setup-token` exists for a box with no
+  browser and prints a token the user must paste back; when a real terminal is
+  available — and inside OSA one always is, that being the point of the pty —
+  the ordinary login is the shorter path and the one whose credential Claude
+  Code refreshes by itself.
+  """
+  @spec login_argv_from_help(String.t(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def login_argv_from_help(top_help, auth_help \\ "") do
+    cond do
+      mentions_subcommand?(auth_help, "login") -> {:ok, ["auth", "login"]}
+      mentions_subcommand?(top_help, "login") -> {:ok, ["login"]}
+      mentions_subcommand?(top_help, "setup-token") -> {:ok, ["setup-token"]}
+      # `auth` exists but we could not read its help (e.g. it wrote to a pager,
+      # or exited non-zero). Trusting the one subcommand the top-level help DID
+      # name is better than declaring the CLI unusable.
+      mentions_subcommand?(top_help, "auth") -> {:ok, ["auth", "login"]}
+      true -> {:error, {:no_login_subcommand, String.slice(top_help, 0, 400)}}
+    end
+  end
+
+  # Matches a word only where a help listing would put a subcommand: at the
+  # start of a line (`  login    Sign in…`) or inside a usage/commands
+  # enumeration (`<login|logout>`, `login|logout`). A bare substring test
+  # matches the word "login" inside a *sentence* about logging in, which is
+  # how a CLI with no `login` subcommand gets one invented for it.
+  defp mentions_subcommand?(help, word) when is_binary(help) do
+    esc = Regex.escape(word)
+    Regex.match?(~r/^\s{1,6}#{esc}(?:[\s,|]|$)/m, help) or
+      Regex.match?(~r/[<\[|]#{esc}[>\]|]/, help) or
+      Regex.match?(~r/^\s*#{esc}\s{2,}\S/m, help)
+  end
+
+  defp mentions_subcommand?(_, _), do: false
+
+  # `--help` on a CLI that does not know the subcommand exits non-zero and
+  # prints its complaint to stderr; that output is still the most informative
+  # thing we have, so it is kept rather than discarded with the exit code.
+  defp help_text(bin, args) do
+    case cmd(bin, args ++ ["--help"]) do
+      {out, _} -> to_string(out)
+    end
+  end
+
+  @doc """
+  Everything a sign-in surface needs to decide what to draw, in one read.
+
+  Deliberately one call: a screen that has to make four separate decisions
+  about the same binary (is it there, how old, is it signed in, what do I run)
+  will make them at four different instants, and the resulting screen can
+  describe a state that never existed.
+
+  ## What the caller is being asked to execute
+
+  A surface that acts on this spawns `login_program` with `login_argv`, so it
+  is worth being explicit about where those strings come from:
+
+    * `login_program` is `binary/0` — a path from `PATH` or from the operator's
+      own `OSA_CLAUDE_CLI_BIN`. Never from a request.
+    * `login_argv` is drawn from a closed set of literals defined in this
+      module (`["auth", "login"]`, `["login"]`, `["setup-token"]`). The CLI's
+      `--help` output selects *which* literal; no part of it is ever
+      interpolated into the argv.
+    * `install_argv` is a module constant.
+
+  So no help text, no response body and no user input reaches an exec. That is
+  a property to preserve, not an accident: the moment a detected string is
+  passed through instead of matched against, this endpoint becomes a way to
+  ask OSA to run something.
+  """
+  @spec cli_state() :: map()
+  def cli_state do
+    bin = binary()
+    ver = if bin, do: version(), else: nil
+
+    {signed_in?, account} =
+      case probe() do
+        {:ok, acct} -> {true, acct}
+        _ -> {false, nil}
+      end
+
+    {login_argv, login_error} =
+      case login_argv() do
+        {:ok, argv} -> {argv, nil}
+        {:error, reason} -> {nil, inspect(reason)}
+      end
+
+    %{
+      installed: not is_nil(bin),
+      path: bin,
+      version: ver,
+      # `nil` when there is no binary to ask, NOT `true`. "Old enough" is a
+      # claim about a version we do not have.
+      version_ok: if(bin, do: version_ok?(ver), else: nil),
+      min_version: @min_version,
+      signed_in: signed_in?,
+      account: account && account.email,
+      org: account && account.org,
+      plan: account && account.plan,
+      # `login_program` is what gets spawned (an absolute path, so a caller
+      # never depends on its own PATH matching OSA's); `login_argv` is the
+      # detected subcommand, and the two are only meaningful together.
+      login_program: bin,
+      login_argv: login_argv,
+      login_display:
+        if(login_argv, do: Enum.join(["claude" | login_argv], " "), else: nil),
+      login_error: login_error,
+      install_argv: @install_argv,
+      install_url: "https://claude.com/product/claude-code"
+    }
+  end
+
   # ── Connect ─────────────────────────────────────────────────────────────
 
   @doc """
@@ -230,10 +410,16 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
     case binary() do
       nil ->
         io.("")
-        io.("  Claude Code is not installed, or is not on PATH.")
-        io.("  Install it from  https://claude.com/product/claude-code")
-        io.("  then re-run setup. If it is installed somewhere unusual, set")
-        io.("  OSA_CLAUDE_CLI_BIN to its full path.")
+        io.("  Claude Code is Anthropic's own command-line client. OSA runs it")
+        io.("  for inference, so your Claude Pro/Max plan is billed instead of")
+        io.("  per-token API credit — but it is not installed here.")
+        io.("")
+        io.("    #{Enum.join(@install_argv, " ")}")
+        io.("")
+        io.("  Or open the provider picker in the OSA TUI (Alt+P → Claude), which")
+        io.("  will run that for you and then drive the sign-in in place.")
+        io.("  If it IS installed somewhere unusual, set OSA_CLAUDE_CLI_BIN to")
+        io.("  its full path.")
         {:error, :cli_not_installed}
 
       bin ->
@@ -266,15 +452,23 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
           end
 
         {:error, :cli_not_signed_in} ->
+          cmd_line =
+            case login_argv() do
+              {:ok, argv} -> Enum.join(["claude" | argv], " ")
+              _ -> "claude auth login"
+            end
+
           io.("")
           io.("  Claude Code is installed but not signed in.")
           io.("")
-          io.("    Run   claude auth login        (or  claude setup-token  on a headless box)")
-          io.("    then re-run OSA setup.")
+          io.("    Open the provider picker in the OSA TUI (Alt+P → Claude) and OSA will")
+          io.("    run  #{cmd_line}  for you, in place, and show its prompts here.")
           io.("")
-          io.("  OSA cannot sign you in to Anthropic itself — Anthropic permits you to point")
-          io.("  your own Claude Code at a third-party tool, but not a third-party tool to")
-          io.("  offer Claude login. So this step is yours to run, once.")
+          io.("    Outside the TUI, run it yourself:  #{cmd_line}")
+          io.("")
+          io.("  Either way it is Anthropic's own client doing Anthropic's own login —")
+          io.("  OSA never offers a Claude sign-in of its own, and never sees the")
+          io.("  credential that results.")
           {:error, :cli_not_signed_in}
 
         {:error, reason} ->
@@ -336,6 +530,13 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
           provider: @provider_id,
           account: entry["account_id"],
           plan: entry["plan_type"],
+          # The marker has carried `org` since it was first written, and only
+          # the email was ever displayed — which is how a user with a personal
+          # and a work Claude account could read "connected" off a status
+          # screen and still not know which one OSA was about to spend. All
+          # three are cheap to carry and only one of them is enough to be
+          # confidently wrong.
+          org: entry["org"],
           # An external credential OSA does not hold has no expiry OSA can
           # know. Reporting `nil` is the truthful answer; inventing one would
           # make the status line confidently wrong.

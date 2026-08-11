@@ -98,10 +98,92 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcherTest do
   # ── replace_all across a fuzzy match ──────────────────────────────────
 
   describe "replace_all" do
-    test "replaces every occurrence of a fuzzy-matched region" do
-      # Two identical whitespace-drifted lines; replace_all replaces both.
-      assert {:ok, "col() \nkeep()\ncol() \n", 2, _stage} =
+    test "replaces every occurrence of an EXACT (verbatim) old_string" do
+      # `row()` is a verbatim substring occurring twice — the `:simple` strategy
+      # wins and replace_all is legitimate. This is the common, valid case.
+      assert {:ok, "col() \nkeep()\ncol() \n", 2, :simple} =
                F.replace("row() \nkeep()\nrow() \n", "row()", "col()", true)
+    end
+  end
+
+  # ── replace_all is refused for APPROXIMATE strategies ─────────────────
+  #
+  # An approximate strategy's candidate is a *suggestion about one site*. It is
+  # not old_string, so replacing it globally rewrites regions that never
+  # contained old_string — silent, on-disk source corruption.
+
+  describe "replace_all under an approximate strategy" do
+    # `old` differs from disk only by whitespace RUNS, so nothing before
+    # :whitespace_normalized can match it. That strategy then produces the
+    # candidate "total = count + 1", which occurs twice: once as the real
+    # statement (line 2) and once embedded in a COMMENT (line 1). The comment
+    # never contained old_string in any sense — it must not be rewritten.
+    @content """
+    # note: total = count + 1 is the invariant
+    total = count + 1
+    """
+    @old "total  =  count + 1"
+    @new "total = tally()"
+    @comment "# note: total = count + 1 is the invariant"
+
+    test "the region that never contained old_string is left untouched" do
+      # Property under test, stated independently of how we refuse: after a
+      # replace_all request, the comment line is never rewritten.
+      surviving =
+        case F.replace(@content, @old, @new, true) do
+          # Refused — nothing is written, so the comment survives by construction.
+          {:error, _} -> @content
+          {:error, _, _} -> @content
+          {:ok, updated, _count, _strategy} -> updated
+        end
+
+      assert String.contains?(surviving, @comment),
+             "replace_all under an approximate match rewrote a region that never " <>
+               "contained old_string:\n#{surviving}"
+    end
+
+    test "refuses with the winning strategy named" do
+      assert {:error, {:replace_all_approximate, :whitespace_normalized}} =
+               F.replace(@content, @old, @new, true)
+    end
+
+    test "the same edit without replace_all is unaffected by the guard" do
+      # Both regions still match, so this is ambiguous — as it was before.
+      assert {:error, :ambiguous, 2} = F.replace(@content, @old, @new, false)
+    end
+
+    test "Matcher surfaces the refusal from the cascade" do
+      assert {:error, {:replace_all_approximate, :whitespace_normalized}} =
+               Matcher.replace(@content, @old, @new, true)
+    end
+
+    test "block_anchor cannot license a replace_all either" do
+      content = """
+      function calculate(a, b) {
+        const result = a + b;
+        return result;
+      }
+      """
+
+      old = "function calculate(a, b) {\n  const result = a+b;\n  return result;\n}\n"
+
+      assert {:error, {:replace_all_approximate, :block_anchor}} =
+               F.replace(content, old, "x", true)
+    end
+  end
+
+  describe "exact_strategy?/1" do
+    test "only :simple and :multi_occurrence are exact" do
+      assert F.exact_strategy?(:simple)
+      assert F.exact_strategy?(:multi_occurrence)
+
+      for s <- F.strategies() -- [:simple, :multi_occurrence] do
+        refute F.exact_strategy?(s), "#{s} must be classified approximate"
+      end
+    end
+
+    test "every strategy atom is classified" do
+      for s <- F.strategies(), do: assert(is_boolean(F.exact_strategy?(s)))
     end
   end
 

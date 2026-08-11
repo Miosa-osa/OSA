@@ -413,6 +413,12 @@ pub enum BackendEvent {
     SelfUpdate(crate::app::self_update::SelfUpdateEvent),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
+    /// The active session's human-readable title, pushed over SSE. Arrives as
+    /// soon as the first prompt is sent (heuristic) and again if the backend's
+    /// small-model refinement produces a better one.
+    SessionTitle {
+        title: String,
+    },
     RewindCheckpointsLoaded(Result<Vec<RewindCheckpoint>, String>),
     RewindRestored(Result<RewindRestoreResponse, String>),
     // (removed: legacy `ModelsLoaded` flat-model-list event — it had no producer
@@ -460,6 +466,25 @@ pub enum BackendEvent {
     AccountLoginUpdate(Result<crate::client::types::LoginSessionResponse, String>),
     /// A provider's dynamic model list loaded → switch picker to Models mode.
     ProviderModelsLoaded(Result<OnboardingModelsResponse, String>),
+    /// A reading of `/auth/cli/claude` — what to install, what to run, and who
+    /// is signed in. Drives the in-TUI vendor-CLI sign-in screen.
+    ClaudeCliState(Result<crate::client::types::ClaudeCliState, String>),
+    /// One repaint beat while a vendor CLI owns the pty. Faster than the
+    /// app's 200ms tick, because a terminal that lags a fifth of a second
+    /// behind the keys being typed into it does not feel like a terminal.
+    CliLoginTick,
+    /// `/auth/status` + `/usage/quota` for the picker's usage panel. One event
+    /// for both, so the panel can never draw an account from one instant
+    /// beside a quota window from another.
+    ProviderUsage(
+        Result<
+            (
+                crate::client::types::AuthStatusResponse,
+                crate::client::types::UsageQuotaResponse,
+            ),
+            String,
+        >,
+    ),
 
     // === Dialogs ===
     /// Backend requesting tool permission approval from the user.

@@ -58,7 +58,11 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       expected = SessionTeardown.steps() |> Enum.map(fn {name, _} -> name end)
 
       assert Enum.sort(ran) == Enum.sort(expected)
-      assert length(expected) == 7, "the seven zero-caller cleanups must all be wired in"
+      # Seven original zero-caller cleanups + `:compactor_summary` (the
+      # session-scoped compaction summary, added when that summary stopped
+      # being a global that leaked across sessions).
+      assert length(expected) == 8, "every per-session cleanup must be wired in"
+      assert :compactor_summary in expected
     end
 
     test "the WorldState ledger is covered — it pins rendered payload text" do
@@ -78,8 +82,8 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       assert SessionTeardown.run(:not_a_binary) == []
 
       s = sid()
-      assert length(SessionTeardown.run(s)) == 7
-      assert length(SessionTeardown.run(s)) == 7
+      assert length(SessionTeardown.run(s)) == 8
+      assert length(SessionTeardown.run(s)) == 8
     end
   end
 

@@ -69,6 +69,16 @@ pub enum ModelPickerAction {
     StartAccountLogin { provider: String, model: String },
     /// Ask the backend to abandon an in-flight sign-in (Esc on the wait screen).
     CancelAccountLogin { session_id: String },
+    /// Begin a **vendor-CLI-driven** sign-in for a provider.
+    ///
+    /// Non-terminal, exactly like `StartAccountLogin`, and for a stronger
+    /// reason: the CLI's prompts are the sign-in, so the picker must stay open
+    /// to draw them. Previously this provider's only answer was a sentence
+    /// telling the user to quit OSA and run a command elsewhere.
+    StartCliLogin { provider: String, model: String },
+    /// Re-read the CLI's state. Emitted by the CLI login screen after a child
+    /// exits, because an exit code is not evidence of a credential.
+    RefreshCliLogin,
     /// Retry the initial `/onboarding/status` catalog+detection fetch.
     /// Reachable from Providers mode any time (not just after a load
     /// failure) so a newcomer is never stuck on a stale/degraded list.
@@ -86,6 +96,10 @@ enum PickerMode {
     /// code and URL stay on-screen for the whole grant, which for a
     /// device-code provider is the only place the user can read them.
     AccountLogin,
+    /// A vendor CLI is being installed and/or signed in, on a pty inside this
+    /// dialog. Owns the screen and the keyboard for the same reason
+    /// `AccountLogin` does: the child's prompts have nowhere else to go.
+    CliLogin,
 }
 
 /// How the user proves who they are for a provider.
@@ -205,6 +219,28 @@ pub struct ModelPicker {
     /// The in-flight account sign-in, when `mode == AccountLogin`.
     account_login: Option<AccountLoginState>,
 
+    /// The in-flight vendor-CLI sign-in, when `mode == CliLogin`.
+    cli_login: Option<super::claude_login::ClaudeLogin>,
+    /// The provider and model the CLI sign-in is for, carried through the run
+    /// so a success can switch without re-deriving them.
+    cli_login_target: Option<(String, String)>,
+
+    /// Per-provider account/plan, from `/auth/status`. Empty until it answers,
+    /// which is a *different* state from "no account" and is rendered as such.
+    accounts: std::collections::HashMap<String, crate::client::types::SubscriptionStatus>,
+    /// Per-provider quota windows, from `/usage/quota`. A provider absent from
+    /// this map has reported nothing yet — there is deliberately no zero to
+    /// fall back to.
+    quota: std::collections::HashMap<String, crate::client::types::ProviderQuota>,
+    /// The backend's clock at the moment `quota` was read, so the age of an
+    /// observation is computed against the machine that made it rather than
+    /// against a TUI whose clock may differ.
+    quota_now: Option<i64>,
+    /// True once the usage fetch has answered (either way). Until then the
+    /// panel says "reading…" rather than "not reported yet" — an unanswered
+    /// request and a provider that has never reported are not the same fact.
+    usage_loaded: bool,
+
     /// Rows the provider/model list can actually show — measured on every draw
     /// (via `Cell`, since `draw` takes `&self`) so handle_key scroll math
     /// matches the real dialog height instead of the MAX_H upper bound.
@@ -242,6 +278,12 @@ impl ModelPicker {
             models_base_url: None,
             key_entry: None,
             account_login: None,
+            cli_login: None,
+            cli_login_target: None,
+            accounts: std::collections::HashMap::new(),
+            quota: std::collections::HashMap::new(),
+            quota_now: None,
+            usage_loaded: false,
             list_viewport: Cell::new((MAX_H as usize).saturating_sub(6)),
             load_failed: false,
         }
@@ -540,6 +582,7 @@ impl ModelPicker {
             PickerMode::Models => self.handle_models_key(key),
             PickerMode::KeyEntry => self.handle_key_entry_key(key),
             PickerMode::AccountLogin => self.handle_account_login_key(key),
+            PickerMode::CliLogin => self.handle_cli_login_key(key),
         }
     }
 
@@ -645,6 +688,224 @@ impl ModelPicker {
             // Needs a key → open the dedicated key screen.
             self.open_key_entry(&p);
             None
+        }
+    }
+
+    // ── Usage / quota panel ──────────────────────────────────────────────────
+
+    /// Fold in `/auth/status` and `/usage/quota`.
+    ///
+    /// Both at once, and `usage_loaded` set regardless of whether either was
+    /// empty: the panel has three states to tell apart — not asked yet, asked
+    /// and the provider reported nothing, asked and here is the number — and
+    /// collapsing the first two is how "reading…" turns into a confident
+    /// "never reported".
+    pub fn set_usage(
+        &mut self,
+        accounts: Vec<crate::client::types::SubscriptionStatus>,
+        quota: crate::client::types::UsageQuotaResponse,
+    ) {
+        self.accounts = accounts
+            .into_iter()
+            .map(|s| (s.provider.clone(), s))
+            .collect();
+        self.quota_now = quota.now;
+        self.quota = quota.providers;
+        self.usage_loaded = true;
+    }
+
+    /// The fetch failed. Still "loaded" — the user asked, and the honest
+    /// answer is that we could not tell, which the panel says in words.
+    pub fn set_usage_unavailable(&mut self) {
+        self.usage_loaded = true;
+    }
+
+    /// Everything the usage panel says about one provider, as label/value
+    /// rows. Pure, so the wording is testable without a terminal.
+    ///
+    /// The invariant this function exists to hold: **an unknown never renders
+    /// as a number.** There is no `unwrap_or(0.0)` anywhere below, and there
+    /// must never be — a limit meter drawn at 0% is read as "nothing used",
+    /// which is the single most expensive thing this screen could get wrong.
+    pub(crate) fn usage_rows(&self, provider_id: &str) -> Vec<(String, String)> {
+        let mut rows = Vec::new();
+
+        let sub = self.accounts.get(provider_id);
+        let catalog_auth = self
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .and_then(|p| p.auth.as_ref());
+
+        let account = sub
+            .and_then(|s| s.account.clone())
+            .or_else(|| catalog_auth.and_then(|a| a.account.clone()))
+            .filter(|v| !v.is_empty());
+        let org = sub.and_then(|s| s.org.clone()).filter(|v| !v.is_empty());
+        let plan = sub
+            .and_then(|s| s.plan.clone())
+            .or_else(|| catalog_auth.and_then(|a| a.plan.clone()))
+            .filter(|v| !v.is_empty());
+
+        match account {
+            Some(a) => {
+                // Org on the same row as the account, because they answer one
+                // question together — "which account is this?" — and an email
+                // alone does not distinguish a personal plan from a work one.
+                let who = match org {
+                    Some(o) => format!("{}  ·  {}", a, o),
+                    None => a,
+                };
+                rows.push(("Account".to_string(), who));
+            }
+            None => rows.push((
+                "Account".to_string(),
+                "not connected".to_string(),
+            )),
+        }
+
+        rows.push((
+            "Plan".to_string(),
+            plan.unwrap_or_else(|| "not reported".to_string()),
+        ));
+        rows
+    }
+
+    /// The limit meter's label and the fraction to fill, or `None` when the
+    /// provider has reported nothing.
+    ///
+    /// `None` is not "0%". A caller that gets `None` must draw words, never a
+    /// bar — see `usage_rows`.
+    pub(crate) fn usage_limit(&self, provider_id: &str) -> Option<(String, f64, String)> {
+        let q = self.quota.get(provider_id)?;
+        let used = q.used_percent?;
+        let name = q
+            .limit_name
+            .clone()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| window_label(q.window_minutes));
+        let age = q
+            .observed_at
+            .zip(self.quota_now)
+            .map(|(then, now)| format!("measured {}", ago(now - then)))
+            .unwrap_or_else(|| "measured just now".to_string());
+        let mut note = age;
+        if let Some(reset) = q.resets_at.as_deref().filter(|s| !s.is_empty()) {
+            note = format!("{} · resets {}", note, short_reset(reset));
+        }
+        Some((name, (used / 100.0).clamp(0.0, 1.0), note))
+    }
+
+    /// The one line that replaces the meter when there is no measurement.
+    pub(crate) fn usage_unknown_line(&self, provider_id: &str) -> String {
+        if !self.usage_loaded {
+            return "reading…".to_string();
+        }
+        let connected = self
+            .accounts
+            .get(provider_id)
+            .map(|s| s.connected)
+            .unwrap_or(false);
+        if connected {
+            // The honest reason, not a shrug. These numbers come from response
+            // headers, so they cannot exist before a request has been made.
+            "not known yet — providers report this on a response, so it appears after the first request".to_string()
+        } else {
+            "not known yet — connect this provider and make one request".to_string()
+        }
+    }
+
+    /// Providers whose sign-in is "run the vendor's own CLI", rather than a
+    /// grant the backend can broker.
+    ///
+    /// This is a route table, not a second capability list — the distinction
+    /// matters, because a second capability list here is exactly the bug this
+    /// file's `auth_methods` comment records. There is one backend route that
+    /// can answer "what should I spawn" (`/auth/cli/claude`), and this names
+    /// the provider it belongs to. A second CLI-driven provider wants a
+    /// catalog field, not another arm.
+    fn drives_a_vendor_cli(provider_id: &str) -> bool {
+        provider_id == "claude_cli"
+    }
+
+    // ── Vendor-CLI sign-in ───────────────────────────────────────────────────
+
+    /// Take over the screen for a CLI-driven sign-in.
+    pub fn begin_cli_login(&mut self, provider_id: String, model: String) {
+        self.cli_login = Some(super::claude_login::ClaudeLogin::new());
+        self.cli_login_target = Some((provider_id, model));
+        self.mode = PickerMode::CliLogin;
+    }
+
+    /// Whether a CLI sign-in is on screen. The app uses this to decide whether
+    /// to keep a fast repaint ticker running.
+    pub fn cli_login_alive(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.cli_login.as_ref().map(|c| std::sync::Arc::clone(&c.alive))
+    }
+
+    /// Fold in a reading of `/auth/cli/claude`.
+    pub fn apply_cli_state(
+        &mut self,
+        state: crate::client::types::ClaudeCliState,
+    ) -> Option<ModelPickerAction> {
+        let action = self.cli_login.as_mut()?.apply_state(state);
+        self.finish_cli_login(action)
+    }
+
+    /// The fetch failed outright.
+    pub fn apply_cli_state_error(&mut self, err: String) {
+        if let Some(c) = self.cli_login.as_mut() {
+            c.apply_fetch_error(err);
+        }
+    }
+
+    /// Poll the CLI child. Call on every repaint tick while `CliLogin` is up.
+    pub fn tick_cli_login(&mut self) -> Option<ModelPickerAction> {
+        if self.mode != PickerMode::CliLogin {
+            return None;
+        }
+        let c = self.cli_login.as_mut()?;
+        c.sync_pane_size();
+        let action = c.tick();
+        self.finish_cli_login(action)
+    }
+
+    fn handle_cli_login_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        let action = self.cli_login.as_mut()?.handle_key(key);
+        self.finish_cli_login(action)
+    }
+
+    /// Translate a `ClaudeLoginAction` into the picker's own vocabulary.
+    ///
+    /// `Connected` becomes `SaveKeyAndSwitch` with **no key** — the same shape
+    /// the device-code path produces, and the shape that matters: there is no
+    /// credential here for OSA to carry, and a variant that could carry one
+    /// would be the first step back to the removed OAuth flow.
+    fn finish_cli_login(
+        &mut self,
+        action: Option<super::claude_login::ClaudeLoginAction>,
+    ) -> Option<ModelPickerAction> {
+        use super::claude_login::ClaudeLoginAction as A;
+        match action? {
+            A::Refresh => Some(ModelPickerAction::RefreshCliLogin),
+            A::Cancel => {
+                self.cli_login = None;
+                self.cli_login_target = None;
+                self.mode = PickerMode::Providers;
+                None
+            }
+            A::Connected => {
+                let (provider, model) = self.cli_login_target.clone()?;
+                self.cli_login = None;
+                self.cli_login_target = None;
+                Some(ModelPickerAction::SaveKeyAndSwitch {
+                    runtime_provider: Self::runtime_provider(&provider),
+                    provider,
+                    api_key: None,
+                    model,
+                    base_url: None,
+                })
+            }
         }
     }
 
@@ -853,13 +1114,21 @@ impl ModelPicker {
 
         match ke.auth_method {
             AuthMethod::Account => {
+                let provider = ke.provider_id.clone();
+                if Self::drives_a_vendor_cli(&provider) {
+                    // This provider's "sign-in" is a program, not a grant: the
+                    // broker can only ever report what the CLI's own store
+                    // already says, so asking it before the CLI has been run
+                    // returns `not signed in` for ever. Run the CLI instead,
+                    // here, on a pty.
+                    return Some(ModelPickerAction::StartCliLogin { provider, model });
+                }
                 // Hand off to the backend's out-of-band sign-in and stay on
                 // screen. Whether this finishes in 50ms (a local CLI read, an
                 // AWS credential chain, a signed-in daemon) or needs a browser
                 // and a typed code is the backend's business — the picker
                 // renders whatever state comes back, so a new provider needs
                 // no new case here.
-                let provider = ke.provider_id.clone();
                 Some(ModelPickerAction::StartAccountLogin { provider, model })
             }
             AuthMethod::PasteKey => {
@@ -927,7 +1196,25 @@ impl ModelPicker {
         self.mode == PickerMode::KeyEntry
     }
 
+    /// True when a paste belongs to this dialog rather than to the composer.
+    ///
+    /// Includes the vendor-CLI screen: `claude setup-token` asks the user to
+    /// paste a code back, and a paste that landed in the composer behind the
+    /// dialog would be both lost and, briefly, a credential in a text box.
+    pub fn wants_paste(&self) -> bool {
+        matches!(self.mode, PickerMode::KeyEntry | PickerMode::CliLogin)
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
+        if self.mode == PickerMode::CliLogin {
+            // Straight through, uncleaned: this is going to a program, not
+            // into a field OSA parses, and `clean_pasted_key`'s quote/prefix
+            // stripping would corrupt anything that legitimately contains one.
+            if let Some(c) = self.cli_login.as_mut() {
+                c.paste(text);
+            }
+            return;
+        }
         if let Some(ke) = self.key_entry.as_mut() {
             let cleaned = clean_pasted_key(text);
             ke.api_key.push_str(&cleaned);
@@ -1043,6 +1330,14 @@ impl ModelPicker {
             PickerMode::Models => self.draw_models(frame, inner, &theme),
             PickerMode::KeyEntry => self.draw_key_entry(frame, inner, &theme),
             PickerMode::AccountLogin => self.draw_account_login(frame, inner, &theme),
+            // The CLI screen draws its own frame inside ours: it needs a
+            // titled border of its own to say WHICH command is running, and a
+            // pty pane that is visibly a separate surface from OSA's chrome.
+            PickerMode::CliLogin => {
+                if let Some(c) = self.cli_login.as_ref() {
+                    c.draw(frame, dialog_rect, &theme);
+                }
+            }
         }
     }
 
@@ -1142,7 +1437,15 @@ impl ModelPicker {
         );
         cy += 1;
 
-        let list_h = inner.height.saturating_sub(cy - inner.y + 1);
+        // The usage panel is a fixed band at the bottom of the list, above the
+        // help row. Fixed rather than "whatever is left over" so the list does
+        // not resize under the cursor as the selection moves between a
+        // provider with a meter and one without.
+        let panel_h = self.usage_panel_height(inner);
+        let list_h = inner
+            .height
+            .saturating_sub(cy - inner.y + 1)
+            .saturating_sub(panel_h);
         self.list_viewport.set((list_h as usize).max(1));
         // Render-time clamp: the cursor row stays inside the window even when
         // the stored offset predates a terminal resize.
@@ -1285,6 +1588,11 @@ impl ModelPicker {
             }
         }
 
+        if panel_h > 0 {
+            let panel = Rect::new(inner.x, cy + list_h, inner.width, panel_h);
+            self.draw_usage_panel(frame, panel, theme);
+        }
+
         self.draw_help(
             frame,
             inner,
@@ -1297,6 +1605,139 @@ impl ModelPicker {
                 ("Esc", "cancel"),
             ],
         );
+    }
+
+    /// Rows the usage panel needs: a rule, two account rows, the meter label
+    /// and the meter itself. Zero on a dialog too short to give them up
+    /// without starving the list — a picker you cannot scroll is worse than a
+    /// picker with no usage panel.
+    fn usage_panel_height(&self, inner: Rect) -> u16 {
+        const PANEL_H: u16 = 6;
+        if inner.height < PANEL_H + 8 {
+            0
+        } else {
+            PANEL_H
+        }
+    }
+
+    /// The provider the panel is describing: whatever the cursor is on.
+    /// `None` on the "Default (recommended)" row, which is not a provider.
+    fn selected_provider_id(&self) -> Option<String> {
+        if self.prov_cursor == 0 {
+            return None;
+        }
+        let vis = self.visible_providers();
+        vis.get(self.prov_cursor - 1)
+            .map(|&i| self.providers[i].id.clone())
+    }
+
+    /// Account, plan and a limit meter for the selected provider.
+    ///
+    /// A weekly-limit meter, in the shape a plan page uses — but only ever for
+    /// a number that exists. `usage_limit` returning `None` puts a sentence
+    /// where the bar would be, saying why there is no number rather than
+    /// drawing an empty one. An empty bar and a full one differ by a glyph;
+    /// "0% used" and "we have not been told" differ by everything.
+    fn draw_usage_panel(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
+        let dim = Style::default().fg(theme.colors.dim);
+        let label = Style::default().fg(theme.colors.dim);
+        let value = Style::default().fg(theme.colors.muted);
+
+        let mut y = area.y;
+        frame.render_widget(
+            Paragraph::new("─".repeat(area.width as usize)).style(dim),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+
+        let Some(pid) = self.selected_provider_id() else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "  Usage — select a provider to see its account and limits",
+                    dim,
+                ))
+                .style(dim),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            return;
+        };
+
+        let name = self
+            .providers
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| pid.clone());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  Usage · ", dim),
+                Span::styled(
+                    name,
+                    Style::default()
+                        .fg(theme.colors.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+
+        for (k, v) in self.usage_rows(&pid) {
+            if y >= area.y + area.height {
+                return;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("  {:<9}", k), label),
+                    Span::styled(v, value),
+                ])),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            y += 1;
+        }
+
+        if y >= area.y + area.height {
+            return;
+        }
+
+        match self.usage_limit(&pid) {
+            Some((limit_name, frac, note)) => {
+                // The window's name goes in the VALUE column, not the label
+                // one. It was in the label column, which is nine characters
+                // wide to line up with "Account" and "Plan", and "weekly
+                // limit" clipped to "weekly li" hard against the meter — a
+                // defect no unit test could see, because `usage_limit` was
+                // returning the right string the whole time.
+                let bar_w = 20usize.min(area.width.saturating_sub(30) as usize);
+                let pct = (frac * 100.0).round() as i64;
+                let tone = if frac >= 0.9 {
+                    theme.colors.error
+                } else if frac >= 0.7 {
+                    theme.colors.warning
+                } else {
+                    theme.colors.success
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("  {:<9}", "Limit"), label),
+                        Span::styled(format!("{}  ", limit_name), value),
+                        Span::styled(meter(frac, bar_w), Style::default().fg(tone)),
+                        Span::styled(format!("  {}% used", pct), value),
+                        Span::styled(format!("  · {}", note), dim),
+                    ])),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+            }
+            None => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("  {:<9}", "Limit"), label),
+                        Span::styled(self.usage_unknown_line(&pid), dim),
+                    ])),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+            }
+        }
     }
 
     fn draw_models(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
@@ -1915,6 +2356,325 @@ mod hotfix_tests {
         picker
     }
 
+    // ── Vendor-CLI sign-in (Claude Code) ────────────────────────────────────
+
+    fn claude_cli_provider() -> OnboardingProvider {
+        OnboardingProvider {
+            id: "claude_cli".to_string(),
+            name: "Claude (via Claude Code)".to_string(),
+            description: "Use your Claude Pro/Max plan".to_string(),
+            group: "accounts".to_string(),
+            requires_key: serde_json::Value::Bool(false),
+            default_model: Some("sonnet".to_string()),
+            auth_modes: Some(vec!["oauth".to_string()]),
+            usable_auth_modes: Some(vec!["oauth".to_string()]),
+            tab: Some("accounts".to_string()),
+            auth: Some(crate::client::types::ProviderAuthState {
+                state: "needs_sign_in".to_string(),
+                can_sign_in: true,
+                can_paste_key: false,
+                account: None,
+                plan: None,
+            }),
+            models: serde_json::Value::String("dynamic".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn claude_picker() -> ModelPicker {
+        ModelPicker::new_provider_first(
+            vec![claude_cli_provider()],
+            None,
+            "anthropic".to_string(),
+            "claude".to_string(),
+        )
+    }
+
+    fn cli_state(installed: bool, signed_in: bool) -> crate::client::types::ClaudeCliState {
+        crate::client::types::ClaudeCliState {
+            installed,
+            version: installed.then(|| "2.1.226".to_string()),
+            version_ok: installed.then_some(true),
+            min_version: Some("2.0.0".into()),
+            signed_in,
+            account: signed_in.then(|| "luna@example.com".to_string()),
+            org: signed_in.then(|| "Acme Inc".to_string()),
+            plan: signed_in.then(|| "max".to_string()),
+            login_program: installed.then(|| "/usr/bin/claude".to_string()),
+            login_argv: installed.then(|| vec!["auth".into(), "login".into()]),
+            login_display: installed.then(|| "claude auth login".to_string()),
+            install_argv: vec![
+                "npm".into(),
+                "install".into(),
+                "-g".into(),
+                "@anthropic-ai/claude-code".into(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn choosing_claude_starts_a_cli_sign_in_not_a_broker_grant() {
+        let mut picker = claude_picker();
+        picker.open_key_entry(&claude_cli_provider());
+        picker.mode = PickerMode::KeyEntry;
+
+        assert!(
+            matches!(
+                picker.key_entry_submit(),
+                Some(ModelPickerAction::StartCliLogin { .. })
+            ),
+            "the broker can only report what the CLI's store already says; asking it before the CLI has run returns 'not signed in' for ever"
+        );
+    }
+
+    #[test]
+    fn a_cli_sign_in_keeps_the_picker_open_so_the_prompts_have_somewhere_to_go() {
+        let mut picker = claude_picker();
+        picker.begin_cli_login("claude_cli".into(), "sonnet".into());
+        assert!(matches!(picker.mode, PickerMode::CliLogin));
+        assert!(picker.cli_login.is_some());
+    }
+
+    #[test]
+    fn a_missing_binary_reaches_the_install_offer_rather_than_a_dead_end() {
+        let mut picker = claude_picker();
+        picker.begin_cli_login("claude_cli".into(), "sonnet".into());
+        assert!(picker.apply_cli_state(cli_state(false, false)).is_none());
+        assert_eq!(
+            *picker.cli_login.as_ref().unwrap().phase(),
+            super::super::claude_login::Phase::NotInstalled
+        );
+    }
+
+    #[test]
+    fn a_confirmed_sign_in_switches_with_no_key_because_there_is_no_key() {
+        let mut picker = claude_picker();
+        picker.begin_cli_login("claude_cli".into(), "sonnet".into());
+        picker.apply_cli_state(cli_state(true, true));
+
+        let action = picker.handle_key(key(KeyCode::Enter));
+        match action {
+            Some(ModelPickerAction::SaveKeyAndSwitch {
+                provider,
+                api_key,
+                model,
+                ..
+            }) => {
+                assert_eq!(provider, "claude_cli");
+                assert_eq!(model, "sonnet");
+                assert!(
+                    api_key.is_none(),
+                    "a key here would mean OSA had started holding an Anthropic credential"
+                );
+            }
+            other => panic!("expected SaveKeyAndSwitch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn esc_on_the_cli_screen_returns_to_the_provider_list() {
+        let mut picker = claude_picker();
+        picker.begin_cli_login("claude_cli".into(), "sonnet".into());
+        picker.apply_cli_state(cli_state(true, false));
+
+        assert!(picker.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(matches!(picker.mode, PickerMode::Providers));
+        assert!(picker.cli_login.is_none());
+    }
+
+    #[test]
+    fn a_paste_on_the_cli_screen_is_claimed_by_the_dialog_not_the_composer() {
+        let mut picker = claude_picker();
+        picker.begin_cli_login("claude_cli".into(), "sonnet".into());
+        assert!(
+            picker.wants_paste(),
+            "`claude setup-token` asks for a code to be pasted back"
+        );
+    }
+
+    #[test]
+    fn only_claude_takes_the_cli_route_today() {
+        assert!(ModelPicker::drives_a_vendor_cli("claude_cli"));
+        assert!(!ModelPicker::drives_a_vendor_cli("openai_codex"));
+        assert!(!ModelPicker::drives_a_vendor_cli("ollama_cloud"));
+    }
+
+    // ── Usage panel ─────────────────────────────────────────────────────────
+
+    fn quota(used: Option<f64>) -> crate::client::types::UsageQuotaResponse {
+        let mut providers = std::collections::HashMap::new();
+        if let Some(u) = used {
+            providers.insert(
+                "openai_codex".to_string(),
+                crate::client::types::ProviderQuota {
+                    used_percent: Some(u),
+                    window_minutes: Some(10_080.0),
+                    resets_at: Some("2026-08-18T09:30:00Z".to_string()),
+                    limit_name: None,
+                    observed_at: Some(1_000_000),
+                },
+            );
+        }
+        crate::client::types::UsageQuotaResponse {
+            providers,
+            now: Some(1_007_200),
+        }
+    }
+
+    fn codex_status(connected: bool) -> crate::client::types::SubscriptionStatus {
+        crate::client::types::SubscriptionStatus {
+            provider: "openai_codex".to_string(),
+            connected,
+            verified: connected,
+            account: connected.then(|| "luna@example.com".to_string()),
+            plan: connected.then(|| "plus".to_string()),
+            org: connected.then(|| "Acme Inc".to_string()),
+            expired: false,
+        }
+    }
+
+    fn codex_picker() -> ModelPicker {
+        let p = OnboardingProvider {
+            id: "openai_codex".to_string(),
+            name: "ChatGPT (Codex)".to_string(),
+            tab: Some("accounts".to_string()),
+            models: serde_json::Value::String("dynamic".to_string()),
+            ..Default::default()
+        };
+        let mut picker =
+            ModelPicker::new_provider_first(vec![p], None, "anthropic".into(), "claude".into());
+        // Row 0 is "Default (recommended)"; row 1 is the first provider.
+        picker.prov_cursor = 1;
+        picker
+    }
+
+    #[test]
+    fn before_the_fetch_answers_the_panel_says_it_is_reading_not_that_nothing_exists() {
+        let picker = codex_picker();
+        assert_eq!(picker.usage_unknown_line("openai_codex"), "reading…");
+    }
+
+    #[test]
+    fn a_provider_that_has_reported_nothing_renders_words_and_never_a_bar() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(true)], quota(None));
+
+        assert!(
+            picker.usage_limit("openai_codex").is_none(),
+            "a bar drawn at 0% reads as 'nothing used', which is the most expensive thing this screen could get wrong"
+        );
+        let line = picker.usage_unknown_line("openai_codex");
+        assert!(line.contains("not known yet"), "got {}", line);
+        assert!(
+            line.contains("after the first request"),
+            "the reason matters: these numbers come from response headers, so they cannot exist before a request. got {}",
+            line
+        );
+    }
+
+    #[test]
+    fn a_disconnected_provider_is_told_to_connect_rather_than_to_wait() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(false)], quota(None));
+        assert!(picker
+            .usage_unknown_line("openai_codex")
+            .contains("connect this provider"));
+    }
+
+    #[test]
+    fn a_reported_window_renders_as_a_named_limit_with_its_age() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(true)], quota(Some(48.0)));
+
+        let (name, frac, note) = picker.usage_limit("openai_codex").unwrap();
+        assert_eq!(name, "weekly limit");
+        assert!((frac - 0.48).abs() < 1e-9);
+        // 7200s between the observation and the backend's clock. The age is
+        // part of the reading: a 48% figure from two hours ago is not a claim
+        // about right now, and the panel must not present it as one.
+        assert!(note.contains("2h ago"), "got {}", note);
+        assert!(note.contains("2026-08-18 09:30"), "got {}", note);
+    }
+
+    #[test]
+    fn the_account_row_names_the_org_beside_the_email() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(true)], quota(Some(10.0)));
+
+        let rows = picker.usage_rows("openai_codex");
+        assert_eq!(rows[0].0, "Account");
+        assert!(rows[0].1.contains("luna@example.com"), "got {}", rows[0].1);
+        assert!(
+            rows[0].1.contains("Acme Inc"),
+            "an email alone does not say WHICH account — got {}",
+            rows[0].1
+        );
+        assert_eq!(rows[1], ("Plan".to_string(), "plus".to_string()));
+    }
+
+    #[test]
+    fn a_plan_nobody_reported_says_so_rather_than_showing_a_blank() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(false)], quota(None));
+
+        let rows = picker.usage_rows("openai_codex");
+        assert_eq!(rows[0].1, "not connected");
+        assert_eq!(rows[1].1, "not reported");
+    }
+
+    #[test]
+    fn a_used_percent_over_a_hundred_is_clamped_not_overflowed() {
+        let mut picker = codex_picker();
+        picker.set_usage(vec![codex_status(true)], quota(Some(140.0)));
+        let (_, frac, _) = picker.usage_limit("openai_codex").unwrap();
+        assert_eq!(frac, 1.0);
+    }
+
+    #[test]
+    fn the_meter_is_exactly_the_width_it_is_asked_for() {
+        assert_eq!(meter(0.0, 10).chars().count(), 10);
+        assert_eq!(meter(1.0, 10).chars().count(), 10);
+        assert_eq!(meter(0.5, 10), "█████░░░░░");
+        assert_eq!(meter(0.0, 4), "░░░░");
+        assert_eq!(meter(0.42, 0), "");
+    }
+
+    #[test]
+    fn a_window_length_that_matches_nothing_familiar_is_called_a_limit() {
+        assert_eq!(window_label(None), "limit");
+        assert_eq!(window_label(Some(0.0)), "limit");
+        assert_eq!(window_label(Some(10_080.0)), "weekly limit");
+        assert_eq!(window_label(Some(300.0)), "5-hour limit");
+        assert_eq!(window_label(Some(43_200.0)), "monthly limit");
+    }
+
+    #[test]
+    fn a_reset_string_that_is_not_iso_is_passed_through_rather_than_mangled() {
+        assert_eq!(short_reset("next Tuesday"), "next Tuesday");
+        assert_eq!(short_reset("2026-08-18T09:30:00Z"), "2026-08-18 09:30");
+    }
+
+    #[test]
+    fn the_panel_yields_its_rows_rather_than_starving_a_short_list() {
+        let picker = codex_picker();
+        let tall = Rect::new(0, 0, 100, 28);
+        let short = Rect::new(0, 0, 100, 12);
+        assert!(picker.usage_panel_height(tall) > 0);
+        assert_eq!(
+            picker.usage_panel_height(short),
+            0,
+            "a picker you cannot scroll is worse than a picker with no usage panel"
+        );
+    }
+
+    #[test]
+    fn the_default_row_is_not_a_provider_and_the_panel_says_so() {
+        let mut picker = codex_picker();
+        picker.prov_cursor = 0;
+        assert_eq!(picker.selected_provider_id(), None);
+    }
+
     // ── PasteKey: rejected key or network error must both be save-able ──────
 
     #[test]
@@ -2165,6 +2925,62 @@ mod clean_key_tests {
         let _ = clean_pasted_key(&"\u{20ac}".repeat(30));
         let _ = clean_pasted_key("\"\u{4e2d}\u{6587}\"");
     }
+}
+
+/// Name a quota window from its length, when the provider did not name it.
+///
+/// The names are the ones a plan page uses ("weekly limit"), because that is
+/// the vocabulary the user already has for the thing being measured. A window
+/// we cannot describe is called "limit" rather than being invented into the
+/// nearest familiar bucket.
+pub(crate) fn window_label(minutes: Option<f64>) -> String {
+    match minutes {
+        // Bucketed at the midpoints between the real windows (5h = 300,
+        // 1d = 1440, 7d = 10080, 30d = 43200) rather than at the windows
+        // themselves, so a provider reporting 10079 or 10081 minutes still
+        // lands on "weekly" instead of falling a bucket.
+        Some(m) if m >= 20_000.0 => "monthly limit".to_string(),
+        Some(m) if m >= 6_000.0 => "weekly limit".to_string(),
+        Some(m) if m >= 900.0 => "daily limit".to_string(),
+        Some(m) if m >= 200.0 => "5-hour limit".to_string(),
+        Some(m) if m >= 1.0 => format!("{}-minute limit", m.round() as i64),
+        _ => "limit".to_string(),
+    }
+}
+
+/// A measurement's age, in the coarsest unit that is still true.
+pub(crate) fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 0 => "just now".to_string(),
+        s if s < 90 => "just now".to_string(),
+        s if s < 5_400 => format!("{}m ago", s / 60),
+        s if s < 172_800 => format!("{}h ago", s / 3_600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// Shorten an ISO-8601 reset timestamp to the date and time, dropping the
+/// seconds and the zone marker. Anything that is not ISO-8601-shaped is passed
+/// through untouched rather than mangled — the provider chose that string.
+pub(crate) fn short_reset(raw: &str) -> String {
+    match raw.split_once('T') {
+        Some((date, rest)) if date.len() == 10 => {
+            let time: String = rest.chars().take(5).collect();
+            format!("{} {}", date, time)
+        }
+        _ => raw.to_string(),
+    }
+}
+
+/// A fixed-width meter. `frac` is already clamped to 0.0..=1.0 by the caller,
+/// and there is deliberately no overload that takes an `Option` — a meter is
+/// only ever drawn for a measurement that exists.
+pub(crate) fn meter(frac: f64, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let filled = ((frac * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
 /// Greedy word wrap for the sign-in screen's message line.

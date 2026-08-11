@@ -563,16 +563,21 @@ mod output_quality_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn url_becomes_osc8_link_when_supported() {
-        // Force hyperlink support for a deterministic assertion.
-        std::env::set_var("TERM", "xterm-256color");
-        std::env::set_var("OSA_HYPERLINKS", "1");
+        // Force hyperlink support for a deterministic assertion. Both overrides
+        // are process-global, so they are scoped to this body and restored on
+        // drop, and the test is `#[serial]` so no concurrent test observes the
+        // window in which TERM differs.
+        let _term = crate::test_env::EnvGuard::set("TERM", "xterm-256color");
+        let _links = crate::test_env::EnvGuard::set("OSA_HYPERLINKS", "1");
         assert!(crate::components::osc8::supports_hyperlinks());
         let (spans, _w) = linkify_row("see https://osa.dev/docs now", Style::default());
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         // OSC-8 introducer wraps the URL.
         assert!(joined.contains("\x1b]8;;https://osa.dev/docs"), "{joined:?}");
-        std::env::remove_var("OSA_HYPERLINKS");
+        // No manual cleanup: the guards restore TERM and OSA_HYPERLINKS on
+        // drop, including if an assertion above unwinds.
     }
 
     #[test]

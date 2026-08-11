@@ -17,8 +17,21 @@ defmodule OptimalSystemAgent.Supervisors.Sessions do
   @impl true
   def init(_init_arg) do
     # cleanupPeriodDays (CC-parity): purge saved session transcripts older than
-    # the retention window once at boot. Best-effort — never blocks startup.
-    OptimalSystemAgent.Agent.SessionPersistence.purge_expired()
+    # the retention window once at boot.
+    #
+    # Runs ASYNC. It `File.stat/2`s every file in the sessions directory, which
+    # measured 178ms of boot here and grows with session history — and the
+    # supervisor `init/1` callback is the worst possible place for it, since
+    # nothing above this subsystem in the `:rest_for_one` root tree can start
+    # until it returns. Nothing needs expired sessions to be gone before the
+    # first keystroke is served, so it is dispatched onto the root
+    # `TaskSupervisor` (started before this subsystem) and reaps in the
+    # background. Best-effort: an unlinked task, so a failure cannot take the
+    # supervisor with it.
+    _ =
+      Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+        OptimalSystemAgent.Agent.SessionPersistence.purge_expired()
+      end)
 
     children = [
       # Channel adapters (CLI, HTTP, Telegram, Discord, Slack, etc.)
@@ -36,6 +49,8 @@ defmodule OptimalSystemAgent.Supervisors.Sessions do
       {DynamicSupervisor, name: OptimalSystemAgent.SessionSupervisor, strategy: :one_for_one}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    children
+    |> OptimalSystemAgent.Supervisors.BootTiming.wrap("Sessions")
+    |> Supervisor.init(strategy: :one_for_one)
   end
 end

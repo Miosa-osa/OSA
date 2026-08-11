@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   """
 
   alias OptimalSystemAgent.CLI.Prompt
+  alias OptimalSystemAgent.System.AtomicFile
   alias OptimalSystemAgent.Auth.LoginSession
   alias OptimalSystemAgent.Auth.Subscription
   alias OptimalSystemAgent.Onboarding
@@ -776,17 +777,12 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
     pairs = [{"OSA_DEFAULT_PROVIDER", default_provider} | extra_pairs]
 
-    existing =
-      case File.read(env_path) do
-        {:ok, content} -> content
-        _ -> ""
-      end
+    content = upsert_env(read_env_file!(env_path), pairs)
 
-    content = upsert_env(existing, pairs)
-
-    File.write!(env_path, content)
-    # Restrict permissions — file contains API keys
-    File.chmod!(env_path, 0o600)
+    # 0600 (file contains API keys) is applied to the temp file before the
+    # rename. The previous write-then-chmod left a window in which every key in
+    # the file sat at the umask default, readable by any local user.
+    AtomicFile.write!(env_path, content, mode: 0o600)
 
     apply_live(provider, api_key, model, pairs)
   end
@@ -917,22 +913,45 @@ defmodule OptimalSystemAgent.CLI.Setup do
     |> Kernel.<>("\n")
   end
 
-  defp save_env(key, value) do
+  # Public for the same reason `write_config/3` is: so the upsert behavior is
+  # unit-testable without driving the interactive prompt flow. Still internal API.
+  #
+  # This used to be a second, subtly different copy of `upsert_env/2`, and the
+  # difference silently dropped keys. It decided replace-vs-append with
+  # `String.contains?(existing, "#{key}=")` — an unanchored substring test — but
+  # then performed the replacement with an anchored `~r/^KEY=.*$/m`. For any key
+  # that is a suffix of a key already in the file the two disagree: with
+  # `ANTHROPIC_API_KEY=` present, saving `API_KEY=` matched `contains?` (so the
+  # append was skipped) and matched nothing anchored (so the replace was a
+  # no-op). The key was never written, and the user was told it was. Routing
+  # both paths through the one line-anchored implementation removes the
+  # possibility of the two disagreeing at all.
+  @doc false
+  def save_env(key, value) do
     env_path = Path.join(osa_dir(), ".env")
     File.mkdir_p!(osa_dir())
 
-    existing =
-      case File.read(env_path) do
-        {:ok, content} -> content
-        _ -> ""
-      end
+    content = upsert_env(read_env_file!(env_path), [{key, value}])
 
-    # Replace or append
-    if String.contains?(existing, "#{key}=") do
-      updated = Regex.replace(~r/^#{Regex.escape(key)}=.*$/m, existing, "#{key}=#{value}")
-      File.write!(env_path, updated)
-    else
-      File.write!(env_path, existing <> "#{key}=#{value}\n")
+    # 0600: this file holds API keys. Set on the temp file *before* the rename,
+    # so the key is never momentarily world-readable at its final path.
+    AtomicFile.write!(env_path, content, mode: 0o600)
+  end
+
+  # A missing .env is the normal first-run case and means "start from empty".
+  # Any *other* read error (EACCES, EIO, a directory in the way) is not: the
+  # file may well have contents we simply could not see, and treating it as
+  # empty would make the upsert-and-rewrite below destroy every key in it.
+  defp read_env_file!(env_path) do
+    case File.read(env_path) do
+      {:ok, content} ->
+        content
+
+      {:error, :enoent} ->
+        ""
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "read file", path: env_path
     end
   end
 

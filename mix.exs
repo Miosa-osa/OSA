@@ -258,7 +258,10 @@ defmodule OptimalSystemAgent.MixProject do
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.serve()"
         ;;
       doctor)
-        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.doctor()"
+        shift
+        ARGS=$(printf '"%s",' "$@")
+        ARGS="[${ARGS%,}]"
+        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.doctor(${ARGS})"
         ;;
       opencomputers)
         shift

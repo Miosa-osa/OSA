@@ -20,6 +20,17 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   It is **pure**: no I/O, no state, no config reads. `blocked?/1` returns
   `{:blocked, reason}` or `:ok`.
 
+  ## Quoting and wrappers
+
+  Every pattern below is evaluated against the **variant set** of the command
+  (`CommandVariants.variants/1`), not against the raw string. The shell strips
+  quoting and unwraps `bash -c` before the kernel runs anything, so a matcher
+  that reads the raw string is matching a different program than the one that
+  executes — which is how `rm -rf "/"`, `"rm" -rf /`, `rm -rf \\/` and
+  `bash -c "rm -rf /"` all used to walk straight through a breaker that stopped
+  the bare `rm -rf /`. Normalizing the input is the only fix that generalizes;
+  hardening the regexes loses to the next encoding.
+
   ## What is always blocked
 
     * `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf /*`, `rm -rf .` and other
@@ -33,6 +44,8 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
     * Pipe-to-shell of downloaded content (`curl … | sh`, `wget … | bash`,
       `curl … | sudo sh`).
   """
+
+  alias OptimalSystemAgent.Agent.Safety.CommandVariants
 
   @type reason :: String.t()
   @type result :: {:blocked, reason()} | :ok
@@ -178,9 +191,47 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   @doc """
   Check a raw shell command string against every circuit-breaker pattern.
   Exposed for direct use by shell handlers / hooks.
+
+  The patterns are applied to EVERY variant of the command (unquoted forms,
+  wrapper payloads) — see `CommandVariants`. A match on any variant blocks.
   """
   @spec check_command(String.t()) :: result()
   def check_command(command) when is_binary(command) do
+    command
+    |> CommandVariants.variants()
+    |> Enum.find_value(:ok, fn variant ->
+      case check_variant(variant) do
+        {:blocked, _} = blocked -> blocked
+        :ok -> nil
+      end
+    end)
+  end
+
+  def check_command(_), do: :ok
+
+  @doc """
+  The unrecoverable **filesystem/system destruction** subset of the breaker:
+  `rm -rf` at a broad root, fork bombs, `dd` to a block device, `mkfs`.
+
+  This is the single source of truth for that class. `shell_execute`'s
+  hard-deny tier delegates here rather than keeping a second copy of the same
+  patterns — two lists that must stay in sync is precisely how the quoting hole
+  survived in one of them.
+  """
+  @spec catastrophic_destruction?(String.t()) :: boolean()
+  def catastrophic_destruction?(command) when is_binary(command) do
+    CommandVariants.any?(command, fn variant ->
+      rm_rf_broad_root?(variant) or
+        Regex.match?(@fork_bomb, variant) or
+        Regex.match?(@dd_block_device, variant) or
+        Regex.match?(@mkfs, variant)
+    end)
+  end
+
+  def catastrophic_destruction?(_), do: false
+
+  # A single variant against every pattern.
+  defp check_variant(command) when is_binary(command) do
     cond do
       rm_rf_broad_root?(command) ->
         {:blocked, "recursive force-delete of a root/home path (rm -rf) is never permitted"}
@@ -211,11 +262,26 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
     end
   end
 
-  def check_command(_), do: :ok
-
   # A file-delete tool targeting a broad root path is a hard stop.
   @spec check_path(String.t()) :: result()
   def check_path(path) when is_binary(path) do
+    # A path argument is not shell-processed, but it may still arrive quoted
+    # from a model that wrote it as it would in a shell. Check both forms.
+    unquoted = CommandVariants.shell_unquote(path)
+
+    if unquoted != path do
+      case check_one_path(unquoted) do
+        {:blocked, _} = blocked -> blocked
+        :ok -> check_one_path(path)
+      end
+    else
+      check_one_path(path)
+    end
+  end
+
+  def check_path(_), do: :ok
+
+  defp check_one_path(path) do
     expanded = safe_expand(path)
 
     broad_roots =
@@ -247,8 +313,6 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
         :ok
     end
   end
-
-  def check_path(_), do: :ok
 
   # rm + recursive + force + a broad-root target — all present, order-insensitive.
   defp rm_rf_broad_root?(command) do

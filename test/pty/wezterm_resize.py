@@ -10,10 +10,33 @@ scrollback back out (`wezterm cli get-text --start-line`). That makes it the
 one other real emulator this bug can be checked against without a human
 watching the screen.
 
-It matters because the fix for tmux is environment-scoped (an ED3 history
-purge, applied only under a multiplexer). A scoped fix demands evidence from
-outside its scope: that the unscoped path is still correct on an emulator that
-is not tmux and not libvte.
+It matters because the fix for tmux is environment-scoped, and a scoped fix
+demands evidence from OUTSIDE its scope: that the path taken everywhere else is
+still correct on an emulator that is neither tmux nor libvte. WezTerm is the
+only such emulator here that can be checked without a human watching.
+
+What the scoped fix IS
+----------------------
+The surgical clear from the remembered live-region top (`event_loop.rs`,
+`resize_clear_strategy`): the old chrome is overwritten in place, so it never
+becomes scroll history in the first place.
+
+It is NOT an ED3 history purge. That was v1.0.71 only, reverted in v1.0.72
+because it worked by destroying the user's scrollback on every resize, and
+`layout_invariants.rs` now carries an unconditional test banning ED3 on the
+resize path. This docstring used to describe the purge as the shipped fix; a
+stale comment naming a reverted approach is how someone reintroduces it, which
+is the same reason CHANGELOG records both rejected approaches by name.
+
+What the scope is keyed on
+--------------------------
+Not "is this a multiplexer", and not "does this terminal reflow". The older
+rationale here — that the surgical clear is valid under tmux "because tmux never
+reflows" — is false. tmux has reflowed since 2.5, and `test/pty/reflow_matrix.py`
+measures tmux 3.4 on this box re-wrapping an 85-column line to one row when the
+pane widens to 140, exactly as libvte, WezTerm and Ghostty do. Every terminal
+measurable here reflows, so reflow cannot be what separates them. See
+`resize_clear_strategy` for what the gate keys on instead.
 
 Requires the `wezterm` binary and a display. Skips otherwise.
 
@@ -30,6 +53,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scrollback_prelude  # noqa: E402  (needs the sys.path line above)
+import term_env  # noqa: E402
 
 STUB_PORT = 12795
 
@@ -60,16 +86,50 @@ def main() -> int:
 
     failures: list[str] = []
 
-    with StubBackend(STUB_PORT) as backend:
-        env = os.environ.copy()
-        env["OSA_BASE_URL"] = backend.base_url
+    def _x_windows() -> set[str]:
+        r = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--class", "org.wezfurlong.wezterm"],
+            capture_output=True, text=True,
+        )
+        return {w for w in r.stdout.split() if w.strip()}
 
-        # `spawn --new-window` prints the new pane id, which is how everything
-        # below targets it without disturbing any pane the user has open.
+    windows_before = _x_windows()
+
+    with StubBackend(STUB_PORT) as backend:
+        # `wezterm cli spawn` is executed by the already-running mux SERVER, so
+        # the child inherits that server's environment and nothing set here
+        # would reach it. The sanitization and `OSA_BASE_URL` therefore travel
+        # inside the command line. Without this the child inherits whatever the
+        # user's wezterm was started from — including `$TMUX` when that was a
+        # tmux session, which would make this "WezTerm" test measure tmux.
+        prefix = term_env.sh_env_prefix(
+            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+        )
+        # A scrollback of WRAPPED lines, so a widen actually re-joins content
+        # above the live region and the drag can strand something. With an
+        # empty transcript nothing moves and the assertion is vacuous.
+        prelude = scrollback_prelude.prelude_text(
+            lines=int(os.environ.get("OSA_PTY_PRELUDE_LINES", "12"))
+        )
+        import shlex as _shlex
+
+        # The leading sleep gives the harness time to enlarge the window
+        # BEFORE the prelude prints. A WezTerm window opens at roughly 80x24,
+        # and 12 wrapped lines plus an inline live region do not fit in 24 rows
+        # — the binary then wedges on startup and never reaches a composer.
+        # (That wedge is a real OSA defect in its own right; see the report.)
+        cmd = (
+            "sleep 5; "
+            f"printf %s {_shlex.quote(prelude)}; "
+            # `exec` FIRST: it is a shell builtin, so `env … exec binary` would
+            # have `env` look for a program literally named "exec" and fail.
+            f"exec {prefix} {_shlex.quote(str(binary))}"
+        )
+
+        # `--new-window` gives a fresh GUI window, which is what gets resized.
         try:
             pane = subprocess.run(
-                ["wezterm", "cli", "spawn", "--new-window", "--", str(binary)],
-                env=env,
+                ["wezterm", "cli", "spawn", "--new-window", "--", "/bin/sh", "-c", cmd],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -92,36 +152,51 @@ def main() -> int:
             return r.stdout
 
         def window_id() -> str | None:
-            r = subprocess.run(
-                ["xdotool", "search", "--pid", pid_of_pane()],
-                capture_output=True, text=True,
-            )
-            ids = [x for x in r.stdout.split() if x.strip()]
-            return ids[-1] if ids else None
+            """The X window of the pane we just spawned.
 
-        def pid_of_pane() -> str:
-            r = subprocess.run(
-                ["wezterm", "cli", "list", "--format", "json"],
-                capture_output=True, text=True,
-            )
-            import json as _json
-            try:
-                for p in _json.loads(r.stdout or "[]"):
-                    if str(p.get("pane_id")) == pane_id:
-                        return str(p.get("window_id", ""))
-            except Exception:
-                pass
-            return ""
+            Found by DIFFING the visible windows of WezTerm's class before and
+            after the spawn. The previous implementation looked the window up by
+            pid — `xdotool search --pid` fed with WezTerm's own *window_id*
+            field, which is a WezTerm mux id and not a process id at all, so the
+            search never matched and this harness reported SKIPPED on every run.
+            Diffing avoids the question entirely: a pid is not usable here in
+            any case, because `cli spawn` routes through the already-running
+            gui process and the window belongs to THAT pid, not to anything the
+            harness started.
+            """
+            # Poll: the window is mapped by the gui process asynchronously and
+            # is not visible to X the instant `cli spawn` returns.
+            for _ in range(60):
+                new = _x_windows() - windows_before
+                if new:
+                    return sorted(new)[-1]
+                time.sleep(0.25)
+            return None
 
         try:
-            time.sleep(8)
-            before = get_text()
-            if BANDS["composer prompt"] not in before:
-                return _skip("binary did not reach a composer inside wezterm")
-
             wid = window_id()
             if not wid:
                 return _skip("could not locate the wezterm X window to resize")
+            # Enlarge before the prelude lands (see the `sleep 5` above), and
+            # start WIDE so the drag below has room to narrow into.
+            subprocess.run(["xdotool", "windowsize", wid, "1200", "900"],
+                           capture_output=True)
+
+            # Poll rather than sleep a fixed 8s. Startup spans a backend
+            # handshake and a provider probe; a fixed wait that is occasionally
+            # short degrades into an intermittent SKIP, which is a green run
+            # that asserted nothing.
+            before = ""
+            for _ in range(45):
+                time.sleep(1.0)
+                before = get_text()
+                if BANDS["composer prompt"] in before:
+                    break
+            else:
+                if os.environ.get("WEZ_DEBUG"):
+                    print("--- pane text (debug) ---")
+                    print("\n".join(before.splitlines()[-30:]))
+                return _skip("binary did not reach a composer inside wezterm")
 
             # Drag the window through a range of widths. xdotool drives the
             # real window manager, so the emulator resizes exactly as it does

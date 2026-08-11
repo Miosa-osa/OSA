@@ -179,6 +179,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   defp msg_field(_, _), do: nil
 
   def stop_session(session_id) do
+    # `/clear`, `/new` and `/exit` all funnel here (via `start_new_session/1`,
+    # `resume_session/3` and the REPL's quit path). The CLI stops the Loop
+    # directly rather than through `Runtime.SessionManager.stop_session/1`, so
+    # it does NOT reach `Runtime.SessionTeardown`. Drop the session's persisted
+    # compaction summary explicitly — it is verbatim conversation content and
+    # must not survive into whatever session comes next.
+    OptimalSystemAgent.Agent.Compactor.forget_session(session_id)
+
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{pid, _}] -> GenServer.stop(pid, :normal)
       _ -> :ok

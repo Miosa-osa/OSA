@@ -170,15 +170,58 @@ LOCK_DIR="$OSA_HOME/.update.lock.d"
 # is no longer alive (e.g. the machine lost power mid-update) is detected by
 # pid and cleared automatically instead of wedging every future update. ─────
 LOCK_ACQUIRED=0
+
+# Classify a pid as alive / foreign / gone.
+#
+# `kill -0` conflates two very different answers in its exit status: ESRCH
+# ("no such process", the lock IS stale) and EPERM ("process exists, not
+# yours", the lock is emphatically NOT stale). The old code read any non-zero
+# status as stale and deleted the lock — so a multi-user or container-uid
+# mismatch silently removed the lock guarding somebody else's running update.
+# stderr distinguishes them; where /proc exists it is checked first because it
+# answers directly and without parsing localized text.
+pid_state() {
+  local pid="$1" err
+  [ -n "$pid" ] || { echo gone; return; }
+  case "$pid" in
+    ''|*[!0-9]*) echo gone; return ;;
+  esac
+
+  if [ -d /proc ] && [ -e /proc/1 ]; then
+    if [ -d "/proc/$pid" ]; then echo alive; else echo gone; fi
+    return
+  fi
+
+  if kill -0 "$pid" 2>/dev/null; then
+    echo alive
+    return
+  fi
+  err="$(kill -0 "$pid" 2>&1 >/dev/null || true)"
+  case "$err" in
+    *[Pp]ermission*|*[Nn]ot\ permitted*|*EPERM*) echo foreign ;;
+    *) echo gone ;;
+  esac
+}
+
 acquire_lock() {
   mkdir -p "$OSA_HOME" 2>/dev/null \
     || abort "cannot create '$OSA_HOME'. Check permissions and free disk space, then retry."
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     local lpid=""
     [ -f "$LOCK_DIR/pid" ] && lpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null; then
-      abort "another 'osa update' is already running (pid $lpid). Wait for it to finish, then try again."
-    fi
+    case "$(pid_state "$lpid")" in
+      alive)
+        abort "another 'osa update' is already running (pid $lpid). Wait for it to finish, then try again."
+        ;;
+      # EPERM: the process EXISTS, we just don't own it (another user, or a
+      # different uid inside a container). Deleting the lock here would let us
+      # run concurrently with a live update and race it over the same
+      # $VERSIONS_DIR and `current` symlink. Refuse instead — a stuck update is
+      # recoverable by hand, two simultaneous updates are not.
+      foreign)
+        abort "another 'osa update' is already running as a different user (pid $lpid). Wait for it to finish. If you are certain it is gone, remove '$LOCK_DIR' by hand."
+        ;;
+    esac
     warn "clearing a stale update lock left by process ${lpid:-unknown} (not running)"
     rm -rf "$LOCK_DIR" 2>/dev/null || true
     mkdir "$LOCK_DIR" 2>/dev/null \
@@ -275,15 +318,26 @@ print_changelog_top() {
   ' "$changelog" 2>/dev/null || true
 }
 
+# The ONE env both gates use. This used to be two different answers: the build
+# ran with whatever MIX_ENV happened to be inherited (i.e. `dev`), while the
+# health check hardcoded a fallback to `prod`. The result was a gate that
+# booted an artifact the build had never produced — it either recompiled from
+# scratch inside the probe's 40s timeout, or, worse, booted a *stale* prod
+# build left over from an earlier version and passed. A green gate then said
+# nothing at all about the code being installed. Same value, both gates, or the
+# gate is theatre.
+OSA_UPDATE_MIX_ENV="${OSA_UPDATE_MIX_ENV:-${MIX_ENV:-prod}}"
+
 # ── Build (gate #1) ────────────────────────────────────────────────────────
 run_build() {
   local stage="$1"
   if [ -n "${OSA_UPDATE_BUILD_CMD:-}" ]; then
-    ( cd "$stage" && STAGE_DIR="$stage" bash -c "$OSA_UPDATE_BUILD_CMD" )
+    ( cd "$stage" && STAGE_DIR="$stage" MIX_ENV="$OSA_UPDATE_MIX_ENV" bash -c "$OSA_UPDATE_BUILD_CMD" )
     return $?
   fi
   (
     cd "$stage"
+    export MIX_ENV="$OSA_UPDATE_MIX_ENV"
     mix local.hex --force --if-missing >/dev/null 2>&1 || true
     mix local.rebar --force --if-missing >/dev/null 2>&1 || true
     mix deps.get
@@ -298,13 +352,14 @@ run_build() {
 run_health_check() {
   local stage="$1" port="$2" label="${3:-booting}"
   if [ -n "${OSA_UPDATE_HEALTH_CMD:-}" ]; then
-    ( cd "$stage" && STAGE_DIR="$stage" PROBE_PORT="$port" bash -c "$OSA_UPDATE_HEALTH_CMD" )
+    ( cd "$stage" && STAGE_DIR="$stage" PROBE_PORT="$port" MIX_ENV="$OSA_UPDATE_MIX_ENV" \
+        bash -c "$OSA_UPDATE_HEALTH_CMD" )
     return $?
   fi
   local pid rc=1 i
   (
     cd "$stage"
-    OSA_PORT="$port" MIX_ENV="${MIX_ENV:-prod}" timeout 40 mix osa.serve \
+    OSA_PORT="$port" MIX_ENV="$OSA_UPDATE_MIX_ENV" timeout 40 mix osa.serve \
       >"$stage/.osa-update-probe.log" 2>&1 &
     echo $! > "$stage/.osa-update-probe.pid"
   )
@@ -334,6 +389,30 @@ cleanup_stage() {
   ( git -C "$root" worktree remove --force "$stage" 2>/dev/null ) || rm -rf "$stage"
 }
 
+# Every staged version in $VERSIONS_DIR is a git worktree (see cmd_update's
+# `git worktree add`). A bare `rm -rf` deletes the checkout but leaves git's
+# administrative record of it in $ROOT/.git/worktrees — so git still believes
+# a worktree is registered at that path, and the next `git worktree add`
+# targeting it fails with "already exists". Pruning enough versions wedged
+# every future update, which is exactly the self-sealing failure this tool has
+# shipped once already.
+#
+# `git worktree remove` deregisters and deletes together. If that fails (not a
+# worktree, git absent, $ROOT gone), fall back to rm -rf and then `prune` to
+# garbage-collect any record pointing at the now-missing path.
+remove_version_dir() {
+  local d="$1"
+  if [ -n "${ROOT:-}" ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if git -C "$ROOT" worktree remove --force "$d" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  rm -rf "$d" 2>/dev/null || true
+  if [ -n "${ROOT:-}" ]; then
+    git -C "$ROOT" worktree prune >/dev/null 2>&1 || true
+  fi
+}
+
 prune_old_versions() {
   [ -d "$VERSIONS_DIR" ] || return 0
   local keep_cur keep_prev d dirs mtime_sorted n=0
@@ -347,7 +426,7 @@ prune_old_versions() {
     if [ "$d" = "$keep_cur" ] || [ "$d" = "$keep_prev" ]; then continue; fi
     n=$((n + 1))
     if [ "$n" -gt "$KEEP" ]; then
-      rm -rf "$d" 2>/dev/null || true
+      remove_version_dir "$d"
     fi
   done <<< "$mtime_sorted"
 }

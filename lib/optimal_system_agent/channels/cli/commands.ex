@@ -1047,7 +1047,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       if length(sessions) > 0 do
         Enum.each(sessions, fn {sid, _pid, _meta} ->
           marker = if sid == session_id, do: "#{@green}*#{@reset}", else: " "
-          IO.puts("  #{marker} #{@dim}#{sid}#{@reset}")
+
+          case OptimalSystemAgent.Memory.SessionTitler.display_title(sid) do
+            title when is_binary(title) and title != "" ->
+              IO.puts("  #{marker} #{title}  #{@dim}#{sid}#{@reset}")
+
+            _ ->
+              IO.puts("  #{marker} #{@dim}#{sid}#{@reset}")
+          end
         end)
       else
         IO.puts("  #{@dim}#{session_id}#{@reset} #{@green}(current)#{@reset}")
@@ -1586,7 +1593,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                 _ -> ""
               end
 
-            IO.puts("  #{@cyan}#{id}#{@reset}  #{@dim}#{date_str}#{@reset}")
+            # What the session was ABOUT leads the row; the opaque id is the
+            # thing you type, not the thing you scan for.
+            title =
+              OptimalSystemAgent.Memory.SessionTitler.display_title(id) || session[:title]
+
+            if is_binary(title) and title != "" do
+              IO.puts("  #{@bold}#{title}#{@reset}")
+              IO.puts("  #{@cyan}#{id}#{@reset}  #{@dim}#{date_str}#{@reset}")
+            else
+              IO.puts("  #{@cyan}#{id}#{@reset}  #{@dim}#{date_str}#{@reset}")
+            end
 
             if preview != "" do
               IO.puts("    #{@dim}#{preview}#{@reset}")

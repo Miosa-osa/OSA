@@ -27,7 +27,9 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
         skin_engine_children() ++
         skill_curator_children()
 
-    Supervisor.init(children, strategy: :one_for_one)
+    children
+    |> OptimalSystemAgent.Supervisors.BootTiming.wrap("Extensions")
+    |> Supervisor.init(strategy: :one_for_one)
   end
 
   # Treasury — opt-in via OSA_TREASURY_ENABLED=true

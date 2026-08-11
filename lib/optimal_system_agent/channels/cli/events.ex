@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
   """
 
   alias OptimalSystemAgent.Agent.Tasks
+  alias OptimalSystemAgent.Agent.Trajectory
   alias OptimalSystemAgent.Channels.CLI.{Renderer, TaskDisplay}
   alias OptimalSystemAgent.Events.Bus
 
@@ -183,7 +184,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         %{event: :background_agent_completed, role: role, result: result, duration_ms: dur} ->
           Renderer.clear_line()
           duration = Renderer.format_elapsed(dur)
-          preview = String.slice(to_string(result), 0, 120)
+          # Subagent result text is tool-derived and reaches the terminal
+          # verbatim — redact before slicing so a truncated key never shows.
+          preview = result |> to_string() |> Trajectory.redact() |> String.slice(0, 120)
 
           IO.puts(
             "\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}"
@@ -199,7 +202,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
             "\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}"
           )
 
-          IO.puts("#{dim}    #{error}#{reset}\n")
+          IO.puts("#{dim}    #{Trajectory.redact(to_string(error))}#{reset}\n")
 
         %{event: :background_agent_started, role: role, agent_id: aid} ->
           Renderer.clear_line()

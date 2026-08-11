@@ -41,14 +41,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     # Rich metadata (title/first-prompt, message_count, created_at/last_active)
     # comes from the persisted transcript store — the same source already used
     # by GET /sessions/recent. We merge in live-registry alive status on top.
+    # Real, human-readable titles (auto-generated at session start, or set by
+    # `/rename`) with the truncated first prompt as the fallback for sessions
+    # that predate titling. Resolved in ONE pass — a per-row lookup would be 500
+    # file reads for this listing.
     rich_sessions =
       OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: 500)
+      |> OptimalSystemAgent.Memory.SessionTitler.decorate_rows()
       |> Enum.map(fn s ->
         sid = s[:session_id]
 
         %{
           id: sid,
-          title: s[:first_message] || "",
+          title: s[:title] || s[:first_message] || "",
           message_count: s[:message_count] || 0,
           created_at: s[:started_at] || "",
           last_active: s[:last_active] || "",
@@ -78,7 +83,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
         %{
           id: sid,
-          title: "",
+          # A live session with no persisted turn yet may still have been titled
+          # (or renamed); fall back to "" only when it genuinely has no title.
+          title: OptimalSystemAgent.Memory.SessionTitler.display_title(sid, ""),
           message_count: 0,
           created_at: created_at,
           last_active: "",
@@ -201,7 +208,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   get "/recent" do
     limit = parse_int(conn.params["limit"], 50)
-    sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
+    sessions =
+      OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
+      |> OptimalSystemAgent.Memory.SessionTitler.decorate_rows()
+
     json(conn, 200, %{sessions: sessions})
   end
 
@@ -363,7 +373,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       body =
         Jason.encode!(%{
           id: session_id,
-          title: nil,
+          title: OptimalSystemAgent.Memory.SessionTitler.display_title(session_id),
           message_count: length(formatted_messages),
           created_at: nil,
           last_active: nil,

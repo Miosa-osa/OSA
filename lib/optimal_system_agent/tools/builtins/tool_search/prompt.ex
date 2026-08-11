@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   @moduledoc """
   Dynamic prompt for `tool_search`.
 
- The prompt body is a
+  The prompt body is a
   function so it can adapt based on where deferred tools are announced:
   either in `<system-reminder>` messages (delta / lazy-loading path) or in
   a prepended `<available-deferred-tools>` block (legacy path).
@@ -25,6 +25,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
 
   Query forms:
   - "select:Read,Edit,Grep" — fetch these exact tools by name
+  - "server:<name>" — list EVERY tool on one connected MCP server, unranked and uncapped
   - "notebook jupyter" — keyword search, up to max_results best matches
   - "+slack send" — require "slack" in the name, rank by remaining terms\"""
 
@@ -45,11 +46,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   # :system_reminder = delta/lazy-loading path (deferred tools appear in
   #   <system-reminder> attachments injected by the PromptAssembler).
   # :available_block = pre-gate legacy path (<available-deferred-tools>).
+  #
+  # BOTH hints now also point at <mcp-servers>. Deferred BUILTIN tools are the
+  # only ones the PromptAssembler names in <system-reminder>; deferred MCP tools
+  # are listed in the separate <mcp-servers> block built by
+  # `Soul.ToolsSection.build_mcp_catalog/0`. Saying only "<system-reminder>"
+  # told the model to look somewhere MCP tools have never appeared.
+  @mcp_hint " MCP tools are listed separately, by server, in the <mcp-servers> block."
+
   defp tool_location_hint(:system_reminder),
-    do: "Deferred tools appear by name in <system-reminder> messages."
+    do: "Deferred tools appear by name in <system-reminder> messages." <> @mcp_hint
 
   defp tool_location_hint(:available_block),
-    do: "Deferred tools appear by name in <available-deferred-tools> messages."
+    do: "Deferred tools appear by name in <available-deferred-tools> messages." <> @mcp_hint
 
   defp tool_location_hint(_),
     do: tool_location_hint(:system_reminder)

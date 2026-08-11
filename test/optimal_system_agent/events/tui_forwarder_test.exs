@@ -36,6 +36,48 @@ defmodule OptimalSystemAgent.Events.TuiForwarderTest do
     assert event.gaps == ["[completeness] error handling", "[verifiability] no test"]
   end
 
+  test "forwards session_title so the TUI status bar can name the session",
+       %{session_id: sid} do
+    Bus.emit(:system_event, %{
+      event: :session_title,
+      session_id: sid,
+      title: "Debugging production 500 errors"
+    })
+
+    assert_receive {:osa_event, event}, 2000
+    assert event.type == :system_event
+    assert event.event == :session_title
+    assert event.title == "Debugging production 500 errors"
+  end
+
+  test "ensure_title/3 puts a title on the wire without waiting for a model",
+       %{session_id: sid} do
+    # The end-to-end stage-1 path: an opening message titles the session AND the
+    # title reaches the session topic, with no LLM call in the loop.
+    tmp = Path.join(System.tmp_dir!(), "osa_titler_fwd_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    prev = Application.get_env(:optimal_system_agent, :config_dir)
+    Application.put_env(:optimal_system_agent, :config_dir, tmp)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:optimal_system_agent, :config_dir, prev),
+        else: Application.delete_env(:optimal_system_agent, :config_dir)
+
+      File.rm_rf(tmp)
+    end)
+
+    :ok =
+      OptimalSystemAgent.Memory.SessionTitler.ensure_title(
+        sid,
+        "debug 500 errors in production",
+        refine: false
+      )
+
+    assert_receive {:osa_event, %{event: :session_title, title: title}}, 2000
+    assert title == "Debug 500 errors in production"
+  end
+
   test "forwards the lightweight start-phase signal too", %{session_id: sid} do
     Bus.emit(:system_event, %{
       event: :goal_verifier_round,

@@ -857,6 +857,31 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /auth/cli/claude — what to install, what to run, and who is signed in.
+    ///
+    /// One call rather than four, because a screen that makes four separate
+    /// decisions about the same binary makes them at four different instants
+    /// and can end up describing a state that never existed.
+    pub async fn claude_cli_state(&self) -> Result<ClaudeCliState> {
+        let resp = self.get("/auth/cli/claude").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /usage/quota — the last quota window each provider reported.
+    ///
+    /// A provider absent from the map has reported nothing yet. That absence
+    /// is the payload's way of forbidding a zero: there is no field to default.
+    pub async fn usage_quota(&self) -> Result<UsageQuotaResponse> {
+        let resp = self.get("/usage/quota").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /auth/status — a pure read of every sign-in-capable provider.
+    pub async fn auth_status(&self) -> Result<AuthStatusResponse> {
+        let resp = self.get("/auth/status").await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST /auth/login/cancel
     pub async fn auth_login_cancel(&self, id: &str) -> Result<()> {
         let body = serde_json::json!({ "session_id": id });

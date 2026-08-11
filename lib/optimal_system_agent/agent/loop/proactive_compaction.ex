@@ -31,8 +31,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   Thresholds come from `OptimalSystemAgent.Agent.Loop.CompactionThresholds`
   (CC reserve math). After 3 consecutive summarization failures a circuit
-  breaker opens and auto-compact is disabled for that session until a
-  summarization succeeds again.
+  breaker opens and auto-compact is disabled for that session — but only for
+  `:proactive_compaction_breaker_probation_ms` (default 5 minutes), after which
+  one trial attempt is let through. A success closes the breaker; a failed
+  trial starts a fresh window. The breaker is keyed per session (per calling
+  process when there is no session id), never globally.
 
   Uses the same token estimator the loop uses
   (`OptimalSystemAgent.Agent.Compactor.estimate_tokens/1`).
@@ -533,6 +536,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # Helpers
   # ---------------------------------------------------------------------------
 
+  # Context occupancy for the compaction decision.
+  #
+  # `last_input_tokens` is the provider's own report of the previous
+  # round-trip's prompt size, written by `Loop.Accounting.record/2` via
+  # `Accounting.effective_input_tokens/1` — fresh input PLUS cache writes PLUS
+  # cache reads. It must stay the effective total: Anthropic reports the three
+  # slices separately, so reading `input_tokens` alone would shrink this number
+  # as prompt caching gets MORE effective and silently stop compaction from
+  # ever firing. Only when the provider has told us nothing do we fall back to
+  # the local heuristic.
   @spec estimated_tokens(map()) :: non_neg_integer()
   defp estimated_tokens(state) do
     last = Map.get(state, :last_input_tokens, 0)
@@ -544,7 +557,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     end
   end
 
-  @spec emit_event(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
+  @spec emit_event(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+          :ok
   defp emit_event(before_count, after_count, before_tokens, after_tokens) do
     Bus.emit(:system_event, %{
       event: :proactive_compaction,
@@ -681,12 +695,87 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     Application.get_env(:optimal_system_agent, :proactive_compaction_auto_continue, true) == true
   end
 
+  # ── Circuit breaker ────────────────────────────────────────────────────────
+  #
+  # The breaker exists to stop a session from burning an LLM call on every
+  # iteration when summarization is persistently failing. Two properties are
+  # load-bearing and were both wrong:
+  #
+  #   1. It must be able to RE-CLOSE. `should_compact?/2` gates on
+  #      `not breaker_open?/1`, and the only thing that cleared the counter was
+  #      the success branch of `compact/3` — which the gate makes unreachable
+  #      once open. Three transient failures therefore disabled proactive
+  #      compaction for the rest of the VM's life, and the session then grew
+  #      unchecked into a hard provider overflow. Hence probation: after
+  #      `breaker_probation_ms/0` has elapsed since the breaker opened, ONE
+  #      trial is allowed through. If that trial also fails, `record_failure/1`
+  #      re-stamps the open time and the next window begins — so a persistent
+  #      failure still costs at most one attempt per window, while a transient
+  #      one heals on its own.
+  #
+  #   2. It must be keyed per caller. The key was
+  #      `{:compact_failures, session_id || :global}`, so every id-less path
+  #      (cron, subagent, anonymous) shared ONE counter: three failures spread
+  #      across three unrelated callers opened the breaker for all of them, and
+  #      one caller's success closed it for all of them. With no session id the
+  #      calling process is the only honest identity available, so that is what
+  #      is used.
+  #
+  # The counter lives in VM-local ETS, so a restart also disarms the breaker.
+  # That is a deliberate trade: state that survives a restart would have to be
+  # persisted per session, and a restart is already the strongest possible
+  # signal that whatever was failing may no longer be.
+
+  # How long the breaker stays shut before allowing one trial attempt.
+  @default_breaker_probation_ms 5 * 60_000
+
   @doc false
-  def breaker_open?(session_id),
-    do: failure_count(session_id) >= @max_consecutive_failures
+  def breaker_open?(session_id) do
+    if failure_count(session_id) < @max_consecutive_failures do
+      false
+    else
+      # Tripped. Still open only while inside the probation window.
+      elapsed_since_open(session_id) < breaker_probation_ms()
+    end
+  end
+
+  defp breaker_key(session_id) when is_binary(session_id) and session_id != "",
+    do: {:compact_failures, session_id}
+
+  # No session id: the calling process is the only real identity available.
+  # Never collapse to a shared `:global` bucket — that lets unrelated callers
+  # open and close each other's breakers.
+  defp breaker_key(_), do: {:compact_failures, {:pid, self()}}
+
+  defp opened_at_key(session_id) do
+    {:compact_failures, id} = breaker_key(session_id)
+    {:compact_breaker_opened_at, id}
+  end
+
+  defp elapsed_since_open(session_id) do
+    case :ets.lookup(:osa_compactor_state, opened_at_key(session_id)) do
+      [{_key, at}] when is_integer(at) -> System.monotonic_time(:millisecond) - at
+      # Tripped but unstamped (pre-upgrade row) — treat as freshly opened rather
+      # than as infinitely old, so an unstamped breaker still protects.
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  end
+
+  defp breaker_probation_ms do
+    case Application.get_env(
+           :optimal_system_agent,
+           :proactive_compaction_breaker_probation_ms,
+           @default_breaker_probation_ms
+         ) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_breaker_probation_ms
+    end
+  end
 
   defp failure_count(session_id) do
-    case :ets.lookup(:osa_compactor_state, {:compact_failures, session_id || :global}) do
+    case :ets.lookup(:osa_compactor_state, breaker_key(session_id)) do
       [{_key, n}] when is_integer(n) -> n
       _ -> 0
     end
@@ -694,15 +783,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     _ -> 0
   end
 
-  defp record_failure(session_id) do
-    key = {:compact_failures, session_id || :global}
-    :ets.update_counter(:osa_compactor_state, key, {2, 1}, {key, 0})
+  @doc false
+  def record_failure(session_id) do
+    key = breaker_key(session_id)
+    count = :ets.update_counter(:osa_compactor_state, key, {2, 1}, {key, 0})
+
+    # (Re-)stamp the open time on every failure at or past the threshold, so a
+    # failed probation trial starts a fresh window instead of leaving the
+    # breaker permanently eligible for retry.
+    if count >= @max_consecutive_failures do
+      :ets.insert(
+        :osa_compactor_state,
+        {opened_at_key(session_id), System.monotonic_time(:millisecond)}
+      )
+    end
+
+    count
   rescue
     _ -> 0
   end
 
-  defp reset_failures(session_id) do
-    :ets.delete(:osa_compactor_state, {:compact_failures, session_id || :global})
+  @doc false
+  def reset_failures(session_id) do
+    :ets.delete(:osa_compactor_state, breaker_key(session_id))
+    :ets.delete(:osa_compactor_state, opened_at_key(session_id))
     :ok
   rescue
     _ -> :ok
@@ -711,7 +815,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   defp session_of(state), do: Map.get(state, :session_id)
 
   defp keep_turns do
-    case Application.get_env(:optimal_system_agent, :proactive_compaction_keep_turns, @default_keep_turns) do
+    case Application.get_env(
+           :optimal_system_agent,
+           :proactive_compaction_keep_turns,
+           @default_keep_turns
+         ) do
       n when is_integer(n) and n >= 0 -> n
       _ -> @default_keep_turns
     end

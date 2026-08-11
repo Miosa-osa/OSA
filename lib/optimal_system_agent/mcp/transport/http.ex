@@ -51,7 +51,11 @@ defmodule OptimalSystemAgent.MCP.Transport.Http do
     post_url: nil,
     sse_buffer: "",
     sse_task: nil,
-    probed?: false
+    probed?: false,
+    # The revision `ServerSession` negotiated with this server, once known.
+    # Until then the announced revision is used — correct, because the only
+    # request sent before negotiation completes is `initialize` itself.
+    protocol_version: nil
   ]
 
   # ── Transport API ─────────────────────────────────────────────────────
@@ -139,6 +143,13 @@ defmodule OptimalSystemAgent.MCP.Transport.Http do
   def handle_info({:sse_closed, reason}, state) do
     notify_closed(state, {:sse_closed, reason})
     {:stop, :normal, state}
+  end
+
+  # The owning ServerSession finished version negotiation. The transport spec
+  # says the header SHOULD carry the version negotiated at initialization, not
+  # the one the client opened with, so adopt it for every later request.
+  def handle_info({:mcp_protocol_version, version}, state) when is_binary(version) do
+    {:noreply, %{state | protocol_version: version}}
   end
 
   def handle_info({:set_post_url, url}, state) do
@@ -379,11 +390,14 @@ defmodule OptimalSystemAgent.MCP.Transport.Http do
   # being silently version-negotiated by omission — every server guessing,
   # none of them told.
   defp streamable_headers(state) do
+    version =
+      state.protocol_version || OptimalSystemAgent.MCP.Protocol.Messages.protocol_version()
+
     base =
       [
         {"content-type", "application/json"},
         {"accept", @accept},
-        {"mcp-protocol-version", OptimalSystemAgent.MCP.Protocol.Messages.protocol_version()}
+        {"mcp-protocol-version", version}
       ] ++ state.headers
 
     if state.session_id, do: [{"mcp-session-id", state.session_id} | base], else: base

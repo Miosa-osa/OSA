@@ -50,8 +50,10 @@ defmodule OptimalSystemAgent.MCP.Config do
               tool_filter: nil,
               scope: :user,
               # Where this server was discovered: `:osa` for native
-              # (~/.osa, .mcp.json, .osa/mcp.local.json), or an external tool
-              # tag (`:codex`, `:claude_code`, `:claude_desktop`, `:cursor`).
+              # (~/.osa, .mcp.json, .osa/mcp.local.json), an external tool tag
+              # (`:codex`, `:claude_code`, `:claude_desktop`, `:cursor`), or
+              # `:plugin` for a portable plugin bundle manifest. `/mcp` renders
+              # this via `MCP.Discovery.source_label/1`.
               source: :osa
   end
 

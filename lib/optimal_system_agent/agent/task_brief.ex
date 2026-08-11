@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Agent.TaskBrief do
   require Logger
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.System.AtomicFile
 
   @cache :osa_task_brief_cache
   @placeholder "_Not set._"
@@ -158,9 +159,7 @@ defmodule OptimalSystemAgent.Agent.TaskBrief do
 
     case Jason.encode(stringify(brief)) do
       {:ok, json} ->
-        tmp = file <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-        File.write!(tmp, json)
-        File.rename!(tmp, file)
+        AtomicFile.write!(file, json)
         cache_put(session_id, brief)
         :ok
 

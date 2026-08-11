@@ -17,21 +17,76 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
 
   alias OptimalSystemAgent.MCP.Protocol.JSONRPC
 
-  # MCP protocol revision OSA speaks. Servers may negotiate down.
+  # MCP protocol revision OSA announces. Servers may negotiate down.
   #
-  # NOTE: this is the ORIGINAL revision, and it is inconsistent with the
-  # transport OSA actually uses. `MCP.Transport.Http` implements **Streamable
-  # HTTP**, which was introduced in `2025-03-26` and replaced the HTTP+SSE
-  # transport that `2024-11-05` defines — the one now marked deprecated. So OSA
-  # announces a 2024 protocol while speaking a 2025 transport, and a server
-  # that honours the announcement may withhold everything added since.
+  # ## Why 2025-06-18
   #
-  # Raising it is a real change, not a string edit: later revisions add
-  # capabilities (structured tool output, elicitation, resource links) that a
-  # client should not claim without implementing, and OSA's own MCP *server*
-  # side reads the same constant. Left at the honest value until that work is
-  # done, rather than raised to look current.
-  @protocol_version "2024-11-05"
+  # `MCP.Transport.Http` implements **Streamable HTTP**, introduced in
+  # `2025-03-26`, which replaced the HTTP+SSE transport `2024-11-05` defines.
+  # Announcing 2024 while speaking a 2025 transport lets a server that honours
+  # the announcement withhold everything added since.
+  #
+  # Of the two candidate revisions, `2025-06-18` is the one OSA can honestly
+  # claim, and `2025-03-26` is the one it cannot:
+  #
+  #   * `2025-03-26` made JSON-RPC **batching** part of the protocol — a
+  #     receiver must accept an array of messages. `Protocol.JSONRPC.decode/1`
+  #     and `Server.StdioServer` handle exactly one message per frame, so
+  #     announcing 2025-03-26 would claim batch handling OSA does not have.
+  #   * `2025-06-18` REMOVED batching again, so single-message framing is
+  #     conformant there.
+  #
+  # ## What each revision requires, and what OSA does about it
+  #
+  # 2025-03-26 over 2024-11-05:
+  #
+  #   * Streamable HTTP transport      — implemented (`Transport.Http`).
+  #   * OAuth 2.1 authorization        — OPTIONAL for a client. OSA does not
+  #     implement the MCP OAuth flow (it sends operator-configured static
+  #     headers), and declares no authorization capability, so nothing is
+  #     claimed. RFC 8707 resource indicators bind on clients that DO speak
+  #     OAuth; not applicable.
+  #   * JSON-RPC batching              — not implemented; removed again in
+  #     2025-06-18, which is why that is the announced revision.
+  #   * Tool annotations               — inert metadata on `tools/list` entries;
+  #     passed through to the provider untouched. Nothing to implement.
+  #   * `ProgressNotification.message`  — progress notifications are consumed
+  #     (`ServerSession` re-arms the call timeout on them); the extra
+  #     descriptive field is simply ignored, which is legal.
+  #   * Audio content blocks           — handled in `normalize_tool_result/1`.
+  #   * `completions` capability       — a SERVER capability. OSA's client never
+  #     calls `completion/complete`, so it neither needs nor announces it.
+  #
+  # 2025-06-18 over 2025-03-26:
+  #
+  #   * No JSON-RPC batching           — matches OSA's framing.
+  #   * Structured tool output         — `normalize_tool_result/1` reads
+  #     `structuredContent`, and `sanitize_tool/1` already guards `outputSchema`.
+  #   * Resource links in tool results — handled in `normalize_tool_result/1`.
+  #   * `MCP-Protocol-Version` header  — sent by `Transport.Http` on every
+  #     request, sourced from `protocol_version/0` / the negotiated revision.
+  #   * Elicitation                    — a CLIENT capability, and OSA has no
+  #     path to put an `elicitation/create` form in front of the operator. It is
+  #     therefore deliberately NOT announced; a server will simply not use it.
+  #   * `_meta` / `title` / completion `context` — additive fields OSA either
+  #     passes through or ignores; nothing to claim.
+  #
+  # Client capabilities announced below are exactly the implemented set:
+  # `roots` only. `sampling` is absent (OSA answers no `sampling/createMessage`)
+  # and so is `elicitation`. The previous `"tools" => %{}` entry was never a
+  # client capability at all — `tools` is declared by SERVERS — so it announced
+  # nothing and has been dropped.
+  @protocol_version "2025-06-18"
+
+  # Every revision OSA can operate under, newest first. A server may negotiate
+  # down to any of these; anything else is refused rather than guessed at.
+  # `2024-11-05` stays supported because the legacy HTTP+SSE fallback in
+  # `Transport.Http` exists precisely to talk to servers still on it.
+  @supported_versions ["2025-06-18", "2025-03-26", "2024-11-05"]
+
+  # Per the transport spec: a server receiving no `MCP-Protocol-Version` header,
+  # with no other way to identify the version, SHOULD assume `2025-03-26`.
+  @assumed_header_version "2025-03-26"
 
   @doc """
   The MCP revision OSA announces.
@@ -44,12 +99,103 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
   @spec protocol_version() :: String.t()
   def protocol_version, do: @protocol_version
 
+  @doc "Every MCP revision OSA can operate under, newest first."
+  @spec supported_versions() :: [String.t()]
+  def supported_versions, do: @supported_versions
+
+  @doc "Whether `version` is a revision OSA can operate under."
+  @spec supports_version?(term()) :: boolean()
+  def supports_version?(version) when is_binary(version), do: version in @supported_versions
+  def supports_version?(_), do: false
+
+  @doc """
+  Resolve the revision to use from a server's `initialize` RESULT (OSA as client).
+
+  The server may negotiate down: it answers with the revision it will speak,
+  which need not be the one we asked for. Returns
+
+    * `{:ok, version}` — a revision OSA supports; use it from here on, including
+      in the `MCP-Protocol-Version` header.
+    * `{:error, {:unsupported_protocol_version, version}}` — the server picked
+      something OSA cannot speak. The lifecycle spec says the client SHOULD
+      disconnect rather than continue, because every later message would be
+      interpreted under a schema neither side agreed on.
+
+  A result with no `protocolVersion` at all is a server not following the
+  lifecycle. Rather than inventing a revision, we keep the one we announced —
+  which is exactly the state the connection was already in.
+  """
+  @spec negotiate_version(map()) ::
+          {:ok, String.t()} | {:error, {:unsupported_protocol_version, term()}}
+  def negotiate_version(%{"protocolVersion" => version}) when is_binary(version) do
+    if supports_version?(version),
+      do: {:ok, version},
+      else: {:error, {:unsupported_protocol_version, version}}
+  end
+
+  def negotiate_version(%{"protocolVersion" => version}),
+    do: {:error, {:unsupported_protocol_version, version}}
+
+  def negotiate_version(result) when is_map(result), do: {:ok, @protocol_version}
+
+  @doc """
+  Pick the revision OSA's own MCP SERVER will answer an `initialize` with.
+
+  Per the lifecycle spec: if the client's requested version is supported the
+  server MUST respond with that same version; otherwise it MUST respond with a
+  version it does support (SHOULD be the latest). A client that cannot live
+  with the answer disconnects.
+  """
+  @spec negotiate_server_version(term()) :: String.t()
+  def negotiate_server_version(requested) when is_binary(requested) do
+    if supports_version?(requested), do: requested, else: @protocol_version
+  end
+
+  def negotiate_server_version(_), do: @protocol_version
+
+  @doc """
+  Validate an inbound `MCP-Protocol-Version` header value (OSA as HTTP server).
+
+  Returns `{:ok, version}` for a revision OSA supports, or
+  `{:error, {:unsupported_protocol_version, value}}`, which the HTTP layer MUST
+  turn into a `400 Bad Request` — the spec is explicit that an invalid or
+  unsupported value is a 400, not a silent downgrade.
+
+  A MISSING header is not an error: for backwards compatibility the spec says a
+  server with no other way to identify the version SHOULD assume
+  `#{@assumed_header_version}`, so `nil` resolves to that rather than rejecting.
+  """
+  @spec validate_protocol_version_header(term()) ::
+          {:ok, String.t()} | {:error, {:unsupported_protocol_version, term()}}
+  def validate_protocol_version_header(nil), do: {:ok, @assumed_header_version}
+  def validate_protocol_version_header(""), do: {:ok, @assumed_header_version}
+
+  def validate_protocol_version_header(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" -> {:ok, @assumed_header_version}
+      supports_version?(trimmed) -> {:ok, trimmed}
+      true -> {:error, {:unsupported_protocol_version, value}}
+    end
+  end
+
+  def validate_protocol_version_header(value),
+    do: {:error, {:unsupported_protocol_version, value}}
+
   @client_info %{
     "name" => "osa",
     "version" => "1.0.0"
   }
 
-  @doc "Build the `initialize` request (client → server handshake)."
+  @doc """
+  Build the `initialize` request (client → server handshake).
+
+  `capabilities` lists ONLY what OSA implements — `roots`, answered by
+  `MCP.Client.ServerSession`. `sampling` and `elicitation` are absent by design:
+  announcing either would have servers issue requests OSA never answers, which
+  hangs the server rather than degrading it.
+  """
   @spec initialize(integer() | nil) :: map()
   def initialize(id \\ nil) do
     JSONRPC.request(
@@ -57,7 +203,6 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
       %{
         "protocolVersion" => @protocol_version,
         "capabilities" => %{
-          "tools" => %{},
           "roots" => %{"listChanged" => false}
         },
         "clientInfo" => @client_info
@@ -184,11 +329,21 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
         text = join_text(blocks)
 
         text =
-          if text == "" and blocks != [] do
-            # No text blocks but content present (e.g. lone resource): summarize.
-            "[MCP result: #{length(blocks)} content block(s)]"
-          else
-            text
+          cond do
+            text != "" ->
+              text
+
+            # 2025-06-18 structured tool output. A server returning
+            # `structuredContent` SHOULD also mirror it into a text block for
+            # older clients, but that is a SHOULD — when it doesn't, the JSON
+            # is the entire result, and dropping it (as the old code did, via
+            # the "N content block(s)" placeholder) throws the answer away.
+            true ->
+              case structured_text(result) do
+                nil when blocks != [] -> "[MCP result: #{length(blocks)} content block(s)]"
+                nil -> ""
+                json -> json
+              end
           end
 
         {:ok, text}
@@ -224,7 +379,43 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
     "[image: #{image["mimeType"] || "image"}]"
   end
 
+  # 2025-03-26 content type. Binary audio is useless inline, so it is named
+  # rather than dumped — but it must be NAMED: falling through to "" made a
+  # lone audio result indistinguishable from an empty one.
+  defp block_to_text(%{"type" => "audio"} = audio) do
+    "[audio: #{audio["mimeType"] || "audio"}]"
+  end
+
+  # 2025-06-18 resource links. Unlike an embedded `resource` block these carry
+  # no contents — only a pointer the agent can follow with a later tool call —
+  # so the URI is the entire payload and must survive.
+  defp block_to_text(%{"type" => "resource_link"} = link) do
+    uri = link["uri"]
+
+    cond do
+      not is_binary(uri) or uri == "" ->
+        ""
+
+      is_binary(link["name"]) and link["name"] != "" ->
+        "[resource_link: #{link["name"]} <#{uri}>]"
+
+      true ->
+        "[resource_link: #{uri}]"
+    end
+  end
+
   defp block_to_text(_), do: ""
+
+  # Serialize a 2025-06-18 `structuredContent` payload for the text channel.
+  # `nil` when absent or unencodable, so the caller can fall back.
+  defp structured_text(%{"structuredContent" => structured}) when is_map(structured) do
+    case Jason.encode(structured) do
+      {:ok, json} -> json
+      _ -> nil
+    end
+  end
+
+  defp structured_text(_), do: nil
 
   # Convert an MCP image block into OSA's `{:image, %{media_type, data, path}}`.
   defp normalize_image(%{} = image) do

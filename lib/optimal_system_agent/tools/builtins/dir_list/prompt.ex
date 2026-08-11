@@ -25,7 +25,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Prompt do
     Usage:
     - The path parameter must be an absolute path, not a relative path.
     - Omit path (or pass ".") to list the current working directory.
+    - First line is a header: `<directory> — <n> entries`; entries follow, one per line.
     - Output format per entry: `<type>\\t<size>\\t<name>` where type is `dir`, `file`, or the raw fs type.
+    - Hidden entries (dotfiles) are always included — same as `#{file_glob_name}`.
+    - An empty directory reports itself explicitly; it never comes back as an empty result.
     - Sizes use human-readable suffixes (B, K, M); directories always show `-`.
     - To read a specific file use `#{file_read_name}`.
     - To search for files matching a pattern use `#{file_glob_name}`.

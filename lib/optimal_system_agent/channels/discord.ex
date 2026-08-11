@@ -23,6 +23,8 @@ defmodule OptimalSystemAgent.Channels.Discord do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
   @discord_api "https://discord.com/api/v10"
@@ -30,8 +32,18 @@ defmodule OptimalSystemAgent.Channels.Discord do
   # Initial exponential back-off delay (milliseconds).
   @backoff_initial_ms 1_000
 
-  # Discord message length limit.
+  # Discord message length limit: 2000 "characters", validated server-side as
+  # JavaScript `content.length` — i.e. UTF-16 code units. A CJK char costs 1,
+  # an astral emoji costs 2, a ZWJ family sequence costs 7-11.
+  #
+  # The old code tested `byte_size(candidate) > 2000` but then cut with
+  # `String.split_at(para, 1990)`, which counts graphemes. On an emoji-heavy
+  # paragraph the test tripped at ~500 emoji (4 bytes each) while the cut handed
+  # back 1990 emoji — 3980 UTF-16 units, almost 2x Discord's cap. Discord 400'd
+  # that chunk, the adapter ignored the result, and the following chunks were
+  # still delivered: a hole in the middle of the reply.
   @max_message_length 2_000
+  @length_unit :utf16
 
   # ── Behaviour callbacks ───────────────────────────────────────────────
 
@@ -156,21 +168,24 @@ defmodule OptimalSystemAgent.Channels.Discord do
           :ok
 
         true ->
-        session_id = "discord:#{channel_id}"
-        actor_id = "discord:#{user_id}"
+          session_id = "discord:#{channel_id}"
+          actor_id = "discord:#{user_id}"
 
-        ensure_session(session_id)
+          ensure_session(session_id)
 
-        Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-          case Loop.process_message(session_id, text, channel: :discord, user_id: actor_id) do
-            {:ok, response} ->
-              send_text(token, channel_id, response)
+          Delivery.start_task(:discord, fn ->
+            case Loop.process_message(session_id, text, channel: :discord, user_id: actor_id) do
+              {:ok, response} ->
+                send_text(token, channel_id, response)
 
-            {:error, reason} ->
-              Logger.warning("[Discord] Loop error for session #{session_id}: #{inspect(reason)}")
-              send_text(token, channel_id, "Something went wrong. Please try again.")
-          end
-        end)
+              {:error, reason} ->
+                Logger.warning(
+                  "[Discord] Loop error for session #{session_id}: #{inspect(reason)}"
+                )
+
+                send_text(token, channel_id, "Something went wrong. Please try again.")
+            end
+          end)
       end
     else
       _ ->
@@ -223,11 +238,9 @@ defmodule OptimalSystemAgent.Channels.Discord do
   defp send_text(token, channel_id, text) do
     text
     |> chunk_message()
-    |> Enum.each(fn chunk ->
-      post_message(token, channel_id, chunk)
-    end)
-
-    :ok
+    |> then(
+      &Delivery.send_chunks(:discord, &1, fn chunk -> post_message(token, channel_id, chunk) end)
+    )
   end
 
   defp post_message(token, channel_id, text) do
@@ -259,40 +272,16 @@ defmodule OptimalSystemAgent.Channels.Discord do
 
   # ── Message Chunking ──────────────────────────────────────────────────
 
-  defp chunk_message(text) when byte_size(text) <= @max_message_length, do: [text]
+  @doc """
+  Split an outbound reply into Discord-sized chunks.
 
-  defp chunk_message(text) do
-    paragraphs = String.split(text, "\n\n")
-    build_chunks(paragraphs, [], "")
-  end
+  Public so the chunking contract can be tested against Discord's real limit
+  and unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
 
-  defp build_chunks([], acc, current) do
-    if current == "" do
-      Enum.reverse(acc)
-    else
-      Enum.reverse([String.trim(current) | acc])
-    end
-  end
-
-  defp build_chunks([para | rest], acc, current) do
-    candidate =
-      if current == "" do
-        para
-      else
-        current <> "\n\n" <> para
-      end
-
-    if byte_size(candidate) > @max_message_length do
-      if current == "" do
-        # Single paragraph too long — force split by characters
-        {head, tail} = String.split_at(para, @max_message_length - 10)
-        build_chunks([tail | rest], [head <> "..." | acc], "")
-      else
-        # Current chunk is full, start new one with this paragraph
-        build_chunks([para | rest], [String.trim(current) | acc], "")
-      end
-    else
-      build_chunks(rest, acc, candidate)
-    end
-  end
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 end

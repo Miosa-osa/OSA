@@ -19,10 +19,9 @@ defmodule OptimalSystemAgent.MCP.Server.Dispatcher do
 
   require Logger
 
-  alias OptimalSystemAgent.MCP.Protocol.JSONRPC
+  alias OptimalSystemAgent.MCP.Protocol.{JSONRPC, Messages}
   alias OptimalSystemAgent.Tools.Registry, as: Tools
 
-  @protocol_version "2024-11-05"
   @server_info %{"name" => "osa", "version" => "1.0.0"}
   @agent_tool "osa_ask"
 
@@ -39,9 +38,20 @@ defmodule OptimalSystemAgent.MCP.Server.Dispatcher do
 
   # ── Method handlers ───────────────────────────────────────────────────
 
-  defp handle("initialize", _params, id) do
+  # Version negotiation, server side. The lifecycle spec: respond with the
+  # client's requested revision when we support it, otherwise with one we do
+  # support (the latest) and let the client decide whether to continue. The
+  # revision is NOT restated here — it comes from `Protocol.Messages`, the same
+  # constant the client half and the HTTP header read, so the two halves of OSA
+  # can never drift into announcing different protocols.
+  defp handle("initialize", params, id) do
+    requested = if is_map(params), do: params["protocolVersion"], else: nil
+
     result = %{
-      "protocolVersion" => @protocol_version,
+      "protocolVersion" => Messages.negotiate_server_version(requested),
+      # Only what this server actually serves. `tools/list` + `tools/call` are
+      # implemented; `resources`, `prompts`, `logging` and `completions` are
+      # not, so they are not announced.
       "capabilities" => %{"tools" => %{"listChanged" => false}},
       "serverInfo" => @server_info
     }

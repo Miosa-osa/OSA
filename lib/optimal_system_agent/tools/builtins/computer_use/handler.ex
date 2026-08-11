@@ -207,6 +207,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
       not Regex.match?(Constants.key_combo_pattern(), combo) ->
         {:error, "Key combo contains invalid characters"}
 
+      # The character-class check above only proves the combo cannot inject
+      # shell metacharacters — `ctrl+alt+del`, `super+l` and `alt+F4` all pass
+      # it. Deny the combos that end the session, kill the display server,
+      # force-quit, switch VT, or power the machine down: they are
+      # unrecoverable from inside the agent, which loses the very screen it
+      # would need to observe or undo the result.
+      Constants.destructive_combo?(combo) ->
+        {:error,
+         "Refusing destructive key combo #{inspect(combo)} — this ends the session, " <>
+           "force-quits, switches virtual terminal, or powers off the machine, and the " <>
+           "agent cannot observe or undo it. Ask the user to press it themselves."}
+
       true ->
         :ok
     end

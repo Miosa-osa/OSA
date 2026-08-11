@@ -188,12 +188,78 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
             end
 
           {:error, reason} ->
-            {:error, "Error writing file: #{reason}"}
+            {:error, write_failure(expanded, reason)}
         end
 
       {:error, reason} ->
-        {:error, "Cannot create directory: #{:file.format_error(reason)}"}
+        {:error, mkdir_failure(Path.dirname(expanded), reason)}
     end
+  end
+
+  # ── Failure text ──────────────────────────────────────────────────────
+  #
+  # These used to render as `Error writing file: eacces` — a bare errno, which
+  # names neither the cause in words nor anything the caller can do next, so the
+  # only available move was to reissue the identical write. Each branch below
+  # states the specific fact that stopped the write and one concrete next step,
+  # matching the contract `FileRead.Messages` sets for the read side.
+
+  defp write_failure(path, :eacces) do
+    "Cannot write #{path}: permission denied (eacces). The path is inside the allowed " <>
+      "write roots, but the filesystem refuses it — the file or its directory is owned by " <>
+      "another user or is read-only. Retrying will fail identically. Check with " <>
+      "`shell_execute` and `ls -ld #{path} #{Path.dirname(path)}`, or write somewhere you own."
+  end
+
+  defp write_failure(path, :eisdir) do
+    "Cannot write #{path}: it is an existing directory, not a file. Writing would have to " <>
+      "destroy the directory, which `file_write` will not do. Choose a filename inside it " <>
+      "(e.g. `#{Path.join(path, "output.txt")}`), or use `dir_list` with " <>
+      "`path: \"#{path}\"` to see what is already there."
+  end
+
+  defp write_failure(path, :enospc) do
+    "Cannot write #{path}: the filesystem is out of space (enospc). Nothing was written " <>
+      "and no smaller retry of this same file is guaranteed to fit. Check free space with " <>
+      "`shell_execute` and `df -h #{Path.dirname(path)}` before retrying."
+  end
+
+  defp write_failure(path, :erofs) do
+    "Cannot write #{path}: the filesystem is mounted read-only (erofs). No write to any " <>
+      "path on this mount can succeed, so a different filename will not help. Write under " <>
+      "a writable root such as `~/.osa/workspace` instead."
+  end
+
+  defp write_failure(path, :enametoolong) do
+    "Cannot write #{path}: the filename is too long for this filesystem (enametoolong, " <>
+      "#{byte_size(Path.basename(path))} bytes in the final component). Shorten the " <>
+      "basename and retry."
+  end
+
+  defp write_failure(path, reason) do
+    "Cannot write #{path}: #{:file.format_error(reason)} (#{inspect(reason)}). This is a " <>
+      "filesystem-level failure, so reissuing the same write will fail the same way. Use " <>
+      "`shell_execute` with `ls -ld #{Path.dirname(path)}` to inspect the target directory."
+  end
+
+  defp mkdir_failure(dir, :eacces) do
+    "Cannot create the parent directory #{dir}: permission denied (eacces). The file was " <>
+      "NOT written. Retrying will fail identically. Inspect the nearest existing ancestor " <>
+      "with `shell_execute` and `ls -ld #{Path.dirname(dir)}`, or write under a directory " <>
+      "you own such as `~/.osa/workspace`."
+  end
+
+  defp mkdir_failure(dir, :enotdir) do
+    "Cannot create the parent directory #{dir}: one of its path components is an existing " <>
+      "file, not a directory (enotdir). The file was NOT written. Use `dir_list` walking " <>
+      "up from #{Path.dirname(dir)} to find which component is the file, then pick a " <>
+      "different path."
+  end
+
+  defp mkdir_failure(dir, reason) do
+    "Cannot create the parent directory #{dir}: #{:file.format_error(reason)} " <>
+      "(#{inspect(reason)}). The file was NOT written. Verify the path with `dir_list` on " <>
+      "the nearest existing ancestor before retrying."
   end
 
   # ── Private ───────────────────────────────────────────────────────────

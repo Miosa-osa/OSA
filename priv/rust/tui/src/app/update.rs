@@ -149,10 +149,11 @@ impl App {
                     && self
                         .model_picker
                         .as_ref()
-                        .map(|p| p.is_key_entry())
+                        .map(|p| p.wants_paste())
                         .unwrap_or(false)
                 {
-                    // Paste-friendly API key entry on the picker's key screen.
+                    // Paste-friendly API key entry on the picker's key screen,
+                    // and pass-through to a running vendor CLI on its own.
                     if let Some(ref mut picker) = self.model_picker {
                         picker.handle_paste(&text);
                     }

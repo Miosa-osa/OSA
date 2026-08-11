@@ -58,20 +58,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   # NOTE: all sigils use the `/` delimiter with internal `/` escaped as `\/`.
   # (An earlier `~r|…|` form broke compilation — the `|` delimiter collided with
   # the `|` alternations inside the patterns.)
+  #
+  # THIS LIST IS AN EXTENSION, NOT A COPY. `rm -rf <broad root>`, fork bombs and
+  # `dd of=/dev/…` used to be duplicated here with the SAME shape — and the same
+  # quoting hole — as `Agent.Safety.DangerousCommands`. Two blocklists that must
+  # stay in sync is how a fix lands in one and not the other, so those rows are
+  # gone: `Handler.catastrophic?/1` now delegates that class to
+  # `DangerousCommands.catastrophic_destruction?/1`, which matches over the
+  # normalized command-variant set. What remains here is only what the breaker
+  # does NOT cover.
   @catastrophic_patterns [
-    # rm -rf targeting a filesystem/home ROOT (not a scoped subdir):
-    #   rm -rf /        rm -rf /*        rm -rf ~        rm -rf $HOME
-    #   rm --recursive --force /   (long flags, any order)
-    ~r/\brm\s+(?:-[a-zA-Z]*\s+|--[a-z]+\s+)*(?:\/|~|\$HOME|\/\*|~\/\*|\$HOME\/\*)\s*$/,
-    ~r/\brm\s+(?:-[a-zA-Z]*\s+|--[a-z]+\s+)*(?:\/|~|\$HOME)\/?\*/,
-    # Classic fork bomb :(){ :|:& };:
-    ~r/:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
-    # Filesystem formatting / partitioning
+    # Filesystem formatting / partitioning (broader than the breaker's `mkfs`
+    # rule, which requires a /dev/ target).
     ~r/\bmkfs(\.\w+)?\b/,
     ~r/\bfdisk\b/,
     ~r/\bmkswap\b/,
-    # dd writing directly to a block device
-    ~r/\bdd\b[^|;&]*\bof=\/dev\//,
     # Redirect into a raw disk device
     ~r/>\s*\/dev\/(sd|nvme|hd|vd|mmcblk)/,
     # Recursive chmod/chown on a filesystem root

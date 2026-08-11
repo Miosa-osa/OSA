@@ -161,6 +161,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @cancel_table :osa_cancel_flags
 
+  # `init/1` traps exits so `terminate/2` actually runs on a supervisor shutdown
+  # (it did not before — see the `terminate/2` comment), which makes this budget
+  # load-bearing rather than incidental. It is bounded on purpose: `terminate/2`
+  # only ever does local, guarded work (a checkpoint write, a session save, the
+  # session-end hook), so 2s is already generous, and it caps how long a quit
+  # can block. A loop that is mid-turn does not trap at all (see `during_turn/1`),
+  # so this budget is never spent waiting on a running turn —
+  # `force_terminate_subagent/1` still reaps a stuck child immediately.
+  @shutdown_budget_ms 2_000
+
   # --- Client API ---
 
   @doc """
@@ -174,7 +184,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       id: {__MODULE__, session_id},
       start: {__MODULE__, :start_link, [opts]},
       restart: :transient,
-      type: :worker
+      type: :worker,
+      shutdown: @shutdown_budget_ms
     }
   end
 
@@ -188,20 +199,43 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def process_message(session_id, message, opts \\ []) do
-    # The agent loop runs up to `max_turns` iterations with tool calls and
-    # subagents, and is bounded logically by max_turns + max_budget_usd — not
-    # by wall-clock here. The previous 30s (then 10-min) default capped every
-    # real task far below the loop's own limits, so multi-step work (e.g.
-    # codebase exploration) or an hours-long autonomous run died with
-    # {:timeout}. The turn is already bounded logically by max_iterations +
-    # max_budget_usd, so the wall-clock is redundant and fatal for long runs:
-    # default to `:infinity`. An explicit opts[:timeout] still wins, and the
-    # global default is tunable via `:agent_turn_timeout_ms`.
-    timeout =
-      Keyword.get(opts, :timeout) ||
-        Application.get_env(:optimal_system_agent, :agent_turn_timeout_ms, :infinity)
+    GenServer.call(via(session_id), {:process, message, opts}, turn_timeout(opts))
+  end
 
-    GenServer.call(via(session_id), {:process, message, opts}, timeout)
+  # Wall-clock backstop for ONE `{:process, ...}` join.
+  #
+  # The turn is bounded LOGICALLY by max_turns + max_budget_usd, so a short
+  # wall-clock (the old 30s, then 10-min defaults) killed legitimate multi-step
+  # work — that is why this became `:infinity`. But `:infinity` is not a bound
+  # at all: every caller of `process_message/3` is a *surface* (an HTTP request,
+  # a Slack/Telegram/Discord/email delivery, the CLI, a channel worker), and a
+  # loop wedged inside one un-cancellable operation (a provider socket that
+  # never closes, a tool that never returns) leaves that surface blocked with
+  # no ack, forever, holding its process and its user's turn open. Nothing ever
+  # times it out and nothing ever tells the user.
+  #
+  # So: a real, finite, deliberately GENEROUS default. 24h is far past any
+  # honest turn (the tightest real bound is the orchestrator's own 2h subagent
+  # join) yet still guarantees every caller eventually gets `{:timeout, _}`
+  # instead of hanging for the VM's life. An explicit `opts[:timeout]` still
+  # wins for callers with a tighter budget (the orchestrator passes one), and
+  # an operator who genuinely wants the old behaviour can still set
+  # `config :optimal_system_agent, :agent_turn_timeout_ms, :infinity`.
+  @default_turn_timeout_ms 24 * 60 * 60 * 1000
+
+  @doc false
+  @spec turn_timeout(keyword()) :: pos_integer() | :infinity
+  def turn_timeout(opts \\ []) do
+    case Keyword.get(opts, :timeout) ||
+           Application.get_env(
+             :optimal_system_agent,
+             :agent_turn_timeout_ms,
+             @default_turn_timeout_ms
+           ) do
+      :infinity -> :infinity
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> @default_turn_timeout_ms
+    end
   end
 
   @doc "Get a snapshot of loop state (iteration count, token estimate, status, etc.)."
@@ -595,6 +629,61 @@ defmodule OptimalSystemAgent.Agent.Loop do
       {:error, :not_running}
   end
 
+  @doc """
+  Clear the cooperative cancel flag for `session_id` **and its whole
+  descendant subtree** — the exact inverse of `cancel/1`.
+
+  `cancel/1` writes a flag for every descendant it can discover (RunStore BFS,
+  the cancel table's own `agent:<id>:` prefix, and the live SessionRegistry).
+  Until now nothing removed those: the only deletes in the codebase
+  (`TurnPipeline.clear_cancel_flag/1`, `ReactLoop`'s two interrupt paths) each
+  clear exactly ONE key — the session that was executing a turn. A descendant
+  that was flagged but never got to run a turn (already finished, force
+  terminated by `cancel/1` itself, or never started) kept its `true` forever:
+  `:osa_cancel_flags` grew for the life of the VM, and — worse — the readers in
+  `Loop.PermissionBroker` and `Loop.Survey` treat a live flag as "cancelled", so
+  a LATER run reusing that id (a resumed delegate, a stable `@name` handle) had
+  its permission prompts and `ask_user` surveys auto-denied before it ever
+  cleared anything.
+
+  Set and clear are now symmetric: whatever `cancel/1` flags, this un-flags.
+  """
+  @spec clear_cancel(String.t()) :: :ok
+  def clear_cancel(session_id) when is_binary(session_id) do
+    Enum.each([session_id | descendant_session_ids(session_id)], &clear_cancel_key/1)
+
+    # Same belt-and-braces sweep `cancel/1` uses to FIND descendants, applied in
+    # reverse: any `agent:<session_id>:` key still sitting in the table (flagged
+    # via the prefix fold or the registry scan, e.g. a child that had not yet
+    # reached RunStore.start_run/1) is cleared too. Without this the two paths
+    # are asymmetric and the flags set by the registry scan can never be removed.
+    prefix = "agent:#{session_id}:"
+
+    try do
+      :ets.foldl(
+        fn {key, _val}, acc ->
+          if is_binary(key) and String.starts_with?(key, prefix), do: clear_cancel_key(key)
+          acc
+        end,
+        :ok,
+        @cancel_table
+      )
+    rescue
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  def clear_cancel(_), do: :ok
+
+  defp clear_cancel_key(id) do
+    :ets.delete(@cancel_table, id)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   # True when `id` is a spawned subagent (RunStore row with a parent), not a
   # top-level interactive session. Best-effort — any failure treats `id` as
   # NOT a subagent so we never accidentally hard-kill an unknown/root session.
@@ -688,9 +777,28 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def init(opts) do
+    # Without this, `terminate/2` NEVER runs on a supervisor shutdown: an
+    # untrapped `:shutdown` exit signal kills the process outright, so the
+    # session-end hook, the background-command reaping, and (since the fix
+    # below) the mid-turn save of an unfinished turn were all dead code on the
+    # ordinary application-stop path. Trapping makes the child's shutdown budget
+    # load-bearing — see `shutdown_budget/1`, which sets it explicitly.
+    Process.flag(:trap_exit, true)
+
     opts = apply_preset(opts)
     extra_tools = Keyword.get(opts, :extra_tools, [])
     session_id = Keyword.fetch!(opts, :session_id)
+
+    # A cancel flag belongs to a RUN, not to an id. Ids are reused on purpose —
+    # `Orchestrator.resume_subagent/2` restarts under the ORIGINAL agent id, and
+    # a `name:`-addressed teammate ("@smoke-e2e") always gets the same id. If the
+    # previous run under this id was cancelled, its flag is still sitting in the
+    # table (`cancel/1` force-terminates a subagent, so that process never
+    # reaches the delete in ReactLoop/TurnPipeline), and `PermissionBroker`/
+    # `Survey` would read it as "this session is cancelled" — auto-denying the
+    # fresh run's very first permission prompt or `ask_user` survey before it had
+    # a chance to clear anything. A starting loop is by definition not cancelled.
+    clear_cancel_key(session_id)
 
     restored = Checkpoint.restore_checkpoint(session_id)
 
@@ -981,10 +1089,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # guard, compaction, message build, and genre routing) live in TurnPipeline
     # as named ordered steps. It returns a terminal reply or hands back a
     # `:dispatch` signal for plan-mode / ReactLoop execution.
-    case TurnPipeline.run(message, opts, state) do
-      {:reply, reply, state} -> {:reply, reply, state}
-      {:dispatch, state, skip_plan} -> dispatch_message(state, skip_plan)
-    end
+    during_turn(fn ->
+      case TurnPipeline.run(message, opts, state) do
+        {:reply, reply, state} -> {:reply, reply, state}
+        {:dispatch, state, skip_plan} -> dispatch_message(state, skip_plan)
+      end
+    end)
   end
 
   @impl true
@@ -1099,13 +1209,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def handle_call(:compact, _from, state) do
     # The window MUST come from the registry's honest per-model resolver — the
     # compactor no longer has (and must never regrow) a hardcoded default.
+    # Bounded: a wedged summarizer must not hang `/compact` forever — see
+    # TurnPipeline.bounded_compaction/2.
     compacted =
-      OptimalSystemAgent.Agent.Compactor.maybe_compact(
-        state.messages,
-        Map.get(state, :last_input_tokens, 0),
-        state.session_id,
-        context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state)
-      )
+      TurnPipeline.bounded_compaction(state.messages, fn ->
+        OptimalSystemAgent.Agent.Compactor.maybe_compact(
+          state.messages,
+          Map.get(state, :last_input_tokens, 0),
+          state.session_id,
+          context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state)
+        )
+      end) || state.messages
 
     {:reply, :ok, %{state | messages: compacted}}
   end
@@ -1118,11 +1232,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
     messages = state.messages || []
 
     compacted =
-      OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(
-        messages,
-        state.session_id,
-        instructions
-      )
+      TurnPipeline.bounded_compaction(messages, fn ->
+        OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(
+          messages,
+          state.session_id,
+          instructions
+        )
+      end) || messages
 
     stats = %{
       messages_before: length(messages),
@@ -1203,15 +1319,42 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # time out and the entire save was silently dropped. A cast is queued instead,
   # so a busy loop DEFERS the save rather than losing it, and the state written
   # is the loop's own — never a scraped snapshot.
+  #
+  # A failed save was previously DISCARDED (`_ = save_from_state(...)`). A full
+  # disk, a read-only config dir, or an encode error logged one warning at
+  # `:warning` level from deep inside SessionPersistence and the turn was
+  # delivered to the user exactly as if it had been persisted — the session then
+  # evaporated on the next restart with no signal that anything went wrong.
+  # Match the result and SURFACE the failure on the same typed `:system_event` +
+  # session PubSub channel every other turn-level fault uses, so the TUI/HTTP
+  # consumers can tell the user their conversation is not being saved.
   @impl true
   def handle_cast({:persist_session, session_id}, state) do
-    _ = OptimalSystemAgent.Agent.SessionPersistence.save_from_state(session_id, state)
-    {:noreply, state}
+    case OptimalSystemAgent.Agent.SessionPersistence.save_from_state(session_id, state) do
+      :ok ->
+        {:noreply, state}
+
+      {:ok, _} ->
+        {:noreply, state}
+
+      {:error, reason} ->
+        notify_persistence_failure(session_id, state, reason)
+        {:noreply, state}
+
+      other ->
+        notify_persistence_failure(session_id, state, {:unexpected, other})
+        {:noreply, state}
+    end
   end
 
   @impl true
   def handle_cast({:inject_agent_result, content}, state) do
-    injected = %{role: "user", content: content}
+    # `scaffold: true` marks this as loop-authored user-role text, NOT something
+    # the human typed. `/undo` (drop_last_exchange/1) walks past scaffolding to
+    # the last real user turn; without the marker, an `/undo` immediately after
+    # a delegation result dropped only this injection and reported `dropped: 1`
+    # while changing nothing the user could see.
+    injected = %{role: "user", content: content, scaffold: true}
     {:noreply, %{state | messages: state.messages ++ [injected]}}
   end
 
@@ -1258,7 +1401,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
             current_input: "[background task notification]"
         }
 
-        {:reply, _reply, state} = run_and_reply(state)
+        # Same turn, same reasoning as handle_call({:process, _}) — see
+        # `during_turn/1`: this callback blocks in LLMClient exactly like a real
+        # turn does, so exit trapping must be off for its duration.
+        {:reply, _reply, state} = during_turn(fn -> run_and_reply(state) end)
         {:noreply, state}
     end
   end
@@ -1279,37 +1425,135 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:noreply, new_state}
   end
 
+  # Termination is split by two independent questions, not by exit reason alone:
+  #
+  #   1. Is a turn IN FLIGHT (`status: :processing`)?  The `Checkpoint` and the
+  #      `DurableLog` are exactly the markers `init/1` reads back to restore an
+  #      interrupted turn. Clearing them unconditionally — as all three "clean"
+  #      clauses used to — deleted the recovery evidence for a turn that had NOT
+  #      finished, so a shutdown that landed mid-turn threw the work away. They
+  #      are only safe to clear at a genuine idle boundary.
+  #
+  #   2. Was the exit ABNORMAL, or clean-but-mid-turn?  Auto-save is registered
+  #      on `:post_response` only, so a turn that never reached a response was
+  #      never persisted. Save here before the process is gone.
+  #
+  # Note `init/1` sets `trap_exit`; without it none of this ran on a supervisor
+  # shutdown at all (`terminate/2` is not invoked for an untrapped exit signal).
   @impl true
-  def terminate(:normal, state) do
-    fire_session_end(state)
-    Checkpoint.clear_checkpoint(state.session_id)
-    DurableLog.clear(state.session_id)
-    :ok
-  end
-
-  def terminate(:shutdown, state) do
-    fire_session_end(state)
-    Checkpoint.clear_checkpoint(state.session_id)
-    DurableLog.clear(state.session_id)
-    :ok
-  end
-
-  def terminate({:shutdown, _}, state) do
-    fire_session_end(state)
-    Checkpoint.clear_checkpoint(state.session_id)
-    DurableLog.clear(state.session_id)
-    :ok
-  end
+  def terminate(:normal, state), do: end_session(state, :normal)
+  def terminate(:shutdown, state), do: end_session(state, :normal)
+  def terminate({:shutdown, _}, state), do: end_session(state, :normal)
 
   def terminate(reason, state) do
+    # Abnormal exit — always try to save, and never clear recovery markers.
+    # The cancel flag is NOT a recovery marker: it is per-run cooperative state
+    # whose only reader is a process that no longer exists, so it must go with
+    # the process (see `clear_cancel/1`).
+    clear_cancel_key(state.session_id)
+    save_unsaved_turn(state, reason)
     fire_session_end(state, reason)
     :ok
   end
 
+  defp end_session(state, hook_reason) do
+    clear_cancel_key(state.session_id)
+
+    if turn_in_flight?(state) do
+      save_unsaved_turn(state, hook_reason)
+    else
+      Checkpoint.clear_checkpoint(state.session_id)
+      DurableLog.clear(state.session_id)
+    end
+
+    fire_session_end(state, hook_reason)
+    :ok
+  end
+
+  defp turn_in_flight?(%{status: :processing}), do: true
+  defp turn_in_flight?(_), do: false
+
+  # Best-effort durable save of a turn that never reached `:post_response`.
+  # Guarded end-to-end: a save problem must never turn a fast shutdown into a
+  # hanging one, and must never mask the original exit reason.
+  defp save_unsaved_turn(%{session_id: sid} = state, reason) when is_binary(sid) do
+    _ = Checkpoint.checkpoint_state(state)
+
+    case SessionPersistence.save_from_state(sid, state) do
+      :ok ->
+        Logger.info("[loop] session #{sid}: saved unfinished turn on #{inspect(reason)} exit")
+        :ok
+
+      {:ok, _} ->
+        :ok
+
+      {:error, save_reason} ->
+        notify_persistence_failure(sid, state, save_reason)
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp save_unsaved_turn(_state, _reason), do: :ok
+
+  # `trap_exit` turns linked-process exits into ordinary messages. Nothing in
+  # this module creates a link on purpose (tool tasks use `async_nolink`), so
+  # this clause exists only so a stray EXIT cannot be mistaken for real work —
+  # a non-parent link dying must not silently take the session's state with it.
+  @impl true
+  def handle_info({:EXIT, pid, exit_reason}, state) do
+    Logger.debug(
+      "[loop] session #{inspect(Map.get(state, :session_id))}: trapped EXIT from " <>
+        "#{inspect(pid)} (#{inspect(exit_reason)})"
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  # Emitted when a durable session save fails. Deliberately `Logger.error` (not
+  # `warning`): losing the transcript is a data-loss event, not a hiccup. Goes
+  # out on the same typed `:system_event` + session PubSub pair every other
+  # turn-level fault uses, so the TUI/HTTP consumers can tell the user their
+  # conversation is not being saved instead of showing a normal reply.
+  defp notify_persistence_failure(session_id, state, reason) do
+    message =
+      "Session save FAILED — this turn is not on disk and will be lost on restart " <>
+        "(#{inspect(reason)})."
+
+    Logger.error("[loop] session #{session_id}: #{message}")
+
+    payload = %{
+      event: :session_persist_failed,
+      session_id: session_id,
+      reason: inspect(reason),
+      message: message
+    }
+
+    Bus.emit(:system_event, payload, Observability.annotate(state, source: "agent.loop"))
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, Map.put(payload, :type, :system_event)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   # SessionEnd hook — run synchronously so session-cleanup handlers execute
   # before the process exits. Fully guarded: hook problems never block shutdown.
-  defp fire_session_end(state, reason \\ :normal)
-
   defp fire_session_end(%{session_id: sid} = state, reason) when is_binary(sid) do
     # WS6 — orphan reaping: a dying session must not leave its background
     # shell commands running with nobody left to notify. Best-effort.
@@ -1350,6 +1594,40 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   # --- Message Dispatch ---
+
+  # Run a turn with exit trapping DISABLED, then restore it.
+  #
+  # `init/1` traps exits so `terminate/2` runs on a supervisor shutdown. That is
+  # only correct while the loop is IDLE — back in its receive loop, where a
+  # trapped EXIT is seen immediately. Inside a turn the process is blocked in
+  # its callback (ultimately in `LLMClient`'s selective `receive`), and trapping
+  # there is actively harmful in two ways:
+  #
+  #   1. `LLMClient` runs the provider stream in a LINKED `Task.async` plus two
+  #      `spawn_link`ed watchers, and its `receive` has no `{:EXIT, _, _}`
+  #      clause. Untrapped, a stream task that dies abnormally takes the loop
+  #      down at once. Trapped, that exit becomes a message the selective
+  #      receive skips — and the turn would block until the 1-hour absolute
+  #      timeout instead of failing fast.
+  #   2. A shutdown signal arriving mid-turn could not be acted on anyway (the
+  #      process cannot reach `terminate/2` from inside the turn), so trapping
+  #      would only add dead wait before the supervisor's kill — and would make
+  #      `force_terminate_subagent/1` wait out the shutdown budget before it
+  #      could unblock a parent joined on a stuck child.
+  #
+  # Nothing is lost by not trapping here: an abnormal exit RAISED inside the
+  # turn still runs `terminate/2` (that path never needed trap_exit), and the
+  # mid-turn `Checkpoint`/`DurableLog` markers survive a hard kill precisely
+  # because `terminate/2` no longer clears them while a turn is in flight.
+  defp during_turn(fun) do
+    Process.flag(:trap_exit, false)
+
+    try do
+      fun.()
+    after
+      Process.flag(:trap_exit, true)
+    end
+  end
 
   defp dispatch_message(state, skip_plan) do
     if not skip_plan and should_plan?(state) do
@@ -1661,18 +1939,68 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   # /undo backend: split off the most recent user turn and everything after it.
   # Returns {kept_messages, dropped_count}. No user turn -> unchanged, 0 dropped.
-  defp drop_last_exchange(messages) do
+  #
+  # "The most recent user turn" is NOT simply "the last message with
+  # role == \"user\"". OSA writes several kinds of user-role SCAFFOLDING into
+  # history that the user never typed:
+  #
+  #   * `ReactLoop.finalize_interrupt/2`'s `[Request interrupted by user]`
+  #     marker, appended on every Esc/interrupt;
+  #   * `inject_agent_result/2`'s delegation-result injection;
+  #   * background `<task-notification>` drains.
+  #
+  # Walking to the last user-role message therefore made `/undo` right after an
+  # interrupt (or right after a teammate reported back) drop ONLY the
+  # scaffolding — a visible no-op that still reported `dropped: 1`. The user
+  # pressed it again and lost a real turn.
+  #
+  # The walker now skips scaffolding and lands on the last message the user
+  # actually authored, dropping the scaffolding along with it.
+  @doc false
+  @spec drop_last_exchange([map()]) :: {[map()], non_neg_integer()}
+  def drop_last_exchange(messages) do
     last_user_idx =
       messages
       |> Enum.with_index()
-      |> Enum.filter(fn {m, _i} ->
-        to_string(Map.get(m, :role) || Map.get(m, "role") || "") == "user"
-      end)
+      |> Enum.filter(fn {m, _i} -> real_user_message?(m) end)
       |> List.last()
 
     case last_user_idx do
       {_m, idx} -> {Enum.take(messages, idx), length(messages) - idx}
       nil -> {messages, 0}
+    end
+  end
+
+  # A user-role message the HUMAN authored — i.e. not loop scaffolding.
+  defp real_user_message?(m) do
+    to_string(Map.get(m, :role) || Map.get(m, "role") || "") == "user" and
+      not scaffold_message?(m)
+  end
+
+  @doc false
+  # Scaffolding is identified two ways, on purpose:
+  #
+  #   1. An explicit `:scaffold` marker on the message map. This is the
+  #      preferred, unambiguous signal and is what every injection site OSA
+  #      owns should set.
+  #   2. A content match against `ReactLoop.interrupt_markers/0` and the
+  #      background-notification envelope, for the injection sites that write
+  #      the marker text directly (react_loop.ex is owned elsewhere) and for
+  #      transcripts PERSISTED BEFORE the marker existed — those replay from
+  #      disk with no flag at all, so a flag-only check would silently keep the
+  #      old broken behaviour on every resumed session.
+  @spec scaffold_message?(map()) :: boolean()
+  def scaffold_message?(m) do
+    cond do
+      Map.get(m, :scaffold) || Map.get(m, "scaffold") ->
+        true
+
+      true ->
+        content = to_string(Map.get(m, :content) || Map.get(m, "content") || "")
+        trimmed = String.trim(content)
+
+        trimmed in ReactLoop.interrupt_markers() or
+          String.starts_with?(trimmed, "<task-notification")
     end
   end
 

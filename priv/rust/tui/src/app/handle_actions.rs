@@ -975,6 +975,74 @@ impl App {
         });
     }
 
+    /// Account + quota for the picker's usage panel.
+    ///
+    /// Fired alongside the catalog rather than lazily on selection: both reads
+    /// are pure (`/auth/status` never dials out, `/usage/quota` is a cache of
+    /// response headers), so there is nothing to save by deferring, and a
+    /// panel that populates as the cursor moves reads as flicker.
+    ///
+    /// Both halves are fetched before either is published, so the panel cannot
+    /// show an account from one instant beside a quota window from another.
+    pub(crate) fn load_provider_usage(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let event = match (client.auth_status().await, client.usage_quota().await) {
+                (Ok(a), Ok(q)) => BackendEvent::ProviderUsage(Ok((a, q))),
+                (Err(e), _) | (_, Err(e)) => BackendEvent::ProviderUsage(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Open the vendor-CLI sign-in screen and read the CLI's state into it.
+    ///
+    /// Also starts a fast repaint beat, scoped to the dialog's lifetime by the
+    /// `alive` flag the dialog clears on drop. The app's own 200ms tick is
+    /// fine for a spinner and much too slow for a terminal: a fifth of a
+    /// second between a keystroke and its echo is the difference between
+    /// typing into a program and fighting one.
+    pub(crate) fn start_cli_login(&mut self, provider: String, model: String) {
+        if let Some(picker) = self.model_picker.as_mut() {
+            picker.begin_cli_login(provider, model);
+        }
+        let alive = match self.model_picker.as_ref().and_then(|p| p.cli_login_alive()) {
+            Some(a) => a,
+            None => return,
+        };
+
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                ticker.tick().await;
+                if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                if tx.send(Event::Backend(BackendEvent::CliLoginTick)).is_err() {
+                    return;
+                }
+            }
+        });
+
+        self.refresh_cli_login();
+    }
+
+    /// Re-read `/auth/cli/claude`. The only way to learn whether a child that
+    /// just exited actually changed anything.
+    pub(crate) fn refresh_cli_login(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let event = match client.claude_cli_state().await {
+                Ok(s) => BackendEvent::ClaudeCliState(Ok(s)),
+                Err(e) => BackendEvent::ClaudeCliState(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
     /// Verify a candidate provider key live (picker key screen).
     pub(crate) fn verify_provider_key(
         &self,

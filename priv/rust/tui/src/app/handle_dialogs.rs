@@ -102,6 +102,15 @@ impl App {
                 ModelPickerAction::StartAccountLogin { provider, model } => {
                     self.start_account_login(provider, model);
                 }
+                // Non-terminal, like StartAccountLogin: the picker stays open
+                // and the vendor CLI runs on a pty inside it. Closing here is
+                // what would put the CLI's prompts nowhere.
+                ModelPickerAction::StartCliLogin { provider, model } => {
+                    self.start_cli_login(provider, model);
+                }
+                ModelPickerAction::RefreshCliLogin => {
+                    self.refresh_cli_login();
+                }
                 ModelPickerAction::CancelAccountLogin { session_id } => {
                     self.exit_overlay();
                     self.model_picker = None;
@@ -131,7 +140,12 @@ impl App {
             if let Some(action) = browser.handle_key(key) {
                 match action {
                     crate::dialogs::sessions::SessionAction::Switch(id) => {
+                        // Adopt the title from the row the user just picked, so
+                        // the status bar names the new session immediately
+                        // rather than keeping the old one's until an SSE push.
+                        let picked_title = browser.title_for(&id);
                         self.exit_overlay();
+                        self.set_session_title(picked_title);
                         // Reuse the proven switch helper (same path as startup
                         // `--resume <id>`): it clears the view, reconnects the SSE
                         // stream to the selected session, AND fetches its transcript
@@ -150,6 +164,11 @@ impl App {
                         self.exit_overlay();
                     }
                     crate::dialogs::sessions::SessionAction::Rename(id, new_title) => {
+                        // Renaming the session you are in must retitle the status
+                        // bar too, not just the picker row.
+                        if id == self.session_id {
+                            self.set_session_title(Some(new_title.clone()));
+                        }
                         let client = self.client.clone();
                         let tx = self.event_tx.clone();
                         tokio::spawn(async move {

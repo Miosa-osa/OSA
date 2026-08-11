@@ -13,6 +13,23 @@ use crate::event::Event;
 const MAX_RECONNECTS: u32 = 10;
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MB
 
+/// How long an attached stream may go completely silent before we treat it as
+/// dead and reconnect.
+///
+/// The reconnect loop below only ever runs on an `Err` from the read. A
+/// half-open TCP connection produces neither bytes nor an error — the laptop
+/// slept, the VPN dropped, a NAT box forgot the flow — so without a timeout the
+/// `select!` parks forever, the backoff never fires, and the UI silently stops
+/// updating for the rest of the session.
+///
+/// The server emits `: keepalive` every 30s (`session_routes.ex`'s SSE loop),
+/// which lands here as a comment line and counts as traffic. Three intervals of
+/// slack means a live stream has to miss three consecutive keepalives before we
+/// call it: enough that a scheduling hiccup or a brief stall never trips it,
+/// short enough that a genuinely wedged connection recovers in ~90s instead of
+/// never. Do not tighten this below `3 * keepalive`.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// SSE client that connects to the backend event stream and dispatches
 /// parsed events through a channel.
 pub struct SseClient {
@@ -21,6 +38,10 @@ pub struct SseClient {
     token: String,
     event_tx: mpsc::UnboundedSender<Event>,
     cancel: CancellationToken,
+    /// Silence budget for an attached stream. Always [`IDLE_TIMEOUT`] in
+    /// production; tests shorten it so they can prove the timeout actually
+    /// fires without waiting out three keepalive intervals.
+    idle_timeout: Duration,
 }
 
 impl SseClient {
@@ -41,7 +62,16 @@ impl SseClient {
             token,
             event_tx,
             cancel,
+            idle_timeout: IDLE_TIMEOUT,
         }
+    }
+
+    /// Shorten the idle budget. Test-only: production always uses
+    /// [`IDLE_TIMEOUT`], which is pinned to the server's keepalive cadence.
+    #[cfg(test)]
+    fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
     }
 
     /// Returns a cancellation token that can be used to stop the SSE stream.
@@ -210,7 +240,25 @@ impl SseClient {
                 _ = self.cancel.cancelled() => {
                     return Err(SseError::Cancelled);
                 }
-                line = lines.next_line() => {
+                line = tokio::time::timeout(self.idle_timeout, lines.next_line()) => {
+                    // Timeout elapsed: the stream is attached but silent past
+                    // three keepalive intervals. Fall into the SAME mid-stream
+                    // drop path a read error takes, so the existing
+                    // reconnect/backoff machinery recovers it.
+                    let Ok(line) = line else {
+                        warn!(
+                            "SSE idle for {:?} (no data, no keepalive) — treating as half-open and reconnecting",
+                            self.idle_timeout
+                        );
+                        return Err(SseError::Disconnected {
+                            err: anyhow::anyhow!(
+                                "SSE stream idle for {:?}",
+                                self.idle_timeout
+                            ),
+                            connected: true,
+                        });
+                    };
+
                     match line {
                         Ok(Some(line)) => {
                             if line.is_empty() {
@@ -533,6 +581,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "proactive_message"
         | "proactive_mode_changed"
         | "coordinator_mode"
+        | "session_title"
         | "auto_mode_paused" => parse_system_event(data),
 
         // Background (fire-and-forget) subagents. `started` arrives wrapped as a
@@ -1618,6 +1667,28 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::CoordinatorMode { active: ev.active })
         }
 
+        // The session's human-readable title. Emitted twice in the normal case:
+        // once with the instant heuristic title when the first prompt lands, then
+        // again if the backend's small-model refinement improves it. An empty
+        // title is dropped rather than blanking a good one.
+        "session_title" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                title: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("session_title", e)),
+            };
+            if ev.title.trim().is_empty() {
+                return None;
+            }
+            Some(BackendEvent::SessionTitle {
+                title: ev.title.trim().to_string(),
+            })
+        }
+
         // Multi-agent workflow events may also arrive wrapped as a system_event
         // (with an `event` field). Delegate to the top-level parser, which builds
         // them from the same frame data.
@@ -1649,6 +1720,95 @@ fn parse_warning(event_type: &str, err: serde_json::Error) -> BackendEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle budget must stay at or above three server keepalive intervals
+    /// (`session_routes.ex` chunks `: keepalive` every 30s). Tighter than that
+    /// and a single missed keepalive tears down a perfectly healthy stream.
+    #[test]
+    fn the_idle_timeout_leaves_room_for_three_keepalives() {
+        const SERVER_KEEPALIVE: Duration = Duration::from_secs(30);
+        assert!(
+            IDLE_TIMEOUT >= SERVER_KEEPALIVE * 3,
+            "idle timeout {:?} must not be tighter than 3 keepalive intervals",
+            IDLE_TIMEOUT
+        );
+    }
+
+    /// THE defect: a half-open connection yields neither bytes nor an error, so
+    /// the read parked forever and the reconnect path below it never ran — the
+    /// UI stopped updating for the rest of the session with no error anywhere.
+    ///
+    /// This drives the real client against a real socket that completes the
+    /// HTTP response head, delivers one event, and then goes silent forever
+    /// without closing (exactly what a dropped NAT flow looks like). The client
+    /// must give up on its own and report a *mid-stream* drop, which is the
+    /// variant the reconnect loop retries.
+    #[tokio::test]
+    async fn a_silent_half_open_stream_gives_up_instead_of_parking_forever() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: answer the request, send one frame, then never speak again
+        // and never close. Holding the socket alive is the whole point.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the request head so the client's write completes.
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Transfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            // One well-formed keepalive comment (0xd = 13 bytes), then silence.
+            sock.write_all(b"d\r\n: keepalive\n\n\r\n").await.unwrap();
+            sock.flush().await.unwrap();
+            // Park, holding the connection open.
+            std::future::pending::<()>().await;
+        });
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = SseClient::with_cancel(
+            "s1".to_string(),
+            format!("http://{addr}"),
+            String::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        // The production budget is 90s; the *mechanism* is what is under test,
+        // so shorten it rather than make the suite wait. A paused clock is not
+        // usable here — the runtime is parked on real socket I/O, so it never
+        // auto-advances.
+        .with_idle_timeout(Duration::from_millis(300));
+
+        // An order-of-magnitude outer bound: if the read parks forever again
+        // this fails the suite instead of hanging it.
+        let outcome = tokio::time::timeout(Duration::from_secs(10), client.connect_once()).await;
+
+        server.abort();
+
+        let Ok(result) = outcome else {
+            panic!("connect_once never returned — the read is parked forever on a half-open stream");
+        };
+        match result {
+            Err(SseError::Disconnected { connected, err }) => {
+                assert!(
+                    connected,
+                    "an idle timeout happens AFTER the body attached, so it must \
+                     report connected=true and reset the reconnect budget"
+                );
+                assert!(
+                    err.to_string().contains("idle"),
+                    "the surfaced error should name the idle timeout: {err}"
+                );
+            }
+            other => panic!("expected a mid-stream Disconnected, got {other:?}"),
+        }
+    }
 
     #[test]
     fn reconnect_budget_resets_after_a_recovered_blip() {
@@ -1779,6 +1939,39 @@ mod tests {
             }
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    #[test]
+    fn parses_session_title() {
+        // Arrives either under its own frame name or wrapped as a system_event,
+        // depending on whether the SSE loop unwrapped it.
+        let data = br#"{"type":"system_event","event":"session_title","session_id":"s1","title":"Debugging production 500 errors"}"#;
+        for frame in ["session_title", "system_event"] {
+            match parse_sse_event(frame, data) {
+                Some(BackendEvent::SessionTitle { title }) => {
+                    assert_eq!(title, "Debugging production 500 errors")
+                }
+                other => panic!("unexpected for {}: {:?}", frame, other),
+            }
+        }
+    }
+
+    #[test]
+    fn session_title_trims_and_drops_blanks() {
+        let padded = br#"{"type":"system_event","event":"session_title","session_id":"s1","title":"  Rate limiting implementation  "}"#;
+        match parse_sse_event("session_title", padded) {
+            Some(BackendEvent::SessionTitle { title }) => {
+                assert_eq!(title, "Rate limiting implementation")
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // A blank title must never blank out a good one.
+        let blank = br#"{"type":"system_event","event":"session_title","session_id":"s1","title":"   "}"#;
+        assert!(parse_sse_event("session_title", blank).is_none());
+
+        let missing = br#"{"type":"system_event","event":"session_title","session_id":"s1"}"#;
+        assert!(parse_sse_event("session_title", missing).is_none());
     }
 
     #[test]

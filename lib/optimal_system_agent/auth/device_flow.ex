@@ -27,15 +27,26 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
        embedding a client secret in the binary — strictly worse than either
        option above.
 
-  PKCE is therefore not part of *this* grant — there is no authorization code
-  redirected through a user agent to protect. (This paragraph previously
+  PKCE is therefore not *required* by this grant — there is no authorization
+  code redirected through a user agent to protect. (This paragraph once
   pointed at an `Auth.PKCE` module "retained for the authorization-code
-  providers that need it". No such module exists, and none has ever existed:
-  the only `code_verifier` in the tree is **server-supplied** by OpenAI's
-  deviceauth endpoint, which is PKCE in shape only. The reference is removed
-  rather than left as a promise, because the first provider that genuinely
-  needs a client-generated S256 challenge — MiniMax — must build it, not
-  discover it missing.)
+  providers that need it" when no such module existed. It does now:
+  `OptimalSystemAgent.Auth.PKCE`, built because two providers genuinely need a
+  client-generated S256 challenge.)
+
+  ## Optional PKCE
+
+  Some providers bind their device grant to a PKCE challenge anyway. Qwen is
+  one: its own client sends `code_challenge`/`code_challenge_method` with the
+  device authorization request and `code_verifier` with the token exchange,
+  and the exchange is **rejected** without them — so for those providers this
+  is not a hardening option, it is the protocol.
+
+  A provider opts in by putting an `%Auth.PKCE{}` on its config under `:pkce`.
+  Absent that key, not one byte of the request changes, which is what keeps
+  every existing provider on exactly the wire format it had before this was
+  added. `refresh/2` never carries PKCE — a refresh exchange has no
+  authorization code to bind, and the RFC does not define a verifier for it.
 
   ## Secret handling
 
@@ -113,7 +124,8 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
           required(:token_url) => String.t(),
           required(:client_id) => String.t(),
           optional(:scope) => String.t(),
-          optional(:audience) => String.t()
+          optional(:audience) => String.t(),
+          optional(:pkce) => OptimalSystemAgent.Auth.PKCE.t()
         }
 
   @doc """
@@ -128,6 +140,7 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
       %{"client_id" => client_id}
       |> maybe_put("scope", Map.get(config, :scope))
       |> maybe_put("audience", Map.get(config, :audience))
+      |> put_pkce_challenge(Map.get(config, :pkce))
 
     case post_form(url, params) do
       {:ok, %{"device_code" => device_code, "user_code" => user_code} = body} ->
@@ -197,11 +210,13 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
       true ->
         Process.sleep(interval_s * 1000)
 
-        params = %{
-          "client_id" => config.client_id,
-          "device_code" => session.device_code,
-          "grant_type" => "urn:ietf:params:oauth:grant-type:device_code"
-        }
+        params =
+          %{
+            "client_id" => config.client_id,
+            "device_code" => session.device_code,
+            "grant_type" => "urn:ietf:params:oauth:grant-type:device_code"
+          }
+          |> put_pkce_verifier(Map.get(config, :pkce))
 
         case post_form(config.token_url, params) do
           {:ok, %{"access_token" => _} = body} ->
@@ -378,6 +393,23 @@ defmodule OptimalSystemAgent.Auth.DeviceFlow do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # The CHALLENGE is public — it is what the authorization request is bound to.
+  defp put_pkce_challenge(params, %OptimalSystemAgent.Auth.PKCE{} = pkce) do
+    params
+    |> Map.put("code_challenge", pkce.challenge)
+    |> Map.put("code_challenge_method", pkce.method)
+  end
+
+  defp put_pkce_challenge(params, _), do: params
+
+  # The VERIFIER is a secret, and it goes in the POST BODY — never in a query
+  # string, never in argv. `post_form/2` sends it as a form body, so it cannot
+  # reach a proxy access log the way a URL parameter would.
+  defp put_pkce_verifier(params, %OptimalSystemAgent.Auth.PKCE{} = pkce),
+    do: Map.put(params, "code_verifier", pkce.verifier)
+
+  defp put_pkce_verifier(params, _), do: params
 
   defp as_int(v) when is_integer(v), do: v
 

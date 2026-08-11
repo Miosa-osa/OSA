@@ -228,26 +228,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat(provider, messages, opts \\ []) do
     config = get_config!(provider)
 
-    api_key = resolve_api_key(provider, config)
+    with {:ok, api_key, url} <- resolve_credential(provider, config) do
+      model =
+        Keyword.get(opts, :model) ||
+          Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
 
-    model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
+      opts =
+        opts
+        |> Keyword.delete(:model)
+        |> maybe_add_headers(config)
+        |> maybe_extend_timeout(model)
 
-    url = Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)
+      case OpenAICompat.chat(url, api_key, model, messages, opts) do
+        {:error, "API key not configured"} ->
+          {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
 
-    opts =
-      opts
-      |> Keyword.delete(:model)
-      |> maybe_add_headers(config)
-      |> maybe_extend_timeout(model)
-
-    case OpenAICompat.chat(url, api_key, model, messages, opts) do
-      {:error, "API key not configured"} ->
-        {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
-
-      other ->
-        other
+        other ->
+          other
+      end
     end
   end
 
@@ -255,26 +253,100 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat_stream(provider, messages, callback, opts \\ []) do
     config = get_config!(provider)
 
-    api_key = resolve_api_key(provider, config)
+    with {:ok, api_key, url} <- resolve_credential(provider, config) do
+      model =
+        Keyword.get(opts, :model) ||
+          Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
 
-    model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
+      opts =
+        opts
+        |> Keyword.delete(:model)
+        |> maybe_add_headers(config)
+        |> maybe_extend_timeout(model)
 
-    url = Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)
+      case OpenAICompat.chat_stream(url, api_key, model, messages, callback, opts) do
+        {:error, "API key not configured"} ->
+          {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
 
-    opts =
-      opts
-      |> Keyword.delete(:model)
-      |> maybe_add_headers(config)
-      |> maybe_extend_timeout(model)
+        other ->
+          other
+      end
+    end
+  end
 
-    case OpenAICompat.chat_stream(url, api_key, model, messages, callback, opts) do
-      {:error, "API key not configured"} ->
-        {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
+  # ── Dual-mode credential resolution ─────────────────────────────────────
+  #
+  # A provider listed here offers a SECOND way in besides a pasted key: the
+  # user's own account, connected through `Auth.Subscription`. Both modes
+  # reach the same host with the same wire format and the same models — only
+  # the credential differs — so they are one entry here rather than two.
+  #
+  # The value is the auth module, which owns the token and the base URL that
+  # was pinned at sign-in. Nothing about the endpoint is duplicated into this
+  # table.
+  @account_modes %{
+    qwen: OptimalSystemAgent.Auth.Providers.Qwen,
+    xai: OptimalSystemAgent.Auth.Providers.XAI
+  }
 
-      other ->
-        other
+  @doc false
+  # Test/introspection seam for `resolve_credential/2`.
+  @spec resolved_credential(atom()) ::
+          {:ok, String.t() | nil, String.t()} | {:error, String.t()}
+  def resolved_credential(provider), do: resolve_credential(provider, get_config!(provider))
+
+  # Decide WHICH credential this request carries, and therefore which URL it
+  # goes to.
+  #
+  # A configured API key ALWAYS wins, and that ordering is what makes the key
+  # path provably unchanged: whenever a key resolves, this function returns
+  # exactly the `{key, url}` pair the previous code computed — same live-env
+  # fallback, same `:<provider>_url` override — and no account code runs at
+  # all. The account branch is reachable only in the case that previously
+  # produced a nil key and a guaranteed "not configured" error. It is the same
+  # precedence `bedrock` and `ollama_cloud` already use.
+  #
+  # Note the asymmetry on the URL, which is deliberate and is a security
+  # boundary rather than an inconsistency: the key branch honours
+  # `:<provider>_url`, the account branch does not. See
+  # `Auth.Providers.XAI.pinned_base_url/0` for why an env override must never
+  # be able to retarget a subscription bearer token.
+  defp resolve_credential(provider, config) do
+    case resolve_api_key(provider, config) do
+      key when is_binary(key) and key != "" ->
+        {:ok, key, Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
+
+      _ ->
+        account_credential(provider, config)
+    end
+  end
+
+  defp account_credential(provider, config) do
+    case Map.get(@account_modes, provider) do
+      nil ->
+        {:ok, nil, Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
+
+      module ->
+        # `connected?/0` is a pure read; `access_token/0` may refresh. Asking
+        # the cheap question first means a provider with no account connected
+        # falls through to the unchanged "no key" error instead of paying a
+        # store read and an error round-trip for a credential that was never
+        # going to exist.
+        if module.connected?() do
+          case module.access_token() do
+            {:ok, token} ->
+              {:ok, token, module.pinned_base_url()}
+
+            {:error, reason} ->
+              # The reason atom only ever describes a FAILURE MODE. The token
+              # itself is never in it, is never logged, and is never rendered.
+              {:error,
+               OptimalSystemAgent.Auth.Subscription.message(reason, module.display_name())}
+          end
+        else
+          {:ok, nil,
+           Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
+        end
     end
   end
 

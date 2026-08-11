@@ -132,30 +132,49 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
   end
 
   describe "prerequisite failures are actionable" do
-    test "a missing binary names the install step, not 'try again'" do
+    test "a missing binary names the install command AND the in-OSA route, not 'go install it'" do
       System.put_env("OSA_CLAUDE_CLI_BIN", "/nonexistent/claude")
 
       lines = capture_login()
 
       assert Enum.any?(lines, &(&1 =~ "not installed"))
       assert Enum.any?(lines, &(&1 =~ "OSA_CLAUDE_CLI_BIN"))
+
+      assert Enum.any?(lines, &(&1 =~ "npm install -g @anthropic-ai/claude-code")),
+             "the exact command is the whole remedy; a link to a download page is a dead end"
+
+      assert Enum.any?(lines, &(&1 =~ ~r/Alt\+P|provider picker/)),
+             "everything happens inside the harness — the user must be told OSA can run it for them"
+
+      assert Enum.any?(lines, &(&1 =~ "Claude Pro/Max")),
+             "a user who has never heard of Claude Code needs to know what it is before being asked to install it"
     end
 
-    test "a signed-out CLI names the command to run, and says why OSA cannot run it", %{dir: dir} do
+    test "a signed-out CLI offers the in-OSA sign-in, and still says whose login it is", %{
+      dir: dir
+    } do
       stub(dir, "claude", ~S"""
       case "$1" in
         --version) echo "2.1.226" ;;
-        auth) echo '{"loggedIn":false}' ;;
+        auth)
+          case "$2" in
+            --help) echo "Usage: claude auth <command>"; echo "  login    Sign in" ;;
+            *) echo '{"loggedIn":false}' ;;
+          esac ;;
+        --help) echo "Commands:"; echo "  auth     Manage authentication" ;;
       esac
       """)
 
       lines = capture_login()
 
-      assert Enum.any?(lines, &(&1 =~ "claude auth login"))
-      assert Enum.any?(lines, &(&1 =~ "setup-token"))
+      assert Enum.any?(lines, &(&1 =~ "claude auth login")),
+             "the detected command must be named verbatim"
 
-      assert Enum.any?(lines, &(&1 =~ "cannot sign you in")),
-             "the user must be told OSA is not allowed to offer Claude login, not left assuming it is broken"
+      assert Enum.any?(lines, &(&1 =~ ~r/Alt\+P|provider picker/)),
+             "the primary route is now inside OSA, not another terminal"
+
+      assert Enum.any?(lines, &(&1 =~ ~r/OSA never offers a Claude sign-in/)),
+             "driving Anthropic's client is permitted; OSA offering its own login is not, and the message must keep saying so"
     end
 
     test "an old CLI is refused with the upgrade command", %{dir: dir} do
@@ -206,6 +225,178 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       """)
 
       assert {:ok, %{email: "x@y.z"}} = Auth.probe()
+    end
+  end
+
+  describe "driving the CLI's own login from inside OSA" do
+    # The three help shapes the CLI has actually shipped. Each is the whole
+    # question `login_argv/0` exists to answer, and getting it wrong means the
+    # user watches OSA run a subcommand their binary does not have.
+    @modern_help "Commands:\n  auth      Manage authentication\n  mcp       Configure MCP servers\n"
+    @modern_auth_help "Usage: claude auth <command>\n\nCommands:\n  login    Sign in to Claude\n  logout   Sign out\n  status   Show status\n"
+    @old_help "Commands:\n  login          Sign in to Claude\n  logout         Sign out\n"
+    @headless_help "Commands:\n  setup-token    Create a long-lived authentication token\n  mcp            Configure MCP servers\n"
+
+    test "a modern CLI is driven with `claude auth login`" do
+      assert {:ok, ["auth", "login"]} = Auth.login_argv_from_help(@modern_help, @modern_auth_help)
+    end
+
+    test "an older CLI whose login is top-level is driven with `claude login`" do
+      assert {:ok, ["login"]} = Auth.login_argv_from_help(@old_help, "")
+    end
+
+    test "a CLI that only offers setup-token is driven with that" do
+      assert {:ok, ["setup-token"]} = Auth.login_argv_from_help(@headless_help, "")
+    end
+
+    test "an interactive login is preferred over setup-token when both exist" do
+      both = @old_help <> @headless_help
+
+      assert {:ok, ["login"]} = Auth.login_argv_from_help(both, ""),
+             "setup-token asks the user to paste a token back; with a real pty the ordinary login is shorter and self-refreshing"
+    end
+
+    test "prose about logging in does not invent a subcommand that is not there" do
+      prose = """
+      Usage: claude [options] [command]
+
+      To use Claude you must first login with your Anthropic account.
+
+      Commands:
+        mcp      Configure MCP servers
+        doctor   Diagnose your install
+      """
+
+      assert {:error, {:no_login_subcommand, shown}} = Auth.login_argv_from_help(prose, "")
+
+      assert shown =~ "doctor",
+             "the help we could not make sense of is shown back, so the user can see what the CLI DID offer"
+    end
+
+    test "a CLI with no help at all is a reported failure, never a guess" do
+      assert {:error, {:no_login_subcommand, _}} = Auth.login_argv_from_help("", "")
+    end
+
+    test "an `auth` subcommand whose own help could not be read still resolves", %{dir: _} do
+      assert {:ok, ["auth", "login"]} = Auth.login_argv_from_help(@modern_help, ""),
+             "trusting the one subcommand the top-level help named beats declaring the CLI unusable"
+    end
+
+    test "detection reads the installed binary's real --help", %{dir: dir} do
+      stub(dir, "claude", ~S"""
+      if [ "$1" = "--help" ]; then
+        echo "Commands:"
+        echo "  setup-token    Create a long-lived authentication token"
+        exit 0
+      fi
+      """)
+
+      assert {:ok, ["setup-token"]} = Auth.login_argv()
+    end
+
+    test "there is nothing to detect without a binary" do
+      System.put_env("OSA_CLAUDE_CLI_BIN", "/nonexistent/claude")
+      assert {:error, :cli_not_installed} = Auth.login_argv()
+    end
+
+    test "the install command is an argv, so nothing has to survive a shell" do
+      assert ["npm", "install", "-g", "@anthropic-ai/claude-code"] = Auth.install_argv()
+    end
+  end
+
+  describe "cli_state/0 — one read, one consistent screen" do
+    test "a missing binary reports what to install and refuses to claim a version" do
+      System.put_env("OSA_CLAUDE_CLI_BIN", "/nonexistent/claude")
+
+      state = Auth.cli_state()
+
+      refute state.installed
+      refute state.signed_in
+      assert state.path == nil
+      assert state.login_argv == nil
+
+      assert state.version_ok == nil,
+             "'old enough' is a claim about a version we do not have; nil is the only honest answer"
+
+      assert state.install_argv == ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+    end
+
+    test "an installed but signed-out CLI reports the command to run, not an account", %{dir: dir} do
+      stub(dir, "claude", ~S"""
+      case "$1" in
+        --version) echo "2.1.226" ;;
+        --help) echo "Commands:"; echo "  auth   Manage authentication" ;;
+        auth)
+          case "$2" in
+            --help) echo "Commands:"; echo "  login    Sign in" ;;
+            *) echo '{"loggedIn":false}' ;;
+          esac ;;
+      esac
+      """)
+
+      state = Auth.cli_state()
+
+      assert state.installed
+      refute state.signed_in
+      assert state.version == "2.1.226"
+      assert state.version_ok
+      assert state.login_argv == ["auth", "login"]
+      assert state.login_display == "claude auth login"
+      assert state.account == nil
+      assert state.org == nil
+      assert state.plan == nil
+    end
+
+    test "a signed-in CLI reports email, org AND plan — all three", %{dir: dir} do
+      stub(dir, "claude", ~S"""
+      case "$1" in
+        --version) echo "2.1.226" ;;
+        --help) echo "Commands:"; echo "  auth   Manage authentication" ;;
+        auth)
+          case "$2" in
+            --help) echo "Commands:"; echo "  login    Sign in" ;;
+            *) echo '{"loggedIn":true,"email":"luna@example.com","orgName":"Acme Inc","subscriptionType":"max"}' ;;
+          esac ;;
+      esac
+      """)
+
+      state = Auth.cli_state()
+
+      assert state.signed_in
+      assert state.account == "luna@example.com"
+      assert state.org == "Acme Inc"
+      assert state.plan == "max"
+    end
+  end
+
+  describe "the account a status screen shows" do
+    test "status/0 carries org and plan alongside the email", %{dir: dir} do
+      stub(dir, "claude", ~S"""
+      case "$1" in
+        --version) echo "2.1.226" ;;
+        auth) echo '{"loggedIn":true,"email":"luna@example.com","orgName":"Acme Inc","subscriptionType":"max","authMethod":"claude.ai"}' ;;
+      esac
+      """)
+
+      assert {:ok, _} = Auth.connect()
+
+      status = Auth.status()
+
+      assert status.connected?
+      assert status.account == "luna@example.com"
+
+      assert status.plan == "max"
+
+      assert status.org == "Acme Inc",
+             "the marker has always held the org; showing only the email left a user with two Claude accounts unable to tell which one OSA was about to spend"
+    end
+
+    test "a disconnected provider reports no org rather than a stale one" do
+      SubscriptionStore.delete("claude_cli")
+      status = Auth.status()
+
+      refute status.connected?
+      assert Map.get(status, :org) == nil
     end
   end
 

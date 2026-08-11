@@ -583,7 +583,10 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   defp changed_files(_), do: []
 
   defp changed_files_git(path) do
-    case OptimalSystemAgent.Git.cmd(["status", "--porcelain", "-z"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain", "-z"],
+           cd: path,
+           stderr_to_stdout: true
+         ) do
       {out, 0} -> parse_porcelain_z(out)
       _ -> []
     end
@@ -658,7 +661,9 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     working_dir =
       Keyword.get(opts, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
 
-    {system_prompt, allowed_tools} = resolve_agent_type(agent_type, Keyword.get(opts, :system_prompt))
+    {system_prompt, allowed_tools} =
+      resolve_agent_type(agent_type, Keyword.get(opts, :system_prompt))
+
     depth = tree_depth(parent_session_id) + 1
 
     # Register the node in the run tree FIRST so it appears in RunStore.list even
@@ -701,6 +706,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
       {:error, reason} = err ->
         Logger.error("[Fleet] ensure_loop failed for #{node_id}: #{inspect(reason)}")
+
         RunStore.complete(node_id, %{status: :failed, summary: "spawn failed: #{inspect(reason)}"})
 
         emit_fleet_event(parent_session_id, %{
@@ -741,10 +747,19 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     end
   end
 
-  @doc "Number of runs currently in the `:running` state (the fleet size)."
+  @doc """
+  Number of runs currently in the `:running` state (the fleet size).
+
+  Scoped to runs this process may own: `~/.osa/agent-runs` is machine-global and
+  is rehydrated at every boot, so a plain `RunStore.list/1` in a second `osa`
+  invocation counts the FIRST invocation's live subagents against this process's
+  fleet caps. Only runs whose ownership lease is actively held elsewhere are
+  excluded — lease-less legacy rows still count, so single-process behaviour is
+  unchanged.
+  """
   @spec running_count() :: non_neg_integer()
   def running_count do
-    RunStore.list(limit: 1_000, status: :running) |> length()
+    RunStore.all_running_local() |> length()
   rescue
     _ -> 0
   catch
@@ -890,7 +905,9 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   """
   @spec stop_children(String.t()) :: non_neg_integer()
   def stop_children(parent_session_id) when is_binary(parent_session_id) do
-    RunStore.all_running()
+    # `all_running_local/0`, not `all_running/0`: cancelling a child that another
+    # live `osa` process owns would kill work this process never started.
+    RunStore.all_running_local()
     |> Enum.filter(&(Map.get(&1, :parent_session_id) == parent_session_id))
     |> Enum.map(& &1.agent_id)
     |> Enum.reject(&(&1 == parent_session_id))

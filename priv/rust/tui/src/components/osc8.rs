@@ -39,7 +39,20 @@ const ST: &str = "\x1b\\";
 ///
 /// This always emits the escape; callers gate on [`supports_hyperlinks`] (or
 /// use [`hyperlink_span`], which gates for them).
+///
+/// **Both halves are neutralized before they go in**, because both are
+/// attacker-reachable: the URL of a markdown link is chosen by the model
+/// (`src/render/markdown.rs`, the `[text](url)` branch), and so is the link
+/// text. The URL is the sharper of the two — it is interpolated *inside an open
+/// OSC string*, where a bare `BEL` or `ST` closes the string early and hands
+/// everything after it to the terminal as commands. Stripping ESC would not
+/// help; the URI needs the spec's own percent-encoding rule, which
+/// [`crate::render::sanitize::sanitize_osc_uri`] applies. The visible text is
+/// scrubbed of control characters for the ordinary reason — an ESC there breaks
+/// out of the wrapper the same way.
 pub fn osc8(text: &str, url: &str) -> String {
+    let url = crate::render::sanitize::sanitize_osc_uri(url);
+    let text = crate::render::sanitize::scrub_untrusted_line(text);
     format!("{ESC}]8;;{url}{ST}{text}{ESC}]8;;{ST}")
 }
 
@@ -52,7 +65,10 @@ pub fn hyperlink_span(text: impl Into<String>, url: &str, style: Style) -> Span<
     if supports_hyperlinks() {
         Span::styled(osc8(&text, url), style)
     } else {
-        Span::styled(text, style)
+        // The unsupported branch still carries model-chosen text, so it gets the
+        // same scrub. Without it, turning hyperlinks off would turn the defence
+        // off with them.
+        Span::styled(crate::render::sanitize::scrub_untrusted_line(&text), style)
     }
 }
 

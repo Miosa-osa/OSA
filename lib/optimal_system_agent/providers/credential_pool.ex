@@ -24,7 +24,10 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
   # Rate limit cooldown: 60 seconds
   @cooldown_ms 60_000
 
-  defstruct pools: %{}, counters: %{}
+  # `last_issued` records the key `get_key/1` most recently handed out per
+  # provider. It exists so the 429 call site does not have to plumb the key back
+  # through the provider's error tuple — see `mark_rate_limited/1`.
+  defstruct pools: %{}, counters: %{}, last_issued: %{}
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -42,6 +45,30 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
   @doc "Mark a key as rate-limited (will be skipped for @cooldown_ms)."
   def mark_rate_limited(provider, key) do
     GenServer.cast(__MODULE__, {:rate_limited, provider, key})
+  end
+
+  @doc """
+  Mark the key most recently issued for `provider` as rate-limited.
+
+  This module advertises "automatic skip of rate-limited keys", but nothing ever
+  called `mark_rate_limited/2`: a key that returned HTTP 429 kept coming back out
+  of `get_key/1` on the very next attempt, so a multi-key pool rotated through
+  nothing and the same throttled key absorbed every retry. This arity-1 form is
+  what the 429 path can actually call — the provider that sees the response
+  holds an opaque `{:api_key, key}` it should not have to unwrap and pass back,
+  and `get_key/1` is already serialized through this GenServer, so the pool
+  itself is the natural owner of "which key did I just hand out".
+
+  Best-effort by construction: a cast, and a no-op when the pool holds nothing
+  for the provider (single-key setups, or the env-var fallback path).
+  """
+  @spec mark_rate_limited(atom()) :: :ok
+  def mark_rate_limited(provider) do
+    GenServer.cast(__MODULE__, {:rate_limited_last, provider})
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """
@@ -104,7 +131,8 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
         {key, next_counter} = find_available_key(keys, counter, now, length(keys))
 
         new_counters = Map.put(state.counters, provider, next_counter)
-        {:reply, key, %{state | counters: new_counters}}
+        new_last = Map.put(state.last_issued, provider, key)
+        {:reply, key, %{state | counters: new_counters, last_issued: new_last}}
 
       _ ->
         {:reply, fallback_key(provider), state}
@@ -114,8 +142,10 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
   @impl true
   def handle_call(:reload, _from, state) do
     # Counters are reset alongside the pools: they index into the key list, and
-    # a stale offset against a re-read list would skip keys arbitrarily.
-    {:reply, :ok, %{state | pools: load_all_pools(), counters: %{}}}
+    # a stale offset against a re-read list would skip keys arbitrarily. The
+    # last-issued map is dropped for the same reason — it may name a key the
+    # re-read pools no longer contain.
+    {:reply, :ok, %{state | pools: load_all_pools(), counters: %{}, last_issued: %{}}}
   end
 
   @impl true
@@ -131,6 +161,14 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
 
         {:reply, %{total: total, available: total - rate_limited, rate_limited: rate_limited},
          state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:rate_limited_last, provider}, state) do
+    case Map.get(state.last_issued, provider) do
+      nil -> {:noreply, state}
+      key -> handle_cast({:rate_limited, provider, key}, state)
     end
   end
 

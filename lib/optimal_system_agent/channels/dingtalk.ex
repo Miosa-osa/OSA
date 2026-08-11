@@ -18,9 +18,16 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
+  # DingTalk's robot-webhook limit is expressed in bytes (20,000 UTF-8 bytes of
+  # message content), not characters. Counting graphemes (as this module used
+  # to) let 20,000 Chinese characters — 60,000 bytes, 3x the cap — measure as
+  # "one chunk that fits".
   @max_message_length 20_000
+  @length_unit :bytes
 
   defstruct [:client_id, :client_secret, session_webhooks: %{}, connected: false]
 
@@ -74,9 +81,7 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
 
   @impl true
   def handle_cast({:webhook, payload}, state) do
-    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-      process_webhook(payload, state)
-    end)
+    Delivery.start_task(:dingtalk, fn -> process_webhook(payload, state) end)
 
     {:noreply, state}
   end
@@ -127,33 +132,40 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
   end
 
   defp send_via_webhook(webhook_url, text) do
-    chunks = chunk_message(text)
-
-    for chunk <- chunks do
-      body = %{
-        msgtype: "markdown",
-        markdown: %{title: "OSA", text: chunk}
-      }
-
-      Req.post(webhook_url, json: body, receive_timeout: 10_000)
-    end
-
-    :ok
+    text
+    |> chunk_message()
+    |> then(&Delivery.send_chunks(:dingtalk, &1, fn chunk -> post_chunk(webhook_url, chunk) end))
   rescue
     e ->
       Logger.error("[DingTalk] Send failed: #{Exception.message(e)}")
       {:error, :send_failed}
   end
 
-  defp chunk_message(text) do
-    if String.length(text) <= @max_message_length,
-      do: [text],
-      else:
-        text
-        |> String.graphemes()
-        |> Enum.chunk_every(@max_message_length)
-        |> Enum.map(&Enum.join/1)
+  defp post_chunk(webhook_url, chunk) do
+    body = %{msgtype: "markdown", markdown: %{title: "OSA", text: chunk}}
+
+    case Req.post(webhook_url, json: body, receive_timeout: 10_000) do
+      # DingTalk answers 200 with an in-body errcode; 0 means success.
+      {:ok, %{status: 200, body: %{"errcode" => 0}}} -> :ok
+      {:ok, %{status: 200, body: %{"errcode" => code} = body}} -> {:error, {code, body}}
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, {status, body}}
+      {:error, reason} -> {:error, reason}
+    end
   end
+
+  @doc """
+  Split an outbound reply into DingTalk-sized chunks.
+
+  Public so the chunking contract can be tested against DingTalk's real limit
+  and unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
+
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do

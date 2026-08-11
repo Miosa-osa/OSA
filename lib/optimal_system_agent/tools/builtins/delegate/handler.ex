@@ -128,8 +128,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         end
 
       tasks ->
-        # ── Fan-out path — first-class parallel wave via run_parallel ────
-        dispatch_fanout(task, tasks, args, parent_id, parent_depth)
+        # Quality gate BEFORE dispatch: one bad entry in a fan-out otherwise
+        # burns a whole subagent run to produce nothing.
+        bad =
+          tasks
+          |> Enum.with_index()
+          |> Enum.flat_map(fn {t, idx} ->
+            case task_quality_issue(t.prompt) do
+              nil -> []
+              issue -> [{idx, t.prompt, issue}]
+            end
+          end)
+
+        if bad != [] do
+          reject_low_quality_tasks(bad)
+        else
+          # ── Fan-out path — first-class parallel wave via run_parallel ──
+          dispatch_fanout(task, tasks, args, parent_id, parent_depth)
+        end
     end
   end
 
@@ -220,6 +236,80 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       {:ok, value} -> value == true
       :error -> Map.get(config, :background, false) == true
     end
+  end
+
+  # ── Task quality gate ─────────────────────────────────────────────────
+  #
+  # `normalize_tasks/1` rejected only blank strings, so `"fix it"` was a valid
+  # fan-out entry. A subagent starts with NONE of the parent's context: a
+  # deictic task ("this", "same as before", "continue") is unanswerable to it,
+  # so the run is guaranteed waste — a whole subagent's tokens, wall-clock and
+  # a parent turn spent to learn nothing. Rejecting at dispatch costs one
+  # cheap tool result instead.
+  #
+  # The bar is deliberately low. It rejects only what CANNOT succeed, never
+  # merely terse-but-complete instructions: a task naming a concrete target
+  # ("run mix test", "read lib/foo.ex") passes on its verb+object alone.
+  @deictic_only ~w(it this that them those these again same continue go do fix here now)
+
+  @doc false
+  @spec task_quality_issue(String.t()) :: String.t() | nil
+  def task_quality_issue(prompt) when is_binary(prompt) do
+    trimmed = String.trim(prompt)
+    words = String.split(trimmed, ~r/\s+/, trim: true)
+
+    content_words =
+      Enum.reject(words, fn w ->
+        w
+        |> String.downcase()
+        |> String.replace(~r/[^a-z0-9_\/.-]/, "")
+        |> Kernel.in(@deictic_only)
+      end)
+
+    cond do
+      trimmed == "" ->
+        "the task is empty"
+
+      content_words == [] ->
+        "the task is made only of references to context the subagent does not have " <>
+          "(#{inspect(trimmed)})"
+
+      # One content word and nothing concrete to act on. Word count ALONE is not
+      # the test — "read lib/foo.ex" is two words and perfectly actionable —
+      # so a path, module, file or flag-looking token clears the gate.
+      length(content_words) < 2 and not Enum.any?(content_words, &concrete_token?/1) ->
+        "the task is #{length(words)} word(s) and names no concrete target — a subagent " <>
+          "starts with none of your context, so it cannot infer what #{inspect(trimmed)} " <>
+          "refers to"
+
+      true ->
+        nil
+    end
+  end
+
+  def task_quality_issue(_), do: "the task is not a string"
+
+  # A token that identifies something specific on its own: a path, a dotted
+  # module/file name, a snake_case identifier, or a flag.
+  defp concrete_token?(word) do
+    String.contains?(word, "/") or String.contains?(word, ".") or
+      String.contains?(word, "_") or String.contains?(word, "::") or
+      String.starts_with?(word, "-")
+  end
+
+  # Turn a list of {index, prompt, issue} into one actionable rejection.
+  defp reject_low_quality_tasks(bad) do
+    details =
+      Enum.map_join(bad, "\n", fn {idx, prompt, issue} ->
+        "  - tasks[#{idx}] #{inspect(prompt)}: #{issue}"
+      end)
+
+    {:error,
+     "delegate refused #{length(bad)} fan-out task(s) that would have wasted a full " <>
+       "subagent run each:\n#{details}\n\n" <>
+       "A subagent shares no context with you. Next step: rewrite each rejected task as a " <>
+       "self-contained instruction naming the concrete goal, the files or commands involved, " <>
+       "and what a finished result looks like — then call delegate again."}
   end
 
   # Normalize the optional `tasks:[]` fan-out param into a list of
@@ -329,7 +419,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     appendix = format_fanout(umbrella_task, tasks, results)
 
     Enum.join(
-      [header, "## Coordinator summary\n#{summary}", "## Per-workstream reports (appendix)\n#{appendix}"],
+      [
+        header,
+        "## Coordinator summary\n#{summary}",
+        "## Per-workstream reports (appendix)\n#{appendix}"
+      ],
       "\n\n"
     )
   end

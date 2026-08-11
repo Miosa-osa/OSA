@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.CLI.Update do
   require Logger
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.System.AtomicFile
   alias OptimalSystemAgent.OpenComputers.Updater
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
@@ -69,32 +70,45 @@ defmodule OptimalSystemAgent.CLI.Update do
 
   @doc "osa update disable — write [update] enabled = false to config."
   def disable do
-    File.mkdir_p!(Path.dirname(config_path()))
-
-    current_contents =
-      case File.read(config_path()) do
-        {:ok, c} -> c
-        {:error, _} -> ""
-      end
-
-    updated = set_update_enabled(current_contents, false)
-    File.write!(config_path(), updated)
+    set_enabled(false)
     IO.puts("Auto-update disabled. Edit #{config_path()} to re-enable.")
   end
 
   @doc "osa update enable — write [update] enabled = true to config."
   def enable do
-    File.mkdir_p!(Path.dirname(config_path()))
+    set_enabled(true)
+    IO.puts("Auto-update enabled.")
+  end
+
+  # `set_update_enabled/2` derives the *whole* new file from what we read, so
+  # what we read had better be the whole old file. Two ways that used to go
+  # wrong, both silent:
+  #
+  #   1. `{:error, _} -> ""` treated EACCES/EIO/EISDIR exactly like "no file
+  #      yet". A config we merely failed to *read* was rewritten as a two-line
+  #      stub, discarding every other setting in it. Only `:enoent` actually
+  #      means "nothing there".
+  #
+  #   2. `File.write!` truncates in place. A crash or a full disk partway
+  #      through left a half-written TOML that nothing can parse — and this is
+  #      the file that decides whether updates run at all.
+  defp set_enabled(enabled) do
+    path = config_path()
+    File.mkdir_p!(Path.dirname(path))
 
     current_contents =
-      case File.read(config_path()) do
-        {:ok, c} -> c
-        {:error, _} -> ""
+      case File.read(path) do
+        {:ok, c} ->
+          c
+
+        {:error, :enoent} ->
+          ""
+
+        {:error, reason} ->
+          raise File.Error, reason: reason, action: "read file", path: path
       end
 
-    updated = set_update_enabled(current_contents, true)
-    File.write!(config_path(), updated)
-    IO.puts("Auto-update enabled.")
+    AtomicFile.write!(path, set_update_enabled(current_contents, enabled))
   end
 
   @doc """

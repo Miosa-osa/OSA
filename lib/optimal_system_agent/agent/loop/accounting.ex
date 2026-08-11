@@ -55,6 +55,31 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   def normalize_usage(_), do: zero_usage()
 
   @doc """
+  Total prompt tokens that actually occupied the model's context window for one
+  round-trip: fresh input + cache writes + cache reads.
+
+  Providers disagree about how they slice the prompt:
+
+    * **Anthropic** (`Providers.Anthropic.extract_usage/1`) reports the three
+      slices SEPARATELY — `input_tokens` counts only the uncached tail, with
+      `cache_creation_input_tokens` and `cache_read_input_tokens` alongside it.
+    * **OpenAI-compatible** (`Providers.OpenAICompat.parse_usage/1`) folds the
+      whole prompt into `prompt_tokens` → `input_tokens`, leaving both cache
+      fields at zero.
+
+  So `input_tokens` alone is NOT comparable across providers: on Anthropic with
+  caching active it is a small fraction of the real context occupancy, and it
+  shrinks further the better caching works. Summing all three yields the same
+  effective total in both shapes, which is the number every context-pressure
+  consumer (`Loop.ProactiveCompaction.estimated_tokens/1`) actually wants.
+  """
+  @spec effective_input_tokens(map() | nil) :: non_neg_integer()
+  def effective_input_tokens(usage) do
+    norm = normalize_usage(usage)
+    norm.input_tokens + norm.cache_creation_input_tokens + norm.cache_read_input_tokens
+  end
+
+  @doc """
   Record one LLM round-trip's usage into the session accounting on `state`.
 
   Parses `usage`, prices it against `state.model`, and accumulates cost and
@@ -97,7 +122,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       |> put(:session_output_tokens, output)
       |> put(:session_cache_creation_tokens, cache_write)
       |> put(:session_cache_read_tokens, cache_read)
-      |> maybe_put_last_input(norm.input_tokens)
+      |> maybe_put_last_input(effective_input_tokens(norm))
 
     # Surrender this round-trip's numbers OUTSIDE the immutable state thread,
     # so a turn that crashes after burning tokens can still be billed for them.
@@ -361,7 +386,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       OptimalSystemAgent.Budget.record_cost(
         provider_atom(Map.get(state, :provider)),
         to_string(Map.get(state, :model)),
-        norm.input_tokens + norm.cache_creation_input_tokens + norm.cache_read_input_tokens,
+        effective_input_tokens(norm),
         norm.output_tokens,
         Map.get(state, :session_id)
       )

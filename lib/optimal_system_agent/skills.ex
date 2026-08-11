@@ -41,6 +41,18 @@ defmodule OptimalSystemAgent.Skills do
       `SKILL.md` files, now relevance-ordered before the cap rather than by disk
       proximity alone. Bodies are never dumped into context.
 
+    * **AUTHOR - `OptimalSystemAgent.Skills.Validator` + `Skills.Lint`.**
+      The capture gate above guards the *learned* library; this guards the
+      author-curated `SKILL.md` half. Discovery is deliberately forgiving - a
+      file with absent, unterminated or invalid frontmatter still loads, named
+      after its directory with its first 100 raw bytes as the description - so
+      a typo'd header produces a skill that is misnamed, untriggered and
+      effectively unrankable, with no signal to its author. `Validator` turns
+      that silence into findings that each name what is wrong AND how to fix
+      it; `mix osa.skills.lint` makes them runnable, and
+      `Skills.AuthoringStandardsTest` makes them CI-enforced over every shipped
+      skill.
+
     * **INVOKE - `find_skill` / `use_skill`.**
       The model pulls a ranked set (or one slug) via `find_skill`, or runs a
       named `SKILL.md` skill via `use_skill`. Retrieval increments `uses`, so the
@@ -68,7 +80,9 @@ defmodule OptimalSystemAgent.Skills do
   """
 
   alias OptimalSystemAgent.Skills.Capture
+  alias OptimalSystemAgent.Skills.Lint
   alias OptimalSystemAgent.Skills.Ranker
+  alias OptimalSystemAgent.Skills.Validator
   alias OptimalSystemAgent.Store.SkillLibrary
 
   @doc "CAPTURE + STORE: validate then persist a skill. See `SkillLibrary.save_skill/1`."
@@ -90,4 +104,15 @@ defmodule OptimalSystemAgent.Skills do
   @doc "Score a raw text blob against a query. See `Ranker.relevance/2`."
   @spec relevance(String.t(), String.t()) :: float()
   defdelegate relevance(text, query), to: Ranker
+
+  @doc """
+  AUTHORING gate for `SKILL.md` files - the counterpart to `validate/1`, which
+  gates the learned library. See `Validator.validate_file/1`.
+  """
+  @spec validate_skill_file(String.t()) :: [Validator.finding()]
+  defdelegate validate_skill_file(path), to: Validator, as: :validate_file
+
+  @doc "Lint every discoverable `SKILL.md`. See `Lint.run/1` and `mix osa.skills.lint`."
+  @spec lint(keyword()) :: Lint.report()
+  defdelegate lint(opts \\ []), to: Lint, as: :run
 end

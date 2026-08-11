@@ -47,6 +47,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
 
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
   # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
@@ -303,18 +304,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   # relies on to recover its intent. Pure appends (append_entry/2) stay O_APPEND:
   # a torn final line is tolerable for an append-only log and preserves replay.
   @spec atomic_write(String.t(), iodata()) :: :ok | {:error, term()}
-  defp atomic_write(path, contents) do
-    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-
-    with :ok <- File.write(tmp, contents),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
-      {:error, reason} ->
-        _ = File.rm(tmp)
-        {:error, reason}
-    end
-  end
+  defp atomic_write(path, contents), do: AtomicFile.write(path, contents)
 
   # Immutable Task Brief capture (audit gap M1). Never raises into set_goal.
   defp maybe_capture_brief(session_id, goal) do

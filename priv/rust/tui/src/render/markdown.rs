@@ -22,6 +22,18 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 ///   - GFM pipe tables  `| H1 | H2 |` — styled with box-drawing borders
 ///   - Plain text — unstyled
 pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
+    // `input` is the model's reply, verbatim. Everything below styles it with
+    // ratatui `Style` values rather than escape bytes, so the *only* way a
+    // control character reaches the terminal from here is by riding along inside
+    // the content — which is exactly what ratatui does: it fills a cell with the
+    // grapheme it was given, ESC included, and the terminal then executes it.
+    //
+    // Scrubbing at this one entry covers every construct below it, and every
+    // construct added later, including the streaming renderer
+    // (`markdown_stream`) which funnels its every path through this function.
+    // `\n` and `\t` survive because the parser is line-oriented and code blocks
+    // indent with tabs.
+    let input = &*crate::render::sanitize::scrub_untrusted_document(input);
     let theme = crate::style::theme();
     let mut lines: Vec<Line<'static>> = Vec::new();
 

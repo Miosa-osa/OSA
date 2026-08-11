@@ -25,9 +25,22 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry},
 
       # Task supervisor for supervised async work (must come before Events.Bus)
-      # 2000 children: supports ~10 parallel tool calls × 20 concurrent sessions
-      # + bus event fan-out + SSE dispatch without hitting the limit under load.
-      {Task.Supervisor, name: OptimalSystemAgent.Events.TaskSupervisor, max_children: 2000},
+      # 500 children: ~10 parallel tool calls × 20 concurrent sessions + bus
+      # event fan-out + SSE dispatch.
+      #
+      # Message delivery used to share this pool. All 11 channels spawned here
+      # and every one of them ignored `{:error, :max_children}`, so a single
+      # wedged chat could exhaust the pool and starve not just the other chats
+      # but the event bus and SSE dispatch with it — the blast radius of one
+      # stuck conversation was the whole node. Splitting the pools bounds it:
+      # channels can only exhaust their own.
+      {Task.Supervisor, name: OptimalSystemAgent.Events.TaskSupervisor, max_children: 500},
+
+      # Outbound message delivery for every channel adapter. Separate from the
+      # bus above so delivery backpressure cannot reach it. `Channels.Delivery`
+      # takes the supervisor as a parameter, so moving to one pool per channel
+      # later is a change to this list and nothing else.
+      {Task.Supervisor, name: OptimalSystemAgent.Channels.TaskSupervisor, max_children: 1500},
 
       # Core pub/sub and event routing
       {Phoenix.PubSub, name: OptimalSystemAgent.PubSub},
@@ -116,6 +129,8 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       OptimalSystemAgent.Providers.CredentialPool
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    children
+    |> OptimalSystemAgent.Supervisors.BootTiming.wrap("Infrastructure")
+    |> Supervisor.init(strategy: :rest_for_one)
   end
 end

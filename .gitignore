@@ -72,7 +72,13 @@ test-prompts/
 /workspace/
 
 # Internal audit/dev docs (not for public repo)
-tasks/
+# Root-anchored for the same reason `workspace/` above is: an unanchored
+# `tasks/` matches at EVERY depth, so it silently ignored every new file under
+# lib/mix/tasks/, test/mix/tasks/, test/agent/tasks/ and
+# lib/optimal_system_agent/agent/tasks/. The existing files there are tracked
+# only because they predate the rule; anything added since was invisible to
+# `git status` and absent from a fresh clone.
+/tasks/
 docs/LAYER_*
 docs/ONION_*
 docs/MIGRATION_*

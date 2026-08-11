@@ -16,10 +16,29 @@ defmodule OptimalSystemAgent.Utils.Tokens do
   The heuristic formula (words * 1.3 + punctuation * 0.5) is an empirically
   derived approximation of BPE token counts for English text. It is used as
   a fallback when the Go tokenizer or Rust NIF is unavailable.
+
+  The word heuristic alone is **whitespace-blind**: it assumes text is split by
+  spaces, so any payload without them — minified JS/CSS, a single-line JSON
+  blob, base64, a long hex digest — collapses to a handful of "words" and is
+  under-estimated by one to two orders of magnitude. That is precisely the
+  payload shape that blows a context window, and the estimate is consumed by
+  the compaction decision, so under-counting there means compaction fails to
+  fire exactly when it is needed.
+
+  A byte-length floor of `bytes / 4` (the conventional BPE rule of thumb) is
+  therefore applied, and the result is `max(heuristic, floor)`: prose keeps the
+  better word-based estimate, whitespace-poor payloads get a realistic one.
   """
 
+  # Conventional BPE approximation: ~4 bytes per token.
+  @bytes_per_token 4
+
   @doc """
-  Heuristic token count: words * 1.3 + punctuation * 0.5.
+  Heuristic token count: `max(words * 1.3 + punctuation * 0.5, bytes / 4)`.
+
+  The byte-length term is a floor, not a replacement — it only wins for
+  whitespace-poor input (minified code, base64, single-line JSON), where the
+  word heuristic is 20-50x low.
 
   Returns 0 for non-binary inputs.
   """
@@ -27,10 +46,22 @@ defmodule OptimalSystemAgent.Utils.Tokens do
   def estimate(text) when is_binary(text) do
     words = text |> String.split(~r/\s+/, trim: true) |> length()
     punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
-    round(words * 1.3 + punctuation * 0.5)
+    heuristic = round(words * 1.3 + punctuation * 0.5)
+
+    max(heuristic, byte_floor(text))
   end
 
   def estimate(_), do: 0
+
+  @doc """
+  Lower bound on the token count of `text`, from its byte length alone.
+
+  Rounds up, so any non-empty string costs at least one token.
+  """
+  @spec byte_floor(String.t()) :: non_neg_integer()
+  def byte_floor(text) when is_binary(text) do
+    div(byte_size(text) + @bytes_per_token - 1, @bytes_per_token)
+  end
 end
 
 defmodule OptimalSystemAgent.Utils.Text do

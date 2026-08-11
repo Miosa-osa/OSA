@@ -153,3 +153,78 @@ def test_something(backend):
 Append it to `TESTS` in `test_resize.py`. Failures print the whole rendered
 screen — including scrolled-off history, where stranded chrome usually ends up —
 because on this class of bug the screen *is* the evidence.
+
+## The terminal matrix, and what each harness can prove
+
+`test_resize.py` (pyte) is the always-runnable half, and its limitation bounds
+what a green run means: **pyte does not reflow on a width change.** Real
+terminals do, so the whole class of "chrome stranded by a reflow" is invisible
+to it. The other harnesses exist to cover what it cannot see.
+
+| harness              | terminal    | reads the screen via      | can it fail on stranded chrome? |
+|----------------------|-------------|---------------------------|---------------------------------|
+| `test_resize.py`     | pyte model  | pyte                      | no — pyte never reflows         |
+| `tmux_resize.py`     | tmux 3.4    | `capture-pane -S`         | yes                             |
+| `vte_resize.py`      | libvte 7600 | `get_text_range_format`   | yes                             |
+| `wezterm_resize.py`  | WezTerm     | `wezterm cli get-text`    | yes                             |
+| `ghostty_resize.py`  | Ghostty 1.2 | **nothing — no API**      | **no** — see below              |
+| `reflow_matrix.py`   | all of them | DSR cursor query only     | n/a — measures reflow itself    |
+
+### Two things every emulator harness needs
+
+Both were missing, and both made these tests pass while the bug shipped.
+
+1. **Strip the outer terminal's identity** (`term_env.py`). OSA picks its resize
+   branch from `$TMUX` / `$TERM`. This repo is developed inside tmux, and
+   `vte_resize.py` used to inherit `os.environ` verbatim — so `$TMUX` was set in
+   the child and every "OSA survives a drag on real VTE" run was in fact
+   exercising the multiplexer branch. The VTE harness had never tested the path
+   it existed to test.
+
+2. **Put wrapped content above the live region** (`scrollback_prelude.py`). With
+   an empty transcript nothing shortens when the terminal widens, the live
+   region never moves, the remembered top row is trivially correct, and the
+   assertion cannot fail whichever branch it took. Measured: WezTerm passes
+   **both** branches with no prelude, and separates them cleanly with one.
+
+### Ghostty
+
+Ghostty has no CLI, control socket or escape sequence that reports screen or
+scrollback contents, so the band count cannot be asserted there at all.
+`ghostty_resize.py` therefore asserts only that OSA *survives* the drag (the
+historical "cursor position could not be read" crash), and says so in its own
+output rather than implying more. Ghostty's reflow behaviour is measured
+separately by `reflow_matrix.py`, which needs no text extraction because the
+probe reports on itself through a DSR cursor query.
+
+### Reflow is measured, not assumed
+
+`reflow_matrix.py` drives `reflow_probe.py` inside each terminal and asks a
+single question: after a widen, did an already-wrapped line re-join? Measured on
+this box — **tmux 3.4, libvte 7600, WezTerm 20240203 and Ghostty 1.2.3 all
+reflow.** That refutes the comment this code carried for several releases
+("tmux and screen do NOT reflow on a width change"); tmux has reflowed since 2.5.
+
+It also rules out the tempting fix. If reflow were the property that decided the
+resize branch, a runtime reflow probe would be the correct gate — right even on
+a terminal nobody has tested. It is not that property: everything measurable
+reflows, yet tmux needs the surgical clear and WezTerm needs the full wipe. See
+`resize_clear_strategy` in `event_loop.rs` for the table and the argument.
+
+`reflow_probe.py --self-test` runs with no display and no real terminal: it
+drives the probe against two synthetic emulators with known answers, one
+reflowing and one not, so a SKIPPED terminal can never hide a probe whose
+mechanics have rotted.
+
+### Forcing a branch
+
+Every emulator harness forwards `$OSA_RESIZE_CLEAR` to the child, so either
+branch can be forced on any terminal:
+
+```bash
+OSA_RESIZE_CLEAR=surgical python3 test/pty/wezterm_resize.py   # fails
+OSA_RESIZE_CLEAR=full     python3 test/pty/tmux_resize.py      # fails
+```
+
+A gate that is only ever exercised in its default configuration is a gate whose
+table nobody has checked.

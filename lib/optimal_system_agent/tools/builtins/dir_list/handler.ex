@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
   validate / check_permissions / execute three-stage split.
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.DirList.Constants
+  alias OptimalSystemAgent.Tools.Builtins.DirList.{Constants, Messages}
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -60,6 +60,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
     expanded = Path.expand(path)
 
     case File.ls(expanded) do
+      # An empty directory is a FACT, not an empty response. Returning `""` here
+      # meant a successful listing of an empty directory and a tool that silently
+      # produced nothing were byte-identical on the wire.
+      {:ok, []} ->
+        {:ok, Messages.empty_directory(expanded)}
+
       {:ok, entries} ->
         lines =
           entries
@@ -78,13 +84,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
             "#{type}\t#{format_size(size)}\t#{entry}"
           end)
 
-        {:ok, Enum.join(lines, "\n")}
+        header =
+          "#{expanded} — #{length(lines)} #{if length(lines) == 1, do: "entry", else: "entries"}"
+
+        {:ok, header <> "\n" <> Enum.join(lines, "\n")}
 
       {:error, :enoent} ->
-        {:error, "Directory not found: #{expanded}"}
+        {:error, Messages.missing(expanded)}
+
+      # `:enotdir` means the path is real and the caller simply needs a different
+      # tool — a materially different situation from "not found", which the old
+      # shared `Cannot list …: enotdir` string hid.
+      {:error, :enotdir} ->
+        {:error, Messages.not_a_directory(expanded)}
 
       {:error, reason} ->
-        {:error, "Cannot list #{expanded}: #{reason}"}
+        {:error, Messages.unreadable(expanded, reason)}
     end
   end
 

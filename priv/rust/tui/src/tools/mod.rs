@@ -125,7 +125,32 @@ fn strip_tag_blocks(text: &str, tag: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// Render a tool call card.
+///
+/// Both `args` and `result` are fully attacker-reachable — `result` is a shell's
+/// stdout, a file body off a hostile repo, grep hits, or an MCP server's
+/// payload — and every renderer below turns them into spans. A raw `\x1b` in any
+/// of that is carried by ratatui straight to the terminal, which executes it.
+///
+/// The scrub is applied to the rendered [`Line`]s rather than to `args`, and
+/// that is deliberate: most renderers parse `args` as JSON first, so a payload
+/// written as `{"command":"cat ]0;PWNED"}` carries no control byte
+/// until *after* the parse. Scrubbing the output catches it wherever it entered,
+/// covers all ~15 renderers from one place, and covers any renderer added later.
+/// See [`crate::render::sanitize::scrub_rendered_lines`], which preserves the
+/// OSC 8 wrappers the autolinker legitimately emits.
 pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    let mut lines = render_tool_dispatch(name, args, result, opts);
+    crate::render::sanitize::scrub_rendered_lines(&mut lines);
+    lines
+}
+
+fn render_tool_dispatch(
+    name: &str,
+    args: &str,
+    result: &str,
+    opts: &RenderOpts,
+) -> Vec<Line<'static>> {
     // Internal control markup (<system-reminder>, <task-notification>) is
     // model-facing only — never render it as tool output. Done once here so
     // every renderer below is covered.

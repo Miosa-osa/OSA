@@ -5,6 +5,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   All writes are atomic (tmp file + rename) to prevent corruption.
   """
   require Logger
+  alias OptimalSystemAgent.System.AtomicFile
 
   defp config_dir,
     do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
@@ -92,7 +93,6 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   """
   def update_crons(state, update_fn) do
     path = crons_path()
-    tmp_path = path <> ".tmp"
 
     current_jobs =
       case File.read(path) do
@@ -109,8 +109,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
     updated_jobs = update_fn.(current_jobs)
     json = Jason.encode!(%{"jobs" => updated_jobs}, pretty: true)
 
-    with :ok <- File.write(tmp_path, json),
-         :ok <- File.rename(tmp_path, path) do
+    with :ok <- AtomicFile.write(path, json) do
       state = load_crons(%{state | cron_jobs: []})
       {:ok, state}
     else
@@ -126,7 +125,6 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   """
   def update_triggers(state, update_fn) do
     path = triggers_path()
-    tmp_path = path <> ".tmp"
 
     current_triggers =
       case File.read(path) do
@@ -143,8 +141,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
     updated_triggers = update_fn.(current_triggers)
     json = Jason.encode!(%{"triggers" => updated_triggers}, pretty: true)
 
-    with :ok <- File.write(tmp_path, json),
-         :ok <- File.rename(tmp_path, path) do
+    with :ok <- AtomicFile.write(path, json) do
       state = load_triggers(%{state | trigger_handlers: %{}, triggers_raw: []})
       {:ok, state}
     else

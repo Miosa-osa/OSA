@@ -116,7 +116,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           retry_after = parse_retry_after(headers)
           error_msg = extract_error(resp_body)
           Logger.warning("Anthropic rate limited. retry-after: #{retry_after}s — #{error_msg}")
-          {:error, {:rate_limited, retry_after}}
+          rate_limited_error(retry_after)
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -189,7 +189,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           # SUCCESS. Surface it as an error so Resilience/FallbackChain engage.
           Logger.warning("Anthropic stream HTTP 429 (rate limited)")
           drain_self_stream(resp)
-          {:error, {:rate_limited, parse_retry_after(resp.headers)}}
+          rate_limited_error(parse_retry_after(resp.headers))
 
         {:ok, %{status: status} = resp} ->
           Logger.warning("Anthropic stream HTTP #{status}")
@@ -1143,6 +1143,31 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       [] -> base
       _ -> [{"anthropic-beta", Enum.join(betas, ",")} | base]
     end
+  end
+
+  # Single wiring point for HTTP 429 (sync + streaming both funnel here).
+  #
+  # `CredentialPool` advertises "automatic skip of rate-limited keys", but
+  # nothing ever marked a key: `mark_rate_limited/2` had zero callers, so a
+  # throttled key kept being handed straight back out of `resolve_auth/0` and
+  # every same-provider retry (Resilience runs those BEFORE any fallback) hit
+  # the same 429. Marking here — at the point the 429 is recognised, before the
+  # error tuple propagates into the retry loop — is what makes the next attempt
+  # pick a different key.
+  #
+  # Best-effort: the pool is a cast, and a single-key/env-fallback setup is a
+  # no-op there. It must never convert a rate-limit into a crash.
+  defp rate_limited_error(retry_after) do
+    _ =
+      try do
+        OptimalSystemAgent.Providers.CredentialPool.mark_rate_limited(:anthropic)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+
+    {:error, {:rate_limited, retry_after}}
   end
 
   @doc """

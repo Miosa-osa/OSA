@@ -19,10 +19,19 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
   @api_base "https://open.feishu.cn/open-apis"
+
+  # Feishu/Lark sizes message content in bytes (the `content` field is a
+  # JSON-encoded string with a byte ceiling); 4,000 is this adapter's margin
+  # under it. Counting graphemes (as this module used to) meant 4,000 Chinese
+  # characters measured "under" the limit at 12,000 bytes — and Feishu's
+  # `content` is JSON-escaped before sending, which only adds bytes.
   @max_message_length 4_000
+  @length_unit :bytes
 
   defstruct [
     :app_id,
@@ -98,9 +107,7 @@ defmodule OptimalSystemAgent.Channels.Feishu do
         :ok
 
       _ ->
-        Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-          process_event(payload, state)
-        end)
+        Delivery.start_task(:feishu, fn -> process_event(payload, state) end)
     end
 
     {:noreply, state}
@@ -150,27 +157,34 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   # ── Feishu API ───────────────────────────────────────────────────────
 
   defp send_text(state, chat_id, text) do
-    chunks = chunk_message(text)
-
-    for chunk <- chunks do
-      body = %{
-        receive_id: chat_id,
-        msg_type: "text",
-        content: Jason.encode!(%{text: chunk})
-      }
-
-      Req.post("#{@api_base}/im/v1/messages?receive_id_type=chat_id",
-        json: body,
-        headers: auth_headers(state),
-        receive_timeout: 10_000
-      )
-    end
-
-    :ok
+    text
+    |> chunk_message()
+    |> then(&Delivery.send_chunks(:feishu, &1, fn chunk -> post_chunk(state, chat_id, chunk) end))
   rescue
     e ->
       Logger.error("[Feishu] Send failed: #{Exception.message(e)}")
       {:error, :send_failed}
+  end
+
+  defp post_chunk(state, chat_id, chunk) do
+    body = %{
+      receive_id: chat_id,
+      msg_type: "text",
+      content: Jason.encode!(%{text: chunk})
+    }
+
+    case Req.post("#{@api_base}/im/v1/messages?receive_id_type=chat_id",
+           json: body,
+           headers: auth_headers(state),
+           receive_timeout: 10_000
+         ) do
+      # Feishu answers 200 with an in-body code; 0 means success.
+      {:ok, %{status: 200, body: %{"code" => 0}}} -> :ok
+      {:ok, %{status: 200, body: %{"code" => code} = body}} -> {:error, {code, body}}
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, {status, body}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp reply_to_message(state, message_id, text) when is_binary(message_id) do
@@ -222,15 +236,18 @@ defmodule OptimalSystemAgent.Channels.Feishu do
 
   defp auth_headers(state), do: [{"authorization", "Bearer #{state.tenant_token}"}]
 
-  defp chunk_message(text) do
-    if String.length(text) <= @max_message_length,
-      do: [text],
-      else:
-        text
-        |> String.graphemes()
-        |> Enum.chunk_every(@max_message_length)
-        |> Enum.map(&Enum.join/1)
-  end
+  @doc """
+  Split an outbound reply into Feishu-sized chunks.
+
+  Public so the chunking contract can be tested against Feishu's real limit and
+  unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
+
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do

@@ -508,6 +508,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iteration: state.iteration
     })
 
+    # Same duplicate-id repair as the normal tool-call path: `tool_msgs` below is
+    # built one-per-tool_call, so a collision would emit two `tool_result`s
+    # carrying the same `tool_call_id` against a single `tool_use` block.
+    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
+
     content = Map.get(resp, :content) || ""
     assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
 
@@ -974,6 +979,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # response and re-roll the turn, up to a bounded budget, before falling back
     # to the existing halt behavior.
     resample_snapshot = state
+
+    # DUPLICATE-ID REPAIR — must happen HERE, before `assistant_msg` is built and
+    # before either id-keyed map below (`all_results_map` at the merge, and
+    # `ToolOrchestrator.dispatch/3`'s own order-restoring map). Two tool calls
+    # sharing an id collapse in both maps, losing one result and orphaning a
+    # `tool_use` block, which a strict provider rejects on the NEXT request.
+    # Single canonical repair, applied once, upstream of everything.
+    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
 
     # Forward progress: a tool call resets the reasoning-only spin streak (the
     # reasoning-only doom-loop backstop counts only wasted, tool-less, empty
@@ -1474,23 +1487,85 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     {marker, state}
   end
 
-  # CC yieldMissingToolResultBlocks: every tool_use in a trailing assistant
-  # message that never received a tool result gets an "Interrupted by user"
-  # result so the API history stays valid on the next turn.
+  # CC yieldMissingToolResultBlocks: every `tool_use` that never received a
+  # `tool_result` gets a synthetic "Interrupted by user" result so the API
+  # history stays valid on the next turn.
+  #
+  # This scans EVERY assistant message, not just `List.last/1`. The last-message
+  # check was a latent permanent-corruption bug: `finalize_interrupt/2` appends
+  # the partial assistant TEXT before calling here, so an assistant message
+  # carrying both streamed text and tool calls was no longer last and its
+  # `tool_use` blocks were never filled. A strict provider (Anthropic, Gemini)
+  # rejects the whole request over one orphan — and because the transcript is
+  # persisted, that rejection then repeats on EVERY subsequent turn, forever.
+  #
+  # Each synthetic result is inserted IMMEDIATELY AFTER the assistant message
+  # that owns it, not appended at the end: Anthropic requires the `tool_result`
+  # blocks to be in the message directly following their `tool_use`, so a tail
+  # append would trade one invalid transcript for another.
   defp fill_orphaned_tool_results(messages) do
-    case List.last(messages) do
-      %{role: "assistant", tool_calls: tcs} when is_list(tcs) and tcs != [] ->
-        results =
-          Enum.map(tcs, fn tc ->
-            %{role: "tool", tool_call_id: tc.id, content: "Interrupted by user"}
-          end)
+    answered = answered_tool_ids(messages)
 
-        {messages ++ results, true}
+    {reversed, filled_any?} =
+      Enum.reduce(messages, {[], false}, fn msg, {acc, filled?} ->
+        case orphaned_tool_call_ids(msg, answered) do
+          [] ->
+            {[msg | acc], filled?}
+
+          ids ->
+            results =
+              Enum.map(ids, fn id ->
+                %{role: "tool", tool_call_id: id, content: "Interrupted by user"}
+              end)
+
+            # `acc` is reversed, so the results must be pushed in reverse order
+            # to land after `msg` in the restored list.
+            {Enum.reverse(results) ++ [msg | acc], true}
+        end
+      end)
+
+    messages = Enum.reverse(reversed)
+    {messages, filled_any? or trailing_interrupted_tool?(messages)}
+  end
+
+  # Ids of every tool call in `msg` that no `tool` message answers. Tolerates
+  # both atom- and string-keyed messages (checkpoint restore decodes to strings)
+  # and tool calls missing an id (nothing to answer — skipped).
+  defp orphaned_tool_call_ids(msg, answered) do
+    case msg_role(msg) do
+      "assistant" ->
+        msg
+        |> tool_calls_of()
+        |> Enum.map(&tool_call_id/1)
+        |> Enum.reject(&(is_nil(&1) or MapSet.member?(answered, &1)))
+        |> Enum.uniq()
 
       _ ->
-        {messages, trailing_interrupted_tool?(messages)}
+        []
     end
   end
+
+  defp answered_tool_ids(messages) do
+    for msg <- messages,
+        msg_role(msg) == "tool",
+        id = Map.get(msg, :tool_call_id) || Map.get(msg, "tool_call_id"),
+        not is_nil(id),
+        into: MapSet.new(),
+        do: id
+  end
+
+  defp msg_role(msg) when is_map(msg), do: Map.get(msg, :role) || Map.get(msg, "role")
+  defp msg_role(_), do: nil
+
+  defp tool_calls_of(msg) do
+    case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
+      list when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  defp tool_call_id(tc) when is_map(tc), do: Map.get(tc, :id) || Map.get(tc, "id")
+  defp tool_call_id(_), do: nil
 
   # True when the tool batch itself was killed (ToolOrchestrator appended
   # "Error: Interrupted by user" results) — the marker should then say

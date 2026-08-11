@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.Agent.Rewind do
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
   alias OptimalSystemAgent.FSCheckpoint.Server, as: FSCheckpoint
+  alias OptimalSystemAgent.System.AtomicFile
 
   @doc """
   Rewind `session_id` to the state captured by rewind checkpoint
@@ -69,7 +70,11 @@ defmodule OptimalSystemAgent.Agent.Rewind do
           apply_to_live_loop(session_id, result)
 
           if undo_id do
-            record_last_rewind(session_id, %{undo_id: undo_id, target_id: checkpoint_id, scope: scope})
+            record_last_rewind(session_id, %{
+              undo_id: undo_id,
+              target_id: checkpoint_id,
+              scope: scope
+            })
           end
 
           {:ok, Map.merge(result, %{diff: diff, undo_id: undo_id})}
@@ -195,7 +200,13 @@ defmodule OptimalSystemAgent.Agent.Rewind do
   end
 
   defp empty_diff do
-    %{additions: 0, deletions: 0, files: 0, paths: [], messages: %{current_count: 0, target_count: 0, removed: 0}}
+    %{
+      additions: 0,
+      deletions: 0,
+      files: 0,
+      paths: [],
+      messages: %{current_count: 0, target_count: 0, removed: 0}
+    }
   end
 
   # ── Private: current-state snapshot (for the undo point) ─────────────
@@ -263,9 +274,7 @@ defmodule OptimalSystemAgent.Agent.Rewind do
 
     path = pointer_path(session_id)
     File.mkdir_p!(Path.dirname(path))
-    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-    File.write!(tmp, Jason.encode!(data), [:utf8])
-    File.rename!(tmp, path)
+    AtomicFile.write!(path, Jason.encode!(data))
     :ok
   rescue
     e ->

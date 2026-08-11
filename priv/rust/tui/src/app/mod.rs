@@ -209,6 +209,9 @@ pub struct App {
     /// until it arrives; the status bar/title fall back to the launch-dir
     /// basename in the meantime.
     pub workspace_name: Option<String>,
+    /// Human-readable title of the active session, mirrored into the status bar.
+    /// None until the first prompt is titled (or a titled session is resumed).
+    pub session_title: Option<String>,
 
     // Dimensions
     pub width: u16,
@@ -627,6 +630,7 @@ impl App {
             },
 
             workspace_name: None,
+            session_title: None,
             state: AppState::Connecting,
             return_stack: Vec::new(),
             focus: FocusStack::new(),
@@ -939,6 +943,17 @@ impl App {
         } else if from == AppState::Processing && to != AppState::Processing {
             self.input.set_processing(false);
         }
+    }
+
+    /// Set the active session's human-readable title and mirror it into the
+    /// status bar. Single entry point so the two never drift: every producer
+    /// (SSE push, session create/resume, picker selection) goes through here.
+    pub(crate) fn set_session_title(&mut self, title: Option<String>) {
+        let normalized = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        self.session_title = normalized.clone();
+        self.status.set_session_title(normalized);
     }
 
     /// WS12 chrome sync — runs once per event-loop iteration, just before draw

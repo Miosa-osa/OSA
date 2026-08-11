@@ -60,8 +60,15 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceCursorTest do
       assert :ok = SessionPersistence.save(id, convo(3))
 
       assert File.exists?(cursor_file(id))
-      assert {:ok, %{"v" => 1, "msg_count" => 3, "next_seq" => 3}} =
+      # v2: the endpoint hashes (`head_hash`/`tail_hash`) were replaced by a
+      # `span_hash` over the whole projected prefix, because two endpoints
+      # cannot see an in-place rewrite of a message between them. A v1 cursor
+      # left by an older build lacks `span_hash`, so it simply misses and the
+      # slow path rebuilds it — no migration needed.
+      assert {:ok, %{"v" => 2, "msg_count" => 3, "next_seq" => 3, "span_hash" => span}} =
                cursor_file(id) |> File.read!() |> Jason.decode()
+
+      assert is_binary(span)
     end
 
     test "the cursor is never mistaken for a session by list/1", %{id: id} do
@@ -215,7 +222,12 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceCursorTest do
       # Simulate a second writer appending an event we did not project.
       File.write!(
         updates_file(id),
-        Jason.encode!(%{"seq" => 99, "ts" => "x", "hash" => "deadbeef", "msg" => %{"role" => "user", "content" => "other"}}) <> "\n",
+        Jason.encode!(%{
+          "seq" => 99,
+          "ts" => "x",
+          "hash" => "deadbeef",
+          "msg" => %{"role" => "user", "content" => "other"}
+        }) <> "\n",
         [:append]
       )
 

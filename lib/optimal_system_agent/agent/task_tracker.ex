@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   # ── Task struct ────────────────────────────────────────────────────
 
@@ -533,9 +534,7 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
       File.mkdir_p!(dir)
       serialized = Enum.map(tasks, &serialize_task/1)
       json = Jason.encode!(serialized, pretty: true)
-      tmp = path <> ".tmp"
-      File.write!(tmp, json)
-      File.rename!(tmp, path)
+      AtomicFile.write!(path, json)
     rescue
       e -> Logger.error("[TaskTracker] Persist failed: #{inspect(e)}")
     end

@@ -156,15 +156,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         })
 
       {:computer_use_result, result} ->
-        # Immediate feedback: print computer_use result as a permanent line
+        # Immediate feedback: print computer_use result as a permanent line.
+        # This is raw TOOL OUTPUT going straight to the terminal — redact it.
         clear_line()
-        preview = truncate(result, 70)
+        preview = truncate(redact(result), 70)
         safe_io_puts("  #{IO.ANSI.green()}✓ #{preview}#{@reset}")
         spinner_loop(rest, state)
 
       {:computer_use_error, result} ->
         clear_line()
-        preview = truncate(result, 70)
+        preview = truncate(redact(result), 70)
         safe_io_puts("  #{IO.ANSI.red()}✗ #{preview}#{@reset}")
         spinner_loop(rest, state)
 
@@ -242,7 +243,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   # --- Formatting helpers ---
 
   defp tool_hint({_name, args, _start}) when is_binary(args) and args != "" do
-    " — #{truncate(args, 45)}"
+    # Tool arguments are echoed verbatim on the completed-tool line. A
+    # `shell_execute` invocation such as `curl -H "Authorization: Bearer …"`
+    # would otherwise print the credential to the terminal (and into whatever
+    # scrollback/recording captures it). Redact BEFORE truncating so a
+    # half-shown key is not what reaches the screen.
+    " — #{truncate(redact(args), 45)}"
   end
 
   defp tool_hint(_), do: ""
@@ -265,6 +271,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
 
   defp truncate(str, max),
     do: OptimalSystemAgent.Utils.Text.truncate(str, max)
+
+  # Shared secret scrubber (`Agent.Trajectory.redact/1`) applied to everything
+  # tool-derived that this process prints. Never raises and leaves text with no
+  # credential shape byte-identical.
+  defp redact(str), do: OptimalSystemAgent.Agent.Trajectory.redact(str)
 
   defp clear_line do
     width =

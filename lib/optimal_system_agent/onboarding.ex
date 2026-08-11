@@ -726,8 +726,93 @@ defmodule OptimalSystemAgent.Onboarding do
     {"llamacpp", "llama.cpp", "Local server — no key needed", "http://localhost:8080/v1"}
   ]
 
+  # ── Per-provider capability overlay for the compact tuple rows ──────────
+  #
+  # `@additional_providers` is a tuple list precisely because those rows differ
+  # only in six presentation strings; the fields that vary are the six in the
+  # tuple and nothing else. When ONE of them gains a capability the other
+  # seventeen do not have — an account sign-in — there are two ways to express
+  # it, and only one of them is reversible:
+  #
+  #   * expand that row into a literal map alongside the tuples. That splits
+  #     the list into two shapes, and the next provider to gain a capability
+  #     splits it again.
+  #   * declare the extra fields separately, keyed by provider id, and merge
+  #     them onto the expanded row. The tuple list stays one shape.
+  #
+  # This is the second. It is a MERGE over the expanded row, so an overlay can
+  # only ADD or OVERRIDE named fields: a provider id absent from this map
+  # expands byte-identically to how it did before this function existed, which
+  # is what keeps the key-only providers untouched. Two more providers are
+  # expected to need it, which is why it is a map rather than a special case.
+  #
+  # A function rather than a module attribute so the values can be read from
+  # the auth modules at call time (the same "derive, never duplicate" rule
+  # `derived_base_url/1` follows) without making this module compile-time
+  # dependent on every auth provider.
+  defp additional_provider_overlays do
+    %{
+      # xAI: a SECOND MODE on the existing row, not a second provider. Same
+      # host (`api.x.ai/v1`), same OpenAI-compatible wire format, same models
+      # — only the credential differs, so splitting it into an `xai`/`xai_oauth`
+      # pair would present a distinction that does not exist below the
+      # credential. Compare `openai`/`openai_codex`, which ARE split because
+      # the base URL, the protocol and the model list all change with the
+      # credential. Pattern A, the same one `ollama_cloud` and `bedrock` use.
+      "xai" => %{
+        # `requires_key: true` (from the tuple, unchanged) paired with
+        # `key_optional: true` is what makes the account mode reachable from
+        # the TUI: its onboarding dialog decides whether to render a
+        # credential field from `requires_key` alone, so `requires_key: false`
+        # would take the KEY mode away from TUI users, and omitting
+        # `key_optional` would make the key mandatory and hide the account
+        # mode. Identical reasoning to `bedrock`'s.
+        key_optional: true,
+        auth_modes: [:api_key, :oauth],
+        subscription: %{
+          kind: :device_code,
+          label: "Sign in with my xAI account",
+          hint: "Uses your SuperGrok or Premium+ plan — nothing to paste",
+          key_label: "Paste an xAI API key",
+          key_hint: "Pay-per-token billing against console.x.ai",
+          # Unlike `ollama_cloud`, whose two modes genuinely reach different
+          # hosts, this is the SAME endpoint the key path uses. It is stated
+          # anyway, and read from the auth module rather than retyped, because
+          # it is the value the transport pins at sign-in — see
+          # `Auth.Providers.XAI.pinned_base_url/0`.
+          base_url: OptimalSystemAgent.Auth.Providers.XAI.base_url()
+        }
+      },
+      # Qwen: the same second-mode shape, with one difference that is the
+      # provider's own doing rather than a modelling choice. An account is
+      # issued a `resource_url` at sign-in and its inference endpoint is
+      # derived from that; a DashScope key belongs to DashScope's
+      # compatible-mode endpoint. So the two modes reach different hosts —
+      # exactly the `ollama_cloud` situation, where `subscription.base_url`
+      # exists precisely because the modes do not share one.
+      #
+      # The value below is only what the picker SHOWS before sign-in. The
+      # endpoint actually used is resolved per account from the provider's own
+      # token response and pinned into the marker; see
+      # `Auth.Providers.Qwen.resolve_base_url/1`.
+      "qwen" => %{
+        key_optional: true,
+        auth_modes: [:api_key, :oauth],
+        subscription: %{
+          kind: :device_code,
+          label: "Sign in with my Qwen account",
+          hint: "Uses your Qwen Code coding plan — nothing to paste",
+          key_label: "Paste a DashScope API key",
+          key_hint: "Pay-per-token billing against DashScope",
+          base_url: OptimalSystemAgent.Auth.Providers.Qwen.default_base_url()
+        }
+      }
+    }
+  end
+
   defp additional_providers do
     routable = routable_provider_ids()
+    overlays = additional_provider_overlays()
 
     keyed =
       for {id, name, description, group, env_var, signup_url} <- @additional_providers,
@@ -744,6 +829,7 @@ defmodule OptimalSystemAgent.Onboarding do
           signup_url: signup_url,
           models: :dynamic
         }
+        |> Map.merge(Map.get(overlays, id, %{}))
       end
 
     local =

@@ -13,6 +13,9 @@ use ratatui::{
 };
 
 use super::DialogAction;
+use crate::render::sanitize::{
+    scrub_untrusted_block, scrub_untrusted_line, scrub_untrusted_line_opt,
+};
 
 const MIN_W: u16 = 50;
 const MAX_W: u16 = 90;
@@ -105,10 +108,15 @@ impl Permissions {
     }
 
     /// Set the tool being requested and the backend-assigned request identifier.
+    ///
+    /// The tool name and argument payload are scrubbed on the way in — see
+    /// [`set_target`](Self::set_target) for why this dialog in particular
+    /// cannot display backend text verbatim. `request_id` is opaque and goes
+    /// back to the backend untouched.
     pub fn set_tool(&mut self, name: String, args: String, request_id: String) {
-        self.tool_name = name;
+        self.tool_name = scrub_untrusted_line(&name);
         self.target = None;
-        self.tool_args = args;
+        self.tool_args = scrub_untrusted_block(&args);
         self.request_id = request_id;
         self.diff_old = None;
         self.diff_new = None;
@@ -127,8 +135,21 @@ impl Permissions {
 
     /// Attach the human-facing target (skill name, command, path). Empty/blank
     /// values are ignored so the title falls back to the tool name.
+    ///
+    /// The target is scrubbed here, at ingress, rather than at each render
+    /// site: it is the string the "Allow …?" title puts in front of the
+    /// operator, and it is chosen by whatever produced the tool call — a
+    /// prompt-injected model, a hostile repo, an MCP server. Left verbatim, a
+    /// bidi override reorders it so the command the operator reads is not the
+    /// command that runs, in the one dialog where that decides whether it runs
+    /// at all. The backend does not scrub (verified: `tool_executor.ex`'s
+    /// `clip/1` collapses `\s` only, which does not match U+202E), so this is
+    /// the only place the defence exists. Scrubbing on the way in also means a
+    /// render site added later inherits it for free.
     pub fn set_target(&mut self, target: Option<String>) {
-        self.target = target.filter(|s| !s.trim().is_empty());
+        self.target = target
+            .map(|s| scrub_untrusted_line(&s))
+            .filter(|s| !s.trim().is_empty());
     }
 
     /// Syntect language token for the diff, derived from the target's file
@@ -161,9 +182,13 @@ impl Permissions {
     }
 
     /// Attach the enriched metadata (destructive warning + prompt reason).
+    ///
+    /// Backend-supplied prose, scrubbed on the same grounds as the target: it
+    /// is rendered inside the trust decision, and a reordered "reason" is a
+    /// reordered justification.
     pub fn set_meta(&mut self, warning: Option<String>, reason: Option<String>) {
-        self.warning = warning;
-        self.reason = reason;
+        self.warning = scrub_untrusted_line_opt(warning);
+        self.reason = scrub_untrusted_line_opt(reason);
     }
 
     /// Handle a key event.  Returns `Some(action)` when the dialog should close.
@@ -580,6 +605,152 @@ mod tests {
         assert_eq!(d.display_label(), "shell_execute");
     }
 
+    // ───────────────── Trojan Source in the trust decision ──────────────────
+    //
+    // The backend does NOT scrub: `tool_executor.ex`'s `clip/1` only trims and
+    // collapses `\s`, which does not match U+202E. So a tool call whose command
+    // carries a bidi override arrives here intact, and this dialog is where the
+    // operator decides whether it executes. The scrub has to happen here.
+
+    /// A command carrying an RLO renders right-to-left from that point on, so
+    /// what the operator reads is not what runs. The override must not survive
+    /// into the label at all.
+    #[test]
+    fn a_bidi_override_never_reaches_the_permission_label() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "echo hi".into(), "req_bidi".into());
+        // Reads as "rm -rf /tmp/safe" but the tail is reordered by the RLO.
+        d.set_target(Some("rm -rf /\u{202E}efas/pmt/".into()));
+
+        let label = d.display_label();
+        assert!(
+            !label
+                .chars()
+                .any(crate::render::sanitize::is_invisible_formatting_char),
+            "the label must carry no reordering codepoint: {label:?}"
+        );
+        assert_eq!(label, "rm -rf /efas/pmt/");
+    }
+
+    /// The whole Trojan Source family, plus a raw ESC, across every untrusted
+    /// field the dialog displays.
+    #[test]
+    fn every_untrusted_field_is_scrubbed() {
+        let mut d = Permissions::new();
+        d.set_tool(
+            "shell\u{202E}_execute".into(),
+            "--flag\u{2066}=1\nsecond\u{200B}line".into(),
+            "req_all".into(),
+        );
+        d.set_target(Some("/tmp/\u{2069}path".into()));
+        d.set_meta(
+            Some("destruc\u{202D}tive".into()),
+            Some("because\u{061C} reasons".into()),
+        );
+
+        assert_eq!(d.tool_name, "shell_execute");
+        assert_eq!(d.display_label(), "/tmp/path");
+        assert_eq!(d.warning.as_deref(), Some("destructive"));
+        assert_eq!(d.reason.as_deref(), Some("because reasons"));
+        // The block variant keeps line structure, drops everything else.
+        assert_eq!(d.tool_args, "--flag=1\nsecondline");
+
+        // A raw escape introducer must never survive into a rendered span.
+        d.set_target(Some("cat \x1b]0;pwn\x07/etc/passwd".into()));
+        assert_eq!(d.display_label(), "cat ]0;pwn/etc/passwd");
+    }
+
+    /// **The escape-injection half of the same gap, and the one that is
+    /// genuinely exploitable.**
+    ///
+    /// Measured against a real terminal emulator (`VT100Backend` pipes
+    /// ratatui's actual ANSI output through a vt100 parser), the two families
+    /// behave very differently:
+    ///
+    ///   * bidi controls are zero-width graphemes, and ratatui drops those when
+    ///     it fills a `Buffer` cell — so an RLO never reaches the terminal
+    ///     through this render path at all;
+    ///   * a raw `ESC` is *not* dropped. It survives into the buffer and is
+    ///     written straight out, where the terminal executes it.
+    ///
+    /// So a backend-supplied command of the form `…\x1b]0;PWNED\x07…` does not
+    /// display in the permission dialog — it *runs*, retitling the operator's
+    /// window from inside the prompt that is asking them to authorize
+    /// something, and hiding its own payload from the row while it does. This
+    /// asserts on the emulator's state, not on a `Buffer`, because a `Buffer`
+    /// assertion cannot tell "displayed" from "executed".
+    #[test]
+    fn a_command_carrying_an_escape_cannot_drive_the_terminal() {
+        use ratatui::Terminal;
+
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "echo hi".into(), "req_esc".into());
+        d.set_target(Some("cat \u{1b}]0;PWNED\u{7}/etc/passwd".into()));
+
+        let mut term = Terminal::new(crate::test_backend::VT100Backend::new(80, 24)).unwrap();
+        term.draw(|frame| {
+            let area = frame.area();
+            d.draw_inline(frame, area);
+        })
+        .unwrap();
+
+        let title = term.backend().vt100().screen().title().to_string();
+        assert_ne!(
+            title, "PWNED",
+            "backend-supplied text executed an OSC sequence from inside the \
+             permission dialog — the escape reached the terminal"
+        );
+
+        let screen = term.backend().contents();
+        assert!(
+            screen.contains("cat ]0;PWNED/etc/passwd"),
+            "the neutralized command must still be fully legible so the operator \
+             can see exactly what they are authorizing:\n{screen}"
+        );
+    }
+
+    /// The bidi half, asserted at the same level for completeness. ratatui's
+    /// zero-width-grapheme drop already keeps an RLO off the screen, so this
+    /// pins that the scrub does not *regress* legibility — the command must
+    /// read correctly and carry no reordering codepoint.
+    #[test]
+    fn the_drawn_dialog_shows_the_command_in_reading_order() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "echo hi".into(), "req_draw".into());
+        d.set_target(Some("rm -rf /\u{202E}efas/pmt/".into()));
+
+        let buf = crate::layout_invariants::render_to_buffer(
+            |frame| {
+                let area = frame.area();
+                d.draw_inline(frame, area);
+            },
+            80,
+            24,
+        );
+        let screen = crate::layout_invariants::snapshot_buffer(&buf);
+
+        assert!(
+            !screen
+                .chars()
+                .any(crate::render::sanitize::is_invisible_formatting_char),
+            "no reordering codepoint may reach the screen:\n{screen}"
+        );
+        assert!(
+            screen.contains("rm -rf /efas/pmt/"),
+            "the scrubbed command must still be legible on screen:\n{screen}"
+        );
+    }
+
+    /// Over-scrubbing would be its own defect — the operator has to be able to
+    /// read a normal command, including non-Latin text and emoji.
+    #[test]
+    fn ordinary_commands_render_untouched() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "npm test".into(), "req_ok".into());
+        d.set_target(Some("git commit -m \"fix: 漢字 🎉\"".into()));
+        assert_eq!(d.display_label(), "git commit -m \"fix: 漢字 🎉\"");
+    }
+
     #[test]
     fn set_tool_resets_stale_target() {
         let mut d = Permissions::new();
@@ -589,3 +760,4 @@ mod tests {
         assert_eq!(d.display_label(), "file_edit");
     }
 }
+

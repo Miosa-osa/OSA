@@ -14,6 +14,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Safety.CommandVariants
+  alias OptimalSystemAgent.Agent.Safety.DangerousCommands
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser
   alias OptimalSystemAgent.Tools.UseContext
@@ -198,7 +200,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         n
 
       _ ->
-        Logger.warning("[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default")
+        Logger.warning(
+          "[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default"
+        )
+
         Constants.effective_timeout_ms()
     end
   end
@@ -388,9 +393,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     " (Approving always-allows: #{Enum.join(patterns, ", ")}.)"
   end
 
+  # First word (command name) of each pipe/;/&&/|| segment of EVERY variant of
+  # the command — the unquoted form and any wrapper payload included.
+  #
+  # Reading only the raw string let `bash -c "rm -rf /tmp/x"` past the :ask tier
+  # entirely: the payload is one opaque argument, so the only head visible was
+  # `bash`, which is not a risky command. See `Agent.Safety.CommandVariants`.
+  defp command_heads(command) do
+    command
+    |> CommandVariants.variants()
+    |> Enum.flat_map(&segment_heads/1)
+    |> Enum.uniq()
+  end
+
   # First word (command name) of each pipe/;/&&/|| segment, with leading
   # backslashes and any path prefix stripped (`\rm`, `/usr/bin/rm` → `rm`).
-  defp command_heads(command) do
+  defp segment_heads(command) do
     command
     |> String.split(~r/\s*[|;&]{1,2}\s*/)
     |> Enum.map(&String.trim/1)
@@ -404,8 +422,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     end)
   end
 
+  # Hard-deny tier. The `rm -rf <root>` / fork-bomb / `dd` / `mkfs` class is
+  # owned by the circuit-breaker (ONE list, matched over the normalized variant
+  # set); `Constants.effective_catastrophic_patterns/0` carries only the
+  # extensions plus whatever the operator added via `[permissions]`, and those
+  # are matched over the variants too so quoting cannot slip past them either.
   defp catastrophic?(command) do
-    Enum.any?(Constants.effective_catastrophic_patterns(), &Regex.match?(&1, command))
+    DangerousCommands.catastrophic_destruction?(command) or
+      matches_any_variant?(command, Constants.effective_catastrophic_patterns())
+  end
+
+  defp matches_any_variant?(command, patterns) do
+    CommandVariants.any?(command, fn variant ->
+      Enum.any?(patterns, &Regex.match?(&1, variant))
+    end)
   end
 
   # Operator hard-deny: any command head listed in [permissions].deny.
@@ -437,8 +467,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   defp risky?(command) do
     heads = command_heads(command)
+
     Enum.any?(heads, &(&1 in Constants.effective_ask_commands())) or
-      Enum.any?(Constants.effective_ask_patterns(), &Regex.match?(&1, command))
+      matches_any_variant?(command, Constants.effective_ask_patterns())
   end
 
   # Short human-readable reason for the permission prompt.
@@ -446,7 +477,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     heads = command_heads(command)
 
     cond do
-      Enum.any?(Constants.effective_ask_patterns(), &Regex.match?(&1, command)) ->
+      matches_any_variant?(command, Constants.effective_ask_patterns()) ->
         "runs downloaded/redirected code or force-rewrites"
 
       head = Enum.find(heads, &(&1 in Constants.effective_ask_commands())) ->
@@ -501,6 +532,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
       session_id: session_id,
       tool_call_id: tool_call_id
     }
+
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     try do
@@ -775,6 +807,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
       true ->
         chunk = stream.pending |> Enum.reverse() |> IO.iodata_to_binary() |> clip_chunk()
+
         broadcast_output_delta(
           session_id,
           detach.command,
@@ -812,7 +845,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   defp clip_chunk(bin) do
     kept =
-      binary_part(bin, byte_size(bin) - @output_delta_max_chunk_bytes, @output_delta_max_chunk_bytes)
+      binary_part(
+        bin,
+        byte_size(bin) - @output_delta_max_chunk_bytes,
+        @output_delta_max_chunk_bytes
+      )
 
     "…\n" <> kept
   end
@@ -858,7 +895,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp kill_os_process(os_pid) do
     case :os.type() do
       {:win32, _} ->
-        _ = System.cmd("taskkill", ["/PID", to_string(os_pid), "/T", "/F"], stderr_to_stdout: true)
+        _ =
+          System.cmd("taskkill", ["/PID", to_string(os_pid), "/T", "/F"], stderr_to_stdout: true)
 
       _ ->
         # SIGTERM for a graceful stop, then SIGKILL as a fallback.

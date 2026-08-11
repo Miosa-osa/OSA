@@ -59,6 +59,43 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     temporarily service\ unavailable bad\ gateway gateway\ timeout
   )
 
+  # Process-dictionary key holding the "bytes already reached the user" flag for
+  # the request currently inside `with_retry/2`. See `mark_output_observed/0`.
+  @output_observed_key :osa_resilience_output_observed
+
+  @doc """
+  Record that this request has already streamed OUTPUT THE USER CAN SEE.
+
+  Called from the streaming callback on the first text/thinking delta and on the
+  first completed tool_use block. Once set, `with_retry/2` will not retry the
+  request: a retry re-invokes the provider against the SAME live callback, so
+  every byte already on screen would be emitted a second time and the user
+  watches the paragraph appear twice. Delivering bytes to the user is a one-way
+  door — past it the only honest options are "finish" or "fail", never "start
+  over".
+
+  The flag lives in the process dictionary of the process running the stream
+  (providers drive `into: :self` receive loops, so the callback, `native_stream`
+  and `with_retry` all share one process) and is cleared at every `with_retry/2`
+  entry, so it can never leak across requests.
+  """
+  @spec mark_output_observed() :: :ok
+  def mark_output_observed do
+    Process.put(@output_observed_key, true)
+    :ok
+  end
+
+  @doc "True when `mark_output_observed/0` fired for the in-flight request."
+  @spec output_observed?() :: boolean()
+  def output_observed?, do: Process.get(@output_observed_key, false) == true
+
+  @doc "Clear the observed-output flag. Called at every `with_retry/2` entry."
+  @spec reset_output_observed() :: :ok
+  def reset_output_observed do
+    Process.delete(@output_observed_key)
+    :ok
+  end
+
   @doc "The HTTP statuses that trigger a same-provider retry."
   @spec retryable_statuses() :: [pos_integer()]
   def retryable_statuses, do: @retryable_statuses
@@ -124,8 +161,13 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   # the retry (a fresh API call with NEW tool ids that dedup can't catch) would
   # double-execute side-effecting tools. So we suppress the in-place retry ONLY
   # when the partial carries tool_calls, letting stream_with_fallback drop to
-  # the sync same-provider attempt / provider fallback chain instead. Text-only
-  # partials still retry (at worst a cosmetic duplicate prefix).
+  # the sync same-provider attempt / provider fallback chain instead.
+  #
+  # Text-only partials are handled one level up, by `output_observed?/0`: if a
+  # single token was already rendered, `do_retry/7` refuses the retry outright
+  # (a duplicated paragraph is NOT cosmetic — the user watches it happen). This
+  # clause therefore still classifies a text-only partial as retryable, which is
+  # exactly right for the case where the error arrived before any delta did.
   def classify({:stream_error, _reason}), do: {:retry, nil}
 
   def classify({:stream_error, _reason, partial}) do
@@ -224,6 +266,8 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   @spec with_retry((-> term()) | (map() -> term()), keyword()) :: term()
   def with_retry(fun, opts \\ []) when is_function(fun, 0) or is_function(fun, 1) do
     max_attempts = Keyword.get_lazy(opts, :max_attempts, &max_attempts/0)
+    # Fresh request → fresh one-way door. Never inherit a previous request's flag.
+    reset_output_observed()
     ctx = %{attempt: 1, force_http1: false, strip_images: false}
     do_retry(fun, 1, max_attempts, opts, 0, false, ctx)
   end
@@ -234,32 +278,62 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     result = invoke(fun, ctx)
 
     case result do
+      # OUTPUT ALREADY ON SCREEN — the effective retry budget for this request
+      # is zero. `fun` streams into a live callback the user is watching; a
+      # retry is a fresh provider call against that SAME callback, so every
+      # token already rendered would be re-emitted and the user would watch the
+      # same paragraph appear twice. This is checked BEFORE classification so it
+      # overrides every retryable classification, including the mid-stream
+      # `{:stream_error, _}` that used to be waved through as "at worst a
+      # cosmetic duplicate prefix". Returning the error hands the failure to the
+      # caller's fallback chain, which is free to decide — with full knowledge
+      # of what was already delivered — what to do next.
       {:error, reason} when attempt < max_attempts ->
         overloaded_count =
           if overloaded?(reason), do: overloaded_count + 1, else: overloaded_count
 
-        # Overloaded fallback (CC MAX_529_RETRIES): after 3 consecutive 529s
-        # stop hammering this provider — return the error so the caller's
-        # fallback chain can switch to another model/provider instead.
-        if overloaded_count >= @max_529_attempts do
-          Logger.warning(
-            "[resilience] #{@max_529_attempts}x overloaded (529) — giving up on this provider so fallback can engage"
-          )
-
-          result
-        else
-          # retry_count = retries already performed (attempt-1). max_retries is
-          # passed as max_attempts so the classifier's own budget guard never
-          # preempts the outer `attempt < max_attempts` loop bound for generic
-          # retryable errors — only the 429 rate-limit cap (min(_, threshold))
-          # tightens the budget. The outer guard owns overall termination.
-          decision =
-            RetryClassifier.classify(reason, attempt - 1, max_attempts,
-              rate_limit_threshold: @rate_limit_threshold,
-              fail_fast_categories: Keyword.get(opts, :fail_fast_categories, [])
+        cond do
+          output_observed?() ->
+            Logger.warning(
+              "[resilience] not retrying — output already streamed to the user " <>
+                "(a retry would duplicate it): #{reason_to_string(reason)}"
             )
 
-          act_on(decision, result, reason, fun, attempt, max_attempts, opts, overloaded_count, stripped?)
+            result
+
+          # Overloaded fallback (CC MAX_529_RETRIES): after 3 consecutive 529s
+          # stop hammering this provider — return the error so the caller's
+          # fallback chain can switch to another model/provider instead.
+          overloaded_count >= @max_529_attempts ->
+            Logger.warning(
+              "[resilience] #{@max_529_attempts}x overloaded (529) — giving up on this provider so fallback can engage"
+            )
+
+            result
+
+          true ->
+            # retry_count = retries already performed (attempt-1). max_retries is
+            # passed as max_attempts so the classifier's own budget guard never
+            # preempts the outer `attempt < max_attempts` loop bound for generic
+            # retryable errors — only the 429 rate-limit cap (min(_, threshold))
+            # tightens the budget. The outer guard owns overall termination.
+            decision =
+              RetryClassifier.classify(reason, attempt - 1, max_attempts,
+                rate_limit_threshold: @rate_limit_threshold,
+                fail_fast_categories: Keyword.get(opts, :fail_fast_categories, [])
+              )
+
+            act_on(
+              decision,
+              result,
+              reason,
+              fun,
+              attempt,
+              max_attempts,
+              opts,
+              overloaded_count,
+              stripped?
+            )
         end
 
       _ ->

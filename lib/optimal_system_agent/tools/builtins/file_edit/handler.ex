@@ -126,16 +126,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
     # edit. Matcher.replace preserves the exact-match fast path verbatim.
     case Matcher.replace(content, old, new, replace_all) do
       {:error, :not_found} ->
-        {:error, "old_string not found in #{display_path}"}
+        already_applied_or_not_found(content, display_path, new)
 
       {:error, :ambiguous, count} ->
         {:error,
-         "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
+         "old_string found #{count} times in #{display_path} — must be unique. " <>
+           ambiguous_locations_note(content, old) <>
+           "Next step: extend old_string with surrounding context from one of those " <>
+           "locations so it matches exactly once, or set replace_all: true to change all #{count}."}
 
       {:error, :disproportionate} ->
         {:error,
          "Refusing edit in #{display_path}: the fuzzy-matched region is much larger than old_string. " <>
            "Re-read the file and provide the exact text to replace."}
+
+      {:error, {:replace_all_approximate, strategy}} ->
+        {:error,
+         "Refusing replace_all in #{display_path}: old_string does not appear in the file " <>
+           "verbatim — it only matched approximately (fuzzy #{strategy} match). " <>
+           "An approximate match identifies ONE candidate region; it is not evidence about " <>
+           "every region that resembles it, so replacing globally would rewrite regions that " <>
+           "never contained old_string. " <>
+           "Next step: re-read #{display_path}, then either (a) supply a longer old_string that " <>
+           "matches the file exactly and retry with replace_all, or (b) drop replace_all and " <>
+           "edit each site individually with its own exact old_string."}
 
       {:ok, new_content, occurrences, stage} ->
         # Non-bang write with clean error reporting (mirrors file_write). A
@@ -190,6 +204,60 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
               {:ok, result}
             end
         end
+    end
+  end
+
+  # ── Idempotent re-application ─────────────────────────────────────────
+  #
+  # A retry after a partial success used to be unrecoverable: the first attempt
+  # applied the edit, so `old_string` is gone, so the retry hard-errors
+  # "old_string not found" — forever, no matter how many times it is retried.
+  # The agent dead-ends on a file that is ALREADY in the state it asked for.
+  #
+  # An edit is a request for a target state, and that state holds. So when
+  # old_string is absent but new_string is present, report success as a NO-OP.
+  # This is strictly narrower than "ignore missing matches":
+  #
+  #   * `new` must be non-empty — a deletion (`new == ""`) is vacuously
+  #     "present" in every file, so treating it as applied would swallow every
+  #     genuinely failed deletion. Deletions keep the hard error.
+  #   * `new` must actually occur in the current content.
+  #
+  # No file is written and no drift-guard/read-state baseline moves, so this
+  # cannot mask a stale-write: it is a pure read-and-report path.
+  defp already_applied_or_not_found(content, display_path, new) do
+    if new != "" and String.contains?(content, new) do
+      {:ok,
+       "No change needed in #{display_path}: old_string is absent and new_string is already " <>
+         "present, so this edit was already applied. The file is in the requested state — " <>
+         "continue with the next step rather than retrying."}
+    else
+      {:error,
+       "old_string not found in #{display_path}. " <>
+         "Next step: re-read #{display_path} with file_read and copy old_string verbatim " <>
+         "from the output (including indentation), then retry."}
+    end
+  end
+
+  # Ambiguity is reported with a count but not with WHERE, so the model has to
+  # re-read the file and hunt for the duplicates itself. The line numbers are a
+  # cheap scan of content we have already loaded — hand them over.
+  defp ambiguous_locations_note(content, old) do
+    first_old_line = old |> String.split("\n") |> List.first() |> to_string()
+
+    lines =
+      content
+      |> String.split("\n")
+      |> Enum.with_index(1)
+      |> Enum.filter(fn {line, _n} ->
+        first_old_line != "" and String.contains?(line, first_old_line)
+      end)
+      |> Enum.map(fn {_line, n} -> n end)
+      |> Enum.take(20)
+
+    case lines do
+      [] -> ""
+      nums -> "Candidate locations (line numbers): #{Enum.join(nums, ", ")}. "
     end
   end
 

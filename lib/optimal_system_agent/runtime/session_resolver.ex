@@ -85,7 +85,17 @@ defmodule OptimalSystemAgent.Runtime.SessionResolver do
   end
 
   def explain(ref, {:ambiguous, candidates}) do
+    # Annotate each candidate with what it was about — choosing between several
+    # near-identical ids is the whole problem this message has to solve.
+    described =
+      Enum.map_join(candidates, ", ", fn id ->
+        case OptimalSystemAgent.Memory.SessionTitler.display_title(id) do
+          title when is_binary(title) and title != "" -> "#{id} (#{title})"
+          _ -> id
+        end
+      end)
+
     "#{inspect(ref)} matches #{length(candidates)} sessions: " <>
-      Enum.join(candidates, ", ") <> ". Use more characters."
+      described <> ". Use more characters."
   end
 end

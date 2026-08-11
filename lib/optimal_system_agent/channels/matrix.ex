@@ -19,10 +19,19 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
   @sync_timeout_ms 30_000
+
+  # Matrix has no per-message character limit; what it enforces is a 65,536
+  # *byte* ceiling on the whole event PDU. 4,000 is this adapter's conservative
+  # self-imposed budget, and bytes is the unit that ceiling is expressed in.
+  # Counting graphemes (as this module used to) meant 4,000 CJK characters
+  # measured "under" the limit while weighing 12,000 bytes on the wire.
   @max_message_length 4_000
+  @length_unit :bytes
 
   defstruct [:homeserver, :token, :since, :user_id, allowed_users: MapSet.new(), connected: false]
 
@@ -138,7 +147,7 @@ defmodule OptimalSystemAgent.Channels.Matrix do
           text = get_in(event, ["content", "body"]) || ""
 
           if text != "" do
-            Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+            Delivery.start_task(:matrix, fn ->
               process_message(room_id, sender, text, state)
             end)
           end
@@ -166,24 +175,28 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   defp send_text(state, room_id, text) do
     text
     |> chunk_message()
-    |> Enum.each(fn chunk ->
-      txn_id = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-
-      url =
-        "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
-
-      Req.put(url,
-        json: %{msgtype: "m.text", body: chunk},
-        headers: auth_headers(state),
-        receive_timeout: 10_000
-      )
-    end)
-
-    :ok
+    |> then(&Delivery.send_chunks(:matrix, &1, fn chunk -> put_event(state, room_id, chunk) end))
   rescue
     e ->
       Logger.error("[Matrix] Send failed: #{Exception.message(e)}")
       {:error, :send_failed}
+  end
+
+  defp put_event(state, room_id, chunk) do
+    txn_id = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    url =
+      "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
+
+    case Req.put(url,
+           json: %{msgtype: "m.text", body: chunk},
+           headers: auth_headers(state),
+           receive_timeout: 10_000
+         ) do
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, {status, body}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────
@@ -214,15 +227,18 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   defp allowed?(_sender, allowed) when allowed == %MapSet{}, do: true
   defp allowed?(sender, allowed), do: MapSet.member?(allowed, sender)
 
-  defp chunk_message(text) do
-    if String.length(text) <= @max_message_length,
-      do: [text],
-      else:
-        text
-        |> String.graphemes()
-        |> Enum.chunk_every(@max_message_length)
-        |> Enum.map(&Enum.join/1)
-  end
+  @doc """
+  Split an outbound reply into Matrix-sized chunks.
+
+  Public so the chunking contract can be tested against Matrix's real limit and
+  unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
+
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do

@@ -25,6 +25,8 @@ defmodule OptimalSystemAgent.Channels.Telegram do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
   # Long-poll timeout sent to the Telegram API (seconds).
@@ -35,8 +37,20 @@ defmodule OptimalSystemAgent.Channels.Telegram do
   @backoff_initial_ms 1_000
   @backoff_max_ms 60_000
 
-  # Telegram message length limit.
+  # Telegram message length limit: "1-4096 characters after entities parsing".
+  # Telegram counts those characters as UTF-16 code units — the same unit its
+  # MessageEntity offsets/lengths use — so a CJK char costs 1 and an astral
+  # emoji costs 2.
+  #
+  # The old code tested `byte_size(candidate) > 4096` but cut with
+  # `String.split_at(para, 4086)`, which counts graphemes. Two failure modes fell
+  # out of that mismatch: CJK text split ~3x more often than necessary (4096
+  # bytes is only ~1365 CJK chars, all of which Telegram would have accepted in
+  # one message), and emoji text produced chunks of 4086 graphemes = 8172 UTF-16
+  # units, double Telegram's cap. Telegram 400'd those, the adapter ignored the
+  # result, and the remaining chunks still went out — a hole mid-reply.
   @max_message_length 4096
+  @length_unit :utf16
 
   # ── Behaviour callbacks ───────────────────────────────────────────────
 
@@ -217,7 +231,7 @@ defmodule OptimalSystemAgent.Channels.Telegram do
 
     ensure_session(session_id)
 
-    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+    Delivery.start_task(:telegram, fn ->
       case Loop.process_message(session_id, text, channel: :telegram, user_id: user_id) do
         {:ok, response} ->
           send_text(token, chat_id, response)
@@ -291,15 +305,12 @@ defmodule OptimalSystemAgent.Channels.Telegram do
   # ── Message Sending ─────────────────────────────────────────────────
 
   defp send_text(token, chat_id, text) do
-    html = markdown_to_html(text)
-
-    html
+    text
+    |> markdown_to_html()
     |> chunk_message()
-    |> Enum.each(fn chunk ->
-      post_message(token, chat_id, chunk)
-    end)
-
-    :ok
+    |> then(
+      &Delivery.send_chunks(:telegram, &1, fn chunk -> post_message(token, chat_id, chunk) end)
+    )
   end
 
   defp post_message(token, chat_id, text) do
@@ -317,11 +328,24 @@ defmodule OptimalSystemAgent.Channels.Telegram do
         :ok
 
       {:ok, %{status: 400, body: %{"description" => desc}}} when is_binary(desc) ->
-        # If HTML parsing fails, retry as plain text
+        # If HTML parsing fails, retry as plain text. The retry's own result was
+        # previously discarded and `:ok` returned unconditionally, so a chunk
+        # that failed twice still reported success.
         if String.contains?(desc, "parse") do
           Logger.debug("[Telegram] HTML parse error, retrying as plain text")
-          Req.post(url, json: %{"chat_id" => chat_id, "text" => strip_html(text)})
-          :ok
+
+          case Req.post(url, json: %{"chat_id" => chat_id, "text" => strip_html(text)}) do
+            {:ok, %{status: 200}} ->
+              :ok
+
+            {:ok, %{status: status, body: body}} ->
+              Logger.warning("[Telegram] plain-text retry failed (#{status}): #{inspect(body)}")
+              {:error, {status, body}}
+
+            {:error, reason} ->
+              Logger.warning("[Telegram] plain-text retry error: #{inspect(reason)}")
+              {:error, reason}
+          end
         else
           Logger.warning("[Telegram] sendMessage failed: #{desc}")
           {:error, desc}
@@ -378,41 +402,16 @@ defmodule OptimalSystemAgent.Channels.Telegram do
 
   # ── Message Chunking ────────────────────────────────────────────────
 
-  defp chunk_message(text) when byte_size(text) <= @max_message_length, do: [text]
+  @doc """
+  Split an outbound reply into Telegram-sized chunks.
 
-  defp chunk_message(text) do
-    # Try to split on paragraph boundaries first
-    paragraphs = String.split(text, "\n\n")
-    build_chunks(paragraphs, [], "")
-  end
+  Public so the chunking contract can be tested against Telegram's real limit
+  and unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
 
-  defp build_chunks([], acc, current) do
-    if current == "" do
-      Enum.reverse(acc)
-    else
-      Enum.reverse([String.trim(current) | acc])
-    end
-  end
-
-  defp build_chunks([para | rest], acc, current) do
-    candidate =
-      if current == "" do
-        para
-      else
-        current <> "\n\n" <> para
-      end
-
-    if byte_size(candidate) > @max_message_length do
-      if current == "" do
-        # Single paragraph too long — force split by characters
-        {head, tail} = String.split_at(para, @max_message_length - 10)
-        build_chunks([tail | rest], [head <> "..." | acc], "")
-      else
-        # Current chunk is full, start new one with this paragraph
-        build_chunks([para | rest], [String.trim(current) | acc], "")
-      end
-    else
-      build_chunks(rest, acc, candidate)
-    end
-  end
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 end

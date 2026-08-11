@@ -1199,10 +1199,18 @@ impl App {
                     );
                 }
             },
+            BackendEvent::SessionTitle { title } => {
+                self.set_session_title(Some(title));
+            }
+
             BackendEvent::SessionCreated(result) => match result {
                 Ok(resp) => {
                     let resumed = resp.status.as_deref() == Some("resumed");
                     self.session_id = resp.id.clone();
+                    // A resumed session already has a title; a brand-new one does
+                    // not until its first prompt lands, so clear any stale title
+                    // from the session we just left rather than showing it here.
+                    self.set_session_title(resp.title.clone());
                     self.chat.clear();
                     self.tasks.clear();
                     self.assistant_stream.reset();
@@ -1264,6 +1272,13 @@ impl App {
                         );
                     self.model_picker = Some(picker);
                     self.enter_overlay(AppState::ModelPicker);
+                    // Ordered AFTER the picker exists, not fired alongside the
+                    // catalog fetch. Both reads are cheap and independent, so
+                    // racing them looks free — but the usage reply routinely
+                    // won, arrived at a `model_picker` of `None`, and was
+                    // dropped, leaving the panel on "reading…" for ever. A
+                    // reply with nowhere to go is a reply that never happened.
+                    self.load_provider_usage();
                 }
                 Err(e) => {
                     // Hotfix: a failed fetch must never leave the newcomer
@@ -1283,6 +1298,7 @@ impl App {
                         current_model,
                     ));
                     self.enter_overlay(AppState::ModelPicker);
+                    self.load_provider_usage();
                 }
             },
 
@@ -1385,6 +1401,42 @@ impl App {
                                 },
                             );
                         }
+                    }
+                }
+            }
+
+            // === Provider-first picker: vendor-CLI sign-in ===
+            BackendEvent::ClaudeCliState(result) => {
+                let action = match self.model_picker.as_mut() {
+                    Some(picker) => match result {
+                        Ok(state) => picker.apply_cli_state(state),
+                        Err(e) => {
+                            picker.apply_cli_state_error(e);
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                self.apply_cli_login_action(action);
+            }
+
+            BackendEvent::CliLoginTick => {
+                let action = self
+                    .model_picker
+                    .as_mut()
+                    .and_then(|picker| picker.tick_cli_login());
+                self.apply_cli_login_action(action);
+            }
+
+            // === Provider-first picker: account + quota panel ===
+            BackendEvent::ProviderUsage(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    match result {
+                        Ok((auth, quota)) => picker.set_usage(auth.providers, quota),
+                        // The panel says "we could not tell", in words, rather
+                        // than staying on "reading…" for ever or falling back
+                        // to a zeroed bar.
+                        Err(_) => picker.set_usage_unavailable(),
                     }
                 }
             }
@@ -2704,6 +2756,40 @@ impl App {
             .map(|c| (c.name.clone(), c.description.clone(), c.category.clone()))
             .collect();
         self.input.set_command_items(items);
+    }
+
+    /// Route what the vendor-CLI sign-in screen decided.
+    ///
+    /// Shared by the state-reading and the tick arms because both can produce
+    /// the same two outcomes, and duplicating the routing is how one of them
+    /// ends up handling a success and the other silently dropping it.
+    pub(crate) fn apply_cli_login_action(
+        &mut self,
+        action: Option<crate::dialogs::model_picker::ModelPickerAction>,
+    ) {
+        match action {
+            Some(crate::dialogs::model_picker::ModelPickerAction::RefreshCliLogin) => {
+                self.refresh_cli_login();
+            }
+            Some(crate::dialogs::model_picker::ModelPickerAction::SaveKeyAndSwitch {
+                provider,
+                runtime_provider,
+                api_key,
+                model,
+                base_url,
+            }) => {
+                self.exit_overlay();
+                self.model_picker = None;
+                self.save_provider_key_and_switch(
+                    provider,
+                    runtime_provider,
+                    api_key,
+                    model,
+                    base_url,
+                );
+            }
+            _ => {}
+        }
     }
 }
 

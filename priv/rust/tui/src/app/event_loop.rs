@@ -20,6 +20,24 @@ use crate::components::measure::Measured;
 use crate::components::Component;
 use crate::event::{terminal, Event};
 
+/// True for the events whose ONLY effect is to grow the live assistant text:
+/// an assistant token or a reasoning delta.
+///
+/// This is the cadence classifier for the streaming rate cap in `run`. It must
+/// stay strict — every event it does not name is treated as "wants the screen
+/// now" and draws immediately, which is the safe direction. In particular a
+/// `Tick`, a tool event, a key press and a resize are all excluded, so the
+/// spinner, tool cells and input keep their existing latency exactly.
+fn is_stream_delta(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Backend(
+            crate::event::backend::BackendEvent::StreamingToken { .. }
+                | crate::event::backend::BackendEvent::ThinkingDelta { .. }
+        )
+    )
+}
+
 type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// Intersect `rect` with the frame's drawable area, returning a rect guaranteed
@@ -608,6 +626,31 @@ impl App {
         // that the settle window dominates the latency, long enough not to spin.
         const RESIZE_POLL: Duration = Duration::from_millis(8);
 
+        // ── Streaming draw cadence ────────────────────────────────────────────
+        //
+        // Measured before adding this: one frame is drawn per delta, and a delta
+        // that lands inside a long fenced code block costs ~1.2ms of render even
+        // after the incremental-highlight fix (~8.9ms before it). A fast stream
+        // therefore spent a real fraction of a core repainting, and — because
+        // deltas arrive in clumps — repainted at whatever ragged cadence the
+        // network happened to deliver. Uniform cadence reads smoother than raw
+        // frame count, so consecutive streaming-only batches are coalesced onto
+        // a 60fps floor.
+        //
+        // The gate is deliberately narrow, because latency-to-first-token is the
+        // number users actually feel:
+        //   * it applies ONLY when the batch just consumed was nothing but
+        //     streaming deltas, and
+        //   * only when the PREVIOUS batch was too — so the first delta of a
+        //     message (whose predecessor is a tick, a tool event or a keypress)
+        //     always draws immediately, and
+        //   * any non-streaming event arriving during the wait breaks it, so a
+        //     keystroke is never held back.
+        const MIN_DRAW_INTERVAL: Duration = Duration::from_millis(16);
+        // Written by every draw, read only by the rate cap below it.
+        let mut last_draw: std::time::Instant;
+        let mut prev_batch_stream_only = false;
+
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
             let want_full = self.wants_full_viewport();
@@ -879,7 +922,10 @@ impl App {
                         // history). It worked, but destroyed the user's
                         // scrollback on every resize to clean up a mess this
                         // branch did not need to make.
-                        let surgical_top = if in_multiplexer() { last_inline_top } else { None };
+                        let surgical_top = match resize_clear_strategy(&TermIdent::from_env()) {
+                            ResizeClear::Surgical => last_inline_top,
+                            ResizeClear::FullScreen => None,
+                        };
                         if let Some(top) = surgical_top {
                             let max_row = size.rows.saturating_sub(1);
                             let _ = execute!(
@@ -1086,12 +1132,14 @@ impl App {
             let draw_res = terminal.draw(|frame| self.draw(frame));
             let _ = execute!(sync_out, crossterm::terminal::EndSynchronizedUpdate);
             draw_res?;
+            last_draw = std::time::Instant::now();
 
             // 4. Block until at least one event is available.
             let event = match self.event_rx.recv().await {
                 Some(event) => event,
                 None => break, // all senders dropped
             };
+            let mut batch_stream_only = is_stream_delta(&event);
             let mut should_quit = self.dispatch_event(event);
 
             // Coalesce: apply every queued event before redrawing. During streaming
@@ -1100,10 +1148,42 @@ impl App {
             // fast streaming). FIFO order is preserved.
             while !should_quit {
                 match self.event_rx.try_recv() {
-                    Ok(event) => should_quit = self.dispatch_event(event),
+                    Ok(event) => {
+                        batch_stream_only &= is_stream_delta(&event);
+                        should_quit = self.dispatch_event(event);
+                    }
                     Err(_) => break,
                 }
             }
+
+            // 4b. Rate cap. A backlog drain only coalesces what had ALREADY
+            // arrived; a steady trickle of deltas arrives one at a time and each
+            // one costs a whole frame. Hold the frame back to the 60fps floor
+            // and keep absorbing deltas while we wait — same bytes, fewer and
+            // more evenly spaced repaints. See MIN_DRAW_INTERVAL above for why
+            // this cannot delay a first token.
+            if !should_quit && batch_stream_only && prev_batch_stream_only {
+                let since = last_draw.elapsed();
+                if since < MIN_DRAW_INTERVAL {
+                    let deadline = tokio::time::Instant::now() + (MIN_DRAW_INTERVAL - since);
+                    loop {
+                        match time::timeout_at(deadline, self.event_rx.recv()).await {
+                            Ok(Some(event)) => {
+                                let more_stream = is_stream_delta(&event);
+                                should_quit = self.dispatch_event(event);
+                                // Anything that is not a streaming delta wants
+                                // the screen NOW — stop waiting and draw.
+                                if should_quit || !more_stream {
+                                    break;
+                                }
+                            }
+                            // Senders dropped, or the interval elapsed.
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                }
+            }
+            prev_batch_stream_only = batch_stream_only;
 
             // A failed launch-time resume is a quit condition in its own right:
             // there is no session to sit in, and staying would present an empty
@@ -2226,20 +2306,128 @@ pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<(
     Ok(())
 }
 
-/// True when this process is running inside a terminal multiplexer.
+/// How the OLD inline chrome is erased when the TERMINAL ITSELF resizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResizeClear {
+    /// Clear from the remembered live-region top downward, leaving the
+    /// transcript above it untouched. The old chrome is overwritten in place
+    /// and never becomes scroll history.
+    Surgical,
+    /// Wipe the whole screen (ED0 from home) and rebuild from nothing.
+    FullScreen,
+}
+
+/// The environment inputs the resize gate is allowed to look at.
 ///
-/// `$TMUX` is set for every process in a tmux pane; the `tmux`/`screen` TERM
-/// prefixes cover a scrubbed environment and GNU screen, which shares the
-/// properties that matter here — its own screen model and no reflow on a
-/// width change.
-pub(crate) fn in_multiplexer() -> bool {
-    if std::env::var_os("TMUX").is_some() {
-        return true;
+/// Split out from the environment itself so [`resize_clear_strategy`] is a pure
+/// function of its inputs and can be tested exhaustively. Reading `std::env`
+/// inside the decision would make every case need a process-global mutation and
+/// the tests unable to run in parallel.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TermIdent {
+    /// `$OSA_RESIZE_CLEAR` — the operator escape hatch.
+    pub r#override: Option<String>,
+    /// `$TMUX` is set — true for every process in a tmux pane.
+    pub tmux: bool,
+    /// `$TERM`, which carries the `tmux`/`screen` prefixes when the environment
+    /// has been scrubbed, and for GNU screen.
+    pub term: String,
+}
+
+impl TermIdent {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            r#override: std::env::var("OSA_RESIZE_CLEAR").ok(),
+            tmux: std::env::var_os("TMUX").is_some(),
+            term: std::env::var("TERM").unwrap_or_default(),
+        }
     }
-    match std::env::var("TERM") {
-        Ok(t) => t.starts_with("tmux") || t.starts_with("screen"),
-        Err(_) => false,
+}
+
+/// Decide how to erase the old chrome on a real terminal resize.
+///
+/// Multiplexers get the surgical clear; everything else gets the full wipe.
+/// That is the same SET of terminals the old `in_multiplexer()` gate picked,
+/// and it is kept because it is what the harnesses measure — but the reason
+/// recorded for it was wrong, and the wrong reason is what made this gate look
+/// safe to generalise. Both are documented here so the next person does not
+/// repeat the attempt.
+///
+/// The rationale that was wrong
+/// ----------------------------
+/// The gate used to be justified by "tmux and screen do NOT reflow on a width
+/// change, so the remembered live-region top stays valid". tmux has reflowed
+/// since 2.5, and `test/pty/reflow_matrix.py` measures tmux 3.4 doing it: an
+/// 85-column line written at width 80 occupies two rows and becomes one row
+/// when the pane widens to 140. Confirmed independently with `capture-pane`,
+/// which needs no cursor query to believe.
+///
+/// The tempting generalisation, and why it fails
+/// ---------------------------------------------
+/// If reflow were the property that mattered, a runtime reflow probe would be
+/// the right gate — correct even on a terminal nobody has tested. It is not
+/// that property. Every terminal measurable on this box reflows: tmux 3.4,
+/// libvte 7600, WezTerm 20240203, Ghostty 1.2.3. A reflow gate would answer
+/// the same everywhere and collapse to one unconditional branch, which is
+/// exactly the bug in one direction or the other.
+///
+/// What the harnesses actually measure
+/// -----------------------------------
+/// Each harness run with each branch forced through `$OSA_RESIZE_CLEAR`:
+///
+/// | terminal | reflows | surgical                  | full wipe                |
+/// |----------|---------|---------------------------|--------------------------|
+/// | tmux 3.4 | yes     | PASS                      | FAIL — 13 stacked copies |
+/// | WezTerm  | yes     | FAIL — 1 stranded composer| PASS                     |
+/// | libvte   | yes     | PASS                      | PASS                     |
+///
+/// So NEITHER branch is universally correct, no measured property predicts
+/// which is needed, and the split happens to fall exactly on "is this a
+/// multiplexer". libvte tolerates both, so it votes for neither.
+///
+/// Why unknown terminals get the FULL wipe
+/// ---------------------------------------
+/// Both failure modes leave litter in scroll history, which no erase this
+/// program may emit can reach — ED3 would, and is banned because it works by
+/// destroying the user's scrollback. They differ in how much:
+///
+///   * Surgical on a terminal that wanted the full wipe stranded exactly ONE
+///     copy of the composer across an 8-step drag. Bounded per drag.
+///   * The full wipe on tmux stranded THIRTEEN copies across a 12-step drag —
+///     one per step. It grows with the length of the gesture, and a user
+///     dragging a window slowly produces dozens.
+///
+/// Unknown terminals are far more likely to be ordinary GUI emulators (where
+/// WezTerm is the measured representative) than multiplexers, which announce
+/// themselves in the environment and are already handled above. So the default
+/// is the full wipe, and the cumulative failure is confined to the case the
+/// environment tells us about.
+///
+/// The residual risk is a non-multiplexer terminal that behaves like tmux —
+/// Alacritty is the usual candidate and could not be installed here to check.
+/// Such a user gets the cumulative failure, and `OSA_RESIZE_CLEAR=surgical`
+/// fixes their session without a rebuild. That escape hatch is the reason this
+/// is a function over a `TermIdent` rather than an `if` at the call site.
+pub(crate) fn resize_clear_strategy(id: &TermIdent) -> ResizeClear {
+    // Unrecognised values fall through to detection rather than picking a
+    // branch at random: a typo in an env var must not silently change how the
+    // screen is erased.
+    match id.r#override.as_deref().map(str::trim) {
+        Some("surgical") => return ResizeClear::Surgical,
+        Some("full") | Some("full-screen") | Some("fullscreen") => {
+            return ResizeClear::FullScreen
+        }
+        _ => {}
     }
+
+    // Inside a multiplexer the OUTER terminal is invisible and irrelevant — the
+    // multiplexer owns the screen and is the thing being drawn to — so this
+    // check comes first and no outer-terminal signal is consulted at all.
+    if id.tmux || id.term.starts_with("tmux") || id.term.starts_with("screen") {
+        return ResizeClear::Surgical;
+    }
+
+    ResizeClear::FullScreen
 }
 
 /// True when `key` is Ctrl+O (the transcript-viewer toggle). Delegates to the
@@ -3415,5 +3603,53 @@ mod render_tests {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::is_stream_delta;
+    use crate::event::backend::BackendEvent;
+    use crate::event::Event;
+
+    fn token() -> Event {
+        Event::Backend(BackendEvent::StreamingToken {
+            text: "hi".into(),
+            session_id: "s".into(),
+            message_id: Some("m1".into()),
+        })
+    }
+
+    /// The rate cap may only ever hold back a frame whose entire batch was
+    /// assistant text. Everything else must fall through to an immediate draw —
+    /// this is the whole safety argument for not regressing input latency or
+    /// time-to-first-token, so it is asserted rather than assumed.
+    #[test]
+    fn only_assistant_deltas_are_deferrable() {
+        assert!(is_stream_delta(&token()));
+        assert!(is_stream_delta(&Event::Backend(BackendEvent::ThinkingDelta {
+            text: "…".into()
+        })));
+
+        // A tick drives the spinner; deferring it would stutter the animation.
+        assert!(!is_stream_delta(&Event::Tick));
+        assert!(!is_stream_delta(&Event::HealthRetry));
+        // Keystrokes must never wait for a streaming interval.
+        assert!(!is_stream_delta(&Event::Terminal(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('a')
+            ))
+        )));
+        // Neither may a resize: the viewport rebuild is latency-critical.
+        assert!(!is_stream_delta(&Event::Terminal(
+            crossterm::event::Event::Resize(80, 24)
+        )));
+        // The terminal event that ENDS the stream draws immediately too.
+        assert!(!is_stream_delta(&Event::Backend(BackendEvent::AgentResponse {
+            response: "done".into(),
+            response_type: "text".into(),
+            signal: None,
+            message_id: Some("m1".into()),
+        })));
     }
 }

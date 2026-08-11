@@ -30,6 +30,8 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
   first time the table is created (post-restart) and rewritten on every put/clear.
   """
 
+  alias OptimalSystemAgent.System.AtomicFile
+
   @table :osa_session_permission_mode
 
   # Modes accepted by the sticky store. `:bypass` is normalized to `:overdrive`
@@ -130,9 +132,7 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
       |> Map.new(fn {sid, mode} -> {sid, Atom.to_string(mode)} end)
 
     File.mkdir_p(Path.dirname(path))
-    tmp = path <> ".tmp"
-    File.write!(tmp, Jason.encode!(map))
-    File.rename!(tmp, path)
+    AtomicFile.write!(path, Jason.encode!(map))
     :ok
   rescue
     _ -> :ok

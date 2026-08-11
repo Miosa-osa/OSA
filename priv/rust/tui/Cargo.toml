@@ -4,7 +4,7 @@ name = "osa-tui"
 # `config::version_source_tests` fails the build if they diverge. This literal is
 # only ever a last-resort fallback: build.rs prefers $OSA_VERSION (release CI),
 # then the VERSION file.
-version = "1.0.73"
+version = "1.0.74"
 edition = "2021"
 
 [[bin]]
@@ -42,6 +42,8 @@ unicode-segmentation = "1"
 cpal = "0.15"
 hound = "3.5"
 zip = "2"
+portable-pty = { version = "0.9", default-features = false }
+vt100 = "0.15"
 
 [profile.release]
 lto = "thin"
@@ -54,3 +56,12 @@ libc = "0.2"
 
 [dev-dependencies]
 vt100 = "0.15"
+# `test-util` gives tests a pausable clock. The SSE idle-timeout test has to
+# prove a 90s budget actually fires; with a virtual clock that costs
+# milliseconds instead of a 90-second suite. Resolver 2 (edition 2021) keeps
+# dev-dependency features out of the release binary.
+tokio = { version = "1", features = ["full", "test-util"] }
+# Env vars are process-global and cargo runs tests multi-threaded. Any test that
+# sets HOME/TERM/OSA_HYPERLINKS must be #[serial] or it races every other test
+# that reads them (config::cli resolves ~/.osa from HOME).
+serial_test = "3"

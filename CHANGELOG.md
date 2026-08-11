@@ -9,6 +9,135 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.74] — displays as `v1.0.074`
+
+The largest release this project has taken. Boot is **20× faster**, a command
+blocklist documented as unbypassable was trivially bypassable, several paths
+lost user data silently, and the model could not see any of your MCP tools.
+Most of it came from reading what comparable tools had already found and fixed,
+then checking each claim against this codebase rather than porting it blind.
+
+### Performance
+
+- **Boot: 8s → 1.2s.** `Tools.Registry.init/1` compiled a goldrush dispatcher
+  module at runtime, one branch per tool: 322ms at 20 tools, **6102ms at 82**.
+  **Nothing ever called it** — no `:glc.handle` reader exists for it anywhere.
+  Six seconds per start, plus a recompile on every tool registration, for a
+  module with zero readers. Now lazy. Also added permanent per-child supervisor
+  timing, because nothing in the tree reported how long a child took to start,
+  which is why this was invisible for so long.
+- **Code-fence streaming: 7.4× faster.** A 200-line fence cost 8907µs *per
+  token* — 27 seconds of render work across the block. Markdown has no safe
+  split point inside an open fence, so the whole block sat in the unstable tail
+  and was re-highlighted from line 1 on every token; measurement showed **93% of
+  the cost was syntect**. Highlighting is now incremental, proven byte-identical
+  against every prefix of the old algorithm.
+- Render cadence held to 60fps for consecutive streaming-only batches. Scoped so
+  the first token of a message always draws immediately and no keystroke is ever
+  delayed.
+
+### Fixed — the command blocklist was bypassable in every mode
+
+- Quoting defeated it: `rm -rf "/"`, `rm -rf '/'`, `"rm" -rf /`, `rm -rf \/` all
+  passed. So did `bash -c "…"`, twice over — the payload is opaque to the target
+  patterns *and* the `:ask` tier only sees the command head, which is `bash`.
+- The breaker is documented in-code as applying in every permission mode
+  including full-auto. Because the hole was in the matcher rather than the
+  gating, it defeated all of them — and in full-auto it is the only gate, so
+  there was nothing between the model and the disk.
+- Fixed by normalising before matching (shell-unquote, recursive wrapper
+  extraction) rather than hardening regexes, which is an unwinnable race. The
+  duplicate blocklist was collapsed into one, with a test asserting they agree.
+
+### Fixed — silent data loss
+
+- **Compaction destroyed the summary it had just produced.** The summary was
+  prepended, then a later step in the *same run* sliced positionally from index
+  0. Its importance score was never consulted. The LLM-generated summary of the
+  entire cold span vanished in the run that created it.
+- **`replace_all` rewrote regions that never contained the search string.**
+  Seven of nine matching strategies are approximate; a global textual replace of
+  an approximate candidate can land in a comment or inside a string literal.
+  Corruption on disk, not just a wrong answer.
+- **A metadata update clobbered the transcript.** Whole-record read-modify-write
+  meant a metadata write racing a turn save destroyed the turn. Metadata now
+  lives in a sidecar and never touches the transcript.
+- **Every `osa` invocation cancelled the previous one's running agents.** Run
+  state is machine-global but liveness was decided by a BEAM-local registry, so
+  another process's live run always looked dead — and the cancellation ran even
+  with resume disabled. Replaced with an on-disk ownership lease that is
+  deliberately *not* released on unclean shutdown.
+- **Compaction summaries leaked across sessions** — a global ETS key, never
+  deleted, folded one session's summary into another's prompt and shipped it to
+  the provider.
+- **Hand-written skills were archivable on the curator's first pass**: a skill
+  with no usage record was treated as 999 days idle. Curation is now report-only
+  by default, with pinning and un-archive.
+- **A read error on the durable log failed open into "the log is empty"**,
+  duplicating the entire transcript into the immutable log.
+
+### Fixed — token accounting was wrong in three directions
+
+- Anthropic usage was read as `input_tokens` alone, ignoring cache-read and
+  cache-creation: a real shape reported **2,000 tokens where the context was
+  152,000** — 76× low, and compaction silently stops firing the moment prompt
+  caching starts working.
+- The estimator was whitespace-blind: a 320KB hex dump estimated at **1 token**.
+  Now floored at bytes/4.
+- Base64 images were charged at their encoded length — one image at 40,034
+  tokens where the provider bills ~1,600.
+
+### Fixed — the model could not see your MCP tools
+
+- Above the virtualization threshold every MCP tool was dropped from the tools
+  array and nothing put it back anywhere the model could read. Measured on this
+  machine: **servers named in the system prompt 0/3 → 3/3, tools 0/30 → 30/30.**
+- Keyword search compared a downcased query against the **raw** tool name, so any
+  tool with an uppercase letter — most MCP names — could never match on name.
+
+### Also in this release
+
+Terminal-injection scrubbing across every renderer, proven at the emulator level
+with control arms (a permission target could retitle your terminal window from
+inside the approval dialog) · TUF signature verification on update metadata,
+with a tripwire test that fails if installation is ever wired to unverified
+metadata · streaming retry no longer re-emits text you already saw · orphaned
+tool results filled across the whole transcript, not just the last message ·
+message chunking measured in the unit each provider actually enforces (CJK and
+emoji replies had holes in the middle) · `trap_exit` so crash-time history
+survives, scoped to outside turns after measurement showed always-on trapping
+turned a fast shutdown into a 5.3s hang · SKILL.md validation and `mix
+osa.skills.lint` — a typo'd `descrption:` silently produced an empty description
+and a relevance score of exactly 0.0 · pre-compaction memory flush · file-read
+diagnostics that name the binary type, distinguish empty from past-EOF, retry
+unicode filenames, and refuse FIFOs by stat rather than hanging forever ·
+`osa doctor --config` showing which markdown files, skills and settings are
+actually loaded, from where, and why a skill is not surfaced.
+
+### Known gaps — stated rather than discovered later
+
+- **Duplicated chrome on resize is not fully solved.** Two distinct failure
+  shapes are measured (one copy per drag step under a multiplexer; a single
+  bounded copy on WezTerm) and the gate is scoped from evidence, but Ghostty's
+  band count is unverified — it exposes no text API — and Alacritty, kitty and
+  xterm are untested. `OSA_RESIZE_CLEAR=surgical|full` overrides it without a
+  rebuild. Two investigations are open, including one that questions whether the
+  resize path is the dominant cause at all.
+- A text file containing a NUL byte in its first 4KB is now refused as binary
+  where it previously read through. Behaviour change.
+- The secret redactor is over-aggressive on three prose shapes
+  (`"Basic authentication configuration"` → `"Basic [REDACTED] configuration"`).
+- Several render surfaces are still unscrubbed, ranked in the source — worst is
+  the transcript viewer, which bypasses markdown entirely.
+- Multi-process SQLite is documented, not solved: WAL plus busy_timeout gives
+  corruption-safety and blocking writers, not serializability.
+- OSA wedges at startup when it inherits a screen with too little room for the
+  inline viewport.
+- `multi_file_edit` is still all-or-nothing: one already-applied hunk kills the
+  batch.
+
+---
+
 ## [1.0.73] — displays as `v1.0.073`
 
 MCP conformance. The spec moved — HTTP+SSE was replaced by **Streamable HTTP**

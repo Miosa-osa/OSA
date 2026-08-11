@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Providers.Resilience
 
   # If no streaming token arrives for this long, the connection is dead.
   # This is NOT a total-duration cap — active streams can run indefinitely.
@@ -21,6 +22,37 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # Process-dictionary key holding the id of the assistant message currently
   # being generated. See `mint_message_id/1`.
   @message_id_key :osa_stream_message_id
+
+  # Hard ceiling on a server-directed `Retry-After` pause taken in THIS module.
+  #
+  # `Providers.Resilience.backoff_ms/2` caps its own honouring of the header at
+  # 60s; the fallback-chain path below took whatever number came back and slept
+  # for it verbatim, with no bound of its own. Today that number happens to be
+  # pre-capped by `Providers.RetryClassifier`, so the reachable path is bounded
+  # — but only incidentally, by a collaborator. A `Process.sleep/1` that parks
+  # an unattended agent for an attacker-chosen duration must not depend on
+  # somebody else's constant staying where it is: the bound belongs at the
+  # sleep. Same value as Resilience's so the two paths agree.
+  @retry_after_cap_ms 60_000
+
+  @doc """
+  Clamp a server-supplied `Retry-After` delay (ms) to `#{@retry_after_cap_ms}ms`.
+
+  `nil` / non-positive / non-integer all collapse to `0` (no wait). Public +
+  `@doc false` purely as a test seam for the cap.
+  """
+  @spec capped_retry_delay_ms(term()) :: non_neg_integer()
+  def capped_retry_delay_ms(ms) when is_integer(ms) and ms > 0,
+    do: min(ms, retry_after_cap_ms())
+
+  def capped_retry_delay_ms(_), do: 0
+
+  defp retry_after_cap_ms do
+    case Application.get_env(:optimal_system_agent, :retry_after_cap_ms, @retry_after_cap_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @retry_after_cap_ms
+    end
+  end
 
   @doc """
   Identity of the assistant message currently being generated in THIS process.
@@ -120,6 +152,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # One-way door: this byte is about to be on the user's screen. Past this
+        # point a same-provider retry would re-emit it into the SAME live
+        # callback and the user would watch the paragraph appear twice, so the
+        # retry budget for this request collapses to zero. Runs in the stream
+        # task process, which is also the process `Resilience.with_retry/2` is
+        # looping in (providers drive `into: :self` receive loops).
+        Resilience.mark_output_observed()
 
         # WS5 — accumulate the partial text (reverse-prepended iodata; single
         # writer = this stream task) so a hard abort can persist what the model
@@ -186,6 +225,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
       {:thinking_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # Reasoning is rendered live in the TUI, so it is user-visible output
+        # under exactly the same one-way-door rule as `:text_delta`.
+        Resilience.mark_output_observed()
 
         Bus.emit(:system_event, %{
           event: :thinking_delta,
@@ -203,6 +245,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # Provider detected a complete tool_use block during streaming.
         # Notify the caller to start executing this tool immediately.
         :atomics.add(heartbeat, 1, 1)
+        # Strongest form of the one-way door: the tool is about to RUN. A retry
+        # would re-issue it under a fresh id that dedup cannot catch, so the
+        # side effect would happen twice. (`classify/1` already refuses to retry
+        # a partial carrying tool_calls; this covers the provider that reports
+        # the block without folding it into the error partial.)
+        Resilience.mark_output_observed()
         send(caller, {:streaming_tool_block, tool_call})
 
         Bus.emit(:tool_call, %{
@@ -263,7 +311,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
                 # event the same-provider retry loop uses, so "Retrying in
                 # Ns…" reflects the real server-requested wait instead of
                 # silently switching providers with no delay at all.
-                delay_ms = OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason) || 0
+                delay_ms =
+                  capped_retry_delay_ms(
+                    OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
+                  )
 
                 Logger.warning(
                   "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>

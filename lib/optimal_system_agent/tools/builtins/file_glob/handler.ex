@@ -10,15 +10,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   Logic is verbatim from the original `file_glob.ex` — no semantic changes.
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.FileGlob.Constants
+  alias OptimalSystemAgent.Tools.Builtins.FileGlob.{Constants, Messages}
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
   @spec validate(map(), UseContext.t()) ::
           {:ok, map()} | {:error, String.t(), integer()}
-  def validate(%{"pattern" => pattern} = input, _ctx) when is_binary(pattern),
-    do: {:ok, input}
+  def validate(%{"pattern" => pattern} = input, _ctx) when is_binary(pattern) do
+    case Map.get(input, "path") do
+      nil -> {:ok, input}
+      p when is_binary(p) -> {:ok, input}
+      other -> {:error, "path must be a string, got #{inspect(other)}", -32_602}
+    end
+  end
 
   def validate(%{"pattern" => _}, _ctx),
     do: {:error, "pattern must be a string", -32_602}
@@ -50,32 +55,85 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"pattern" => pattern} = input, _ctx) do
     base = Path.expand(input["path"] || ".")
-    max = Constants.max_results()
 
-    results =
-      Path.wildcard(Path.join(base, pattern))
-      |> Enum.reject(fn p ->
-        Enum.any?(Constants.sensitive_paths(), &String.contains?(p, &1))
-      end)
-      |> Enum.sort()
-      |> Enum.take(max)
-
-    case results do
-      [] ->
-        {:ok, "No files matched pattern: #{pattern}"}
-
-      files ->
-        count_msg =
-          if length(files) >= max, do: " (showing first #{max})", else: ""
-
-        {:ok, "#{length(files)} files found#{count_msg}:\n#{Enum.join(files, "\n")}"}
+    # Classify the base BEFORE globbing. `Path.wildcard` returns `[]` for a
+    # nonexistent base, an unreadable base and a genuinely unmatched pattern
+    # alike; those three need three different next steps, and only a `stat`
+    # can tell them apart.
+    case File.stat(base) do
+      {:ok, %{type: :directory}} -> glob_in(pattern, base)
+      {:ok, %{type: :regular}} -> {:error, Messages.base_not_a_directory(base)}
+      {:ok, %{type: _other}} -> {:error, Messages.base_not_a_directory(base)}
+      {:error, :enoent} -> {:error, Messages.missing_base(base)}
+      {:error, reason} -> {:error, Messages.base_unreadable(base, reason)}
     end
   end
 
   # ── Private ───────────────────────────────────────────────────────────
 
-  defp sensitive?(expanded_path) do
-    Enum.any?(Constants.sensitive_paths(), fn p -> String.contains?(expanded_path, p) end)
+  defp glob_in(pattern, base) do
+    max = Constants.max_results()
+    filter_git? = not references_noise_dir?(pattern)
+
+    all =
+      base
+      |> Path.join(pattern)
+      # `match_dot: true` is the whole reason dotfiles are visible at all.
+      # Without it `Path.wildcard/2` refuses to match any component beginning
+      # with `.`, so `**/*` skipped `.github/`, `.env.example`, `.gitignore`
+      # and every dot-directory beneath them — not "returned them ranked low",
+      # but never returned them under any pattern the caller could write.
+      |> Path.wildcard(match_dot: true)
+      |> Enum.reject(&sensitive?/1)
+      |> Enum.reject(fn p -> filter_git? and in_noise_dir?(p) end)
+      |> Enum.sort()
+
+    total = length(all)
+    shown = Enum.take(all, max)
+
+    case shown do
+      [] ->
+        {:ok, Messages.no_matches(pattern, base, entry_count(base), filter_git?)}
+
+      files ->
+        header =
+          if total > max do
+            Messages.truncated(length(files), total, base)
+          else
+            "#{total} #{if total == 1, do: "file", else: "files"} found"
+          end
+
+        {:ok, "#{header}:\n#{files |> Enum.map(&decorate/1) |> Enum.join("\n")}"}
+    end
+  end
+
+  # A glob can match directories as well as files, and a caller that pipes a
+  # directory into `file_read` gets an avoidable error. Marking them costs one
+  # character and mirrors how `FileRead.PathResolve` decorates its suggestions,
+  # so the two tools describe the filesystem the same way.
+  defp decorate(path) do
+    if File.dir?(path), do: path <> "/", else: path
+  end
+
+  defp entry_count(base) do
+    case File.ls(base) do
+      {:ok, entries} -> length(entries)
+      _ -> 0
+    end
+  end
+
+  defp sensitive?(path) do
+    Enum.any?(Constants.sensitive_paths(), &String.contains?(path, &1))
+  end
+
+  defp in_noise_dir?(path) do
+    Enum.any?(Constants.noise_dirs(), fn dir ->
+      String.contains?(path, "/" <> dir <> "/") or String.ends_with?(path, "/" <> dir)
+    end)
+  end
+
+  defp references_noise_dir?(pattern) do
+    Enum.any?(Constants.noise_dirs(), &String.contains?(pattern, &1))
   end
 
   defp allowed?(expanded_path) do

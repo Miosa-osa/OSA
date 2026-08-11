@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
   """
 
   require Logger
+  alias OptimalSystemAgent.System.AtomicFile
 
   # ── Workflow Persistence ─────────────────────────────────────────────
 
@@ -78,9 +79,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
     try do
       File.mkdir_p!(dir)
       json = Jason.encode!(tasks, pretty: true)
-      tmp = path <> ".tmp"
-      File.write!(tmp, json)
-      File.rename!(tmp, path)
+      AtomicFile.write!(path, json)
       :ok
     rescue
       e ->

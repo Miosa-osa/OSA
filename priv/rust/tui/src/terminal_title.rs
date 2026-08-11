@@ -88,29 +88,12 @@ pub fn sanitize_terminal_title(title: &str) -> String {
 
 /// Returns whether `ch` should be dropped from terminal-title output.
 ///
-/// Covers plain control characters plus a curated set of invisible formatting
-/// codepoints. The bidi entries are the Trojan-Source-style text-reordering
-/// controls that make a title render differently from its underlying bytes.
+/// Covers plain control characters plus the invisible/text-reordering
+/// codepoints owned by [`crate::render::sanitize`] — the same policy every
+/// other untrusted display surface applies, so the title path and the
+/// permission dialog cannot drift apart.
 fn is_disallowed_terminal_title_char(ch: char) -> bool {
-    if ch.is_control() {
-        return true;
-    }
-
-    matches!(
-        ch,
-        '\u{00AD}'                  // SOFT HYPHEN
-            | '\u{034F}'            // COMBINING GRAPHEME JOINER
-            | '\u{061C}'            // ARABIC LETTER MARK
-            | '\u{180E}'            // MONGOLIAN VOWEL SEPARATOR
-            | '\u{200B}'..='\u{200F}' // ZWSP/ZWNJ/ZWJ/LRM/RLM
-            | '\u{202A}'..='\u{202E}' // LRE/RLE/PDF/LRO/RLO  (Trojan Source)
-            | '\u{2060}'..='\u{206F}' // word joiner, invisible ops, LRI/RLI/FSI/PDI, deprecated bidi
-            | '\u{FE00}'..='\u{FE0F}' // variation selectors
-            | '\u{FEFF}'            // BOM / ZWNBSP
-            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation
-            | '\u{1BCA0}'..='\u{1BCA3}' // shorthand format controls
-            | '\u{E0100}'..='\u{E01EF}' // variation selectors supplement
-    )
+    ch.is_control() || crate::render::sanitize::is_invisible_formatting_char(ch)
 }
 
 /// Build the raw OSC 0 (icon + window title) sequence around an already

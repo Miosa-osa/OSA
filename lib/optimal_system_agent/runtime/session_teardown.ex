@@ -29,6 +29,10 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
     * `Agent.Loop.PermissionBroker.clear_session/1` — session-scoped allows.
       (Grants are session-scoped by definition, so they must not outlive it —
       this one is a correctness fix as much as a memory one.)
+    * `Agent.Compactor.forget_session/1` — the session's persisted structured
+      compaction summary. Like the permission grants above, this is a
+      confidentiality fix first: the summary is verbatim conversation content
+      and must not survive the session that produced it.
 
   ## What is deliberately NOT torn down
 
@@ -49,6 +53,7 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Compactor
   alias OptimalSystemAgent.Agent.Context.WorldState
   alias OptimalSystemAgent.Agent.CoordinatorMode
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
@@ -90,7 +95,8 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
       {:verification_evidence, &VerificationEvidence.reset/1},
       {:skill_touch, &SkillTouch.reset/1},
       {:coordinator_mode, &CoordinatorMode.clear/1},
-      {:permission_broker, &PermissionBroker.clear_session/1}
+      {:permission_broker, &PermissionBroker.clear_session/1},
+      {:compactor_summary, &Compactor.forget_session/1}
     ]
   end
 

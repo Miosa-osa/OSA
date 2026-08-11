@@ -89,6 +89,45 @@ defmodule OptimalSystemAgent.Auth.Providers.XAI do
   @spec base_url() :: String.t()
   def base_url, do: @base_url
 
+  @doc """
+  The base URL an account-mode request must be sent to, read from the marker
+  written at sign-in.
+
+  This is deliberately NOT `Application.get_env(:xai_url)`. The key path
+  honours that override, and should: a pasted key is the user's own
+  credential, and pointing it at a proxy or a gateway is a legitimate thing to
+  want. A subscription bearer token is different — it is minted by xAI for
+  xAI, and an `XAI_BASE_URL` picked up from an untrusted workspace `.env`
+  would silently redirect it to a host of the attacker's choosing, which is
+  credential exfiltration dressed as configuration. Same reasoning as
+  `openai_codex`.
+
+  Reading it from the marker rather than from `@base_url` means the value that
+  was in force when the user consented is the value that is used, so changing
+  the constant later cannot retarget a token already issued.
+
+  A **pure read**. It never writes, and in particular it never re-creates a
+  marker the user has just removed — the whole point of `fetch/1` returning
+  `nil` rather than a default entry.
+  """
+  @spec pinned_base_url() :: String.t()
+  def pinned_base_url do
+    case SubscriptionStore.fetch(@provider_id) do
+      %{"base_url" => url} when is_binary(url) and url != "" -> url
+      _ -> @base_url
+    end
+  end
+
+  @doc """
+  True when an account marker exists. Pure read, no network, no refresh.
+
+  Exists so the transport can ask "is there an account to fall back to?"
+  without calling `access_token/0`, which MAY refresh — the resolution
+  contract in `Auth.Subscription` turns on exactly that distinction.
+  """
+  @spec connected?() :: boolean()
+  def connected?, do: SubscriptionStore.connected?(@provider_id)
+
   defp config do
     %{
       device_code_url: @device_code_url,

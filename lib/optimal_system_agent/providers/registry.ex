@@ -1819,6 +1819,41 @@ defmodule OptimalSystemAgent.Providers.Registry do
     _ -> false
   end
 
+  # Qwen is dual-mode for the same reason xAI is: a `QWEN_API_KEY` OR a
+  # connected Qwen account. Pure read of the marker — never a token call.
+  def provider_configured?(:qwen) do
+    case Application.get_env(:optimal_system_agent, :qwen_api_key) do
+      key when is_binary(key) and key != "" ->
+        true
+
+      _ ->
+        live_cloud_key_present?(:qwen) or
+          OptimalSystemAgent.Auth.SubscriptionStore.connected?("qwen")
+    end
+  rescue
+    _ -> false
+  end
+
+  # xAI is dual-mode: an `XAI_API_KEY` OR a connected xAI account. The generic
+  # clause below sees only the key, so a user who signed in with their
+  # SuperGrok plan and pasted nothing would be told the provider is not
+  # configured — which is exactly the state the sign-in exists to leave them
+  # in. The account half is a pure read of the connection marker (never a
+  # fresh token call), so asking "is this configured?" cannot spend a refresh
+  # token or bill a request. Same shape as `:bedrock` above.
+  def provider_configured?(:xai) do
+    case Application.get_env(:optimal_system_agent, :xai_api_key) do
+      key when is_binary(key) and key != "" ->
+        true
+
+      _ ->
+        live_cloud_key_present?(:xai) or
+          OptimalSystemAgent.Auth.SubscriptionStore.connected?("xai")
+    end
+  rescue
+    _ -> false
+  end
+
   # Boot-time `Application.get_env` is a one-shot snapshot taken when
   # `config/runtime.exs` ran. A key added to `~/.osa/.env` afterward by a
   # different OS process (the CLI setup wizard, `osa setup`, a hand edit)

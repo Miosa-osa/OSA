@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     fleet_node_progress
     fleet_node_completed
     fleet_summary
+    session_title
   )a
 
   def start_link(_opts \\ []) do

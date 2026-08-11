@@ -22,9 +22,17 @@ defmodule OptimalSystemAgent.Channels.Slack do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
+  # Slack's own cap on chat.postMessage `text` is 40,000; 4,000 is this
+  # adapter's self-imposed, far more conservative limit. Because it sits 10x
+  # under the real cap, measuring in UTF-8 bytes is safe under every reading of
+  # Slack's "characters" (bytes >= UTF-16 units >= codepoints for all input),
+  # and unlike the previous code it is the same unit the split uses.
   @max_message_length 4_000
+  @length_unit :bytes
   @slack_post_url "https://slack.com/api/chat.postMessage"
 
   # ── Behaviour callbacks ───────────────────────────────────────────────
@@ -189,7 +197,7 @@ defmodule OptimalSystemAgent.Channels.Slack do
     session_id = "slack:#{channel_id}"
     ensure_session(session_id)
 
-    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+    Delivery.start_task(:slack, fn ->
       case Loop.process_message(session_id, text,
              channel: :slack,
              user_id: "slack:#{user_id}"
@@ -249,9 +257,9 @@ defmodule OptimalSystemAgent.Channels.Slack do
     text
     |> markdown_to_mrkdwn()
     |> chunk_message()
-    |> Enum.each(&post_message(token, channel_id, &1))
-
-    :ok
+    |> then(
+      &Delivery.send_chunks(:slack, &1, fn chunk -> post_message(token, channel_id, chunk) end)
+    )
   end
 
   defp post_message(token, channel_id, text) do
@@ -296,28 +304,16 @@ defmodule OptimalSystemAgent.Channels.Slack do
 
   # ── Message Chunking ──────────────────────────────────────────────────
 
-  defp chunk_message(text) when byte_size(text) <= @max_message_length, do: [text]
+  @doc """
+  Split an outbound reply into Slack-sized chunks.
 
-  defp chunk_message(text) do
-    text |> String.split("\n\n") |> build_chunks([], "")
-  end
+  Public so the chunking contract can be tested against Slack's real limit and
+  unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
 
-  defp build_chunks([], acc, current) do
-    if current == "", do: Enum.reverse(acc), else: Enum.reverse([String.trim(current) | acc])
-  end
-
-  defp build_chunks([para | rest], acc, current) do
-    candidate = if current == "", do: para, else: current <> "\n\n" <> para
-
-    if byte_size(candidate) > @max_message_length do
-      if current == "" do
-        {head, tail} = String.split_at(para, @max_message_length - 10)
-        build_chunks([tail | rest], [head <> "..." | acc], "")
-      else
-        build_chunks([para | rest], [String.trim(current) | acc], "")
-      end
-    else
-      build_chunks(rest, acc, candidate)
-    end
-  end
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 end

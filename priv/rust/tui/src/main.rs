@@ -33,6 +33,9 @@ mod voice;
 /// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
 #[cfg(test)]
 mod test_backend;
+/// Scoped, restoring overrides for the process-global environment.
+#[cfg(test)]
+mod test_env;
 /// The band arbiter's contract: rects derive from measurements, bands tile the
 /// region, and the composer is never shed.
 #[cfg(test)]

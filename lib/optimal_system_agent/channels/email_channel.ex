@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Delivery
 
   @default_poll_interval 15_000
 
@@ -178,7 +179,7 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
                 send_imap(socket, "A005 STORE #{id} +FLAGS (\\Seen)")
                 recv_imap(socket)
 
-                Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+                Delivery.start_task(:email, fn ->
                   process_email(from, subject, body, state)
                 end)
               end
@@ -214,7 +215,16 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
         reply_subject =
           if String.starts_with?(subject, "Re: "), do: subject, else: "Re: #{subject}"
 
-        send_email(state, from, reply_subject, response)
+        # SMTP has no practical length limit, so there is nothing to chunk here —
+        # but the send result was still being discarded, so a reply that never
+        # left the box looked identical to one that did.
+        case send_email(state, from, reply_subject, response) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("[Email] Reply to #{from} not sent: #{inspect(reason)}")
+        end
 
       {:error, reason} ->
         Logger.warning("[Email] Agent error: #{inspect(reason)}")

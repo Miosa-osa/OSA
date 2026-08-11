@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
   """
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.System.AtomicFile
 
   @table :osa_pending_plans
 
@@ -89,14 +90,12 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
     # torn plan file — the file a long run reads back to recover its intent — so a
     # reader always sees either the intact old plan or the intact new one.
     path = plan_file_path(session_id)
-    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
 
-    with :ok <- File.write(tmp, plan),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
+    case AtomicFile.write(path, plan) do
+      :ok ->
+        :ok
+
       {:error, reason} ->
-        _ = File.rm(tmp)
         {:error, reason}
     end
   end

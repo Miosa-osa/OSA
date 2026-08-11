@@ -299,6 +299,163 @@ case "$out" in *"permission"*|*"Permission"*|*"cannot create"*) assert "permissi
 assert_eq "current untouched after permission failure" "$before_current" "$(readlink "$HOME_DIR/current")"
 assert_eq "previous untouched after permission failure" "$before_previous" "$(readlink "$HOME_DIR/previous")"
 
+# ── 15. prune deregisters git worktrees instead of rm -rf'ing them ─────────
+# Every versions/<rev> is a `git worktree add` checkout. A bare `rm -rf`
+# deletes the tree but leaves git's admin record in $SRC/.git/worktrees, so
+# git keeps believing a worktree is registered at that path and the NEXT
+# `git worktree add` for the same rev fails with "already exists" — every
+# future update to that rev wedged, permanently.
+#
+# The test drives prune (--keep 1) hard enough to evict a version, then asserts
+# git has no dangling record AND that re-staging that exact rev still works.
+echo ""
+echo "-- prune deregisters worktrees (re-staging a pruned rev still works) --"
+PRUNE_TMP="$TMP/prune"
+PSRC="$PRUNE_TMP/repo"
+PHOME="$PRUNE_TMP/home"
+mkdir -p "$PSRC"
+git -C "$PSRC" init --quiet -b main
+git -C "$PSRC" config user.email "test@example.com"
+git -C "$PSRC" config user.name "Test"
+# Four staged versions, --keep 1. current/previous (P4/P3) are exempt from the
+# count entirely, so of the rest only the newest survives: P2 is kept, P1 and
+# the bootstrap dir are evicted. P1 is the one that was added as a worktree.
+for v in 1 2 3 4; do
+  echo "2.0.$v" > "$PSRC/VERSION"
+  git -C "$PSRC" add -A
+  git -C "$PSRC" commit --quiet -m "p$v"
+  eval "P${v}_REV=\"\$(git -C '$PSRC' rev-parse --short=12 HEAD)\""
+done
+
+for rev in "$P1_REV" "$P2_REV" "$P3_REV" "$P4_REV"; do
+  OSA_UPDATE_BUILD_CMD="true" OSA_UPDATE_HEALTH_CMD="true" \
+    "$UPDATER" update --root "$PSRC" --home "$PHOME" --ref "$rev" --keep 1 >/dev/null 2>&1
+  # Distinct mtimes so the newest-first ordering prune relies on is unambiguous.
+  sleep 1.1
+done
+
+# P1 is neither current (P4) nor previous (P3) nor the newest survivor (P2).
+assert "pruned version dir is gone from disk" \
+  "$([ ! -d "$PHOME/versions/$P1_REV" ] && echo 0 || echo 1)"
+
+# The real regression: git must not still think a worktree lives there.
+dangling="$(git -C "$PSRC" worktree list --porcelain 2>/dev/null | grep -c "worktree $PHOME/versions/$P1_REV\$" || true)"
+assert_eq "git has no dangling worktree record for the pruned dir" "0" "$dangling"
+
+# And the consequence a user would actually hit: re-staging that rev works.
+set +e
+restage_out="$(git -C "$PSRC" worktree add --detach --quiet "$PHOME/versions/$P1_REV" "$P1_REV" 2>&1)"
+restage_rc=$?
+set -e
+assert "re-adding a worktree at the pruned path succeeds (not 'already exists')" \
+  "$([ "$restage_rc" = "0" ] && echo 0 || echo 1)"
+case "$restage_out" in
+  *"already exists"*) assert "re-add did not fail with 'already exists'" 1 ;;
+  *) assert "re-add did not fail with 'already exists'" 0 ;;
+esac
+
+# ── 16. a lock held by a LIVE process we cannot signal is never cleared ────
+# `kill -0` returns non-zero for BOTH "no such process" (ESRCH — lock really
+# is stale) and "operation not permitted" (EPERM — process is alive and well,
+# just owned by another uid). Treating the second as stale deletes the lock
+# guarding somebody else's in-flight update and lets two updates race the same
+# versions dir and `current` symlink.
+#
+# pid 1 is the canonical live-but-unsignalable process for an unprivileged
+# user: it always exists, and kill(1, 0) is EPERM unless we are root.
+echo ""
+echo "-- a live process's lock is never cleared (EPERM != 'no such process') --"
+if [ "$(id -u)" = "0" ]; then
+  echo "  skip — running as root, kill(1,0) succeeds so EPERM cannot be provoked"
+else
+  LOCK_TMP="$TMP/lock"
+  LSRC="$LOCK_TMP/repo"
+  LHOME="$LOCK_TMP/home"
+  mkdir -p "$LSRC"
+  git -C "$LSRC" init --quiet -b main
+  git -C "$LSRC" config user.email "test@example.com"
+  git -C "$LSRC" config user.name "Test"
+  echo "3.0.0" > "$LSRC/VERSION"
+  git -C "$LSRC" add -A
+  git -C "$LSRC" commit --quiet -m "l1"
+  L1_REV="$(git -C "$LSRC" rev-parse --short=12 HEAD)"
+
+  mkdir -p "$LHOME/.update.lock.d"
+  echo 1 > "$LHOME/.update.lock.d/pid"
+
+  set +e
+  out="$(OSA_UPDATE_BUILD_CMD="true" OSA_UPDATE_HEALTH_CMD="true" \
+    "$UPDATER" update --root "$LSRC" --home "$LHOME" --ref "$L1_REV" 2>&1)"
+  rc=$?
+  set -e
+
+  assert "update refuses to run against a live foreign-owned lock" \
+    "$([ "$rc" != "0" ] && echo 0 || echo 1)"
+  case "$out" in
+    *"already running"*) assert "refusal names the running update" 0 ;;
+    *) assert "refusal names the running update" 1 ;;
+  esac
+  case "$out" in
+    *"stale update lock"*) assert "a live process's lock is NOT declared stale" 1 ;;
+    *) assert "a live process's lock is NOT declared stale" 0 ;;
+  esac
+  assert "the foreign lock directory still exists (was not deleted)" \
+    "$([ -d "$LHOME/.update.lock.d" ] && echo 0 || echo 1)"
+  assert_eq "the foreign lock's pid file was not overwritten" "1" \
+    "$(cat "$LHOME/.update.lock.d/pid" 2>/dev/null || echo MISSING)"
+  rm -rf "$LHOME/.update.lock.d"
+fi
+
+# ── 17. build and health gate agree on MIX_ENV ─────────────────────────────
+# The build ran with an inherited MIX_ENV (dev) while the health gate forced
+# prod, so the gate booted an artifact the build had never produced. Both
+# override hooks now receive the same MIX_ENV, and it is the one the build
+# used — the gate measures what was built or it measures nothing.
+echo ""
+echo "-- build gate and health gate see the same MIX_ENV --"
+ENV_TMP="$TMP/mixenv"
+ESRC="$ENV_TMP/repo"
+EHOME="$ENV_TMP/home"
+mkdir -p "$ESRC"
+git -C "$ESRC" init --quiet -b main
+git -C "$ESRC" config user.email "test@example.com"
+git -C "$ESRC" config user.name "Test"
+echo "4.0.0" > "$ESRC/VERSION"
+git -C "$ESRC" add -A
+git -C "$ESRC" commit --quiet -m "e1"
+E1_REV="$(git -C "$ESRC" rev-parse --short=12 HEAD)"
+
+# Deliberately run the whole updater under MIX_ENV=dev, the value a developer
+# shell actually has. Both hooks record what they were given.
+MIX_ENV=dev \
+  OSA_UPDATE_BUILD_CMD="echo \"\$MIX_ENV\" > '$ENV_TMP/build.env'" \
+  OSA_UPDATE_HEALTH_CMD="echo \"\$MIX_ENV\" > '$ENV_TMP/health.env'" \
+  "$UPDATER" update --root "$ESRC" --home "$EHOME" --ref "$E1_REV" >/dev/null 2>&1
+assert "build hook recorded a MIX_ENV" "$([ -s "$ENV_TMP/build.env" ] && echo 0 || echo 1)"
+assert "health hook recorded a MIX_ENV" "$([ -s "$ENV_TMP/health.env" ] && echo 0 || echo 1)"
+assert_eq "health gate probes the same MIX_ENV the build produced" \
+  "$(cat "$ENV_TMP/build.env" 2>/dev/null)" "$(cat "$ENV_TMP/health.env" 2>/dev/null)"
+
+# The block above is necessary but not sufficient: with both hooks overridden,
+# each simply inherits the caller's environment, so they agreed even when the
+# bug was present. What the bug actually was is visible only in the DEFAULT
+# value — the real health path hardcoded a prod fallback the real build path
+# did not have — so the two assertions below are the load-bearing ones.
+#
+# And the default, with nothing inherited, is a single explicit value on both.
+# A *fresh* home, not a wiped one: `rm -rf`ing the old home would leave git's
+# worktree record pointing at the deleted path and the re-add would fail —
+# which is precisely the bug case 15 covers, and not what this case is testing.
+rm -f "$ENV_TMP/build.env" "$ENV_TMP/health.env"
+EHOME2="$ENV_TMP/home2"
+env -u MIX_ENV \
+  OSA_UPDATE_BUILD_CMD="echo \"\$MIX_ENV\" > '$ENV_TMP/build.env'" \
+  OSA_UPDATE_HEALTH_CMD="echo \"\$MIX_ENV\" > '$ENV_TMP/health.env'" \
+  "$UPDATER" update --root "$ESRC" --home "$EHOME2" --ref "$E1_REV" >/dev/null 2>&1
+assert_eq "with no inherited MIX_ENV both gates still agree" \
+  "$(cat "$ENV_TMP/build.env" 2>/dev/null)" "$(cat "$ENV_TMP/health.env" 2>/dev/null)"
+assert_eq "and that shared default is prod" "prod" "$(cat "$ENV_TMP/build.env" 2>/dev/null)"
+
 echo ""
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

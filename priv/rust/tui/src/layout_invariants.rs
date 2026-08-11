@@ -445,6 +445,7 @@ mod panel_invariants {
     use crate::components::agents::Agents;
     use crate::components::task_checklist::{ChecklistStatus, TaskChecklist};
     use crate::components::Component;
+    use serial_test::serial;
 
     const W: u16 = 100;
 
@@ -1350,12 +1351,21 @@ mod panel_invariants {
 
     /// Two explorers listing three sibling directories under
     /// `~/.osa/workspace/codex/codex-rs/` — the exact trail from the capture.
+    /// Pin `HOME` for the duration of a test body.
+    ///
+    /// `display_path`'s home tier is what fires for the sandbox paths in these
+    /// fixtures, so they cannot inherit the test runner's `HOME`. The override
+    /// is process-global, so the guard restores it on drop and every test that
+    /// takes one is `#[serial]` — otherwise a concurrent test resolving
+    /// `~/.osa` from `HOME` reads this fixture's path instead of its own.
+    /// Hold the guard for the whole body: `display_path` reads `HOME` at render
+    /// time, not at construction time.
+    fn home_fixture() -> crate::test_env::EnvGuard {
+        crate::test_env::EnvGuard::set("HOME", "/Users/rhl")
+    }
+
     fn captured_scene() -> Agents {
         let mut a = Agents::new();
-        a.set_workspace_root("/Users/rhl/projects/osa");
-        // `display_path`'s home tier is what fires for the sandbox, so the
-        // fixture must pin HOME rather than inherit the test runner's.
-        unsafe { std::env::set_var("HOME", "/Users/rhl") };
         a.set_workspace_root("/Users/rhl/projects/osa");
         // No goal → `main` has nothing of its own to say.
         a.set_main_row("", 231, 2_800);
@@ -1384,7 +1394,9 @@ mod panel_invariants {
     /// carries information, lands at a shallow fixed column instead of past
     /// column 40 on every line.
     #[test]
+    #[serial]
     fn fleet_view_trail_paths_are_workspace_relative_and_elide_shared_prefixes() {
+        let _home = home_fixture();
         let a = captured_scene();
         let screen = snapshot_buffer(&render_to_buffer(
             |f| a.draw(f, f.area()),
@@ -1423,7 +1435,9 @@ mod panel_invariants {
     /// three neighbouring surfaces (roster header, `main` row, roster tree). Each
     /// may state its own fact once; none may restate another's.
     #[test]
+    #[serial]
     fn no_fleet_surface_restates_another() {
+        let _home = home_fixture();
         let a = captured_scene();
         let screen = snapshot_buffer(&render_to_buffer(
             |f| a.draw(f, f.area()),
@@ -1456,7 +1470,9 @@ mod panel_invariants {
     /// or when it is the selection the user is about to act on. Folding a
     /// selection the user cannot see would be a worse bug than a crowded panel.
     #[test]
+    #[serial]
     fn main_row_returns_when_it_carries_a_goal_or_the_selection() {
+        let _home = home_fixture();
         for (label, mut a) in [
             ("goal", {
                 let mut a = captured_scene();
@@ -1487,7 +1503,9 @@ mod panel_invariants {
     /// panics, and the reservation matches the ink at every column count. A
     /// design that only works at 120 columns is not done.
     #[test]
+    #[serial]
     fn the_captured_scene_holds_across_a_width_sweep() {
+        let _home = home_fixture();
         for w in [40u16, 56, 72, 80, 100, 120, 160] {
             let a = captured_scene();
             let reserved = a.height().max(1);
@@ -1511,9 +1529,10 @@ mod panel_invariants {
     /// place as an ASCII one — every truncation here goes through `fit_cols`
     /// (COLUMNS), never bytes or chars.
     #[test]
+    #[serial]
     fn a_wide_glyph_trail_path_still_aligns_the_meta_column() {
+        let _home = home_fixture();
         let mut a = Agents::new();
-        unsafe { std::env::set_var("HOME", "/Users/rhl") };
         a.set_workspace_root("/Users/rhl/projects/osa");
         a.set_main_row("", 40, 2_800);
         a.agent_started("agent:x:osa-explorer", "explorer", "", "scan", None);
@@ -4783,6 +4802,118 @@ Beta is the one I would pick.
              screen into the history it just purged. Emitted: {seq:?}"
         );
         assert!(ed3_follows_an_erase(&seq), "the visible screen must be erased BEFORE the purge; emitted {seq:?}");
+    }
+
+    // ── the resize-clear GATE ───────────────────────────────────────
+    //
+    // These pin the DECISION, not the bytes. The bytes are covered above; what
+    // kept regressing was which branch a given terminal took, and that was
+    // untestable while the decision read `std::env` inline.
+
+    use crate::app::event_loop::{resize_clear_strategy, ResizeClear, TermIdent};
+
+    fn ident(over: Option<&str>, tmux: bool, term: &str) -> TermIdent {
+        TermIdent {
+            r#override: over.map(str::to_string),
+            tmux,
+            term: term.to_string(),
+        }
+    }
+
+    /// A multiplexer takes the surgical clear.
+    ///
+    /// Measured, in `test/pty/tmux_resize.py`: forcing the full wipe here
+    /// strands THIRTEEN copies of the chrome in pane history across a 12-step
+    /// drag — one per step, growing with the gesture.
+    ///
+    /// Note the reason is NOT "tmux does not reflow", which is what this gate
+    /// used to claim. tmux 3.4 reflows (`test/pty/reflow_matrix.py`), as does
+    /// every terminal measurable here; reflow simply is not the property that
+    /// separates them.
+    #[test]
+    fn multiplexers_take_the_surgical_clear() {
+        assert_eq!(
+            resize_clear_strategy(&ident(None, true, "xterm-256color")),
+            ResizeClear::Surgical,
+            "$TMUX is set for every process in a tmux pane"
+        );
+        for term in ["tmux-256color", "screen", "screen.xterm-256color"] {
+            assert_eq!(
+                resize_clear_strategy(&ident(None, false, term)),
+                ResizeClear::Surgical,
+                "TERM={term} is a multiplexer even with a scrubbed environment"
+            );
+        }
+    }
+
+    /// Everything else takes the full wipe.
+    ///
+    /// WezTerm is the measured representative (`test/pty/wezterm_resize.py`):
+    /// forcing the surgical clear there strands a composer, reproducibly.
+    /// libvte passes either way and so votes for neither.
+    #[test]
+    fn ordinary_terminals_take_the_full_wipe() {
+        for term in ["xterm-256color", "wezterm", "xterm-ghostty", "alacritty", ""] {
+            assert_eq!(
+                resize_clear_strategy(&ident(None, false, term)),
+                ResizeClear::FullScreen,
+                "TERM={term} is not a multiplexer"
+            );
+        }
+    }
+
+    /// Inside a multiplexer the OUTER terminal is invisible: tmux owns the
+    /// screen. A tmux session started from WezTerm must still get the surgical
+    /// clear, so no outer-terminal signal may outrank the multiplexer check.
+    #[test]
+    fn the_multiplexer_check_outranks_the_outer_terminal() {
+        assert_eq!(
+            resize_clear_strategy(&ident(None, true, "wezterm")),
+            ResizeClear::Surgical
+        );
+    }
+
+    /// The escape hatch exists so a user on an emulator nobody has tested — a
+    /// non-multiplexer that behaves like tmux, Alacritty being the usual
+    /// candidate — can pick the other branch without waiting for a release. It
+    /// must outrank detection in BOTH directions.
+    #[test]
+    fn resize_clear_override_outranks_detection_both_ways() {
+        assert_eq!(
+            resize_clear_strategy(&ident(Some("surgical"), false, "wezterm")),
+            ResizeClear::Surgical,
+            "a user on an untested terminal must be able to opt into surgical"
+        );
+        assert_eq!(
+            resize_clear_strategy(&ident(Some("full"), true, "tmux-256color")),
+            ResizeClear::FullScreen,
+            "and out of it, even inside a multiplexer"
+        );
+        for spelling in ["full-screen", "fullscreen", "  full  "] {
+            assert_eq!(
+                resize_clear_strategy(&ident(Some(spelling), true, "tmux-256color")),
+                ResizeClear::FullScreen,
+                "{spelling:?} should select the full wipe"
+            );
+        }
+    }
+
+    /// A typo must not silently change how the screen is erased: an
+    /// unrecognised value falls through to DETECTION, not to a fixed branch.
+    #[test]
+    fn unrecognised_resize_clear_override_falls_back_to_detection() {
+        for junk in ["", "FULL", "yes", "1", "surgial", "none"] {
+            assert_eq!(
+                resize_clear_strategy(&ident(Some(junk), true, "tmux-256color")),
+                ResizeClear::Surgical,
+                "{junk:?} must not override the multiplexer detection"
+            );
+            assert_eq!(
+                resize_clear_strategy(&ident(Some(junk), false, "wezterm")),
+                ResizeClear::FullScreen,
+                "{junk:?} must not override the default either"
+            );
+        }
     }
 
     fn ed3_follows_an_erase(seq: &str) -> bool {

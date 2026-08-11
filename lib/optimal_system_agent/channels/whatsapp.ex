@@ -30,10 +30,18 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
   @poll_interval_ms 1_500
+
+  # WhatsApp caps a text body at 4,096 characters. The reply goes through the
+  # Node/Baileys bridge, so the value that is actually checked is a JavaScript
+  # `String.length` — UTF-16 code units. Counting graphemes (as this module used
+  # to) let 4,096 emoji through as 8,192 units, twice the cap.
   @max_message_length 4_096
+  @length_unit :utf16
   @send_timeout 15_000
 
   defstruct [:bridge_url, :poll_timer, connected: false]
@@ -125,9 +133,7 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
         state = if !state.connected, do: %{state | connected: true}, else: state
 
         for msg <- messages do
-          Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-            process_incoming(msg, state.bridge_url)
-          end)
+          Delivery.start_task(:whatsapp, fn -> process_incoming(msg, state.bridge_url) end)
         end
 
         state
@@ -177,30 +183,38 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
   defp send_text(bridge_url, chat_id, text) do
     text
     |> chunk_message()
-    |> Enum.each(fn chunk ->
-      Req.post("#{bridge_url}/send",
-        json: %{chatId: chat_id, message: chunk},
-        receive_timeout: @send_timeout
-      )
-    end)
-
-    :ok
+    |> then(
+      &Delivery.send_chunks(:whatsapp, &1, fn chunk -> post_send(bridge_url, chat_id, chunk) end)
+    )
   rescue
     e ->
       Logger.error("[WhatsApp] Send failed: #{Exception.message(e)}")
       {:error, :send_failed}
   end
 
-  defp chunk_message(text) do
-    if String.length(text) <= @max_message_length do
-      [text]
-    else
-      text
-      |> String.graphemes()
-      |> Enum.chunk_every(@max_message_length)
-      |> Enum.map(&Enum.join/1)
+  defp post_send(bridge_url, chat_id, chunk) do
+    case Req.post("#{bridge_url}/send",
+           json: %{chatId: chat_id, message: chunk},
+           receive_timeout: @send_timeout
+         ) do
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, {status, body}}
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc """
+  Split an outbound reply into WhatsApp-sized chunks.
+
+  Public so the chunking contract can be tested against WhatsApp's real limit
+  and unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
+
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 
   # ── Helpers ──────────────────────────────────────────────────────────
 

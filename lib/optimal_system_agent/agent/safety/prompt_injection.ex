@@ -65,6 +65,92 @@ defmodule OptimalSystemAgent.Agent.Safety.PromptInjection do
     ~r/(?:^|\n)-{3,}\s*\n\s*(?:new\s+)?instructions?/i
   ]
 
+  # Patterns that are meaningful when they appear in *untrusted third-party
+  # text* (fetched web pages, MCP tool output, transcript turns being fed to a
+  # policy classifier) rather than in a message the user typed.
+  #
+  # These are deliberately NOT part of `@injection_patterns`. The user-message
+  # classifier is tuned for "the human is trying to extract my system prompt",
+  # and its verdict is used to REFUSE the turn. Neither the tuning nor the
+  # consequence transfers: a web page saying "ignore previous instructions" is
+  # not the user misbehaving, and refusing the user's turn is the wrong
+  # response. Untrusted text is delimited and defanged, never refused — see
+  # `OptimalSystemAgent.Agent.Safety.UntrustedContent`.
+  @untrusted_directive_patterns [
+    # Direct instruction to the reading model.
+    ~r/ignore\s+(all\s+)?(the\s+)?(previous|prior|above|preceding|earlier)\s+(instructions?|prompts?|rules?|context|directions?)/i,
+    ~r/disregard\s+(all\s+)?(the\s+)?(previous|prior|above|preceding|earlier|system)\s+(instructions?|prompts?|rules?|context)/i,
+    ~r/forget\s+(everything|all)\s+(you\s+)?(were\s+)?(told|instructed|read)/i,
+    # Impersonating operator/system authority.
+    ~r/\b(new|updated?|revised|override|overriding)\s+(system\s+)?(instructions?|rules?|directives?|policy)\b/i,
+    ~r/\b(important|urgent|attention)\s*:?\s*(ai|assistant|agent|model|llm|claude|gpt)\b/i,
+    ~r/\bthis\s+(is|message\s+is)\s+(a\s+)?(system|admin|operator|developer)\s+(message|instruction|override)/i,
+    # Steering the agent's tool use / permissions.
+    ~r/\byou\s+(must|should|are\s+required\s+to|need\s+to)\s+(now\s+)?(run|execute|call|invoke)\b/i,
+    ~r/\b(auto[-\s]?approve|approve\s+automatically|without\s+asking|do\s+not\s+ask|don'?t\s+ask)\s+(the\s+)?(user|permission|for\s+approval)?/i,
+    ~r/\b(this|the)\s+(command|action|tool\s+call)\s+is\s+(safe|harmless|already\s+approved|pre[-\s]?approved)\b/i,
+    # Credential / exfiltration solicitation.
+    ~r/\b(send|post|upload|exfiltrate|transmit)\s+.{0,40}(to\s+https?:\/\/|to\s+the\s+following\s+url)/i,
+    ~r/\b(reveal|print|output|show)\s+.{0,30}(api\s*key|token|credential|secret|password|\.env)/i
+  ]
+
+  @doc """
+  Structural prompt-boundary markers only (Tier 3), exposed on its own.
+
+  Used by untrusted-content handling, which must know whether a *third party's*
+  text is trying to forge prompt structure, independent of the user-message
+  verdict.
+  """
+  @spec structural_injection?(term()) :: boolean()
+  def structural_injection?(text) when is_binary(text) do
+    Enum.any?(@structural_injection_patterns, &Regex.match?(&1, text))
+  end
+
+  def structural_injection?(_), do: false
+
+  @doc """
+  Screen text that arrived from an untrusted third party (a fetched page, an
+  MCP server's output, a transcript turn under attacker influence).
+
+  Returns `{:suspicious, markers}` when the text forges prompt structure or
+  addresses the reading model as if it were the operator, else `:clean`.
+  `markers` is a small list of `:structural` / `:directive` atoms plus the
+  matched excerpt, for logging and for annotating the delimited block.
+
+  This is intentionally a DIFFERENT question from `prompt_injection?/1`:
+  that one asks "is the user attacking me" and its answer refuses the turn.
+  This one asks "is this data pretending to be instructions" and its answer
+  only labels the data.
+  """
+  @spec screen_untrusted(term()) :: :clean | {:suspicious, [{atom(), String.t()}]}
+  def screen_untrusted(text) when is_binary(text) do
+    normalized = normalize_for_injection_check(text)
+
+    structural =
+      for p <- @structural_injection_patterns,
+          m = first_match(p, text) || first_match(p, normalized),
+          do: {:structural, m}
+
+    directive =
+      for p <- @untrusted_directive_patterns,
+          m = first_match(p, text) || first_match(p, normalized),
+          do: {:directive, m}
+
+    case Enum.take(structural ++ directive, 8) do
+      [] -> :clean
+      markers -> {:suspicious, markers}
+    end
+  end
+
+  def screen_untrusted(_), do: :clean
+
+  defp first_match(pattern, text) do
+    case Regex.run(pattern, text) do
+      [m | _] -> m |> String.trim() |> String.slice(0, 80)
+      _ -> nil
+    end
+  end
+
   @doc """
   Returns true if the message appears to be a prompt injection attempt.
 

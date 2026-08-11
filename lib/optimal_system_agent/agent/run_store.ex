@@ -6,10 +6,41 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   and a sidechain transcript for each subagent. ETS gives live inspection even
   when a run is active; append-only markdown files under `~/.osa/agent-runs`
   keep completed runs inspectable after the process exits.
+
+  ## Cross-process ownership leases
+
+  `~/.osa/agent-runs` is **machine-global**, but every `osa` invocation is its
+  own BEAM with its own ETS table and its own `SessionRegistry`. `rehydrate/0`
+  therefore populates a fresh process's index with *other live processes'*
+  `:running` rows, and a `Registry.lookup` liveness probe — which can only ever
+  see the local node — reports every one of them as dead. That combination let a
+  second `osa` invocation cancel (and re-dispatch) runs that were healthily in
+  flight in the first one.
+
+  A registry lookup cannot answer a cross-process question, so liveness is no
+  longer guessed: each run carries an **ownership lease** on disk next to its
+  transcript (`<run>.md.lease.json`) holding a claim, an expiry and a heartbeat
+  renewed while the owner lives. Every destructive step (cancel, reconcile,
+  re-dispatch) must (re-)acquire that lease *immediately before* it mutates
+  anything — see `claim_lease/1`, `renew_lease/1`, `release_lease/1`,
+  `lease_state/1`.
+
+  Deliberate properties:
+
+    * A lease is **not** released on unclean shutdown. Self-clearing on crash
+      would let a second process race a half-dead worker; instead the lease
+      simply stops being renewed and **expires**.
+    * The OS-level liveness check (owning pid still exists *and* its start time
+      matches, so a recycled pid does not read as alive) is belt-and-braces
+      *alongside* the expiry — it can only VETO a steal that expiry already
+      permits, never substitute for it.
+    * If the heartbeat finds a lease is no longer ours, the run is aborted
+      locally rather than left running unowned.
   """
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Trajectory
   alias OptimalSystemAgent.ConfigFile
 
   @table __MODULE__
@@ -23,6 +54,22 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   # table grows unbounded over long-running/heavy-fan-out sessions, slowing every
   # tab2list-based read and leaking memory. :running rows are never pruned.
   @max_terminal_runs 500
+
+  # ── ownership lease tunables ───────────────────────────────────────────────
+
+  # Local (per-BEAM) index of the runs THIS process holds a lease on. Never
+  # populated by rehydrate/0 — rehydration reads other processes' runs and must
+  # not imply ownership of them.
+  @lease_owners :"Elixir.OptimalSystemAgent.Agent.RunStore.LeaseOwners"
+
+  # A lease older than this without a heartbeat is stealable. Sized so a normal
+  # GC pause / slow disk never expires a healthy owner, but a crashed one is
+  # reclaimed promptly. Override with `:run_lease_ttl_ms`.
+  @default_lease_ttl_ms 60_000
+
+  @heartbeat_name :"Elixir.OptimalSystemAgent.Agent.RunStore.LeaseHeartbeat"
+
+  @lease_lost_reason "ownership lease lost to another process; run aborted locally"
 
   @type run :: %{
           agent_id: String.t(),
@@ -87,6 +134,21 @@ defmodule OptimalSystemAgent.Agent.RunStore do
 
     :ets.insert(@table, {agent_id, run})
 
+    # Claim the cross-process ownership lease for this run BEFORE anyone can
+    # observe it as `:running`. A failure here means another live `osa` process
+    # already owns this id — we keep the local row (so the caller still gets a
+    # transcript) but never register ownership, which keeps every destructive
+    # path in this process off the run.
+    case claim_lease(agent_id) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[RunStore] could not claim ownership lease for #{agent_id}: #{inspect(reason)}"
+        )
+    end
+
     resumed_note =
       if run.resumed_from, do: " resumed_from=#{run.resumed_from}", else: ""
 
@@ -144,7 +206,14 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       }
     end)
 
-    append(agent_id, "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}")
+    append(
+      agent_id,
+      "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}"
+    )
+
+    # Clean terminal transition — the only place a lease is *released*. An
+    # unclean exit deliberately leaves the lease behind to expire (see moduledoc).
+    release_lease(agent_id)
     prune_terminal()
     :ok
   end
@@ -226,10 +295,18 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   counts settle. Rows whose process IS alive (e.g. a run the FleetResumer just
   re-dispatched under its original id) are left untouched.
 
+  `alive_fun` is a LOCAL-node probe and cannot see another `osa` process, so it
+  is never trusted on its own: a row only becomes a reconciliation candidate
+  once this process can also **acquire its ownership lease**, which is
+  re-confirmed immediately before the row is mutated. A run owned by another
+  live process is skipped entirely, no matter what the local registry says.
+
   Options:
     * `:alive_fun`  — `(agent_id -> boolean)` liveness probe. Defaults to a
       `SessionRegistry` lookup. Injectable so the selection logic is unit
       testable without booting real loops.
+    * `:claim_fun`  — `(agent_id -> {:ok, term} | {:error, term})` ownership
+      acquisition, default `claim_lease/1`. Injectable for tests.
     * `:status`     — terminal status to stamp (`:cancelled` | `:failed`),
       default `:cancelled`.
     * `:reason`     — human note recorded on the row/transcript.
@@ -240,12 +317,16 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   def reconcile_stale_running(opts \\ []) do
     ensure_table()
     alive_fun = Keyword.get(opts, :alive_fun, &default_alive?/1)
+    claim_fun = Keyword.get(opts, :claim_fun, &claim_lease/1)
     status = Keyword.get(opts, :status, :cancelled)
     reason = Keyword.get(opts, :reason, "reconciled at boot: owning process gone after restart")
     now = DateTime.utc_now()
 
     all_running()
     |> Enum.reject(fn run -> safe_alive?(alive_fun, run.agent_id) end)
+    # Ownership gate — re-confirmed here, immediately before the destructive
+    # write below, not merely at selection time.
+    |> Enum.filter(fn run -> claimed?(claim_fun, run.agent_id) end)
     |> Enum.map(fn run ->
       reconciled = %{
         run
@@ -257,10 +338,33 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       :ets.insert(@table, {run.agent_id, reconciled})
       append(run.agent_id, "RECONCILE status=#{status}\n\n#{reason}")
       Logger.info("[RunStore] reconciled stale :running run #{run.agent_id} -> #{status}")
+      # The row is terminal now; drop the lease so the file does not linger.
+      release_lease(run.agent_id)
       reconciled
     end)
   rescue
     _ -> []
+  end
+
+  defp claimed?(claim_fun, agent_id) do
+    case claim_fun.(agent_id) do
+      {:ok, _} ->
+        true
+
+      {:error, reason} ->
+        Logger.info(
+          "[RunStore] skipping #{agent_id}: owned by another process (#{inspect(reason)})"
+        )
+
+        false
+
+      other ->
+        other == true
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   # Default liveness probe: a run is alive iff its agent_id has a live entry in
@@ -301,17 +405,63 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   Persist the child Loop's full message history + resume metadata so a run can
   later be resumed with COMPLETE context (CC resumeAgent parity). Stored as ETF
   next to the markdown transcript — shape-preserving and lossless. Best-effort.
+
+  **Written crash-atomically** (temp + fsync + rename, the discipline used by
+  `SessionPersistence` / `ProgressLedger`). This file is the ONLY copy of a
+  subagent run's resume context: `load_messages/1` has no rebuild path and
+  degrades a torn file to `{:error, :not_found}`, i.e. silent, permanent loss of
+  the run's context. An in-place `File.write/2` can be torn by a crash or
+  `ENOSPC` mid-write; a rename cannot — a reader sees either the whole previous
+  version or the whole new one.
   """
   @spec save_messages(String.t(), [map()], map()) :: :ok
   def save_messages(agent_id, messages, meta \\ %{}) when is_list(messages) do
-    path = messages_path(agent_id)
-    File.mkdir_p!(Path.dirname(path))
-    File.write(path, :erlang.term_to_binary(%{messages: messages, meta: meta}))
-    :ok
+    payload = :erlang.term_to_binary(%{messages: messages, meta: meta})
+
+    case atomic_write(messages_path(agent_id), payload) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("[RunStore] save_messages failed for #{agent_id}: #{inspect(reason)}")
+        :ok
+    end
   rescue
     e ->
       Logger.debug("[RunStore] save_messages failed for #{agent_id}: #{Exception.message(e)}")
       :ok
+  end
+
+  @doc """
+  Crash-atomic full-file write: write a temp file in the SAME directory, fsync
+  it so the bytes are durable before it is published, then `rename/2` it into
+  place (atomic within a filesystem). On any failure the temp file is removed
+  and the previous contents are left untouched.
+  """
+  @spec atomic_write(String.t(), iodata()) :: :ok | {:error, term()}
+  def atomic_write(path, contents) do
+    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, io} <- :file.open(tmp, [:write, :binary, :raw]),
+         :ok <- write_and_sync(io, contents),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, reason}
+    end
+  end
+
+  defp write_and_sync(io, contents) do
+    result =
+      with :ok <- :file.write(io, contents) do
+        :file.sync(io)
+      end
+
+    _ = :file.close(io)
+    result
   end
 
   @doc "Load the saved message history + metadata for a run, if present."
@@ -343,6 +493,508 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   def transcript_path_for(agent_id), do: transcript_path(agent_id)
 
   defp messages_path(agent_id), do: transcript_path(agent_id) <> ".messages.etf"
+
+  # ── ownership leases ───────────────────────────────────────────────────────
+  #
+  # Why a lease and not a better liveness guess: the question "is this run still
+  # being executed?" is cross-process, and `Registry.lookup/2` is scoped to one
+  # BEAM. No amount of tuning makes a local lookup answer a global question, and
+  # every wrong answer is destructive (cancel / duplicate dispatch). A lease
+  # inverts the burden of proof: a mutation is allowed only when this process
+  # can PROVE it owns the run, and the proof lives where every process can see
+  # it — on disk beside the run.
+
+  defp lease_path(agent_id), do: transcript_path(agent_id) <> ".lease.json"
+
+  @doc """
+  Identity of this process as a lease owner: `%{owner_id:, os_pid:, os_start:,
+  host:}`. `owner_id` is unique per BEAM (host, pid, process start time and a
+  nanosecond nonce), so a *recycled* OS pid never inherits a previous owner's
+  claim. Overridable wholesale via the `:run_lease_identity` app env, which is
+  how tests impersonate a second, independent process.
+  """
+  @spec lease_identity() :: map()
+  def lease_identity do
+    base = default_identity()
+
+    case Application.get_env(:optimal_system_agent, :run_lease_identity) do
+      %{} = override ->
+        Map.merge(base, Map.take(override, [:owner_id, :os_pid, :os_start, :host]))
+
+      _ ->
+        base
+    end
+  end
+
+  defp default_identity do
+    case :persistent_term.get({__MODULE__, :identity}, nil) do
+      nil ->
+        pid = self_os_pid()
+        host = hostname()
+
+        identity = %{
+          owner_id:
+            "#{host}:#{pid}:#{proc_start_time(pid) || 0}:#{System.system_time(:nanosecond)}",
+          os_pid: pid,
+          os_start: proc_start_time(pid),
+          host: host
+        }
+
+        :persistent_term.put({__MODULE__, :identity}, identity)
+        identity
+
+      identity ->
+        identity
+    end
+  end
+
+  defp self_os_pid do
+    case Integer.parse(System.pid()) do
+      {n, _} -> n
+      _ -> 0
+    end
+  end
+
+  defp hostname do
+    case :inet.gethostname() do
+      {:ok, name} -> to_string(name)
+      _ -> "unknown-host"
+    end
+  end
+
+  @doc "Configured lease TTL in ms (`:run_lease_ttl_ms`)."
+  @spec lease_ttl_ms() :: pos_integer()
+  def lease_ttl_ms do
+    case Application.get_env(:optimal_system_agent, :run_lease_ttl_ms, @default_lease_ttl_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_lease_ttl_ms
+    end
+  end
+
+  @doc """
+  Current ownership of a run, from THIS process's point of view:
+
+    * `{:free, nil}`      — no lease on disk (never claimed, or cleanly released)
+    * `{:mine, lease}`    — we hold it
+    * `{:held, lease}`    — another owner holds it and the claim is still good
+    * `{:expired, lease}` — another owner's claim lapsed AND the OS check does
+      not contradict that, so it may be stolen
+
+  Note the asymmetry in `:held` vs `:expired`: expiry is the primary signal, and
+  the OS liveness check can only keep a lapsed lease `:held` (owner demonstrably
+  still alive). It can never expire a lease early.
+  """
+  @spec lease_state(String.t()) ::
+          {:free, nil} | {:mine, map()} | {:held, map()} | {:expired, map()}
+  def lease_state(agent_id) when is_binary(agent_id) do
+    identity = lease_identity()
+
+    case read_lease(agent_id) do
+      nil ->
+        {:free, nil}
+
+      lease ->
+        cond do
+          Map.get(lease, "owner_id") == identity.owner_id -> {:mine, lease}
+          lease_expired?(lease) and owner_alive?(lease) != true -> {:expired, lease}
+          true -> {:held, lease}
+        end
+    end
+  end
+
+  @doc """
+  Read-only: could this process take ownership right now? Used for *selection*
+  (which must stay side-effect free); every destructive path still re-acquires
+  with `claim_lease/1` immediately before mutating.
+  """
+  @spec lease_claimable?(String.t()) :: boolean()
+  def lease_claimable?(agent_id) when is_binary(agent_id) do
+    case lease_state(agent_id) do
+      {:held, _} -> false
+      _ -> true
+    end
+  end
+
+  def lease_claimable?(_), do: false
+
+  @doc """
+  Acquire (or re-affirm) ownership of a run. Returns `{:ok, lease}` when this
+  process owns the run afterwards, `{:error, {:held_by, lease}}` when another
+  live owner does.
+
+  The free-slot path uses an `O_EXCL` create so two processes racing a fresh id
+  cannot both win. The steal path (expired lease only) writes atomically and
+  then RE-READS to confirm our own `owner_id` survived, so two simultaneous
+  stealers cannot both believe they won.
+  """
+  @spec claim_lease(String.t()) :: {:ok, map()} | {:error, term()}
+  def claim_lease(agent_id) when is_binary(agent_id), do: do_claim(agent_id, 0)
+  def claim_lease(_), do: {:error, :invalid_agent_id}
+
+  defp do_claim(_agent_id, attempt) when attempt > 2, do: {:error, :claim_contended}
+
+  defp do_claim(agent_id, attempt) do
+    identity = lease_identity()
+    path = lease_path(agent_id)
+    _ = File.mkdir_p(Path.dirname(path))
+
+    case create_exclusive(path, encode_lease(agent_id, identity)) do
+      :ok ->
+        register_owned(agent_id)
+        {:ok, read_lease(agent_id)}
+
+      {:error, :eexist} ->
+        case lease_state(agent_id) do
+          {:mine, _} ->
+            _ = atomic_write(path, encode_lease(agent_id, identity))
+            register_owned(agent_id)
+            {:ok, read_lease(agent_id)}
+
+          {:expired, lease} ->
+            steal_lease(agent_id, identity, lease)
+
+          {:held, lease} ->
+            {:error, {:held_by, lease}}
+
+          {:free, _} ->
+            # The file vanished between the create and the read; retry.
+            do_claim(agent_id, attempt + 1)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp steal_lease(agent_id, identity, previous) do
+    case atomic_write(lease_path(agent_id), encode_lease(agent_id, identity)) do
+      :ok ->
+        # Confirm we, and not a concurrent stealer, own the published file.
+        case read_lease(agent_id) do
+          nil ->
+            {:error, :lease_vanished}
+
+          %{"owner_id" => owner} = lease ->
+            if owner == identity.owner_id do
+              register_owned(agent_id)
+
+              Logger.info(
+                "[RunStore] stole expired lease for #{agent_id} from " <>
+                  "#{inspect(Map.get(previous, "owner_id"))}"
+              )
+
+              {:ok, lease}
+            else
+              {:error, {:held_by, lease}}
+            end
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Heartbeat: extend our claim on a run we own. Returns `{:error, :lost}` when
+  the lease is no longer ours — the signal that the run must be aborted.
+  """
+  @spec renew_lease(String.t()) :: :ok | {:error, term()}
+  def renew_lease(agent_id) when is_binary(agent_id) do
+    case lease_state(agent_id) do
+      {:mine, lease} ->
+        atomic_write(
+          lease_path(agent_id),
+          Jason.encode!(Map.put(lease, "renewed_at", now_ms()))
+        )
+
+      {:free, _} ->
+        # Our own lease file was removed underneath us (manual cleanup); as the
+        # local owner we may re-create it, but only if nobody else claims first.
+        case claim_lease(agent_id) do
+          {:ok, _} -> :ok
+          _ -> {:error, :lost}
+        end
+
+      {_, _} ->
+        {:error, :lost}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @doc """
+  Release a lease we own. Called ONLY on a clean terminal transition
+  (`complete/2`, reconcile). Never call this from a crash/exit path: a lease
+  that self-clears on an unclean shutdown lets a second process start racing a
+  worker that may still be half-alive. Let it expire instead.
+  """
+  @spec release_lease(String.t()) :: :ok
+  def release_lease(agent_id) when is_binary(agent_id) do
+    case lease_state(agent_id) do
+      {:mine, _} -> _ = File.rm(lease_path(agent_id))
+      _ -> :ok
+    end
+
+    unregister_owned(agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  def release_lease(_), do: :ok
+
+  @doc "True iff this process currently holds the lease for `agent_id`."
+  @spec owns_lease?(String.t()) :: boolean()
+  def owns_lease?(agent_id) when is_binary(agent_id) do
+    match?({:mine, _}, lease_state(agent_id))
+  end
+
+  def owns_lease?(_), do: false
+
+  @doc """
+  `:running` rows that are NOT demonstrably owned by another live process.
+
+  This is what fleet counts and parent-shutdown sweeps must use: `all_running/0`
+  reads a machine-global index, so in a second `osa` invocation it includes
+  other processes' live runs. Rows with no lease at all (legacy runs, rows
+  inserted directly by tests) are treated as local — only a lease actively held
+  elsewhere excludes a row.
+  """
+  @spec all_running_local() :: [run()]
+  def all_running_local do
+    all_running()
+    |> Enum.reject(fn run -> match?({:held, _}, lease_state(run.agent_id)) end)
+  rescue
+    _ -> []
+  end
+
+  # ── heartbeat ──────────────────────────────────────────────────────────────
+
+  @doc false
+  @spec heartbeat_tick() :: :ok
+  def heartbeat_tick do
+    ensure_lease_table()
+
+    @lease_owners
+    |> :ets.tab2list()
+    |> Enum.each(fn {agent_id} ->
+      case renew_lease(agent_id) do
+        :ok -> :ok
+        {:error, :lost} -> handle_ownership_loss(agent_id)
+        {:error, _other} -> :ok
+      end
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  @doc """
+  Ownership was lost mid-flight (another process legitimately took over after
+  our claim expired). The run must not keep executing unowned: mark the local
+  row terminal, note it on the transcript, and abort the loop.
+  """
+  @spec handle_ownership_loss(String.t()) :: :ok
+  def handle_ownership_loss(agent_id) when is_binary(agent_id) do
+    Logger.warning("[RunStore] #{@lease_lost_reason} (#{agent_id})")
+    unregister_owned(agent_id)
+
+    update(agent_id, fn run ->
+      if run.status == :running do
+        %{
+          run
+          | status: :cancelled,
+            completed_at: DateTime.utc_now(),
+            result:
+              Map.merge(run.result || %{}, %{status: :cancelled, summary: @lease_lost_reason})
+        }
+      else
+        run
+      end
+    end)
+
+    append(agent_id, "LEASE_LOST status=cancelled\n\n#{@lease_lost_reason}")
+    abort_run(agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp abort_run(agent_id) do
+    case Application.get_env(:optimal_system_agent, :run_lease_abort_fun) do
+      fun when is_function(fun, 1) -> fun.(agent_id)
+      _ -> OptimalSystemAgent.Agent.Fleet.stop_node(agent_id)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp ensure_heartbeat do
+    if is_nil(Process.whereis(@heartbeat_name)) do
+      pid = spawn(fn -> heartbeat_loop() end)
+
+      try do
+        Process.register(pid, @heartbeat_name)
+      rescue
+        _ -> Process.exit(pid, :kill)
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp heartbeat_loop do
+    interval = max(div(lease_ttl_ms(), 3), 1_000)
+
+    receive do
+      :stop -> :ok
+    after
+      interval ->
+        heartbeat_tick()
+        heartbeat_loop()
+    end
+  end
+
+  # ── lease plumbing ─────────────────────────────────────────────────────────
+
+  defp encode_lease(agent_id, identity) do
+    now = now_ms()
+
+    Jason.encode!(%{
+      "agent_id" => agent_id,
+      "owner_id" => identity.owner_id,
+      "host" => identity.host,
+      "node" => to_string(node()),
+      "os_pid" => identity.os_pid,
+      "os_start" => identity.os_start,
+      "claimed_at" => now,
+      "renewed_at" => now,
+      "ttl_ms" => lease_ttl_ms()
+    })
+  end
+
+  defp read_lease(agent_id) do
+    with {:ok, bin} <- File.read(lease_path(agent_id)),
+         {:ok, %{"owner_id" => _} = lease} <- Jason.decode(bin) do
+      lease
+    else
+      _ -> nil
+    end
+  end
+
+  defp lease_expired?(lease) do
+    renewed = Map.get(lease, "renewed_at")
+    ttl = Map.get(lease, "ttl_ms")
+
+    cond do
+      not is_integer(renewed) -> true
+      not is_integer(ttl) or ttl <= 0 -> now_ms() - renewed > lease_ttl_ms()
+      true -> now_ms() - renewed > ttl
+    end
+  end
+
+  # Belt-and-braces OS check. `true` = the owning process definitely still
+  # exists with the same start time; `false` = definitely gone (or the pid was
+  # recycled into a different process); `:unknown` = we cannot tell (no procfs,
+  # lease written on another host, no recorded start time). Only `true` blocks a
+  # steal — an inconclusive answer defers to the expiry that already elapsed.
+  defp owner_alive?(lease) do
+    pid = Map.get(lease, "os_pid")
+    start = Map.get(lease, "os_start")
+    host = Map.get(lease, "host")
+
+    cond do
+      not procfs?() -> :unknown
+      is_binary(host) and host != hostname() -> :unknown
+      not is_integer(pid) -> :unknown
+      not File.exists?("/proc/#{pid}/stat") -> false
+      not is_integer(start) -> :unknown
+      proc_start_time(pid) == start -> true
+      true -> false
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  defp procfs?, do: File.dir?("/proc/self")
+
+  # Field 22 of /proc/<pid>/stat (starttime, in clock ticks since boot). Parsed
+  # after the ") " that closes the comm field, since comm may contain spaces.
+  defp proc_start_time(pid) when is_integer(pid) do
+    with true <- procfs?(),
+         {:ok, content} <- File.read("/proc/#{pid}/stat"),
+         [_head, rest] <- String.split(content, ") ", parts: 2),
+         token when is_binary(token) <- rest |> String.split(" ") |> Enum.at(19),
+         {n, _} <- Integer.parse(token) do
+      n
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp proc_start_time(_), do: nil
+
+  # O_EXCL|O_CREAT: succeeds only if we created the file, so two processes
+  # racing a never-before-claimed run cannot both win.
+  defp create_exclusive(path, contents) do
+    case :file.open(path, [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} -> write_and_sync(io, contents)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp now_ms, do: System.system_time(:millisecond)
+
+  defp ensure_lease_table do
+    case :ets.whereis(@lease_owners) do
+      :undefined ->
+        :ets.new(@lease_owners, [:named_table, :public, :set])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp register_owned(agent_id) do
+    ensure_lease_table()
+    :ets.insert(@lease_owners, {agent_id})
+    ensure_heartbeat()
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp unregister_owned(agent_id) do
+    ensure_lease_table()
+    :ets.delete(@lease_owners, agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   @doc "Format a structured result for legacy string-return callers."
   @spec format_result(map()) :: String.t()
@@ -390,6 +1042,13 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   defp append(agent_id, body) do
     path = transcript_path(agent_id)
     File.mkdir_p!(Path.dirname(path))
+
+    # Sidechain transcripts are a durable on-disk artifact under
+    # `~/.osa/agent-runs`, written from subagent progress lines, commands run
+    # and result summaries — all of which can carry whatever a tool echoed.
+    # Redact at the write boundary (the single funnel for every `append/2`
+    # caller) so a key a subagent's shell command printed is not persisted.
+    body = Trajectory.redact(to_string(body))
 
     entry = """
 
@@ -507,14 +1166,16 @@ defmodule OptimalSystemAgent.Agent.RunStore do
             _ -> ""
           end
 
+        status = rehydrated_status(agent_id, content)
+
         run = %{
           agent_id: agent_id,
           parent_session_id: Map.get(meta, :parent_session_id) || "unknown",
           role: Map.get(meta, :role) || "agent",
           task: Map.get(meta, :task) || extract_task(content),
-          status: infer_status(content),
+          status: status,
           started_at: mtime,
-          completed_at: mtime,
+          completed_at: if(status == :running, do: nil, else: mtime),
           duration_ms: nil,
           tool_count: 0,
           tokens_used: 0,
@@ -535,6 +1196,29 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   rescue
     _ -> nil
   end
+
+  # A transcript with no STOP record is ambiguous: its owner may have died
+  # mid-run (a genuine orphan) or the run may still be EXECUTING in another live
+  # `osa` process — `~/.osa/agent-runs` is machine-global and every invocation
+  # rehydrates from it. The ownership lease is the only cross-process authority
+  # on which, so it decides. Previously such a run was unconditionally recorded
+  # as `:failed`, which silently mislabelled another process's healthy run as
+  # dead in this process's index.
+  defp rehydrated_status(agent_id, content) do
+    case infer_status(content) do
+      :failed ->
+        if not stop_recorded?(content) and match?({:held, _}, lease_state(agent_id)),
+          do: :running,
+          else: :failed
+
+      other ->
+        other
+    end
+  rescue
+    _ -> :failed
+  end
+
+  defp stop_recorded?(content), do: Regex.match?(~r/STOP status=(\w+)/, content)
 
   defp infer_status(content) do
     case Regex.scan(~r/STOP status=(\w+)/, content) do

@@ -84,7 +84,12 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     # Consecutive connect-failure counter for the dormancy cap. Reset to 0 when a
     # connection survives the stability window (`:mark_stable`).
     fail_count: 0,
-    backoff: @initial_backoff_ms
+    backoff: @initial_backoff_ms,
+    # The MCP revision this connection settled on. `nil` until `initialize`
+    # returns; the server MAY answer with a revision older than the one OSA
+    # announced, and everything after the handshake — including the
+    # `MCP-Protocol-Version` header — must follow the answer, not the request.
+    protocol_version: nil
   ]
 
   # ── Public API ────────────────────────────────────────────────────────
@@ -351,10 +356,18 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   defp handle_inbound(bin, state) do
     case JSONRPC.decode(bin) do
-      {:ok, {:response, id, result}} -> handle_response(id, result, state)
-      {:ok, {:error, id, err}} -> handle_error(id, err, state)
-      {:ok, {:notification, method, params}} -> handle_notification(method, params, state)
-      {:ok, {:request, _id, _method, _params}} -> state
+      {:ok, {:response, id, result}} ->
+        handle_response(id, result, state)
+
+      {:ok, {:error, id, err}} ->
+        handle_error(id, err, state)
+
+      {:ok, {:notification, method, params}} ->
+        handle_notification(method, params, state)
+
+      {:ok, {:request, req_id, method, params}} ->
+        handle_request(req_id, method, params, state)
+
       {:error, reason} ->
         Logger.debug("[MCP:#{state.server.name}] decode failed: #{inspect(reason)}")
         state
@@ -378,7 +391,93 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   defp handle_notification(_method, _params, state), do: state
 
-  defp handle_response(id, _result, %{init_id: id} = state) do
+  # ── Inbound server → client REQUESTS ──────────────────────────────────
+  #
+  # These were previously dropped on the floor. A JSON-RPC request that is never
+  # answered is not a no-op: the server sits waiting on a reply that will never
+  # come, and a server that blocks its own handshake on `roots/list` (a normal
+  # thing to do, since OSA ANNOUNCES the roots capability) never becomes ready.
+  # Every inbound request now gets a response — the real answer where OSA
+  # implements the method, an explicit method-not-found where it does not.
+
+  @method_not_found -32601
+
+  # `roots/list` — the one client capability OSA announces. The workspace root
+  # is the directory the agent is actually operating in.
+  defp handle_request(id, "roots/list", _params, state) do
+    _ = send_msg(state, JSONRPC.response(id, %{"roots" => roots()}))
+    state
+  end
+
+  defp handle_request(id, "ping", _params, state) do
+    _ = send_msg(state, JSONRPC.response(id, %{}))
+    state
+  end
+
+  # Anything else — `sampling/createMessage`, `elicitation/create`, … OSA does
+  # not announce those capabilities, so a conforming server should never ask;
+  # answering with method-not-found tells a non-conforming one immediately
+  # instead of leaving it hanging.
+  defp handle_request(id, method, _params, state) do
+    Logger.debug("[MCP:#{state.server.name}] unsupported inbound request #{inspect(method)}")
+
+    _ =
+      send_msg(
+        state,
+        JSONRPC.error_response(id, @method_not_found, "Method not found: #{method}")
+      )
+
+    state
+  end
+
+  defp roots do
+    cwd = OptimalSystemAgent.Workspace.Cwd.get()
+
+    [%{"uri" => "file://" <> cwd, "name" => Path.basename(cwd)}]
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp handle_response(id, result, %{init_id: id} = state) do
+    case Messages.negotiate_version(result) do
+      {:ok, version} -> complete_handshake(version, state)
+      {:error, reason} -> reject_handshake(reason, state)
+    end
+  end
+
+  # The server answered with a revision OSA cannot speak. Continuing would mean
+  # exchanging messages under a schema neither side agreed on, so drop the
+  # connection instead — the lifecycle spec says the client SHOULD disconnect.
+  defp reject_handshake({:unsupported_protocol_version, version}, state) do
+    Logger.warning(
+      "[MCP:#{state.server.name}] server negotiated unsupported MCP revision " <>
+        "#{inspect(version)} (OSA speaks #{Enum.join(Messages.supported_versions(), ", ")}); " <>
+        "disconnecting"
+    )
+
+    schedule_reconnect(%{state | status: :failed, init_id: nil})
+  end
+
+  defp complete_handshake(version, state) do
+    if version != Messages.protocol_version() do
+      Logger.debug(
+        "[MCP:#{state.server.name}] negotiated down to MCP #{version} " <>
+          "(announced #{Messages.protocol_version()})"
+      )
+    end
+
+    # Tell the HTTP transport which revision won, so the `MCP-Protocol-Version`
+    # header on every subsequent request carries the NEGOTIATED value rather
+    # than the one we opened with. Only the HTTP transport has headers, so the
+    # message is not broadcast at transports that would have no use for it.
+    if state.transport_mod == Http and is_pid(state.transport) do
+      send(state.transport, {:mcp_protocol_version, version})
+    end
+
+    state = %{state | protocol_version: version}
+
     # initialize succeeded → send `initialized`, then request the first tool
     # page. Don't reset the backoff yet: the connection must survive the
     # stability window first (see `:mark_stable`), so a server that handshakes
@@ -551,7 +650,14 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     Logger.debug("[MCP:#{state.server.name}] discovered #{length(tools)} tools")
     report_tools(state.server.name, tools)
 
-    %{state | tools: tools, list_id: nil, tools_acc: [], list_cursors: MapSet.new(), list_pages: 0}
+    %{
+      state
+      | tools: tools,
+        list_id: nil,
+        tools_acc: [],
+        list_cursors: MapSet.new(),
+        list_pages: 0
+    }
   end
 
   # Attach a `_meta.progressToken` to an outbound tools/call so the server may

@@ -50,8 +50,8 @@ defmodule OptimalSystemAgent.CLI do
     Process.sleep(:infinity)
   end
 
-  def doctor do
-    OptimalSystemAgent.CLI.Doctor.run()
+  def doctor(args \\ []) do
+    OptimalSystemAgent.CLI.Doctor.run(args)
   end
 
   def opencomputers(args \\ []) do

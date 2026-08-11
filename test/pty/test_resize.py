@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from osa_pty import SETTLE, SINGLETON_BANDS, PtySession  # noqa: E402
-from stub_backend import StubBackend  # noqa: E402
+from stub_backend import StubBackend, set_claude_cli_state  # noqa: E402
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
 STUB_PORT = 12787
@@ -196,9 +196,431 @@ def test_provider_surface(backend: StubBackend) -> None:
         # 4. Esc gets back out. Reversibility is part of the contract: every
         #    step of this flow has to be exitable, or a user who opens the
         #    wrong provider is stuck.
+        #
+        #    Via `_escape_out`, which documents the lone-ESC input defect this
+        #    single write used to trip over intermittently. The band assertion
+        #    is identical; only the wait is bounded rather than fixed.
+        _escape_out(s, "after Esc out of the provider surface")
+
+
+def _wait_for(s: PtySession, needle: str, ceiling: float, what: str) -> str:
+    """Pump until `needle` is on screen, or fail after `ceiling` seconds.
+
+    A bounded wait rather than a fixed `pump(SETTLE * n)`: the steps being
+    watched here are a real subprocess starting, printing and exiting, and the
+    time each takes is a property of the machine, not of the feature. A fixed
+    sleep long enough to be reliable on a loaded CI box is a sleep that makes
+    the suite slow everywhere, and one short enough to be fast is one that
+    flakes. This waits for the fact, and the ceiling is only there so a genuine
+    regression fails instead of hanging.
+    """
+    waited = 0.0
+    while waited < ceiling:
+        s.pump(0.25)
+        waited += 0.25
+        if needle in "\n".join(s.lines()):
+            return "\n".join(s.lines())
+    raise AssertionError(
+        f"{what}: {needle!r} never appeared within {ceiling}s.\n"
+        f"--- rendered screen ---\n{s.dump()}"
+    )
+
+
+# How long one Esc gets to bring the composer back before another is sent.
+#
+# Measured, not guessed: instrumenting every `_escape_out` call in this suite
+# per-press, a lone Esc changes the screen in 51-52ms and the composer is back
+# 53-55ms after the write — every press, every flow, no outliers. Half a second
+# is ~9x that, which is margin for a loaded box without making a genuinely
+# undelivered keystroke cost seconds.
+ESC_SETTLE_CEILING = 0.5
+
+
+def _escape_out(s: PtySession, context: str, presses: int = 3) -> None:
+    """Esc out of whatever overlay is up, then assert the live region is intact.
+
+    `presses` is how many OVERLAYS deep the flow is — how many layers to peel —
+    not a retry ladder for lost input. Each Esc is given `ESC_SETTLE_CEILING`
+    to put the composer back; if it does not, there is another layer underneath
+    and the next press peels it. Pressing again is always safe here because the
+    loop only continues while the composer is absent, i.e. while something is
+    still covering it.
+
+    HISTORY — this helper used to claim it was working around an input-layer
+    defect: "a lone ESC byte with no further input behind it is sometimes never
+    delivered as an Esc key at all", attributed to crossterm holding the byte
+    in its parse buffer, and evidenced as "7 of 8 dialogs closed in 250ms and
+    the eighth was still open after 8 seconds". That was measured again, both
+    here and against crossterm directly on a kernel PTY, and **it is not true**:
+
+      * crossterm 0.28 parses a one-byte `[0x1B]` buffer as `Esc` on the spot
+        whenever the read did not fill its 1024-byte buffer, which for a lone
+        keypress is always. It never waits. (`event/source/unix/tty.rs` passes
+        `input_available = n == TTY_BUFFER_SIZE`; `sys/unix/parse.rs` answers.)
+      * Instrumented per-press, every lone Esc in this suite was delivered in
+        ~52ms. None was ever held.
+
+    The "eighth dialog, 8 seconds" was this helper measuring itself. The CLI
+    sign-in flow is legitimately TWO overlays deep, so its first Esc correctly
+    does not restore the composer — and the old code then sat in a 2.0s wait
+    before pressing again. With `presses=5` that ladder is 10s long, and the
+    2277ms it actually cost was one full 2.0s wait plus a 250ms poll, not a
+    lost keystroke.
+
+    So the wait is now short and the retries mean what they say. The band
+    assertion is unchanged and unweakened.
+
+    `event/terminal.rs` carries the full measurement, including the one real
+    input defect that pass did turn up (a PARTIAL escape sequence wedges
+    crossterm's parse buffer and eats the next keystroke) — which is a
+    different bug, not this one, and not fixable in dialog code either.
+    """
+    for _ in range(presses):
         s.write(b"\x1b")
+        waited = 0.0
+        while waited < ESC_SETTLE_CEILING:
+            s.pump(0.05)
+            waited += 0.05
+            if s.count(SINGLETON_BANDS["composer"]) == 1:
+                assert_single_live_region(s, context)
+                return
+    assert_single_live_region(s, context)
+
+
+def _open_provider_surface(s: PtySession) -> str:
+    """Type `/provider`, submit it, and return the rendered screen.
+
+    Factored out because three tests need the same opening move, and because
+    the double-Enter is a real behaviour (the completion popup eats the first)
+    that is easy to get subtly wrong per-copy.
+    """
+    s.write(b"/provider")
+    s.pump(SETTLE)
+    for _ in range(2):
+        s.write(b"\r")
         s.pump(SETTLE)
-        assert_single_live_region(s, "after Esc out of the provider surface")
+        if "ChatGPT (Codex)" in "\n".join(s.lines()):
+            break
+    s.pump(SETTLE)
+    return "\n".join(s.lines())
+
+
+def test_one_lone_escape_closes_a_dialog(backend: StubBackend) -> None:
+    """ONE Esc byte, with nothing behind it, closes the dialog. No retries.
+
+    This is the assertion the rest of the suite cannot make, because
+    `_escape_out` is allowed to press again — so a regression that made Esc
+    need a second keystroke would stay green everywhere else. Here exactly one
+    `\\x1b` is written into a quiet terminal and the composer has to come back.
+
+    Two failures are in scope, and they are opposite:
+
+      * Esc not delivered at all until some later key wakes the input layer.
+        That is the defect this suite's helper used to assert was happening;
+        it was not (see `_escape_out`), and this test is what will notice if it
+        ever starts.
+      * Esc delivered, but LATE, because something in the reader grew an
+        "ESC disambiguation" hold — a timer that sits on the byte to see
+        whether an arrow key follows. There is nothing left to disambiguate by
+        then (crossterm decides at parse time, from whether the read filled its
+        buffer), so such a hold is pure added latency on the key users press to
+        get out of things. The deadline below is what makes it visible: the
+        measured cost is ~55ms, so a conventional 25-50ms hold roughly doubles
+        it and a careless one blows the budget outright.
+
+    The deadline is `ESC_SETTLE_CEILING` — see that constant for why 0.5s.
+    """
+    with PtySession(backend.base_url) as s:
+        s.boot()
+        screen = _open_provider_surface(s)
+        if "ChatGPT (Codex)" not in screen:
+            raise AssertionError(
+                "the provider surface never opened, so there was nothing to "
+                f"Esc out of.\n--- rendered screen ---\n{s.dump()}"
+            )
+        if s.count(SINGLETON_BANDS["composer"]) != 0:
+            raise AssertionError(
+                "the composer is still on screen with the dialog up, so "
+                "'composer is back' cannot mean 'the dialog closed'. This "
+                f"test needs a different dialog.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        # Let the terminal go completely quiet first: a lone Esc arriving with
+        # other input behind it is a different, easier case, and the one that
+        # was never in doubt.
+        s.pump(SETTLE)
+
+        s.write(b"\x1b")
+        waited = 0.0
+        while waited < ESC_SETTLE_CEILING:
+            s.pump(0.05)
+            waited += 0.05
+            if s.count(SINGLETON_BANDS["composer"]) == 1:
+                break
+        else:
+            raise AssertionError(
+                f"a single lone Esc did not close the dialog within "
+                f"{ESC_SETTLE_CEILING}s (measured cost when healthy: ~55ms). "
+                "Either the byte is not reaching the app, or something in the "
+                "input path is holding it. See priv/rust/tui/src/event/"
+                f"terminal.rs.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        assert_single_live_region(s, "after one lone Esc")
+
+
+def test_provider_picker_shows_account_plan_and_a_limit_meter(
+    backend: StubBackend,
+) -> None:
+    """The picker draws a usage panel for the selected provider.
+
+    The data has existed all along — `Usage.RateLimits` records
+    `used_percent` / `window_minutes` / `resets_at` from `x-codex-*` response
+    headers, and `/usage` renders it — and the picker showed none of it. So a
+    user choosing between providers could not see which plan they were about
+    to spend, or how much of it was left.
+
+    Asserted on the SCREEN rather than on `usage_rows()` because the unit test
+    for that function passes whether or not the panel is ever given rows to
+    draw in: `usage_panel_height` returning 0 on a dialog it thinks is short
+    would leave every one of those tests green and the screen blank.
+    """
+    with PtySession(backend.base_url, cols=120, rows=40) as s:
+        s.boot()
+        _open_provider_surface(s)
+
+        # Down once: row 0 is "Default (recommended)", row 1 is the first
+        # provider, and the accounts tab sorts first.
+        s.write(b"\x1b[B")
+        s.pump(SETTLE)
+        screen = "\n".join(s.lines())
+
+        if "Usage" not in screen:
+            raise AssertionError(
+                "no usage panel on the provider picker.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # The panel appears immediately and fills in when `/auth/status` and
+        # `/usage/quota` answer, so wait for the measurement rather than for a
+        # fixed interval. "reading…" is a legitimate intermediate state, not a
+        # failure — asserting through it is what makes this flaky.
+        screen = _wait_for(
+            s, "48% used", 10.0, "the quota reading never reached the panel"
+        )
+
+        # 1. The account, its org, and the plan — all three. Showing only the
+        #    email is the state the owner reported being unsure about.
+        for needed in ("luna@example.com", "Acme Inc", "plus"):
+            if needed not in screen:
+                raise AssertionError(
+                    f"usage panel did not name {needed!r}; account, org and plan "
+                    "must all be on screen.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+        # 2. A weekly-limit meter, with the number the provider actually
+        #    reported and the age of that reading.
+        for needed in ("weekly limit", "48% used", "2h ago"):
+            if needed not in screen:
+                raise AssertionError(
+                    f"usage panel did not render {needed!r}.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+        if "█" not in screen:
+            raise AssertionError(
+                "no meter glyph on screen — the limit rendered as text only.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        _escape_out(s, "after Esc out of the usage panel")
+
+
+def test_a_provider_with_no_reported_quota_says_so_instead_of_drawing_zero(
+    backend: StubBackend,
+) -> None:
+    """`claude_cli` has reported no quota, so it gets words, not a bar.
+
+    This codebase's hard rule: an unknown never renders as a number. A limit
+    meter drawn at 0% is read as "nothing used", which is the most expensive
+    thing this screen could get wrong — and it is the shape a naive
+    `unwrap_or(0.0)` produces, which is why this is asserted against the
+    rendered screen and not against the formatter.
+    """
+    with PtySession(backend.base_url, cols=120, rows=40) as s:
+        s.boot()
+        _open_provider_surface(s)
+
+        # Down twice: Default → ChatGPT (Codex) → Claude.
+        s.write(b"\x1b[B\x1b[B")
+        screen = _wait_for(
+            s,
+            "not known yet",
+            10.0,
+            "a provider that has reported no quota did not say so",
+        )
+        if "0% used" in screen:
+            raise AssertionError(
+                "an unreported quota rendered as 0% — 'nothing used' and 'we "
+                "have not been told' are not the same fact.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        if "█" in screen:
+            raise AssertionError(
+                "a meter was drawn for a provider with no measurement behind it.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
+def test_claude_code_is_installed_and_signed_in_without_leaving_osa(
+    backend: StubBackend,
+) -> None:
+    """The whole of Feature 1, driven the way a user drives it.
+
+    Before this, selecting Claude with no CLI installed printed "install Claude
+    Code" and stopped, and selecting it signed-out printed "run `claude auth
+    login` then re-run OSA setup". Both are the thing the standing rule forbids:
+    quit the harness and go elsewhere.
+
+    The stub points `install_argv` and `login_program` at `/bin/echo`, so what
+    is being proved here is precisely the mechanism — OSA spawns what the
+    backend named, on a real pty, inside its own dialog, and the child's output
+    lands on OSA's screen. Whether that child is `echo` or `npm` is not
+    something the TUI knows.
+    """
+    set_claude_cli_state(
+        installed=False,
+        signed_in=False,
+        login_program=None,
+        login_argv=None,
+        login_display=None,
+    )
+
+    with PtySession(backend.base_url, cols=120, rows=40) as s:
+        s.boot()
+        _open_provider_surface(s)
+
+        # Default → ChatGPT (Codex) → Claude, then open it.
+        s.write(b"\x1b[B\x1b[B")
+        s.pump(SETTLE)
+        s.write(b"\r")
+        s.pump(SETTLE)
+        # The connect screen; Enter starts the CLI route.
+        s.write(b"\r")
+
+        # 1. NOT a dead end. The install command is named in full, and the
+        #    offer is to run it here. Waited for rather than pumped: the screen
+        #    is drawn as soon as the dialog opens and fills in when
+        #    `/auth/cli/claude` answers, and "Asking OSA about Claude Code…" is
+        #    a legitimate intermediate state.
+        screen = _wait_for(
+            s,
+            "It isn't installed on this machine",
+            10.0,
+            "OSA never reported the missing binary",
+        )
+        if "PTY-INSTALL-RAN" not in screen:
+            raise AssertionError(
+                "the install command was not shown in full — a link to a "
+                "download page is a dead end.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        for banned in ("re-run setup", "re-run OSA setup", "another terminal"):
+            if banned in screen:
+                raise AssertionError(
+                    f"the screen still sends the user away ({banned!r}).\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+        # 2. Enter runs it, on a pty, inside OSA. The child's stdout has to
+        #    appear on OSA's own screen WHILE IT IS STILL RUNNING — that is
+        #    the pane working, as opposed to a summary printed afterwards.
+        #    The state is moved now, so the re-check that follows the child's
+        #    exit sees an installed CLI, exactly as a real install would.
+        set_claude_cli_state(
+            installed=True,
+            path="/usr/bin/claude",
+            version="2.1.226",
+            version_ok=True,
+            login_program="/bin/sh",
+            login_argv=["-c", "echo PTY-LOGIN-RAN; sleep 4"],
+            login_display="claude auth login",
+        )
+        s.write(b"\r")
+        screen = _wait_for(
+            s,
+            "PTY-INSTALL-RAN",
+            6.0,
+            "the spawned child's output never reached OSA's screen — the pty "
+            "pane is not rendering",
+        )
+        if "Installing Claude Code" not in screen:
+            raise AssertionError(
+                "the pane did not say what it was running.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # 3. Let the child finish on its own. OSA re-asks the backend rather
+        #    than inferring success from an exit code, and lands on the
+        #    DETECTED login subcommand with no further keystrokes.
+        _wait_for(
+            s,
+            "claude auth login",
+            15.0,
+            "after installing, OSA did not re-check and offer the detected "
+            "login subcommand",
+        )
+
+        # 4. Run the sign-in. Same mechanism, second child.
+        set_claude_cli_state(
+            signed_in=True,
+            account="luna@example.com",
+            org="Acme Inc",
+            plan="max",
+        )
+        s.write(b"\r")
+        _wait_for(
+            s,
+            "PTY-LOGIN-RAN",
+            6.0,
+            "the sign-in child's output never reached OSA's screen",
+        )
+
+        # 5. The success screen names email, org AND plan. This is the
+        #    complaint the feature exists to answer: "connected" with only an
+        #    email left the owner unsure which account was live.
+        screen = _wait_for(
+            s,
+            "Connected through Claude Code",
+            15.0,
+            "OSA never confirmed the sign-in after the CLI exited",
+        )
+        for needed in ("luna@example.com", "Acme Inc", "max"):
+            if needed not in screen:
+                raise AssertionError(
+                    f"the connected screen did not name {needed!r}.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+        # 6. And back out cleanly: a pty pane that strands chrome is the exact
+        #    class this harness exists for. Two overlays deep (CLI screen, then
+        #    the picker), so more presses than the default.
+        _escape_out(s, "after backing out of the CLI sign-in", presses=5)
+
+    # Leave the stub as the other tests expect to find it.
+    set_claude_cli_state(
+        installed=False,
+        path=None,
+        version=None,
+        version_ok=None,
+        signed_in=False,
+        account=None,
+        org=None,
+        plan=None,
+        login_program=None,
+        login_argv=None,
+        login_display=None,
+    )
 
 
 def test_resize_with_transcript(backend: StubBackend) -> None:
@@ -361,6 +783,10 @@ TESTS = [
     test_height_resize,
     test_small_viewport,
     test_provider_surface,
+    test_one_lone_escape_closes_a_dialog,
+    test_provider_picker_shows_account_plan_and_a_limit_meter,
+    test_a_provider_with_no_reported_quota_says_so_instead_of_drawing_zero,
+    test_claude_code_is_installed_and_signed_in_without_leaving_osa,
 ]
 
 

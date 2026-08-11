@@ -35,8 +35,6 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Store.SessionTranscript
 
-  @cancel_table :osa_cancel_flags
-
   @doc """
   Run the pre-LLM gate pipeline for one turn.
 
@@ -126,12 +124,16 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     _ -> :ok
   end
 
+  # A finished turn clears the cancel flag for this session AND every
+  # descendant it may have spawned. `Loop.cancel/1` flags a whole subtree; a
+  # single-key delete here left every descendant flag behind forever (they are
+  # force-terminated by cancel and so never reach their own delete), which grows
+  # `:osa_cancel_flags` unboundedly and makes a later run under a reused agent
+  # id read as "already cancelled". Set and clear must cover the same set.
   defp clear_cancel_flag(state) do
-    try do
-      :ets.delete(@cancel_table, state.session_id)
-    rescue
-      ArgumentError -> :ok
-    end
+    OptimalSystemAgent.Agent.Loop.clear_cancel(state.session_id)
+  rescue
+    _ -> :ok
   end
 
   defp apply_overrides(state, opts) do
@@ -263,15 +265,17 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     original_messages = state.messages
 
     compacted =
-      Compactor.maybe_compact(
-        original_messages,
-        Map.get(state, :last_input_tokens, 0),
-        state.session_id,
-        # Real per-model window (`effective_context_window_info/2`). Without
-        # this the compactor budgeted every model against a flat 128k and
-        # summarized 1M-window sessions at ~11% occupancy on every turn.
-        context_window: ContextWindow.resolve(state)
-      ) || original_messages
+      bounded_compaction(original_messages, fn ->
+        Compactor.maybe_compact(
+          original_messages,
+          Map.get(state, :last_input_tokens, 0),
+          state.session_id,
+          # Real per-model window (`effective_context_window_info/2`). Without
+          # this the compactor budgeted every model against a flat 128k and
+          # summarized 1M-window sessions at ~11% occupancy on every turn.
+          context_window: ContextWindow.resolve(state)
+        )
+      end) || original_messages
 
     state =
       if compacted != original_messages do
@@ -281,6 +285,66 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       end
 
     %{state | messages: compacted}
+  end
+
+  @doc """
+  Run a compaction closure under a wall-clock bound, falling back to the
+  DETERMINISTIC compaction path when it expires.
+
+  Compaction is the one call an unattended agent cannot skip: history has
+  outgrown the window, so the turn cannot proceed until it shrinks. The
+  summarizer inside `Compactor` reaches a provider (`Providers.chat/2`) with no
+  timeout of its own, and neither `Compactor` nor `ProactiveCompaction`
+  contained the string `timeout` anywhere — so a provider that accepted the
+  connection and then went quiet stalled the whole loop indefinitely, with no
+  turn boundary, no event, and nothing for a watchdog to observe.
+
+  The closure runs in a supervised task; on expiry the task is killed
+  (`Task.shutdown(:brutal_kill)` — a summarizer stuck in a socket read will not
+  honour a graceful shutdown) and we fall back to `Compactor.micro_compact/1`,
+  which is pure/deterministic and reaches no provider. That still shrinks
+  history, so the turn makes progress instead of hanging.
+
+  Bound is `:compaction_timeout_ms` (default 120s — the summarizer is a real
+  generation, so this is generous; it is a wedge detector, not a latency SLA).
+
+  Public + `@doc false` so `Loop` can share the same bound for its `/compact`
+  and `/proactive-compact` call sites without duplicating the policy.
+  """
+  @spec bounded_compaction([map()], (-> [map()] | nil)) :: [map()] | nil
+  def bounded_compaction(fallback_messages, fun) when is_function(fun, 0) do
+    timeout =
+      Application.get_env(:optimal_system_agent, :compaction_timeout_ms, 120_000)
+
+    task = Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fun)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} ->
+        result
+
+      {:exit, reason} ->
+        Logger.error("[turn] compaction crashed: #{inspect(reason)} — deterministic fallback")
+        deterministic_compaction(fallback_messages)
+
+      nil ->
+        Logger.error(
+          "[turn] compaction exceeded #{timeout}ms (wedged summarizer) — " <>
+            "killed it and fell back to deterministic micro-compaction"
+        )
+
+        deterministic_compaction(fallback_messages)
+    end
+  rescue
+    # No TaskSupervisor (bare unit test, stripped release) — degrade to running
+    # inline rather than failing the turn. Unbounded, but strictly better than
+    # crashing, and the supervisor is present in every real runtime.
+    _ -> fun.()
+  end
+
+  defp deterministic_compaction(messages) do
+    Compactor.micro_compact(messages)
+  rescue
+    _ -> messages
   end
 
   @doc """
@@ -359,6 +423,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   @spec persist_user_turn(String.t(), term()) :: :ok
   def persist_user_turn(session_id, message) when is_binary(message) and message != "" do
     SessionTranscript.save_turn(session_id, "user", message)
+
+    # Title the session from its opening message, synchronously and without a
+    # network call, so it is never listed as a bare id — an untitled row in a
+    # picker is useless exactly when you are scanning for the one you want.
+    # A no-op after the first turn. The LLM refinement it schedules is
+    # fire-and-forget: titling cannot block, slow, or fail this turn.
+    OptimalSystemAgent.Memory.SessionTitler.ensure_title(session_id, message)
 
     Task.start(fn ->
       try do

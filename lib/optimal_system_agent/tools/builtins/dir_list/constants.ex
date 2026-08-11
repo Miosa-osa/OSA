@@ -28,4 +28,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Constants do
     ".pypirc"
   ]
   def sensitive_paths, do: @sensitive_paths
+
+  @max_suggestions 3
+  def max_suggestions, do: @max_suggestions
 end

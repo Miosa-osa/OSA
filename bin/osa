@@ -1393,7 +1393,11 @@ case "${1:-}" in
     ;;
 
   doctor)
-    (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run()" 2>/dev/null) || \
+    shift
+    # Forward flags (currently --config / --all) as an Elixir list of strings.
+    DOCTOR_ARGS=$(printf '"%s",' "$@")
+    DOCTOR_ARGS="[${DOCTOR_ARGS%,}]"
+    (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run(${DOCTOR_ARGS})" 2>/dev/null) || \
       echo "Doctor command not available. Try: osa then type /doctor"
     exit 0
     ;;

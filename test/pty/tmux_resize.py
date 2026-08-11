@@ -38,6 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import term_env  # noqa: E402  (needs the sys.path line above)
+
 STUB_PORT = 12793
 SESSION = "osa-resize-probe"
 
@@ -91,8 +93,12 @@ def main() -> int:
         # A dedicated tmux SERVER (-L), so nothing here can touch the user's
         # sessions and a stuck probe cannot outlive this process.
         tmux("kill-server", check=False)
-        env = os.environ.copy()
-        env["OSA_BASE_URL"] = backend.base_url
+        # tmux sets its own TERM/TMUX in the pane, but the harness's outer
+        # identity (TERM_PROGRAM, WEZTERM_*, VTE_VERSION) would otherwise leak
+        # straight through it and misidentify the terminal. See `term_env.py`.
+        env = term_env.clean_env(
+            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+        )
 
         subprocess.run(
             [

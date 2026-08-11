@@ -38,9 +38,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   ## Token Estimation
 
-  Uses a word + punctuation heuristic instead of the naive `len / 4`:
+  Uses a word + punctuation heuristic floored by byte length:
 
-      words * 1.3 + punctuation * 0.5
+      max(words * 1.3 + punctuation * 0.5, bytes / 4)
+
+  Image blocks are excluded from that text estimate and charged a flat
+  per-image cost instead — see `@image_token_estimate`.
 
   ## Public API
 
@@ -90,6 +93,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   alias OptimalSystemAgent.PromptLoader
   alias OptimalSystemAgent.Agent.CompactionSafety
   alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
+  alias OptimalSystemAgent.Agent.Trajectory
 
   @type window_input :: {:ok, pos_integer()} | :unknown | pos_integer() | nil
   @type severity :: :none | :background | :aggressive | :emergency
@@ -115,6 +119,60 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Divide-and-conquer chunk token limit for cold-zone summarization (P7,
   # grok inter_compaction `dnc_chunk_token_limit`).
   @dnc_chunk_token_limit_default 3_000
+
+  # Flat token cost charged for one image block, in place of measuring its
+  # base64 envelope.
+  #
+  # Providers bill an image by its pixel dimensions, not by the size of the
+  # transport encoding: Anthropic charges roughly (width * height) / 750,
+  # capped near 1600 for a full-size image; OpenAI charges a fixed base plus
+  # per-512px-tile cost in the same range. The base64 payload behind it is
+  # typically ~10x larger in token-equivalent bytes, so JSON-encoding an image
+  # block into the text estimate over-states the context it occupies by an
+  # order of magnitude — and over-statement drives needless compaction, which
+  # destroys history that did not need destroying.
+  @image_token_estimate 1_600
+
+  # Block `type` values that carry an image payload, across the provider
+  # dialects this codebase sees: Anthropic (`image`), OpenAI chat
+  # (`image_url`), OpenAI Responses (`input_image`).
+  @image_block_types ~w(image image_url input_image)
+  @text_block_types ~w(text input_text output_text)
+
+  # Reasoning blocks. Anthropic emits `%{type: "thinking", thinking: <text>,
+  # signature: <base64>}`; the signature is opaque metadata that must be echoed
+  # back verbatim (anthropic.ex:808-813) but is NOT billed as content, and it is
+  # routinely several times the length of the reasoning it signs. Charging the
+  # JSON envelope — which is what the fallback path does, and which the byte
+  # floor makes worse — over-states these blocks severalfold.
+  @thinking_block_types ~w(thinking reasoning)
+
+  # `redacted_thinking` carries ONLY an opaque `data` blob — there is no text to
+  # measure. It still occupies context, so it is not free; charge it a small
+  # flat cost rather than the length of its encoding.
+  @redacted_thinking_token_estimate 100
+
+  # Message keys (outside `:content`) that carry replayed reasoning. `ReactLoop`
+  # stores thinking blocks at the top level as `:thinking_blocks`
+  # (react_loop.ex:1011-1013) and providers surface `:reasoning_content`; both
+  # are sent again on the next turn, so both occupy the context window.
+  @reasoning_message_keys [:thinking_blocks, :reasoning_content]
+
+  # Importance score marking an annotated entry as UNDROPPABLE by any purely
+  # positional pipeline step.
+  #
+  # `:compress_cold` spends an LLM call folding the whole cold span into one
+  # summary and prepends it at index 0. `:emergency_truncate` then drops
+  # `Enum.slice(annotated, 0, split)` — index 0 first — so the summary was
+  # destroyed by the same pipeline run that produced it, and since the
+  # pipeline's return value REPLACES `state.messages`, the span it summarized
+  # survived nowhere in context. Scoring it 2.0 did not help: nothing consulted
+  # the annotation.
+  #
+  # The value sits far above anything `message_importance/1` can produce
+  # (its ceiling is 1.0 + 0.5 + 0.3 + 0.3 = 2.1), so an organically-scored
+  # message can never be mistaken for a pin.
+  @pinned_importance 1_000.0
 
   # Acknowledgment patterns — these get compressed first
   @ack_patterns ~r/\A\s*(ok|okay|sure|thanks|thank you|got it|yes|no|yep|nope|k|kk|alright|cool|nice|great|perfect|noted|ack|roger|👍|👌)\s*[\.\!\?]?\s*\z/iu
@@ -288,14 +346,19 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   For message lists: sums per-message token estimates including tool call
   overhead and a 4-token per-message framing cost.
 
-  For strings: uses a word + punctuation heuristic —
-  words * 1.3 + punctuation * 0.5.
+  For strings: uses a word + punctuation heuristic floored by byte length —
+  `max(words * 1.3 + punctuation * 0.5, bytes / 4)`.
+
+  Structured (block-list) content is walked block by block: image blocks are
+  charged `#{@image_token_estimate}` tokens each rather than being JSON-encoded
+  into the text estimate, because a base64 envelope is ~10x the tokens the
+  provider actually bills for the image it carries.
   """
   @spec estimate_tokens([map()] | String.t() | nil) :: non_neg_integer()
   @impl OptimalSystemAgent.Agent.ContextEngine
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
+      content_tokens = estimate_content_tokens(Map.get(msg, :content))
 
       tool_call_tokens =
         case Map.get(msg, :tool_calls) do
@@ -317,7 +380,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         end
 
       # Per-message overhead (role label, delimiters)
-      acc + content_tokens + tool_call_tokens + 4
+      acc + content_tokens + tool_call_tokens + reasoning_tokens(msg) + 4
     end)
   end
 
@@ -330,6 +393,88 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp estimate_tokens_heuristic(text),
     do: OptimalSystemAgent.Utils.Tokens.estimate(text)
+
+  @doc """
+  Token estimate for one message's `content`, which may be a plain string or a
+  provider block list.
+
+  Split out from `estimate_tokens/1` so image blocks never reach the text
+  heuristic. Flattening structured content with `Jason.encode!/1` first — which
+  is what the string path does — drags every base64 byte of an inline image
+  into the estimate, and with a byte-length floor in the heuristic that inflates
+  a single screenshot from its real ~#{@image_token_estimate} tokens to tens of
+  thousands.
+  """
+  @spec estimate_content_tokens(term()) :: non_neg_integer()
+  def estimate_content_tokens(nil), do: 0
+  def estimate_content_tokens(content) when is_binary(content), do: estimate_tokens(content)
+
+  def estimate_content_tokens(blocks) when is_list(blocks),
+    do: Enum.reduce(blocks, 0, fn block, acc -> acc + estimate_block_tokens(block) end)
+
+  def estimate_content_tokens(other), do: estimate_tokens(safe_to_string(other))
+
+  # One content block. Images are charged flat; text blocks are measured on
+  # their text alone (not the JSON envelope); tool-result wrappers recurse so a
+  # nested image is not re-inflated. Anything unrecognised falls back to the
+  # previous behaviour: encode and measure.
+  defp estimate_block_tokens(block) when is_map(block) do
+    cond do
+      image_block?(block) ->
+        @image_token_estimate
+
+      block_type(block) == "redacted_thinking" ->
+        @redacted_thinking_token_estimate
+
+      block_type(block) in @thinking_block_types ->
+        estimate_tokens(thinking_text(block))
+
+      block_type(block) in @text_block_types ->
+        estimate_tokens(block_text(block))
+
+      nested = block_nested_content(block) ->
+        estimate_content_tokens(nested)
+
+      true ->
+        estimate_tokens(safe_to_string(block))
+    end
+  end
+
+  defp estimate_block_tokens(block), do: estimate_tokens(safe_to_string(block))
+
+  defp image_block?(block) when is_map(block), do: block_type(block) in @image_block_types
+
+  # The human-readable reasoning carried by a thinking/reasoning block, with the
+  # opaque `signature` deliberately excluded.
+  @thinking_text_keys [:thinking, "thinking", :reasoning, "reasoning", :text, "text"]
+
+  defp thinking_text(block) do
+    Enum.find_value(@thinking_text_keys, "", fn key ->
+      case Map.get(block, key) do
+        text when is_binary(text) and text != "" -> text
+        _ -> nil
+      end
+    end)
+  end
+
+  # Reasoning replayed on the next request but stored OUTSIDE `:content`.
+  defp reasoning_tokens(msg) do
+    Enum.reduce(@reasoning_message_keys, 0, fn key, acc ->
+      case Map.get(msg, key) || Map.get(msg, Atom.to_string(key)) do
+        nil -> acc
+        "" -> acc
+        [] -> acc
+        value -> acc + estimate_content_tokens(value)
+      end
+    end)
+  end
+
+  defp block_nested_content(block) do
+    case Map.get(block, :content) || Map.get(block, "content") do
+      nested when is_list(nested) -> nested
+      _ -> nil
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # GenServer callbacks
@@ -387,6 +532,16 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         _ -> estimated
       end
 
+    # Everything in the real request that the message-only estimate cannot see:
+    # system prompt, tool schemas, provider framing. The DECISION is made on
+    # `decision_tokens`, but every per-step budget check inside the pipeline
+    # measures the message list — so without this the pipeline compacts until
+    # the MESSAGES fit a budget derived from the FULL request, stops short, and
+    # the next request overflows again on history it just declared small enough.
+    # Zero whenever there is no provider-reported count to compare against, so
+    # the heuristic-only path is unchanged.
+    overhead = max(decision_tokens - estimated, 0)
+
     force? = Keyword.get(opts, :force, false) == true
 
     case resolve_window(Keyword.get(opts, :context_window)) do
@@ -402,7 +557,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
                 "— running #{severity} pipeline"
             )
 
-            run_pipeline(messages, estimated, severity, cw, session_id)
+            run_pipeline(messages, estimated, severity, cw, session_id, overhead)
         end
 
       :unknown when force? ->
@@ -413,7 +568,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             "(provider reported overflow) — running emergency pipeline"
         )
 
-        run_pipeline(messages, estimated, :emergency, :unknown, session_id)
+        run_pipeline(messages, estimated, :emergency, :unknown, session_id, overhead)
 
       :unknown ->
         # DEFER. See maybe_compact/4's "Unknown windows" section: guessing a
@@ -434,7 +589,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp run_pipeline(messages, tokens_before, severity, cw, session_id) do
+  defp run_pipeline(messages, tokens_before, severity, cw, session_id, overhead) do
     # PreCompact hook — SYNCHRONOUS (CC parity). Command hooks receive the
     # full event on stdin and can contribute custom summarization
     # instructions (additionalContext / exit-0 stdout), threaded into every
@@ -476,6 +631,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       Process.put(:osa_compact_instructions, compact_instructions)
     end
 
+    # Scope the iterative structured summary to THIS session for the duration
+    # of this pipeline run — same discipline as `:osa_compact_instructions`
+    # directly above. `get_previous_summary/0` and `store_previous_summary/1`
+    # read this to build a session-keyed ETS key, so one session's summary text
+    # can never be folded into another session's compaction prompt.
+    if is_binary(session_id) do
+      Process.put(:osa_compact_session_id, session_id)
+    else
+      Process.delete(:osa_compact_session_id)
+    end
+
     # Target: get back OUT of the warning band, i.e. below the shared
     # `warn_at/1` threshold — the same reserve-based definition that decided we
     # were too full in the first place. `:emergency` (or a forced compaction
@@ -491,12 +657,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     # Step 0 (micro-compact) is the cheapest — no LLM call, just truncates old tool results
     result =
       {annotated, system_msgs, :none}
-      |> pipeline_step(:micro_compact, target_tokens, cw)
-      |> pipeline_step(:strip_tool_args, target_tokens, cw)
-      |> pipeline_step(:merge_consecutive, target_tokens, cw)
-      |> pipeline_step(:summarize_warm, target_tokens, cw)
-      |> pipeline_step(:compress_cold, target_tokens, cw)
-      |> pipeline_step(:emergency_truncate, target_tokens, cw)
+      |> pipeline_step(:micro_compact, target_tokens, cw, overhead)
+      |> pipeline_step(:strip_tool_args, target_tokens, cw, overhead)
+      |> pipeline_step(:merge_consecutive, target_tokens, cw, overhead)
+      |> pipeline_step(:summarize_warm, target_tokens, cw, overhead)
+      |> pipeline_step(:compress_cold, target_tokens, cw, overhead)
+      |> pipeline_step(:emergency_truncate, target_tokens, cw, overhead)
 
     {final_annotated, final_system, last_step} = result
     final_messages = final_system ++ strip_annotations(final_annotated)
@@ -569,9 +735,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   # Pipeline step dispatcher — skips if already under budget
   @doc false
-  defp pipeline_step({annotated, system_msgs, prev_step}, step, target_tokens, cw) do
+  defp pipeline_step({annotated, system_msgs, prev_step}, step, target_tokens, cw, overhead) do
+    # `overhead` carries the part of the real request the message list cannot
+    # see (system prompt + tool schemas), so this check measures the SAME
+    # quantity the severity decision was made on. Without it the pipeline
+    # declares victory while the actual request is still `overhead` over budget.
     current_tokens =
-      estimate_tokens(system_msgs) + estimate_tokens(strip_annotations(annotated))
+      overhead + estimate_tokens(system_msgs) + estimate_tokens(strip_annotations(annotated))
 
     if current_tokens <= target_tokens do
       # Already under budget — skip remaining steps
@@ -895,7 +1065,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             :ok ->
               store_previous_summary(summary)
               wrapped = prepend_user_query(summary, latest_query)
-              summary_entry = {%{role: "system", content: "[Context Summary]\n#{wrapped}"}, 2.0}
+
+              summary_entry =
+                {%{role: "system", content: "[Context Summary]\n#{wrapped}"}, @pinned_importance}
+
               {[summary_entry | rest], system_msgs, :compress_cold}
 
             {:error, reason} ->
@@ -931,8 +1104,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       snapped = CompactionSafety.safe_split_index(msgs, candidate)
       split = if snapped >= total, do: candidate, else: snapped
 
-      dropped = Enum.slice(annotated, 0, split)
-      kept = Enum.slice(annotated, split, total - split)
+      head = Enum.slice(annotated, 0, split)
+      tail = Enum.slice(annotated, split, total - split)
+
+      # The positional split is the whole point of this step, but it must not
+      # take the pinned cold-zone summary with it. A summary produced earlier in
+      # THIS pipeline run sits at index 0 — the first thing a positional slice
+      # reaches — and it is the only surviving record of the span it folded up.
+      # Carry pinned entries across the split, in order, ahead of the tail.
+      {pinned, dropped} = Enum.split_with(head, &pinned?/1)
 
       topic_notice = %{
         role: "system",
@@ -941,7 +1121,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       }
 
       updated_system = system_msgs ++ [topic_notice]
-      {kept, updated_system, :emergency_truncate}
+      {pinned ++ tail, updated_system, :emergency_truncate}
     end
   end
 
@@ -983,6 +1163,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
     max(base + tool_bonus + tool_result_bonus + length_bonus + ack_penalty, 0.1)
   end
+
+  # True for an annotated entry that no positional step may drop.
+  defp pinned?({_msg, importance}) when is_number(importance),
+    do: importance >= @pinned_importance
+
+  defp pinned?(_), do: false
 
   @doc false
   defp strip_annotations(annotated) do
@@ -1685,12 +1871,52 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp single_msg_tokens(msg), do: estimate_tokens([msg])
 
   # ── Structured Summary Persistence (ETS) ─────────────────────────────
+  #
+  # The iterative structured summary is SESSION-SCOPED. It used to live under a
+  # single global `:previous_summary` key in the shared `:osa_compactor_state`
+  # table, which meant session B's next compaction folded session A's summary
+  # into its prompt as the `PREVIOUS SUMMARY` / `<chunk_summary index="prev">`
+  # block — conversation content crossing a session boundary, and then being
+  # shipped to the provider. Keys are `{:previous_summary, session_id}` now
+  # (mirroring `{:compact_failures, session_id}` in `Loop.ProactiveCompaction`)
+  # and `forget_session/1` drops them on teardown so they do not outlive the
+  # session either.
+
+  # Session key for the current compaction run. `nil` session ids (ad-hoc /
+  # test callers with no session) share `:global` — the same fallback
+  # `ProactiveCompaction` uses — but every real session is isolated.
+  defp summary_key do
+    case Process.get(:osa_compact_session_id) do
+      sid when is_binary(sid) and sid != "" -> sid
+      _ -> :global
+    end
+  end
+
+  @doc """
+  Drop the persisted structured summary for `session_id`.
+
+  Called from session teardown (`Runtime.SessionTeardown`) and from the CLI's
+  `stop_session/1`, which is the path `/clear`, `/new` and session exit all go
+  through. Idempotent and never raises.
+  """
+  @spec forget_session(String.t() | nil) :: :ok
+  def forget_session(session_id) when is_binary(session_id) do
+    :ets.delete(:osa_compactor_state, {:previous_summary, session_id})
+    :ets.delete(:osa_compactor_state, {:last_summary_at, session_id})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def forget_session(_), do: :ok
 
   @doc false
   defp get_previous_summary do
+    key = summary_key()
+
     try do
-      case :ets.lookup(:osa_compactor_state, :previous_summary) do
-        [{:previous_summary, summary}] -> summary
+      case :ets.lookup(:osa_compactor_state, {:previous_summary, key}) do
+        [{{:previous_summary, ^key}, summary}] -> summary
         _ -> nil
       end
     rescue
@@ -1700,9 +1926,11 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp store_previous_summary(summary) do
+    key = summary_key()
+
     try do
-      :ets.insert(:osa_compactor_state, {:previous_summary, summary})
-      :ets.insert(:osa_compactor_state, {:last_summary_at, DateTime.utc_now()})
+      :ets.insert(:osa_compactor_state, {{:previous_summary, key}, summary})
+      :ets.insert(:osa_compactor_state, {{:last_summary_at, key}, DateTime.utc_now()})
     rescue
       _ -> :ok
     end
@@ -1773,6 +2001,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       "#{role}#{tool_info}: #{content}"
     end)
     |> Enum.join("\n")
+    # Every summarization prompt in this module is assembled from this
+    # function's output (`call_summary_llm`, `call_key_facts_llm`,
+    # `summarize_chunk`), so this is THE text boundary at which raw
+    # conversation — including whatever a shell command echoed — is handed to
+    # a provider and then written back into context as a summary. Redact once,
+    # here, rather than at each of the three call sites.
+    |> Trajectory.redact()
   end
 
   # Strips images/media from message content, replacing each media block with

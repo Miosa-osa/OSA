@@ -43,6 +43,15 @@ pub fn render_diff_body(
     start_line: usize,
     language: Option<&str>,
 ) -> Vec<Line<'static>> {
+    // Both sides are untrusted: `old` is a file off disk (a hostile repo can
+    // choose those bytes) and `new` is the model's proposed replacement. The
+    // renderer paints its own +/- backgrounds and word-level highlights as
+    // ratatui styles, so scrubbing the content strips the escape-injection
+    // vector and leaves the coloring untouched. `\n` survives, so the scrub
+    // cannot change the line count `TextDiff` and the syntect run indices are
+    // aligned on.
+    let old = &*crate::render::sanitize::scrub_untrusted_document(old);
+    let new = &*crate::render::sanitize::scrub_untrusted_document(new);
     let theme = crate::style::theme();
     let diff = TextDiff::from_lines(old, new);
     let groups = diff.grouped_ops(3);

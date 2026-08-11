@@ -32,20 +32,20 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
   # against.
   @cw 128_000
 
-  # The cold-zone summarizer persists its last structured summary in the GLOBAL
-  # `:osa_compactor_state` ETS table (created at app boot, :public/:named_table).
-  # That entry is written by ANY compaction anywhere in the suite — other test
-  # modules and the app's own proactive/background compaction — and the
-  # divide-and-conquer cold path folds it back in as a `<chunk_summary
-  # index="prev">` block. A stale entry perturbs these deterministic pipeline
-  # assertions (e.g. it can unbalance the chunk-tag validation so NO
-  # `[Context Summary]` is emitted). Clear the summary keys before each test so
-  # `get_previous_summary/0` is deterministically empty.
+  # The cold-zone summarizer persists its last structured summary in the shared
+  # `:osa_compactor_state` ETS table (created at app boot, :public/:named_table),
+  # keyed by session id — `{:previous_summary, session_id}`. These tests call
+  # `maybe_compact/1` with no session, which lands on the `:global` key; the
+  # divide-and-conquer cold path folds whatever it finds there back in as a
+  # `<chunk_summary index="prev">` block. A stale entry perturbs these
+  # deterministic pipeline assertions (e.g. it can unbalance the chunk-tag
+  # validation so NO `[Context Summary]` is emitted). Clear every summary key
+  # before each test so `get_previous_summary/0` is deterministically empty.
   setup do
     clear_compactor_summary = fn ->
       try do
-        :ets.delete(:osa_compactor_state, :previous_summary)
-        :ets.delete(:osa_compactor_state, :last_summary_at)
+        :ets.match_delete(:osa_compactor_state, {{:previous_summary, :_}, :_})
+        :ets.match_delete(:osa_compactor_state, {{:last_summary_at, :_}, :_})
       rescue
         ArgumentError -> :ok
       end

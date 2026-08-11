@@ -538,6 +538,43 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     end
   end
 
+  # Everything a sign-in surface needs in order to DRIVE the Claude Code CLI
+  # rather than tell the user to go and run it: whether the binary is there,
+  # what to spawn to install it, and which login subcommand THIS installation
+  # actually has. See `Auth.Providers.ClaudeCli.cli_state/0`.
+  #
+  # A separate route from `/auth/login/start` because it is a different kind of
+  # thing: the broker's device-code sessions are owned by the backend, whereas
+  # this one is answered once and then acted on by whichever surface asked —
+  # the pty the user watches lives in the TUI, next to the keyboard.
+  get "/auth/cli/claude" do
+    case verify_bearer_when_required(conn) do
+      :ok -> json(conn, 200, OptimalSystemAgent.Auth.Providers.ClaudeCli.cli_state())
+      :unauthorized -> json(conn, 401, %{error: "unauthorized"})
+    end
+  end
+
+  # The last quota window each provider reported, for a picker that wants to
+  # show a limit meter beside a provider's name.
+  #
+  # Pure read of `Usage.RateLimits`, which is a cache of response headers and
+  # nothing else — this route can no more spend a metered request than the
+  # `/usage` command can. A provider absent from the map has reported nothing
+  # yet, and MUST be rendered as "not known" rather than zero; the payload
+  # carries no key for it at all precisely so a renderer cannot default it.
+  get "/usage/quota" do
+    case verify_bearer_when_required(conn) do
+      :ok ->
+        json(conn, 200, %{
+          providers: OptimalSystemAgent.Usage.RateLimits.all(),
+          now: System.system_time(:second)
+        })
+
+      :unauthorized ->
+        json(conn, 401, %{error: "unauthorized"})
+    end
+  end
+
   # Authentication is required once setup is complete, and not before — the
   # same rule the onboarding routes follow, and for the same reason: during
   # first-run there is no token to present, and the sign-in screen has to work

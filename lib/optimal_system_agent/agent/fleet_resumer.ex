@@ -23,12 +23,35 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
        marking those rows terminal so counts settle. Runs just re-dispatched are
        alive again and are therefore skipped by the reconcile.
 
+  ## Cross-process safety (the reason this module cannot trust `alive_fun`)
+
+  `resume_on_boot/1` runs at EVERY BEAM boot, and every `osa` invocation is its
+  own BEAM. `RunStore.rehydrate/0` reads the machine-global `~/.osa/agent-runs`,
+  so a second invocation's index is seeded with the FIRST invocation's live
+  `:running` rows — and the `SessionRegistry` probe, being node-local, reports
+  every one of them as dead. Unguarded, that made a second `osa` both
+  re-dispatch (duplicate execution) and cancel (`reconcile_stale_running/1`)
+  another process's healthy in-flight runs.
+
+  So "dead" is never inferred from a registry lookup alone. A run is a candidate
+  only if this process could take its `RunStore` **ownership lease**
+  (`lease_claimable?/1` — read-only, keeps selection side-effect free), and the
+  lease is actually **acquired immediately before** the re-dispatch, not merely
+  at selection time. A run owned by another live process is skipped in both
+  phases. Reconciliation is gated the same way inside
+  `RunStore.reconcile_stale_running/1`.
+
   ## Opt-in and budget
 
   Re-dispatch is **opt-in** and safe-by-default: it only runs when the app-env
   flag `:fleet_resume_on_boot` is truthy (default `false`). Reconciliation of
   stale rows ALWAYS runs at boot regardless of the flag, since inflated counts
-  are never desirable. The number of runs re-dispatched in one boot is capped by
+  are never desirable — note that the flag has never gated the cancellation half
+  (the `if enabled` in `resume_on_boot/1` closes before it), so before the
+  ownership lease existed, turning fleet-resume OFF suppressed the duplicate
+  dispatch but NOT the cross-process cancellation. It is the lease, not the
+  flag, that makes the unconditional reconcile safe. The number of runs
+  re-dispatched in one boot is capped by
   `:fleet_resume_max` (default `#{10}`) so a large dead fleet cannot stampede the
   node on restart.
 
@@ -71,74 +94,106 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
     * `:resume_fun` — `(agent_id, message -> {:ok, term} | {:error, term})`,
       default `Orchestrator.resume_subagent/2`. Injectable so selection can be
       tested without booting real loops.
+    * `:claimable_fun` — read-only ownership probe used for SELECTION, default
+      `RunStore.lease_claimable?/1`.
+    * `:claim_fun`  — ownership ACQUISITION used immediately before dispatch and
+      before reconciliation, default `RunStore.claim_lease/1`.
+
+  `:skipped` in the summary lists runs that were dropped because another live
+  process owns them.
   """
   @spec resume_on_boot(keyword()) :: %{
           enabled: boolean(),
           resumed: [String.t()],
           failed: [String.t()],
+          skipped: [String.t()],
           reconciled: [String.t()]
         }
   def resume_on_boot(opts \\ []) do
     enabled = Keyword.get(opts, :enabled, enabled?())
     alive_fun = Keyword.get(opts, :alive_fun, &default_alive?/1)
+    claim_fun = Keyword.get(opts, :claim_fun, &RunStore.claim_lease/1)
 
-    {resumed, failed} =
+    {resumed, failed, skipped} =
       if enabled do
         candidates = Keyword.get_lazy(opts, :runs, &RunStore.all_running/0)
+        claimable_fun = Keyword.get(opts, :claimable_fun, &RunStore.lease_claimable?/1)
 
         selected =
           qualifying_orphans(candidates,
             alive_fun: alive_fun,
             posture_fun: Keyword.get(opts, :posture_fun, &default_autonomous?/1),
+            claimable_fun: claimable_fun,
             budget: Keyword.get(opts, :budget, max_resumes())
           )
 
         warn_queued_gap(candidates, selected)
-        dispatch(selected, resume_fun(opts))
+        {resumed, failed, lost_in_flight} = dispatch(selected, resume_fun(opts), claim_fun)
+
+        # Runs another process owns are dropped in two places — at selection (the
+        # read-only probe) and again at dispatch (if ownership changed in between).
+        # Report both, so "skipped because someone else owns it" is never silent.
+        {resumed, failed, foreign(candidates, claimable_fun) ++ lost_in_flight}
       else
-        {[], []}
+        {[], [], []}
       end
 
     # Reconcile stale rows AFTER re-dispatch so the just-resumed runs (now alive)
-    # are skipped and only true ghosts are marked terminal.
+    # are skipped and only true ghosts are marked terminal. The reconcile takes
+    # the ownership lease itself, so a run owned by another live `osa` process is
+    # left strictly alone even though our node-local `alive_fun` says it is dead.
     reconciled =
-      RunStore.reconcile_stale_running(alive_fun: alive_fun)
+      RunStore.reconcile_stale_running(alive_fun: alive_fun, claim_fun: claim_fun)
       |> Enum.map(& &1.agent_id)
 
-    summary = %{enabled: enabled, resumed: resumed, failed: failed, reconciled: reconciled}
+    summary = %{
+      enabled: enabled,
+      resumed: resumed,
+      failed: failed,
+      skipped: skipped,
+      reconciled: reconciled
+    }
 
     Logger.info(
       "[FleetResumer] boot recovery: enabled=#{enabled} resumed=#{length(resumed)} " <>
-        "failed=#{length(failed)} reconciled=#{length(reconciled)}"
+        "failed=#{length(failed)} skipped=#{length(skipped)} reconciled=#{length(reconciled)}"
     )
 
     summary
   rescue
     e ->
       Logger.warning("[FleetResumer] boot recovery failed: #{Exception.message(e)}")
-      %{enabled: false, resumed: [], failed: [], reconciled: []}
+      %{enabled: false, resumed: [], failed: [], skipped: [], reconciled: []}
   end
 
   @doc """
   Pure selection: which `:running` runs qualify for boot re-dispatch.
 
-  A run qualifies when it is `:running`, its owning process is gone (crash
-  orphan, not a currently-live run) and it was dispatched under an autonomous
-  posture. Results are ordered root-first (walking the `parent_session_id` chain
-  within the candidate set) so parents resume before their descendants, then
-  truncated to `:budget`.
+  A run qualifies when it is `:running`, **no other live process owns it**, its
+  owning process is gone on this node (crash orphan, not a currently-live run)
+  and it was dispatched under an autonomous posture. Results are ordered
+  root-first (walking the `parent_session_id` chain within the candidate set) so
+  parents resume before their descendants, then truncated to `:budget`.
 
-  Options: `:alive_fun`, `:posture_fun`, `:budget` (see `resume_on_boot/1`).
-  Deterministic and side-effect free — the unit-test seam for W3.
+  The ownership filter runs FIRST and is the only one that can answer the
+  cross-process question; `alive_fun` merely narrows things further within this
+  node. Selection uses the read-only probe — the lease itself is taken in
+  `dispatch/3`, immediately before the run is restarted.
+
+  Options: `:alive_fun`, `:posture_fun`, `:claimable_fun`, `:budget` (see
+  `resume_on_boot/1`). Deterministic and side-effect free — the unit-test seam
+  for W3.
   """
   @spec qualifying_orphans([RunStore.run()], keyword()) :: [RunStore.run()]
   def qualifying_orphans(runs, opts \\ []) when is_list(runs) do
     alive_fun = Keyword.get(opts, :alive_fun, &default_alive?/1)
     posture_fun = Keyword.get(opts, :posture_fun, &default_autonomous?/1)
+    claimable_fun = Keyword.get(opts, :claimable_fun, &RunStore.lease_claimable?/1)
     budget = Keyword.get(opts, :budget, max_resumes())
 
     runs
     |> Enum.filter(fn r -> Map.get(r, :status) == :running end)
+    |> Enum.filter(fn r -> invoke_bool(claimable_fun, r.agent_id) end)
     |> Enum.reject(fn r -> invoke_bool(alive_fun, r.agent_id) end)
     |> Enum.filter(fn r -> invoke_bool(posture_fun, r) end)
     |> order_root_first()
@@ -169,22 +224,61 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
 
   defp take_budget(runs, _), do: runs
 
-  defp dispatch(runs, resume_fun) do
-    Enum.reduce(runs, {[], []}, fn run, {ok, err} ->
-      case invoke_resume(resume_fun, run.agent_id) do
+  # Ownership is acquired here — immediately before the re-dispatch, the only
+  # moment that matters. Selection happened earlier and the world may have moved
+  # since; a run another process claimed in between is skipped, never duplicated.
+  # A resume that fails releases the lease again so the run is not left pinned to
+  # a process that is not running it.
+  defp dispatch(runs, resume_fun, claim_fun) do
+    Enum.reduce(runs, {[], [], []}, fn run, {ok, err, skipped} ->
+      case invoke_claim(claim_fun, run.agent_id) do
         {:ok, _} ->
-          Logger.info("[FleetResumer] re-dispatched orphan #{run.agent_id}")
-          {[run.agent_id | ok], err}
+          case invoke_resume(resume_fun, run.agent_id) do
+            {:ok, _} ->
+              Logger.info("[FleetResumer] re-dispatched orphan #{run.agent_id}")
+              {[run.agent_id | ok], err, skipped}
+
+            {:error, reason} ->
+              Logger.warning(
+                "[FleetResumer] resume failed for #{run.agent_id}: #{inspect(reason)}"
+              )
+
+              RunStore.release_lease(run.agent_id)
+              {ok, [run.agent_id | err], skipped}
+          end
 
         {:error, reason} ->
-          Logger.warning(
-            "[FleetResumer] resume failed for #{run.agent_id}: #{inspect(reason)}"
+          Logger.info(
+            "[FleetResumer] not resuming #{run.agent_id}: owned by another live process " <>
+              "(#{inspect(reason)})"
           )
 
-          {ok, [run.agent_id | err]}
+          {ok, err, [run.agent_id | skipped]}
       end
     end)
-    |> then(fn {ok, err} -> {Enum.reverse(ok), Enum.reverse(err)} end)
+    |> then(fn {ok, err, skipped} ->
+      {Enum.reverse(ok), Enum.reverse(err), Enum.reverse(skipped)}
+    end)
+  end
+
+  # `:running` candidates that another live process demonstrably owns.
+  defp foreign(candidates, claimable_fun) do
+    candidates
+    |> Enum.filter(fn r -> Map.get(r, :status) == :running end)
+    |> Enum.reject(fn r -> invoke_bool(claimable_fun, r.agent_id) end)
+    |> Enum.map(& &1.agent_id)
+  end
+
+  defp invoke_claim(fun, agent_id) do
+    case fun.(agent_id) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp invoke_resume(fun, agent_id) do

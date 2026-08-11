@@ -33,8 +33,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
       when the matched span is much larger than `old_string` (see
       `disproportionate?/2`) — this stops an anchor pair from swallowing a giant
       unrelated block. Returns `{:error, :disproportionate}`.
+    * **`replace_all` requires an EXACT match.** See below.
     * **Not found.** If no strategy produces any occurring candidate, returns
       `{:error, :not_found}`.
+
+  ## `replace_all` requires an exact match
+
+  Only `:simple` and `:multi_occurrence` are **exact**: their candidate is
+  `old_string` itself, verbatim. Every other strategy is **approximate** — its
+  candidate is a region of the file that merely *resembles* `old_string` after
+  trimming, whitespace-collapsing, unescaping, or Levenshtein scoring.
+
+  An approximate candidate is a *suggestion about one site*. It is not
+  `old_string`, so replacing it globally rewrites every region that happens to
+  contain that candidate text — including regions that never contained
+  `old_string` at all (a comment, a string literal, an unrelated call site).
+  That is silent source corruption on disk, discovered much later.
+
+  The `disproportionate?/2` guard does not help here: it bounds the *span size*
+  of a single match and says nothing about how faithfully the match resembles
+  `old_string`.
+
+  So when `replace_all: true` is requested and the winning strategy is
+  approximate, the cascade refuses with
+  `{:error, {:replace_all_approximate, strategy}}` rather than guessing. The
+  refusal is unconditional — it fires even when the candidate happens to occur
+  only once, because a strategy that matched one site approximately gives no
+  evidence about the *other* sites `replace_all` claims to cover (a second site
+  with different drift produces a different candidate and is silently skipped,
+  yet the caller is told "replaced all occurrences").
 
   ## Return
 
@@ -42,6 +69,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
     * `{:error, :not_found}`
     * `{:error, :ambiguous, count}`
     * `{:error, :disproportionate}`
+    * `{:error, {:replace_all_approximate, strategy}}`
   """
 
   @type strategy ::
@@ -70,9 +98,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
     :multi_occurrence
   ]
 
+  # Strategies whose candidate is `old_string` VERBATIM, established by reading
+  # each candidate function rather than inferring from its name:
+  #
+  #   * `:simple`           — `candidates/3` returns `[find]` unchanged.
+  #   * `:multi_occurrence` — returns `List.duplicate(find, n)`; every element is
+  #                           `find` itself.
+  #
+  # Every other strategy returns a slice of the FILE that only resembles `find`:
+  #
+  #   * `:line_trimmed`          — per-line trim equality; the candidate carries
+  #                                the file's own leading/trailing whitespace.
+  #   * `:block_anchor`          — first/last line anchors, interior accepted on
+  #                                a Levenshtein average ≥ 0.65. The interior
+  #                                may differ arbitrarily.
+  #   * `:whitespace_normalized` — whitespace runs collapsed; `ws_substring/2`
+  #                                can even return a FRAGMENT of a line.
+  #   * `:indentation_flexible`  — common leading indent stripped before compare.
+  #   * `:escape_normalized`     — backslash escapes expanded before compare.
+  #   * `:trimmed_boundary`      — the block's boundary whitespace trimmed off.
+  #   * `:context_aware`         — anchors + only ≥50% interior line agreement.
+  @exact_strategies [:simple, :multi_occurrence]
+
   @doc "The ordered list of strategy atoms the cascade runs."
   @spec strategies() :: [strategy()]
   def strategies, do: @strategies
+
+  @doc """
+  True when `strategy` matches `old_string` verbatim, so its candidate IS
+  `old_string` and a global replace is faithful to what the caller asked for.
+
+  False for every approximate strategy — see the "`replace_all` requires an
+  exact match" section of the moduledoc.
+  """
+  @spec exact_strategy?(strategy()) :: boolean()
+  def exact_strategy?(strategy) when strategy in @exact_strategies, do: true
+  def exact_strategy?(strategy) when strategy in @strategies, do: false
 
   # ── Public entry ──────────────────────────────────────────────────────
 
@@ -81,6 +142,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
           | {:error, :not_found}
           | {:error, :ambiguous, non_neg_integer()}
           | {:error, :disproportionate}
+          | {:error, {:replace_all_approximate, strategy()}}
   def replace(content, old, new, replace_all) do
     run(@strategies, content, old, new, replace_all, {false, 0})
   end
@@ -97,12 +159,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
       |> candidates(content, old)
       |> Enum.reject(&(&1 == ""))
 
-    case try_candidates(candidates, content, old, new, replace_all) do
+    case try_candidates(candidates, content, old, new, replace_all, strategy) do
       {:done, new_content, count} ->
         {:ok, new_content, count, strategy}
 
       :disproportionate ->
         {:error, :disproportionate}
+
+      :replace_all_approximate ->
+        {:error, {:replace_all_approximate, strategy}}
 
       {:continue, delta} ->
         run(rest, content, old, new, replace_all, merge_state(state, delta))
@@ -112,17 +177,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
   # Walk one strategy's candidates. First candidate that both occurs and (unless
   # replace_all) occurs uniquely wins. The disproportionate guard fires on the
   # first occurring candidate regardless of uniqueness (mirrors opencode).
-  defp try_candidates([], _content, _old, _new, _replace_all), do: {:continue, {false, 0}}
+  defp try_candidates([], _content, _old, _new, _replace_all, _strategy),
+    do: {:continue, {false, 0}}
 
-  defp try_candidates([search | rest], content, old, new, replace_all) do
+  defp try_candidates([search | rest], content, old, new, replace_all, strategy) do
     count = occurrences(content, search)
 
     cond do
       count == 0 ->
-        try_candidates(rest, content, old, new, replace_all)
+        try_candidates(rest, content, old, new, replace_all, strategy)
 
       disproportionate?(search, old) ->
         :disproportionate
+
+      # `replace_all` is a licence to rewrite EVERY occurrence of `search`. That
+      # is only faithful to the caller's request when `search` IS `old_string`.
+      # Under an approximate strategy it is not, and a global replace would
+      # clobber regions that never contained `old_string`. Refuse instead.
+      replace_all and not verbatim_match?(strategy, search, old) ->
+        :replace_all_approximate
 
       replace_all ->
         {:done, String.replace(content, search, new, global: true), count}
@@ -132,11 +205,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher do
 
       true ->
         # Found, but not unique. Remember it and keep looking for a unique match.
-        case try_candidates(rest, content, old, new, replace_all) do
+        case try_candidates(rest, content, old, new, replace_all, strategy) do
           {:continue, {_found?, amb}} -> {:continue, {true, max(amb, count)}}
           other -> other
         end
     end
+  end
+
+  # Belt and braces: the strategy must be one we classified exact AND the
+  # candidate it produced must actually be `old` verbatim. The second check
+  # makes the guard independent of the classification staying correct if a
+  # strategy implementation ever changes.
+  defp verbatim_match?(strategy, search, old) do
+    exact_strategy?(strategy) and search == old
   end
 
   defp merge_state({f1, a1}, {f2, a2}), do: {f1 or f2, max(a1, a2)}

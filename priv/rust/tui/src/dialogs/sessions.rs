@@ -59,6 +59,17 @@ pub struct SessionBrowser {
 }
 
 impl SessionBrowser {
+    /// The listed title for `id`, if this browser knows it and it is non-empty.
+    /// Lets the caller adopt a session's title at the moment it switches, so the
+    /// status bar is correct immediately instead of after the next SSE push.
+    pub fn title_for(&self, id: &str) -> Option<String> {
+        self.sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.trim().to_string())
+            .filter(|t| !t.is_empty())
+    }
+
     pub fn new(sessions: Vec<SessionInfo>, active_id: String) -> Self {
         let filtered: Vec<usize> = (0..sessions.len()).collect();
         Self {

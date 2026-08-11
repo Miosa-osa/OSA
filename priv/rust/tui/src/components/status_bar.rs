@@ -5,8 +5,22 @@ use ratatui::widgets::Paragraph;
 use crate::client::types::Signal;
 use crate::event::Event;
 use crate::style;
+use crate::util::{cols, fit_cols};
 
 use super::{Component, ComponentAction};
+
+/// Columns row 0 keeps in reserve for the context meter and the trailing chips
+/// when deciding whether the session title fits. The meter (`▁▂▃ 42% ctx`) plus
+/// its separator is ~16 columns; the rest covers the version chip and a little
+/// slack so a title never squeezes the meter off the right edge.
+const TITLE_RESERVE_COLS: usize = 26;
+/// Below this the title is unreadable, so it is omitted instead of shown as a
+/// stub like "Debugging pr…" — a fragment that costs row space and answers
+/// nothing. Verified against the rendered row: 80 columns shows a full title,
+/// 60 shows none.
+const TITLE_MIN_COLS: usize = 16;
+/// Upper bound so a long title cannot dominate row 0 on a wide terminal.
+const TITLE_MAX_COLS: usize = 32;
 
 /// Tool-permission mode. OSA's Shift+Tab cycle is
 /// `ask → auto-edit → plan → overdrive (full auto)`. `Auto` is retained as a
@@ -351,6 +365,10 @@ pub struct StatusBar {
     coordinator: bool,
     shell_count: usize,
     cwd_basename: String,
+    /// Human-readable title of the active session ("Debugging production 500
+    /// errors"), pushed from the backend over SSE. None ⇒ untitled (a session
+    /// with no prompt yet) ⇒ the segment is omitted.
+    session_title: Option<String>,
     /// "goal N/max" indicator when a /goal auto-continue loop is active.
     goal_label: Option<String>,
     /// Transient goal-verification indicator, rendered next to the goal line.
@@ -420,6 +438,7 @@ impl StatusBar {
             coordinator: false,
             shell_count: 0,
             cwd_basename,
+            session_title: None,
             goal_label: None,
             goal_verify: None,
             effort: None,
@@ -456,6 +475,27 @@ impl StatusBar {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| path.to_string());
         self.cwd_basename = name;
+    }
+
+    /// Set (or clear with None) the session-title segment. Blank titles are
+    /// normalized to None so an empty backend value renders nothing rather than
+    /// a stray separator.
+    ///
+    /// The title is **model-generated** (the backend asks the model to name the
+    /// conversation) and lands in *persistent chrome* — row 0, redrawn every
+    /// frame. That makes it the worst place in the UI for a raw escape: one
+    /// injected OSC survives every redraw for the life of the session. Scrubbed
+    /// here, at the single setter, so no render site has to remember.
+    pub fn set_session_title(&mut self, title: Option<String>) {
+        let title = crate::render::sanitize::scrub_untrusted_line_opt(title);
+        self.session_title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+    }
+
+    /// The active session title, if any.
+    pub fn session_title(&self) -> Option<&str> {
+        self.session_title.as_deref()
     }
 
     /// Set (or clear with None) the reasoning-effort chip.
@@ -940,6 +980,31 @@ impl Component for StatusBar {
         }
         spans.push(Span::styled(self.cwd_basename.clone(), theme.header_provider()));
 
+        // Session title — what this conversation is ABOUT, next to where it is.
+        //
+        // Budgeted, never unconditional. Row 0 has no global truncation: ratatui
+        // simply clips at the right edge, so an unbudgeted label here would push
+        // the context meter off-screen on a narrow pane — the meter is the one
+        // segment that must always survive. So the title only spends what is
+        // left after the segments already built and a reserve for the meter and
+        // the trailing chips, and is dropped entirely when that is too little to
+        // be worth reading.
+        if let Some(title) = self.session_title.as_deref().filter(|t| !t.is_empty()) {
+            // Budget off the ACTUAL draw rect, not `self.width`: the live app
+            // never calls `set_width` (only test helpers and the inline-viewport
+            // path do), so `self.width` is 0 in a real terminal and a
+            // self.width-based budget would silently never render the title.
+            let used: usize = spans.iter().map(|s| cols(s.content.as_ref())).sum();
+            let budget = (area.width as usize)
+                .saturating_sub(used)
+                .saturating_sub(TITLE_RESERVE_COLS);
+            if budget >= TITLE_MIN_COLS {
+                let fitted = fit_cols(title, budget.min(TITLE_MAX_COLS));
+                spans.push(Span::styled("  ", theme.status_sep()));
+                spans.push(Span::styled(fitted, theme.header_model()));
+            }
+        }
+
         // Permission mode is shown exactly ONCE — on the ⏵⏵ line (row 1),
         // matching Claude Code's single mode indicator
         // (PromptInputFooterLeftSide.tsx: `{symbol} {title.toLowerCase()} on`).
@@ -1383,6 +1448,82 @@ mod status_bar_tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    /// Render row 0 at `width` with an optional session title and flatten it.
+    fn render_title_row(width: u16, title: Option<&str>) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut sb = StatusBar::new();
+        sb.set_width(width);
+        sb.set_provider_info("anthropic", "claude-opus-4");
+        sb.set_cwd_path("/home/dev/OSA");
+        sb.set_context(0.6, 120_000, 200_000);
+        sb.set_session_title(title.map(|t| t.to_string()));
+        let mut term = Terminal::new(TestBackend::new(width, 2)).unwrap();
+        term.draw(|f| sb.draw(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        // Row 0 only.
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn session_title_renders_in_the_status_bar() {
+        let row = render_title_row(120, Some("Debugging production 500 errors"));
+        assert!(
+            row.contains("Debugging production 500 errors"),
+            "title missing from status row: {row:?}"
+        );
+    }
+
+    #[test]
+    fn session_title_setter_normalizes_blanks() {
+        let mut sb = StatusBar::new();
+        sb.set_session_title(Some("   ".to_string()));
+        assert_eq!(sb.session_title(), None);
+        sb.set_session_title(Some("  Rate limiting  ".to_string()));
+        assert_eq!(sb.session_title(), Some("Rate limiting"));
+        sb.set_session_title(None);
+        assert_eq!(sb.session_title(), None);
+    }
+
+    #[test]
+    fn session_title_never_displaces_the_context_meter() {
+        // Row 0 has no global truncation — ratatui clips at the right edge. The
+        // context meter is the segment that must always survive, and the PTY
+        // harness keys its `status` band on "ctx". A title must never push it
+        // off, at ANY width, however long the title is.
+        let long = "An extremely long session title that would happily eat the whole row";
+        for width in [40u16, 60, 72, 80, 100, 120, 160, 200] {
+            let with = render_title_row(width, Some(long));
+            assert!(
+                with.contains("ctx"),
+                "context meter clipped at width {width}: {with:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_title_is_omitted_when_there_is_no_room() {
+        // A narrow pane drops the title entirely rather than rendering a stub.
+        // 60 columns is the verified boundary: it omits, 80 shows it in full.
+        for width in [40u16, 60] {
+            let narrow = render_title_row(width, Some("Debugging production 500 errors"));
+            assert!(
+                !narrow.contains("Debugging"),
+                "width {width} rendered a title stub: {narrow:?}"
+            );
+            assert!(narrow.contains("ctx"));
+        }
+        assert!(render_title_row(80, Some("Debugging production 500 errors"))
+            .contains("Debugging production 500 errors"));
+    }
+
+    #[test]
+    fn untitled_session_adds_nothing_to_the_row() {
+        // No title ⇒ byte-identical row, i.e. no stray separator is emitted.
+        assert_eq!(render_title_row(120, None), render_title_row(120, Some("")));
     }
 
     #[test]

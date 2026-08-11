@@ -53,6 +53,8 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       OptimalSystemAgent.Speculative.Executor
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    children
+    |> OptimalSystemAgent.Supervisors.BootTiming.wrap("AgentServices")
+    |> Supervisor.init(strategy: :one_for_one)
   end
 end

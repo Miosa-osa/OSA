@@ -104,25 +104,6 @@ defmodule OptimalSystemAgent.Orchestrator do
           })
         end
 
-        # Spawn all tasks in this wave as async Tasks. Thread the stable
-        # batch_id (team_id) and wave number into each config so run_subagent
-        # can carry them onto lifecycle events — the TUI groups per-workstream
-        # by batch_id and per-wave.
-        tasks =
-          Enum.map(indexed_configs, fn {config, original_idx} ->
-            config =
-              config
-              |> Map.put(:parent_session_id, parent_id)
-              |> Map.put(:batch_id, team_id)
-              |> Map.put(:wave, wave_num)
-
-            {original_idx,
-             Task.Supervisor.async_nolink(
-               OptimalSystemAgent.TaskSupervisor,
-               fn -> run_subagent(config) end
-             )}
-          end)
-
         # Wait for all tasks in this wave. Timeout is configurable and defaults
         # to a real, finite backstop (`@default_subagent_timeout_ms`, not
         # `:infinity`) so a genuinely stuck teammate cannot hang the parent
@@ -139,32 +120,66 @@ defmodule OptimalSystemAgent.Orchestrator do
               @default_subagent_timeout_ms
             )
 
+        # Bounded fan-out. `:max_fleet_agents` (default 16) was enforced ONLY on
+        # the `fleet` path (Agent.Fleet), never here — and `delegate` (the path
+        # the model actually reaches for) lands here. A single `delegate` call
+        # with 200 tasks in one wave therefore span 200 concurrent subagent
+        # Loops, each with its own provider connection, context window and token
+        # spend, with nothing to stop it. Waves already run sequentially; now
+        # each wave runs at most `cap` agents at a time and the rest QUEUE,
+        # exactly as the fleet path does. Ordering is preserved because results
+        # are re-sorted by original index below.
+        cap = delegate_concurrency_cap()
+
         results =
-          Enum.map(tasks, fn {original_idx, task} ->
-            result =
-              try do
-                Task.await(task, await_timeout)
-              catch
-                :exit, {:timeout, _} ->
-                  # Reap the async task instead of orphaning it — the underlying
-                  # async_nolink Task keeps running run_subagent with no owner,
-                  # burning tokens. brutal_kill stops the leak.
-                  #
-                  # Classified as a FAILURE (not laundered into {:ok, ...}) so
-                  # `completed_count` below and `dispatch_fanout`'s reconcile
-                  # gate never treat a timed-out workstream as real completed
-                  # output — the parent model must not build on non-existent
-                  # work (D2 — matches grok/opencode marking a failed subagent
-                  # as failed, not success).
-                  Task.shutdown(task, :brutal_kill)
-                  {:error, :timeout}
+          indexed_configs
+          |> Enum.chunk_every(cap)
+          |> Enum.flat_map(fn batch ->
+            # Spawn one batch as async Tasks. Thread the stable batch_id
+            # (team_id) and wave number into each config so run_subagent can
+            # carry them onto lifecycle events — the TUI groups per-workstream
+            # by batch_id and per-wave.
+            tasks =
+              Enum.map(batch, fn {config, original_idx} ->
+                config =
+                  config
+                  |> Map.put(:parent_session_id, parent_id)
+                  |> Map.put(:batch_id, team_id)
+                  |> Map.put(:wave, wave_num)
 
-                :exit, reason ->
-                  Task.shutdown(task, :brutal_kill)
-                  {:error, {:crashed, reason}}
-              end
+                {original_idx,
+                 Task.Supervisor.async_nolink(
+                   OptimalSystemAgent.TaskSupervisor,
+                   fn -> run_subagent(config) end
+                 )}
+              end)
 
-            {original_idx, result}
+            Enum.map(tasks, fn {original_idx, task} ->
+              result =
+                try do
+                  Task.await(task, await_timeout)
+                catch
+                  :exit, {:timeout, _} ->
+                    # Reap the async task instead of orphaning it — the underlying
+                    # async_nolink Task keeps running run_subagent with no owner,
+                    # burning tokens. brutal_kill stops the leak.
+                    #
+                    # Classified as a FAILURE (not laundered into {:ok, ...}) so
+                    # `completed_count` below and `dispatch_fanout`'s reconcile
+                    # gate never treat a timed-out workstream as real completed
+                    # output — the parent model must not build on non-existent
+                    # work (D2 — matches grok/opencode marking a failed subagent
+                    # as failed, not success).
+                    Task.shutdown(task, :brutal_kill)
+                    {:error, :timeout}
+
+                  :exit, reason ->
+                    Task.shutdown(task, :brutal_kill)
+                    {:error, {:crashed, reason}}
+                end
+
+              {original_idx, result}
+            end)
           end)
 
         # Sort by original index to maintain order
@@ -478,7 +493,12 @@ defmodule OptimalSystemAgent.Orchestrator do
 
       {:error, {:already_started, _pid}} ->
         stop_event_forwarder(forwarder)
-        RunStore.complete(subagent_id, failure_result(subagent_id, parent_id, role, :already_started))
+
+        RunStore.complete(
+          subagent_id,
+          failure_result(subagent_id, parent_id, role, :already_started)
+        )
+
         {:error, "Subagent session #{subagent_id} already exists"}
 
       {:error, reason} ->
@@ -574,7 +594,23 @@ defmodule OptimalSystemAgent.Orchestrator do
       role: role
     })
 
+    start_stall_watcher(parent_id, subagent_id, display_name, role)
+
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      # Concurrency admission. `:max_fleet_agents` (default 16) was enforced ONLY
+      # on the `fleet` path — `run_background/2`, which is where the `delegate`
+      # tool's `background: true` lands, had no ceiling whatsoever, so a model
+      # could start unlimited concurrent subagent Loops (each with its own
+      # provider connection, context window and spend) with nothing joined to
+      # them to even notice.
+      #
+      # This QUEUES rather than refuses, exactly like Fleet's dispatcher: the
+      # agent id was already returned to the caller and is already in flight in
+      # the TUI, and `run_background/2`'s `{:ok, id}` contract is pattern-matched
+      # by callers outside this module. Waiting here keeps the contract and still
+      # bounds live concurrency.
+      await_background_slot(subagent_id)
+
       start_time = System.monotonic_time(:millisecond)
 
       # Guard the ENTIRE subagent run (not just the inner Loop): run_subagent's
@@ -868,10 +904,104 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   # ---------------------------------------------------------------------------
+  # Concurrency cap (delegate path)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Concurrency ceiling for the DELEGATE path — foreground fan-out via
+  `run_parallel/3` and background spawns via `run_background/2`.
+
+  Deliberately the SAME `:max_fleet_agents` knob `Agent.Fleet` enforces: an
+  operator raising their concurrency budget means one thing, not two. Before
+  this existed the cap applied only to `fleet`, while `delegate` — the tool the
+  model actually reaches for — was unbounded.
+
+  Public + `@doc false` so the cap is directly assertable in tests.
+  """
+  @spec delegate_concurrency_cap() :: pos_integer()
+  def delegate_concurrency_cap do
+    max(OptimalSystemAgent.Agent.Fleet.max_fleet_agents(), 1)
+  rescue
+    _ -> 16
+  end
+
+  @doc """
+  Number of subagent runs currently counted as live against the cap.
+
+  Reads RunStore's `:running` rows — the same source `GET /runs` reports — so
+  "how many agents are running" means one thing across the product.
+  """
+  @spec live_agent_count() :: non_neg_integer()
+  def live_agent_count do
+    RunStore.list(limit: 100_000)
+    |> Enum.count(fn run -> Map.get(run, :status) == :running end)
+  rescue
+    _ -> 0
+  end
+
+  @doc false
+  @spec background_slot_available?() :: boolean()
+  def background_slot_available?, do: live_agent_count() < delegate_concurrency_cap()
+
+  # Block until a slot frees up, or until the admission wait budget expires.
+  #
+  # The budget exists so a leaked/stuck `:running` row can never permanently
+  # wedge every future background spawn — the cap is a throttle, not a lock.
+  # On expiry we proceed anyway and log, which is the same trade Fleet makes.
+  # The count is a soft cap: two admissions can race past the same check, so
+  # brief overshoot by a few agents is possible. That is a throttle behaving
+  # like a throttle, and is categorically different from the previous behaviour
+  # of no ceiling at all.
+  defp await_background_slot(subagent_id) do
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Application.get_env(:optimal_system_agent, :background_admission_timeout_ms, 3_600_000)
+
+    do_await_background_slot(subagent_id, deadline, false)
+  end
+
+  defp do_await_background_slot(subagent_id, deadline, logged?) do
+    cond do
+      background_slot_available?() ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        Logger.warning(
+          "[Orchestrator] #{subagent_id} waited out the background admission budget " <>
+            "(cap: #{delegate_concurrency_cap()}) — starting anyway"
+        )
+
+        :ok
+
+      true ->
+        unless logged? do
+          Logger.info(
+            "[Orchestrator] #{subagent_id} queued — #{live_agent_count()} agent(s) already " <>
+              "running at the :max_fleet_agents cap of #{delegate_concurrency_cap()}"
+          )
+        end
+
+        Process.sleep(
+          Application.get_env(:optimal_system_agent, :background_admission_poll_ms, 250)
+        )
+
+        do_await_background_slot(subagent_id, deadline, true)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
 
-  defp execute_and_collect(subagent_id, task, parent_id, role, _max_iter, worktree_info, opts \\ []) do
+  defp execute_and_collect(
+         subagent_id,
+         task,
+         parent_id,
+         role,
+         _max_iter,
+         worktree_info,
+         opts \\ []
+       ) do
     display_name = Keyword.get(opts, :display_name) || role
     batch_id = Keyword.get(opts, :batch_id)
     resumed_from = Keyword.get(opts, :resumed_from)
@@ -992,9 +1122,19 @@ defmodule OptimalSystemAgent.Orchestrator do
           result: structured
         })
 
-        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :completed)
+        emit_agent_finished(
+          parent_id,
+          subagent_id,
+          display_name,
+          duration_ms,
+          batch_id,
+          :completed
+        )
 
-        {:ok, ResultSummarizer.summarize(structured, child_messages)}
+        {:ok,
+         structured
+         |> ResultSummarizer.summarize(child_messages)
+         |> append_cost_note(subagent_id)}
 
       {:error, reason} ->
         structured =
@@ -1058,9 +1198,19 @@ defmodule OptimalSystemAgent.Orchestrator do
           summary: completion_summary(structured)
         })
 
-        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :completed)
+        emit_agent_finished(
+          parent_id,
+          subagent_id,
+          display_name,
+          duration_ms,
+          batch_id,
+          :completed
+        )
 
-        {:ok, ResultSummarizer.summarize(structured, child_messages)}
+        {:ok,
+         structured
+         |> ResultSummarizer.summarize(child_messages)
+         |> append_cost_note(subagent_id)}
     end
   end
 
@@ -1142,6 +1292,210 @@ defmodule OptimalSystemAgent.Orchestrator do
       _ -> 0
     end
   end
+
+  # ── Phase-aware stall detection (background runs) ─────────────────────
+  #
+  # `run_background/2` returns immediately and then has NO visibility into
+  # whether the child is working or wedged. The only backstop anywhere is the
+  # 2h join timeout — and a background run is never joined, so in practice a
+  # stuck background subagent was silent until the parent gave up on it. That
+  # is the worst failure shape for a long task: the parent waits on a teammate
+  # that stopped making progress an hour ago.
+  #
+  # The watcher polls the child's RunStore row for a PROGRESS FINGERPRINT
+  # (tool_count + tokens + newest action). Unchanged fingerprint = no progress.
+  # It is phase-aware because "no tools yet" and "tools then nothing" are
+  # different failures with different normal durations:
+  #
+  #   :starting — spawned, zero tools so far. Model/provider setup and the
+  #               first completion legitimately take minutes, so the threshold
+  #               is long enough not to cry wolf on a slow first token.
+  #   :working  — has run at least one tool. A gap here means a hung tool or a
+  #               provider that stopped responding mid-run; a much shorter
+  #               threshold is appropriate.
+  #
+  # It only OBSERVES: it emits `:background_agent_stalled` and stops. It never
+  # kills the child — a long-running-but-alive teammate must not be reaped by a
+  # heuristic, and the existing join timeout remains the only hard stop.
+  # It exits as soon as the run reaches a terminal status or its row disappears.
+  @stall_poll_interval_ms 30_000
+  @stall_threshold_starting_ms 5 * 60 * 1000
+  @stall_threshold_working_ms 15 * 60 * 1000
+
+  defp stall_poll_interval_ms,
+    do:
+      Application.get_env(:optimal_system_agent, :stall_poll_interval_ms, @stall_poll_interval_ms)
+
+  defp stall_threshold_ms(:starting),
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :stall_threshold_starting_ms,
+        @stall_threshold_starting_ms
+      )
+
+  defp stall_threshold_ms(:working),
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :stall_threshold_working_ms,
+        @stall_threshold_working_ms
+      )
+
+  @doc false
+  @spec start_stall_watcher(String.t(), String.t(), String.t(), String.t()) :: :ok
+  def start_stall_watcher(parent_id, subagent_id, display_name, role) do
+    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      watch_for_stall(parent_id, subagent_id, display_name, role, nil, now_ms())
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp watch_for_stall(parent_id, subagent_id, display_name, role, last_print, last_change_at) do
+    Process.sleep(stall_poll_interval_ms())
+
+    case RunStore.get(subagent_id) do
+      %{status: :running} = run ->
+        print = progress_fingerprint(run)
+        phase = if run.tool_count > 0, do: :working, else: :starting
+
+        cond do
+          print != last_print ->
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, now_ms())
+
+          now_ms() - last_change_at >= stall_threshold_ms(phase) ->
+            emit_stall(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              phase,
+              now_ms() - last_change_at,
+              run
+            )
+
+          true ->
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, last_change_at)
+        end
+
+      # Terminal, or the row was pruned: nothing left to watch.
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp progress_fingerprint(run) do
+    {Map.get(run, :tool_count, 0), Map.get(run, :tokens_used, 0),
+     run |> Map.get(:recent_actions, []) |> List.first()}
+  end
+
+  defp emit_stall(parent_id, subagent_id, display_name, role, phase, stalled_ms, run) do
+    minutes = div(stalled_ms, 60_000)
+
+    detail =
+      case phase do
+        :starting ->
+          "it has not run a single tool since it started — most likely a provider/model " <>
+            "setup failure. Next step: check it with task_output, and re-dispatch with a " <>
+            "different model or a narrower task if it is wedged."
+
+        :working ->
+          "it ran #{run.tool_count} tool(s) and then went quiet — most likely a hung tool " <>
+            "or a stalled provider call. Next step: inspect its transcript with task_output, " <>
+            "and stop it with task_stop if it is not recoverable."
+      end
+
+    Logger.warning(
+      "[Orchestrator] Background subagent #{subagent_id} appears stalled in :#{phase} " <>
+        "for #{minutes}m"
+    )
+
+    payload = %{
+      event: :background_agent_stalled,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role,
+      phase: phase,
+      stalled_ms: stalled_ms,
+      tool_count: run.tool_count,
+      message:
+        "Background agent @#{display_name} has made no progress for #{minutes} minutes: #{detail}"
+    }
+
+    Bus.emit(:system_event, payload)
+
+    # Same dual-emit as the completed/failed events above, so the TUI and SSE
+    # consumers see a stall on the session topic they already listen to.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, Map.put(payload, :type, :background_agent_stalled)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # ── Per-delegation cost ───────────────────────────────────────────────
+  #
+  # The spend of every run is already accumulated per session and persisted by
+  # `SessionPersistence` — `Accounting.tree_spend_usd/1` reads exactly this to
+  # enforce `max_budget_usd`. The number existed; the model just never saw it.
+  # A delegating agent that cannot see what a delegation cost cannot decide
+  # whether to delegate again, so it either under-uses subagents or fans out
+  # until a budget guard stops it.
+  #
+  # Appended to the summary the parent model reads, so budgeting is a fact in
+  # context rather than a guess. Read-only and best-effort: a missing sidecar
+  # returns 0.0 and the note is simply omitted.
+  @doc """
+  USD spend of a single completed run, read from its durable spend sidecar.
+
+  Returns `0.0` when the run has no recorded spend (free/local provider, or a
+  sidecar that was never written).
+  """
+  @spec run_cost_usd(String.t()) :: float()
+  def run_cost_usd(agent_id) when is_binary(agent_id) do
+    case OptimalSystemAgent.Agent.SessionPersistence.load_spend(agent_id) do
+      %{cost_usd: c} when is_number(c) and c > 0 -> c * 1.0
+      _ -> 0.0
+    end
+  rescue
+    _ -> 0.0
+  catch
+    :exit, _ -> 0.0
+  end
+
+  def run_cost_usd(_), do: 0.0
+
+  defp append_cost_note(summary, agent_id) when is_binary(summary) do
+    case run_cost_usd(agent_id) do
+      cost when cost > 0 ->
+        summary <>
+          "\n\nDelegation cost: $#{:erlang.float_to_binary(cost, decimals: 4)} " <>
+          "(this subagent only). Factor it in before delegating again."
+
+      _ ->
+        summary
+    end
+  end
+
+  defp append_cost_note(summary, _agent_id), do: summary
 
   defp structured_result(attrs) do
     agent_id = Map.fetch!(attrs, :agent_id)

@@ -32,6 +32,16 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     2. `:claude_code`   — `~/.claude/mcp.json` and `~/.claude.json`
     3. `:claude_desktop`— platform `claude_desktop_config.json`
     4. `:cursor`        — `~/.cursor/mcp.json`
+    5. `:plugin`        — portable plugin bundles in `~/.osa/plugins/*/mcp.json`
+
+  `:plugin` is not another tool's config — it is a bundle installed into OSA
+  that declares MCP servers in a manifest. It rides the same path anyway,
+  because the property that matters is identical: these are servers the
+  operator did not write into an OSA config file by hand, so they are OFFERED,
+  never auto-run, and they carry a `:source` saying where they came from.
+  Reading a manifest compiles nothing (see `MCP.PluginManifest`), which is why
+  it is gated on the MCP import switch rather than on `Plugins.Loader`'s
+  code-execution switch.
 
   Native OSA servers (`Config.load_all/0`) always win over any discovered
   server of the same name; that precedence is applied in `Config.load_startup/0`,
@@ -46,10 +56,25 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   alias OptimalSystemAgent.MCP.Config
   alias OptimalSystemAgent.MCP.Config.Server
 
-  # Sources in precedence order (earlier wins on name collision).
-  @sources [:codex, :claude_code, :claude_desktop, :cursor]
+  # OTHER TOOLS' config files, in precedence order (earlier wins on collision).
+  # This list is what `:mcp_import_sources` narrows, and it is deliberately kept
+  # to foreign tools.
+  @foreign_sources [:codex, :claude_code, :claude_desktop, :cursor]
 
-  @doc "Every foreign source this module knows how to read, in precedence order."
+  # Plugin bundles installed into OSA's own `~/.osa/plugins/`. Read LAST, so a
+  # foreign tool's server keeps a colliding name (in practice collisions cannot
+  # happen: bundle servers are qualified `<plugin>_<server>`).
+  #
+  # `:plugin` is intentionally NOT subject to `:mcp_import_sources`. That key
+  # enumerates which OTHER TOOLS to read, and its shipped default in
+  # `config/config.exs` was written before bundles existed — filtering `:plugin`
+  # through it would leave the feature permanently off for every operator on the
+  # default config, which is not a narrowing anyone asked for.
+  @plugin_source :plugin
+
+  @sources @foreign_sources ++ [@plugin_source]
+
+  @doc "Every source this module knows how to read, in precedence order."
   @spec all_sources() :: [atom()]
   def all_sources, do: @sources
 
@@ -96,13 +121,22 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     _, _ -> nil
   end
 
-  @doc "The foreign sources that will be read when import is enabled."
+  @doc """
+  The sources that will be read when import is enabled.
+
+  `:mcp_import_sources` narrows the FOREIGN tools only; the plugin-bundle
+  source is always read (it is gated by the import switch and the deny/allow
+  lists like everything else). See the `@plugin_source` note above.
+  """
   @spec sources() :: [atom()]
   def sources do
-    case Application.get_env(:optimal_system_agent, :mcp_import_sources, @sources) do
-      list when is_list(list) -> Enum.filter(@sources, &(&1 in list))
-      _ -> @sources
-    end
+    foreign =
+      case Application.get_env(:optimal_system_agent, :mcp_import_sources, @foreign_sources) do
+        list when is_list(list) -> Enum.filter(@foreign_sources, &(&1 in list))
+        _ -> @foreign_sources
+      end
+
+    foreign ++ [@plugin_source]
   end
 
   @doc """
@@ -200,6 +234,7 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   def source_label(:claude_desktop), do: "inherited from claude desktop"
   def source_label(:cursor), do: "inherited from cursor"
   def source_label(:codex), do: "inherited from codex"
+  def source_label(:plugin), do: "declared by a plugin bundle"
   def source_label(other), do: "inherited from #{other}"
 
   @doc """
@@ -217,6 +252,14 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   end
 
   def source_path(:claude_desktop), do: claude_desktop_path()
+
+  # The bundle directory rather than a single file: a plugin's servers may come
+  # from any bundle's `mcp.json` under it.
+  def source_path(:plugin) do
+    dir = OptimalSystemAgent.MCP.PluginManifest.plugins_dir()
+    if File.dir?(dir), do: dir
+  end
+
   def source_path(_), do: nil
 
   defp existing(path), do: if(File.exists?(path), do: path)
@@ -227,6 +270,12 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   defp servers_for(:claude_code), do: read_claude_code()
   defp servers_for(:claude_desktop), do: read_claude_desktop()
   defp servers_for(:cursor), do: read_cursor()
+
+  # Portable plugin bundles. Already returns %Server{source: :plugin} structs
+  # with qualified `<plugin>_<server>` names, so no re-tagging is needed —
+  # unlike the foreign readers, which reuse Config.parse and stamp the source
+  # afterwards.
+  defp servers_for(:plugin), do: OptimalSystemAgent.MCP.PluginManifest.servers()
 
   # Codex: TOML with an `[mcp_servers.NAME]` table per server.
   defp read_codex do

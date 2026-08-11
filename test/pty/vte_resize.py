@@ -32,6 +32,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import scrollback_prelude  # noqa: E402  (needs the sys.path line above)
+import term_env  # noqa: E402
+
 STUB_PORT = 12791
 # Each singleton band, as a substring that appears exactly once on a healthy
 # screen. Shared in spirit with SINGLETON_BANDS in osa_pty.py, but matched
@@ -78,31 +81,40 @@ def main() -> int:
         # Deep scrollback: stranded copies land here, and a short buffer would
         # quietly discard the evidence this test exists to find.
         term.set_scrollback_lines(10_000)
-        term.set_size(120, 30)
+        # 50 rows, not 30. The scrollback prelude below occupies ~24 of them and
+        # the inline live region needs its own; on a 30-row screen the two do
+        # not both fit and the binary never reaches a composer at all. (That is
+        # itself a real defect — OSA wedges on startup when the screen it
+        # inherits leaves too little room for the inline viewport — but it is a
+        # startup fault, not a resize one, and giving this harness room is the
+        # correct way to keep it measuring the thing it is named after.)
+        term.set_size(120, 50)
 
-        env = [f"{k}={v}" for k, v in os.environ.items() if k != "LINES" and k != "COLUMNS"]
-        env.append(f"OSA_BASE_URL={backend.base_url}")
-        # FORCE_MUX_PATH lies about TERM so the binary takes its
-        # multiplexer branch (the surgical clear from the remembered
-        # live-region top) on a terminal that genuinely reflows. Used to check
-        # whether that branch could simply be the default everywhere.
+        # The child must NOT inherit the harness's own terminal identity. This
+        # repo is developed inside tmux, and this harness used to pass
+        # `os.environ` through verbatim — so `TMUX` was set in the child and
+        # every "OSA survives a drag on real VTE" run was actually exercising
+        # the multiplexer branch. VTE sets its own `TERM` and `VTE_VERSION`
+        # once the identity vars are out of the way. See `term_env.py`.
         #
-        # It passes here — but this session's transcript is nearly empty. On a
-        # reflowing terminal that is WIDENING, wrapped lines join and content
-        # moves UP, so the remembered top can sit BELOW the chrome and a clear
-        # from it would miss the rows above. tmux cannot do that because it
-        # never reflows. That is why the branch stays gated rather than
-        # becoming the default, and why this switch is a diagnostic rather
-        # than a supported mode.
-        import os as _os
-        if _os.environ.get("FORCE_MUX_PATH"):
-            env = [e for e in env if not e.startswith("TERM=")]
-            env.append("TERM=tmux-256color")
+        # `OSA_RESIZE_CLEAR` is forwarded when the caller set it, which is how
+        # a branch is forced here to prove the gate's table is keyed on the
+        # right terminal rather than passing by luck.
+        env = term_env.clean_env_list(
+            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+        )
+
+        # Fill the scrollback with WRAPPED lines before the binary starts.
+        # Without them the transcript above the live region is empty, nothing
+        # shortens when the terminal widens, the live region never moves, and
+        # the harness passes whichever branch it took — which is why this test
+        # used to be evidence of nothing. See `scrollback_prelude.py`.
+        argv = scrollback_prelude.wrap_command(str(binary), lines=12)
 
         ok, _pid = term.spawn_sync(
             Vte.PtyFlags.DEFAULT,
             str(repo),
-            [str(binary)],
+            argv,
             env,
             GLib.SpawnFlags.DEFAULT,
             None,
@@ -135,17 +147,25 @@ def main() -> int:
                 out = next((x for x in out if isinstance(x, str)), "")
             return out or ""
 
-        pump(6.0)
-        before = visible_and_scrollback()
-        if BANDS["composer prompt"] not in before:
+        # Poll rather than sleep a fixed 6s: startup here spans a backend
+        # handshake and a provider probe and is not reliably done in any one
+        # interval, and a fixed sleep that is occasionally too short turns into
+        # an intermittent SKIP — a green run that asserted nothing.
+        before = ""
+        for _ in range(30):
+            pump(1.5)
+            before = visible_and_scrollback()
+            if BANDS["composer prompt"] in before:
+                break
+        else:
             return _skip("binary did not reach a composer; nothing to assert about")
 
         # The reported gesture: a slow drag through several widths.
         for cols in (115, 110, 105, 100, 95, 90):
-            term.set_size(cols, 30)
+            term.set_size(cols, 50)
             pump(0.35)
         for cols in (95, 100, 105, 110, 115, 120):
-            term.set_size(cols, 30)
+            term.set_size(cols, 50)
             pump(0.35)
         pump(3.0)
 

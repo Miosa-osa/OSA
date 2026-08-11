@@ -28,6 +28,8 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   alias OptimalSystemAgent.Auth.Providers.CopilotCli
   alias OptimalSystemAgent.Auth.Providers.OllamaAccount
   alias OptimalSystemAgent.Auth.Providers.OpenAICodex
+  alias OptimalSystemAgent.Auth.Providers.Qwen
+  alias OptimalSystemAgent.Auth.Providers.XAI
   alias OptimalSystemAgent.Auth.SubscriptionStore
 
   @typedoc """
@@ -47,13 +49,21 @@ defmodule OptimalSystemAgent.Auth.Subscription do
       surface that renders only `connected?` presents a guess as a fact.
   """
   @type status :: %{
-          connected?: boolean(),
-          verified?: boolean(),
-          provider: String.t(),
-          account: String.t() | nil,
-          plan: String.t() | nil,
-          expires_at: integer() | nil,
-          expired?: boolean()
+          required(:connected?) => boolean(),
+          required(:verified?) => boolean(),
+          required(:provider) => String.t(),
+          required(:account) => String.t() | nil,
+          required(:plan) => String.t() | nil,
+          required(:expires_at) => integer() | nil,
+          required(:expired?) => boolean(),
+          # Optional because only some providers' markers record an
+          # organisation — and the ones that do must be able to say so.
+          # `account` alone does not identify an account: a user with a
+          # personal plan and a work plan reads the same email on both, which
+          # is exactly the ambiguity a status screen exists to remove. A
+          # provider with no notion of an org omits the key rather than
+          # sending `nil`, so "no org" and "personal" stay distinguishable.
+          optional(:org) => String.t() | nil
         }
 
   @doc "Run the interactive sign-in. `io` is an output callback so the flow is testable headlessly."
@@ -87,7 +97,19 @@ defmodule OptimalSystemAgent.Auth.Subscription do
     # untouched and gains "use my signed-in local daemon" beside it. No token
     # is held here either — the daemon owns the device key.
     "ollama_cloud" => OllamaAccount,
-    "openai_codex" => OpenAICodex
+    "openai_codex" => OpenAICodex,
+    # Third of the same shape. `qwen` differs from `xai` in one respect only:
+    # its two modes reach different hosts, because an account is issued a
+    # `resource_url` at sign-in while a DashScope key belongs to DashScope.
+    # That is the `ollama_cloud` situation, not a reason to split the row.
+    "qwen" => Qwen,
+    # The second entry of that shape (see `ollama_cloud` above), and the first
+    # one where OSA genuinely HOLDS the account credential: `xai` keeps its
+    # `XAI_API_KEY` path byte-identical and gains "sign in with your xAI
+    # account" beside it. Same host, same wire format, same models — only the
+    # credential differs, which is why it is one row with two modes rather
+    # than an `openai`/`openai_codex`-style split.
+    "xai" => XAI
   }
 
   @doc "The provider ids that support account sign-in."

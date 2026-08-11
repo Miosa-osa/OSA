@@ -18,9 +18,18 @@ defmodule OptimalSystemAgent.Channels.WeCom do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Events.Bus
 
+  # WeCom states its bot-webhook limit in bytes, not characters: markdown
+  # content must be "最长不超过4096个字节" (at most 4096 UTF-8 bytes). 4,000 is this
+  # adapter's margin under that. Counting graphemes (as this module used to)
+  # was catastrophic for exactly the language WeCom is used in — 4,000 Chinese
+  # characters measured "under" the limit at 12,000 bytes, 3x the real cap, so
+  # every long Chinese reply was rejected outright.
   @max_message_length 4_000
+  @length_unit :bytes
 
   defstruct [:bot_key, :webhook_token, connected: false]
 
@@ -72,9 +81,7 @@ defmodule OptimalSystemAgent.Channels.WeCom do
 
   @impl true
   def handle_cast({:webhook, payload}, state) do
-    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-      process_webhook(payload, state)
-    end)
+    Delivery.start_task(:wecom, fn -> process_webhook(payload, state) end)
 
     {:noreply, state}
   end
@@ -112,31 +119,41 @@ defmodule OptimalSystemAgent.Channels.WeCom do
   defp send_bot_message(bot_key, text) do
     url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=#{bot_key}"
 
-    chunks = chunk_message(text)
-
-    for chunk <- chunks do
-      Req.post(url,
-        json: %{msgtype: "markdown", markdown: %{content: chunk}},
-        receive_timeout: 10_000
-      )
-    end
-
-    :ok
+    text
+    |> chunk_message()
+    |> then(&Delivery.send_chunks(:wecom, &1, fn chunk -> post_chunk(url, chunk) end))
   rescue
     e ->
       Logger.error("[WeCom] Send failed: #{Exception.message(e)}")
       {:error, :send_failed}
   end
 
-  defp chunk_message(text) do
-    if String.length(text) <= @max_message_length,
-      do: [text],
-      else:
-        text
-        |> String.graphemes()
-        |> Enum.chunk_every(@max_message_length)
-        |> Enum.map(&Enum.join/1)
+  defp post_chunk(url, chunk) do
+    case Req.post(url,
+           json: %{msgtype: "markdown", markdown: %{content: chunk}},
+           receive_timeout: 10_000
+         ) do
+      # WeCom answers 200 with an in-body errcode; 0 means success.
+      {:ok, %{status: 200, body: %{"errcode" => 0}}} -> :ok
+      {:ok, %{status: 200, body: %{"errcode" => code} = body}} -> {:error, {code, body}}
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, {status, body}}
+      {:error, reason} -> {:error, reason}
+    end
   end
+
+  @doc """
+  Split an outbound reply into WeCom-sized chunks.
+
+  Public so the chunking contract can be tested against WeCom's real limit and
+  unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
+
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do

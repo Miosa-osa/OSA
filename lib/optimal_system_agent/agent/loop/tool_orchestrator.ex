@@ -97,6 +97,73 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   end
 
   @doc """
+  Rewrite DUPLICATE tool-call ids so every call in a batch carries a distinct one.
+
+  A provider (or streaming re-assembly) can emit two `tool_use` blocks under the
+  same id. Every downstream stage keys results BY id — `dispatch/3`'s own
+  order-restoring map and `ReactLoop`'s streaming/fresh merge map — so a
+  collision makes one result overwrite the other and a result is lost. Worse,
+  the assistant message then carries two `tool_use` blocks against a single
+  `tool_result`, and a strict provider (Anthropic) rejects the *following*
+  request outright: the turn after the one that actually went wrong is the one
+  that breaks.
+
+  This is the single, canonical place that repair happens. It must be applied
+  ONCE and UPSTREAM of every id-keyed map — patching either map alone leaves the
+  other broken, and two divergent repairs is how the bug survives.
+
+  Rules:
+
+    * The FIRST occurrence of an id keeps it verbatim, so streaming
+      reconciliation (which started tools under the provider's original ids)
+      still matches.
+    * Each later duplicate gets a `#N` suffix, re-checked against everything
+      already emitted so the rewrite cannot collide either.
+    * A missing/non-scalar id is minted rather than left `nil` — two `nil` ids
+      collapse in a map exactly like two equal strings do.
+    * Strict no-op (same terms, same order) when the ids are already unique.
+  """
+  @spec uniquify_ids([tool_call()]) :: [tool_call()]
+  def uniquify_ids(tool_calls) when is_list(tool_calls) do
+    tool_calls
+    |> Enum.map_reduce(MapSet.new(), fn tc, seen ->
+      id = Map.get(tc, :id)
+
+      cond do
+        not scalar_id?(id) ->
+          new_id = fresh_id(seen, "osa_toolcall")
+          {Map.put(tc, :id, new_id), MapSet.put(seen, new_id)}
+
+        MapSet.member?(seen, id) ->
+          new_id = fresh_id(seen, to_string(id))
+          {Map.put(tc, :id, new_id), MapSet.put(seen, new_id)}
+
+        true ->
+          {tc, MapSet.put(seen, id)}
+      end
+    end)
+    |> elem(0)
+  end
+
+  def uniquify_ids(other), do: other
+
+  # `nil` is an atom, so it must be excluded explicitly — a missing id is
+  # "mint one", not "a valid scalar that happens to be nil".
+  defp scalar_id?(nil), do: false
+  defp scalar_id?(""), do: false
+  defp scalar_id?(id), do: is_binary(id) or is_integer(id) or is_atom(id)
+
+  defp fresh_id(seen, base), do: fresh_id(seen, base, 1)
+
+  defp fresh_id(seen, base, n) do
+    candidate = "#{base}##{n}"
+
+    if MapSet.member?(seen, candidate),
+      do: fresh_id(seen, base, n + 1),
+      else: candidate
+  end
+
+  @doc """
   Partition tool calls into `{concurrency_safe, must_be_serial}`.
 
   Per-input — looks up the tool's module and asks

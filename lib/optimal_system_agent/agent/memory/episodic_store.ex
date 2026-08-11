@@ -46,6 +46,7 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   @type episode :: %{optional(String.t()) => term()}
 
@@ -244,9 +245,7 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
         # session's episode array (which read_file would then silently drop).
         # Unique temp path per writer prevents a shared ".tmp" inode from being
         # re-truncated mid-flight and torn.
-        tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-        File.write!(tmp, json)
-        File.rename!(tmp, path)
+        AtomicFile.write!(path, json)
         emit_recorded(episode)
         {:ok, episode}
 
@@ -352,13 +351,20 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
 
   defp to_int(value, default) do
     cond do
-      is_integer(value) -> value
-      is_float(value) -> round(value)
-      is_binary(value) -> case Integer.parse(value) do
-        {n, _} -> n
-        :error -> default
-      end
-      true -> default
+      is_integer(value) ->
+        value
+
+      is_float(value) ->
+        round(value)
+
+      is_binary(value) ->
+        case Integer.parse(value) do
+          {n, _} -> n
+          :error -> default
+        end
+
+      true ->
+        default
     end
   end
 

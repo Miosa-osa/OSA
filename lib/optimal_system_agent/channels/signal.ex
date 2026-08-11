@@ -31,9 +31,22 @@ defmodule OptimalSystemAgent.Channels.Signal do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Chunker
+  alias OptimalSystemAgent.Channels.Delivery
   alias OptimalSystemAgent.Channels.Session
 
   @send_timeout 15_000
+
+  # This adapter did no chunking whatsoever: the whole agent reply went into a
+  # single `/v2/send` body. Signal's protocol frames a message body in bytes and
+  # signal-cli rejects an over-long one, so a long reply failed outright — and
+  # because `process_webhook/2` discarded the send result, nothing was logged
+  # and the user was simply never answered.
+  #
+  # signal-cli does not document a fixed cap, so this is a deliberately
+  # conservative byte budget that comfortably clears Signal's envelope framing.
+  @max_message_length 2_000
+  @length_unit :bytes
 
   defstruct [:api_url, :phone_number, connected: false]
 
@@ -128,7 +141,9 @@ defmodule OptimalSystemAgent.Channels.Signal do
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
-        do_send_message(state.api_url, state.phone_number, source, response, [])
+        state.api_url
+        |> do_send_message(state.phone_number, source, response, [])
+        |> log_send_result("reply to #{source}")
 
       {:filtered, signal} ->
         Logger.debug("Signal: Signal filtered (weight=#{signal.weight})")
@@ -164,7 +179,9 @@ defmodule OptimalSystemAgent.Channels.Signal do
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
-        do_send_group_message(state.api_url, state.phone_number, group_id, response)
+        state.api_url
+        |> do_send_group_message(state.phone_number, group_id, response)
+        |> log_send_result("group reply to #{group_id}")
 
       {:filtered, signal} ->
         Logger.debug("Signal: Group signal filtered (weight=#{signal.weight})")
@@ -178,19 +195,39 @@ defmodule OptimalSystemAgent.Channels.Signal do
     Logger.debug("Signal: Unhandled webhook shape: #{inspect(Map.keys(body))}")
   end
 
+  # The send result used to be discarded here, so a reply that never reached the
+  # user left no trace at all.
+  defp log_send_result(:ok, _what), do: :ok
+
+  defp log_send_result({:error, reason}, what) do
+    Logger.warning("Signal: #{what} was not fully delivered: #{inspect(reason)}")
+    :error
+  end
+
   # ── HTTP Helpers ─────────────────────────────────────────────────────
 
   defp do_send_message(api_url, from_number, recipient, message, _opts) do
-    # signal-cli REST API v2 send endpoint
-    url = "#{api_url}/v2/send"
+    Delivery.send_chunks(:signal, chunk_message(message), fn chunk ->
+      post_send(api_url, from_number, recipient, chunk)
+    end)
+  end
 
+  defp do_send_group_message(api_url, from_number, group_id, message) do
+    Delivery.send_chunks(:signal, chunk_message(message), fn chunk ->
+      post_send(api_url, from_number, group_id, chunk)
+    end)
+  end
+
+  # signal-cli REST API v2 send endpoint. `recipient` may be a phone number or a
+  # group id — both go in `recipients`.
+  defp post_send(api_url, from_number, recipient, message) do
     body = %{
       message: message,
       number: from_number,
       recipients: [recipient]
     }
 
-    case Req.post(url, json: body, receive_timeout: @send_timeout) do
+    case Req.post("#{api_url}/v2/send", json: body, receive_timeout: @send_timeout) do
       {:ok, %{status: status}} when status in [200, 201] ->
         :ok
 
@@ -204,26 +241,16 @@ defmodule OptimalSystemAgent.Channels.Signal do
     end
   end
 
-  defp do_send_group_message(api_url, from_number, group_id, message) do
-    url = "#{api_url}/v2/send"
+  @doc """
+  Split an outbound reply into Signal-sized chunks.
 
-    body = %{
-      message: message,
-      number: from_number,
-      recipients: [group_id]
-    }
+  Public so the chunking contract can be tested against Signal's real limit and
+  unit rather than against a copy of them.
+  """
+  @spec chunk_message(String.t()) :: [String.t()]
+  def chunk_message(text), do: Chunker.chunk(text, @max_message_length, @length_unit)
 
-    case Req.post(url, json: body, receive_timeout: @send_timeout) do
-      {:ok, %{status: status}} when status in [200, 201] ->
-        :ok
-
-      {:ok, %{body: body}} ->
-        Logger.warning("Signal: Group send failed: #{inspect(body)}")
-        {:error, body}
-
-      {:error, reason} ->
-        Logger.warning("Signal: HTTP error sending to group: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
+  @doc false
+  @spec message_limit() :: {pos_integer(), Chunker.unit()}
+  def message_limit, do: {@max_message_length, @length_unit}
 end

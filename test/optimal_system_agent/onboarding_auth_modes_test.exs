@@ -34,19 +34,47 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
   @new_provider_ids ["openai_codex", "claude_cli", "copilot_cli", "bedrock"]
 
   # Pre-existing providers that have since GAINED a second auth mode in place,
-  # rather than being split into a second entry. Only `ollama_cloud`: its
-  # account mode (a signed-in local daemon) and its key mode reach the same
-  # models, so nothing but the credential differs and a split would be a lie.
+  # rather than being split into a second entry. The test for which pattern
+  # applies is whether anything besides the CREDENTIAL differs:
+  #
+  #   * `ollama_cloud` — account mode is a signed-in local daemon, key mode is
+  #     ollama.com. Same models either way.
+  #   * `xai` — same host (`api.x.ai/v1`), same OpenAI-compatible wire format,
+  #     same models. Only the credential differs.
+  #   * `qwen` — same OpenAI-compatible wire format and the same live-resolved
+  #     models. The endpoint does differ, but only because the provider issues
+  #     an account its own `resource_url` while a DashScope key belongs to
+  #     DashScope — the `ollama_cloud` situation exactly.
+  #
+  # Contrast the `openai`/`openai_codex` split, which is two entries precisely
+  # because the base URL, the protocol AND the model list all change with the
+  # credential.
   #
   # These are still held to the baseline — everything about the entry except
-  # the two fields the fork adds must be unchanged, which is what says the key
+  # the fields the fork adds must be unchanged, which is what says the key
   # path still works exactly as it did. What they are exempt from is the
   # "declares key-only auth" assertion, which is the thing that deliberately
   # changed.
-  @dual_mode_ids ["ollama_cloud"]
+  #
+  # Adding an id here is the deliberate, written-down decision that a provider
+  # gained a second mode. A catalog edit alone cannot do it.
+  @dual_mode_ids ["ollama_cloud", "qwen", "xai"]
 
   # The fields a dual-mode upgrade is allowed to add to an existing entry.
-  @fork_fields [:auth_modes, :subscription]
+  #
+  # `:key_optional` is one of them, and it belongs here rather than being
+  # treated as an unexplained catalog change: it is what makes BOTH modes
+  # reachable from the TUI, whose onboarding dialog decides whether to render
+  # a credential field from `requires_key` alone. Without it the key would be
+  # mandatory and the account mode unreachable there; with `requires_key:
+  # false` instead, the KEY mode would be unreachable. The pairing is the
+  # fork, so it is scoped to dual-mode ids like the other two.
+  #
+  # Because these are stripped from BOTH sides of the baseline comparison, the
+  # "still offers its key" test below asserts the affordance directly — the
+  # claim is checked somewhere, just not by a diff that would also fire on a
+  # legitimate upgrade.
+  @fork_fields [:auth_modes, :subscription, :key_optional]
 
   # Presentation-only fields every entry now carries: which tab a setup surface
   # files it under, and its position within that tab.
@@ -108,15 +136,21 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       # mode in place. Everything else about that entry — env var, base URL,
       # key affordance, model catalog — must still match, which is exactly the
       # claim "the API-key path is unchanged" rests on.
-      stripped =
-        Enum.map(preexisting(), fn p ->
-          drop =
-            if(p.id in @dual_mode_ids, do: @fork_fields, else: [:auth_modes]) ++ @grouping_fields
+      # Stripped from BOTH sides for the dual-mode ids, so the comparison is
+      # symmetric: a fork field is exempt whether the baseline happened to
+      # carry it already (`ollama_cloud` did) or the upgrade added it (`xai`
+      # and `qwen` did). Every OTHER field — env var, base URL, signup URL,
+      # default model, model catalog, name, description, group — is still
+      # compared exactly, and that is the claim "the API-key path is
+      # unchanged" actually rests on.
+      strip = fn p ->
+        drop =
+          if(p.id in @dual_mode_ids, do: @fork_fields, else: [:auth_modes]) ++ @grouping_fields
 
-          Map.drop(p, drop)
-        end)
+        Map.drop(p, drop)
+      end
 
-      assert stripped == baseline()
+      assert Enum.map(preexisting(), strip) == Enum.map(baseline(), strip)
     end
 
     test "there are still exactly 27 of them, with the same ids in the same order" do
@@ -141,6 +175,20 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
         assert :api_key in Onboarding.usable_auth_modes(id)
         assert Onboarding.auth_route(id, :api_key) == :api_key
         assert Onboarding.auth_route(id, nil) == :api_key
+
+        # The affordance the baseline diff can no longer see, asserted here
+        # instead: a dual-mode row must still RENDER a credential field (so
+        # the key mode stays reachable from the TUI) and must not REQUIRE one
+        # (so the account mode is reachable at all).
+        assert entry.requires_key == true, "#{id} must still render a key field"
+        assert entry.key_optional == true, "#{id} must not force a key"
+
+        # And the sign-in half is real, not merely declared.
+        assert :oauth in Onboarding.usable_auth_modes(id),
+               "#{id} declares :oauth but cannot perform it"
+
+        assert Onboarding.auth_route(id, :oauth) == :oauth
+        assert Map.has_key?(entry, :subscription)
       end
     end
 
@@ -282,6 +330,19 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       ollama = Enum.find(decoded, &(&1["id"] == "ollama_cloud"))
       assert ollama["auth_modes"] == ["api_key", "oauth"]
       assert ollama["subscription"]["kind"] == "local_daemon"
+
+      # The compact `@additional_providers` rows reach the TUI through the
+      # same field. These two are built from a tuple and decorated by an
+      # overlay, so this is also the check that the overlay's output survives
+      # serialization rather than being a CLI-only shape.
+      for id <- ["xai", "qwen"] do
+        row = Enum.find(decoded, &(&1["id"] == id))
+
+        assert row["auth_modes"] == ["api_key", "oauth"], "#{id} must reach the TUI dual-mode"
+        assert row["subscription"]["kind"] == "device_code"
+        assert row["key_optional"] == true
+        assert row["requires_key"] == true
+      end
 
       for entry <- decoded, entry["id"] not in @new_provider_ids ++ @dual_mode_ids do
         assert entry["auth_modes"] == ["api_key"]

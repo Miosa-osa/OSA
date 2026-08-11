@@ -37,6 +37,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
     * `{:error, :ambiguous, count}`
     * `{:error, :disproportionate}` — a fuzzy candidate matched a span far larger
       than `old_string`; refuse rather than clobber (from `FuzzyMatcher`).
+    * `{:error, {:replace_all_approximate, strategy}}` — `replace_all: true` was
+      requested but only an APPROXIMATE strategy matched. A fuzzy candidate is a
+      suggestion about one site, not a licence to rewrite every site that
+      resembles it, so the cascade refuses rather than corrupt unrelated regions
+      (from `FuzzyMatcher` — see its moduledoc).
   """
 
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher
@@ -48,6 +53,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
           | {:error, :not_found}
           | {:error, :ambiguous, non_neg_integer()}
           | {:error, :disproportionate}
+          | {:error, {:replace_all_approximate, FuzzyMatcher.strategy()}}
   def replace(content, old, new, replace_all) do
     if String.contains?(content, old) do
       count = count_occurrences(content, old)

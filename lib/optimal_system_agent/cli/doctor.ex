@@ -10,6 +10,31 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   @app :optimal_system_agent
   @separator "────────────────────────────────"
 
+  @doc """
+  Dispatch `osa doctor [--config]`.
+
+  Bare `doctor` keeps its existing behaviour exactly. `--config` prints the
+  setup-inspection report instead — which markdown files are loaded from where,
+  which skills surface and why, and which layer produced each effective setting.
+  It is a separate report rather than extra rows because it answers a different
+  question: `run/0` asks "is OSA healthy", `--config` asks "what is OSA
+  actually reading".
+  """
+  @spec run([String.t()]) :: :ok
+  def run(args) when is_list(args) do
+    cond do
+      "--config" in args or "config" in args ->
+        OptimalSystemAgent.CLI.Doctor.Inspection.run()
+
+      "--all" in args ->
+        run()
+        OptimalSystemAgent.CLI.Doctor.Inspection.run()
+
+      true ->
+        run()
+    end
+  end
+
   @doc "Run all health checks and print the report."
   def run do
     # Best-effort: works whether or not the OTP app is already running (the

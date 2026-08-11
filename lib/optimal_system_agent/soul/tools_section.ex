@@ -105,12 +105,69 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   defp render(loaded_section, deferred_names) do
     base = "## Available Tools\n\n#{loaded_section}"
 
-    if deferred_names == [] do
-      base
+    parts =
+      [
+        base,
+        if(deferred_names == [], do: nil, else: build_deferred_reminder(deferred_names)),
+        build_mcp_catalog()
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    Enum.join(parts, "\n\n")
+  end
+
+  # ── MCP catalog ───────────────────────────────────────────────────────────
+  #
+  # `fetch_builtin_modules/0` reads ONLY `{Registry, :builtin_tools}`, so MCP
+  # tools have never appeared in this section — not as loaded schemas, and not
+  # even as names in the deferred reminder. Above the virtualization threshold
+  # (`MCP.Virtualization`, default 10) every MCP tool is also stripped from
+  # `Registry.list_active/0`, i.e. from the provider `tools` array. The net
+  # effect was that a configured MCP server left NO trace anywhere the model
+  # could see: it could not use what it had no evidence existed.
+  #
+  # This block is the evidence. It names every server and every tool it offers,
+  # so the model can go straight to `tool_search` with an exact name or a
+  # `server:` enumeration. Schemas stay deferred — only the catalog is cheap
+  # (one line per tool) and always present.
+  defp build_mcp_catalog do
+    catalog = Registry.mcp_catalog()
+
+    deferred_catalog =
+      catalog
+      |> Enum.map(fn {server, entries} -> {server, Enum.filter(entries, & &1.deferred?)} end)
+      |> Enum.reject(fn {_server, entries} -> entries == [] end)
+      |> Enum.sort_by(fn {server, _} -> server end)
+
+    if deferred_catalog == [] do
+      nil
     else
-      reminder = build_deferred_reminder(deferred_names)
-      base <> "\n\n" <> reminder
+      total = deferred_catalog |> Enum.map(fn {_s, e} -> length(e) end) |> Enum.sum()
+
+      servers =
+        Enum.map_join(deferred_catalog, "\n", fn {server, entries} ->
+          tools = Enum.map_join(entries, ", ", & &1.tool)
+          "- **#{server}** (#{length(entries)} tools): #{tools}"
+        end)
+
+      """
+      <mcp-servers>
+      #{total} MCP tool(s) across #{length(deferred_catalog)} connected server(s) are available but NOT loaded — their schemas are deferred to keep this prompt small. They are real, callable tools; you just need to fetch a schema first.
+
+      #{servers}
+
+      To use one, call `tool_search` first:
+      - `select:mcp__<server>__<tool>` — fetch exact schemas (comma-separate several)
+      - `server:<server>` — list every tool on one server with its schema
+      Then call the tool by its full `mcp__<server>__<tool>` name.
+      </mcp-servers>
+      """
+      |> String.trim_trailing()
     end
+  rescue
+    err ->
+      Logger.warning("[Soul.ToolsSection] MCP catalog build failed: #{Exception.message(err)}")
+      nil
   end
 
   defp build_deferred_reminder(names) do

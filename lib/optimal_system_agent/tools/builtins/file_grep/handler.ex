@@ -54,6 +54,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   def execute(%{"pattern" => pattern} = params, _ctx) do
     path = Path.expand(params["path"] || ".")
 
+    if File.exists?(path) do
+      do_search(pattern, path, params)
+    else
+      # A typo'd or stale path used to return "No matches found." — a silent
+      # WRONG answer. The agent concludes the symbol does not exist anywhere and
+      # follows a false trail, when in fact nothing was ever searched. ripgrep
+      # exits 1 for "no match" AND for "path does not exist", and the fallback
+      # simply globs an absent directory into []; neither could tell them apart.
+      {:error, missing_path_message(params["path"] || ".", path)}
+    end
+  end
+
+  def execute(_, _ctx), do: {:error, "Missing required parameter: pattern"}
+
+  defp do_search(pattern, path, params) do
     rg_opts = %{
       glob: params["glob"],
       case_insensitive: params["case_insensitive"] == true,
@@ -68,7 +83,69 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     end
   end
 
-  def execute(_, _ctx), do: {:error, "Missing required parameter: pattern"}
+  # ── Private: missing-path diagnostics ─────────────────────────────────
+
+  # Name what went wrong AND the next step: the nearest existing ancestor plus
+  # the closest sibling names under it, so a one-character typo is a single
+  # retry rather than a re-exploration of the tree.
+  defp missing_path_message(display_path, expanded) do
+    base =
+      "Search path does not exist: #{display_path} (resolved to #{expanded}). " <>
+        "Nothing was searched — this is NOT the same as 'no matches'. "
+
+    base <> suggestion_sentence(expanded)
+  end
+
+  defp suggestion_sentence(expanded) do
+    parent = Path.dirname(expanded)
+    target = Path.basename(expanded)
+
+    case nearest_existing(parent) do
+      nil ->
+        "Next step: verify the path with dir_list, or omit `path` to search the working directory."
+
+      ^parent ->
+        near = near_misses(parent, target)
+
+        if near == [] do
+          "Its parent #{parent} does exist. " <>
+            "Next step: list it with dir_list to get the real name, then retry."
+        else
+          "Its parent #{parent} does exist and contains similarly-named entries: " <>
+            "#{Enum.join(near, ", ")}. Next step: retry with one of those."
+        end
+
+      ancestor ->
+        "The nearest existing ancestor is #{ancestor}. " <>
+          "Next step: list it with dir_list to find the correct path, then retry."
+    end
+  end
+
+  # Walk up until an existing directory is found. Bounded by the root.
+  defp nearest_existing(path) do
+    cond do
+      File.exists?(path) -> path
+      path in ["/", ".", ""] -> nil
+      true -> nearest_existing(Path.dirname(path))
+    end
+  end
+
+  defp near_misses(dir, target) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        down = String.downcase(target)
+
+        entries
+        |> Enum.map(fn e -> {e, String.jaro_distance(down, String.downcase(e))} end)
+        |> Enum.filter(fn {_e, score} -> score >= 0.75 end)
+        |> Enum.sort_by(fn {_e, score} -> score end, :desc)
+        |> Enum.take(5)
+        |> Enum.map(fn {e, _} -> e end)
+
+      _ ->
+        []
+    end
+  end
 
   # ── Private: ripgrep path ─────────────────────────────────────────────
 

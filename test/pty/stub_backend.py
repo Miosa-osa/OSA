@@ -74,12 +74,14 @@ _ONBOARDING_STATUS = {
             "order": 6,
             "auth_modes": ["oauth"],
             "usable_auth_modes": ["oauth"],
+            # Signed in, so the usage panel has an account, an org and a plan
+            # to name — the three things the picker previously showed none of.
             "auth": {
-                "state": "needs_sign_in",
+                "state": "connected",
                 "can_sign_in": True,
                 "can_paste_key": False,
-                "account": None,
-                "plan": None,
+                "account": "luna@example.com",
+                "plan": "plus",
             },
             "models": "dynamic",
         },
@@ -93,12 +95,15 @@ _ONBOARDING_STATUS = {
             "order": 7,
             "auth_modes": ["oauth"],
             "usable_auth_modes": ["oauth"],
+            # Deliberately NOT signed in: this is the row whose only previous
+            # answer was a sentence telling the user to quit OSA and run a
+            # command somewhere else. The harness drives it to a real pty.
             "auth": {
-                "state": "connected",
+                "state": "needs_sign_in",
                 "can_sign_in": True,
                 "can_paste_key": False,
-                "account": "someone@example.com",
-                "plan": "max",
+                "account": None,
+                "plan": None,
             },
             "models": [{"id": "sonnet", "name": "sonnet", "ctx": 0, "tools": True}],
         },
@@ -123,6 +128,88 @@ _ONBOARDING_STATUS = {
         },
     ],
 }
+
+
+# `Auth.Subscription.status_all/0`. `openai_codex` is connected and carries an
+# ORG as well as an email — the field the picker used to drop, which left a
+# user with a personal and a work plan unable to tell which one was live.
+_AUTH_STATUS = {
+    "providers": [
+        {
+            "provider": "openai_codex",
+            "connected?": True,
+            "verified?": True,
+            "account": "luna@example.com",
+            "plan": "plus",
+            "org": "Acme Inc",
+            "expired?": False,
+        },
+        {
+            "provider": "claude_cli",
+            "connected?": False,
+            "verified?": False,
+            "account": None,
+            "plan": None,
+            "org": None,
+            "expired?": False,
+        },
+    ]
+}
+
+# `Usage.RateLimits.all/0`. Exactly one provider has reported — which is the
+# realistic case and the interesting one: the OTHER provider must render as
+# "not known yet", in words, and MUST NOT get a zeroed bar. A provider that has
+# reported nothing is ABSENT from this map; there is deliberately no key for it
+# to be defaulted from.
+_USAGE_NOW = 1_700_000_000
+_USAGE_QUOTA = {
+    "providers": {
+        "openai_codex": {
+            "used_percent": 48.0,
+            "window_minutes": 10080,
+            "resets_at": "2026-08-18T09:30:00Z",
+            "limit_name": None,
+            "observed_at": _USAGE_NOW - 7200,
+        }
+    },
+    "now": _USAGE_NOW,
+}
+
+# `Auth.Providers.ClaudeCli.cli_state/0`, and the one piece of stub state a
+# test mutates: the whole point of the feature is that OSA installs and signs
+# in *in place*, so the harness has to be able to say "not installed", watch
+# OSA run something, and then say "installed".
+#
+# `install_argv` / `login_program` point at real, harmless binaries. That is
+# not a shortcut around the feature — the feature IS "spawn what the backend
+# named on a pty and show me its screen", and pointing it at `/bin/echo` tests
+# exactly that without needing npm or an Anthropic account in CI.
+CLAUDE_CLI_STATE = {
+    "installed": False,
+    "path": None,
+    "version": None,
+    "version_ok": None,
+    "min_version": "2.0.0",
+    "signed_in": False,
+    "account": None,
+    "org": None,
+    "plan": None,
+    "login_program": None,
+    "login_argv": None,
+    "login_display": None,
+    "login_error": None,
+    # Prints, then lingers. A real `npm install -g` runs for tens of seconds
+    # with output arriving throughout, and that IS the state the pane exists
+    # to render; a child that prints and exits in the same millisecond would
+    # make the assertion a race against OSA's own re-check.
+    "install_argv": ["/bin/sh", "-c", "echo PTY-INSTALL-RAN; sleep 4"],
+    "install_url": "https://claude.com/product/claude-code",
+}
+
+
+def set_claude_cli_state(**fields) -> None:
+    """Move the stub's Claude Code state, as running a command would."""
+    CLAUDE_CLI_STATE.update(fields)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -180,6 +267,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"rules": []})
         if path == "/onboarding/status":
             return self._json(_ONBOARDING_STATUS)
+        if path == "/auth/status":
+            return self._json(_AUTH_STATUS)
+        if path == "/usage/quota":
+            return self._json(_USAGE_QUOTA)
+        if path == "/auth/cli/claude":
+            return self._json(dict(CLAUDE_CLI_STATE))
         if path == "/onboarding/models":
             # The shape the real backend answers with. Note the STATUS: 200.
             # The shipped defect answered 401 here for every provider once

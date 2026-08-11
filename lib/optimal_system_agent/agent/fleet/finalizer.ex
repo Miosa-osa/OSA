@@ -10,6 +10,15 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
        into DISJOINT file-owned workstreams. If two nodes touched the SAME file,
        that is an overlap the finalizer must NOT clobber: the conflicted files
        are reported and skipped, never merged.
+
+       Skipping is safe but *lossy*: every node's work on that file is silently
+       voided, which can be the majority of a wave. So alongside `:conflicts`
+       the finalizer now emits `:conflict_briefs` — for each conflicted file,
+       the claimants (node id, worktree ref, self-gate, summary) — the exact
+       input a follow-up reconciliation pass needs to salvage the work by hand.
+       The bundled `merge-reconciler` skill (`priv/skills/merge-reconciler`) is
+       the procedure that consumes it. The finalizer itself stays mechanical: it
+       never reconciles, never guesses, and never clobbers.
     2. **Merges disjoint diffs** — for each node that ran in its own worktree
        (`worktree_ref`), its non-conflicting `files_changed` are brought into the
        current branch via `git checkout <worktree_ref> -- <files>`.
@@ -58,10 +67,24 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
       %{
         merged: [binary],                     # files brought into the branch
         conflicts: [binary],                  # overlapping files, skipped
+        conflict_briefs: [conflict_brief],    # who claimed each conflicted file
         gate: :pass | :fail | :skipped,
         gate_output: binary,
         committed: boolean,
         message: binary                       # human-readable detail
+      }
+
+  where each `conflict_brief` is
+
+      %{
+        file: binary,
+        claimants: [%{
+          node_id: binary,
+          worktree_ref: binary | nil,
+          gate: :pass | :fail | :skipped,
+          errored: boolean,
+          summary: binary
+        }]
       }
 
   `finalize/3` never raises — any error becomes a `gate: :fail` result with the
@@ -83,9 +106,20 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
   @type git_fun :: ([binary], binary -> {binary, integer})
   @type cmd_fun :: (binary, binary -> {binary, integer})
 
+  @type claimant :: %{
+          node_id: binary,
+          worktree_ref: binary | nil,
+          gate: :pass | :fail | :skipped,
+          errored: boolean,
+          summary: binary
+        }
+
+  @type conflict_brief :: %{file: binary, claimants: [claimant]}
+
   @type result :: %{
           merged: [binary],
           conflicts: [binary],
+          conflict_briefs: [conflict_brief],
           gate: :pass | :fail | :skipped,
           gate_output: binary,
           committed: boolean,
@@ -130,6 +164,7 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
         result = %{
           merged: merged,
           conflicts: conflicts,
+          conflict_briefs: conflict_briefs(node_results, conflicts),
           gate: gate,
           gate_output: gate_output,
           committed: committed,
@@ -147,6 +182,7 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
         %{
           merged: [],
           conflicts: conflicts,
+          conflict_briefs: conflict_briefs(node_results, conflicts),
           gate: :fail,
           gate_output: detail,
           committed: false,
@@ -158,6 +194,7 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
       %{
         merged: [],
         conflicts: [],
+        conflict_briefs: [],
         gate: :fail,
         gate_output: Exception.message(e),
         committed: false,
@@ -176,6 +213,35 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
     |> Enum.filter(fn {_file, count} -> count > 1 end)
     |> Enum.map(fn {file, _count} -> file end)
     |> Enum.sort()
+  end
+
+  # ── Conflict briefs (the reconciler's input) ─────────────────────────
+
+  # Detection alone voids work: a conflicted file is skipped, so BOTH claimants'
+  # edits to it are dropped on the floor and nothing records who they were. The
+  # brief is that record — for each conflicted file, every node that claimed it,
+  # with the worktree ref its version is still recoverable from. Errored nodes
+  # are included and flagged: their diff is untrusted, but knowing they touched
+  # the file is exactly what tells a reconciler the overlap may be spurious.
+  @doc false
+  @spec conflict_briefs([node_result], [binary]) :: [conflict_brief]
+  def conflict_briefs(node_results, conflicts) do
+    Enum.map(conflicts, fn file ->
+      claimants =
+        node_results
+        |> Enum.filter(fn node -> file in Enum.uniq(files_of(node)) end)
+        |> Enum.map(fn node ->
+          %{
+            node_id: to_string(Map.get(node, :node_id) || ""),
+            worktree_ref: worktree_ref_of(node),
+            gate: Map.get(node, :gate, :skipped),
+            errored: node_error?(node),
+            summary: to_string(Map.get(node, :summary) || "")
+          }
+        end)
+
+      %{file: file, claimants: claimants}
+    end)
   end
 
   # ── Merge (disjoint worktree diffs → current branch) ─────────────────
@@ -307,7 +373,17 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
       "finalize(#{session_id}): merged #{length(merged)} file(s), " <>
         "#{length(conflicts)} conflict(s), gate #{gate}, committed #{committed}"
 
-    if conflicts == [], do: "#{base} (#{commit_note})", else: "#{base}; conflicts=#{Enum.join(conflicts, ", ")}"
+    if conflicts == [] do
+      "#{base} (#{commit_note})"
+    else
+      # Name the recovery path. A bare conflict list reads as "this wave failed";
+      # the work is actually still recoverable from each claimant's worktree ref,
+      # and `conflict_briefs` carries exactly what is needed to do it.
+      "#{base}; conflicts=#{Enum.join(conflicts, ", ")}" <>
+        "; the conflicted files were SKIPPED — every claimant's edits to them are unmerged. " <>
+        "Run the `merge-reconciler` skill with the `conflict_briefs` from this result to " <>
+        "recover them; do not re-run the wave."
+    end
   end
 
   # ── Field accessors (tolerant of missing keys) ───────────────────────

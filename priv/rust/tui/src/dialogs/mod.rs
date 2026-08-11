@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod channels_panel;
+pub mod claude_login;
 pub mod command_palette;
 pub mod config_editor;
 pub mod context_breakdown;
@@ -22,6 +23,7 @@ pub mod permissions_manager;
 pub mod persona_picker;
 pub mod picker;
 pub mod plan_review;
+pub mod pty_pane;
 pub mod quit_confirm;
 pub mod reasoning;
 pub mod rewind;

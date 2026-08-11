@@ -34,7 +34,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Prompt do
     - When editing text, ensure you preserve the exact indentation (tabs/spaces) as it appears in the file.
     - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
     - The edit will FAIL if `old_string` is not unique in the file. Provide a larger string with more surrounding context to make it unique, or use `replace_all` to change every instance.
-    - Use `replace_all` for renaming strings across the file (e.g., renaming a variable).
+    - Use `replace_all` for renaming strings across the file (e.g., renaming a variable). `replace_all` requires `old_string` to appear in the file EXACTLY; it is refused when only a fuzzy/approximate match is found, because rewriting every region that merely resembles `old_string` corrupts unrelated code. If it is refused, edit each site individually with its own exact `old_string`.
     - Do NOT re-read the file to verify an edit that succeeded. This tool errors when the edit does not apply (`old_string` not found, or ambiguous), so a successful result already means the file changed.
     - Only use emojis if the user explicitly requests it.
     """

@@ -731,6 +731,115 @@ pub struct LoginSessionResponse {
     pub error: Option<String>,
 }
 
+/// `Auth.Providers.ClaudeCli.cli_state/0` — everything a sign-in surface needs
+/// to drive Anthropic's own CLI instead of telling the user to go and run it.
+///
+/// Note what is NOT here: any token. This struct describes a binary and an
+/// account; the credential the sign-in produces is minted and kept by Claude
+/// Code, and a field for it appearing here would mean OSA had stopped being
+/// the sanctioned integration.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct ClaudeCliState {
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// `None` means "no binary to ask", NOT "fine". A tri-state on purpose:
+    /// "old enough" is a claim about a version we may not have.
+    #[serde(default)]
+    pub version_ok: Option<bool>,
+    #[serde(default)]
+    pub min_version: Option<String>,
+    #[serde(default)]
+    pub signed_in: bool,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub org: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    /// Absolute path to spawn, so the child does not depend on the TUI's own
+    /// PATH matching the backend's.
+    #[serde(default)]
+    pub login_program: Option<String>,
+    /// The subcommand this installation actually has, read from its `--help`.
+    /// `None` when none could be identified — which is a blocked screen, never
+    /// a guess.
+    #[serde(default)]
+    pub login_argv: Option<Vec<String>>,
+    #[serde(default)]
+    pub login_display: Option<String>,
+    #[serde(default)]
+    pub login_error: Option<String>,
+    #[serde(default)]
+    pub install_argv: Vec<String>,
+    #[serde(default)]
+    pub install_url: Option<String>,
+}
+
+/// One provider's last-reported quota window, from `Usage.RateLimits`.
+///
+/// Every field is optional because every field is a *measurement* that a
+/// provider may simply not have sent. `used_percent: None` is "not reported
+/// yet" and must render as such — this codebase's hard rule is that unknown
+/// never renders as a number, and the absence of a default here is what makes
+/// obeying it the path of least resistance.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct ProviderQuota {
+    #[serde(default)]
+    pub used_percent: Option<f64>,
+    #[serde(default)]
+    pub window_minutes: Option<f64>,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    #[serde(default)]
+    pub limit_name: Option<String>,
+    /// Unix seconds. The age of the reading is part of the reading: a 40%
+    /// figure observed four hours ago is not a claim about right now.
+    #[serde(default)]
+    pub observed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UsageQuotaResponse {
+    /// Keyed by provider id. A provider that has reported nothing is ABSENT,
+    /// not present-with-zeroes.
+    #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderQuota>,
+    #[serde(default)]
+    pub now: Option<i64>,
+}
+
+/// One row of `Auth.Subscription.status_all/0`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SubscriptionStatus {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default, rename = "connected?")]
+    pub connected: bool,
+    #[serde(default, rename = "verified?")]
+    pub verified: bool,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    /// Present for providers whose marker records one. Displayed beside the
+    /// account because an email alone does not say WHICH account: a user with
+    /// a personal and a work plan needs the org to tell them apart.
+    #[serde(default)]
+    pub org: Option<String>,
+    #[serde(default, rename = "expired?")]
+    pub expired: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AuthStatusResponse {
+    #[serde(default)]
+    pub providers: Vec<SubscriptionStatus>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectedProvider {
     pub provider: String,

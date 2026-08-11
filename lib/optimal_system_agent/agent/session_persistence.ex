@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   require Logger
 
   alias OptimalSystemAgent.Agent.SessionPersistence.Jsonl
+  alias OptimalSystemAgent.Agent.SessionPersistence.RecordLock
   alias OptimalSystemAgent.ConfigFile
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
@@ -37,50 +38,100 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   @max_sessions 50
 
-  @doc "Save session state to disk. `working_dir` tags the session to a folder so it can be resumed there."
+  @doc """
+  Save session state to disk. `working_dir` tags the session to a folder so it
+  can be resumed there.
+
+  ## Concurrency
+
+  The whole read-modify-write runs under `RecordLock` (an O_EXCL sidecar lock,
+  see that module), so two OSA **OS processes** — every `osa` invocation is its
+  own BEAM — cannot interleave their read and their `rename`.
+
+  Serialization alone is not enough, though: a lock only orders the writes, it
+  does not stop the *second* writer from installing a transcript derived from a
+  state it read before the first writer's turn landed. That was the actual
+  defect: `File.rename!` is whole-file last-writer-wins, so a second process
+  saving its own view of the session silently discarded the other side's turns.
+
+  So each record also carries a monotonic `rev` and the id of the VM (`writer`)
+  that produced it, and this VM remembers the last rev it *observed* for the
+  session (set by `load/1` and by every save). Under the lock:
+
+    * on-disk rev == the rev we last observed → our own lineage; the incoming
+      list supersedes it wholesale, which is what compaction and rewind (both
+      legitimately *shrink* the list) require;
+    * on-disk rev has moved on → a **foreign** writer got in. We do not
+      overwrite. The transcript becomes the multiset union of the on-disk
+      messages and ours (same content-hash identity the immutable event log
+      uses), so neither side's turns are dropped, and the conflict is logged
+      with both writer ids.
+
+  A session this VM has never read or written has no observed rev; the first
+  save then takes the plain-overwrite path, exactly as before. That is the
+  honest boundary — we can detect a writer that raced *us*, not one that wrote
+  before we ever looked.
+  """
   def save(session_id, messages, working_dir \\ nil) when is_list(messages) do
     File.mkdir_p!(sessions_dir())
     path = session_path(session_id)
 
-    data =
-      %{
-        session_id: session_id,
-        working_dir: normalize_dir(working_dir),
-        message_count: length(messages),
-        saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-        messages: sanitize_messages(messages)
-      }
-      # Preserve user-set metadata (title/tags from /rename and /tag) so an
-      # auto_save that only carries messages never clobbers it.
-      |> merge_preserved_metadata(path)
+    result =
+      RecordLock.with_lock(path, fn ->
+        existing = read_record(path)
+        sanitized = sanitize_messages(messages)
 
-    case Jason.encode(data) do
-      {:ok, json} ->
-        # Atomic write-then-rename: a crash mid-write can never truncate the
-        # session JSON, and overlapping auto_saves (which run outside the single
-        # Loop GenServer) resolve to a clean last-writer-wins instead of
-        # interleaving into corrupt bytes.
-        # Unique temp path per writer: concurrent auto_saves each own their own
-        # temp inode so rename(2) gives true whole-file last-writer-wins with no
-        # interleaving (a shared ".tmp" would be re-truncated mid-flight and torn).
-        tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-        File.write!(tmp, json)
-        File.rename!(tmp, path)
+        {final_messages, conflict?} = reconcile(session_id, existing, sanitized)
 
-        # Two-log persistence: alongside the mutable, compaction-pruned transcript
-        # written above (<id>.json), append any newly-seen messages to the
-        # IMMUTABLE append-only event log (<id>.updates.jsonl). Compaction shrinks
-        # `messages` and rewrites <id>.json, but the immutable log is only ever
-        # appended to — it stays the full source of truth for replay/rewind.
-        # Best-effort: a failure here never breaks the (already-committed) save.
-        append_updates(session_id, messages)
+        if conflict? do
+          Logger.error(
+            "[session_persist] #{session_id}: CONCURRENT WRITER detected " <>
+              "(on-disk rev #{rev_of(existing)} by #{inspect(writer_of(existing))}, " <>
+              "we last saw rev #{inspect(observed_rev(session_id))} as #{inspect(writer_id())}). " <>
+              "Merged both sides — #{length(final_messages)} message(s) kept, none dropped."
+          )
+        end
 
-        Logger.debug("[session_persist] Saved #{length(messages)} messages for #{session_id}")
-        :ok
+        data =
+          %{
+            "session_id" => session_id,
+            "working_dir" => normalize_dir(working_dir),
+            "message_count" => length(final_messages),
+            "saved_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+            "messages" => final_messages
+          }
+          # Legacy carry-over: metadata now lives in the `<id>.meta` sidecar
+          # (see update_metadata/2), but records written before that split keep
+          # title/tags/queued_messages inline. We already hold the old record
+          # here, so carrying them costs nothing and keeps old sessions named.
+          |> carry_legacy_metadata(existing)
 
-      {:error, reason} ->
-        Logger.warning("[session_persist] Failed to encode session: #{inspect(reason)}")
-        {:error, reason}
+        case write_record(path, session_id, data, existing) do
+          :ok ->
+            # Two-log persistence: alongside the mutable, compaction-pruned
+            # transcript written above (<id>.json), append any newly-seen
+            # messages to the IMMUTABLE append-only event log
+            # (<id>.updates.jsonl). Compaction shrinks `messages` and rewrites
+            # <id>.json, but the immutable log is only ever appended to — it
+            # stays the full source of truth for replay/rewind. Best-effort: a
+            # failure here never breaks the (already-committed) save.
+            append_updates(session_id, final_messages)
+
+            Logger.debug(
+              "[session_persist] Saved #{length(final_messages)} messages for #{session_id}"
+            )
+
+            :ok
+
+          {:error, reason} = err ->
+            Logger.warning("[session_persist] Failed to encode session: #{inspect(reason)}")
+            err
+        end
+      end)
+
+    case result do
+      {:ok, outcome} -> outcome
+      {:contended, outcome} -> outcome
     end
   rescue
     e ->
@@ -103,7 +154,13 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     case File.read(path) do
       {:ok, json} ->
         case Jason.decode(json) do
-          {:ok, %{"messages" => messages}} when is_list(messages) ->
+          {:ok, %{"messages" => messages} = record} when is_list(messages) ->
+            # Reading the record establishes this VM's lineage: a later save that
+            # finds a DIFFERENT rev on disk knows a foreign writer got in, while
+            # a save that still sees this rev is free to shrink the list
+            # (compaction, rewind). See save/3.
+            observe_rev(session_id, rev_of(record))
+
             # Skip-and-keep-going: one malformed (non-map) turn must not fail the
             # whole session resume. Bound key→atom conversion with
             # to_existing_atom so a tampered file cannot exhaust the atom table.
@@ -144,12 +201,30 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:ok, [], 0} ->
         fallback
 
-      {:ok, _events, _skipped} ->
+      {:ok, _events, skipped} ->
         restored =
           session_id
           |> load_events()
           |> Enum.filter(&is_map/1)
           |> Enum.map(fn m -> Map.new(m, fn {k, v} -> {safe_key(k), v} end) end)
+
+        # Recovery is a read that produces a record, so it must establish this
+        # VM's write lineage exactly like the normal load path does. It did not,
+        # which disabled save/3's merge-on-conflict for precisely the sessions
+        # that had just recovered from corruption: with no observed revision,
+        # the next save took the plain-overwrite branch and a concurrent
+        # writer's turns were dropped. The transcript we recovered from is by
+        # definition unreadable, so the observed revision is 0 — any foreign
+        # write (rev >= 1) then reads as a conflict and merges.
+        observe_rev(session_id, rev_of(read_json(session_path(session_id)) || %{}))
+
+        if skipped > 0 do
+          Logger.warning(
+            "[session_persist] #{session_id}: #{skipped} torn/unparseable record(s) were " <>
+              "skipped while rebuilding from the event log — the recovered transcript may " <>
+              "be missing them (raw file preserved as *.corrupt)"
+          )
+        end
 
         Logger.warning(
           "[session_persist] #{session_id}: <id>.json missing/corrupt, rebuilt " <>
@@ -184,7 +259,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           # the whole listing.
           case File.stat(path) do
             {:ok, stat} ->
-              meta = read_meta(path)
+              meta = read_meta(path, session_id)
 
               [
                 %{
@@ -231,7 +306,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     # deleted session leaves nothing behind.
     Jsonl.delete(updates_path(session_id))
     _ = File.rm(path <> ".corrupt")
+    _ = File.rm(RecordLock.lock_path(path))
+    _ = File.rm(meta_path(session_id))
     _ = File.rm(spend_path(session_id))
+    forget_rev(session_id)
     File.rm(path)
   end
 
@@ -261,7 +339,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
                 session_id = String.trim_trailing(file, ".json")
                 Jsonl.delete(updates_path(session_id))
                 _ = File.rm(path <> ".corrupt")
+                _ = File.rm(RecordLock.lock_path(path))
+                _ = File.rm(meta_path(session_id))
                 _ = File.rm(spend_path(session_id))
+                forget_rev(session_id)
                 File.rm(path) == :ok
 
               _ ->
@@ -293,35 +374,62 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   end
 
   @doc """
-  Merge friendly metadata (e.g. `%{title: ..., tags: [...]}`) into a saved
-  session record. Creates the record if none exists yet so `/rename` and `/tag`
-  work before the first message is saved. Returns `:ok` or `{:error, reason}`.
+  Merge friendly metadata (e.g. `%{title: ..., tags: [...]}`) into a session.
+
+  ## Why this does not touch `<id>.json`
+
+  This used to be a whole-record read-modify-write: read `<id>.json`, merge the
+  fields, write the *entire* record back — messages included. A `/rename`, a
+  `/tag`, or (far more often) a `MessageQueue` mutation calling `save_queue/2`
+  that overlapped a turn save therefore rewrote the transcript from a snapshot
+  taken before the turn landed, and the turn was gone. Not a cross-process
+  hazard — that one loses turns *within a single node*, between the loop and
+  whatever process ran the metadata update.
+
+  Metadata now lives in its own `<id>.meta` sidecar. A metadata update writes
+  only that file, so it shares no bytes with the transcript and there is no
+  read-modify-write over `messages` left to lose a race. `<id>.json` is still
+  created when absent (empty record) so `/rename` and `/tag` before the first
+  message still make the session listable — but an existing transcript is never
+  reopened for writing here.
+
+  Returns `:ok` or `{:error, reason}`.
   """
   def update_metadata(session_id, fields) when is_map(fields) do
     File.mkdir_p!(sessions_dir())
     path = session_path(session_id)
+    meta = meta_path(session_id)
 
-    existing =
-      case File.read(path) do
-        {:ok, json} ->
-          case Jason.decode(json) do
-            {:ok, data} when is_map(data) -> data
-            _ -> base_record(session_id)
-          end
+    result =
+      RecordLock.with_lock(meta, fn ->
+        existing = read_json(meta) || %{}
+        string_fields = Map.new(fields, fn {k, v} -> {to_string(k), v} end)
+        write_json(meta, Map.merge(existing, string_fields))
+      end)
 
-        _ ->
-          base_record(session_id)
+    outcome =
+      case result do
+        {:ok, o} -> o
+        {:contended, o} -> o
       end
 
-    string_fields = Map.new(fields, fn {k, v} -> {to_string(k), v} end)
-    write_json(path, Map.merge(existing, string_fields))
+    # Keep a session that only ever had metadata set visible to list/1 and
+    # purge_expired/0, both of which enumerate `*.json`. Created ONLY when
+    # absent — an existing transcript is never rewritten by a metadata update.
+    unless File.exists?(path) do
+      RecordLock.with_lock(path, fn ->
+        unless File.exists?(path), do: write_json(path, base_record(session_id))
+      end)
+    end
+
+    outcome
   rescue
     e -> {:error, Exception.message(e)}
   end
 
   @doc "Read a single session's metadata (title, tags, working_dir)."
   def get_metadata(session_id) do
-    read_meta(session_path(session_id))
+    read_meta(session_path(session_id), session_id)
   end
 
   @doc """
@@ -341,10 +449,16 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   @doc "Load the persisted per-session message queue as a list of strings ([] if none)."
   @spec load_queue(String.t()) :: [String.t()]
   def load_queue(session_id) do
-    with {:ok, json} <- File.read(session_path(session_id)),
-         {:ok, %{"queued_messages" => q}} when is_list(q) <- Jason.decode(json) do
-      for m <- q, is_binary(m), do: m
-    else
+    # Sidecar first; fall back to the inline field on records written before the
+    # metadata split.
+    queue =
+      case read_json(meta_path(session_id)) do
+        %{"queued_messages" => q} when is_list(q) -> q
+        _ -> (read_json(session_path(session_id)) || %{})["queued_messages"]
+      end
+
+    case queue do
+      q when is_list(q) -> for m <- q, is_binary(m), do: m
       _ -> []
     end
   rescue
@@ -533,8 +647,19 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   @spec load_events(String.t()) :: [map()]
   def load_events(session_id) do
     case Jsonl.read(updates_path(session_id)) do
-      {:ok, events, _skipped} -> Enum.map(events, &Map.get(&1, "msg", &1))
-      _ -> []
+      {:ok, events, skipped} ->
+        if skipped > 0 do
+          Logger.warning(
+            "[session_persist] #{session_id}: #{skipped} torn/unparseable record(s) skipped " <>
+              "while reading the immutable event log — replay is incomplete by that many " <>
+              "records (raw file preserved as *.corrupt)"
+          )
+        end
+
+        Enum.map(events, &Map.get(&1, "msg", &1))
+
+      _ ->
+        []
     end
   end
 
@@ -552,6 +677,144 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   defp session_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
     Path.join(sessions_dir(), "#{safe_id}.json")
+  end
+
+  # Path of the metadata sidecar (title/tags/queued_messages). Deliberately NOT
+  # `*.json`: `list/1` and `purge_expired/0` enumerate `*.json` and would
+  # otherwise mistake it for a second session record.
+  defp meta_path(session_id) do
+    safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
+    Path.join(sessions_dir(), "#{safe_id}.meta")
+  end
+
+  # ── Concurrent-writer detection (defect 3) ───────────────────────────
+  #
+  # `rev` is a per-record monotonic counter and `writer` names the VM that
+  # produced the record. Together with the rev this VM last OBSERVED they let
+  # save/3 tell "I am overwriting my own lineage" (fine — that is compaction and
+  # rewind) apart from "someone else wrote while I was thinking" (not fine —
+  # a plain rename would drop their turns).
+
+  defp rev_of(%{"rev" => n}) when is_integer(n), do: n
+  defp rev_of(_), do: 0
+
+  defp writer_of(%{"writer" => w}) when is_binary(w), do: w
+  defp writer_of(_), do: nil
+
+  # Per-VM identity, minted once. persistent_term is the right home: written
+  # once, read on every save, and visible to every process in this BEAM.
+  defp writer_id do
+    key = {__MODULE__, :writer_id}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        id =
+          "#{node()}/#{System.pid()}/#{System.unique_integer([:positive])}"
+
+        :persistent_term.put(key, id)
+        id
+
+      id ->
+        id
+    end
+  end
+
+  # The rev this VM last saw for a session (nil = never read or written here).
+  # Updated by load/1 and by every successful save; puts happen at turn cadence,
+  # not in a hot loop, so persistent_term's global-scan cost is irrelevant.
+  defp observed_rev(session_id), do: :persistent_term.get({__MODULE__, :rev, session_id}, nil)
+
+  defp observe_rev(session_id, rev) when is_integer(rev) do
+    :persistent_term.put({__MODULE__, :rev, session_id}, rev)
+    :ok
+  end
+
+  defp observe_rev(_, _), do: :ok
+
+  defp forget_rev(session_id) do
+    _ = :persistent_term.erase({__MODULE__, :rev, session_id})
+    :ok
+  end
+
+  # Decide what the transcript should contain. Returns {messages, conflict?}.
+  defp reconcile(_session_id, nil, incoming), do: {incoming, false}
+
+  defp reconcile(session_id, existing, incoming) do
+    seen = observed_rev(session_id)
+    on_disk = rev_of(existing)
+
+    cond do
+      # Never looked at this session in this VM — we have no basis to call
+      # anything a conflict, so behave as before (plain overwrite).
+      is_nil(seen) ->
+        {incoming, false}
+
+      seen == on_disk ->
+        {incoming, false}
+
+      true ->
+        prior = Enum.filter(Map.get(existing, "messages", []), &is_map/1)
+        {union_messages(prior, incoming), true}
+    end
+  end
+
+  # Multiset union by content hash, prior side first: everything the foreign
+  # writer committed is kept, and our messages are appended in order for each
+  # occurrence beyond what the prior list already accounts for. Uses the same
+  # identity function as the immutable event log, so "the same turn saved by
+  # both sides" collapses to one entry rather than duplicating.
+  defp union_messages(prior, incoming) do
+    seen =
+      Enum.reduce(prior, %{}, fn m, acc -> Map.update(acc, event_hash(m), 1, &(&1 + 1)) end)
+
+    {extra, _} =
+      Enum.flat_map_reduce(incoming, %{}, fn msg, cur ->
+        h = event_hash(msg)
+        occurrence = Map.get(cur, h, 0) + 1
+        cur = Map.put(cur, h, occurrence)
+
+        if occurrence > Map.get(seen, h, 0), do: {[msg], cur}, else: {[], cur}
+      end)
+
+    prior ++ extra
+  end
+
+  defp read_record(path) do
+    case read_json(path) do
+      %{} = data -> data
+      _ -> nil
+    end
+  end
+
+  defp carry_legacy_metadata(data, nil), do: data
+
+  defp carry_legacy_metadata(data, existing) do
+    Enum.reduce(["title", "tags", "queued_messages"], data, fn key, acc ->
+      case Map.get(existing, key) do
+        nil -> acc
+        val -> Map.put(acc, key, val)
+      end
+    end)
+  end
+
+  # Stamp the record with the next rev + this VM's writer id, install it
+  # atomically, and remember the rev we just wrote.
+  defp write_record(path, session_id, data, existing) do
+    rev = rev_of(existing) + 1
+
+    stamped =
+      data
+      |> Map.put("rev", rev)
+      |> Map.put("writer", writer_id())
+
+    case write_json(path, stamped) do
+      :ok ->
+        observe_rev(session_id, rev)
+        :ok
+
+      other ->
+        other
+    end
   end
 
   # Path of the immutable append-only event log, sitting next to <id>.json.
@@ -629,11 +892,44 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         write_cursor(session_id, Map.put(cursor, "log_size", file_size(path)))
 
       :miss ->
-        existing =
-          case Jsonl.read(path) do
-            {:ok, events, _skipped} -> events
-            _ -> []
-          end
+        slow_path_append(session_id, path, messages)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("[session_persist] updates log append failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Full multiset diff against the log.
+  #
+  # The read of the log MUST NOT fail open. Coercing a read error to `[]` (which
+  # is what this used to do) makes `seen` empty, so the delta becomes "every
+  # message in the session" and the whole transcript is duplicated into the
+  # immutable log — and because identity here is a content-hash MULTISET, a
+  # wholesale duplicate is indistinguishable from a session that legitimately
+  # repeated its messages. It cannot be detected or undone afterwards.
+  #
+  # A transient EACCES / ENOMEM / lock contention is exactly the condition that
+  # triggers it. So: a read error ABORTS the append. Skipping one append is
+  # recoverable — the next save re-derives the same delta from the log — while a
+  # corrupted recovery log is not.
+  defp slow_path_append(session_id, path, messages) do
+    case Jsonl.read(path) do
+      {:ok, existing, skipped} ->
+        if skipped > 0 do
+          # `Jsonl.read/1` already quarantined the raw file. Say out loud what
+          # happens next: the torn records are absent from `seen`, so the diff
+          # below re-appends them. That is a repair, not a duplication — but a
+          # silent repair is how a log quietly grows junk lines, so it is logged
+          # with the session id.
+          Logger.warning(
+            "[session_persist] #{session_id}: #{skipped} torn/unparseable record(s) in the " <>
+              "event log were skipped; their content will be RE-APPENDED by this save " <>
+              "(the raw file was preserved as *.corrupt)"
+          )
+        end
 
         new_events = compute_new_events(messages, existing)
         Jsonl.append(path, new_events)
@@ -644,13 +940,17 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           |> Kernel.+(1)
 
         rebuild_cursor(session_id, path, next_seq, messages)
-    end
 
-    :ok
-  rescue
-    e ->
-      Logger.warning("[session_persist] updates log append failed: #{Exception.message(e)}")
-      :ok
+      {:error, reason} ->
+        Logger.error(
+          "[session_persist] #{session_id}: could not read the immutable event log " <>
+            "(#{inspect(reason)}) — SKIPPING this append rather than treating the log as " <>
+            "empty, which would duplicate the entire transcript into it. The next save " <>
+            "re-derives the same delta."
+        )
+
+        :ok
+    end
   end
 
   # Try to satisfy the append from the cursor alone. Returns the events to write
@@ -658,19 +958,18 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   # `:miss` to force the full-diff path.
   defp fast_forward(path, session_id, messages) do
     with %{
-           "v" => 1,
+           "v" => 2,
            "log_size" => log_size,
            "next_seq" => next_seq,
            "msg_count" => n,
-           "head_hash" => head_hash,
-           "tail_hash" => tail_hash
+           "span_hash" => span_hash
          }
          when is_integer(log_size) and is_integer(next_seq) and is_integer(n) and n >= 0 <-
            read_cursor(session_id),
          true <- file_size(path) == log_size,
          total = length(messages),
          true <- total >= n,
-         true <- boundary_matches?(messages, n, head_hash, tail_hash) do
+         true <- span_matches?(messages, n, span_hash) do
       ts = DateTime.utc_now() |> DateTime.to_iso8601()
 
       {events, last_seq} =
@@ -682,12 +981,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         end)
 
       cursor = %{
-        "v" => 1,
+        "v" => 2,
         "log_size" => log_size,
         "next_seq" => last_seq,
         "msg_count" => total,
-        "head_hash" => if(total == 0, do: nil, else: hash_at(messages, 0)),
-        "tail_hash" => if(total == 0, do: nil, else: hash_at(messages, total - 1))
+        "span_hash" => span_hash(messages, total)
       }
 
       {:ok, events, cursor}
@@ -696,20 +994,41 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   end
 
-  # A pure append leaves message 0 and message `n - 1` untouched. Compaction
-  # rewrites the head (summary replaces the pruned prefix) and rewind drops the
-  # tail, so both show up here as a mismatch and route to the full diff.
-  defp boundary_matches?(_messages, 0, _head_hash, _tail_hash), do: true
+  # Is the current list still a pure APPEND onto the span we already projected?
+  #
+  # This used to compare only the endpoint hashes — message 0 and message
+  # `n - 1`. That is blind to an IN-PLACE rewrite of any message strictly
+  # between them: both endpoints still match, the fast path declares "pure
+  # append", writes only `Enum.drop(messages, n)`, and the mutation never
+  # reaches the immutable log. `Compactor.apply_step(:micro_compact, ...)` has
+  # exactly that shape — it rewrites older `role: "tool"` contents in place and
+  # leaves the head and tail alone — so `<id>.json` recorded the prune and
+  # `<id>.updates.jsonl` did not. A later events-fallback recovery then restored
+  # pre-prune content the live session had deliberately dropped: the two logs
+  # diverged, silently.
+  #
+  # The fingerprint is now over the WHOLE projected prefix, so any interior edit
+  # is a miss and routes to the full multiset diff (which is correct by
+  # construction). Cost is one pass over the prefix per save — cheap next to the
+  # full-log read + per-message SHA-256 + JSON encode that a miss costs, and the
+  # only price at which "the log cannot silently miss an edit" is available.
+  defp span_matches?(_messages, 0, _span_hash), do: true
 
-  defp boundary_matches?(messages, n, head_hash, tail_hash) do
-    hash_at(messages, 0) == head_hash and hash_at(messages, n - 1) == tail_hash
-  end
+  defp span_matches?(messages, n, span_hash), do: span_hash(messages, n) == span_hash
 
-  defp hash_at(messages, index) do
-    case Enum.at(messages, index) do
-      nil -> nil
-      msg -> msg |> List.wrap() |> sanitize_messages() |> hd() |> event_hash()
-    end
+  # Content fingerprint of the first `n` messages. `messages` reaching here is
+  # already sanitized (string-keyed plain maps), and Erlang encodes small maps
+  # with their keys in canonical order, so `term_to_binary/1` is deterministic
+  # across saves and across VMs.
+  defp span_hash(_messages, 0), do: nil
+
+  defp span_hash(messages, n) do
+    messages
+    |> Enum.take(n)
+    |> sanitize_messages()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   defp file_size(path) do
@@ -744,12 +1063,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     total = length(messages)
 
     write_cursor(session_id, %{
-      "v" => 1,
+      "v" => 2,
       "log_size" => file_size(path),
       "next_seq" => next_seq,
       "msg_count" => total,
-      "head_hash" => if(total == 0, do: nil, else: hash_at(messages, 0)),
-      "tail_hash" => if(total == 0, do: nil, else: hash_at(messages, total - 1))
+      "span_hash" => span_hash(messages, total)
     })
   end
 
@@ -829,18 +1147,32 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   defp normalize_dir(_), do: nil
 
-  # Cheaply read display metadata (working_dir, title, tags) from a session file.
-  defp read_meta(path) do
+  # Cheaply read display metadata (working_dir, title, tags).
+  #
+  # `working_dir` is a property of the transcript (set by save/3); `title`/`tags`
+  # live in the `<id>.meta` sidecar. Records written before the sidecar split
+  # carry title/tags inline, so the record is the fallback — an old session keeps
+  # its name without a migration step.
+  defp read_meta(path, session_id) do
+    record = read_json(path) || %{}
+    meta = read_json(meta_path(session_id)) || %{}
+
+    %{
+      working_dir: record["working_dir"],
+      title: meta["title"] || record["title"],
+      tags: normalize_tags(meta["tags"] || record["tags"])
+    }
+  end
+
+  defp read_json(path) do
     with {:ok, json} <- File.read(path),
          {:ok, data} when is_map(data) <- Jason.decode(json) do
-      %{
-        working_dir: data["working_dir"],
-        title: data["title"],
-        tags: normalize_tags(data["tags"])
-      }
+      data
     else
-      _ -> %{working_dir: nil, title: nil, tags: []}
+      _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   defp normalize_tags(tags) when is_list(tags), do: tags
@@ -869,29 +1201,6 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       "saved_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "messages" => []
     }
-  end
-
-  # Read the title/tags from an existing record (if any) and re-apply them onto
-  # a freshly-built save payload, keeping them stable across message-only saves.
-  defp merge_preserved_metadata(data, path) do
-    case File.read(path) do
-      {:ok, json} ->
-        case Jason.decode(json) do
-          {:ok, existing} when is_map(existing) ->
-            Enum.reduce(["title", "tags", "queued_messages"], data, fn key, acc ->
-              case Map.get(existing, key) do
-                nil -> acc
-                val -> Map.put(acc, key, val)
-              end
-            end)
-
-          _ ->
-            data
-        end
-
-      _ ->
-        data
-    end
   end
 
   # Atomic JSON write (temp-then-rename), shared by save/3 and update_metadata/2.

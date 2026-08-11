@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolHint
   alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
+  alias OptimalSystemAgent.Agent.Safety.UntrustedContent
   alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Permissions.AskFlow
   alias OptimalSystemAgent.Permissions.AutoClassifier
@@ -1247,23 +1248,178 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           }
 
         _ ->
-          limit = max_tool_output_bytes
+          content = spill_or_truncate(result_str, max_tool_output_bytes, tool_call)
 
-          content =
-            if byte_size(result_str) > limit do
-              truncated = binary_part(result_str, 0, limit)
-
-              truncated <>
-                "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{limit} bytes]"
-            else
-              result_str
-            end
-
-          %{role: "tool", tool_call_id: tool_call.id, name: tool_call.name, content: content}
+          %{
+            role: "tool",
+            tool_call_id: tool_call.id,
+            name: tool_call.name,
+            content: fence_untrusted(tool_call.name, content)
+          }
       end
 
     {tool_msg, result_str}
   end
+
+  @doc """
+  Cap a tool result at `limit` bytes WITHOUT losing the tail.
+
+  This is the LAST cut before the result becomes a context message, and it was
+  the only one with no way back: everything past `limit` was dropped and the
+  model was told solely how many bytes it would never see.
+
+  `ToolResultStorage.apply_budget/4` runs earlier and does offload-with-a-
+  reference, but it does not cover this cut. It is bypassed or outrun whenever:
+
+    * `verbose` is set — `apply_budget/4` returns the full result untouched by
+      design, and this cut then amputated it anyway;
+    * a `post_tool_use` hook rewrites or appends to the result AFTER the budget
+      pass, so the message can exceed `limit` without the storage layer ever
+      seeing the final bytes;
+    * the offload write itself fails, in which case `apply_budget/4` falls back
+      to its own head-only truncation with no file behind it;
+    * the two read the same `:max_tool_output_bytes` key but fall back to
+      DIFFERENT defaults (`10_240` here vs `51_200` there), so any deployment
+      that leaves the key unset amputates everything between the two.
+
+  Now the full result is spilled to a content-hashed file and the model is
+  handed a ready-to-run `file_read` call positioned at the first line it has
+  not seen. Truncation becomes a pointer instead of a dead end.
+
+  Content-hashed naming makes the spill idempotent: the same output re-spilled
+  (retry, replay) reuses one file instead of accumulating duplicates. Files land
+  in the same `tool-results/` directory `ToolResultStorage.cleanup/1` sweeps by
+  age, so they do not leak.
+
+  Returns `result_str` unchanged when it is within `limit`. Never raises: a
+  failed spill degrades to the previous head-only truncation, which is no worse
+  than the old behaviour.
+  """
+  # Bytes held back from the head slice for the truncation footer.
+  @overflow_footer_reserve 600
+
+  @spec spill_or_truncate(String.t(), pos_integer(), map()) :: String.t()
+  def spill_or_truncate(result_str, limit, tool_call)
+      when is_binary(result_str) and is_integer(limit) and limit > 0 do
+    if byte_size(result_str) > limit do
+      # Reserve room for the footer so the pointer itself is never the thing
+      # that pushes the message back over the limit.
+      head_limit = max(limit - @overflow_footer_reserve, div(limit, 2))
+      head = safe_head(result_str, head_limit)
+      shown_lines = count_lines(head)
+
+      case spill_overflow(result_str, tool_call) do
+        {:ok, path, total_lines} ->
+          head <>
+            "\n\n[Output truncated — showing #{byte_size(head)} of #{byte_size(result_str)} bytes " <>
+            "(#{shown_lines} of #{total_lines} lines).\n" <>
+            "The COMPLETE output is saved at #{path}.\n" <>
+            "Next step: read the rest with file_read " <>
+            ~s({"path": "#{path}", "offset": #{shown_lines + 1}, "limit": 200}) <>
+            " — repeat with a higher offset to page further.]"
+
+        :error ->
+          head <>
+            "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first " <>
+            "#{byte_size(head)} bytes. The overflow could not be saved to disk.\n" <>
+            "Next step: re-run this tool with a narrower query (a more specific pattern, " <>
+            "path, or line range) so the result fits.]"
+      end
+    else
+      result_str
+    end
+  end
+
+  def spill_or_truncate(result_str, _limit, _tool_call), do: result_str
+
+  # binary_part/3 can split a multi-byte grapheme and produce invalid UTF-8,
+  # which some providers reject outright. Trim back to a valid boundary.
+  defp safe_head(bin, limit) do
+    head = binary_part(bin, 0, min(limit, byte_size(bin)))
+
+    if String.valid?(head) do
+      head
+    else
+      trim_to_valid(head)
+    end
+  end
+
+  defp trim_to_valid(<<>>), do: <<>>
+
+  defp trim_to_valid(bin) do
+    size = byte_size(bin)
+    shorter = binary_part(bin, 0, size - 1)
+    if String.valid?(shorter), do: shorter, else: trim_to_valid(shorter)
+  end
+
+  defp count_lines(""), do: 0
+  defp count_lines(bin), do: bin |> :binary.matches("\n") |> length() |> Kernel.+(1)
+
+  # Write the full result to a content-hashed file under the shared
+  # tool-results directory. Returns {:ok, path, total_lines} or :error.
+  defp spill_overflow(result_str, tool_call) do
+    dir = Path.join(OptimalSystemAgent.ConfigFile.config_dir(), "tool-results")
+    File.mkdir_p!(dir)
+
+    digest =
+      :crypto.hash(:sha256, result_str)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 16)
+
+    tool_name =
+      tool_call
+      |> Map.get(:name, "tool")
+      |> to_string()
+      |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
+
+    path = Path.join(dir, "overflow_#{tool_name}_#{digest}.txt")
+
+    # Content-hashed: if it already exists it is byte-identical, so skip the write.
+    if File.exists?(path) do
+      {:ok, path, count_lines(result_str)}
+    else
+      case File.write(path, result_str) do
+        :ok -> {:ok, path, count_lines(result_str)}
+        {:error, _} -> :error
+      end
+    end
+  rescue
+    _ -> :error
+  end
+
+  @doc """
+  Fence and defang tool output that a third party controls before it becomes a
+  context message.
+
+  Applies to the web tools and every MCP tool. Their output is attacker-
+  reachable in a way the user's own message is not — yet only the user's
+  message was ever screened for injection, and tool results were concatenated
+  into context raw, with no delimiter. A page could therefore emit
+  `SYSTEM: ignore previous instructions` and have it read as prompt structure.
+
+  Output is never dropped or refused on a hit: that would let any web page
+  deny the agent its own tool results. It is delimited with a nonce'd fence,
+  line-quoted so nothing inside can start a line with a role header, stripped
+  of zero-width smuggling, and annotated when it screens as hostile. See
+  `OptimalSystemAgent.Agent.Safety.UntrustedContent`.
+
+  Public + `@doc false`-free so the fencing is directly unit-testable.
+  """
+  @spec fence_untrusted(term(), term()) :: term()
+  def fence_untrusted(tool_name, content) when is_binary(content) do
+    if UntrustedContent.untrusted_tool?(tool_name) do
+      UntrustedContent.wrap(content, source: tool_name, max_bytes: byte_size(content))
+    else
+      content
+    end
+  rescue
+    # Fencing must never cost the turn its tool result.
+    e ->
+      Logger.debug("[loop] fence_untrusted failed (non-critical): #{inspect(e)}")
+      content
+  end
+
+  def fence_untrusted(_tool_name, content), do: content
 
   # PostToolUse hook consumption (CC parity). The tool has already run, so a
   # hook cannot un-run it — but its verdict shapes what the model sees:
