@@ -26,11 +26,12 @@ defmodule Mix.Tasks.Osa.Sandbox.Setup do
 
   After setup completes, enable the sandbox in one of two ways:
 
-      # Environment variable (recommended for production)
-      export OSA_SANDBOX_ENABLED=true
-
-      # Or in config/dev.exs
-      config :optimal_system_agent, sandbox_enabled: true
+      # In config/dev.exs — these are the keys the code actually reads
+      # (`Sandbox.Router` reads :sandbox_backend/:sandbox_mode,
+      #  `Sandbox.Docker` reads the nested :sandbox_docker map).
+      config :optimal_system_agent, :sandbox_backend, :docker
+      config :optimal_system_agent, :sandbox_mode, :required
+      config :optimal_system_agent, :sandbox_docker, %{image: "osa-sandbox:latest"}
 
   ## Security model
 
@@ -217,11 +218,14 @@ defmodule Mix.Tasks.Osa.Sandbox.Setup do
     Mix.shell().info("")
     Mix.shell().info("Setup complete!")
     Mix.shell().info("")
-    Mix.shell().info("To enable the sandbox:")
-    Mix.shell().info("  export OSA_SANDBOX_ENABLED=true")
-    Mix.shell().info("")
-    Mix.shell().info("Or in config/dev.exs:")
-    Mix.shell().info("  config :optimal_system_agent, sandbox_enabled: true")
+    Mix.shell().info("To enable the sandbox, in config/dev.exs:")
+    Mix.shell().info("  config :optimal_system_agent, :sandbox_backend, :docker")
+    Mix.shell().info("  config :optimal_system_agent, :sandbox_mode, :required")
+
+    Mix.shell().info(
+      "  config :optimal_system_agent, :sandbox_docker, %{image: #{inspect(image)}}"
+    )
+
     Mix.shell().info("")
     Mix.shell().info("Image:     #{image}")
     Mix.shell().info("Workspace: #{Path.expand("~/.osa/workspace")}")

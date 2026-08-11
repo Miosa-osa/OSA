@@ -98,6 +98,15 @@ pub(crate) const TRAIL_MAX_ROWS: usize = 4;
 /// The label rendered on an agent's roster row: its live current action, falling
 /// back to the subject it was spawned with.
 pub(super) fn row_activity(entry: &AgentEntry) -> &str {
+    // Unknown / Stalled rows state their condition on the line BELOW them, and
+    // `current_action` for those rows holds that same condition string — so
+    // using it here printed the identical sentence twice, stacked. It also has
+    // no business claiming to be "live activity" for an agent that is by
+    // definition not sending any. The head row says what the agent was given to
+    // do; the line under it says what we know about its state.
+    if matches!(entry.status, AgentStatus::Unknown | AgentStatus::Stalled) {
+        return entry.subject.trim();
+    }
     if !entry.current_action.trim().is_empty() {
         entry.current_action.trim()
     } else {
@@ -471,6 +480,19 @@ impl Agents {
         self.entries.len()
     }
 
+    /// Agents that have NOT reached a terminal state — i.e. the ones the footer
+    /// cue means when it says "N subagents". `entry_count` includes rows that
+    /// already finished (they linger for `RETAIN_SECS`), so using it there
+    /// reported e.g. "4 subagents" for one running worker and three that were
+    /// already done.
+    ///
+    /// `Unknown` and `Stalled` count as in-flight on purpose: neither is a
+    /// report that the agent ended, and dropping them would understate the fleet
+    /// exactly as badly as `entry_count` overstates it.
+    pub fn running_count(&self) -> usize {
+        self.entries.iter().filter(|e| !e.status.is_terminal()).count()
+    }
+
     /// True if any agent has ever been tracked this session — gates opening the
     /// dashboard.
     pub fn has_entries(&self) -> bool {
@@ -615,6 +637,10 @@ impl Agents {
                 let shown = trail_actions(entry).len();
                 1 + shown.max(1).min(TRAIL_MAX_ROWS) as u16
             }
+            // Unknown / Stalled: 1 subject + exactly 1 state line. No trail (the
+            // trail would imply live activity we do not have) and no summary
+            // (nothing was produced — the agent has not ended).
+            AgentStatus::Unknown | AgentStatus::Stalled => 2,
             // Terminal rows: 1 subject + 1 Done/Failed trail + an optional dim
             // `⎿ <summary>` line when the backend delivered a result preview.
             _ => 2 + u16::from(entry.result_summary.is_some()),
@@ -628,33 +654,45 @@ impl Agents {
         self.prune_stale();
     }
 
-    /// How long a still-"Running" agent may go silent before we treat it as dead.
+    /// How long a still-"Running" agent may go silent before the panel admits it
+    /// no longer knows the agent's state.
     const STALE_SECS: u64 = 90;
     /// How long a finished (Completed/Failed) row lingers before it's removed so
     /// the panel doesn't accumulate old rows.
     const RETAIN_SECS: u64 = 20;
+    /// How long an `Unknown` row is kept before it is DROPPED (not failed). At
+    /// some point a row whose state we cannot determine stops being information
+    /// and becomes clutter — but removing it still says nothing false, whereas
+    /// flipping it to Failed would.
+    const UNKNOWN_REAP_SECS: u64 = 600;
 
-    /// Reconcile the panel with reality: mark silent running agents as Failed
-    /// (they crashed / were rate-limited / the backend dropped their stream), and
-    /// drop finished rows that have lingered past the retain window. Idempotent,
-    /// cheap, safe to call every tick.
+    /// Reconcile the panel with reality: demote silent running agents to
+    /// `Unknown`, and drop finished rows that have lingered past the retain
+    /// window. Idempotent, cheap, safe to call every tick.
+    ///
+    /// This deliberately does NOT synthesize a failure. A background subagent
+    /// emits `started` before it waits for a concurrency slot and emits nothing
+    /// while queued, so silence is the NORMAL shape of a healthy queued agent —
+    /// the old Running→Failed transition invented a failure for it. `Failed` may
+    /// only come from a terminal backend event.
     pub fn prune_stale(&mut self) {
-        // 1. Silent runners → Failed (stops the forever-"Running" ghost).
+        // 1. Silent runners → Unknown (stops the forever-"Running" ghost without
+        //    claiming a death nobody reported).
         for e in self.entries.iter_mut() {
             if e.is_stale(Self::STALE_SECS) {
-                e.status = AgentStatus::Failed;
-                if e.current_action.is_empty() || e.current_action == "complete" {
-                    e.current_action = "stalled".into();
-                }
-                e.finished_at.get_or_insert_with(std::time::Instant::now);
+                e.status = AgentStatus::Unknown;
             }
         }
-        // 2. Old finished rows → removed.
+        // 2. Old finished rows → removed; long-Unknown rows → removed as well
+        //    (silent removal, never a fabricated terminal state).
         self.entries.retain(|e| match e.status {
             AgentStatus::Completed | AgentStatus::Failed => e
                 .finished_at
                 .map(|t| t.elapsed().as_secs() < Self::RETAIN_SECS)
                 .unwrap_or(true),
+            AgentStatus::Unknown => {
+                e.last_activity.elapsed().as_secs() < Self::UNKNOWN_REAP_SECS
+            }
             _ => true,
         });
         // Panel goes idle once nothing is left to show.
@@ -703,6 +741,7 @@ impl Agents {
                     finished_at: None,
                     last_activity: std::time::Instant::now(),
                     result_summary: None,
+                    cost_usd: None,
                 });
             }
         }
@@ -754,6 +793,7 @@ impl Agents {
                 finished_at: None,
                 last_activity: std::time::Instant::now(),
                 result_summary: None,
+                cost_usd: None,
             });
         }
         self.active = true;
@@ -771,6 +811,11 @@ impl Agents {
         let subject = subject.into();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.last_activity = std::time::Instant::now();
+            // A signal from a row we had given up on (Unknown) or that the
+            // backend flagged as stalled means it is demonstrably alive again.
+            if matches!(entry.status, AgentStatus::Unknown | AgentStatus::Stalled) {
+                entry.status = AgentStatus::Running;
+            }
             entry.current_action = action.into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
@@ -791,42 +836,90 @@ impl Agents {
         }
     }
 
+    /// Terminal "completed" transition.
+    ///
+    /// `tool_uses` / `tokens` are OPTIONAL and non-destructive: `None` means the
+    /// wire carried no usage for this agent, in which case the counters that
+    /// were accumulated from its progress events are LEFT ALONE. Passing a
+    /// hardcoded `0` here used to wipe every real number the panel had
+    /// collected, so a worker that ran 12 tools and 40k tokens finished reading
+    /// `0 tools · 0 tokens`. Same rule the fleet path already follows
+    /// (`fleet_node_completed`).
     pub fn agent_completed(
         &mut self,
         name: &str,
-        tool_uses: u32,
-        tokens: u32,
+        tool_uses: Option<u32>,
+        tokens: Option<u32>,
         summary: Option<String>,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.status = AgentStatus::Completed;
             entry.current_action = "complete".into();
-            entry.tool_uses = tool_uses;
-            entry.tokens_used = tokens;
+            if let Some(t) = tool_uses {
+                entry.tool_uses = t;
+            }
+            if let Some(t) = tokens {
+                entry.tokens_used = t;
+            }
             entry.finished_at = Some(std::time::Instant::now());
             entry.result_summary = summary.filter(|s| !s.trim().is_empty());
         }
     }
 
+    /// Terminal "failed" transition. `tool_uses` / `tokens` are non-destructive
+    /// for the same reason as [`Agents::agent_completed`] — a crash is exactly
+    /// when the accumulated counters matter most.
     pub fn agent_failed(
         &mut self,
         name: &str,
         error: impl Into<String>,
-        tool_uses: u32,
-        tokens: u32,
+        tool_uses: Option<u32>,
+        tokens: Option<u32>,
         summary: Option<String>,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.status = AgentStatus::Failed;
             entry.current_action = error.into();
-            entry.tool_uses = tool_uses;
-            entry.tokens_used = tokens;
+            if let Some(t) = tool_uses {
+                entry.tool_uses = t;
+            }
+            if let Some(t) = tokens {
+                entry.tokens_used = t;
+            }
             entry.finished_at = Some(std::time::Instant::now());
             entry.result_summary = summary.filter(|s| !s.trim().is_empty());
         }
     }
 
+    /// The BACKEND reported no progress for this agent (`background_agent_stalled`).
+    /// Non-terminal: the row keeps its counters and its live clock, and any
+    /// later progress event revives it. `stalled_ms` comes from the backend's
+    /// own measurement — the panel never guesses it.
+    pub fn agent_stalled(&mut self, name: &str, stalled_ms: u64) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            if entry.status.is_terminal() {
+                return;
+            }
+            entry.status = AgentStatus::Stalled;
+            entry.current_action = format!("no progress for {}m", (stalled_ms / 60_000).max(1));
+        }
+    }
+
     /// Terminal transition for a fleet node from a `fleet_node_completed` frame.
+    /// Record what an agent cost, from the backend's durable spend record.
+    ///
+    /// `None` is a NO-OP, not a write: the same non-destructive rule as
+    /// [`Agents::agent_completed`]'s counters. A frame that carries no cost
+    /// (legacy backend, or a run with no recorded spend) must leave whatever we
+    /// already knew alone rather than overwrite it with a fabricated zero.
+    /// `None` renders as `—` — see [`AgentEntry::cost_usd`].
+    pub fn set_agent_cost(&mut self, name: &str, cost_usd: Option<f64>) {
+        let Some(cost) = cost_usd else { return };
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            entry.cost_usd = Some(cost);
+        }
+    }
+
     /// The frame carries NO tool/token counts (they were set by the preceding
     /// progress events), so this flips status + records the summary WITHOUT
     /// overwriting the accumulated counters. `status` is
@@ -1048,7 +1141,7 @@ mod tests {
     fn completed_summary_populates_entry_and_renders_dim_line() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "researcher", "", "scan modules", None);
-        a.agent_completed("worker-1", 3, 1200, Some("Found 4 dead code paths".to_string()));
+        a.agent_completed("worker-1", Some(3), Some(1200), Some("Found 4 dead code paths".to_string()));
 
         // Entry carries the summary + the terminal row reserves one extra line.
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
@@ -1065,7 +1158,7 @@ mod tests {
     fn completed_without_summary_renders_no_extra_line() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "researcher", "", "scan modules", None);
-        a.agent_completed("worker-1", 1, 100, None);
+        a.agent_completed("worker-1", Some(1), Some(100), None);
 
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(entry.result_summary, None);
@@ -1079,7 +1172,7 @@ mod tests {
     fn blank_summary_is_treated_as_none() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "", "", "work", None);
-        a.agent_completed("worker-1", 0, 0, Some("   \n  ".to_string()));
+        a.agent_completed("worker-1", Some(0), Some(0), Some("   \n  ".to_string()));
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(entry.result_summary, None, "whitespace-only summary must be dropped");
     }
@@ -1088,7 +1181,7 @@ mod tests {
     fn failed_summary_renders_in_error_style() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "", "", "work", None);
-        a.agent_failed("worker-1", "timeout", 2, 500, Some("join timeout after 300ms".to_string()));
+        a.agent_failed("worker-1", "timeout", Some(2), Some(500), Some("join timeout after 300ms".to_string()));
 
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(entry.status, AgentStatus::Failed);
@@ -1102,7 +1195,7 @@ mod tests {
         let mut a = Agents::new();
         a.agent_started("w", "", "", "s", None);
         let long = "abcdefghijklmnopqrstuvwxyz0123456789 ".repeat(6);
-        a.agent_completed("w", 1, 1, Some(long));
+        a.agent_completed("w", Some(1), Some(1), Some(long));
         // Narrow panel: the summary line must fit (ellipsis), no panic, no wrap.
         let text = render_text(&a, 40, 10);
         assert!(text.contains('\u{2026}'), "expected ellipsis truncation: {:?}", text);
@@ -1150,11 +1243,11 @@ mod tests {
         let mut a = Agents::new();
         a.agent_started("w1", "researcher", "", "scan", None);
         assert!(a.is_cancellable(1), "running worker at roster idx 1 is cancellable");
-        a.agent_completed("w1", 1, 10, None);
+        a.agent_completed("w1", Some(1), Some(10), None);
         assert!(!a.is_cancellable(1), "completed worker is not cancellable");
 
         a.agent_started("w2", "coder", "", "build", None);
-        a.agent_failed("w2", "boom", 0, 0, None);
+        a.agent_failed("w2", "boom", Some(0), Some(0), None);
         assert!(!a.is_cancellable(2), "failed worker is not cancellable");
     }
 
@@ -1191,14 +1284,14 @@ mod tests {
     fn summary_clears_when_agent_restarts_and_on_new_turn() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "", "", "work", None);
-        a.agent_completed("worker-1", 1, 1, Some("done stuff".to_string()));
+        a.agent_completed("worker-1", Some(1), Some(1), Some("done stuff".to_string()));
         assert!(a.entries[0].result_summary.is_some());
 
         // Re-running the same agent (resume/new wave) clears the stale summary.
         a.agent_started("worker-1", "", "", "work", None);
         assert_eq!(a.entries[0].result_summary, None);
 
-        a.agent_completed("worker-1", 1, 1, Some("done again".to_string()));
+        a.agent_completed("worker-1", Some(1), Some(1), Some("done again".to_string()));
         // A new top-level turn wipes the whole panel (rows + their summaries).
         a.task_started("task-2");
         assert_eq!(a.entry_count(), 0);
@@ -1302,11 +1395,11 @@ mod tests {
     #[test]
     fn prune_stale_reaps_finished_rows_and_flips_silent_runners() {
         // (4) Finished rows older than the retain window are dropped; a running
-        // row silent past the stale window flips to Failed (no forever-ghost).
+        // row silent past the stale window stops claiming to be running.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
         a.agent_started("done-1", "", "", "s", None);
-        a.agent_completed("done-1", 1, 10, None);
+        a.agent_completed("done-1", Some(1), Some(10), None);
         a.agent_started("live-1", "", "", "s", None); // fresh running row stays
 
         let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
@@ -1319,13 +1412,15 @@ mod tests {
         assert!(a.entries.iter().all(|e| e.name != "done-1"), "stale finished row reaped");
         assert!(a.entries.iter().any(|e| e.name == "live-1"), "fresh running row kept");
 
-        // Silence the live runner past the stale threshold → flipped to Failed.
+        // Silence the live runner past the stale threshold → Unknown, NOT Failed.
+        // The panel may only report a failure the backend actually reported.
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "live-1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 40);
         }
         a.prune_stale();
         let live = a.entries.iter().find(|e| e.name == "live-1").unwrap();
-        assert_eq!(live.status, AgentStatus::Failed, "silent runner marked failed");
+        assert_eq!(live.status, AgentStatus::Unknown, "silent runner is unknown, not failed");
+        assert!(live.finished_at.is_none(), "a silent agent has not finished");
     }
 
     #[test]
@@ -1338,7 +1433,7 @@ mod tests {
         for i in 0..50 {
             let name = format!("w{i}");
             a.agent_started(name.clone(), "", "", "s", None);
-            a.agent_completed(&name, 1, 1, None);
+            a.agent_completed(&name, Some(1), Some(1), None);
         }
         let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
         for e in a.entries.iter_mut() {
@@ -1456,7 +1551,7 @@ mod tests {
         // A completed worker renders `Done · <elapsed>` (frozen), not a live timer.
         let mut a = Agents::new();
         a.agent_started("w1", "researcher", "", "scan", None);
-        a.agent_completed("w1", 3, 1200, Some("found 4 paths".to_string()));
+        a.agent_completed("w1", Some(3), Some(1200), Some("found 4 paths".to_string()));
         let lines = render_lines(&a, 70, 10);
         let joined = lines.join("\n");
         assert!(joined.contains("Done \u{00b7}"), "Done · elapsed line: {joined:?}");
@@ -1579,5 +1674,223 @@ mod tests {
             assert_eq!(r.len(), w as usize, "row spans exactly the pane width");
             assert_eq!(r[w as usize - 1], "k", "meta ends flush at the right edge");
         }
+    }
+
+    // ── Wave 1: the panel must not state things that are false ────────────────
+
+    #[test]
+    fn completion_without_usage_keeps_the_counters_it_accumulated() {
+        // FIX 1. The background completion frame used to be handled with a
+        // hardcoded `agent_completed(&id, 0, 0, …)`, so a worker that really ran
+        // 12 tools and 40k tokens finished the turn displaying `0 tools · 0 tok`
+        // — the panel destroyed the only real numbers it had.
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan", None);
+        a.agent_progress("worker-1", "grep", 12, 40_000, "", vec![]);
+
+        // No usage on the wire → the accumulated counters survive untouched.
+        a.agent_completed("worker-1", None, None, Some("done".into()));
+        let e = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(e.status, AgentStatus::Completed);
+        assert_eq!(e.tool_uses, 12, "absent usage must not zero the tool count");
+        assert_eq!(e.tokens_used, 40_000, "absent usage must not zero the token count");
+
+        // And a REAL zero from the wire is still honoured — `None` means absent,
+        // not "ignore the backend".
+        a.agent_started("worker-2", "researcher", "", "scan", None);
+        a.agent_progress("worker-2", "grep", 5, 900, "", vec![]);
+        a.agent_completed("worker-2", Some(0), Some(0), None);
+        let e2 = a.entries.iter().find(|e| e.name == "worker-2").unwrap();
+        assert_eq!((e2.tool_uses, e2.tokens_used), (0, 0), "an explicit 0 is applied");
+    }
+
+    #[test]
+    fn failure_without_usage_keeps_the_counters_it_accumulated() {
+        // FIX 1, failure path — a crash is exactly when the accumulated work
+        // matters most, and it was being wiped the same way.
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "coder", "", "build", None);
+        a.agent_progress("worker-1", "bash", 7, 12_345, "", vec![]);
+        a.agent_failed("worker-1", "boom", None, None, None);
+        let e = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!((e.tool_uses, e.tokens_used), (7, 12_345));
+    }
+
+    #[test]
+    fn a_silent_running_agent_becomes_unknown_never_failed() {
+        // FIX 4. A background agent emits `started` BEFORE it waits for a
+        // concurrency slot and emits nothing at all while queued, so silence is
+        // the normal shape of a healthy queued agent. The panel used to invent a
+        // `Failed · stalled` row for it.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("queued-1", "researcher", "", "scan modules", None);
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "queued-1") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 150);
+        }
+        a.tick();
+
+        let e = a.entries.iter().find(|e| e.name == "queued-1").unwrap();
+        assert_eq!(e.status, AgentStatus::Unknown, "silence is not death");
+        assert_ne!(e.status, AgentStatus::Failed);
+        assert!(e.finished_at.is_none(), "nothing terminal happened");
+
+        // On screen: the row says what it knows and no more.
+        let text = render_text(&a, 80, 12);
+        assert!(text.contains("state unknown"), "unknown row text missing: {text:?}");
+        assert!(text.contains("last signal"), "unknown row lacks the age: {text:?}");
+        assert!(!text.contains("stalled"), "must not claim a stall it never saw: {text:?}");
+        assert!(!text.contains("Failed"), "must not claim a failure: {text:?}");
+
+        // And it recovers: any later signal proves it is alive.
+        a.agent_progress("queued-1", "grep pattern", 1, 10, "", vec![]);
+        let e = a.entries.iter().find(|e| e.name == "queued-1").unwrap();
+        assert_eq!(e.status, AgentStatus::Running, "a signal revives an Unknown row");
+    }
+
+    #[test]
+    fn an_unknown_row_is_dropped_not_failed_once_it_is_hopeless() {
+        // Unknown rows cannot linger forever, but they leave by being REMOVED —
+        // never by being relabelled with an outcome nobody reported.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("ghost", "", "", "s", None);
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "ghost") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::UNKNOWN_REAP_SECS + 5);
+        }
+        a.prune_stale();
+        assert!(a.entries.is_empty(), "hopeless unknown row removed");
+    }
+
+    #[test]
+    fn backend_reported_stall_is_its_own_state_and_is_not_terminal() {
+        // FIX 5. `background_agent_stalled` had no consumer at all. A stall is a
+        // positive backend observation — distinct from `Unknown` (we lost the
+        // signal) and from `Failed` (it ended badly).
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_progress("w1", "grep", 3, 500, "", vec![]);
+        a.agent_stalled("w1", 14 * 60 * 1000);
+
+        let e = a.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(e.status, AgentStatus::Stalled);
+        assert!(e.finished_at.is_none(), "a stall is not a finish");
+        assert_eq!(e.tool_uses, 3, "the stall keeps the work it had done");
+
+        let text = render_text(&a, 80, 12);
+        assert!(text.contains("no progress for 14m"), "stall row text: {text:?}");
+
+        // A terminal event still wins — a stalled agent that later completes is
+        // completed.
+        a.agent_completed("w1", None, None, None);
+        assert_eq!(a.entries[0].status, AgentStatus::Completed);
+        // And a stall report can never resurrect a finished row.
+        a.agent_stalled("w1", 99 * 60 * 1000);
+        assert_eq!(a.entries[0].status, AgentStatus::Completed, "terminal is terminal");
+    }
+
+    #[test]
+    fn running_count_excludes_finished_rows() {
+        // FIX 3. The footer cue counted EVERY entry, and finished rows linger for
+        // the retain window — so one live worker plus three just-finished ones
+        // read as "4 subagents".
+        let mut a = Agents::new();
+        for n in ["a", "b", "c", "live"] {
+            a.agent_started(n, "", "", "s", None);
+        }
+        a.agent_completed("a", None, None, None);
+        a.agent_completed("b", None, None, None);
+        a.agent_failed("c", "boom", None, None, None);
+
+        assert_eq!(a.entry_count(), 4, "all four rows are still tracked");
+        assert_eq!(a.running_count(), 1, "only the live worker is in flight");
+
+        // Unknown/Stalled still count: neither says the agent ended.
+        a.agent_stalled("live", 60_000);
+        assert_eq!(a.running_count(), 1, "a stalled agent has not finished");
+    }
+
+    #[test]
+    fn header_never_calls_unfinished_agents_completed() {
+        // A roster with nothing confirmed-running but rows that never ended used
+        // to fall through to the `N agents completed` tally.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
+        }
+        a.prune_stale();
+        let text = render_text(&a, 80, 12);
+        assert!(!text.contains("completed"), "never claims completion: {text:?}");
+        assert!(text.contains("no recent signal"), "header states the truth: {text:?}");
+    }
+
+    /// Flatten the `/agents` DASHBOARD render (not the inline tree) — the
+    /// per-agent cost column lives there.
+    fn render_dashboard_text(agents: &Agents, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| agents.draw_dashboard(f, f.area(), 0, &[], 0)).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// A4 — cost follows the same non-destructive rule, and an UNKNOWN cost is
+    /// rendered as `—`. `$0.00` would be the panel asserting a measurement
+    /// nobody made, and "this teammate was free" is exactly the wrong thing to
+    /// tell someone deciding whether to delegate again.
+    #[test]
+    fn an_unknown_cost_renders_as_a_dash_never_as_zero() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "unpriced", None);
+        a.agent_completed("w1", Some(3), Some(1000), None);
+        a.set_agent_cost("w1", None);
+
+        assert_eq!(
+            a.entries.iter().find(|e| e.name == "w1").unwrap().cost_usd,
+            None,
+            "an absent cost must stay absent"
+        );
+
+        let text = render_dashboard_text(&a, 100, 16);
+        // Assert on the COST COLUMN specifically (the metric tail is
+        // `… · <n> tok · <cost>`), not on a bare em-dash — the dashboard title
+        // contains one too, and a test that passes on the title would still
+        // pass with no cost column at all.
+        assert!(
+            text.contains("tok \u{00b7} \u{2014}"),
+            "unknown cost must render as a dash in the cost column: {text:?}"
+        );
+        assert!(
+            !text.contains("$0.00"),
+            "never claim a run was free when nobody measured it: {text:?}"
+        );
+    }
+
+    /// A known cost is shown, and a later frame that carries none must not wipe
+    /// it — the same rule as the tool/token counters.
+    #[test]
+    fn a_known_cost_is_shown_and_is_not_wiped_by_a_later_silent_frame() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "priced", None);
+        // A sub-cent price is the realistic shape for a short subagent run, and
+        // it is exactly the case that must not collapse to "$0.00".
+        a.set_agent_cost("w1", Some(0.0043));
+        a.agent_completed("w1", Some(3), Some(1000), None);
+        a.set_agent_cost("w1", None);
+
+        assert_eq!(
+            a.entries.iter().find(|e| e.name == "w1").unwrap().cost_usd,
+            Some(0.0043),
+            "None is a no-op, not a write"
+        );
+
+        let text = render_dashboard_text(&a, 100, 16);
+        assert!(text.contains("$0.0043"), "sub-cent costs keep their precision: {text:?}");
+        assert!(!text.contains("$0.00 "), "a sub-cent cost must not collapse to zero: {text:?}");
     }
 }

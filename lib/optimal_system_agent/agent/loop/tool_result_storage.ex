@@ -153,15 +153,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     _ -> :ok
   end
 
-  @doc """
-  Read a persisted tool result by its file path.
-  """
-  def read(path) do
-    case File.read(path) do
-      {:ok, content} -> {:ok, content}
-      {:error, reason} -> {:error, "Cannot read stored result: #{reason}"}
-    end
-  end
+  # No `read/1` here on purpose: offloaded results are re-read by the model
+  # itself through the `file_read` tool, using the path embedded in
+  # `reference_note/3`. A module-local reader had zero callers.
 
   # ── Private ──────────────────────────────────────────────────────────
 

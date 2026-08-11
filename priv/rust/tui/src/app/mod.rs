@@ -1016,7 +1016,19 @@ impl App {
         // the agents panel while sub-agents are active; clear it otherwise.
         if self.agents.is_active() {
             self.status
-                .set_subagents(self.agents.entry_count(), self.agents.est_cost_usd());
+                // Two corrections, both "stop stating something false":
+                //  * COUNT — `entry_count` includes rows that already finished
+                //    (they linger for the retain window), so the cue read "4
+                //    subagents" for one live worker plus three done ones.
+                //    `running_count` counts only what has not reached a terminal
+                //    state.
+                //  * COST — the number passed here was `est_cost_usd`, the
+                //    WHOLE-TASK appraisal, rendered inches from a per-agent
+                //    count where it reads as per-agent spend. The backend
+                //    reports no per-agent cost, so the cue now shows none; the
+                //    task-level figure keeps its home on the roster header and
+                //    the dashboard, where it is labelled as such.
+                .set_subagents(self.agents.running_count(), None);
             // CC FleetView `main` root row: synthesize it from live session
             // state (top-level action, turn elapsed, session output tokens). No
             // backend event drives `main` — it is the home node the TUI owns.

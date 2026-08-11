@@ -171,13 +171,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
   end
 
   # Resolve symlinks before security checks to prevent symlink traversal attacks.
-  defp resolve_real_path(path) do
-    case :file.read_link_all(String.to_charlist(path)) do
-      {:ok, real} -> to_string(real)
-      {:error, :einval} -> path
-      {:error, _} -> path
-    end
-  end
+  # EVERY component is resolved, not just the last one — see `PathCanon`.
+  defp resolve_real_path(path),
+    do: OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
 
   defp path_allowed?(expanded_path) do
     sensitive =

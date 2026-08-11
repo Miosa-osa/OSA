@@ -67,6 +67,12 @@ impl Agents {
                 .iter()
                 .filter(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
                 .count();
+            // Rows that have NOT reached a terminal state. `running` excludes
+            // Unknown/Stalled, so without this the header would fall through to
+            // the "N agents completed" tally while agents were still out there
+            // with an undetermined state — the loudest possible version of the
+            // bug this whole pass exists to remove.
+            let in_flight = self.entries.iter().filter(|e| !e.status.is_terminal()).count();
             let total = self.entries.len();
 
             // DETAIL-PER-SURFACE (Codex placement rule): three surfaces used to
@@ -88,6 +94,13 @@ impl Agents {
                         if running == 1 { "" } else { "s" }
                     ),
                 }
+            } else if in_flight > 0 {
+                // Nothing is confirmed running, but these have not ended either.
+                format!(
+                    "{} agent{} \u{2014} no recent signal",
+                    in_flight,
+                    if in_flight == 1 { "" } else { "s" }
+                )
             } else if total > 0 {
                 format!(
                     "{} agent{} completed",
@@ -110,7 +123,7 @@ impl Agents {
             // competition, and it holds in light themes as well as dark. The
             // completed tally keeps its green: by then no activity line exists,
             // so there is nothing to compete with.
-            let header_style = if running > 0 {
+            let header_style = if running > 0 || in_flight > 0 {
                 theme.bold()
             } else {
                 theme.task_done()
@@ -409,6 +422,25 @@ impl Agents {
                             entry.current_action.clone()
                         };
                         vec![(msg, theme.error_text())]
+                    }
+                    // The panel lost the signal. It says exactly that, and how
+                    // long ago — it does not guess an outcome.
+                    AgentStatus::Unknown => vec![(
+                        format!(
+                            "state unknown \u{00b7} last signal {}m ago",
+                            entry.silent_mins()
+                        ),
+                        theme.faint(),
+                    )],
+                    // The BACKEND measured the stall; `current_action` already
+                    // carries its wording ("no progress for 14m").
+                    AgentStatus::Stalled => {
+                        let msg = if entry.current_action.is_empty() {
+                            "no progress reported".to_string()
+                        } else {
+                            entry.current_action.clone()
+                        };
+                        vec![(msg, theme.faint())]
                     }
                     _ => {
                         // De-duplicated + bounded child list. `trail_actions`
@@ -736,9 +768,16 @@ impl Agents {
 
         // Fixed group order with the labels the task calls for. "Ready" maps to
         // agents that are spawned but not yet running.
-        let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 4] = [
+        // The groups MUST cover every AgentStatus: an entry matched by no
+        // predicate is silently absent from the dashboard while still occupying
+        // a selection index, so the cursor lands on an invisible row.
+        let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 6] = [
             ("Working", &|e: &AgentEntry| e.status == AgentStatus::Running),
             ("Ready", &|e: &AgentEntry| e.status == AgentStatus::Spawning),
+            ("No progress reported", &|e: &AgentEntry| {
+                e.status == AgentStatus::Stalled
+            }),
+            ("State unknown", &|e: &AgentEntry| e.status == AgentStatus::Unknown),
             ("Completed", &|e: &AgentEntry| e.status == AgentStatus::Completed),
             ("Failed", &|e: &AgentEntry| e.status == AgentStatus::Failed),
         ];
@@ -788,14 +827,17 @@ impl Agents {
                 };
                 // Compact progress indicator from the data we actually have: a
                 // token-usage micro-bar (relative to the busiest agent) plus
-                // elapsed/tool/token counts. No per-agent percent or cost exists.
+                // elapsed/tool/token counts, and — once the agent is finished —
+                // what it cost. A finished agent whose cost was never reported
+                // shows `—`, because `$0.00` would be a claim we cannot make.
                 let meta = format!(
-                    "  {} {} · {} tool{} · {} tok",
+                    "  {} {} · {} tool{} · {} tok · {}",
                     token_bar(entry.tokens_used, max_tokens),
                     fmt_elapsed(entry.elapsed_secs()),
                     entry.tool_uses,
                     if entry.tool_uses == 1 { "" } else { "s" },
                     fmt_tokens(entry.tokens_used),
+                    fmt_cost_opt(entry.cost_usd),
                 );
 
                 let mut spans = vec![
@@ -872,14 +914,28 @@ impl Agents {
             )));
         }
 
-        // Cost note: honest about the missing per-agent breakdown.
+        // Cost note. Per-agent cost IS reported now (on each agent's terminal
+        // event, from the backend's durable spend record), so sum what we were
+        // actually told and say how much of the roster it covers rather than
+        // presenting a partial total as if it were the whole bill.
         lines.push(Line::from(""));
-        let cost_note = match self.est_cost_usd {
-            Some(cost) => format!(
-                "Cost: task est. {} — per-agent cost not reported by backend",
+        let reported: Vec<f64> = self.entries.iter().filter_map(|e| e.cost_usd).collect();
+        let cost_note = match (self.est_cost_usd, reported.len()) {
+            (_, n) if n > 0 => format!(
+                "Cost: {} reported across {}/{} agents{}",
+                fmt_cost(reported.iter().sum::<f64>()),
+                n,
+                self.entries.len(),
+                match self.est_cost_usd {
+                    Some(est) => format!(" · task est. {}", fmt_cost(est)),
+                    None => String::new(),
+                }
+            ),
+            (Some(cost), _) => format!(
+                "Cost: task est. {} — no per-agent cost reported yet",
                 fmt_cost(cost)
             ),
-            None => "Cost: not reported by backend (no per-task or per-agent estimate)".to_string(),
+            (None, _) => "Cost: not reported by backend (no per-task or per-agent estimate)".to_string(),
         };
         lines.push(Line::from(Span::styled(cost_note, theme.faint())));
 
@@ -901,6 +957,11 @@ impl Agents {
                 let frame = SPINNER[self.tick as usize % SPINNER.len()];
                 (frame, theme.spinner())
             }
+            // Neither a tick nor a cross: nothing has been decided about these
+            // two. A question mark for "we lost the signal", a pause bar for
+            // "the backend says it is not moving".
+            AgentStatus::Unknown => ('?', theme.faint()),
+            AgentStatus::Stalled => ('\u{23f8}', theme.faint()),
             AgentStatus::Completed => ('✓', theme.task_done()),
             AgentStatus::Failed => ('✗', theme.error_text()),
         }
@@ -928,6 +989,20 @@ fn fmt_cost(usd: f64) -> String {
         format!("${:.4}", usd)
     } else {
         format!("${:.2}", usd)
+    }
+}
+
+/// Format a per-agent cost that MAY NOT BE KNOWN.
+///
+/// The two facts are different and must look different: a run whose price the
+/// backend recorded shows the price; a run whose price nobody recorded shows
+/// `—`. Rendering the unknown as `$0.00` would be the panel inventing a
+/// measurement, and "this agent was free" is exactly the wrong thing to tell
+/// someone deciding whether to delegate again.
+pub(super) fn fmt_cost_opt(usd: Option<f64>) -> String {
+    match usd {
+        Some(c) => fmt_cost(c),
+        None => "\u{2014}".to_string(),
     }
 }
 

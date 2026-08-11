@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
 
   import Bitwise, only: [band: 2]
 
+  alias OptimalSystemAgent.Agent.Safety.PathCanon
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Constants
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Lines
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Magic
@@ -375,26 +376,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         Constants.default_allowed_paths()
       )
 
+    # The candidate path is canonicalised before it is compared, so the roots
+    # must be canonicalised too — otherwise an allowlist entry that is itself a
+    # symlink (`/tmp` on macOS, a symlinked `$HOME`) never matches anything and
+    # the tool silently denies every read.
     Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
+      expanded = PathCanon.canonicalize(p)
       if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
     end)
   end
 
   # Resolve symlinks before security checks to prevent symlink traversal.
-  defp resolve_real_path(path) do
-    case :file.read_link_all(String.to_charlist(path)) do
-      {:ok, real} ->
-        real_str = to_string(real)
-        if String.starts_with?(real_str, "/"), do: real_str, else: "/" <> real_str
-
-      {:error, :einval} ->
-        path
-
-      {:error, _} ->
-        path
-    end
-  end
+  # EVERY component is resolved, not just the last one — see `PathCanon`.
+  defp resolve_real_path(path), do: PathCanon.canonicalize(path)
 
   defp sensitive?(expanded_path) do
     Enum.any?(Constants.sensitive_paths(), fn pattern ->

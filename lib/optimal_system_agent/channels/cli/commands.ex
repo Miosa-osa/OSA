@@ -1111,9 +1111,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     session_id
   end
 
-  def cmd_doctor(_args, session_id) do
+  def cmd_doctor(args, session_id) do
     IO.puts("")
-    OptimalSystemAgent.CLI.Doctor.run()
+    # Pass the args through: `Doctor.run/1` already dispatches `--config` /
+    # `--all` to the setup-inspection report, but the TUI dropped its args and
+    # called `run/0`, so `/doctor --config` was silently the plain health
+    # report and the inspection report was reachable ONLY from `osa doctor
+    # --config` outside a session. An empty arg list takes the `run/0` branch,
+    # so bare `/doctor` is unchanged.
+    OptimalSystemAgent.CLI.Doctor.run(String.split(String.trim(args), ~r/\s+/, trim: true))
     IO.puts("")
     session_id
   rescue

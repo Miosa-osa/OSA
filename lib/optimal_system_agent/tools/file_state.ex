@@ -187,18 +187,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
   # Canonical absolute path: expand, then resolve the full symlink chain so the
   # key agrees across file_read (resolves symlinks), file_write and
   # multi_file_edit (expand only) — resolution here makes them converge.
-  defp canonical(path) do
-    expanded = Path.expand(path)
-
-    case :file.read_link_all(String.to_charlist(expanded)) do
-      {:ok, real} ->
-        real_str = to_string(real)
-        if String.starts_with?(real_str, "/"), do: real_str, else: "/" <> real_str
-
-      _ ->
-        expanded
-    end
-  end
+  defp canonical(path), do: OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
 
   defp stat(path) do
     case File.stat(path, time: :posix) do

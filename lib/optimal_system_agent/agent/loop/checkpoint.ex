@@ -18,8 +18,62 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     Path.join(checkpoint_dir(), "#{session_id}.json")
   end
 
-  @doc "Write a checkpoint for the given loop state."
+  # Every field the crash-recovery record carries. `checkpoint_state/1` writes
+  # ALL of them, so a caller that supplies only some of them is asking for the
+  # rest to be overwritten with their defaults — which for the spend
+  # accumulators means $0 and for `max_budget_usd` means *uncapped*.
+  #
+  # Rather than trusting callers to remember that, the writer refuses to be a
+  # partial writer: anything it wasn't given is filled from the record already
+  # on disk (see `ensure_full_record/1`), so an omitted field can only ever be
+  # preserved, never zeroed. `update_checkpoint/1` is the named, documented way
+  # to ask for a partial update.
+  @record_keys [
+    :session_id,
+    :messages,
+    :iteration,
+    :plan_mode,
+    :turn_count,
+    :session_cost_usd,
+    :session_input_tokens,
+    :session_output_tokens,
+    :session_cache_creation_tokens,
+    :session_cache_read_tokens,
+    :max_budget_usd,
+    :started_at
+  ]
+
+  @doc """
+  Update *some* fields of a session's crash-recovery checkpoint, leaving every
+  field not supplied at its currently-persisted value.
+
+  This is the path a conversation-only restore (`/rewind`, `unrevert`) must
+  take: it rewrites `messages`/`iteration`/`turn_count` and must not touch the
+  session's accounting.
+  """
+  @spec update_checkpoint(map()) :: :ok
+  def update_checkpoint(%{session_id: session_id} = partial)
+      when is_binary(session_id) and session_id != "" do
+    session_id
+    |> persisted_record()
+    |> Map.merge(Map.take(partial, @record_keys))
+    |> checkpoint_state()
+
+    :ok
+  end
+
+  def update_checkpoint(_), do: :ok
+
+  @doc """
+  Write a checkpoint for the given loop state.
+
+  Writes the FULL record. A map missing any `@record_keys` field is completed
+  from the persisted record instead of from defaults — a partial map must never
+  be able to zero the spend accumulators or drop the budget cap.
+  """
   def checkpoint_state(state) do
+    state = ensure_full_record(state)
+
     data = %{
       session_id: state.session_id,
       messages: state.messages,
@@ -168,6 +222,78 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   end
 
   defp sanitize_utf8(other), do: to_string(other)
+
+  # Complete a partial state map from the record already on disk.
+  #
+  # A full `%Loop{}` (every `@record_keys` field is a defstruct field) passes
+  # through untouched, so the hot path is unchanged and a real turn can still
+  # LOWER a counter. Only a caller that genuinely omitted a field pays a read,
+  # and what it omitted is preserved rather than defaulted.
+  defp ensure_full_record(state) when is_map(state) do
+    case Enum.reject(@record_keys, &Map.has_key?(state, &1)) do
+      [] ->
+        state
+
+      missing ->
+        session_id = Map.get(state, :session_id)
+
+        if is_binary(session_id) and session_id != "" do
+          Logger.warning(
+            "[loop] checkpoint_state/1 got a PARTIAL record (missing #{inspect(missing)}) — " <>
+              "completing it from the persisted record instead of writing defaults over it"
+          )
+
+          session_id
+          |> persisted_record()
+          |> Map.merge(Map.take(state, @record_keys))
+        else
+          state
+        end
+    end
+  end
+
+  defp ensure_full_record(state), do: state
+
+  # The record as it currently exists durably: the crash checkpoint, with the
+  # never-cleared spend sidecar as the floor for the accumulators (the
+  # checkpoint is deleted at every clean turn boundary, the sidecar is not, so
+  # either one can be the fresher of the two). Spend only ever grows, so `max`
+  # is the honest reconciliation.
+  defp persisted_record(session_id) do
+    prior = restore_checkpoint(session_id)
+    spend = load_spend(session_id)
+
+    %{
+      session_id: session_id,
+      messages: Map.get(prior, :messages, []),
+      iteration: Map.get(prior, :iteration, 0),
+      plan_mode: Map.get(prior, :plan_mode, false),
+      turn_count: Map.get(prior, :turn_count, 0),
+      session_cost_usd: max(Map.get(prior, :session_cost_usd, 0.0), spend.cost_usd),
+      session_input_tokens: max(Map.get(prior, :session_input_tokens, 0), spend.input_tokens),
+      session_output_tokens: max(Map.get(prior, :session_output_tokens, 0), spend.output_tokens),
+      session_cache_creation_tokens:
+        max(Map.get(prior, :session_cache_creation_tokens, 0), spend.cache_creation_tokens),
+      session_cache_read_tokens:
+        max(Map.get(prior, :session_cache_read_tokens, 0), spend.cache_read_tokens),
+      max_budget_usd: Map.get(prior, :max_budget_usd),
+      started_at: Map.get(prior, :started_at) || spend.started_at
+    }
+  end
+
+  defp load_spend(session_id) do
+    OptimalSystemAgent.Agent.SessionPersistence.load_spend(session_id)
+  rescue
+    _ ->
+      %{
+        cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        started_at: nil
+      }
+  end
 
   # Coerce a possibly-nil / possibly-string JSON number into a number, else default.
   defp num(v, _default) when is_number(v), do: v
@@ -436,15 +562,21 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
 
     # Rewrite the crash-recovery checkpoint so a resume of this session loads
     # the restored conversation state.
-    restored_state = %{
-      session_id: entry[:session_id],
-      messages: messages,
-      iteration: entry[:iteration] || 0,
-      plan_mode: entry[:plan_mode] || false,
-      turn_count: entry[:turn_count] || 0
-    }
-
-    _ = checkpoint_state(restored_state)
+    #
+    # This is a CONVERSATION restore, so it must update only the conversation
+    # fields. Going through the full-record writer wrote every field it did not
+    # mention as its default — `session_cost_usd` back to $0, the four token
+    # counters to 0, and `max_budget_usd` to nil (uncapped) — and then mirrored
+    # those zeros into the durable spend sidecar. A user rewinding a $48-of-$50
+    # run got a $0, uncapped run back.
+    _ =
+      update_checkpoint(%{
+        session_id: entry[:session_id],
+        messages: messages,
+        iteration: entry[:iteration] || 0,
+        plan_mode: entry[:plan_mode] || false,
+        turn_count: entry[:turn_count] || 0
+      })
 
     {%{status: "restored", message_count: length(messages)}, messages}
   end

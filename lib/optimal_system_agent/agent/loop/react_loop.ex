@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   alias OptimalSystemAgent.Agent.Context
   alias OptimalSystemAgent.Agent.Scratchpad
+  alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Loop.StreamingToolExecutor
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
@@ -104,7 +105,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     cond do
       cancelled? ->
         Logger.info("[loop] Cancelled by user at iteration #{iter}")
-        :ets.delete(@cancel_table, sid)
+        # `Loop.clear_cancel/1`, not a bare `:ets.delete/2`: `Loop.cancel/1`
+        # sets the flag across the whole subtree (this session + descendants +
+        # any `agent:<sid>:` keys), so clearing only the parent key stranded
+        # child flags in the table and a re-used child id started life already
+        # cancelled. Clearing must be the exact inverse of setting.
+        Loop.clear_cancel(sid)
 
         Bus.emit(:system_event, %{
           event: :agent_cancelled,
@@ -250,10 +256,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               # Warning band: cheap standalone microcompact pass (truncate
               # stale tool results, no LLM call) to delay full compaction.
               # CC parity: apiMicrocompact pre-request pass.
-              %{
-                state
-                | messages: OptimalSystemAgent.Agent.Compactor.micro_compact(state.messages)
-              }
+              #
+              # `maybe_flush/2` first: the memory flush band is a sub-band of
+              # this one, and durable notes must be harvested while the
+              # evidence is still verbatim in the window — microcompaction is
+              # already lossy. Once per compaction cycle (latched inside
+              # Memory.Flush), side-effecting pass-through.
+              state
+              |> ProactiveCompaction.maybe_flush(cw)
+              |> then(
+                &%{&1 | messages: OptimalSystemAgent.Agent.Compactor.micro_compact(&1.messages)}
+              )
 
             true ->
               state
@@ -1246,11 +1259,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     Process.delete(:osa_streaming_tool_ctx)
 
-    try do
-      :ets.delete(@cancel_table, state.session_id)
-    rescue
-      ArgumentError -> :ok
-    end
+    # Subtree-wide clear — the exact inverse of `Loop.cancel/1`. See the
+    # matching call in `run/1`.
+    Loop.clear_cancel(state.session_id)
 
     Bus.emit(:system_event, %{
       event: :agent_cancelled,
@@ -1483,7 +1494,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     {messages, tool_use?} = fill_orphaned_tool_results(messages)
 
     marker = if tool_use?, do: @interrupt_marker_tool_use, else: @interrupt_marker
-    state = %{state | messages: messages ++ [%{role: "user", content: marker}]}
+
+    # `scaffold: true` flags this as a synthetic message the loop injected, not
+    # something the user typed. `/undo` (and anything else walking back to the
+    # last real user turn) can then skip it by FLAG rather than by string-
+    # matching the marker text — a content match breaks the moment the wording
+    # changes or a user types the marker verbatim.
+    state = %{
+      state
+      | messages: messages ++ [%{role: "user", content: marker, scaffold: true}]
+    }
+
     {marker, state}
   end
 

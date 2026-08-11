@@ -594,6 +594,19 @@ defmodule OptimalSystemAgent.Orchestrator do
       role: role
     })
 
+    # Same dual-emit as the `:background_agent_completed` / `:background_agent_failed`
+    # sites below. `emit_event/2` only reaches the `osa:session:<id>` PubSub topic
+    # (SSE/TUI); the CLI renderer listens on the Bus. Without this the CLI printed
+    # "✓ Background agent completed" and "✗ failed" but never the "◉ started" line
+    # at channels/cli/events.ex:97, which could not match anything.
+    Bus.emit(:system_event, %{
+      event: :background_agent_started,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role
+    })
+
     start_stall_watcher(parent_id, subagent_id, display_name, role)
 
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
@@ -673,6 +686,14 @@ defmodule OptimalSystemAgent.Orchestrator do
 
       output_file = RunStore.transcript_path_for(subagent_id)
 
+      # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
+      # the persisted spend record) and was already being appended to the
+      # FOREGROUND delegate result — but a background run rode no event
+      # carrying it, so the panel could only ever show a whole-task estimate.
+      # `nil` when no spend was recorded: unknown and zero are different facts
+      # and the TUI renders them differently.
+      cost_usd = reported_cost_usd(subagent_id)
+
       case result do
         {:ok, response} ->
           Bus.emit(:system_event, %{
@@ -697,6 +718,7 @@ defmodule OptimalSystemAgent.Orchestrator do
                result: String.slice(response, 0, 500),
                duration_ms: duration_ms,
                usage: usage,
+               cost_usd: cost_usd,
                output_file: output_file
              }}
           )
@@ -726,6 +748,7 @@ defmodule OptimalSystemAgent.Orchestrator do
                error: inspect(reason),
                duration_ms: duration_ms,
                usage: usage,
+               cost_usd: cost_usd,
                output_file: output_file
              }}
           )
@@ -1482,6 +1505,23 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   def run_cost_usd(_), do: 0.0
+
+  @doc """
+  Cost of a run for REPORTING, where "we never recorded a cost" and "it cost
+  nothing" must not collapse into the same number.
+
+  `run_cost_usd/1` answers with a float because its callers do arithmetic and
+  string formatting on it. Event payloads need the other answer: `nil` when the
+  spend record is absent, so the TUI can render `—` instead of asserting `$0.00`
+  about a run whose price nobody measured.
+  """
+  @spec reported_cost_usd(String.t()) :: float() | nil
+  def reported_cost_usd(agent_id) do
+    case run_cost_usd(agent_id) do
+      cost when is_number(cost) and cost > 0 -> cost * 1.0
+      _ -> nil
+    end
+  end
 
   defp append_cost_note(summary, agent_id) when is_binary(summary) do
     case run_cost_usd(agent_id) do

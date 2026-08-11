@@ -331,6 +331,13 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       File.rm(SubscriptionStore.path() <> ".lock")
 
       # And the refresh path acts on that detection rather than writing anyway.
+      #
+      # It abandons the WRITE, not the token. `refresh_fun` returning `{:ok, _}`
+      # means the refresh POST already completed, so for a rotating provider the
+      # token this call spent is gone; dropping the replacement on the floor
+      # left the caller with nothing and a dead credential on disk. The loser
+      # therefore still receives its rotation (and uses it for the live
+      # session) — it simply does not persist it over the winner's.
       outcome =
         SubscriptionStore.refresh_within_lock(
           "copilot",
@@ -341,12 +348,14 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
           fn _ -> true end
         )
 
-      assert outcome == {:error, :lock_lost}
+      assert outcome == {:ok, %{"access_token" => "stale-loser-value"}},
+             "a consumed rotation must reach the caller even when it cannot be persisted"
 
       assert SubscriptionStore.fetch("copilot")["access_token"] == "original",
              "the losing write must not land"
 
-      # And it is reported as what it is — a retryable race, never as a
+      # `:lock_lost` remains a first-class, retryable outcome elsewhere in the
+      # auth surface, and is reported as what it is — a race, never as a
       # credential problem that sends the user back through a sign-in.
       message = OptimalSystemAgent.Auth.Subscription.message(:lock_lost, "GitHub Copilot")
       assert message =~ "Retry"

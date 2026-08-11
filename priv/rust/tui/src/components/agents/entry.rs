@@ -4,8 +4,32 @@
 pub enum AgentStatus {
     Spawning,
     Running,
+    /// The backend has sent nothing for this agent in a long while and we do
+    /// NOT know why. Silence is not death: a background subagent emits
+    /// `started` BEFORE it waits for a concurrency slot and emits nothing at
+    /// all while queued, so a perfectly healthy agent can be silent for
+    /// minutes. This state says exactly that — "we lost the signal" — instead
+    /// of inventing a failure. It is NOT terminal: any later progress event
+    /// returns the row to `Running`, and a terminal event still decides
+    /// Completed/Failed.
+    Unknown,
+    /// The BACKEND reported this agent as making no progress
+    /// (`background_agent_stalled`, phase-aware). Unlike `Unknown` this is a
+    /// positive observation from the side that can actually see the run, so
+    /// the row states the measured duration. Still not terminal — a stalled
+    /// agent can recover, and only a terminal event may end it.
+    Stalled,
     Completed,
     Failed,
+}
+
+impl AgentStatus {
+    /// Terminal states are the ONLY ones a completion event may produce. Used
+    /// by the roster/footer counters (a finished agent is not "running") and by
+    /// the retain-window reaper.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, AgentStatus::Completed | AgentStatus::Failed)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +63,13 @@ pub struct AgentEntry {
     /// finished row so a fan-out shows the outcome, not just "@name finished".
     /// `None` while running or when the backend sent no summary.
     pub result_summary: Option<String>,
+    /// What this agent cost in USD, as reported by the backend's durable spend
+    /// record on its terminal event.
+    ///
+    /// `None` is load-bearing and means "we were not told", which is NOT the
+    /// same claim as `Some(0.0)`. It renders as `—`; rendering it as `$0.00`
+    /// would be the panel asserting a measurement nobody made.
+    pub cost_usd: Option<f64>,
 }
 
 impl AgentEntry {
@@ -49,11 +80,21 @@ impl AgentEntry {
         end.saturating_duration_since(self.started_at).as_secs()
     }
 
-    /// A still-"running" agent that hasn't sent any signal for `secs` seconds —
-    /// almost certainly dead (crash / rate-limit / dropped backend stream).
+    /// A still-"running" agent that hasn't sent any signal for `secs` seconds.
+    /// This means the TUI has lost the signal — NOT that the agent died. It may
+    /// be queued behind the background concurrency cap, waiting on a slow first
+    /// completion, or genuinely wedged; the panel cannot tell the difference
+    /// and must not pretend it can.
     pub fn is_stale(&self, secs: u64) -> bool {
         matches!(self.status, AgentStatus::Running | AgentStatus::Spawning)
             && self.last_activity.elapsed().as_secs() >= secs
+    }
+
+    /// Whole minutes since the last backend signal, floored at 1 so the
+    /// `Unknown` row never claims "0m ago" for a gap it only noticed because it
+    /// was already long.
+    pub fn silent_mins(&self) -> u64 {
+        (self.last_activity.elapsed().as_secs() / 60).max(1)
     }
 }
 

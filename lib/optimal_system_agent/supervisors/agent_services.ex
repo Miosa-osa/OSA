@@ -25,7 +25,6 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       # Remembers the quota windows providers report on their own responses,
       # so `/usage` can show them without spending a request to re-read them.
       OptimalSystemAgent.Usage.RateLimits,
-      OptimalSystemAgent.Agent.Progress,
       OptimalSystemAgent.Agent.Hooks,
       OptimalSystemAgent.Agent.Scheduler,
       OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor,
@@ -39,8 +38,15 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       OptimalSystemAgent.ContextMesh.Supervisor,
       OptimalSystemAgent.ContextMesh.Archiver,
 
-      # Team Hierarchy — hierarchical team management with nervous system
-      {Registry, keys: :unique, name: OptimalSystemAgent.Teams.Registry},
+      # Team Hierarchy — hierarchical team management with nervous system.
+      #
+      # The registry MUST be named `OptimalSystemAgent.Registry`: that is the
+      # name every `{:via, Registry, {...}}` tuple in `teams/manager.ex`,
+      # `teams/nervous_system.ex`, `teams/cost_tracker.ex` and
+      # `workspace/workspace.ex` registers and looks up under. It was previously
+      # started as `OptimalSystemAgent.Teams.Registry`, which nothing referenced,
+      # so `team_create` raised `unknown registry` on the first spawn.
+      {Registry, keys: :unique, name: OptimalSystemAgent.Registry},
       OptimalSystemAgent.Teams.Supervisor,
 
       # Self-Healing — autonomous error diagnosis and repair

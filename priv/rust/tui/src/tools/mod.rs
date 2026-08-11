@@ -141,8 +141,60 @@ fn strip_tag_blocks(text: &str, tag: &str) -> String {
 /// OSC 8 wrappers the autolinker legitimately emits.
 pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
     let mut lines = render_tool_dispatch(name, args, result, opts);
+    if opts.status == ToolStatus::Error {
+        force_failure_body(&mut lines, result);
+    }
     crate::render::sanitize::scrub_rendered_lines(&mut lines);
     lines
+}
+
+/// The failure of a tool call must be legible as TEXT, not only as the colour of
+/// its bullet.
+///
+/// Most renderers summarise `result` as if it were the tool's *content*, and
+/// they do it without consulting `opts.status`. A read that failed therefore
+/// rendered
+///
+/// ```text
+/// ● Read(/tmp/x.rs)  40ms
+///   ⎿  Read 1 line (ctrl+o to expand)
+/// ```
+///
+/// — the "1 line" being the error message — and a failed grep claimed it had
+/// *Found* 1 line. Both are actively false, and the only thing separating them
+/// from the successful render was a red vs green `●`: invisible under
+/// `NO_COLOR`, in a monochrome terminal, and to a red/green-colour-blind reader.
+///
+/// So on an errored call: keep the header (it carries the tool, its target and
+/// the duration), and make the body the error itself — unless the renderer
+/// already put the error text on screen, which Bash and the web tools do, and
+/// whose richer failure cells are worth keeping.
+fn force_failure_body(lines: &mut Vec<Line<'static>>, result: &str) {
+    let body = result.trim();
+    if body.is_empty() {
+        return;
+    }
+    // First non-empty line of the error is the part worth promoting.
+    let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or(body).trim();
+    let rendered: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    if rendered.contains(first) {
+        return; // the renderer already showed it
+    }
+    let theme = crate::style::theme();
+    let header = lines.first().cloned();
+    lines.clear();
+    if let Some(h) = header {
+        lines.push(h);
+    }
+    let text = crate::util::truncate_str(first, 200).to_string();
+    lines.push(Line::from(vec![
+        Span::styled("  ⎿  ".to_string(), Style::default().fg(theme.colors.muted)),
+        Span::styled(text, Style::default().fg(theme.colors.error)),
+    ]));
 }
 
 fn render_tool_dispatch(
@@ -316,8 +368,13 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
                 .fg(theme.colors.success)
                 .add_modifier(Modifier::BOLD),
         ),
+        // Success and Error used the SAME `●`, separated only by colour — so a
+        // failed call was indistinguishable from a successful one under
+        // NO_COLOR, on a monochrome terminal, or to a red/green-colour-blind
+        // reader. Keep Claude Code's error colour, but carry the state in the
+        // glyph too (as Canceled's `⊘` and AwaitingPermission's `◐` already do).
         ToolStatus::Error => (
-            bullet, // ● red — Claude Code error color
+            "✗".to_string(),
             Style::default()
                 .fg(theme.colors.error)
                 .add_modifier(Modifier::BOLD),

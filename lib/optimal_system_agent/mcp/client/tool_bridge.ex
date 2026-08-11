@@ -18,6 +18,8 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
   segment is already sanitized to `[a-z0-9_]` by `MCP.Config`.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.MCP.Client.ServerSession
   alias OptimalSystemAgent.MCP.Client.OutputLimiter
   alias OptimalSystemAgent.MCP.Protocol.Messages
@@ -38,14 +40,67 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
   def build_tools(server_name, schemas, tool_filter \\ nil) when is_list(schemas) do
     allowed? = filter_predicate(tool_filter)
 
-    schemas
-    |> Enum.map(fn schema -> build_entry(server_name, schema) end)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.filter(fn {_key, entry} -> allowed?.(entry.original_name) end)
-    |> Map.new()
+    if valid_server_segment?(server_name) do
+      schemas
+      |> Enum.map(fn schema -> build_entry(server_name, schema) end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.filter(fn {_key, entry} -> allowed?.(entry.original_name) end)
+      |> reject_collisions(server_name)
+    else
+      Logger.warning(
+        "[MCP.ToolBridge] Skipping every tool from server #{inspect(server_name)}: the " <>
+          "sanitized server name contains #{inspect(@sep)}, which makes its tool keys " <>
+          "ambiguous with another server's. Rename the server."
+      )
+
+      %{}
+    end
   end
 
-  @doc "The `mcp__<server>__<tool>` key for a server/tool pair."
+  @doc """
+  True when `server_name` can appear in a tool key unambiguously.
+
+  `mcp__<server>__<tool>` is only injective while the server segment cannot
+  itself contain `__`: server `a__b` + tool `c` and server `a` + tool `b__c`
+  both render as `mcp__a__b__c`. `parse_key/1` splits on the first `__`, so the
+  second reading always wins — a tool would route to the wrong server, and
+  `Permissions`, which parses the same key, would grant a rule scoped to `a`
+  over a tool owned by `a__b`. `MCP.Config.sanitize_name/1` collapses `_` runs
+  so this cannot arise from config; this is the fail-closed backstop.
+  """
+  @spec valid_server_segment?(term()) :: boolean()
+  def valid_server_segment?(name) when is_binary(name) do
+    name != "" and not String.contains?(name, @sep)
+  end
+
+  def valid_server_segment?(_), do: false
+
+  # Two schemas that render to the same key are ambiguous — there is no way to
+  # tell which one an invocation meant. `Map.new/1` would resolve that
+  # last-write-wins and silently register the loser's name against the winner's
+  # schema. Drop every member of a colliding group instead, and say so.
+  defp reject_collisions(entries, server_name) do
+    {kept, dropped} =
+      entries
+      |> Enum.group_by(fn {key, _entry} -> key end)
+      |> Enum.split_with(fn {_key, group} -> length(group) == 1 end)
+
+    for {key, _} <- dropped do
+      Logger.warning(
+        "[MCP.ToolBridge] Dropping ambiguous tool key #{inspect(key)} from server " <>
+          "#{inspect(server_name)}: more than one discovered tool renders to it."
+      )
+    end
+
+    Map.new(kept, fn {key, [entry]} -> {key, elem(entry, 1)} end)
+  end
+
+  @doc """
+  The `mcp__<server>__<tool>` key for a server/tool pair.
+
+  Callers that register keys must gate on `valid_server_segment?/1` first —
+  see its docs for why a server segment containing `__` has no unambiguous key.
+  """
   @spec tool_key(String.t(), String.t()) :: String.t()
   def tool_key(server_name, tool_name) do
     @prefix <> server_name <> @sep <> tool_name

@@ -1560,7 +1560,15 @@ impl App {
                 self.recompute_layout();
             }
             BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, summary, .. } => {
-                self.agents.agent_completed(&agent_name, tool_uses, tokens_used, summary);
+                // The orchestrator frame always carries both counters, so they
+                // are authoritative here (unlike the background path, whose
+                // `usage` map may be absent entirely).
+                self.agents.agent_completed(
+                    &agent_name,
+                    Some(tool_uses),
+                    Some(tokens_used),
+                    summary,
+                );
                 self.sidebar.set_current_agent("");
                 // Clear the stale "@agent: subject" spinner label set on every
                 // progress tick — otherwise the leader spinner keeps naming a
@@ -1574,7 +1582,13 @@ impl App {
                     let e = error.trim();
                     if e.is_empty() { None } else { Some(e.chars().take(140).collect()) }
                 });
-                self.agents.agent_failed(&agent_name, &error, tool_uses, tokens_used, fail_summary);
+                self.agents.agent_failed(
+                    &agent_name,
+                    &error,
+                    Some(tool_uses),
+                    Some(tokens_used),
+                    fail_summary,
+                );
                 self.sidebar.set_current_agent("");
             }
             BackendEvent::OrchestratorWaveStarted { wave_number, total_waves } => {
@@ -1694,13 +1708,27 @@ impl App {
                 );
                 self.recompute_layout();
             }
-            BackendEvent::BackgroundAgentCompleted { agent_id, role, result, duration_ms } => {
+            BackendEvent::BackgroundAgentCompleted {
+                agent_id,
+                role,
+                result,
+                duration_ms,
+                total_tokens,
+                tool_uses,
+                cost_usd,
+            } => {
                 let label = if role.is_empty() { "background".to_string() } else { role };
                 let panel_summary: Option<String> = {
                     let first = result.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
                 };
-                self.agents.agent_completed(&agent_id, 0, 0, panel_summary);
+                // Real usage from the wire. `None` (legacy frame / absent key)
+                // leaves the counters accumulated from progress events intact —
+                // passing 0 here erased them.
+                self.agents.agent_completed(&agent_id, tool_uses, total_tokens, panel_summary);
+                // Same non-destructive rule for the price. It rides its own
+                // setter so an absent cost cannot clobber a known one.
+                self.agents.set_agent_cost(&agent_id, cost_usd);
                 let preview: String = result.trim().chars().take(200).collect();
                 // Format duration as h/m/s (shared formatter) so a 2h33m run reads
                 // "2h33m", not "9180.0s". Styled as a teammate-finished line.
@@ -1718,13 +1746,30 @@ impl App {
                 self.refresh_bg_indicators();
                 self.recompute_layout();
             }
-            BackendEvent::BackgroundAgentFailed { agent_id, role, error, duration_ms } => {
+            BackendEvent::BackgroundAgentFailed {
+                agent_id,
+                role,
+                error,
+                duration_ms,
+                total_tokens,
+                tool_uses,
+                cost_usd,
+            } => {
                 let label = if role.is_empty() { "background".to_string() } else { role };
                 let panel_summary: Option<String> = {
                     let first = error.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
                 };
-                self.agents.agent_failed(&agent_id, error.clone(), 0, 0, panel_summary);
+                self.agents.agent_failed(
+                    &agent_id,
+                    error.clone(),
+                    tool_uses,
+                    total_tokens,
+                    panel_summary,
+                );
+                // A run that failed still cost money, and that is exactly when
+                // the user wants to see the number.
+                self.agents.set_agent_cost(&agent_id, cost_usd);
                 let preview: String = error.trim().chars().take(200).collect();
                 let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
                 self.chat.add_system_message(
@@ -1742,19 +1787,62 @@ impl App {
             // === Multi-agent workflow (Claude Code parity) ===
             // Teammate/sub-agent lifecycle + inbound messages + background-command
             // completion + turn recap, decoded from the session SSE stream.
-            BackendEvent::AgentFinished { display_name, duration_ms, .. } => {
+            BackendEvent::AgentFinished { display_name, duration_ms, status, .. } => {
                 let name = if display_name.is_empty() {
                     "agent".to_string()
                 } else {
                     display_name
                 };
+                let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
+                // The orchestrator has always sent `status`; the TUI never read
+                // it, so a teammate that CRASHED announced itself as "finished"
+                // in the same neutral styling as one that succeeded.
+                let (verb, severity) = match status.as_str() {
+                    "failed" => ("failed", "error"),
+                    "completed" => ("finished", "info"),
+                    // Unstated outcome: report the fact (it ended) without
+                    // asserting an outcome nobody sent.
+                    _ => ("ended", "info"),
+                };
                 self.chat.add_system_message(
-                    &format!(
-                        "\u{23fa} Teammate @{} finished \u{00b7} {}",
-                        name,
-                        crate::util::fmt_elapsed(duration_ms / 1000)
-                    ),
-                    "info",
+                    &format!("\u{23fa} Teammate @{} {} \u{00b7} {}", name, verb, elapsed),
+                    severity,
+                );
+                self.recompute_layout();
+            }
+
+            // A stall is NOT a completion: the row stays live, the chat note is a
+            // warning, and — via `BackgroundNotifier` on the backend — the model
+            // is told too, so the screen is no longer the only thing that knows.
+            BackendEvent::BackgroundAgentStalled {
+                agent_id,
+                display_name,
+                role,
+                phase,
+                stalled_ms,
+                message,
+            } => {
+                self.agents.agent_stalled(&agent_id, stalled_ms);
+                let label = if !display_name.is_empty() {
+                    display_name
+                } else if !role.is_empty() {
+                    role
+                } else {
+                    agent_id.clone()
+                };
+                let mins = (stalled_ms / 60_000).max(1);
+                let note = if message.trim().is_empty() {
+                    format!(
+                        "\u{23fa} Teammate @{} has made no progress for {}m ({})",
+                        label, mins, phase
+                    )
+                } else {
+                    format!("\u{23fa} {}", message.trim())
+                };
+                self.chat.add_system_message(&note, "warning");
+                self.toasts.push(
+                    format!("Agent \"{}\" has made no progress for {}m", label, mins),
+                    crate::components::toast::ToastLevel::Warning,
                 );
                 self.recompute_layout();
             }
@@ -2153,6 +2241,83 @@ impl App {
                     }
                 };
                 self.status.set_goal_verification(state);
+            }
+
+            // === Context compaction: make a multi-minute blocking step visible ===
+            //
+            // Compaction blocks the turn while it summarizes history. It used to
+            // emit on `Events.Bus` only, which the TUI does not consume, so the
+            // UI simply froze. These four arms give it the same treatment any
+            // other long step gets: a named spinner verb, the one turn timer,
+            // and a factual line when it lands.
+            BackendEvent::CompactionStarted { trigger, tokens_before } => {
+                // `/compact` can be invoked while the agent is otherwise idle, in
+                // which case no turn is running and the spinner row is down.
+                // Start it so the indicator (and its elapsed timer) exists at all.
+                if !self.activity.is_active() {
+                    self.activity.start();
+                }
+                self.activity
+                    .set_waiting_reason(Some(crate::components::activity::WaitingReason::Compacting));
+                // No details line yet — on purpose. Nothing measured has happened,
+                // and only `CompactionProgress` may draw a bar.
+                self.activity.set_details(None, 1);
+                self.announce_a11y(&format!(
+                    "Compacting conversation ({} trigger, {} tokens)",
+                    trigger,
+                    crate::components::status_bar::compact_tokens(tokens_before)
+                ));
+                self.recompute_layout();
+            }
+
+            BackendEvent::CompactionProgress { chunk_index, chunk_total } => {
+                // Measured work only — see `activity::progress_bar`.
+                self.activity.set_details(
+                    Some(crate::components::activity::progress_bar(chunk_index, chunk_total)),
+                    1,
+                );
+                self.recompute_layout();
+            }
+
+            BackendEvent::CompactionCompleted {
+                tokens_before,
+                tokens_after,
+                messages_before,
+                messages_after,
+                duration_ms,
+            } => {
+                self.activity.set_waiting_reason(None);
+                self.activity.set_details(None, 1);
+                // The folded count is DERIVED from the two message counts rather
+                // than sent as a third number, so the line can never contradict
+                // itself.
+                let folded = messages_before.saturating_sub(messages_after);
+                let line = format!(
+                    "\u{2713} Compacted {} \u{2192} {} tokens ({} messages folded) \u{00B7} {}",
+                    crate::components::status_bar::compact_tokens(tokens_before),
+                    crate::components::status_bar::compact_tokens(tokens_after),
+                    folded,
+                    crate::util::fmt_elapsed(duration_ms / 1000),
+                );
+                self.chat.add_system_message(&line, "info");
+                self.announce_a11y(&line);
+                self.recompute_layout();
+            }
+
+            BackendEvent::CompactionFailed { reason, duration_ms } => {
+                self.activity.set_waiting_reason(None);
+                self.activity.set_details(None, 1);
+                // Say the history is intact. A running indicator that just
+                // disappears reads as success, and the user would otherwise
+                // assume context was freed when it was not.
+                let line = format!(
+                    "\u{2717} Compaction failed after {} \u{2014} conversation unchanged ({})",
+                    crate::util::fmt_elapsed(duration_ms / 1000),
+                    reason
+                );
+                self.chat.add_system_message(&line, "warning");
+                self.announce_a11y(&line);
+                self.recompute_layout();
             }
 
             // === Shared scratchpad activity → Agents panel ===

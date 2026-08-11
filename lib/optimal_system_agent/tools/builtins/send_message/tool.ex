@@ -40,7 +40,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Tool do
       "properties" => %{
         "to" => %{
           "type" => "string",
-          "description" => "Target agent name or session ID"
+          "description" =>
+            "Target agent name or session ID. Use \"user\" to address the session " <>
+              "that delegated you."
         },
         "message" => %{
           "type" => "string",

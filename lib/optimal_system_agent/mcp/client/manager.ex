@@ -297,15 +297,36 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   # at/below it the tools inject directly, keeping small-toolset prompts
   # unchanged.
   defp republish(state) do
+    # `Map.merge/2` would resolve a cross-server key collision last-write-wins:
+    # one server's tool silently answering under another's key, with the
+    # permission rule of whichever server `parse_key/1` happens to name. There
+    # is no safe winner, so drop BOTH sides and say which servers clashed.
     aggregate =
       Enum.reduce(state.tools_by_server, %{}, fn {name, schemas}, acc ->
         tool_filter = state.servers |> Map.get(name) |> server_tool_filter()
-        Map.merge(acc, ToolBridge.build_tools(name, schemas, tool_filter))
+        merge_fail_closed(acc, ToolBridge.build_tools(name, schemas, tool_filter), name)
       end)
       |> Virtualization.apply_decision()
 
     :persistent_term.put(@pt_key, aggregate)
     :ok
+  end
+
+  defp merge_fail_closed(acc, incoming, server_name) do
+    case incoming |> Map.keys() |> Enum.filter(&Map.has_key?(acc, &1)) do
+      [] ->
+        Map.merge(acc, incoming)
+
+      clashing ->
+        Logger.warning(
+          "[MCP] Dropping #{length(clashing)} tool key(s) from server " <>
+            "#{inspect(server_name)} that collide with an already-registered server: " <>
+            "#{inspect(Enum.take(clashing, 5))}. Both sides are withheld — an ambiguous " <>
+            "key cannot be permission-checked correctly."
+        )
+
+        Map.merge(Map.drop(acc, clashing), Map.drop(incoming, clashing))
+    end
   end
 
   defp server_tool_filter(%{tool_filter: tool_filter}), do: tool_filter

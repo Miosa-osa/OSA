@@ -269,10 +269,34 @@ defmodule OptimalSystemAgent.MCP.Config do
     raw = read_raw(path)
     servers = Map.get(raw, "mcpServers", %{})
 
+    # Fail closed on an ambiguous sanitized match: when two raw keys sanitize
+    # to the same name, `Enum.find` would silently remove whichever collided
+    # first — i.e. delete a server the operator did not name. Require either an
+    # exact raw key or exactly ONE sanitized candidate.
     key =
       cond do
-        Map.has_key?(servers, name) -> name
-        true -> Enum.find(Map.keys(servers), fn k -> sanitize_name(k) == sanitize_name(name) end)
+        Map.has_key?(servers, name) ->
+          name
+
+        true ->
+          target = sanitize_name(name)
+
+          case Enum.filter(Map.keys(servers), fn k -> sanitize_name(k) == target end) do
+            [only] ->
+              only
+
+            [_ | _] = ambiguous ->
+              Logger.warning(
+                "[MCP.Config] Refusing to remove #{inspect(name)}: #{length(ambiguous)} " <>
+                  "server keys sanitize to #{inspect(target)} (#{inspect(ambiguous)}). " <>
+                  "Pass the exact key."
+              )
+
+              nil
+
+            [] ->
+              nil
+          end
       end
 
     if key do
@@ -397,12 +421,24 @@ defmodule OptimalSystemAgent.MCP.Config do
     nil
   end
 
-  @doc "Sanitize a server name to the `[a-z0-9_]` alphabet used in tool names."
+  @doc """
+  Sanitize a server name to the `[a-z0-9_]` alphabet used in tool names.
+
+  Runs of underscores collapse to a SINGLE `_`. That is not cosmetic: tool
+  names are `mcp__<server>__<tool>` with `__` as the separator, so a server
+  segment that itself contains `__` makes the key ambiguous — `a__b` + `c` and
+  `a` + `b__c` produce the identical key `mcp__a__b__c`. Since the tool segment
+  is parsed by splitting on the FIRST `__`, such a key routes to the wrong
+  server, and a permission rule scoped to `a` grants a tool owned by `a__b`.
+  Collapsing here makes `__` unrepresentable in a server segment, which is what
+  makes the key injective. `ToolBridge` re-checks and fails closed anyway.
+  """
   @spec sanitize_name(String.t()) :: String.t()
   def sanitize_name(name) when is_binary(name) do
     name
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9_]+/, "_")
+    |> String.replace(~r/_+/, "_")
     |> String.trim("_")
   end
 

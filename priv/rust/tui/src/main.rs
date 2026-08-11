@@ -16,6 +16,7 @@ mod a11y;
 mod app;
 mod client;
 mod clipboard;
+#[cfg(test)] mod tool_outcome_tests;
 mod components;
 mod config;
 mod event;

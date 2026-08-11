@@ -309,19 +309,39 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     _ = File.rm(RecordLock.lock_path(path))
     _ = File.rm(meta_path(session_id))
     _ = File.rm(spend_path(session_id))
+    _ = File.rm(pin_path(session_id))
     forget_rev(session_id)
     File.rm(path)
   end
 
   @doc """
   Delete saved session files older than the `cleanupPeriodDays` retention window
-  (CC-parity; default 30). Called once at startup. A value of `0` purges EVERY
-  saved session (retention disabled). Non-positive/invalid values fall back to
-  the 30-day default. Best-effort: never raises. Returns `{:ok, removed_count}`.
+  (CC-parity; default 30). Called once at startup.
+
+  A value of `0` means **retention disabled** — nothing is age-purged. It does
+  NOT mean "delete everything": a config knob whose zero value destroys every
+  saved transcript is a footgun, and `Store.SessionTranscript` has always read
+  the same `days: 0` as "skip the age purge". The two now agree.
+
+  Negative/invalid values fall back to the 30-day default. Sessions listed in
+  the `session_pins` setting, or carrying an `<id>.pin` sidecar, are never
+  purged regardless of age. Best-effort: never raises. Returns
+  `{:ok, removed_count}`.
   """
   @spec purge_expired() :: {:ok, non_neg_integer()} | {:error, term()}
   def purge_expired do
-    days = retention_days()
+    case retention_days() do
+      :never ->
+        {:ok, 0}
+
+      days ->
+        purge_older_than(days)
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp purge_older_than(days) do
     cutoff = System.system_time(:second) - days * 86_400
 
     case File.ls(sessions_dir()) do
@@ -331,19 +351,23 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           |> Enum.filter(&String.ends_with?(&1, ".json"))
           |> Enum.count(fn file ->
             path = Path.join(sessions_dir(), file)
+            session_id = String.trim_trailing(file, ".json")
 
             case File.stat(path, time: :posix) do
-              {:ok, %{mtime: mtime}} when days == 0 or mtime < cutoff ->
-                # Purge the immutable event log + sidecars alongside the mutable
-                # transcript so an expired session leaves no orphaned files.
-                session_id = String.trim_trailing(file, ".json")
-                Jsonl.delete(updates_path(session_id))
-                _ = File.rm(path <> ".corrupt")
-                _ = File.rm(RecordLock.lock_path(path))
-                _ = File.rm(meta_path(session_id))
-                _ = File.rm(spend_path(session_id))
-                forget_rev(session_id)
-                File.rm(path) == :ok
+              {:ok, %{mtime: mtime}} when mtime < cutoff ->
+                if pinned?(session_id) do
+                  false
+                else
+                  # Purge the immutable event log + sidecars alongside the
+                  # mutable transcript so an expired session leaves no orphans.
+                  Jsonl.delete(updates_path(session_id))
+                  _ = File.rm(path <> ".corrupt")
+                  _ = File.rm(RecordLock.lock_path(path))
+                  _ = File.rm(meta_path(session_id))
+                  _ = File.rm(spend_path(session_id))
+                  forget_rev(session_id)
+                  File.rm(path) == :ok
+                end
 
               _ ->
                 false
@@ -362,13 +386,61 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:error, reason} ->
         {:error, reason}
     end
-  rescue
-    e -> {:error, Exception.message(e)}
   end
 
+  @doc """
+  True when a session is protected from `purge_expired/0`.
+
+  Two independent sources, either of which pins: the `session_pins` setting (a
+  list of session ids) and an `<id>.pin` sidecar on disk. The sidecar is
+  deliberately not `*.json` so neither `list/1` nor `purge_expired/0` — both of
+  which enumerate `*.json` — ever mistakes it for a session record.
+  """
+  @spec pinned?(String.t()) :: boolean()
+  def pinned?(session_id) when is_binary(session_id) do
+    session_id in configured_pins() or File.exists?(pin_path(session_id))
+  rescue
+    _ -> false
+  end
+
+  def pinned?(_), do: false
+
+  @doc "Protect `session_id` from `purge_expired/0` by writing its `.pin` sidecar."
+  @spec pin(String.t()) :: :ok | {:error, term()}
+  def pin(session_id) when is_binary(session_id) do
+    File.mkdir_p(sessions_dir())
+    File.write(pin_path(session_id), "")
+  end
+
+  @doc "Remove the `.pin` sidecar, returning `session_id` to normal retention."
+  @spec unpin(String.t()) :: :ok | {:error, term()}
+  def unpin(session_id) when is_binary(session_id) do
+    case File.rm(pin_path(session_id)) do
+      {:error, :enoent} -> :ok
+      other -> other
+    end
+  end
+
+  defp configured_pins do
+    case OptimalSystemAgent.Settings.get("session_pins", []) do
+      list when is_list(list) -> Enum.filter(list, &is_binary/1)
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  # Path of the pin sidecar. Deliberately NOT `*.json` — see `pinned?/1`.
+  defp pin_path(session_id) do
+    safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
+    Path.join(sessions_dir(), "#{safe_id}.pin")
+  end
+
+  # `0` means retention is DISABLED (`:never`), matching `Store.SessionTranscript`.
   defp retention_days do
     case OptimalSystemAgent.Settings.get("cleanupPeriodDays", 30) do
-      n when is_integer(n) and n >= 0 -> n
+      0 -> :never
+      n when is_integer(n) and n > 0 -> n
       _ -> 30
     end
   end

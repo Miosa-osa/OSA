@@ -198,60 +198,29 @@ config :optimal_system_agent,
   # ---------------------------------------------------------------------------
   # Sandbox — Docker container isolation for skill execution
   # ---------------------------------------------------------------------------
-  # Master switch. Set OSA_SANDBOX_ENABLED=true in your environment to enable.
-  # The sandbox is opt-in; all existing behaviour is preserved when disabled.
-  sandbox_enabled: System.get_env("OSA_SANDBOX_ENABLED", "false") == "true",
-
-  # Execution backend: :docker (OS-level isolation) or :beam (process-only)
+  # Execution backend: :docker (OS-level isolation) or :beam (process-only).
+  # Read by Sandbox.Router (sandbox/router.ex:59).
+  #
+  # The Docker knobs (image, network, memory/cpu caps, timeout, workspace mount,
+  # allowed images, capability drop/add, read-only root, no-new-privileges) used
+  # to live here as ~12 flat `sandbox_*` keys. `Sandbox.Docker` never read any of
+  # them — it reads the nested `:sandbox_docker` map (sandbox/docker.ex:141) and
+  # otherwise falls back to its own module attributes. The flat keys were removed
+  # rather than left as decorative security settings that configure nothing.
   sandbox_mode: :docker,
 
-  # Container image used for execution (build with: mix osa.sandbox.setup)
-  sandbox_image: "osa-sandbox:latest",
-
-  # Allow network access inside the container (false = --network none)
-  sandbox_network: false,
-
-  # Resource limits passed to Docker
-  sandbox_max_memory: "256m",
-  sandbox_max_cpu: "0.5",
-
-  # Per-command execution timeout in milliseconds
-  sandbox_timeout: 30_000,
-
-  # Mount ~/.osa/workspace into the container at /workspace
-  sandbox_workspace_mount: true,
-
-  # Images that skills are allowed to request via the :image opt
-  sandbox_allowed_images: [
-    "osa-sandbox:latest",
-    "python:3.12-slim",
-    "node:22-slim"
-  ],
-
-  # Linux capabilities management (defaults to maximum restriction)
-  sandbox_capabilities_drop: ["ALL"],
-  sandbox_capabilities_add: [],
-
-  # Security hardening flags
-  sandbox_read_only_root: true,
-  sandbox_no_new_privileges: true,
-
-  # ---------------------------------------------------------------------------
-  # Budget — API cost tracking with spend limits
-  # ---------------------------------------------------------------------------
-  budget_daily_limit_usd: 50.0,
-  budget_monthly_limit_usd: 500.0,
-  budget_per_call_limit_usd: 5.0,
+  # NOTE: there are deliberately no `budget_*_limit_usd` keys here. `Budget` and
+  # `Agent.Budget` read `:daily_budget_usd` / `:monthly_budget_usd` /
+  # `:per_call_limit_usd` (budget/budget.ex:153, agent/budget.ex:114). The
+  # `budget_*_limit_usd` spelling was a near-miss that read as a configured spend
+  # cap while the code used its own defaults.
 
   # ---------------------------------------------------------------------------
   # Treasury — financial governance with transaction ledger
   # ---------------------------------------------------------------------------
+  # `Budget.Treasury` has zero `Application.get_env` calls, so only the
+  # enable flag is meaningful here; the limit keys configured nothing.
   treasury_enabled: false,
-  treasury_daily_limit_usd: 250.0,
-  treasury_monthly_limit_usd: 2500.0,
-  treasury_min_reserve_usd: 10.0,
-  treasury_max_single_usd: 50.0,
-  treasury_approval_threshold_usd: 10.0,
 
   # ---------------------------------------------------------------------------
   # Fleet — remote agent fleet registry with sentinel monitoring
@@ -261,10 +230,8 @@ config :optimal_system_agent,
   # ---------------------------------------------------------------------------
   # Wallet — crypto wallet connectivity
   # ---------------------------------------------------------------------------
+  # Only `:wallet_enabled` is read (tools/builtins/wallet_ops.ex:10).
   wallet_enabled: false,
-  wallet_provider: "mock",
-  wallet_address: nil,
-  wallet_rpc_url: nil,
 
   # ---------------------------------------------------------------------------
   # OTA Updater — secure updates with TUF verification
@@ -283,51 +250,12 @@ config :optimal_system_agent,
   open_computers_enabled: false,
 
   # ---------------------------------------------------------------------------
-  # Quiet Hours — heartbeat suppression windows
-  # ---------------------------------------------------------------------------
-  quiet_hours: nil,
-
-  # ---------------------------------------------------------------------------
-  # Python Sidecar — semantic memory search via local embeddings
-  # ---------------------------------------------------------------------------
-  # Set OSA_PYTHON_SIDECAR=true to enable. Requires sentence-transformers.
-  # When disabled, memory search falls back to keyword-based retrieval.
-  python_sidecar_enabled: System.get_env("OSA_PYTHON_SIDECAR", "false") == "true",
-  python_sidecar_model: "all-MiniLM-L6-v2",
-  python_sidecar_timeout: 30_000,
-  python_path: System.get_env("OSA_PYTHON_PATH", "python3"),
-
-  # ---------------------------------------------------------------------------
-  # Go Tokenizer — accurate BPE token counting
-  # ---------------------------------------------------------------------------
-  # Set OSA_GO_TOKENIZER=true to enable. Requires pre-built Go binary.
-  # When disabled or binary missing, falls back to word-count heuristic.
-  go_tokenizer_enabled: System.get_env("OSA_GO_TOKENIZER", "false") == "true",
-  go_tokenizer_encoding: "cl100k_base",
-
-  # ---------------------------------------------------------------------------
   # Webhook Signature Secrets — set these to enable inbound signature verification
   # ---------------------------------------------------------------------------
   telegram_webhook_secret: nil,
   whatsapp_app_secret: nil,
   dingtalk_secret: nil,
   email_webhook_secret: nil,
-
-  # ---------------------------------------------------------------------------
-  # Feature flags — disabled subsystems (Go sidecar, WhatsApp Web)
-  # ---------------------------------------------------------------------------
-  go_git_enabled: false,
-  go_sysmon_enabled: false,
-  whatsapp_web_enabled: false,
-
-  # ---------------------------------------------------------------------------
-  # Vault — structured memory system
-  # ---------------------------------------------------------------------------
-  vault_enabled: true,
-  vault_checkpoint_interval: 10,
-  vault_observation_min_score: 0.4,
-  vault_observation_flush_interval: 60_000,
-  vault_context_max_chars: 3000,
 
   # ---------------------------------------------------------------------------
   # Memory recall + dynamic-context budgeting (Agent.Context / Memory.Store)
@@ -359,8 +287,6 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
   custom_pragmas: [encoding: "'UTF-8'", busy_timeout: 5000]
 
 config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
-
-config :optimal_system_agent, budget_event_emitter: OptimalSystemAgent.BudgetEmitter
 
 # Post-edit format + diagnostics loop (gap analysis G1 + G2). After every
 # file_edit / multi_file_edit / file_write / file_create, `Verify.PostEdit` runs

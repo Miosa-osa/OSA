@@ -203,11 +203,21 @@ pub enum BackendEvent {
         role: String,
     },
     /// A background subagent finished successfully; `result` is a short preview.
+    ///
+    /// `total_tokens` / `tool_uses` come from the backend's `usage` map. They
+    /// are `Option` because a legacy/partial frame may omit them, and an absent
+    /// number must NOT be rendered (or stored) as zero — see
+    /// [`crate::components::agents::Agents::agent_completed`].
     BackgroundAgentCompleted {
         agent_id: String,
         role: String,
         result: String,
         duration_ms: u64,
+        total_tokens: Option<u32>,
+        tool_uses: Option<u32>,
+        /// What this run cost, from the backend's durable spend record.
+        /// `None` means "not recorded" — never conflate it with `Some(0.0)`.
+        cost_usd: Option<f64>,
     },
     /// A background subagent errored out; `error` is the failure reason.
     BackgroundAgentFailed {
@@ -215,6 +225,22 @@ pub enum BackendEvent {
         role: String,
         error: String,
         duration_ms: u64,
+        total_tokens: Option<u32>,
+        tool_uses: Option<u32>,
+        /// What this run cost before it failed. A failure is exactly when the
+        /// number matters most. `None` means "not recorded".
+        cost_usd: Option<f64>,
+    },
+    /// The backend's phase-aware stall watcher reports a background subagent has
+    /// made no progress. NOT a failure and NOT terminal — the agent may still
+    /// recover; `stalled_ms` is the backend's own measurement.
+    BackgroundAgentStalled {
+        agent_id: String,
+        display_name: String,
+        role: String,
+        phase: String,
+        stalled_ms: u64,
+        message: String,
     },
 
     // === Multi-agent workflow (Claude Code parity) ===
@@ -224,6 +250,10 @@ pub enum BackendEvent {
         display_name: String,
         duration_ms: u64,
         batch_id: Option<String>,
+        /// Terminal outcome as sent by the orchestrator: `"completed"` or
+        /// `"failed"`. Empty when the backend did not say, in which case the
+        /// line stays neutral rather than asserting success.
+        status: String,
     },
     /// An inbound message relayed from another agent to the user. Rendered as
     /// `› Message from @{from}: {text}`.
@@ -350,6 +380,44 @@ pub enum BackendEvent {
         swarm_id: String,
         converged: bool,
         rounds: u32,
+    },
+
+    // === Context compaction ===
+    /// Compaction has begun and the turn is blocked until it finishes. Drives
+    /// the spinner's `Compacting` verb + elapsed timer. Compaction regularly
+    /// runs into the tens of seconds; without this the turn froze silently.
+    CompactionStarted {
+        /// "auto" (threshold crossed mid-turn) or "manual" (`/compact`).
+        trigger: String,
+        /// Pre-compaction token estimate.
+        tokens_before: u64,
+    },
+    /// One chunk of a divide-and-conquer summarization finished.
+    ///
+    /// This is MEASURED work: the backend fixes `chunk_total` up front by
+    /// packing history into token-bounded chunks, then emits once per completed
+    /// chunk. It is the only compaction signal that carries a real ratio, and
+    /// it is therefore the only thing permitted to draw a progress bar. A
+    /// compaction that emits none of these renders spinner + elapsed only.
+    CompactionProgress {
+        /// 1-based, inclusive of the chunk just finished.
+        chunk_index: u32,
+        chunk_total: u32,
+    },
+    /// Compaction finished. All counts are measured, never estimated at render
+    /// time; `messages_before - messages_after` is the folded count.
+    CompactionCompleted {
+        tokens_before: u64,
+        tokens_after: u64,
+        messages_before: u32,
+        messages_after: u32,
+        duration_ms: u64,
+    },
+    /// Compaction failed and the conversation is UNCHANGED. Reported explicitly
+    /// — a running indicator that simply disappears reads as success.
+    CompactionFailed {
+        reason: String,
+        duration_ms: u64,
     },
 
     // === Auto Mode (safety guardian) ===

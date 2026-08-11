@@ -269,18 +269,29 @@ impl Accumulator {
             return None;
         }
         let theme = crate::style::theme();
-        let icon_color = if err {
-            theme.colors.error
+        // A failed run in a collapsed batch was signalled ONLY by recolouring
+        // this bullet — so `● Searched for 1 pattern` looked identical whether
+        // the grep succeeded or blew up, under NO_COLOR or to a colour-blind
+        // reader. Carry the failure in the glyph and in words.
+        let (icon, icon_color) = if err {
+            ("✗".to_string(), theme.colors.error)
         } else {
-            theme.colors.success
+            (crate::tools::tool_bullet().to_string(), theme.colors.success)
         };
-        Some(Line::from(vec![
+        let mut spans = vec![
             Span::styled(
-                format!("{} ", crate::tools::tool_bullet()), // ● (Linux) / ⏺ (macOS)
+                format!("{} ", icon),
                 Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(text, Style::default().fg(theme.colors.muted)),
-        ]))
+        ];
+        if err {
+            spans.push(Span::styled(
+                " (failed)".to_string(),
+                Style::default().fg(theme.colors.error),
+            ));
+        }
+        Some(Line::from(spans))
     }
 }
 

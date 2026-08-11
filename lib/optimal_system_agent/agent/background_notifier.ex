@@ -80,6 +80,21 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     {:noreply, state}
   end
 
+  # The orchestrator's phase-aware stall watcher already measured that a
+  # background teammate stopped making progress, and broadcast it here — with
+  # nothing listening. The parent model, which is the party that can actually
+  # DO something about it (task_output, task_stop, re-dispatch), never heard.
+  #
+  # Deliberately NOT arbitrated through `TaskNotifications.mark_notified/1`: that
+  # flag is the exactly-once token for the run's TERMINAL result. A stall is not
+  # terminal — the agent may still complete — so consuming the token here would
+  # swallow the real completion later. The watcher emits at most one stall per
+  # run and then stops, so this cannot repeat on its own.
+  def handle_info({:osa_event, %{type: :background_agent_stalled} = ev}, state) do
+    inject_stall(state.parent_id, ev)
+    {:noreply, state}
+  end
+
   # Background SHELL command completion — same re-entry mechanism as subagents.
   # Reproduces Claude Code's "Background command '<cmd>' completed (exit code N)"
   # so the model picks the result up on its next turn without manual polling.
@@ -175,6 +190,37 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     end
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")
+  end
+
+  # Hand a stall report to the parent Loop the same way a completion is handed
+  # over: queue a `<task-notification>` and poke. The summary carries the
+  # watcher's own wording (which already names the phase and the recommended
+  # next step) so the model gets an actionable message, not a bare flag.
+  defp inject_stall(parent_id, ev) do
+    agent_id = ev |> Map.get(:agent_id, "unknown") |> to_string()
+    display = Map.get(ev, :display_name) || Map.get(ev, :role) || agent_id
+    stalled_ms = Map.get(ev, :stalled_ms, 0)
+    minutes = if is_integer(stalled_ms), do: div(stalled_ms, 60_000), else: 0
+
+    summary =
+      case ev |> Map.get(:message, "") |> to_string() do
+        "" ->
+          "Background agent '#{display}' (#{agent_id}) has made no progress for " <>
+            "#{minutes} minutes (phase: #{Map.get(ev, :phase, "unknown")})."
+
+        msg ->
+          msg
+      end
+
+    TaskNotifications.queue(parent_id, %{
+      task_id: agent_id,
+      status: :stalled,
+      summary: summary
+    })
+
+    Loop.poke(parent_id)
+  rescue
+    e -> Logger.debug("[BackgroundNotifier] inject_stall failed: #{Exception.message(e)}")
   end
 
   defp registry_key(parent_id), do: "bg-notifier:" <> parent_id

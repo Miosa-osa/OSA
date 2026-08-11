@@ -75,10 +75,7 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
 
       # LLM providers (goldrush-compiled :osa_provider_router)
       OptimalSystemAgent.Providers.Registry,
-
-      # Tools (goldrush-compiled :osa_tool_dispatcher)
       OptimalSystemAgent.Tools.Registry,
-      OptimalSystemAgent.Tools.Cache,
       OptimalSystemAgent.Machines,
 
       # Background shell mechanism — Registry for bg-id → worker lookup +
@@ -106,11 +103,7 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # drives programs that REQUIRE a real tty (vim, REPLs, installer prompts).
       # The `pty_*` builtin tools operate through Shell.Pty.Manager.
       {Registry, keys: :unique, name: OptimalSystemAgent.Shell.Pty.Registry},
-      {DynamicSupervisor,
-       name: OptimalSystemAgent.Shell.Pty.Supervisor, strategy: :one_for_one},
-
-      # OS template discovery and connection
-      OptimalSystemAgent.OS.Registry,
+      {DynamicSupervisor, name: OptimalSystemAgent.Shell.Pty.Supervisor, strategy: :one_for_one},
 
       # MCP integration — Registry for server name lookup + DynamicSupervisor for per-server GenServers
       {Registry, keys: :unique, name: OptimalSystemAgent.MCP.Registry},

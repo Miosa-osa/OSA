@@ -52,12 +52,10 @@ When the GenServer starts (lazily, on first tool call), `Adapter.detect_platform
 
 | Priority | Check | Platform |
 |----------|-------|----------|
-| 1 | `config :computer_use_vm` has `:sprite_id` | `:platform_vm` |
-| 2 | `config :computer_use_docker` has `:container` | `:docker` |
-| 3 | `config :computer_use_remote` has `:host` | `:remote_ssh` |
-| 4 | `:os.type() == {:unix, :darwin}` | `:macos` |
-| 5 | `:os.type() == {:unix, :linux}` + `$WAYLAND_DISPLAY` or `$XDG_SESSION_TYPE=wayland` | `:linux_wayland` |
-| 6 | `:os.type() == {:unix, :linux}` (default) | `:linux_x11` |
+| 1 | `config :optimal_system_agent, :computer_use_platform` is set | that value, verbatim |
+| 2 | `:os.type() == {:unix, :darwin}` | `:macos` |
+| 3 | `:os.type() == {:unix, :linux}` + `$WAYLAND_DISPLAY` | `:linux_wayland` |
+| 4 | `:os.type() == {:unix, :linux}` + `$DISPLAY` | `:linux_x11` |
 | 7 | `:os.type() == {:win32, _}` | `:windows` (not yet supported) |
 
 `adapter_for/1` maps the platform atom to the concrete adapter module. The server verifies `adapter.available?()` before accepting commands.
@@ -409,7 +407,22 @@ config :optimal_system_agent, :computer_use_enabled, true
 
 ### Platform Override
 
-For local use, the platform is auto-detected. For remote/container/VM targets, set the appropriate config block. Detection priority: Platform VM → Docker → SSH → local OS.
+For local use, the platform is auto-detected from `:os.type()` and the display-server
+environment variables. Remote/container/VM targets are **not** auto-detected from their
+config blocks — select one explicitly:
+
+```elixir
+config :optimal_system_agent, :computer_use_platform, :docker      # or :remote_ssh, :platform_vm
+```
+
+then fill in the matching `:computer_use_docker` / `:computer_use_remote` /
+`:computer_use_vm` block below.
+
+> `:platform_vm` additionally requires an `OptimalSystemAgent.Sandbox.Sprites`
+> backend module, which is not shipped in this repo. The adapter is wired up and
+> degrades cleanly (`available?/0` returns `false`, calls return
+> `{:error, :sprites_unavailable}`), but it cannot drive a VM until that backend
+> exists.
 
 ## Security
 

@@ -7,17 +7,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
   2. SKILL.md files from ~/.osa/skills/ (markdown-defined, parsed at boot)
   3. MCP server tools (auto-discovered from ~/.osa/mcp.json)
 
-  The registry can build a goldrush-compiled :osa_tool_dispatcher module via
-  `ensure_dispatcher/0`. That compile is LAZY, not eager: `:glc.compile/2`
-  costs ~6s for a full 82-tool toolbox (see the comment on `ensure_dispatcher/0`),
-  and no current code path dispatches through it — tool execution resolves
-  through the in-memory `builtin_tools` map.
+  Tool execution resolves through the in-memory `builtin_tools` map — see
+  `handle_call({:execute, ...})`.
 
   ## Hot Code Reload
   When a new tool is registered via `register/1` it becomes available
   immediately — the registry's map and the `:persistent_term` snapshots are
-  updated synchronously. The goldrush module, if anything ever needs it, is
-  rebuilt on the next `ensure_dispatcher/0` because the tool-name set changed.
+  updated synchronously.
 
   ## Sub-modules
     - Registry.SkillLoader — loads/parses SKILL.md from priv/skills/ and ~/.osa/skills/
@@ -45,11 +41,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
   @doc """
   Register a tool module implementing Tools.Behaviour.
 
-  `timeout` stays generous even though the handler no longer recompiles the
-  goldrush dispatcher (that is lazy now — see `ensure_dispatcher/0`): a timeout
-  here is an `exit`, not an error return, so it takes down whatever was
-  registering rather than failing that one tool, and the registry is a
-  singleton that other boot work queues behind.
+  `timeout` stays generous: a timeout here is an `exit`, not an error return,
+  so it takes down whatever was registering rather than failing that one tool,
+  and the registry is a singleton that other boot work queues behind.
   """
   def register(skill_module, timeout \\ 30_000) do
     GenServer.call(__MODULE__, {:register_module, skill_module}, timeout)
@@ -456,7 +450,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     tool_docs ++ skill_docs
   end
 
-  @doc "Reload skills from disk (~/.osa/skills/) and recompile the dispatcher."
+  @doc "Reload skills from disk (~/.osa/skills/)."
   def reload_skills do
     GenServer.call(__MODULE__, :reload_skills)
   end
@@ -973,70 +967,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
     not function_exported?(mod, :available?, 0) or mod.available?()
   end
 
-  # ── Goldrush Dispatcher Compilation (lazy) ────────────────────────────
-  #
-  # `:glc.compile/2` generates and loads an Erlang module at RUNTIME from a
-  # query AST. Its cost is superlinear in the number of `:glc.any/1` branches,
-  # and this query has one branch per registered tool. Measured on this box
-  # with the real toolbox shape:
-  #
-  #     20 tools →  322ms      60 tools → 3135ms
-  #     40 tools → 1343ms      82 tools → 6102ms
-  #
-  # Calling it from `init/1` therefore parked the Infrastructure supervisor —
-  # and, because the tree is `:rest_for_one`, everything above it — for ~6s of
-  # every single boot, with no log line to show for it. That was ~75% of OSA's
-  # startup time.
-  #
-  # Nothing dispatches through `:osa_tool_dispatcher`: tool execution resolves
-  # through the `builtin_tools` map in `handle_call({:execute, ...})`, and
-  # `:glc.handle/2` is only ever called for `:osa_event_router` (Events.Bus).
-  # So the module is now built ON DEMAND by `ensure_dispatcher/0` rather than
-  # eagerly at boot and on every `register/1`. Boot pays 0ms; a caller that
-  # genuinely needs the compiled module pays for it once, and again only after
-  # the toolbox changes.
-  @doc """
-  Compile the goldrush `:osa_tool_dispatcher` module for the current toolbox,
-  if it is not already compiled for exactly this set of tool names.
-
-  Call this before `:glc.handle(:osa_tool_dispatcher, event)`. It is NOT called
-  at boot — see the comment above for why (it costs ~6s for 82 tools).
-  """
-  @spec ensure_dispatcher() :: :ok
-  def ensure_dispatcher do
-    builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
-    generation = builtin_tools |> Map.keys() |> Enum.sort()
-
-    if :persistent_term.get({__MODULE__, :dispatcher_generation}, nil) == generation do
-      :ok
-    else
-      compile_dispatcher(builtin_tools)
-      :persistent_term.put({__MODULE__, :dispatcher_generation}, generation)
-      :ok
-    end
-  end
-
-  defp compile_dispatcher(builtin_tools) do
-    if map_size(builtin_tools) > 0 do
-      tool_filters =
-        Enum.map(builtin_tools, fn {name, _mod} ->
-          :glc.eq(:tool_name, name)
-        end)
-
-      query =
-        :glc.with(:glc.any(tool_filters), fn event ->
-          _ = :gre.fetch(:tool_name, event)
-          :ok
-        end)
-
-      case :glc.compile(:osa_tool_dispatcher, query) do
-        {:ok, _} -> :ok
-        error -> Logger.warning("Failed to compile :osa_tool_dispatcher: #{inspect(error)}")
-      end
-    end
-  rescue
-    _ -> :ok
-  end
+  # Historical note: the registry used to compile a goldrush `:osa_tool_dispatcher`
+  # module (`:glc.compile/2`) with one `:glc.any/1` branch per tool. Nothing ever
+  # read it — tool execution resolves through the `builtin_tools` map in
+  # `handle_call({:execute, ...})`, and `:glc.handle/2` is only ever called for
+  # `:osa_event_router` (Events.Bus). Building it cost ~6s at 82 tools (superlinear:
+  # 20 tools → 322ms, 40 → 1343ms, 60 → 3135ms, 82 → 6102ms), which was ~75% of
+  # OSA's startup time. It has been removed outright rather than made lazy.
 
   # ── Private: Validation Error Formatting ─────────────────────────────
 

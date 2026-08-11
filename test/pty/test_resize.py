@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from osa_pty import SETTLE, SINGLETON_BANDS, PtySession  # noqa: E402
+from osa_pty import SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
 from stub_backend import StubBackend, set_claude_cli_state  # noqa: E402
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
@@ -41,6 +41,67 @@ def assert_single_live_region(session: PtySession, context: str) -> None:
             f"{counts} (offending: {wrong}).\n"
             f"--- rendered screen ---\n{session.dump()}"
         )
+
+
+def assert_chrome_bottom_anchored(session: PtySession, context: str) -> None:
+    """The live region occupies the LAST rows of the screen.
+
+    Band counting cannot express this, and that is exactly why the defect it
+    guards against shipped through a thousand passing tests. `clear_screen_for_resize`
+    homes the cursor to row 0 before erasing, and the `rebuild_inline` that
+    follows anchors `Viewport::Inline` on wherever the cursor is
+    (ratatui 0.29 `compute_inline_size`: `row = pos.y`). So after one width
+    resize the whole live region was rebuilt at the TOP of the screen — and
+    there was still exactly ONE of it, so every assertion in this file passed
+    while the user watched "the chat thing go all the way to the top".
+
+    The invariant the inline design actually rests on is bottom-anchoring:
+    `top == rows - inline_h`, the same equation `resize_clear_top_from_bottom`
+    states in `event_loop.rs`. Externally the region's top is not directly
+    readable, but its LAST row is: the status bar is the final row the region
+    draws, so a bottom-anchored region puts the status bar on the last
+    non-blank row of the screen, with nothing but blanks under it.
+
+    Checking the bottom rather than the top is deliberate — it needs no
+    knowledge of the region's height, which changes as the composer grows.
+
+    It measures the status bar's distance from the SCREEN BOTTOM, not from the
+    last non-blank row. That distinction is the whole assertion: when the region
+    is rebuilt at the top, everything below it is blank, so the status bar is
+    *still* the last non-blank row and a check written that way passes on the
+    broken screen. (It did. This function's first version asserted exactly that
+    and stayed green with the fix reverted.) The reported symptom is literally
+    "the composer is at the top and there is dead space below it", so the dead
+    space is the evidence and must not be ignored.
+    """
+    rows = [line.rstrip() for line in session.screen.display]
+    status_rows = [i for i, line in enumerate(rows) if STATUS.search(line)]
+    if not status_rows:
+        raise AssertionError(
+            f"{context}: no status bar on screen at all — the live region is "
+            f"missing, not merely misplaced.\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+    # Ratatui's inline viewport may leave a row or two under the region (the
+    # cursor's own line), so this is a small tolerance rather than an equality.
+    # It does not need to be tight: bottom-anchored measures 1 on a 30-row
+    # screen, and the defect measured 25.
+    slack = (len(rows) - 1) - status_rows[-1]
+    if slack > 2:
+        raise AssertionError(
+            f"{context}: the live region is not bottom-anchored — the status "
+            f"bar is on row {status_rows[-1]} of a {len(rows)}-row screen, "
+            f"leaving {slack} rows of dead space beneath it. The region was "
+            f"rebuilt at the TOP of the screen; there is still exactly one of "
+            f"every band, so only this assertion can see it.\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+
+
+def assert_live_region_ok(session: PtySession, context: str) -> None:
+    """Both invariants: exactly one live region, and it is at the bottom."""
+    assert_single_live_region(session, context)
+    assert_chrome_bottom_anchored(session, context)
 
 
 # --- tests -----------------------------------------------------------------
@@ -61,7 +122,7 @@ def test_resize_sweep(backend: StubBackend) -> None:
     """
     with PtySession(backend.base_url, cols=120, rows=30) as s:
         s.boot()
-        assert_single_live_region(s, "after boot at 120x30")
+        assert_live_region_ok(s, "after boot at 120x30")
 
         for width in range(119, 79, -5):
             s.resize(width, 30)
@@ -70,13 +131,13 @@ def test_resize_sweep(backend: StubBackend) -> None:
             # wait for the app between steps.
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after narrowing sweep 120 -> 80")
+        assert_live_region_ok(s, "after narrowing sweep 120 -> 80")
 
         for width in range(85, 125, 5):
             s.resize(width, 30)
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after widening sweep 80 -> 120")
+        assert_live_region_ok(s, "after widening sweep 80 -> 120")
 
 
 def test_height_resize(backend: StubBackend) -> None:
@@ -89,19 +150,19 @@ def test_height_resize(backend: StubBackend) -> None:
     """
     with PtySession(backend.base_url, cols=100, rows=40) as s:
         s.boot()
-        assert_single_live_region(s, "after boot at 100x40")
+        assert_live_region_ok(s, "after boot at 100x40")
 
         for rows in range(38, 19, -2):
             s.resize(100, rows)
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after shortening sweep 40 -> 20")
+        assert_live_region_ok(s, "after shortening sweep 40 -> 20")
 
         for rows in range(22, 42, 2):
             s.resize(100, rows)
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after heightening sweep 20 -> 40")
+        assert_live_region_ok(s, "after heightening sweep 20 -> 40")
 
 
 def test_small_viewport(backend: StubBackend) -> None:

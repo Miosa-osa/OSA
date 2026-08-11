@@ -95,56 +95,119 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
         _ -> false
       end)
 
-    if errors != [] do
-      error_lines =
-        Enum.map_join(errors, "\n", fn {:error, display_path, reason} ->
-          "  - #{display_path}: #{reason}"
-        end)
+    # Hunks that are already in the requested state. Not errors and not work:
+    # they are reported per-hunk in the observation and excluded from the
+    # atomic apply set (there is nothing to write).
+    already_applied =
+      for {:already_applied, dp} <- validation_results, do: dp
 
-      {:error, "Validation failed — no files were modified:\n#{error_lines}"}
-    else
-      # All edits validated. Apply them ATOMICALLY (all-or-nothing) so a write
-      # that fails partway can never leave the repo half-edited (BUG B).
-      case apply_atomic(validation_results) do
-        {:ok, per_file} ->
-          # Refresh read-state for every edited file (P0-1) and run the
-          # post-edit validation hook synchronously per file, aggregating any
-          # diagnostics into the observation (P1-4).
-          edited_paths =
-            for {:valid, _dp, ep, _o, _n, _c} <- validation_results, do: ep
+    to_apply =
+      Enum.filter(validation_results, fn
+        {:valid, _, _, _, _, _} -> true
+        _ -> false
+      end)
 
-          Enum.each(edited_paths, &FileState.record_write(session, &1))
+    cond do
+      errors != [] ->
+        # A genuine failure still fails the whole batch — the atomicity and
+        # read-before-edit guarantees are the point of this tool. But the
+        # message now carries EVERY hunk's outcome, so the model can see which
+        # ones were fine and reissue only what actually needs doing.
+        {:error,
+         "Validation failed — no files were modified:\n" <>
+           per_hunk_report(errors, already_applied, to_apply)}
 
-          hook_note =
-            edited_paths
-            |> Enum.map(fn ep ->
-              FileEditHandler.file_changed_note(%{
-                path: ep,
-                tool: "multi_file_edit",
-                operation: :edit
-              })
-            end)
-            |> Enum.join("")
+      to_apply == [] ->
+        # Every hunk was already applied. This is the retry-after-partial-
+        # success case: it is a success, not a failure.
+        count = length(already_applied)
 
-          summary =
-            Enum.map_join(per_file, "\n", fn %{path: dp, lines_changed: lc} ->
-              "  #{dp} (#{lc} lines changed)"
-            end)
+        {:ok,
+         "No changes needed — all #{count} #{if count == 1, do: "edit", else: "edits"} " <>
+           "were already applied:\n" <>
+           Enum.map_join(already_applied, "\n", &"  #{&1} (already applied)") <>
+           "\nThe files are in the requested state — continue with the next step " <>
+           "rather than retrying.",
+         %{results: [], count: 0, already_applied: already_applied}}
 
-          count = length(per_file)
-
-          result =
-            "Edited #{count} #{if count == 1, do: "file", else: "files"}:\n#{summary}" <> hook_note
-
-          {:ok, result, %{results: per_file, count: count}}
-
-        {:error, reason} ->
-          {:error, "Apply failed — all changes rolled back, no files were modified:\n  #{reason}"}
-      end
+      true ->
+        apply_validated(to_apply, already_applied, session)
     end
   end
 
   def execute(_, _ctx), do: {:error, "Missing required parameter: edits"}
+
+  defp per_hunk_report(errors, already_applied, to_apply) do
+    error_lines =
+      Enum.map_join(errors, "\n", fn {:error, display_path, reason} ->
+        "  - #{display_path}: #{reason}"
+      end)
+
+    applied_lines =
+      Enum.map_join(already_applied, "\n", &"  - #{&1}: already applied (no change needed)")
+
+    ok_lines =
+      Enum.map_join(to_apply, "\n", fn {:valid, dp, _ep, _o, _n, _c} ->
+        "  - #{dp}: would apply cleanly"
+      end)
+
+    [error_lines, applied_lines, ok_lines]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp apply_validated(validation_results, already_applied, session) do
+    # Every remaining edit validated. Apply them ATOMICALLY (all-or-nothing) so
+    # a write that fails partway can never leave the repo half-edited (BUG B).
+    case apply_atomic(validation_results) do
+      {:ok, per_file} ->
+        # Refresh read-state for every edited file (P0-1) and run the
+        # post-edit validation hook synchronously per file, aggregating any
+        # diagnostics into the observation (P1-4).
+        edited_paths =
+          for {:valid, _dp, ep, _o, _n, _c} <- validation_results, do: ep
+
+        Enum.each(edited_paths, &FileState.record_write(session, &1))
+
+        hook_note =
+          edited_paths
+          |> Enum.map(fn ep ->
+            FileEditHandler.file_changed_note(%{
+              path: ep,
+              tool: "multi_file_edit",
+              operation: :edit
+            })
+          end)
+          |> Enum.join("")
+
+        summary =
+          Enum.map_join(per_file, "\n", fn %{path: dp, lines_changed: lc} ->
+            "  #{dp} (#{lc} lines changed)"
+          end)
+
+        # Per-hunk outcomes: the skipped hunks are named explicitly so the
+        # model can tell "already in the requested state" apart from "silently
+        # dropped".
+        skipped =
+          if already_applied == [] do
+            ""
+          else
+            "\n" <> Enum.map_join(already_applied, "\n", &"  #{&1} (already applied, skipped)")
+          end
+
+        count = length(per_file)
+
+        result =
+          "Edited #{count} #{if count == 1, do: "file", else: "files"}:\n" <>
+            summary <> skipped <> hook_note
+
+        {:ok, result,
+         %{results: per_file, count: count, already_applied: already_applied}}
+
+      {:error, reason} ->
+        {:error, "Apply failed — all changes rolled back, no files were modified:\n  #{reason}"}
+    end
+  end
 
   # ── Private ───────────────────────────────────────────────────────────
 
@@ -181,7 +244,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
           {:ok, content} ->
             cond do
               not String.contains?(content, old) ->
-                {:error, dp, "old_string not found in file"}
+                # Idempotency, inherited from single-file `file_edit`
+                # (`already_applied_or_not_found/3`) which `multi_file_edit`
+                # has its own apply logic and so never got.
+                #
+                # Why it matters MORE here: this batch is all-or-nothing, so a
+                # single already-applied hunk failed validation and reverted
+                # every other hunk. A retry after a partial success therefore
+                # could never succeed — the batch was permanently unusable and
+                # the model had no way out except editing files one at a time.
+                #
+                # Narrow, exactly as in `file_edit`: `new` must be non-empty
+                # AND actually present. A deletion (`new == ""`) is trivially
+                # "present" in every file, so treating it as applied would
+                # swallow every genuinely failed deletion — deletions keep the
+                # hard error.
+                if new != "" and String.contains?(content, new) do
+                  {:already_applied, dp}
+                else
+                  {:error, dp, "old_string not found in file"}
+                end
 
               # Ambiguity guard mirroring single-file file_edit: apply_atomic uses
               # global: false and would silently rewrite only the FIRST match,

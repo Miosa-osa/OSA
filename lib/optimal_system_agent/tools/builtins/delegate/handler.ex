@@ -527,20 +527,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     {:ok, agent_id} = Orchestrator.run_background(parent_id, config)
     output_file = OptimalSystemAgent.Agent.RunStore.transcript_path_for(agent_id)
 
-    {:ok,
-     """
-     Async agent launched.
-     agentId: #{agent_id}
-     output_file: #{output_file}
+    {:ok, async_launch_notice(config.role, agent_id, output_file)}
+  end
 
-     The '#{config.role}' agent is running in the background. A <task-notification> \
-     will be injected into this conversation when it completes — do NOT poll for it \
-     with task_output, and do NOT read the output file before that notification \
-     arrives. Do not duplicate this agent's work yourself. Briefly tell the user \
-     the agent was launched, then continue with other work or end your response. \
-     Use task_resume (or message_agent send to: "#{agent_id}") to continue it later \
-     with its full context.
-     """}
+  @doc """
+  The tool result the lead agent reads the instant a background teammate starts.
+
+  This string decides what the lead does for the next several minutes, so it is
+  a named function rather than an inline heredoc — it is behaviour, and it is
+  tested as behaviour.
+
+  It used to end with *"then continue with other work or end your response."*
+  Claude Code shipped that exact instruction and then removed it (2.1.193:
+  "the launch result no longer instructs Claude to 'end your response' — it
+  keeps working while the agent runs"), for the reason that shows up
+  immediately in practice: offered the choice, a model takes the second branch
+  almost every time. The user asks for something, the lead delegates it, and
+  the turn ENDS — the session goes quiet with work in flight, and the user is
+  left holding a launch notice instead of an answer.
+
+  So the choice is gone. What survives untouched is the anti-poll discipline:
+  polling `task_output` or reading the transcript before the notification lands
+  burns the parent's context re-reading a file that is still being written.
+  """
+  @spec async_launch_notice(String.t(), String.t(), String.t()) :: String.t()
+  def async_launch_notice(role, agent_id, output_file) do
+    """
+    Async agent launched.
+    agentId: #{agent_id}
+    output_file: #{output_file}
+
+    The '#{role}' agent is running in the background. A <task-notification> \
+    will be injected into this conversation when it completes — do NOT poll for it \
+    with task_output, and do NOT read the output file before that notification \
+    arrives. Do not duplicate this agent's work yourself. Mention the launch to the \
+    user in one clause, then KEEP WORKING: pick up the next thing that does not \
+    depend on this agent's result. Launching a teammate is never a reason to stop \
+    or to wait — the notification will reach you wherever you are. \
+    Use task_resume (or message_agent send to: "#{agent_id}") to continue it later \
+    with its full context.
+    """
   end
 
   defp resolve_parent_id(_args, %UseContext{session_id: sid}) when is_binary(sid), do: sid

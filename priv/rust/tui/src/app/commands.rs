@@ -665,10 +665,21 @@ impl App {
                 // Trigger proactive compaction on the live loop now. An optional
                 // argument becomes custom summarization instructions (CC parity:
                 // `/compact <instructions>`).
-                self.toasts.push(
-                    "Compacting context...".into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                // Show the running indicator OPTIMISTICALLY rather than toasting.
+                // The backend's `compaction_started` says the same thing a moment
+                // later; a toast plus a spinner both reading "Compacting" is the
+                // same fact twice. Starting the spinner here instead makes the
+                // acknowledgement instant AND persistent for the whole (often
+                // multi-minute) run. `compaction_completed` / `compaction_failed`
+                // clear it; so does the turn ending, so a dropped SSE connection
+                // cannot strand it on screen forever.
+                if !self.activity.is_active() {
+                    self.activity.start();
+                }
+                self.activity.set_waiting_reason(Some(
+                    crate::components::activity::WaitingReason::Compacting,
+                ));
+                self.recompute_layout();
                 self.do_compact(arg);
             }
             "/recap" => {
@@ -789,16 +800,35 @@ impl App {
         tokio::spawn(async move {
             let event = match client.compact_session(&sid, &instructions).await {
                 Ok(r) => {
-                    let output = format!(
-                        "Context compacted: {} → {} messages (~{} → ~{} tokens)",
-                        r.messages_before, r.messages_after, r.tokens_before, r.tokens_after
-                    );
-                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
-                        kind: "info".into(),
-                        output,
-                        action: None,
-                    }))
+                    // The success line is NOT written here. A real compaction
+                    // broadcasts `compaction_started`/`compaction_completed` on
+                    // the session topic, and the SSE handler renders the
+                    // spinner and the `✓ Compacted …` line from those. Printing
+                    // the HTTP result too would report the same event twice.
+                    //
+                    // The one case the events cannot cover: the backend
+                    // declines to compact because history is already below the
+                    // "worth an LLM round-trip" floor. It returns unchanged
+                    // counts and emits nothing — so without this branch,
+                    // `/compact` would appear to do nothing at all. Say so.
+                    if r.messages_before == r.messages_after
+                        && r.tokens_before == r.tokens_after
+                    {
+                        BackendEvent::CommandResult(Ok(
+                            crate::client::types::CommandExecuteResponse {
+                                kind: "info".into(),
+                                output: "Nothing to compact — the conversation is \
+                                         already below the compaction threshold."
+                                    .into(),
+                                action: None,
+                            },
+                        ))
+                    } else {
+                        return;
+                    }
                 }
+                // Transport/HTTP failures never produce a backend event, so this
+                // is the only place the user would hear about them.
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));

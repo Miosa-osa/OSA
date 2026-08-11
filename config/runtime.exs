@@ -35,7 +35,10 @@ config_dir =
     stale_home_before = System.os_time(:second) - 86_400
 
     for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-home-*")),
-        match?({:ok, %{mtime: mtime}} when mtime < stale_home_before, File.stat(stale, time: :posix)) do
+        match?(
+          {:ok, %{mtime: mtime}} when mtime < stale_home_before,
+          File.stat(stale, time: :posix)
+        ) do
       _ = File.rm_rf(stale)
     end
 
@@ -370,8 +373,6 @@ config :optimal_system_agent,
   telegram_allowed_chats: System.get_env("TELEGRAM_ALLOWED_CHATS"),
   discord_allowed_users: System.get_env("DISCORD_ALLOWED_USERS"),
   slack_allowed_users: System.get_env("SLACK_ALLOWED_USERS"),
-  # Web search
-  brave_api_key: System.get_env("BRAVE_API_KEY"),
 
   # Provider selection
   default_provider: default_provider,
@@ -497,24 +498,17 @@ config :optimal_system_agent,
   monthly_budget_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), nil),
   per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), nil),
 
-  # Treasury — keys match Treasury GenServer expectations
+  # Treasury. Only the enable flag is live — `Budget.Treasury` makes no
+  # `Application.get_env` calls, so the auto-debit/daily/max-single keys
+  # configured nothing and were removed.
   treasury_enabled: System.get_env("OSA_TREASURY_ENABLED") == "true",
-  treasury_auto_debit: System.get_env("OSA_TREASURY_AUTO_DEBIT") != "false",
-  treasury_daily_limit: parse_float.(System.get_env("OSA_TREASURY_DAILY_LIMIT"), 250.0),
-  treasury_max_single: parse_float.(System.get_env("OSA_TREASURY_MAX_SINGLE"), 50.0),
 
   # Fleet management
   fleet_enabled: System.get_env("OSA_FLEET_ENABLED") == "true",
 
-  # Wallet integration
+  # Wallet integration. Only `:wallet_enabled` is read
+  # (tools/builtins/wallet_ops.ex:10).
   wallet_enabled: System.get_env("OSA_WALLET_ENABLED") == "true",
-  wallet_provider: System.get_env("OSA_WALLET_PROVIDER") || "mock",
-  wallet_address: System.get_env("OSA_WALLET_ADDRESS"),
-  wallet_rpc_url: System.get_env("OSA_WALLET_RPC_URL"),
-
-  # Sprites.dev sandbox
-  sprites_token: System.get_env("SPRITES_TOKEN"),
-  sprites_api_url: System.get_env("SPRITES_API_URL") || "https://api.sprites.dev",
 
   # OTA updates
   update_enabled: System.get_env("OSA_UPDATE_ENABLED") == "true",
@@ -598,10 +592,6 @@ config :optimal_system_agent,
 
   # Extended thinking
   thinking_enabled: System.get_env("OSA_THINKING_ENABLED") == "true",
-  thinking_budget_tokens: parse_int.(System.get_env("OSA_THINKING_BUDGET"), 5_000),
-
-  # Quiet hours for heartbeat
-  quiet_hours: System.get_env("OSA_QUIET_HOURS"),
 
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.
@@ -630,7 +620,6 @@ end
 
 config :optimal_system_agent,
   jwt_secret: System.get_env("JWT_SECRET"),
-  amqp_url: System.get_env("AMQP_URL"),
   platform_enabled: database_url != nil
 
 # ── Custom / proxied provider base URLs ─────────────────────────────────────

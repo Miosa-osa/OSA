@@ -181,18 +181,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard do
 
   # ── Internals ─────────────────────────────────────────────────────────
 
-  defp canonical(path) do
-    expanded = Path.expand(path)
-
-    case :file.read_link_all(String.to_charlist(expanded)) do
-      {:ok, real} ->
-        real_str = to_string(real)
-        if String.starts_with?(real_str, "/"), do: real_str, else: "/" <> real_str
-
-      _ ->
-        expanded
-    end
-  end
+  defp canonical(path), do: OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
 
   defp fnv1a(binary) do
     binary

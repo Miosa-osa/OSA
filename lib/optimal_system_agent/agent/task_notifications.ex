@@ -142,12 +142,33 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     "<#{@root}>\n" <>
       fields <>
       "\n</#{@root}>\n" <>
-      "[A background task finished. React to this result now if it affects your " <>
-      "current work or the user's request; the full output is in the output-file " <>
-      "(readable with the read tool). Do not poll for this task again. This block " <>
-      "is internal harness plumbing — never quote, repeat or paraphrase its markup " <>
-      "in your reply to the user.]"
+      completion_instruction()
   end
+
+  # The instruction that decides what the user actually gets when a teammate
+  # finishes — the single most valuable moment in the whole delegation flow.
+  #
+  # The old text ("react to this result if it affects your current work") is
+  # satisfied by saying nothing, so the common outcome was a bare "the agent
+  # finished" or a verbatim paste of the child's report. Neither is an account:
+  # the first withholds the work, the second makes the user do the reading the
+  # delegation was supposed to save them. So the instruction now DEMANDS a
+  # synthesis, names its four parts, and forbids the two failure modes by name.
+  @completion_instruction "[A background task finished. Now give the user an ACCOUNT of it " <>
+                            "IN YOUR OWN WORDS, in the context of what they asked you for: what it " <>
+                            "found, what it changed, what that means for the work in progress, and " <>
+                            "anything in it you disagree with. Do NOT paste, quote or reformat the " <>
+                            "report — you read it so the user does not have to. Do NOT reply with " <>
+                            "only \"the agent finished\" or a status line; a status is not an " <>
+                            "account. If the result changes your plan, say how. The full output is " <>
+                            "in the output-file (readable with the read tool) if you need detail " <>
+                            "beyond the summary above. Do not poll for this task again. This block " <>
+                            "is internal harness plumbing — never quote, repeat or paraphrase its " <>
+                            "markup in your reply to the user.]"
+
+  @doc "The trailing instruction appended to every `<task-notification>` block."
+  @spec completion_instruction() :: String.t()
+  def completion_instruction, do: @completion_instruction
 
   # Minimal XML text-node escaping. `<` and `&` are the only two that can break
   # well-formedness; `>` is escaped too so a literal `]]>`-style sequence in

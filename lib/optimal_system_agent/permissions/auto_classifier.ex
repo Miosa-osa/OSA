@@ -66,6 +66,7 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Safety.CommandVariants
   alias OptimalSystemAgent.Agent.Safety.DangerousCommands
   alias OptimalSystemAgent.Agent.Safety.UntrustedContent
   alias OptimalSystemAgent.Providers.Registry, as: Providers
@@ -168,6 +169,14 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
 
   defp shell_fast_path(command) when is_binary(command) and command != "" do
     cond do
+      # The de-obfuscation pass has size and fan-out bounds. When it could not
+      # derive the COMPLETE variant set, "no dangerous variant matched" is not
+      # evidence of safety — it is evidence we stopped looking. A bound on a
+      # safety analysis has to fail closed, so an incompletely-analysed command
+      # is never auto-approved; it goes to the operator.
+      not CommandVariants.fully_analyzed?(command) ->
+        :inconclusive
+
       # Command substitution / parameter expansion could hide an arbitrary write
       # behind a read-looking head — never fast-allow.
       String.contains?(command, "$(") or String.contains?(command, "`") or

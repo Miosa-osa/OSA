@@ -313,12 +313,37 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsBypassTest do
       assert length(vs) <= 64
     end
 
-    test "an oversized command is not expanded but is still checked raw" do
+    test "an oversized command still contains the raw input among its variants" do
       big = String.duplicate("x", 30_000)
-      assert CommandVariants.variants(big) == [big]
+      vs = CommandVariants.variants(big)
+
+      assert big in vs
 
       assert {:blocked, _} =
                DC.check_command(String.duplicate("# pad\n", 10) <> "#{@rm} #{@root}")
+    end
+
+    # The size bound used to fail OPEN: over @max_length, `variants/1` returned
+    # the raw, still-quoted string and nothing else, so 20 KB of padding was a
+    # complete bypass of the hard-deny tier. A bound on a safety analysis has to
+    # fail closed instead.
+    test "padding a catastrophic command past the size bound does not bypass the breaker" do
+      pad = String.duplicate("#", 25_000)
+
+      for cmd <- [
+            ~s(#{@rm} "#{@root}" ; echo #{pad}),
+            ~s(bash -c "#{@rm} '#{@root}'" # #{pad})
+          ] do
+        assert byte_size(cmd) > 20_000
+        assert {:blocked, _} = DC.check_command(cmd), "not blocked: #{String.slice(cmd, 0, 60)}"
+        assert DC.catastrophic_destruction?(cmd)
+      end
+    end
+
+    test "an incompletely-analysed command reports itself as such" do
+      assert CommandVariants.fully_analyzed?("ls -la")
+      refute CommandVariants.fully_analyzed?(String.duplicate("x", 30_000))
+      refute CommandVariants.fully_analyzed?(nil)
     end
 
     test "malformed input never raises" do

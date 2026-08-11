@@ -44,8 +44,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   alias OptimalSystemAgent.Agent.ContextEngine.Router, as: Compactor
   alias OptimalSystemAgent.Agent.CompactRestore
+  alias OptimalSystemAgent.Agent.CompactionEvents
   alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
-  alias OptimalSystemAgent.Providers.Registry, as: Providers
+  # NOTE: `Compactor` above is aliased to `ContextEngine.Router`, so the real
+  # `Agent.Compactor` (which owns the bounded summarizer call) needs its own
+  # name here. Provider calls now go through `AgentCompactor.bounded_chat/2`
+  # rather than `Providers.Registry.chat/2` directly, so they carry a timeout.
+  alias OptimalSystemAgent.Agent.Compactor, as: AgentCompactor
+  alias OptimalSystemAgent.Memory.Flush
   alias OptimalSystemAgent.Events.Bus
 
   @default_keep_turns 4
@@ -151,6 +157,37 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   end
 
   @doc """
+  Memory-flush hook — `Memory.Flush.hook_contract/0`'s `:before_compaction`.
+
+  Harvests durable notes (root causes, decisions, constraints) into long-term
+  memory *while the evidence is still in the context window*, i.e. before a
+  compaction folds those turns into a lossy summary. Runs at most once per
+  compaction cycle; `Memory.Flush` owns the latch, so calling this on every
+  loop iteration in the band is safe and cheap.
+
+  `Flush.flush_at/1` is clamped to `max(warn_at, compact_at - margin)`, so the
+  flush band is always a sub-band of the microcompact band — which is why this
+  is invoked from exactly where `should_microcompact?/2` is consumed. Returns
+  `state` unchanged; it is a side-effecting pass-through so the call site stays
+  a single expression.
+
+  Never raises: memory is a nicety, a wedged or missing memory backend must not
+  take down a turn.
+  """
+  @spec maybe_flush(map(), term()) :: map()
+  def maybe_flush(state, context_window) do
+    if Flush.should_flush?(state, context_window) do
+      Flush.run(state.messages, session_id: state.session_id)
+    end
+
+    state
+  rescue
+    e ->
+      Logger.debug("[proactive_compaction] memory flush failed: #{inspect(e)}")
+      state
+  end
+
+  @doc """
   Compact a message list by summarizing older turns into a structured,
   Claude Code-style summary message, keeping the most recent N turns verbatim.
 
@@ -185,9 +222,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
           tokens_before: older_tokens
         })
 
+        # Announce BEFORE the summarizer call, not after. This path blocks the
+        # turn for as long as the provider takes (bounded at 90-120s, and it
+        # regularly runs into the tens of seconds); emitting only on completion
+        # is what made the TUI freeze with no explanation.
+        started_at = System.monotonic_time(:millisecond)
+        CompactionEvents.started(session_id, :manual, older_tokens)
+
         case summarize_with_retries(older, @summary_retries, instructions) do
           {:ok, summary} ->
             reset_failures(session_id)
+
+            # `Memory.Flush.hook_contract/0`'s `:after_compaction`. History has
+            # just been folded, so open the next flush cycle — otherwise the
+            # once-per-cycle latch stays claimed and the agent never flushes
+            # again for the rest of the session.
+            Flush.reset_cycle(session_id)
 
             summary_msg = %{role: "system", content: compact_boundary_content(summary)}
 
@@ -210,6 +260,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
             emit_event(length(messages), length(compacted), older_tokens, after_tokens)
 
+            CompactionEvents.completed(session_id,
+              tokens_before: older_tokens,
+              tokens_after: after_tokens,
+              messages_before: length(messages),
+              messages_after: length(compacted),
+              duration_ms: System.monotonic_time(:millisecond) - started_at
+            )
+
             Logger.info(
               "[proactive_compaction] folded #{length(older)} older messages into 1 summary " <>
                 "(~#{older_tokens} → ~#{Compactor.estimate_tokens([summary_msg])} tokens; " <>
@@ -219,6 +277,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             compacted
 
           {:error, reason} ->
+            # The running indicator must not just vanish — a disappearing
+            # spinner reads as success. Say the history is untouched.
+            CompactionEvents.failed(
+              session_id,
+              reason,
+              System.monotonic_time(:millisecond) - started_at
+            )
+
             failures = record_failure(session_id)
 
             if failures >= @max_consecutive_failures do
@@ -475,7 +541,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         |> append_user_instructions(instructions)
 
       try do
-        case Providers.chat([%{role: "user", content: prompt}], summarizer_opts()) do
+        # Bounded: see `Compactor.bounded_chat/2`. Unlike the Compactor's own
+        # call sites this one also runs from the *proactive* path, which fires
+        # between turns on an unattended agent — with no timeout at all a
+        # wedged provider parked the agent forever. On expiry this returns
+        # `{:error, :summarizer_timeout}` and the caller falls back to the
+        # deterministic (provider-free) compaction path.
+        case AgentCompactor.bounded_chat([%{role: "user", content: prompt}], summarizer_opts()) do
           {:ok, %{content: content}} when is_binary(content) and content != "" ->
             {:ok, content}
 

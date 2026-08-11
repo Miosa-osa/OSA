@@ -2,9 +2,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
   @moduledoc """
   Event handler registration for the CLI REPL.
 
-  Subscribes to the Events.Bus for orchestrator progress, task tracker
-  updates, proactive messages, and async agent responses — then drives
+  Subscribes to the Events.Bus for swarm/context/background-agent/limit
+  signals, task tracker updates, and async agent responses — then drives
   terminal output accordingly.
+
+  Orchestrator sub-agent progress is NOT handled here: it travels on the
+  `osa:session:<id>` PubSub topic (see `Orchestrator.emit_event/2`), which
+  only the SSE/TUI path consumes.
   """
 
   alias OptimalSystemAgent.Agent.Tasks
@@ -31,132 +35,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
       data = payload[:data] || payload
 
       case data do
-        %{event: :orchestrator_task_started, task_id: task_id} ->
-          Renderer.clear_line()
-          IO.puts("#{bold}#{cyan}  ▶ Spawning agents...#{reset}")
-
-          try do
-            :ets.insert(:cli_signal_cache, {:active_task, task_id})
-          rescue
-            _ -> :ok
-          end
-
-        %{event: :orchestrator_agents_spawning, agent_count: count} ->
-          Renderer.clear_line()
-
-          IO.puts("#{cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{reset}")
-
-        %{event: :orchestrator_agent_started, agent_name: name, role: role, description: desc} ->
-          task_desc = if is_binary(desc) and desc != "", do: String.slice(desc, 0, 50), else: ""
-          role_str = role || name
-          IO.puts("#{dim}  ⏺ #{role_str}(#{task_desc})#{reset}")
-
-        %{event: :orchestrator_agent_started, agent_name: name, role: role} ->
-          role_str = role || name
-          IO.puts("#{dim}  ⏺ #{role_str}#{reset}")
-
-        %{
-          event: :orchestrator_agent_progress,
-          agent_name: name,
-          role: role,
-          current_action: action,
-          tool_uses: tools,
-          tokens_used: tokens
-        }
-        when is_binary(action) and action != "" ->
-          Renderer.clear_line()
-          role_str = role || name
-
-          tokens_str =
-            if is_number(tokens) and tokens >= 1000,
-              do: "#{Float.round(tokens / 1000, 1)}k",
-              else: "#{tokens || 0}"
-
-          tc = tools || 0
-          tl = if tc == 1, do: "tool use", else: "tool uses"
-
-          IO.write(
-            "#{dim}  ⏺ #{role_str}: #{String.slice(action, 0, 50)} (#{tc} #{tl} · #{tokens_str} tokens)#{reset}"
-          )
-
-        %{event: :orchestrator_agent_progress, agent_name: name, current_action: action}
-        when is_binary(action) and action != "" ->
-          Renderer.clear_line()
-          IO.write("#{dim}  │  #{name}: #{String.slice(action, 0, 60)}#{reset}")
-
-        %{
-          event: :orchestrator_agent_completed,
-          agent_name: name,
-          role: role,
-          tool_uses: tools,
-          tokens_used: tokens,
-          duration_ms: dur_ms
-        } ->
-          Renderer.clear_line()
-          role_str = role || name
-
-          tokens_str =
-            if is_number(tokens) and tokens >= 1000,
-              do: "#{Float.round(tokens / 1000, 1)}k",
-              else: "#{tokens || 0}"
-
-          dur_str = Renderer.format_duration_ms(dur_ms)
-          tool_count = tools || 0
-          tool_label = if tool_count == 1, do: "tool use", else: "tool uses"
-
-          parts =
-            ["#{tool_count} #{tool_label}", "#{tokens_str} tokens", dur_str]
-            |> Enum.reject(&(&1 == ""))
-
-          IO.puts("#{dim}  ⏺ #{role_str}#{reset}")
-          IO.puts("#{dim}    ⎿  Done (#{Enum.join(parts, " · ")})#{reset}")
-
-        %{event: :orchestrator_agent_completed, agent_name: name} ->
-          Renderer.clear_line()
-          IO.puts("#{dim}  ⏺ #{name}#{reset}")
-          IO.puts("#{dim}    ⎿  Done#{reset}")
-
-        %{event: :orchestrator_synthesizing} ->
-          Renderer.clear_line()
-          IO.puts("#{cyan}  ▶ Synthesizing results...#{reset}")
-
-        %{event: :orchestrator_task_completed} ->
-          Renderer.clear_line()
-          IO.puts("#{cyan}  ▶ All agents completed#{reset}")
-
-        %{event: :orchestrator_task_failed, reason: reason} ->
-          Renderer.clear_line()
-          IO.puts("#{yellow}  ▶ Orchestration failed: #{reason}#{reset}")
-
+        # NOTE: there are deliberately no `:orchestrator_*` clauses here.
+        # `Orchestrator.emit_event/2` publishes those sub-events on the
+        # `osa:session:<id>` PubSub topic with STRING names; nothing has ever
+        # emitted them as atoms on `Events.Bus`, and `Events.TuiForwarder`'s
+        # allowlist deliberately excludes `orchestrator_*` to avoid duplicating
+        # them. The ~110 lines of renderers that used to sit here could not
+        # match any payload the Bus carries. `:swarm_completed` was dead for the
+        # same reason — only `:swarm_started` is emitted
+        # (channels/http/api/orchestrate_routes.ex:361).
         %{event: :swarm_started, swarm_id: id} ->
           Renderer.clear_line()
           IO.puts("#{bold}#{cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... launched#{reset}")
-
-        %{event: :swarm_completed, swarm_id: id} ->
-          Renderer.clear_line()
-          IO.puts("#{cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... completed#{reset}")
-
-        %{
-          event: :orchestrator_task_appraised,
-          estimated_cost_usd: cost,
-          estimated_hours: hours
-        } ->
-          Renderer.clear_line()
-          cost_str = if cost < 0.01, do: "<$0.01", else: "$#{Float.round(cost, 2)}"
-          hours_str = if hours < 0.1, do: "<0.1h", else: "#{Float.round(hours, 1)}h"
-          IO.puts("#{dim}  ⊕ Estimated: #{cost_str} · #{hours_str}#{reset}")
-
-        %{
-          event: :orchestrator_wave_started,
-          wave_number: num,
-          total_waves: total,
-          agent_count: count
-        } ->
-          Renderer.clear_line()
-
-          IO.puts(
-            "#{cyan}  ▶ Wave #{num}/#{total} — #{count} agent#{if count > 1, do: "s", else: ""}#{reset}"
-          )
 
         %{
           event: :context_pressure,
@@ -207,6 +97,43 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         %{event: :background_agent_started, role: role, agent_id: aid} ->
           Renderer.clear_line()
           IO.puts("#{dim}  ◉ Background agent \"#{role}\" started (#{aid})#{reset}")
+
+        # Compaction. The CLI has no spinner row to hang a live indicator on, so
+        # it gets the two facts that matter as plain lines: that the agent is
+        # about to spend a while folding history, and what that cost/bought.
+        # Without these the REPL just went quiet for minutes mid-turn.
+        %{event: :compaction_started, tokens_before: before_tokens} ->
+          Renderer.clear_line()
+
+          IO.puts(
+            "#{dim}  ⋯ Compacting conversation (#{Renderer.format_tokens(before_tokens)})…#{reset}"
+          )
+
+        %{
+          event: :compaction_completed,
+          tokens_before: before_tokens,
+          tokens_after: after_tokens,
+          messages_before: msgs_before,
+          messages_after: msgs_after,
+          duration_ms: dur
+        } ->
+          Renderer.clear_line()
+
+          IO.puts(
+            "#{IO.ANSI.green()}  ✓ Compacted#{reset} #{dim}" <>
+              "#{Renderer.format_tokens(before_tokens)} → #{Renderer.format_tokens(after_tokens)} " <>
+              "(#{msgs_before - msgs_after} messages folded · #{Renderer.format_elapsed(dur)})#{reset}"
+          )
+
+        # Say the history is intact — a silent failure would leave the user
+        # believing context was freed when nothing changed.
+        %{event: :compaction_failed, reason: reason, duration_ms: dur} ->
+          Renderer.clear_line()
+
+          IO.puts(
+            "#{yellow}  ✗ Compaction failed#{reset} #{dim}(#{reason} · " <>
+              "#{Renderer.format_elapsed(dur)}) — conversation unchanged#{reset}"
+          )
 
         %{event: :budget_limit_reached, current_cost: cost, limit: limit} ->
           Renderer.clear_line()
@@ -261,44 +188,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
           rescue
             _ -> :ok
           end
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
-
-  # ── Proactive Message Handler ────────────────────────────────────────
-
-  def register_proactive_handler(session_id) do
-    reset = IO.ANSI.reset()
-    dim = IO.ANSI.faint()
-    yellow = IO.ANSI.yellow()
-    cyan = IO.ANSI.cyan()
-
-    Bus.register_handler(:system_event, fn payload ->
-      data = Map.get(payload, :data, payload)
-
-      case data do
-        %{
-          event: :proactive_message,
-          session_id: ^session_id,
-          message: msg,
-          message_type: type
-        } ->
-          prefix =
-            case type do
-              :alert -> "#{yellow}  ⚠ OSA"
-              :work_complete -> "#{dim}  ✓ OSA"
-              :work_failed -> "#{yellow}  ✗ OSA"
-              :greeting -> "#{cyan}  OSA"
-              _ -> "#{cyan}  OSA"
-            end
-
-          Renderer.clear_line()
-          IO.puts("\n#{prefix} > #{msg}#{reset}\n")
 
         _ ->
           :ok

@@ -21,25 +21,53 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   @doc """
   All agents work simultaneously on their assigned sub-tasks.
   Returns results in the same order as configs.
+
+  Supported `opts` (both exist so the timeout/cap behaviour below is testable
+  against the REAL `async_stream` machinery rather than a re-implementation):
+
+    * `:runner`  — 1-arity fun invoked per config. Defaults to
+      `Orchestrator.run_subagent/1`.
+    * `:timeout` — per-agent timeout in ms. Defaults to 10 minutes.
   """
-  def parallel(parent_id, configs, _opts \\ []) do
+  def parallel(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] parallel — #{length(configs)} agents")
+
+    runner = Keyword.get(opts, :runner, &Orchestrator.run_subagent/1)
+    timeout = Keyword.get(opts, :timeout, 600_000)
 
     results =
       OptimalSystemAgent.TaskSupervisor
       |> Task.Supervisor.async_stream_nolink(
         configs,
         fn config ->
-          Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id))
+          runner.(Map.put(config, :parent_session_id, parent_id))
         end,
-        max_concurrency: length(configs),
-        timeout: 600_000,
+        # `length(configs)` was no cap at all: a 40-agent swarm started 40
+        # concurrent subagent Loops, each with its own provider connection,
+        # context window and spend. The delegate path bounds exactly this with
+        # `delegate_concurrency_cap/0` (the `:max_fleet_agents` setting); the
+        # swarm path never adopted it. async_stream QUEUES beyond the cap, so
+        # every config still runs — just not all at once.
+        max_concurrency: min(length(configs), Orchestrator.delegate_concurrency_cap()),
+        timeout: timeout,
         on_timeout: :kill_task
       )
       |> Enum.map(fn
-        {:ok, result} -> result
-        {:exit, :timeout} -> {:ok, "[Agent timed out]"}
-        {:exit, reason} -> {:error, inspect(reason)}
+        {:ok, result} ->
+          result
+
+        # A timeout is a FAILURE, not output. This arm used to return
+        # `{:ok, "[Agent timed out]"}`, so a killed agent that produced nothing
+        # was indistinguishable from one that succeeded: it counted toward
+        # completion tallies and its placeholder string was handed to the
+        # synthesizer as if it were work. The delegate path was fixed the same
+        # way (`Orchestrator.dispatch` classifies `:exit, {:timeout, _}` as
+        # `{:error, :timeout}`); this path was missed.
+        {:exit, :timeout} ->
+          {:error, :timeout}
+
+        {:exit, reason} ->
+          {:error, inspect(reason)}
       end)
 
     {:ok, results}
@@ -105,7 +133,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           fn config ->
             Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id))
           end,
-          max_concurrency: length(proposers),
+          # Same cap as `parallel/3` — an uncapped fan-out here is the identical
+          # defect, just reached through a different pattern.
+          max_concurrency: min(length(proposers), Orchestrator.delegate_concurrency_cap()),
           timeout: 600_000,
           on_timeout: :kill_task
         )

@@ -162,6 +162,10 @@ def _calibrate(wid: str, text_counts: dict[str, int], label: str) -> list[str]:
     Failing here is the point — a derived measurement nobody checks is how this
     whole defect stayed invisible for months.
     """
+    # Raise BEFORE reading geometry and grabbing: the screenshot comes from the
+    # root composite, so a covered window yields a black image and a silent
+    # zero. Geometry is read after the raise because activating can move it.
+    gt.raise_window(wid)
     geo = gt.window_geometry(wid)
     if geo is None:
         return ["could not read the kitty window geometry to calibrate pixels.py"]

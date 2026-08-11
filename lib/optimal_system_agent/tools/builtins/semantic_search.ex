@@ -50,16 +50,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
   # ── Memory Search ─────────────────────────────────────────────────
 
   defp search_memory(query) do
-    alias OptimalSystemAgent.Agent.Memory
+    # `OptimalSystemAgent.Agent.Memory` does not exist and never has, so this
+    # branch used to raise `UndefinedFunctionError` on every call and get
+    # swallowed by the `rescue` below into a "Memory search error" section.
+    # The real facade is `SDK.Memory.recall_relevant/2` (the same one
+    # `data_routes.ex:93` uses); it returns a LIST of entry maps, not a
+    # pre-formatted string, so format it here.
+    alias OptimalSystemAgent.SDK.Memory
 
-    # recall_relevant uses keyword matching (+ optional semantic sidecar)
-    # and returns a formatted string already budgeted to 2000 tokens
-    result = Memory.recall_relevant(query, 2000)
+    case Memory.recall_relevant(query, 2000) do
+      [] ->
+        nil
 
-    if result == "" do
-      nil
-    else
-      result
+      entries when is_list(entries) ->
+        Enum.map_join(entries, "\n", fn entry ->
+          content = entry[:content] || entry["content"] || inspect(entry)
+          "- #{String.slice(to_string(content), 0, 300)}"
+        end)
+
+      _ ->
+        nil
     end
   rescue
     e -> {:error, Exception.message(e)}
@@ -68,21 +78,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
   # ── Learning Search ───────────────────────────────────────────────
 
   defp search_learning(query) do
-    alias OptimalSystemAgent.Agent.Learning
+    # Same rename drift as `search_memory/1`: the module is
+    # `OptimalSystemAgent.Memory.Learning`, not `Agent.Learning`.
+    alias OptimalSystemAgent.Memory.Learning
 
     keywords = extract_keywords(query)
 
-    patterns = Learning.patterns()
-    solutions = Learning.solutions()
+    # `patterns/0` and `solutions/0` return `{:ok, [map()]}` — a list of pattern
+    # maps (`:description`, `:trigger`, `:response`, `:occurrences`, ...), not
+    # the `key => count` map this tool used to assume.
+    {:ok, patterns} = Learning.patterns()
+    {:ok, solutions} = Learning.solutions()
 
     matching_patterns =
       patterns
-      |> Enum.filter(fn {key, _val} -> matches_any?(to_string(key), keywords) end)
+      |> Enum.filter(&pattern_matches?(&1, keywords))
       |> Enum.take(5)
 
     matching_solutions =
       solutions
-      |> Enum.filter(fn {key, _val} -> matches_any?(to_string(key), keywords) end)
+      |> Enum.filter(&pattern_matches?(&1, keywords))
       |> Enum.take(5)
 
     if matching_patterns == [] and matching_solutions == [] do
@@ -92,6 +107,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
     end
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  defp pattern_matches?(pattern, keywords) do
+    haystack =
+      [pattern[:description], pattern[:trigger], pattern[:response], pattern[:category]]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" ")
+
+    matches_any?(haystack, keywords)
   end
 
   defp matches_any?(text, keywords) do
@@ -114,8 +138,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
     parts =
       if patterns != [] do
         lines =
-          Enum.map_join(patterns, "\n", fn {key, count} ->
-            "- #{key}: observed #{count}x"
+          Enum.map_join(patterns, "\n", fn p ->
+            "- #{p[:description] || p[:trigger] || p[:id]}: observed #{p[:occurrences] || 1}x"
           end)
 
         ["### Learned Patterns\n#{lines}" | parts]
@@ -126,8 +150,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
     parts =
       if solutions != [] do
         lines =
-          Enum.map_join(solutions, "\n", fn {error_type, fix} ->
-            "- **#{error_type}**: #{fix}"
+          Enum.map_join(solutions, "\n", fn s ->
+            "- **#{s[:trigger] || s[:description] || s[:id]}**: #{s[:response]}"
           end)
 
         ["### Known Solutions\n#{lines}" | parts]

@@ -582,6 +582,10 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "proactive_mode_changed"
         | "coordinator_mode"
         | "session_title"
+        | "compaction_started"
+        | "compaction_progress"
+        | "compaction_completed"
+        | "compaction_failed"
         | "auto_mode_paused" => parse_system_event(data),
 
         // Background (fire-and-forget) subagents. `started` arrives wrapped as a
@@ -617,16 +621,27 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 result: String,
                 #[serde(default)]
                 duration_ms: u64,
+                #[serde(default)]
+                usage: Option<Usage>,
+                /// What this teammate actually cost, from the backend's durable
+                /// spend record. `None` when nothing was recorded — which is a
+                /// DIFFERENT fact from "$0.00" and must render differently.
+                #[serde(default)]
+                cost_usd: Option<f64>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("background_agent_completed", e)),
             };
+            let usage = ev.usage.unwrap_or_default();
             Some(BackendEvent::BackgroundAgentCompleted {
                 agent_id: ev.agent_id,
                 role: ev.role,
                 result: ev.result,
                 duration_ms: ev.duration_ms,
+                total_tokens: usage.total_tokens,
+                tool_uses: usage.tool_uses,
+                cost_usd: ev.cost_usd,
             })
         }
 
@@ -641,16 +656,60 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 error: String,
                 #[serde(default)]
                 duration_ms: u64,
+                #[serde(default)]
+                usage: Option<Usage>,
+                /// See `background_agent_completed` — a failed run still cost
+                /// money, and that is exactly when the user wants the number.
+                #[serde(default)]
+                cost_usd: Option<f64>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("background_agent_failed", e)),
             };
+            let usage = ev.usage.unwrap_or_default();
             Some(BackendEvent::BackgroundAgentFailed {
                 agent_id: ev.agent_id,
                 role: ev.role,
                 error: ev.error,
                 duration_ms: ev.duration_ms,
+                total_tokens: usage.total_tokens,
+                tool_uses: usage.tool_uses,
+                cost_usd: ev.cost_usd,
+            })
+        }
+
+        // Phase-aware stall report from the backend's watcher. It was emitted on
+        // both the session topic and the Bus and had NO consumer here, so it fell
+        // through to `ParseWarning` — the one surface that knew a teammate had
+        // gone quiet threw the message away.
+        "background_agent_stalled" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent_id: String,
+                #[serde(default)]
+                display_name: String,
+                #[serde(default)]
+                role: String,
+                #[serde(default)]
+                phase: String,
+                #[serde(default)]
+                stalled_ms: u64,
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_agent_stalled", e)),
+            };
+            Some(BackendEvent::BackgroundAgentStalled {
+                agent_id: ev.agent_id,
+                display_name: ev.display_name,
+                role: ev.role,
+                phase: ev.phase,
+                stalled_ms: ev.stalled_ms,
+                message: ev.message,
             })
         }
 
@@ -667,6 +726,11 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 duration_ms: u64,
                 #[serde(default)]
                 batch_id: Option<String>,
+                /// `"completed"` | `"failed"`, sent by `emit_agent_finished/6`.
+                /// It was never deserialized, so a crashed teammate printed the
+                /// same "finished" line as a successful one.
+                #[serde(default)]
+                status: String,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -676,6 +740,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 display_name: ev.display_name,
                 duration_ms: ev.duration_ms,
                 batch_id: ev.batch_id,
+                status: ev.status,
             })
         }
 
@@ -812,6 +877,21 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             message: format!("[sse] unknown event type: {}", other),
         }),
     }
+}
+
+/// The backend's `usage` map on background-agent terminal frames
+/// (`orchestrator.ex` builds it from the child's RunStore row).
+///
+/// Every field is `Option` on purpose: an ABSENT counter and a counter that is
+/// genuinely zero are different facts, and the panel must be able to tell them
+/// apart so it can leave its accumulated numbers alone instead of overwriting
+/// them with a fabricated 0.
+#[derive(serde::Deserialize, Default)]
+struct Usage {
+    #[serde(default)]
+    total_tokens: Option<u32>,
+    #[serde(default)]
+    tool_uses: Option<u32>,
 }
 
 fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
@@ -1389,6 +1469,80 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "compaction_started" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                trigger: String,
+                #[serde(default)]
+                tokens_before: u64,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::CompactionStarted {
+                trigger: ev.trigger,
+                tokens_before: ev.tokens_before,
+            })
+        }
+
+        "compaction_progress" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                chunk_index: u32,
+                #[serde(default)]
+                chunk_total: u32,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            // A zero total carries no ratio. Drop it rather than letting a
+            // divide-by-zero become a 0%-forever or 100%-instantly bar.
+            if ev.chunk_total == 0 {
+                return None;
+            }
+            Some(BackendEvent::CompactionProgress {
+                chunk_index: ev.chunk_index.min(ev.chunk_total),
+                chunk_total: ev.chunk_total,
+            })
+        }
+
+        "compaction_completed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                tokens_before: u64,
+                #[serde(default)]
+                tokens_after: u64,
+                #[serde(default)]
+                messages_before: u32,
+                #[serde(default)]
+                messages_after: u32,
+                #[serde(default)]
+                duration_ms: u64,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::CompactionCompleted {
+                tokens_before: ev.tokens_before,
+                tokens_after: ev.tokens_after,
+                messages_before: ev.messages_before,
+                messages_after: ev.messages_after,
+                duration_ms: ev.duration_ms,
+            })
+        }
+
+        "compaction_failed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                reason: String,
+                #[serde(default)]
+                duration_ms: u64,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::CompactionFailed {
+                reason: ev.reason,
+                duration_ms: ev.duration_ms,
+            })
+        }
+
         "scratchpad_activity" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -1884,6 +2038,78 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_compaction_lifecycle() {
+        // Before this existed, compaction frames fell through the `parse_sse_event`
+        // allowlist and were dropped, so a multi-minute blocking step rendered as
+        // a frozen UI. These four frames are the exact shapes
+        // `Agent.CompactionEvents` broadcasts on `osa:session:<id>`.
+        let started = br#"{"type":"system_event","event":"compaction_started","session_id":"s1","trigger":"manual","tokens_before":84000}"#;
+        match parse_sse_event("compaction_started", started) {
+            Some(BackendEvent::CompactionStarted { trigger, tokens_before }) => {
+                assert_eq!(trigger, "manual");
+                assert_eq!(tokens_before, 84_000);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let progress = br#"{"type":"system_event","event":"compaction_progress","session_id":"s1","chunk_index":6,"chunk_total":10}"#;
+        match parse_sse_event("compaction_progress", progress) {
+            Some(BackendEvent::CompactionProgress { chunk_index, chunk_total }) => {
+                assert_eq!(chunk_index, 6);
+                assert_eq!(chunk_total, 10);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let completed = br#"{"type":"system_event","event":"compaction_completed","session_id":"s1","tokens_before":84000,"tokens_after":21000,"messages_before":52,"messages_after":14,"duration_ms":134000}"#;
+        match parse_sse_event("compaction_completed", completed) {
+            Some(BackendEvent::CompactionCompleted {
+                tokens_before,
+                tokens_after,
+                messages_before,
+                messages_after,
+                duration_ms,
+            }) => {
+                assert_eq!(tokens_before, 84_000);
+                assert_eq!(tokens_after, 21_000);
+                // The rendered line says "38 messages folded" — derived here, not
+                // sent as a separate number that could disagree.
+                assert_eq!(messages_before - messages_after, 38);
+                assert_eq!(duration_ms, 134_000);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let failed = br#"{"type":"system_event","event":"compaction_failed","session_id":"s1","reason":"summarizer timeout","duration_ms":90000}"#;
+        match parse_sse_event("compaction_failed", failed) {
+            Some(BackendEvent::CompactionFailed { reason, duration_ms }) => {
+                assert_eq!(reason, "summarizer timeout");
+                assert_eq!(duration_ms, 90_000);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compaction_progress_without_a_real_total_is_dropped() {
+        // A zero total carries no ratio. It must be dropped at the parser rather
+        // than reaching the renderer, where it could only become a bar that is
+        // stuck at 0% or claims 100% instantly. Neither describes reality.
+        let zero = br#"{"type":"system_event","event":"compaction_progress","session_id":"s1","chunk_index":1,"chunk_total":0}"#;
+        assert!(parse_sse_event("compaction_progress", zero).is_none());
+
+        // An index past the total is clamped, never rendered as >100%.
+        let over = br#"{"type":"system_event","event":"compaction_progress","session_id":"s1","chunk_index":99,"chunk_total":8}"#;
+        match parse_sse_event("compaction_progress", over) {
+            Some(BackendEvent::CompactionProgress { chunk_index, chunk_total }) => {
+                assert_eq!(chunk_index, 8);
+                assert_eq!(chunk_total, 8);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_scratchpad_activity() {
         // The compact fan-out coordination signal: who wrote what, how big — and
         // crucially NO file contents.
@@ -1938,6 +2164,130 @@ mod tests {
                 assert_eq!(summary, None);
             }
             other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// FIX 1 — `orchestrator.ex` has always put a `usage` map on the background
+    /// completion/failure broadcast (`total_tokens`, `tool_uses`, `duration_ms`).
+    /// The parser simply never looked at it, which is why the handler fell back
+    /// to a hardcoded `0, 0`.
+    #[test]
+    fn parses_background_agent_usage_and_distinguishes_absent_from_zero() {
+        let with_usage = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000,"usage":{"total_tokens":40123,"tool_uses":12,"duration_ms":91000},"output_file":"/tmp/x.md"}"#;
+        match parse_sse_event("background_agent_completed", with_usage) {
+            Some(BackendEvent::BackgroundAgentCompleted { total_tokens, tool_uses, .. }) => {
+                assert_eq!(total_tokens, Some(40123));
+                assert_eq!(tool_uses, Some(12));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Legacy frame with no `usage` at all → None, NOT Some(0). The handler
+        // relies on this distinction to leave the panel's counters alone.
+        let legacy = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000}"#;
+        match parse_sse_event("background_agent_completed", legacy) {
+            Some(BackendEvent::BackgroundAgentCompleted { total_tokens, tool_uses, .. }) => {
+                assert_eq!(total_tokens, None, "absent usage must not decode as 0");
+                assert_eq!(tool_uses, None, "absent usage must not decode as 0");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // The failure broadcast carries the same map.
+        let failed = br#"{"type":"background_agent_failed","agent_id":"agent:s1:2","role":"coder","error":"boom","duration_ms":50,"usage":{"total_tokens":7,"tool_uses":2,"duration_ms":50}}"#;
+        match parse_sse_event("background_agent_failed", failed) {
+            Some(BackendEvent::BackgroundAgentFailed { total_tokens, tool_uses, .. }) => {
+                assert_eq!((total_tokens, tool_uses), (Some(7), Some(2)));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// `Orchestrator.run_cost_usd/1` has always been real and durable, but it
+    /// rode NO event — the panel could only ever show a whole-task estimate and
+    /// said so in its footer. The backend now attaches `cost_usd` to both
+    /// terminal broadcasts, and `nil` (a run with no recorded spend) must decode
+    /// as `None`, never as `Some(0.0)`: "free" is a claim, "unmeasured" is not.
+    #[test]
+    fn parses_background_agent_cost_and_distinguishes_absent_from_zero() {
+        let priced = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000,"usage":{"total_tokens":40123,"tool_uses":12,"duration_ms":91000},"cost_usd":0.0431}"#;
+        match parse_sse_event("background_agent_completed", priced) {
+            Some(BackendEvent::BackgroundAgentCompleted { cost_usd, .. }) => {
+                assert_eq!(cost_usd, Some(0.0431));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Backend sent `cost_usd: nil` (no spend record) — absent, not zero.
+        let unpriced = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000,"cost_usd":null}"#;
+        match parse_sse_event("background_agent_completed", unpriced) {
+            Some(BackendEvent::BackgroundAgentCompleted { cost_usd, .. }) => {
+                assert_eq!(cost_usd, None, "an unrecorded cost must not decode as 0");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // A run that FAILED still cost money — that is when the number matters.
+        let failed = br#"{"type":"background_agent_failed","agent_id":"agent:s1:2","role":"coder","error":"boom","duration_ms":50,"cost_usd":1.25}"#;
+        match parse_sse_event("background_agent_failed", failed) {
+            Some(BackendEvent::BackgroundAgentFailed { cost_usd, .. }) => {
+                assert_eq!(cost_usd, Some(1.25));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// FIX 2 — `emit_agent_finished/6` sends `status: "completed" | "failed"`.
+    /// The `Ev` struct had no such field, so a crashed teammate rendered the
+    /// identical "finished" line as a successful one.
+    #[test]
+    fn agent_finished_carries_its_status() {
+        let failed = br#"{"type":"agent_finished","display_name":"explorer","duration_ms":1200,"status":"failed"}"#;
+        match parse_sse_event("agent_finished", failed) {
+            Some(BackendEvent::AgentFinished { status, display_name, .. }) => {
+                assert_eq!(status, "failed");
+                assert_eq!(display_name, "explorer");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let ok = br#"{"type":"agent_finished","display_name":"explorer","duration_ms":1200,"status":"completed"}"#;
+        match parse_sse_event("agent_finished", ok) {
+            Some(BackendEvent::AgentFinished { status, .. }) => assert_eq!(status, "completed"),
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Legacy frame with no status → empty, and the handler stays neutral.
+        let legacy = br#"{"type":"agent_finished","display_name":"explorer","duration_ms":1200}"#;
+        match parse_sse_event("agent_finished", legacy) {
+            Some(BackendEvent::AgentFinished { status, .. }) => assert_eq!(status, ""),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// FIX 5 — the stall event was emitted on the session topic and on the Bus
+    /// and had NO consumer here, so it hit the catch-all and became a
+    /// `ParseWarning`. The one signal that a teammate had gone quiet was thrown
+    /// away by the only surface watching.
+    #[test]
+    fn parses_background_agent_stalled_instead_of_warning_about_it() {
+        let frame = br#"{"type":"background_agent_stalled","session_id":"s1","agent_id":"agent:s1:1","display_name":"explorer","role":"researcher","phase":"working","stalled_ms":840000,"tool_count":3,"message":"Background agent @explorer has made no progress for 14 minutes: it ran 3 tool(s) and then went quiet"}"#;
+        match parse_sse_event("background_agent_stalled", frame) {
+            Some(BackendEvent::BackgroundAgentStalled {
+                agent_id,
+                display_name,
+                phase,
+                stalled_ms,
+                message,
+                ..
+            }) => {
+                assert_eq!(agent_id, "agent:s1:1");
+                assert_eq!(display_name, "explorer");
+                assert_eq!(phase, "working");
+                assert_eq!(stalled_ms, 840_000);
+                assert!(message.contains("no progress"));
+            }
+            other => panic!("stall must not fall through to ParseWarning: {:?}", other),
         }
     }
 

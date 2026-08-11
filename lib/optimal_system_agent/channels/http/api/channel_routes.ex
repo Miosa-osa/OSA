@@ -249,16 +249,45 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   post "/dingtalk/webhook" do
     alias OptimalSystemAgent.Channels.DingTalk
 
-    if DingTalk.connected?() do
-      DingTalk.handle_webhook(conn.body_params)
-      send_resp(conn, 200, "")
-    else
-      json_error(
-        conn,
-        503,
-        "channel_unavailable",
-        "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET."
-      )
+    # `verify_dingtalk/3` and the `:dingtalk_secret` config key both existed but
+    # had zero callers/readers, so this endpoint fed unauthenticated request
+    # bodies straight into `handle_webhook/1`. Same warn-and-allow shape as the
+    # Signal route above: enforced once a secret is configured, dev-mode
+    # permissive when it is not.
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    secret = Application.get_env(:optimal_system_agent, :dingtalk_secret)
+
+    verified =
+      case verify_dingtalk(params["timestamp"] || "", params["sign"] || "", secret) do
+        :ok ->
+          :ok
+
+        {:error, :no_secret} ->
+          Logger.warning(
+            "DingTalk webhook: dingtalk_secret not configured — processing without verification (dev mode)"
+          )
+
+          :ok
+
+        {:error, :invalid_signature} ->
+          {:error, :invalid_signature}
+      end
+
+    cond do
+      verified == {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid DingTalk signature")
+
+      DingTalk.connected?() ->
+        DingTalk.handle_webhook(conn.body_params)
+        send_resp(conn, 200, "")
+
+      true ->
+        json_error(
+          conn,
+          503,
+          "channel_unavailable",
+          "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET."
+        )
     end
   end
 

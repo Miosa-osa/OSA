@@ -1181,7 +1181,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          tool_call_id: tool_call.id,
          phase: "end",
          duration_ms: tool_duration_ms,
-         success: true,
+         # NOT a literal. This broadcast is what the TUI's SSE stream carries
+         # (SessionRoutes `GET /:id/stream` subscribes to this exact topic), so
+         # a hard-coded `true` labelled every failed tool call a success on
+         # screen — the sibling Bus.emit above already computed the real value.
+         success: not tool_failed,
          session_id: state.session_id
        }}
     )

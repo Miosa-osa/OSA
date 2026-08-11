@@ -9,8 +9,8 @@ defmodule OptimalSystemAgent.Machines do
   - Research: Config toggle (web_search_deep, summarize, translate)
 
   When a machine is enabled, `activate_machines/0` registers its skills with
-  the goldrush-compiled tool dispatcher and injects machine-specific prompt
-  addendums into the agent's system prompt.
+  the tool registry and injects machine-specific prompt addendums into the
+  agent's system prompt.
   """
   use GenServer
   require Logger

@@ -277,8 +277,10 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   this process must abandon its write rather than complete it. The window is
   not eliminated — that would need a filesystem primitive not portably
   available — but it is narrowed from "the whole body" to "between the check
-  and the rename", and the failure mode changes from silent clobber to a clean
-  `{:error, :lock_lost}` the caller can report and retry.
+  and the rename", and the failure mode changes from a silent clobber to a
+  write this process declines to make. (In `refresh_within_lock/3` that means
+  it skips the write and logs — it still hands the caller the rotation it
+  already spent a token to obtain; see that function's docs.)
   """
   @spec with_lock((-> result) | (String.t() -> result)) ::
           result | {:error, :lock_timeout} when result: term()
@@ -394,6 +396,19 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   `refresh_fun` receives the current entry and returns `{:ok, new_entry}` or
   `{:error, reason}`. Errors are passed through untouched and nothing is
   written, so a transient network failure never destroys a working credential.
+
+  ## Once the exchange has happened, the new token is never dropped
+
+  A `{:ok, new_entry}` means the refresh POST completed, which for a rotating
+  provider means the token that was on disk is now **spent**. `new_entry` is
+  from that moment the only working credential in existence, so this function
+  returns `{:ok, new_entry}` even when persisting it fails or the store lock
+  turned out to have been broken. It retries the write and logs loudly, but a
+  disk error is reported through the log — never by throwing away the
+  credential. (Returning `{:error, ...}` there is what turned a transient write
+  failure into "your account is signed out, re-run setup": the caller lost the
+  new token and the spent one stayed on disk to fail `:refresh_token_invalid`
+  forever after.)
   """
   @spec refresh_within_lock(String.t() | atom(), (entry() -> {:ok, entry()} | {:error, term()}), (entry() ->
                                                                                                     boolean())) ::
@@ -409,24 +424,36 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           if needs_refresh?.(fresh) do
             case refresh_fun.(fresh) do
               {:ok, updated} ->
-                # The refresh POST is the slow part, and the only part long
-                # enough for this process's lock to have been broken as stale
-                # underneath it. Check before writing: a lock we no longer hold
-                # means somebody else has taken over and our copy is the older
-                # one, so writing it would undo their work.
+                # PAST THE POINT OF NO RETURN. The refresh POST has already
+                # gone out and come back, so for a rotating-refresh-token
+                # provider the token still on disk is SPENT — it can never be
+                # exchanged again. From here `updated` is the only working
+                # credential that exists anywhere, and it must reach the caller
+                # no matter what the disk does.
+                #
+                # The lock check still governs whether we WRITE (a lock we no
+                # longer hold means somebody else took over and our copy may be
+                # the older one, so writing it would undo their work) — but not
+                # whether we RETURN. Failing to persist costs a re-refresh next
+                # boot; failing to return costs the grant.
                 if still_holding?(token) do
                   all = read_all()
                   merged = Map.put(all, to_string(provider_id), stringify(updated))
-
-                  case write_all(merged) do
-                    :ok -> {:ok, updated}
-                    err -> err
-                  end
+                  persist_rotated(provider_id, merged)
                 else
-                  {:error, :lock_lost}
+                  Logger.error(
+                    "[Auth] #{provider_id}: the store lock was broken while a refresh was in " <>
+                      "flight, so the rotated token was NOT written (a peer's credential is on " <>
+                      "disk and must not be clobbered). Returning it to the live session; it " <>
+                      "will be re-refreshed on the next start."
+                  )
                 end
 
+                {:ok, updated}
+
               {:error, _} = err ->
+                # Nothing was spent — the exchange never completed — so the
+                # on-disk token is still good. Pass the error through untouched.
                 err
             end
           else
@@ -435,5 +462,42 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           end
       end
     end)
+  end
+
+  # Persist a rotation that has ALREADY been consumed.
+  #
+  # Retries, because the alternative to a retry here is a destroyed grant: the
+  # old token is spent, so if this write never lands the user is silently
+  # signed out and has to re-run setup. A duplicate/late write is recoverable;
+  # this is not. Never raises, and never decides the caller's return value —
+  # the token goes back regardless.
+  @persist_attempts 3
+  @persist_retry_ms 25
+
+  defp persist_rotated(provider_id, merged, attempt \\ 1) do
+    case write_all(merged) do
+      :ok ->
+        :ok
+
+      {:error, reason} when attempt < @persist_attempts ->
+        Logger.warning(
+          "[Auth] #{provider_id}: could not persist a freshly rotated token " <>
+            "(#{inspect(reason)}) — retry #{attempt}/#{@persist_attempts - 1}"
+        )
+
+        Process.sleep(@persist_retry_ms)
+        persist_rotated(provider_id, merged, attempt + 1)
+
+      {:error, reason} ->
+        Logger.error(
+          "[Auth] #{provider_id}: a token rotation SUCCEEDED but could not be written to " <>
+            "#{path()} after #{@persist_attempts} attempts (#{inspect(reason)}). The previous " <>
+            "refresh token is spent, so the credential on disk is now dead. This session keeps " <>
+            "working with the in-memory token; fix the disk (permissions/space) or re-run " <>
+            "`osa login #{provider_id}` before restarting."
+        )
+
+        {:error, reason}
+    end
   end
 end

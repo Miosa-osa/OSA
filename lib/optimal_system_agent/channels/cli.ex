@@ -108,8 +108,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
       MessageQueue.agent_finished(session_id)
     end)
 
-    Events.register_proactive_handler(session_id)
-
     loop(session_id)
   end
 

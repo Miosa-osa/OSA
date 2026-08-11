@@ -23,7 +23,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
   Detect the current platform. Priority: config override → OS detection → env vars.
   """
   @spec detect_platform() ::
-          :macos | :linux_x11 | :linux_wayland | :windows | :miosa | :unknown
+          :macos
+          | :linux_x11
+          | :linux_wayland
+          | :windows
+          | :miosa
+          | :docker
+          | :remote_ssh
+          | :platform_vm
+          | :unknown
   def detect_platform do
     case Application.get_env(:optimal_system_agent, :computer_use_platform) do
       nil -> detect_from_os()
@@ -43,6 +51,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
   def adapter_for(:miosa), do: {:ok, Adapters.Miosa}
   def adapter_for(:linux_wayland), do: {:ok, Adapters.LinuxWayland}
   def adapter_for(:windows), do: {:ok, Adapters.Windows}
+
+  # Remote targets. These three adapter modules shipped and are documented in
+  # docs/features/computer-use.md, but had no clause here — so `computer_use`
+  # could never reach them by any path, including the documented
+  # `:computer_use_platform` override, which fell through to
+  # `{:error, "Unknown platform: docker"}`.
+  def adapter_for(:docker), do: {:ok, Adapters.Docker}
+  def adapter_for(:remote_ssh), do: {:ok, Adapters.RemoteSSH}
+  def adapter_for(:platform_vm), do: {:ok, Adapters.PlatformVM}
 
   def adapter_for(:unknown),
     do:

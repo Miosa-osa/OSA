@@ -8,8 +8,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
     * `execute/2`            — resolves target, broadcasts via PubSub, stores in ETS
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.SendMessage.Constants
+  alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Tools.Builtins.SendMessage.{Constants, Discipline}
   alias OptimalSystemAgent.Tools.UseContext
+
+  # Addresses that mean "the session that delegated me". A subagent knows its
+  # own id and its teammates' names, but had NO way to name the one participant
+  # it most often needs — the conversation it was spawned from. Without this the
+  # interruption channel exists and is unreachable from the side that needs it.
+  @parent_aliases ~w(user parent)
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
@@ -35,7 +42,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"to" => to, "message" => message} = _args, ctx) do
     sender_id = ctx.session_id || "unknown"
-    target_id = resolve_target(to)
+
+    case Discipline.check(sender_id) do
+      :ok -> deliver(to, message, sender_id)
+      {:refused, reason} -> {:ok, reason}
+    end
+  end
+
+  # The send itself, once the sender has been cleared to speak.
+  defp deliver(to, message, sender_id) do
+    target_id = resolve_target(to, sender_id)
+    message = Discipline.truncate(message, sender_id)
 
     if target_id do
       # Keep the existing per-agent topic + ETS pending row (drained into the
@@ -72,7 +89,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
 
       {:ok, "Message sent to #{to} (#{target_id})"}
     else
-      {:ok, "Error: could not find agent '#{to}'. Use /agents to see running agents."}
+      {:ok, not_found(to)}
+    end
+  end
+
+  defp not_found(to) do
+    if String.downcase(String.trim_leading(to_string(to), "@")) in @parent_aliases do
+      "Error: `to: \"#{to}\"` addresses the session that delegated you, and this " <>
+        "session has no parent — you are not running as a subagent. Address a " <>
+        "teammate by name instead."
+    else
+      "Error: could not find agent '#{to}'. Use /agents to see running agents."
     end
   end
 
@@ -85,25 +112,95 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
     try do
       messages = :ets.lookup(Constants.pending_table(), agent_id)
       :ets.delete(Constants.pending_table(), agent_id)
-      Enum.map(messages, fn {_key, msg} -> msg end)
+
+      cutoff = System.system_time(:millisecond) - Constants.pending_ttl_ms()
+
+      messages
+      |> Enum.map(fn {_key, msg} -> msg end)
+      |> Enum.reject(&expired?(&1, cutoff))
     rescue
       _ -> []
     end
   end
 
+  @doc """
+  Drop parked messages older than `Constants.pending_ttl_ms/0`.
+
+  The bag is written by the SENDER and drained by the RECIPIENT's loop, so a
+  message addressed to an agent that crashed, or that finished before its next
+  iteration, was never drained — it sat in ETS for the lifetime of the node.
+  Nothing bounded the table. This sweeps it; it runs on every send, which is
+  rare (a subagent gets two), so the scan cost is irrelevant.
+  """
+  @spec sweep_pending(integer() | nil) :: non_neg_integer()
+  def sweep_pending(now_ms \\ nil) do
+    now_ms = now_ms || System.system_time(:millisecond)
+    cutoff = now_ms - Constants.pending_ttl_ms()
+
+    :ets.select_delete(Constants.pending_table(), [
+      {{:_, %{timestamp: :"$1"}}, [{:<, :"$1", cutoff}], [true]}
+    ])
+  rescue
+    _ -> 0
+  end
+
+  # A row with no usable timestamp is treated as live: dropping messages we
+  # cannot date would lose real ones to guard against a leak we cannot prove.
+  defp expired?(%{timestamp: ts}, cutoff) when is_integer(ts), do: ts < cutoff
+  defp expired?(_msg, _cutoff), do: false
+
   # ── Private ───────────────────────────────────────────────────────────
 
-  # Render a compact @handle from a session id: "agent:parent:smoke-e2e" -> "smoke-e2e".
+  # The @handle the human sees on an inbound message.
+  #
+  # The last `:`-segment of a session id is an ORDINAL, not a name: a subagent
+  # spawned as `agent:sess-123:7` rendered as `@7`, which tells the reader
+  # nothing about who is speaking or why they should care. The run's role is the
+  # name the user chose when delegating, so prefer it and fall back to the
+  # segment only when there is no run row (a plain session, a test double).
   defp pretty_name(id) when is_binary(id) do
-    id |> String.split(":") |> List.last() |> to_string()
+    case RunStore.get(id) do
+      %{role: role} when is_binary(role) and role != "" -> role
+      _ -> id |> String.split(":") |> List.last() |> to_string()
+    end
+  rescue
+    _ -> id |> String.split(":") |> List.last() |> to_string()
+  catch
+    :exit, _ -> id |> String.split(":") |> List.last() |> to_string()
   end
 
   defp pretty_name(id), do: to_string(id)
 
-  defp resolve_target(id_or_name) do
+  defp resolve_target(id_or_name, sender_id) do
     # Support "@name" addressing by stripping a leading @ before matching.
     id_or_name = id_or_name |> to_string() |> String.trim_leading("@")
 
+    if String.downcase(id_or_name) in @parent_aliases do
+      parent_of(sender_id)
+    else
+      resolve_named(id_or_name)
+    end
+  end
+
+  # The parent session id recorded for this run at spawn time. `nil` for a
+  # top-level session, which has no parent to address.
+  defp parent_of(sender_id) when is_binary(sender_id) do
+    case RunStore.get(sender_id) do
+      %{parent_session_id: parent} when is_binary(parent) and parent not in ["", "unknown"] ->
+        parent
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp parent_of(_), do: nil
+
+  defp resolve_named(id_or_name) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, id_or_name) do
       [{_pid, _}] ->
         id_or_name
@@ -138,6 +235,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
       rescue
         ArgumentError -> Constants.pending_table()
       end
+
+      # Bound the bag before adding to it. Undelivered rows are the ones that
+      # accumulate, and nothing else ever removes them.
+      sweep_pending()
 
       :ets.insert(Constants.pending_table(), {
         target_id,

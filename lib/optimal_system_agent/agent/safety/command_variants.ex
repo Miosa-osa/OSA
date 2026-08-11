@@ -85,17 +85,78 @@ defmodule OptimalSystemAgent.Agent.Safety.CommandVariants do
   The set of command strings equivalent to `command` after shell processing.
 
   The raw input is always the first element. Returns `[]` for non-binaries.
+
+  Over `@max_length` the input is not returned raw — see `oversize_variants/1`
+  for why that would be a bypass, and `fully_analyzed?/1` for how a caller
+  learns the analysis was partial.
   """
   @spec variants(term()) :: [String.t()]
   def variants(command) when is_binary(command) do
     if byte_size(command) > @max_length do
-      [command]
+      oversize_variants(command)
     else
       expand([command], 1, MapSet.new([command]), [command])
     end
   end
 
   def variants(_), do: []
+
+  @doc """
+  True when `variants/1` was able to derive the COMPLETE equivalent set for
+  `command` — i.e. the command fits the size bound and the variant set was not
+  truncated by `@max_variants`.
+
+  A size bound on a safety analysis must fail CLOSED. `false` here does not
+  mean "dangerous"; it means "not proven safe", and a caller that would
+  otherwise auto-approve must ask instead. `variants/1` used to hand back the
+  raw, still-quoted string for anything over 20 KB, so padding `rm -rf "/"`
+  with 20 KB of comment walked straight through the hard-deny tier.
+  """
+  @spec fully_analyzed?(term()) :: boolean()
+  def fully_analyzed?(command) when is_binary(command) do
+    byte_size(command) <= @max_length and
+      elem(expand([command], 1, MapSet.new([command]), [command], true), 1)
+  end
+
+  def fully_analyzed?(_), do: false
+
+  # An over-length command still gets analysed — just not exhaustively.
+  #
+  # The realistic attack is padding: the dangerous command is short and sits
+  # next to a wall of filler that exists only to trip the size bound. So we
+  # classify BEFORE bounding, over inputs that are each individually within
+  # budget:
+  #
+  #   * every shell statement (split on `;`, `&&`, `||`, `|`, newline) that is
+  #     itself short enough — catches `rm -rf "/" ; echo <20KB>`;
+  #   * the first `@max_length` bytes of the whole command — catches padding
+  #     that is a trailing comment or heredoc rather than a separate statement,
+  #     e.g. `bash -c "rm -rf '/'" # <20KB>`.
+  #
+  # The raw command is retained as well, so this is strictly stronger than the
+  # old behaviour, never weaker. Growth stays bounded: the head is capped at
+  # `@max_length` and the statement list at `@max_variants`.
+  defp oversize_variants(command) do
+    head = binary_part(command, 0, @max_length)
+
+    statements =
+      command
+      |> String.split(~r/;|&&|\|\||\||\n/, trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == "" or byte_size(&1) > @max_length))
+      |> Enum.take(@max_variants)
+
+    seeds = Enum.uniq([head | statements])
+
+    derived =
+      Enum.flat_map(seeds, fn seed ->
+        expand([seed], 1, MapSet.new([seed]), [seed])
+      end)
+
+    [command | derived]
+    |> Enum.uniq()
+    |> Enum.take(@max_variants * 2)
+  end
 
   @doc """
   True when `fun` returns a truthy value for ANY variant of `command`.
@@ -139,28 +200,45 @@ defmodule OptimalSystemAgent.Agent.Safety.CommandVariants do
 
   # ── expansion ─────────────────────────────────────────────────────────
 
-  defp expand(_frontier, depth, _seen, acc) when depth > @max_depth, do: Enum.reverse(acc)
-
-  defp expand([], _depth, _seen, acc), do: Enum.reverse(acc)
-
+  # `expand/4` keeps the historic "just give me the list" shape; `expand/5`
+  # additionally reports whether the search RAN OUT of budget with work still
+  # pending. That distinction is the whole point: a frontier abandoned at the
+  # depth or variant bound means unexamined encodings still exist, so "nothing
+  # dangerous matched" is not a safety result.
   defp expand(frontier, depth, seen, acc) do
+    {list, _complete?} = expand(frontier, depth, seen, acc, true)
+    list
+  end
+
+  defp expand(frontier, depth, _seen, acc, complete?) when depth > @max_depth,
+    do: {Enum.reverse(acc), complete? and frontier == []}
+
+  defp expand([], _depth, _seen, acc, complete?), do: {Enum.reverse(acc), complete?}
+
+  defp expand(frontier, depth, seen, acc, complete?) do
     if length(acc) >= @max_variants do
-      Enum.reverse(acc)
+      {Enum.reverse(acc), false}
     else
-      {next, seen, acc} =
-        Enum.reduce(frontier, {[], seen, acc}, fn cmd, {next, seen, acc} ->
+      {next, seen, acc, complete?} =
+        Enum.reduce(frontier, {[], seen, acc, complete?}, fn cmd, {next, seen, acc, complete?} ->
           cmd
           |> derive()
-          |> Enum.reduce({next, seen, acc}, fn v, {next, seen, acc} ->
+          |> Enum.reduce({next, seen, acc, complete?}, fn v, {next, seen, acc, complete?} ->
             cond do
-              v == "" or MapSet.member?(seen, v) -> {next, seen, acc}
-              length(acc) >= @max_variants -> {next, seen, acc}
-              true -> {[v | next], MapSet.put(seen, v), [v | acc]}
+              v == "" or MapSet.member?(seen, v) ->
+                {next, seen, acc, complete?}
+
+              length(acc) >= @max_variants ->
+                # Dropped for budget, not because it was uninteresting.
+                {next, seen, acc, false}
+
+              true ->
+                {[v | next], MapSet.put(seen, v), [v | acc], complete?}
             end
           end)
         end)
 
-      expand(Enum.reverse(next), depth + 1, seen, acc)
+      expand(Enum.reverse(next), depth + 1, seen, acc, complete?)
     end
   end
 

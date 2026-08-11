@@ -236,6 +236,27 @@ fn fmt_compact_tight(secs: u64) -> String {
     }
 }
 
+/// Format a TOOL-CALL duration for the live feed.
+///
+/// Delegates to `tools::format_duration` — the same formatter the transcript
+/// tool headers below the feed use — so one call never reads two ways on one
+/// screen. The feed used to print `{:.1}s` unconditionally, which floored every
+/// call faster than 50 ms to a literal `0.0s` while the transcript line for the
+/// SAME call said `40ms`.
+///
+/// `format_duration` returns an empty string for 0, its "nothing to report"
+/// signal. Here 0 is never unknown — an unmeasured call is `duration_ms: None`
+/// and takes the running branch — so a 0 is a real sub-millisecond measurement
+/// and is rendered as such.
+fn fmt_tool_duration(ms: u64) -> String {
+    let s = crate::tools::format_duration(ms);
+    if s.is_empty() {
+        "<1ms".to_string()
+    } else {
+        s
+    }
+}
+
 /// Ease the displayed token counter one animation step toward `target` (CC's
 /// SpinnerAnimationRow token-count easing): step by a fraction of the gap, at
 /// least +3 so it visibly ticks, capped at +50 so a big jump animates instead of
@@ -548,6 +569,48 @@ pub const ACTIVITY_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 /// is what continuation rows are indented by, so the wrapped text sits in one
 /// clean column under the `└`.
 const DETAILS_PREFIX: &str = "  \u{2514} ";
+
+/// Width, in cells, of the compaction progress bar.
+const PROGRESS_BAR_CELLS: usize = 20;
+
+/// Render a MEASURED progress bar: `▰▰▰▰▰▰▱▱▱▱ 60% · chunk 6/10`.
+///
+/// # This function may only be called with real counts
+///
+/// It takes `done` and `total` because it renders a *fraction of known work* —
+/// there is no time-based or animated variant on purpose. The only compaction
+/// signal carrying a genuine ratio is `CompactionProgress`, which the backend
+/// emits once per finished divide-and-conquer chunk against a `chunk_total`
+/// fixed before summarization starts. Compactions that do not chunk (the
+/// `/compact` manual path is a single summarizer call) emit no progress at all
+/// and must render spinner + elapsed only.
+///
+/// A bar that sweeps on a timer while the system has no idea how far along it
+/// is tells the user something the program does not know. That is a lie about
+/// the state of the system, and it is worse than showing nothing, because the
+/// user calibrates their patience against it.
+///
+/// Filled and empty cells use different GLYPHS (▰ / ▱), not different colours,
+/// so the bar is readable in a monochrome terminal and by anyone who cannot
+/// distinguish the two hues.
+pub fn progress_bar(done: u32, total: u32) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let done = done.min(total);
+    let ratio = done as f64 / total as f64;
+    // Floor, so the bar only fills a cell that is genuinely earned and can
+    // never read as complete before the last chunk lands.
+    let filled = ((ratio * PROGRESS_BAR_CELLS as f64).floor() as usize).min(PROGRESS_BAR_CELLS);
+    format!(
+        "{}{} {}% · chunk {}/{}",
+        "\u{25B0}".repeat(filled),
+        "\u{25B1}".repeat(PROGRESS_BAR_CELLS - filled),
+        (ratio * 100.0).floor() as u32,
+        done,
+        total
+    )
+}
 
 /// Rotating counter so consecutive requests pick different starting verbs.
 static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1246,10 +1309,21 @@ impl Activity {
                 // Other folded calls are still in flight — the row keeps running.
                 entry.concurrent -= 1;
             } else {
-                // If the backend sends 0 (missing or untracked), measure from the
-                // TUI-side start Instant so the display shows real elapsed time.
-                let effective_ms = if duration_ms == 0 {
-                    entry.start.elapsed().as_millis() as u64
+                // The wire type is a bare `u64`, so a 0 is ambiguous: either the
+                // backend did not track this call, or the call really did finish
+                // in under a millisecond. Disambiguate with the TUI-side clock,
+                // which is an UPPER bound on the true duration (it also contains
+                // the SSE round trip).
+                //
+                // Below the threshold a 0 is credible and is kept — substituting
+                // the TUI measurement there would inflate a genuine 0.4 ms read
+                // into "15ms" of mostly transport latency. Above it, the call was
+                // demonstrably not instant, so the backend simply did not report
+                // and the TUI measurement is the only number available.
+                const UNREPORTED_MS: u64 = 250;
+                let observed_ms = entry.start.elapsed().as_millis() as u64;
+                let effective_ms = if duration_ms == 0 && observed_ms >= UNREPORTED_MS {
+                    observed_ms
                 } else {
                     duration_ms
                 };
@@ -1978,23 +2052,26 @@ impl Component for Activity {
             let suppress_running_timer = is_agent_tool(&entry.name);
             match (entry.duration_ms, entry.success) {
                 (Some(ms), Some(true)) => {
-                    spans.push(Span::styled(
-                        format!("{:.1}s", ms as f64 / 1000.0),
-                        theme.task_done(),
-                    ));
+                    spans.push(Span::styled(fmt_tool_duration(ms), theme.task_done()));
                 }
                 (Some(ms), Some(false)) => {
                     spans.push(Span::styled(
-                        format!("{:.1}s [error]", ms as f64 / 1000.0),
+                        format!("{} [error]", fmt_tool_duration(ms)),
                         theme.error_text(),
                     ));
                 }
+                // Duration known but the outcome is not: report the fact we have
+                // and stay silent about the one we don't, rather than falling
+                // through to the running branch and restarting a dead clock.
+                (Some(ms), None) => {
+                    spans.push(Span::styled(fmt_tool_duration(ms), theme.faint()));
+                }
                 _ if suppress_running_timer => {}
                 _ => {
-                    // Still running
-                    let running_ms = entry.start.elapsed().as_millis();
+                    // Still running — a live, still-growing measurement.
+                    let running_ms = entry.start.elapsed().as_millis() as u64;
                     spans.push(Span::styled(
-                        format!("{:.1}s...", running_ms as f64 / 1000.0),
+                        format!("{}...", fmt_tool_duration(running_ms)),
                         theme.faint(),
                     ));
                 }
@@ -2364,6 +2441,53 @@ mod activity_tests {
         // A resuming phase clears the pending cue.
         act.set_phase(ProcessingPhase::ToolCall);
         assert!(!act.pending_user());
+    }
+
+    #[test]
+    fn progress_bar_is_measured_not_decorative() {
+        // Every cell is earned: the fill is a floor of the real ratio, so the bar
+        // can never read fuller than the work actually completed.
+        let half = progress_bar(5, 10);
+        assert_eq!(half.matches('\u{25B0}').count(), 10);
+        assert_eq!(half.matches('\u{25B1}').count(), 10);
+        assert!(half.contains("50%"), "{}", half);
+        assert!(half.contains("chunk 5/10"), "{}", half);
+
+        // Nothing done → nothing filled. No "starter" cell to look busy with.
+        let none = progress_bar(0, 8);
+        assert_eq!(none.matches('\u{25B0}').count(), 0);
+        assert!(none.contains("0%"), "{}", none);
+
+        // Only the genuinely-final chunk produces a full bar at 100%.
+        let all = progress_bar(8, 8);
+        assert_eq!(all.matches('\u{25B0}').count(), PROGRESS_BAR_CELLS);
+        assert!(all.contains("100%"), "{}", all);
+
+        // 7/8 must NOT round up to a full bar — that would announce completion
+        // one whole LLM call early.
+        let nearly = progress_bar(7, 8);
+        assert!(nearly.matches('\u{25B0}').count() < PROGRESS_BAR_CELLS, "{}", nearly);
+        assert!(!nearly.contains("100%"), "{}", nearly);
+    }
+
+    #[test]
+    fn progress_bar_refuses_to_invent_a_ratio() {
+        // No known total ⇒ no bar at all. The caller renders spinner + elapsed
+        // only. This is the guard that keeps a non-chunking compaction (the
+        // `/compact` single-summarizer path) from growing a fake bar.
+        assert_eq!(progress_bar(3, 0), "");
+
+        // Filled vs empty differ by GLYPH, not colour, so the bar survives a
+        // monochrome terminal and colour-blind readers.
+        let bar = progress_bar(1, 4);
+        assert!(bar.contains('\u{25B0}') && bar.contains('\u{25B1}'), "{}", bar);
+    }
+
+    #[test]
+    fn compacting_names_the_wait_on_the_spinner_row() {
+        // The spinner must say what is blocking the turn. A flavour verb here
+        // would imply the model is thinking when it is actually folding history.
+        assert_eq!(WaitingReason::Compacting.label(), "Compacting");
     }
 
     #[test]
@@ -3102,5 +3226,67 @@ mod slot_invariant_tests {
         }
         assert_eq!(act.live_output_lines().len(), 1);
         let _ = render_live(&act, 80, act.max_height().max(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool-duration rendering in the live activity feed.
+//
+// The feed printed EVERY completed tool's duration as `{:.1}s`, so anything
+// faster than 50 ms floored to a literal `0.0s` while the very same call
+// rendered `40ms` in the transcript below it (`tools::format_duration`). These
+// tests pin the feed to that one shared formatter.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod duration_render_tests {
+    use super::*;
+
+    fn render(act: &Activity, w: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let h = act.max_height().max(1);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn feed_with(duration_ms: u64, success: bool) -> Activity {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::All;
+        act.tool_start_with_id("file_read", "/tmp/x.rs", Some("c1"));
+        act.tool_end_with_id("file_read", duration_ms, success, Some("c1"));
+        act
+    }
+
+    #[test]
+    fn sub_second_tool_durations_keep_millisecond_resolution() {
+        // A 40 ms read is a real measurement, not zero.
+        let act = feed_with(40, true);
+        let out = render(&act, 100);
+        assert!(out.contains("40ms"), "expected millisecond resolution: {out:?}");
+        assert!(
+            !out.contains("0.0s"),
+            "a 40ms call must never render as zero seconds: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_sub_second_call_also_keeps_millisecond_resolution() {
+        let act = feed_with(12, false);
+        let out = render(&act, 100);
+        assert!(out.contains("12ms"), "expected 12ms: {out:?}");
+        assert!(!out.contains("0.0s"), "failed fast call showed 0.0s: {out:?}");
+    }
+
+    #[test]
+    fn multi_second_durations_still_render_in_seconds() {
+        let act = feed_with(2_500, true);
+        let out = render(&act, 100);
+        assert!(out.contains("2.5s"), "expected 2.5s: {out:?}");
     }
 }

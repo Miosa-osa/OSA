@@ -47,6 +47,7 @@ defmodule OptimalSystemAgent.Permissions do
   """
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.MCP.Client.ToolBridge
   alias OptimalSystemAgent.Settings
 
   # Runtime-resolved default so a prebuilt release uses the END USER's home, not
@@ -924,22 +925,91 @@ defmodule OptimalSystemAgent.Permissions do
   # MCP server-level rules (WS14 semantics, integrated): "mcp__server" and
   # "mcp__server__*" both match every "mcp__server__<tool>". Deny beats allow
   # via the deny-first evaluation order in check_detailed/2.
+  #
+  # The server a key belongs to is decided by `ToolBridge.parse_key/1` — the
+  # SAME parse the dispatcher uses — rather than by a prefix test of our own.
+  # A rule must scope to exactly the server that will actually be invoked; two
+  # independent readings of one key is precisely how `mcp__a` came to cover a
+  # tool owned by `a__b`. (`ToolBridge` now also refuses to register a server
+  # segment containing `__`, so no such key reaches here in the first place.)
   defp mcp_server_rule_matches?("mcp__" <> _ = rtool, "mcp__" <> _ = tool_name) do
     base =
       if String.ends_with?(rtool, "__*"),
         do: binary_part(rtool, 0, byte_size(rtool) - 3),
         else: rtool
 
-    String.starts_with?(tool_name, base <> "__")
+    with "mcp__" <> rule_server <- base,
+         {:ok, {server, _tool}} <- ToolBridge.parse_key(tool_name) do
+      rule_server == server
+    else
+      _ -> false
+    end
   end
 
   defp mcp_server_rule_matches?(_, _), do: false
 
   defp match_generic_rule?(content, value) do
     case classify_content(content) do
-      {:prefix, prefix} -> value == prefix or String.starts_with?(value, prefix)
+      {:prefix, prefix} -> prefix_match?(prefix, value)
       {:wildcard, pattern} -> wildcard_match?(pattern, value)
       {:exact, exact} -> value == exact or safe_expand(value) == safe_expand(exact)
+    end
+  end
+
+  # A `prefix:*` allow rule matches at a TOKEN BOUNDARY only. A bare
+  # `String.starts_with?/2` would let `file_write(/home/u/safe:*)` pre-approve
+  # `/home/u/safe-backup-of-everything`, and `WebFetch(https://example.com:*)`
+  # pre-approve `https://example.com.evil.tld` — the classic look-alike host.
+  #
+  # The two sibling matchers in this module already enforce a boundary
+  # (`match_shell_rule?/2` demands a space, `path_in_scope?/1` demands a `/`);
+  # this is the same discipline generalised, because the delimiter that keeps
+  # you inside the same entity depends on what the content IS:
+  #
+  #   * a URL  — `/`, `?` or `#` stay on the same origin+path; `.`, `-`, `@`
+  #              and `:` all move you to a DIFFERENT host, so they are not
+  #              boundaries.
+  #   * a path — only `/` descends into the approved directory.
+  #   * other  — `/` or whitespace; anything else is a different token.
+  #
+  # A prefix that already ends in one of its own boundary characters
+  # (`https://`, `/home/u/safe/`) needs no extra separator.
+  defp prefix_match?("", _value), do: false
+
+  defp prefix_match?(prefix, value) when is_binary(prefix) and is_binary(value) do
+    cond do
+      value == prefix ->
+        true
+
+      not String.starts_with?(value, prefix) ->
+        false
+
+      true ->
+        bounds = prefix_boundaries(prefix)
+        String.ends_with?(prefix, bounds) or next_grapheme(value, prefix) in bounds
+    end
+  end
+
+  defp prefix_match?(_, _), do: false
+
+  # The grapheme of `value` immediately after `prefix` (`nil` when there is none
+  # — that case is already handled by the `value == prefix` branch).
+  defp next_grapheme(value, prefix) do
+    case String.next_grapheme(binary_part(value, byte_size(prefix), byte_size(value) - byte_size(prefix))) do
+      {g, _rest} -> g
+      nil -> nil
+    end
+  end
+
+  @url_boundaries ["/", "?", "#"]
+  @path_boundaries ["/"]
+  @generic_boundaries ["/", " ", "\t"]
+
+  defp prefix_boundaries(prefix) do
+    cond do
+      Regex.match?(~r{^[a-zA-Z][a-zA-Z0-9+.\-]*://}, prefix) -> @url_boundaries
+      String.starts_with?(prefix, ["/", "~"]) -> @path_boundaries
+      true -> @generic_boundaries
     end
   end
 

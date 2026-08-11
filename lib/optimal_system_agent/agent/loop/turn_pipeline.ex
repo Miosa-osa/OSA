@@ -407,7 +407,15 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # Reset the token-target "work to target" continue counter each new
       # user turn — otherwise it leaks across turns and the feature dies
       # after the first turn that used it up.
-      target_continues: 0
+      target_continues: 0,
+      # Reset the grounded-verification gate's re-prompt budget each new user
+      # turn. `VerificationGate` documents and only makes sense with a PER-TURN
+      # cap (`@max_reprompts`, so a stubborn model can't trap one turn's
+      # completion path), but the counter lives on the long-lived Loop state and
+      # nothing reset it — so two gate firings anywhere in a session disabled
+      # the gate permanently, silently, on exactly the long sessions it exists
+      # for. Written by `VerificationGate.build_directive/1` via `Map.put`.
+      verification_gate_prompts: 0
     })
   end
 

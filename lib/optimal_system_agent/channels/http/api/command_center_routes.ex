@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
   Routes:
     GET  /                          → dashboard summary
     GET  /agents                    → all agents
+    GET  /agents/health             → all agents health summary
+    GET  /agents/:name/health       → single agent health
     GET  /agents/:name              → agent detail
     GET  /tiers                     → tier breakdown
     GET  /patterns                  → swarm patterns
@@ -26,6 +28,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
     POST /scheduler/triggers        → add trigger
     DELETE /scheduler/triggers/:id  → remove trigger
     POST /scheduler/triggers/:id/toggle → toggle trigger enabled
+    GET  /skills                    → list loaded skills
+    POST /skills/reload             → hot-reload skills from disk
+
+  There is deliberately no `/webhooks` group here. Three routes used to call
+  `OptimalSystemAgent.Webhooks.Dispatcher`, a module that has never existed in
+  this repo, so every request to them raised `UndefinedFunctionError`. Inbound
+  webhooks are served by `DataRoutes` at `POST /api/v1/webhooks/:trigger_id`;
+  outbound webhook fan-out was never built.
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
@@ -36,7 +46,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
   alias OptimalSystemAgent.Sandbox.Provisioner
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Agent.HealthTracker
-  alias OptimalSystemAgent.Webhooks.Dispatcher
   alias OptimalSystemAgent.Tools.Registry, as: ToolRegistry
 
   plug(:match)
@@ -439,17 +448,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
     end
   end
 
-  # ── GET /webhooks — list registered webhooks ──────────────────────────
-
-  get "/webhooks" do
-    webhooks = Dispatcher.list()
-    body = Jason.encode!(%{webhooks: webhooks, count: length(webhooks)})
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, body)
-  end
-
   # ── GET /skills — list all loaded skills ─────────────────────────────
 
   get "/skills" do
@@ -472,52 +470,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, body)
-  end
-
-  # ── POST /webhooks — register a webhook ───────────────────────────────
-
-  post "/webhooks" do
-    with %{"url" => url} <- conn.body_params do
-      secret = conn.body_params["secret"]
-      filter = conn.body_params["filter"] || []
-
-      case Dispatcher.register(url, secret, filter) do
-        {:ok, id} ->
-          body =
-            Jason.encode!(%{
-              id: id,
-              url: url,
-              filter: filter,
-              has_secret: not is_nil(secret),
-              created_at: System.os_time(:second)
-            })
-
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(201, body)
-
-        {:error, :invalid_url} ->
-          json_error(conn, 422, "invalid_url", "URL must start with http:// or https://")
-      end
-    else
-      _ -> json_error(conn, 400, "invalid_request", "Missing required field: url")
-    end
-  end
-
-  # ── DELETE /webhooks/:id — unregister a webhook ────────────────────────
-
-  delete "/webhooks/:id" do
-    case Dispatcher.unregister(id) do
-      :ok ->
-        body = Jason.encode!(%{status: "removed", id: id})
-
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(200, body)
-
-      {:error, :not_found} ->
-        json_error(conn, 404, "not_found", "Webhook '#{id}' not found")
-    end
   end
 
   # ── POST /skills/reload — hot-reload skills from disk ─────────────────

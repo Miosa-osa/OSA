@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     * Rich `{:ok, result, metadata}` return with diff text + stats when content changes
   """
 
+  alias OptimalSystemAgent.Agent.Safety.PathCanon
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
   alias OptimalSystemAgent.Tools.Builtins.FileWrite.Constants
   alias OptimalSystemAgent.Tools.FileState
@@ -277,49 +278,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
   # Returns {resolved_path, symlink_traversal?} where symlink_traversal? is
   # true when the resolved path differs from the original expanded path.
   #
-  # For existing files: resolve the full path via :file.read_link_all.
-  # For new files (don't exist yet): resolve the parent directory and
-  # reconstruct the full path so a symlinked parent is caught.
-  defp resolve_for_write(expanded_path) do
-    case resolve_real_path(expanded_path) do
-      ^expanded_path ->
-        parent = Path.dirname(expanded_path)
-        resolved_parent = resolve_real_path(parent)
-
-        if resolved_parent == parent do
-          {expanded_path, false}
-        else
-          filename = Path.basename(expanded_path)
-          resolved = Path.join(resolved_parent, filename)
-          {resolved, resolved != expanded_path}
-        end
-
-      resolved ->
-        {resolved, true}
-    end
-  end
-
-  # Resolve all symlink components in a path to get the real filesystem path.
-  # Uses :file.read_link_all (follows the full symlink chain / POSIX realpath).
-  # Falls back to the original path when the path doesn't exist or has no symlinks.
-  #
-  # On macOS, the resolution of `/tmp` returns the *relative* form `private/tmp`
-  # rather than `/private/tmp` (a known erlang/OTP behavior on Darwin). Absolutize
-  # the result so downstream `String.starts_with?` checks against allowlist
-  # entries (which are always absolute) work correctly.
-  defp resolve_real_path(path) do
-    case :file.read_link_all(String.to_charlist(path)) do
-      {:ok, real} ->
-        real_str = to_string(real)
-        if String.starts_with?(real_str, "/"), do: real_str, else: "/" <> real_str
-
-      {:error, :einval} ->
-        path
-
-      {:error, _} ->
-        path
-    end
-  end
+  # `PathCanon` resolves EVERY component — including a not-yet-existing leaf,
+  # which is the normal case for a write. The previous version special-cased
+  # the immediate parent only, so `allowed/link/sub/new.txt` where
+  # `link -> ~/.ssh` escaped the allowlist entirely: neither the leaf nor its
+  # parent (`sub`) was a symlink, so nothing was resolved.
+  defp resolve_for_write(expanded_path), do: PathCanon.resolve(expanded_path)
 
   defp allowed_write_paths do
     configured =
@@ -329,8 +293,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
         Constants.default_allowed_write_paths()
       )
 
+    # Canonicalise the roots too: the candidate path is canonical by the time it
+    # reaches `write_allowed?/1`, so a root that is itself a symlink (macOS
+    # `/tmp`, a symlinked `$HOME`) would otherwise never match and every write
+    # would be denied.
     Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
+      expanded = PathCanon.canonicalize(p)
       if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
     end)
   end

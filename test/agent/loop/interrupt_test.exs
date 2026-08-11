@@ -23,8 +23,12 @@ defmodule OptimalSystemAgent.Agent.Loop.InterruptTest do
 
     assert response == "[Request interrupted by user]"
 
+    # `scaffold: true` is part of the marker's contract, not incidental: it is
+    # what lets `/undo` skip loop-injected text by flag instead of by matching
+    # the marker string. Asserted as an exact map so a silently-dropped flag
+    # fails here.
     assert List.last(new_state.messages) ==
-             %{role: "user", content: "[Request interrupted by user]"}
+             %{role: "user", content: "[Request interrupted by user]", scaffold: true}
   end
 
   test "orphaned tool_use gets an interrupted tool_result and the tool-use marker" do
@@ -45,7 +49,11 @@ defmodule OptimalSystemAgent.Agent.Loop.InterruptTest do
     assert tool_result.role == "tool"
     assert tool_result.tool_call_id == "tc_1"
     assert tool_result.content =~ "Interrupted by user"
-    assert marker == %{role: "user", content: "[Request interrupted by user for tool use]"}
+    assert marker == %{
+             role: "user",
+             content: "[Request interrupted by user for tool use]",
+             scaffold: true
+           }
   end
 
   # The orphan fill used to look at `List.last/1` only. `finalize_interrupt/2`

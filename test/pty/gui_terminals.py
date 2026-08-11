@@ -164,6 +164,26 @@ def resize_window(wid: str, w: int, h: int) -> None:
     subprocess.run(["xdotool", "windowsize", wid, str(w), str(h)], capture_output=True)
 
 
+def raise_window(wid: str) -> None:
+    """Bring `wid` to the front and give it focus, before a SCREENSHOT.
+
+    Pillow's X11 grabber reads the root window's composite, so it sees whatever
+    is actually on screen at that stack position — not the target window's own
+    buffer. A terminal that has drifted behind another window screenshots as a
+    rectangle of the thing in front of it, and one that is fully covered
+    screenshots as solid black.
+
+    That is not hypothetical, and it fails in the worst possible direction: a
+    black image contains no full-width rule, so the pixel counter reports ZERO
+    bands and a caller checking only "more than one?" reads it as a clean
+    screen. Observed exactly that on a kitty calibration run that had passed
+    minutes earlier with the identical code.
+    """
+    subprocess.run(["xdotool", "windowraise", wid], capture_output=True)
+    subprocess.run(["xdotool", "windowactivate", "--sync", wid], capture_output=True)
+    time.sleep(0.4)
+
+
 def kill_window(wid: str) -> None:
     subprocess.run(["xdotool", "windowkill", wid], capture_output=True)
 

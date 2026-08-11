@@ -92,6 +92,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.PromptLoader
   alias OptimalSystemAgent.Agent.CompactionSafety
+  alias OptimalSystemAgent.Agent.CompactionEvents
   alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
   alias OptimalSystemAgent.Agent.Trajectory
 
@@ -642,6 +643,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       Process.delete(:osa_compact_session_id)
     end
 
+    # Announce before any step runs. `:osa_compact_session_id` is already in the
+    # process dictionary above, which is what lets the nested chunked summarizer
+    # emit session-scoped progress without threading the id through six layers.
+    compaction_started_at = System.monotonic_time(:millisecond)
+    CompactionEvents.started(session_id, :auto, tokens_before)
+
     # Target: get back OUT of the warning band, i.e. below the shared
     # `warn_at/1` threshold — the same reserve-based definition that decided we
     # were too full in the first place. `:emergency` (or a forced compaction
@@ -713,6 +720,14 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     Logger.info(
       "Compactor pipeline (#{severity}): #{tokens_before} -> #{tokens_after} tokens " <>
         "(saved #{saved}, last_step=#{last_step})"
+    )
+
+    CompactionEvents.completed(session_id,
+      tokens_before: tokens_before,
+      tokens_after: tokens_after,
+      messages_before: length(messages),
+      messages_after: length(final_messages),
+      duration_ms: System.monotonic_time(:millisecond) - compaction_started_at
     )
 
     final_messages
@@ -1343,6 +1358,63 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   %MESSAGES%
   """
 
+  @doc """
+  Run one summarizer `Providers.chat/2` under its own wall-clock bound.
+
+  `TurnPipeline.bounded_compaction/2` already contains a wedged summarizer from
+  *outside* (120s, then deterministic micro-compaction). That is the turn's
+  safety net, not this call's. Every innermost summarizer call carries its own,
+  strictly-smaller bound so that:
+
+    * the inner bound fires first, and the caller's own deterministic fallback
+      runs — instead of the whole compaction being killed brutally at 120s;
+    * call sites reached OUTSIDE `bounded_compaction/2` (an unattended agent
+      auto-compacting between turns) are still bounded at all. Before this,
+      those had no timeout whatsoever and a provider stuck in a socket read
+      parked the agent indefinitely.
+
+  On expiry the task is `:brutal_kill`ed — a summarizer blocked in a socket read
+  will not honour a graceful shutdown — and `{:error, :summarizer_timeout}` is
+  returned. `CompactionSafety.sample_with_retry/2` short-circuits on `{:error,
+  _}` (it only retries *degenerate* summaries), so a timeout is not re-tried;
+  it goes straight to the caller's deterministic path.
+
+  Bound is `:summarizer_timeout_ms` (default 90s — under the 120s outer bound
+  by design). Public + `@doc false`-ish so `Loop.ProactiveCompaction` shares
+  one policy instead of duplicating it.
+  """
+  @spec bounded_chat([map()], keyword()) :: {:ok, map()} | {:error, term()}
+  def bounded_chat(messages, opts) do
+    timeout = Application.get_env(:optimal_system_agent, :summarizer_timeout_ms, 90_000)
+
+    task =
+      Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
+        Providers.chat(messages, opts)
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} ->
+        result
+
+      {:exit, reason} ->
+        {:error, {:summarizer_crashed, reason}}
+
+      nil ->
+        Logger.error(
+          "[compactor] summarizer exceeded #{timeout}ms (wedged provider call) — " <>
+            "killed it; falling back to the deterministic path"
+        )
+
+        {:error, :summarizer_timeout}
+    end
+  rescue
+    # No TaskSupervisor (bare unit test, stripped release) — degrade to an
+    # inline call rather than failing compaction outright. Unbounded, but
+    # strictly better than crashing, and the supervisor exists in every real
+    # runtime.
+    _ -> Providers.chat(messages, opts)
+  end
+
   @doc false
   defp call_summary_llm(messages_to_summarize) do
     if not compactor_llm_enabled?() do
@@ -1367,7 +1439,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # header), not concise-but-valid summaries.
       sampler = fn ->
         try do
-          Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
+          bounded_chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
           |> case do
             {:ok, %{content: content}} when is_binary(content) and content != "" ->
               {:ok, content}
@@ -1473,7 +1545,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # ~500 chars and retry the sampler before accepting one.
       sampler = fn ->
         try do
-          Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
+          bounded_chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
           |> case do
             {:ok, %{content: content}} when is_binary(content) and content != "" ->
               {:ok, content}
@@ -1583,10 +1655,22 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # merge across compactions) into one text blob for validation/persistence.
   @doc false
   defp call_key_facts_llm_chunked(chunks) do
+    total = length(chunks)
+    session_id = CompactionEvents.current_session_id()
+
+    # The ONE place in compaction with a genuine, monotonic ratio of completed
+    # to total known work: N independent summarizer calls, fixed up front by
+    # `chunk_messages_by_tokens/2`. Progress is emitted per finished chunk so
+    # the TUI's bar tracks measured work. Nothing else in compaction may emit
+    # progress — see `CompactionEvents`' moduledoc.
     chunk_results =
       chunks
       |> Enum.with_index()
-      |> Enum.map(fn {chunk_msgs, idx} -> summarize_chunk(chunk_msgs, idx) end)
+      |> Enum.map(fn {chunk_msgs, idx} ->
+        result = summarize_chunk(chunk_msgs, idx)
+        CompactionEvents.progress(session_id, idx + 1, total)
+        result
+      end)
 
     case Enum.find(chunk_results, &match?({:error, _}, &1)) do
       {:error, _} = err ->
@@ -1628,7 +1712,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       sampler = fn ->
         try do
-          Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 600)
+          bounded_chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 600)
           |> case do
             {:ok, %{content: content}} when is_binary(content) and content != "" ->
               {:ok, content}

@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   The 3-tuple shape is preserved exactly from the original.
   """
 
+  alias OptimalSystemAgent.Agent.Safety.PathCanon
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Constants
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
@@ -356,21 +357,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   end
 
   # Resolve symlinks BEFORE security checks to prevent symlink traversal attacks.
-  # Uses :file.read_link_all which follows the full symlink chain (POSIX realpath).
-  # Falls back to the original path if the path doesn't exist or has no symlinks.
-  defp resolve_real_path(path) do
-    case :file.read_link_all(String.to_charlist(path)) do
-      {:ok, real} ->
-        real_str = to_string(real)
-        if String.starts_with?(real_str, "/"), do: real_str, else: "/" <> real_str
-
-      {:error, :einval} ->
-        path
-
-      {:error, _} ->
-        path
-    end
-  end
+  # Resolves EVERY component, not just the last — `:file.read_link_all/1` alone
+  # is not realpath (it reads one link's contents, and only when the leaf is
+  # itself a link), which is what let a symlinked intermediate directory walk
+  # straight past this guard. See `PathCanon`.
+  defp resolve_real_path(path), do: PathCanon.canonicalize(path)
 
   defp read_allowed?(expanded_path) do
     sensitive =
@@ -413,7 +404,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
       Constants.default_allowed_paths()
     )
     |> Enum.map(fn p ->
-      e = Path.expand(p)
+      e = PathCanon.canonicalize(p)
       if String.ends_with?(e, "/"), do: e, else: e <> "/"
     end)
   end
@@ -425,7 +416,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
       Constants.default_allowed_paths()
     )
     |> Enum.map(fn p ->
-      e = Path.expand(p)
+      e = PathCanon.canonicalize(p)
       if String.ends_with?(e, "/"), do: e, else: e <> "/"
     end)
   end

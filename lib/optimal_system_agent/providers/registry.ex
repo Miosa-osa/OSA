@@ -767,15 +767,42 @@ defmodule OptimalSystemAgent.Providers.Registry do
       :ok ->
         :ok
 
-      {:error, _reason} ->
-        # 2. Same-provider sync fallback (a plain request sometimes succeeds
-        #    where a stream-only hiccup did not), then the model/provider chain.
-        case fallback_sync_stream(module, messages, callback, opts) do
-          :ok ->
-            :ok
+      {:error, reason} ->
+        # Snapshot the one-way door BEFORE anything else runs: every entry into
+        # `Resilience.with_retry/2` clears the flag, and both the sync attempt
+        # and the provider chain below go through it.
+        if Resilience.output_observed?() do
+          # OUTPUT ALREADY ON SCREEN. `Resilience.do_retry/7` refuses to retry
+          # past this point for exactly one reason — a retry re-runs the
+          # provider against the SAME live callback, so bytes the user already
+          # watched render get emitted a second time. Every fallback below has
+          # that identical property: `fallback_sync_stream/4` pushes the WHOLE
+          # sync response through the same callback as one `:text_delta`, and
+          # each hop of `stream_fallback_chain/5` re-streams the response from
+          # scratch. So the retry suppression was a one-way door with a side
+          # entrance: `with_retry` correctly declined to retry and handed the
+          # error here, where the fallback promptly re-emitted the duplicate
+          # `with_retry` had just prevented — a partial paragraph followed by
+          # the full answer, or the same answer twice from two providers.
+          #
+          # Past this door the only honest options are "finish" or "fail".
+          Logger.warning(
+            "Provider #{provider} stream failed after output was already streamed to the " <>
+              "user — not falling back (it would duplicate what is on screen): " <>
+              Resilience.reason_to_string(reason)
+          )
 
-          {:error, sync_reason} ->
-            stream_fallback_chain(provider, messages, callback, opts, sync_reason)
+          {:error, reason}
+        else
+          # 2. Same-provider sync fallback (a plain request sometimes succeeds
+          #    where a stream-only hiccup did not), then the model/provider chain.
+          case fallback_sync_stream(module, messages, callback, opts) do
+            :ok ->
+              :ok
+
+            {:error, sync_reason} ->
+              stream_fallback_chain(provider, messages, callback, opts, sync_reason)
+          end
         end
     end
   end
