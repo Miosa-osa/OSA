@@ -43,15 +43,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
   def execute(%{"to" => to, "message" => message} = _args, ctx) do
     sender_id = ctx.session_id || "unknown"
 
-    case Discipline.check(sender_id) do
-      :ok -> deliver(to, message, sender_id)
-      {:refused, reason} -> {:ok, reason}
+    # Resolve BEFORE charging the budget. A subagent gets two messages per run;
+    # a mistyped teammate name must not cost one of them, or a typo silences the
+    # agent for the rest of the run and it never learns why.
+    case resolve_target(to, sender_id) do
+      nil ->
+        {:ok, not_found(to)}
+
+      target_id ->
+        case Discipline.check(sender_id) do
+          :ok -> deliver(target_id, to, message, sender_id)
+          {:refused, reason} -> {:ok, reason}
+        end
     end
   end
 
-  # The send itself, once the sender has been cleared to speak.
-  defp deliver(to, message, sender_id) do
-    target_id = resolve_target(to, sender_id)
+  # The send itself, once the target resolved and the sender was cleared to speak.
+  defp deliver(target_id, to, message, sender_id) do
     message = Discipline.truncate(message, sender_id)
 
     if target_id do
