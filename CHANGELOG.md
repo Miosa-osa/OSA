@@ -252,6 +252,25 @@ models your plan stopped carrying three releases ago.
 
 ---
 
+## [1.0.68] — displays as `v1.0.068`
+
+### Added — `/mcp` can turn servers on and off
+
+- The panel listed loaded servers and nothing else: no way to see what could
+  be turned on, and no way to turn it on. Servers you had not enabled were
+  invisible, so the list looked complete while hiding most of the choices, and
+  the footer read "nav / close" because those genuinely were the only two
+  things it could do.
+- `GET /api/v1/mcp` now also returns discovered-but-not-imported servers with
+  status `available`, plus their source and whether each row is toggleable.
+- `POST /api/v1/mcp/:name/toggle` edits the allow list in user settings and
+  reloads the client, so a toggle takes effect without a restart. Native
+  `~/.osa/mcp.json` entries are refused with an explanation rather than
+  silently rewritten, and an empty allow list is expanded before removal so
+  turning one off is never a no-op.
+
+---
+
 ## [1.0.67] — displays as `v1.0.067`
 
 You can now sign in to a provider with an account you already pay for, from
@@ -365,6 +384,36 @@ hand a credential. A provider offering both lets you switch between them.
 
 ---
 
+## [1.0.66] — displays as `v1.0.066`
+
+### Fixed — two machines can release without colliding
+
+- The release path would happily mint a version another machine had already
+  published. It now refuses, rather than discovering the collision after the
+  tag exists.
+
+---
+
+## [1.0.65] — displays as `v1.0.065`
+
+### Added — pick which inherited MCP servers OSA actually runs
+
+- OSA discovers MCP servers configured in other tools, but the switch
+  governing them was one boolean over every server in every other tool's
+  config. On a real machine that is several config files and around twenty
+  servers, so picking the two you want meant enumerating the eighteen you did
+  not — and re-editing that list whenever another tool gained a server.
+- Adds `mcp_import_only`, an allow list read from the same places as the deny
+  list. Empty means no restriction, so existing setups are unchanged. A
+  non-empty list means only those names import. The deny list still wins,
+  because excluding a server is an explicit decision an allow must not
+  override.
+- The discovery menu deliberately does **not** apply the allow list: it is the
+  list you choose from, and filtering it by the choice already made would hide
+  every server you had not yet picked.
+
+---
+
 ## [1.0.64] — displays as `v1.0.064`
 
 Typing a message that began with the letter `y` lost that letter. So did a
@@ -422,6 +471,8 @@ every shortcut, so no future binding can take a character out of what you type.
   `Char` are still routed as control keys, no shipped default binding starts
   with a typable character, and a displayed permission prompt still confirms on
   `y` and declines on `n`.
+
+---
 
 ## [1.0.63] — displays as `v1.0.063`
 
@@ -1132,6 +1183,8 @@ its spend with it.
   text, so a turn carrying a tool call or a tool result is passed through byte for
   byte and the tool round-trip behaves exactly as before.
 
+---
+
 ## [1.0.53] — displays as `v1.0.053`
 
 ### Changed — you can read a reply while it is still being written
@@ -1201,6 +1254,8 @@ its spend with it.
   recording why, so the gap is not mistaken for staleness and "fixed" by bumping a
   version.
 
+---
+
 ## [1.0.52] — displays as `v1.0.052`
 
 ### Fixed — popups and notifications no longer paint over the conversation
@@ -1229,6 +1284,8 @@ its spend with it.
   and of the toasts is now fitted by display width rather than by character count, so
   a mention of a path containing CJK text or an emoji can no longer overrun the width
   it was given and push a row out of shape.
+
+---
 
 ## [1.0.51] — displays as `v1.0.051`
 
@@ -1275,6 +1332,8 @@ its spend with it.
   scrollback together, in one pass, so a completed turn resolves once instead of
   visibly redrawing itself.
 
+---
+
 ## [1.0.50] — displays as `v1.0.050`
 
 ### Fixed — turns died outright on the Claude 5 models
@@ -1303,6 +1362,8 @@ its spend with it.
 - **A source-checkout update printed an empty release-notes section.** It was reading
   a changelog that stops at 0.9.0 and contains no 1.0 releases at all, so there was
   never anything to find. It now reads the changelog releases are actually written to.
+
+---
 
 ## [1.0.49] — displays as `v1.0.049`
 
@@ -1472,6 +1533,8 @@ its spend with it.
   limit for the life of the process or the install.
 - **Timestamps render in local time** instead of leaving you to convert.
 
+---
+
 ## [1.0.47] — displays as `v1.0.047`
 
 ### Fixed — asking you a question deadlocked the turn
@@ -1574,6 +1637,8 @@ its spend with it.
   done, and toward **stopping once a question has been answered** rather than
   continuing to investigate past the point of an answer.
 
+---
+
 ## [1.0.46] — displays as `v1.0.046`
 
 ### Security — a cloned repo could execute code just by having OSA run git in it
@@ -1648,6 +1713,8 @@ its spend with it.
 - **Agent instructions substantially expanded**, covering tool usage and
   workflow guidance in materially more detail.
 
+---
+
 ## [1.0.41] — displays as `v1.0.041`
 
 ### Fixed — switching the model failed before the first message
@@ -1664,6 +1731,8 @@ its spend with it.
     `session_not_found` → 200 `ok`** (provider, model and context window returned).
   - Added a regression test asserting a switch on a not-yet-started session neither
     404s nor leaves the session unmaterialised.
+
+---
 
 ## [1.0.40] — displays as `v1.0.040`
 
@@ -1732,6 +1801,8 @@ helpers existed at three different correctness levels.**
   when saturated) across every verbosity and screen-reader mode. No test previously
   compared reservation against layout — which is why these regressions shipped green.
 
+---
+
 ## [1.0.39] — displays as `v1.0.039`
 
 ### Added — action authority + OpenComputers remote client
@@ -1749,6 +1820,8 @@ helpers existed at three different correctness levels.**
   versioned, TLS-only remote-client envelope that keeps the MIOSA account credential in memory
   (resolved from `miosa login` or `MIOSA_PLATFORM_API_KEY`, never persisted in host config).
   v1 supports one-shot exec/agent operations; no interactive PTY routing yet.
+
+---
 
 ## [1.0.38] — displays as `v1.0.038`
 
@@ -1774,6 +1847,8 @@ Known remaining edge (tracked): on terminals that *reliably* drop the cursor-pos
 a rebuild degrades to full-screen and finalized messages can be silently dropped rather than
 shown — a separate fix.
 
+---
+
 ## [1.0.37] — displays as `v1.0.037`
 
 ### Fixed — composer no longer stacks down the screen during an agent turn
@@ -1788,6 +1863,8 @@ shown — a separate fix.
   stacks. **Validated live** against a real agent turn executing shell tools: single composer,
   no stacking, no crash.
 
+---
+
 ## [1.0.36] — displays as `v1.0.036`
 
 ### Fixed — resize wipe was firing on every height change (regression)
@@ -1800,6 +1877,8 @@ shown — a separate fix.
   keystroke. Now the full-screen wipe runs **only on an actual terminal resize** (where reflow
   makes surgical clearing impossible); a pure height change clears surgically from the tracked
   region top, preserving the transcript above.
+
+---
 
 ## [1.0.35] — displays as `v1.0.035`
 
@@ -1818,6 +1897,8 @@ shown — a separate fix.
   ships). Also fixes version comparison against the zero-padded display tag (`v1.0.034`), which
   `Version.parse/1` had been rejecting as an invalid leading zero.
 
+---
+
 ## [1.0.34] — displays as `v1.0.034`
 
 ### Fixed — Ollama Cloud onboarding (client-blocking)
@@ -1834,6 +1915,8 @@ shown — a separate fix.
   reachable local device-identity daemon. Every other provider was already correct (Anthropic →
   `api.anthropic.com`, OpenAI → `api.openai.com`, OpenRouter → `openrouter.ai`, Ollama Local →
   `localhost:11434`).
+
+---
 
 ## [1.0.33] — displays as `v1.0.033`
 
@@ -1856,6 +1939,8 @@ shown — a separate fix.
   down). The finalized conversation still lives in the terminal's scrollback history and the
   in-app transcript viewer — only the on-screen copy is redrawn.
 
+---
+
 ## [1.0.32] — displays as `v1.0.032`
 
 ### Fixed
@@ -1869,6 +1954,8 @@ shown — a separate fix.
   rebuild), clamped into the resized screen, so it erases the on-screen chrome whether it sits
   high (empty session) or low (full screen); the rebuild re-anchors the fresh region at the
   same row, leaving exactly one copy.
+
+---
 
 ## [1.0.31] — displays as `v1.0.031`
 
@@ -1901,6 +1988,8 @@ shown — a separate fix.
   `crossterm::terminal::size()` (an ioctl reflecting the applied resize, no escape round-trip
   to drop): deterministic for grow/width-only changes, exact for shrink.
 
+---
+
 ## [1.0.30] — displays as `v1.0.030`
 
 ### Fixed / robustness
@@ -1920,6 +2009,8 @@ shown — a separate fix.
 - **TUI** — the "backend unreachable" message now names the port and points at `osa doctor`
   instead of a vague dead-end.
 
+---
+
 ## [1.0.29] — displays as `v1.0.029`
 
 ### Fixed
@@ -1932,6 +2023,8 @@ shown — a separate fix.
   the local KV cap for `:cloud` models, so the meter (and context budgeting + `num_ctx`
   sizing, one source of truth) use the true window. A ~50k-token session now reads ~5%
   instead of pinned-full.
+
+---
 
 ## [1.0.28] — displays as `v1.0.028`
 
@@ -2006,6 +2099,8 @@ isolated worktrees, verify it, and commit itself. See `docs/FLEETVIEW_DESIGN.md`
   scrollback on every resize. Intermittently-flaky tests stabilized at the root cause
   (session-scoped event capture; `async: false` where global app-env is shared). Full
   suite: 5116 tests, 0 failures.
+
+---
 
 ## [1.0.10] — displays as `v1.0.010`
 
