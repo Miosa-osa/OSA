@@ -9,6 +9,55 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.71] — displays as `v1.0.071`
+
+Dragging the window no longer leaves a stack of composers behind. This one has
+been reported repeatedly and "fixed" several times; it survived because nothing
+that could fail was watching.
+
+### Fixed — a width drag stranded one copy of the live region per resize
+
+- **The cause is tmux, not the terminal.** Reports came from sessions running
+  `TERM=tmux-256color`. tmux is not a passthrough: it is its own emulator with
+  its own screen model, it does not reflow on a width change, and the live
+  region scrolls into its PANE HISTORY as it redraws at each new width. An
+  erase — any erase — cannot reach scroll history, so the existing ED0 clear
+  wiped the visible screen and left every abandoned copy exactly where it was.
+- The copy count tracked the *rebuild* count precisely: a 12-step drag left 13
+  copies, a fast (coalesced) drag left 5. That is why raising the settle window
+  reduced the symptom without ever removing it.
+- `ESC[3J` is the only sequence that reaches pane history, and it now runs on
+  resize **inside a multiplexer only**.
+
+### Why previous fixes could not have worked
+
+- The layout harness renders with `pyte`, which does not reflow on resize.
+  Real terminals do. A drag that stacked copies on the user's screen rendered
+  as clean in the harness, so every fix shipped green.
+- Two new harnesses close that gap. `test/pty/vte_resize.py` embeds real
+  libvte through GObject introspection — the library GNOME Terminal links —
+  and verifies its own resizes actually reach the child before asserting
+  anything. `test/pty/tmux_resize.py` drives a real tmux pane on a dedicated
+  server and reads history back with `capture-pane`. The tmux one reproduced
+  the defect on demand; the VTE one shows libvte reflow never stranded
+  anything, which is what scopes the fix.
+- A discarded hypothesis, recorded so it is not re-tried: the rebuild's DSR
+  cursor query being dropped by tmux. Resizing the viewport in place instead of
+  reconstructing it — removing the query entirely — changed nothing. Still 13
+  copies. The copies arrive through ordinary scrolling, not through anchoring.
+
+### The trade-off, stated plainly
+
+- **Resizing inside tmux discards that pane's scroll history.** The
+  conversation is not lost — every finalized message stays in the transcript
+  viewer (Ctrl+O) — but scrolling the pane back past a resize will not show it.
+- Outside a multiplexer nothing changes at all: the added code returns
+  immediately, so Ghostty, WezTerm, kitty, Alacritty and every plain terminal
+  take byte-for-byte the path they took in 1.0.70. A test pins that scoping in
+  both directions so the exception cannot be widened by accident.
+
+---
+
 ## [1.0.70] — displays as `v1.0.070`
 
 The provider and model pickers now tell you what you are actually looking at:

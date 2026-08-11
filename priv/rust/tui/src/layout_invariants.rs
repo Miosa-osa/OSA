@@ -4754,11 +4754,52 @@ Beta is the one I would pick.
             "the resize clear must still erase the whole screen (ED0 from \
              home); emitted {seq:?}"
         );
-        assert!(
-            !seq.contains(ED3),
-            "a resize must never purge the user's scroll history; that is \
-             /clear's job alone. Emitted: {seq:?}"
-        );
+        // The ED3 ban still holds OUTSIDE a multiplexer, which is where it was
+        // written and where it is still exactly right. Inside tmux it is
+        // deliberately lifted — see `clear_multiplexer_history`. The test runs
+        // in whichever environment CI provides, so assert the rule that
+        // matches it rather than assuming a bare terminal.
+        if !crate::app::event_loop::in_multiplexer() {
+            assert!(
+                !seq.contains(ED3),
+                "a resize must never purge the user's scroll history on a \
+                 plain terminal; that is /clear's job alone. Real VTE reflow \
+                 does not strand chrome (test/pty/vte_resize.py), so there is \
+                 nothing here for a purge to repair. Emitted: {seq:?}"
+            );
+        }
+    }
+
+    /// The multiplexer exception, pinned so it cannot be widened by accident.
+    ///
+    /// Inside tmux the live region scrolls into pane history as it redraws at
+    /// each new width, and an erase cannot reach history — so a drag left one
+    /// stacked copy of composer + hint + status per rebuild (13 for a 12-step
+    /// drag; see `test/pty/tmux_resize.py`). ED3 is the only sequence that
+    /// reaches that history. This test exists so the exception stays an
+    /// exception: it must be conditional on the environment, never
+    /// unconditional.
+    #[test]
+    fn the_history_purge_is_scoped_to_multiplexers() {
+        let seq = emitted(|out| clear_screen_for_resize(out).unwrap());
+
+        if crate::app::event_loop::in_multiplexer() {
+            assert!(
+                seq.contains(ED3),
+                "inside a multiplexer the resize clear must ALSO purge pane \
+                 history, or stranded chrome survives the erase. Emitted: {seq:?}"
+            );
+        } else {
+            assert!(
+                !seq.contains(ED3),
+                "outside a multiplexer the purge must not fire. Emitted: {seq:?}"
+            );
+        }
+
+        // Either way the visible screen is still erased in place, and ED2 —
+        // which VTE implements as a scroll INTO history — stays banned.
+        assert!(ED0.iter().any(|e| seq.contains(e)), "emitted {seq:?}");
+        assert!(!seq.contains(ED2), "emitted {seq:?}");
     }
 
     /// `/clear` is the ONLY caller allowed to destroy history — and it has the

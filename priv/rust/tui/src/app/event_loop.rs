@@ -2187,7 +2187,61 @@ pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<(
         crossterm::cursor::MoveTo(0, 0),
         crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
     )?;
+    clear_multiplexer_history(out)
+}
+
+/// Inside a multiplexer only, also purge the pane's scroll history.
+///
+/// This is the fix for "one width drag leaves N stacked composers", and it is
+/// a deliberate, narrow exception to the rule that a resize never destroys
+/// history. The reasoning, since the exception looks alarming on its own:
+///
+/// * The stranded copies are **already in tmux's pane history** by the time
+///   this runs. They arrive there through ordinary scrolling as the live
+///   region redraws at each new width — not through the rebuild's cursor
+///   anchoring, which was the first theory and was tested and disproved
+///   (resizing the viewport in place instead of reconstructing it changed
+///   nothing: still 13 copies).
+/// * An erase — any erase — cannot reach scroll history. ED3 is the only
+///   sequence that can, so it is the only available repair.
+/// * It is scoped to multiplexers because the problem is scoped to them.
+///   `test/pty/vte_resize.py` drives real libvte and shows no stranding
+///   there, so purging outside a multiplexer would destroy real scrollback to
+///   solve a problem that does not exist.
+///
+/// **The cost, stated plainly:** resizing inside tmux discards that pane's
+/// scroll history. The conversation itself is not lost — every finalized
+/// message is retained in `transcript_log` and stays reachable with Ctrl+O —
+/// but scrolling the pane back past the resize will not show it. That is a
+/// real trade against visibly corrupted chrome on every drag; if it proves
+/// the worse half, the fix to reach for is keeping the live region from
+/// scrolling into history in the first place, which is a larger change.
+fn clear_multiplexer_history(out: &mut impl std::io::Write) -> Result<()> {
+    if !in_multiplexer() {
+        return Ok(());
+    }
+    execute!(
+        out,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+        crossterm::cursor::MoveTo(0, 0),
+    )?;
     Ok(())
+}
+
+/// True when this process is running inside a terminal multiplexer.
+///
+/// `$TMUX` is set for every process in a tmux pane; the `tmux`/`screen` TERM
+/// prefixes cover a scrubbed environment and GNU screen, which shares the
+/// properties that matter here — its own screen model and no reflow on a
+/// width change.
+pub(crate) fn in_multiplexer() -> bool {
+    if std::env::var_os("TMUX").is_some() {
+        return true;
+    }
+    match std::env::var("TERM") {
+        Ok(t) => t.starts_with("tmux") || t.starts_with("screen"),
+        Err(_) => false,
+    }
 }
 
 /// True when `key` is Ctrl+O (the transcript-viewer toggle). Delegates to the
