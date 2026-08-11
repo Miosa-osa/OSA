@@ -94,42 +94,13 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
     end
   end
 
-  defp wrap_text(text, width) do
-    text
-    |> String.split("\n")
-    |> Enum.flat_map(fn line ->
-      if visible_length(line) <= width do
-        [line]
-      else
-        wrap_line(line, width)
-      end
-    end)
-  end
+  # Width arithmetic is SHARED, not copied. This module used to carry a
+  # byte-for-byte duplicate of the renderer's already-known-bad helpers:
+  # `String.length/1` as a display width, and an ANSI strip that removed only
+  # SGR. That is worse here than in the renderer, because the content in this box
+  # is MODEL-AUTHORED and the box is the CONSENT GATE the user reads before
+  # approving a plan — a sheared box is a misread plan.
+  defp wrap_text(text, width), do: OptimalSystemAgent.CLI.Width.wrap(text, width)
 
-  defp wrap_line(line, width) do
-    line
-    |> String.split(~r/\s+/)
-    |> Enum.reduce([""], fn word, [current | rest] ->
-      current_len = visible_length(current)
-      word_len = visible_length(word)
-
-      if current_len + word_len + 1 <= width do
-        if current == "" do
-          [word | rest]
-        else
-          [current <> " " <> word | rest]
-        end
-      else
-        [word, current | rest]
-      end
-    end)
-    |> Enum.reverse()
-  end
-
-  defp visible_length(str) do
-    # Strip ANSI escape sequences for accurate width calculation
-    str
-    |> String.replace(~r/\e\[[0-9;]*m/, "")
-    |> String.length()
-  end
+  defp visible_length(str), do: OptimalSystemAgent.CLI.Width.visible(str)
 end

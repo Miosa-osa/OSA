@@ -39,8 +39,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Tool do
       "properties" => %{
         "name" => %{
           "type" => "string",
-          "description" =>
-            "Human-readable team name (max #{Constants.max_name_length()} chars)"
+          "description" => "Human-readable team name (max #{Constants.max_name_length()} chars)"
         },
         "members" => %{
           "type" => "array",

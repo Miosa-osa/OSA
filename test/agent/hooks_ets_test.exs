@@ -155,7 +155,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
           fn payload ->
             send(test_pid, {:hook_executed_in, self()})
             {:ok, payload}
-          end, priority: 50)
+          end,
+          priority: 50
+        )
 
       Process.sleep(50)
 
@@ -191,7 +193,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
               :counters.add(counter, 1, 1)
               :ets.insert(execution_order, {idx, label})
               {:ok, payload}
-            end, priority: priority)
+            end,
+            priority: priority
+          )
       end
 
       Process.sleep(50)
@@ -223,7 +227,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
             else
               {:ok, payload}
             end
-          end, priority: 1)
+          end,
+          priority: 1
+        )
 
       Process.sleep(50)
 
@@ -245,7 +251,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
           hook_name,
           fn _payload ->
             raise "ETS crash test"
-          end, priority: 1)
+          end,
+          priority: 1
+        )
 
       Process.sleep(50)
 
@@ -267,7 +275,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
           hook_name,
           fn _payload ->
             :skip
-          end, priority: 1)
+          end,
+          priority: 1
+        )
 
       Process.sleep(50)
 

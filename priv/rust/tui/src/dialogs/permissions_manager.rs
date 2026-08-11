@@ -292,17 +292,19 @@ impl PermissionsManager {
                 // Fixed-width badge: "● allow", padded so rule text aligns.
                 let badge = format!("\u{25CF} {:<5}", r.behavior);
                 let src = format!("[{}]", r.source);
-                let bw = badge.chars().count();
-                let sw = src.chars().count();
+                // COLUMNS: `r.source` is user-supplied (a settings file path), so a
+                // char-count width mis-sizes the right-aligned tag and pushes it
+                // off the pane.
+                let bw = crate::util::cols(&badge);
+                let sw = crate::util::cols(&src);
 
                 if selected {
                     // Full-width highlight bar: badge + rule + right-aligned source.
                     let gap = 2usize;
                     let rule_room = maxw.saturating_sub(bw + 1 + gap + sw);
                     let rule_txt = truncate_chars(&r.rule, rule_room);
-                    let mut s = format!("{badge} {rule_txt}");
-                    let pad = maxw.saturating_sub(s.chars().count() + sw);
-                    s.push_str(&" ".repeat(pad));
+                    let head = format!("{badge} {rule_txt}");
+                    let mut s = crate::util::pad_cols(&head, maxw.saturating_sub(sw));
                     s.push_str(&src);
                     let s = truncate_chars(&s, maxw);
                     put(
@@ -313,7 +315,7 @@ impl PermissionsManager {
                 } else {
                     let rule_room = maxw.saturating_sub(bw + 1 + 2 + sw);
                     let rule_txt = truncate_chars(&r.rule, rule_room);
-                    let used = bw + 1 + rule_txt.chars().count();
+                    let used = bw + 1 + crate::util::cols(&rule_txt);
                     let pad = maxw.saturating_sub(used + sw);
                     let spans = vec![
                         Span::styled(badge, Style::default().fg(Self::badge_color(&r.behavior, c)).add_modifier(Modifier::BOLD)),
@@ -351,14 +353,13 @@ impl PermissionsManager {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte rule text can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

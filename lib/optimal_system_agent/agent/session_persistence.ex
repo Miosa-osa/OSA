@@ -651,7 +651,8 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           output_tokens: non_neg_integer(),
           cache_creation_tokens: non_neg_integer(),
           cache_read_tokens: non_neg_integer(),
-          started_at: String.t() | nil
+          started_at: String.t() | nil,
+          complete: boolean()
         }
   def load_spend(session_id) when is_binary(session_id) do
     with {:ok, json} <- File.read(spend_path(session_id)),
@@ -662,7 +663,9 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         output_tokens: spend_num(data["output_tokens"], 0),
         cache_creation_tokens: spend_num(data["cache_creation_tokens"], 0),
         cache_read_tokens: spend_num(data["cache_read_tokens"], 0),
-        started_at: data["started_at"]
+        started_at: data["started_at"],
+        # This is a real reading of a real sidecar.
+        complete: true
       }
     else
       _ -> zero_spend()
@@ -673,6 +676,12 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   def load_spend(_), do: zero_spend()
 
+  # "We have no bill for this session" — NOT "this session was free".
+  #
+  # The numbers are zeros because every caller does arithmetic and formatting on
+  # them, but `complete: false` says the zeros are a placeholder rather than a
+  # measurement. Spend ENFORCEMENT must branch on `:complete` and refuse to
+  # treat an absent bill as $0.00; DISPLAY may keep showing `—`.
   defp zero_spend do
     %{
       cost_usd: 0.0,
@@ -680,7 +689,8 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       output_tokens: 0,
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
-      started_at: nil
+      started_at: nil,
+      complete: false
     }
   end
 

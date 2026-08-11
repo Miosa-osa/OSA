@@ -199,7 +199,10 @@ impl SandboxPicker {
                     Style::default().fg(if b.available { c.muted } else { c.dim }),
                 ));
             }
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            // COLUMNS: `name_col` and `display_name` are backend-supplied, so a
+            // char-count sum under-measures them and the `available` tag lands
+            // past the right edge.
+            let used: usize = spans.iter().map(|s| crate::util::cols(&s.content)).sum();
             let pad = max_w.saturating_sub(used + avail_txt.len());
             if pad > 0 {
                 spans.push(Span::raw(" ".repeat(pad)));
@@ -261,14 +264,13 @@ impl SandboxPicker {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

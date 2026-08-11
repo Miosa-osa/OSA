@@ -41,32 +41,35 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
 
   @impl true
   def init(_opts) do
-    children = [
-      Config,
-      FrameRouter,
-      Executor.Supervisor
-    ] ++ pty_children() ++ [
-      DesktopController,
-      TunnelExecutor,
-      # Inference cluster controller — manages exo/MLX processes on this host
-      ClusterController,
-      # GitHub Actions self-hosted runner controller
-      GhaRunnerExecutor,
-      # Backup executor — handles backup_snapshot_request and backup_restore_request
-      BackupExecutor,
-      # WireGuard mesh networking — manages wg interfaces for tenant mesh networks
-      WgMeshExecutor,
-      # Container orchestration — Docker/Podman lifecycle, log streaming, stats
-      ContainerExecutor,
-      # Docker Compose multi-service stacks — up/down/ps/logs wrapping docker compose v2
-      ComposeExecutor,
-      # SSH key management — add/remove authorized_keys entries on this host
-      SshKeysExecutor,
-      # Clipboard sync — bidirectional clipboard relay (pbcopy/xclip/wl-copy)
-      ClipboardExecutor,
-      Updater,
-      Session
-    ]
+    children =
+      [
+        Config,
+        FrameRouter,
+        Executor.Supervisor
+      ] ++
+        pty_children() ++
+        [
+          DesktopController,
+          TunnelExecutor,
+          # Inference cluster controller — manages exo/MLX processes on this host
+          ClusterController,
+          # GitHub Actions self-hosted runner controller
+          GhaRunnerExecutor,
+          # Backup executor — handles backup_snapshot_request and backup_restore_request
+          BackupExecutor,
+          # WireGuard mesh networking — manages wg interfaces for tenant mesh networks
+          WgMeshExecutor,
+          # Container orchestration — Docker/Podman lifecycle, log streaming, stats
+          ContainerExecutor,
+          # Docker Compose multi-service stacks — up/down/ps/logs wrapping docker compose v2
+          ComposeExecutor,
+          # SSH key management — add/remove authorized_keys entries on this host
+          SshKeysExecutor,
+          # Clipboard sync — bidirectional clipboard relay (pbcopy/xclip/wl-copy)
+          ClipboardExecutor,
+          Updater,
+          Session
+        ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end

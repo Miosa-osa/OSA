@@ -252,7 +252,8 @@ defmodule OptimalSystemAgent.Auth.AwsCredentials do
   # ── a small INI reader ────────────────────────────────────────────────────
 
   @doc false
-  @spec read_ini(String.t()) :: {:ok, %{String.t() => %{String.t() => String.t()}}} | {:error, term()}
+  @spec read_ini(String.t()) ::
+          {:ok, %{String.t() => %{String.t() => String.t()}}} | {:error, term()}
   def read_ini(path) do
     case File.read(path) do
       {:ok, content} -> {:ok, parse_ini(content)}
@@ -281,7 +282,9 @@ defmodule OptimalSystemAgent.Auth.AwsCredentials do
           case String.split(line, "=", parts: 2) do
             [k, v] ->
               key = k |> String.trim() |> String.downcase()
-              {section, update_in(acc, [Access.key(section, %{})], &Map.put(&1, key, String.trim(v)))}
+
+              {section,
+               update_in(acc, [Access.key(section, %{})], &Map.put(&1, key, String.trim(v)))}
 
             _ ->
               {section, acc}

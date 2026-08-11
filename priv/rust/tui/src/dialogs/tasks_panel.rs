@@ -311,7 +311,7 @@ impl TasksPanel {
                         let selected = *pos == self.cursor;
                         // Priority tag reserves a right-aligned slot when it fits.
                         let ptag = format!("[{}]", t.priority);
-                        let pw = ptag.chars().count();
+                        let pw = crate::util::cols(&ptag);
                         let show_tag = maxw > pw + 12 && !t.priority.is_empty();
                         let desc_budget = if show_tag {
                             maxw.saturating_sub(pw + 6) // "  \u{25CF} " + gap
@@ -323,14 +323,12 @@ impl TasksPanel {
                         if selected {
                             let mut s = format!("  \u{25CF} {desc}");
                             if show_tag {
-                                let used = s.chars().count();
+                                let used = crate::util::cols(&s);
                                 let pad = maxw.saturating_sub(used + pw);
                                 s.push_str(&" ".repeat(pad));
                                 s.push_str(&ptag);
                             }
-                            let mut s = truncate_chars(&s, maxw);
-                            let pad = maxw.saturating_sub(s.chars().count());
-                            s.push_str(&" ".repeat(pad));
+                            let s = crate::util::pad_cols(&s, maxw);
                             put(
                                 frame,
                                 Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
@@ -381,14 +379,13 @@ impl TasksPanel {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte descriptions can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

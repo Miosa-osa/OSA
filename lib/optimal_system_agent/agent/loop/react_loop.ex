@@ -780,7 +780,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         }
 
         state =
-          %{state | messages: state.messages ++ [%{role: "assistant", content: content}, nudge], iteration: state.iteration + 1}
+          %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+              iteration: state.iteration + 1
+          }
           |> Map.put(:target_continues, Map.get(state, :target_continues, 0) + 1)
 
         run(state)
@@ -796,7 +800,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           )
 
         state =
-          %{state | messages: state.messages ++ [%{role: "assistant", content: content}, cont], iteration: state.iteration + 1}
+          %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}, cont],
+              iteration: state.iteration + 1
+          }
           |> Map.put(:just_compacted, false)
           |> Map.put(:just_compacted_overflow, false)
 
@@ -1150,7 +1158,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp continue_after_tools(results, tool_calls, state, resample_snapshot) do
-
     # Per-iteration context-pressure emit (mid-turn meter fix): previously
     # Telemetry.emit_context_pressure/1 only fired at turn boundaries (loop.ex),
     # so the TUI context bar stayed frozen while a single turn ran many tool
@@ -1318,8 +1325,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               state.messages,
               Map.get(state, :last_input_tokens, 0),
               state.session_id,
-              context_window:
-                OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+              context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
               force: true
             )
         end
@@ -1330,7 +1336,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # placeholders before retrying. Idempotent (placeholders are plain text) and
       # a no-op when there is no media.
       state =
-        %{state | messages: strip_media_from_messages(collapsed_messages), overflow_retries: retry_num}
+        %{
+          state
+          | messages: strip_media_from_messages(collapsed_messages),
+            overflow_retries: retry_num
+        }
         |> Map.put(:just_compacted, true)
         |> Map.put(:just_compacted_overflow, true)
 

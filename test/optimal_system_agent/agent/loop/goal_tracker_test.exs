@@ -150,7 +150,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerTest do
       GoalTracker.start(sid, "goal")
 
       # Round 1 (turn N): incomplete, cites gap A — first occurrence, no stall yet.
-      snap1 = GoalTracker.advance(sid, result(:incomplete, gaps: ["still missing the CSV export"]))
+      snap1 =
+        GoalTracker.advance(sid, result(:incomplete, gaps: ["still missing the CSV export"]))
+
       assert snap1.status == :active
       assert snap1.stall_count == 1
 
@@ -159,7 +161,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerTest do
       GoalTracker.tick_turn(sid)
 
       # Round 2 (turn N+1): identical gap fingerprint -> stall trips.
-      snap2 = GoalTracker.advance(sid, result(:incomplete, gaps: ["still missing the CSV export"]))
+      snap2 =
+        GoalTracker.advance(sid, result(:incomplete, gaps: ["still missing the CSV export"]))
 
       assert snap2.status == :paused
       assert snap2.pause_reason == :no_progress

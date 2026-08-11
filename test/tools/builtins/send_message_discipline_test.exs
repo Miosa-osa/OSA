@@ -75,8 +75,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessageDisciplineTest do
 
       assert result =~ @parent, "expected the send to resolve to the parent session"
 
-      assert_receive {:osa_event,
-                      %{type: :agent_message, session_id: @parent, text: text}},
+      assert_receive {:osa_event, %{type: :agent_message, session_id: @parent, text: text}},
                      1_000
 
       assert text =~ "no tests at all"
@@ -249,7 +248,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessageDisciplineTest do
 
       :ets.insert(
         Constants.pending_table(),
-        {target, %{from: "ghost", content: "ancient", timestamp: now - Constants.pending_ttl_ms() - 1}}
+        {target,
+         %{from: "ghost", content: "ancient", timestamp: now - Constants.pending_ttl_ms() - 1}}
       )
 
       :ets.insert(

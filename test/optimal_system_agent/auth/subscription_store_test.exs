@@ -68,7 +68,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       entry = %{"access_token" => "at", "refresh_token" => "rt", "expires_at" => 123}
       assert :ok = SubscriptionStore.put("copilot", entry)
 
-      assert %{"access_token" => "at", "refresh_token" => "rt"} = SubscriptionStore.fetch("copilot")
+      assert %{"access_token" => "at", "refresh_token" => "rt"} =
+               SubscriptionStore.fetch("copilot")
+
       assert SubscriptionStore.connected?("copilot")
     end
 
@@ -175,7 +177,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
 
     test "refreshing an unconnected provider reports it rather than crashing" do
       assert {:error, :not_connected} =
-               SubscriptionStore.refresh_within_lock("copilot", fn e -> {:ok, e} end, fn _ -> true end)
+               SubscriptionStore.refresh_within_lock("copilot", fn e -> {:ok, e} end, fn _ ->
+                 true
+               end)
     end
 
     test "the file the refresh writes is still 0600" do
@@ -209,7 +213,12 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
             Process.sleep(2)
             all = SubscriptionStore.list()
             entry = Map.put(all["copilot"], "n", current + 1)
-            File.write!(SubscriptionStore.path(), Jason.encode!(%{"version" => 1, "providers" => %{"copilot" => entry}}))
+
+            File.write!(
+              SubscriptionStore.path(),
+              Jason.encode!(%{"version" => 1, "providers" => %{"copilot" => entry}})
+            )
+
             File.chmod!(SubscriptionStore.path(), 0o600)
           end)
         end,
@@ -445,7 +454,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       # collapses every failure to `nil`) tells the caller to sign in again —
       # destructive advice for a file that is merely mis-permissioned.
       assert {:error, {:unsafe_read, :insecure_permissions}} = result
-      assert :counters.get(called?, 1) == 0, "must not spend a refresh token against a store it could not read"
+
+      assert :counters.get(called?, 1) == 0,
+             "must not spend a refresh token against a store it could not read"
 
       File.chmod!(SubscriptionStore.path(), 0o600)
       assert SubscriptionStore.fetch("copilot")["access_token"] == "old"
@@ -457,7 +468,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       future =
         Jason.encode!(%{
           "version" => 99,
-          "providers" => %{"copilot" => %{"access_token" => "a", "some_future_field" => "keep me"}}
+          "providers" => %{
+            "copilot" => %{"access_token" => "a", "some_future_field" => "keep me"}
+          }
         })
 
       File.mkdir_p!(Path.dirname(SubscriptionStore.path()))
@@ -481,7 +494,10 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       File.mkdir_p!(Path.dirname(SubscriptionStore.path()))
 
       for body <- [
-            Jason.encode!(%{"version" => 1, "providers" => %{"copilot" => %{"access_token" => "a"}}}),
+            Jason.encode!(%{
+              "version" => 1,
+              "providers" => %{"copilot" => %{"access_token" => "a"}}
+            }),
             Jason.encode!(%{"providers" => %{"copilot" => %{"access_token" => "a"}}})
           ] do
         File.write!(SubscriptionStore.path(), body)
@@ -498,7 +514,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       # changes mid-operation therefore locked one file and wrote another —
       # an unlocked write, to a store nobody had read.
       original = SubscriptionStore.path()
-      elsewhere = Path.join(System.tmp_dir!(), "osa-substore-moved-#{System.unique_integer([:positive])}")
+
+      elsewhere =
+        Path.join(System.tmp_dir!(), "osa-substore-moved-#{System.unique_integer([:positive])}")
 
       observed =
         SubscriptionStore.with_lock(fn ctx ->

@@ -149,7 +149,12 @@ defmodule OptimalSystemAgent.Agent.Safety.ModelClassifierTest do
     end
 
     test "handles string-keyed tool_call maps" do
-      v = ModelClassifier.classify(%{"name" => "shell_execute", "arguments" => %{"command" => "rm -rf /"}})
+      v =
+        ModelClassifier.classify(%{
+          "name" => "shell_execute",
+          "arguments" => %{"command" => "rm -rf /"}
+        })
+
       assert v.risk == :dangerous
     end
   end

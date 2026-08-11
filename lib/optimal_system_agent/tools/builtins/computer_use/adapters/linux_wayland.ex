@@ -228,8 +228,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
         File.write!(tmp, text)
 
         case System.cmd("sh", ["-c", "wl-copy < #{tmp}"], stderr_to_stdout: true) do
-          {_, 0} -> :ok
-          {output, code} -> {:error, "clipboard write failed (exit #{code}): #{String.trim(output)}"}
+          {_, 0} ->
+            :ok
+
+          {output, code} ->
+            {:error, "clipboard write failed (exit #{code}): #{String.trim(output)}"}
         end
       after
         File.rm(tmp)

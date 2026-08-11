@@ -205,5 +205,4 @@ defmodule OptimalSystemAgent.OpenComputers.UpdaterTest do
 
     result
   end
-
 end

@@ -183,7 +183,11 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
           tool_msgs =
             Enum.map(committed_ids, fn id ->
               Map.get(results_by_id, id) ||
-                %{role: "tool", tool_call_id: id, content: ToolError.model_text("tool result lost")}
+                %{
+                  role: "tool",
+                  tool_call_id: id,
+                  content: ToolError.model_text("tool result lost")
+                }
             end)
 
           content = if is_binary(partial_content), do: partial_content, else: ""

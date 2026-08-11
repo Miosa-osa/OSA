@@ -31,10 +31,12 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipelineCompactionDedupTest do
     original_warn = Application.get_env(:optimal_system_agent, :compaction_warn)
 
     on_exit(fn ->
-      if original_max, do: Application.put_env(:optimal_system_agent, :max_context_tokens, original_max),
+      if original_max,
+        do: Application.put_env(:optimal_system_agent, :max_context_tokens, original_max),
         else: Application.delete_env(:optimal_system_agent, :max_context_tokens)
 
-      if original_warn, do: Application.put_env(:optimal_system_agent, :compaction_warn, original_warn),
+      if original_warn,
+        do: Application.put_env(:optimal_system_agent, :compaction_warn, original_warn),
         else: Application.delete_env(:optimal_system_agent, :compaction_warn)
     end)
 
@@ -58,7 +60,12 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipelineCompactionDedupTest do
 
     # Force the Compactor to actually run against this history.
     Application.put_env(:optimal_system_agent, :compaction_warn, 0.0)
-    Application.put_env(:optimal_system_agent, :max_context_tokens, div(pre_compaction_estimate, 2))
+
+    Application.put_env(
+      :optimal_system_agent,
+      :max_context_tokens,
+      div(pre_compaction_estimate, 2)
+    )
 
     sid = "dedup-#{System.unique_integer([:positive])}"
     state = %{messages: messages, session_id: sid, last_input_tokens: pre_compaction_estimate}
@@ -79,7 +86,12 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipelineCompactionDedupTest do
     pre_compaction_estimate = Compactor.estimate_tokens(messages)
 
     Application.put_env(:optimal_system_agent, :compaction_warn, 0.0)
-    Application.put_env(:optimal_system_agent, :max_context_tokens, div(pre_compaction_estimate, 2))
+
+    Application.put_env(
+      :optimal_system_agent,
+      :max_context_tokens,
+      div(pre_compaction_estimate, 2)
+    )
 
     sid = "dedup-#{System.unique_integer([:positive])}"
     state = %{messages: messages, session_id: sid, last_input_tokens: pre_compaction_estimate}

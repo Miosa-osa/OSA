@@ -134,6 +134,7 @@ defmodule OptimalSystemAgent.Personality do
   @doc "Get the overlay text for the current personality (nil if default)."
   def active_overlay do
     name = current()
+
     case Map.get(all_personalities(), name) do
       %{overlay: nil} -> nil
       %{overlay: overlay} -> "## Active Personality: #{name}\n\n#{overlay}"

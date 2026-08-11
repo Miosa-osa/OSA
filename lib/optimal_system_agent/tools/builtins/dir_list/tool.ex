@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.DirList.Tool do
-  @moduledoc  """
+  @moduledoc """
   Structured-layout tool implementation for `dir_list`.
 
   Per-tool directory layout — declarations only; all logic lives in the

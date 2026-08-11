@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Tool do
-  @moduledoc  """
+  @moduledoc """
   Non-blocking background watch tool.
 
   Registers a supervised watcher (see `Monitor.WatchManager` / `WatchTask`) and

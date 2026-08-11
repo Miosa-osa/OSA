@@ -235,7 +235,9 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
     test "never emits a thinkingBudget for a 3.x model" do
       # thinkingLevel and thinkingBudget are MUTUALLY EXCLUSIVE — sending both
       # is a hard request error.
-      cfg = Google.build_thinking_config(@gemini3, thinking_budget: 32_000, reasoning_effort: "high")
+      cfg =
+        Google.build_thinking_config(@gemini3, thinking_budget: 32_000, reasoning_effort: "high")
+
       refute Map.has_key?(cfg, :thinkingConfig)
       assert Map.has_key?(cfg, :thinkingLevel)
     end
@@ -397,7 +399,9 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
     end
 
     test "gemini + ollama do not crash on the fallback budget" do
-      cfg = Google.build_thinking_config(@gemini_thinking, thinking_budget: Effort.thinking_budget())
+      cfg =
+        Google.build_thinking_config(@gemini_thinking, thinking_budget: Effort.thinking_budget())
+
       assert cfg == %{thinkingConfig: %{thinkingBudget: 5_000}}
 
       assert Ollama.apply_think(%{}, @ollama_flat, []) == %{}

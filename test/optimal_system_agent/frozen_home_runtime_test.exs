@@ -77,7 +77,10 @@ defmodule OptimalSystemAgent.FrozenHomeRuntimeTest do
     result = ToolResultStorage.apply_budget(big, "grep_search", "call-1", "sess-1")
 
     results_dir = Path.join(override, "tool-results")
-    assert String.contains?(result, results_dir), "reference note should point under #{results_dir}"
+
+    assert String.contains?(result, results_dir),
+           "reference note should point under #{results_dir}"
+
     assert Path.wildcard(Path.join(results_dir, "*.txt")) != []
   end
 

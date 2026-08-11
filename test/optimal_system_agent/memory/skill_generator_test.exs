@@ -7,7 +7,10 @@ defmodule OptimalSystemAgent.Memory.SkillGeneratorTest do
     test "generate_all_pending is a no-op when the flag is unset" do
       prev = Application.get_env(:optimal_system_agent, :auto_skill_generation)
       Application.delete_env(:optimal_system_agent, :auto_skill_generation)
-      on_exit(fn -> if prev, do: Application.put_env(:optimal_system_agent, :auto_skill_generation, prev) end)
+
+      on_exit(fn ->
+        if prev, do: Application.put_env(:optimal_system_agent, :auto_skill_generation, prev)
+      end)
 
       assert SkillGenerator.generate_all_pending() == {:ok, 0}
     end

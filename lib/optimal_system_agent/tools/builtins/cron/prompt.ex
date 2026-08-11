@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Prompt do
   Dynamic prompt for the `cron` tool.
 
   Consolidates what the upstream agent CLI splits across CronCreateTool/CronListTool/
-into a single
+  into a single
   function, since OSA exposes all cron actions through one action-discriminated
   tool rather than three separate tools.
 

@@ -279,9 +279,13 @@ defmodule OptimalSystemAgent.Shell.Pty.Screen do
 
   defp erase_display(s, _all), do: %{s | grid: blank_grid(s.rows)}
 
-  defp erase_line(s, 0), do: %{s | grid: update_row(s.grid, s.cur_row, &clear_from(&1, s.cur_col))}
+  defp erase_line(s, 0),
+    do: %{s | grid: update_row(s.grid, s.cur_row, &clear_from(&1, s.cur_col))}
+
   defp erase_line(s, 1), do: %{s | grid: update_row(s.grid, s.cur_row, &clear_to(&1, s.cur_col))}
-  defp erase_line(s, _all), do: %{s | grid: update_row(s.grid, s.cur_row, fn _ -> blank_row() end)}
+
+  defp erase_line(s, _all),
+    do: %{s | grid: update_row(s.grid, s.cur_row, fn _ -> blank_row() end)}
 
   defp cursor_to(s, row1, col1) do
     %{s | cur_row: clamp(row1 - 1, 0, s.rows - 1), cur_col: clamp(col1 - 1, 0, s.cols - 1)}

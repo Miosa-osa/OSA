@@ -116,7 +116,7 @@ defmodule OptimalSystemAgent.MixProject do
 
       # Telemetry
       {:telemetry, "~> 1.2"},
-      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics, "~> 1.0"}
 
       # OTP 28: rustler removed — nif.ex uses pure Elixir fallbacks
       # {:rustler, "~> 0.37", optional: true}

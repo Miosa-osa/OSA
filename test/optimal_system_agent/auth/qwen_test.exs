@@ -116,14 +116,15 @@ defmodule OptimalSystemAgent.Auth.Providers.QwenTest do
     test "binds the grant with PKCE: challenge on the authorization leg, matching verifier on the exchange" do
       stub(%{
         "/api/v1/oauth2/device/code" => device_code_response(),
-        "/api/v1/oauth2/token" => {200,
-         %{
-           "access_token" => "at-1",
-           "refresh_token" => "rt-1",
-           "expires_in" => 3600,
-           "resource_url" => "portal.qwen.ai",
-           "id_token" => jwt(%{"email" => "qwen@example.com"})
-         }}
+        "/api/v1/oauth2/token" =>
+          {200,
+           %{
+             "access_token" => "at-1",
+             "refresh_token" => "rt-1",
+             "expires_in" => 3600,
+             "resource_url" => "portal.qwen.ai",
+             "id_token" => jwt(%{"email" => "qwen@example.com"})
+           }}
       })
 
       assert {:ok, entry} = Qwen.login(io: silent())
@@ -280,8 +281,7 @@ defmodule OptimalSystemAgent.Auth.Providers.QwenTest do
 
       stub(%{
         "/api/v1/oauth2/token" =>
-          {200,
-           %{"access_token" => "at-2", "expires_in" => 3600, "resource_url" => "eu.qwen.ai"}}
+          {200, %{"access_token" => "at-2", "expires_in" => 3600, "resource_url" => "eu.qwen.ai"}}
       })
 
       assert {:ok, "at-2"} = Subscription.access_token("qwen")
@@ -321,7 +321,10 @@ defmodule OptimalSystemAgent.Auth.Providers.QwenTest do
 
     test "the key WINS over a connected account, and the account code never runs" do
       Application.put_env(:optimal_system_agent, :qwen_api_key, "qwen-key-1")
-      connect!(live_entry(%{"expires_at" => System.system_time(:second) - 1, "refresh_token" => ""}))
+
+      connect!(
+        live_entry(%{"expires_at" => System.system_time(:second) - 1, "refresh_token" => ""})
+      )
 
       assert {:ok, "qwen-key-1", @dashscope} = OpenAICompatProvider.resolved_credential(:qwen)
     end

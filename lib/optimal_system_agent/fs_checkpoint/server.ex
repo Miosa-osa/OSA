@@ -111,7 +111,8 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   `additions`/`deletions` (git reports `-`/`-` for them in `--numstat`).
   """
   @spec diff_stat(String.t() | nil, String.t()) ::
-          {:ok, %{additions: integer(), deletions: integer(), files: integer(), paths: [String.t()]}}
+          {:ok,
+           %{additions: integer(), deletions: integer(), files: integer(), paths: [String.t()]}}
           | {:error, String.t()}
   def diff_stat(from_commit, to_commit \\ "HEAD")
 
@@ -488,7 +489,8 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
           end)
           |> Enum.reject(&is_nil/1)
 
-        {:ok, "Restored #{length(restored)} file(s) to code state at #{String.slice(full_hash, 0, 8)}"}
+        {:ok,
+         "Restored #{length(restored)} file(s) to code state at #{String.slice(full_hash, 0, 8)}"}
 
       {err, _} ->
         {:error, "Failed to read checkpoint tree: #{err}"}
@@ -570,7 +572,9 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
         count = count_str |> String.trim() |> String.to_integer()
 
         if count > max + 10 do
-          Logger.info("[fs_checkpoint] Checkpoint count #{count} exceeds max #{max} — consider pruning the shadow repo at #{repo_path}")
+          Logger.info(
+            "[fs_checkpoint] Checkpoint count #{count} exceeds max #{max} — consider pruning the shadow repo at #{repo_path}"
+          )
         end
 
       _ ->

@@ -210,7 +210,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   """
   @spec base_url(atom()) :: String.t()
   def base_url(provider) do
-    Application.get_env(:optimal_system_agent, :"#{provider}_url", get_config!(provider).default_url)
+    Application.get_env(
+      :optimal_system_agent,
+      :"#{provider}_url",
+      get_config!(provider).default_url
+    )
   end
 
   @doc "True when this provider is a local server that needs no API key."
@@ -284,7 +288,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     end
   end
 
-
   # ── Dual-mode credential resolution ─────────────────────────────────────
   #
   # A provider listed here offers a SECOND way in besides a pasted key: the
@@ -324,7 +327,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   # (retry or not, once or repeatedly, account or key), and `OpenAICompat`
   # offers no plug seam to drive that decision through a real HTTP call.
   @doc false
-  @spec retry_once_on_rejected_account_token(atom(), String.t() | nil, (String.t() | nil -> term())) ::
+  @spec retry_once_on_rejected_account_token(atom(), String.t() | nil, (String.t() | nil ->
+                                                                          term())) ::
           term()
   def retry_once_on_rejected_account_token(provider, api_key, fun) do
     case fun.(api_key) do
@@ -390,7 +394,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   defp resolve_credential(provider, config) do
     case resolve_api_key(provider, config) do
       key when is_binary(key) and key != "" ->
-        {:ok, key, Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
+        {:ok, key,
+         Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
 
       _ ->
         account_credential(provider, config)
@@ -400,7 +405,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   defp account_credential(provider, config) do
     case Map.get(@account_modes, provider) do
       nil ->
-        {:ok, nil, Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
+        {:ok, nil,
+         Application.get_env(:optimal_system_agent, :"#{provider}_url", config.default_url)}
 
       module ->
         # `connected?/0` is a pure read; `access_token/0` may refresh. Asking

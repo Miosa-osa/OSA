@@ -391,6 +391,8 @@ defmodule OptimalSystemAgent.Agent.Safety.ModelClassifier do
   defp tool_name(tc) when is_map(tc), do: Map.get(tc, :name) || Map.get(tc, "name")
   defp tool_name(_), do: nil
 
-  defp tool_args(tc) when is_map(tc), do: Map.get(tc, :arguments) || Map.get(tc, "arguments") || %{}
+  defp tool_args(tc) when is_map(tc),
+    do: Map.get(tc, :arguments) || Map.get(tc, "arguments") || %{}
+
   defp tool_args(_), do: %{}
 end

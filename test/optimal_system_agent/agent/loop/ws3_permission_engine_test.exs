@@ -205,7 +205,14 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
         Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, true)
 
       Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, false)
-      on_exit(fn -> Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, prior_bypass) end)
+
+      on_exit(fn ->
+        Application.put_env(
+          :optimal_system_agent,
+          :non_interactive_permission_bypass,
+          prior_bypass
+        )
+      end)
 
       s = state(permission_mode: :accept_edits)
 

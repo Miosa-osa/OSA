@@ -71,7 +71,8 @@ defmodule OptimalSystemAgent.Agent.Safety.Rules do
     {"cat/read secret piped out",
      ~r/\b(?:cat|less|head|tail|dd)\b[^\n]*#{@secret_paths}[^\n]*\|/i},
     {"env dump piped out", ~r/\b(?:env|printenv|set)\b[^\n]*\|[^\n]*#{@exfil_sink}/i},
-    {"curl exfil of secret", ~r/\bcurl\b[^\n]*(?:-d|--data|-T|--upload-file)[^\n]*#{@secret_paths}/i},
+    {"curl exfil of secret",
+     ~r/\bcurl\b[^\n]*(?:-d|--data|-T|--upload-file)[^\n]*#{@secret_paths}/i},
     {"tar secrets to stdout", ~r/\btar\b[^\n]*#{@secret_paths}[^\n]*\|/i}
   ]
 
@@ -80,7 +81,8 @@ defmodule OptimalSystemAgent.Agent.Safety.Rules do
   @mass_delete [
     {"rm -rf root/home/broad",
      ~r/\brm\s+(?:-\w*[rf]\w*\s+)+(?:-\w+\s+)*(?:\/|~|\$HOME|\.\.?\/?|\*|\/\*)(?:\s|$)/i},
-    {"rm -rf with force+recurse", ~r/\brm\s+(?:-[rf]+\s*){1,}.*(?:-fr|-rf|--recursive.*--force)/i},
+    {"rm -rf with force+recurse",
+     ~r/\brm\s+(?:-[rf]+\s*){1,}.*(?:-fr|-rf|--recursive.*--force)/i},
     {"find -delete", ~r/\bfind\b[^\n]*-delete\b/i},
     {"find -exec rm", ~r/\bfind\b[^\n]*-exec\s+rm\b/i},
     {"git clean -fdx", ~r/\bgit\s+clean\b[^\n]*-\w*[fdx]\w*/i},

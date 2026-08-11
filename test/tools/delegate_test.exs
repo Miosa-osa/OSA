@@ -251,7 +251,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
       messages = [%{role: "user", content: "please fix the failing test"}]
 
       assert {:deny, msg} =
-               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:explicit_only, messages))
+               Handler.check_permissions(
+                 %{"task" => "do X"},
+                 policy_ctx(:explicit_only, messages)
+               )
 
       assert msg =~ "explicit-only"
     end
@@ -260,7 +263,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
       messages = [%{role: "user", content: "delegate this to a subagent, please"}]
 
       assert {:allow, _} =
-               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:explicit_only, messages))
+               Handler.check_permissions(
+                 %{"task" => "do X"},
+                 policy_ctx(:explicit_only, messages)
+               )
     end
 
     test "explicit_only accepts string policy form 'explicit-only'" do

@@ -31,7 +31,8 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       "No API key configured · Run /provider to add a key, or /login to sign in with an account.",
     invalid_api_key:
       "Invalid or missing API key · Run /provider to update the key, or /login to sign in with an account.",
-    token_revoked: "Provider token revoked · Run /login to sign in again, or /provider for a fresh API key.",
+    token_revoked:
+      "Provider token revoked · Run /login to sign in again, or /provider for a fresh API key.",
     oauth_org_not_allowed:
       "Your organization does not allow this sign-in method · Run /provider to use an API key, or contact your administrator.",
     org_disabled:

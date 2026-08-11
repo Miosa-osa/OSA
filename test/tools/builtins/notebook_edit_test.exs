@@ -25,7 +25,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEditTest do
     path
   end
 
-  defp code_cell(source), do: %{"cell_type" => "code", "source" => [source], "metadata" => %{}, "execution_count" => nil, "outputs" => []}
+  defp code_cell(source),
+    do: %{
+      "cell_type" => "code",
+      "source" => [source],
+      "metadata" => %{},
+      "execution_count" => nil,
+      "outputs" => []
+    }
+
   defp md_cell(source), do: %{"cell_type" => "markdown", "source" => [source], "metadata" => %{}}
 
   defp read_cells(path) do

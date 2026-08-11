@@ -206,10 +206,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Handler do
         "(bot protection or auth required). No content was retrieved. Try a different source."
 
   defp http_status_error(401, url),
-    do: "HTTP 401 Unauthorized fetching #{url} — this URL requires authentication. No content was retrieved."
+    do:
+      "HTTP 401 Unauthorized fetching #{url} — this URL requires authentication. No content was retrieved."
 
   defp http_status_error(404, url),
-    do: "HTTP 404 Not Found fetching #{url} — no content was retrieved. Check the URL or try a different source."
+    do:
+      "HTTP 404 Not Found fetching #{url} — no content was retrieved. Check the URL or try a different source."
 
   defp http_status_error(429, url),
     do:

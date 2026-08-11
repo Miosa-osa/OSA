@@ -61,7 +61,12 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
 
   describe "skill-discovery collector" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "rem-skill-" <> Integer.to_string(:erlang.unique_integer([:positive])))
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "rem-skill-" <> Integer.to_string(:erlang.unique_integer([:positive]))
+        )
+
       skill_dir = Path.join([tmp, ".osa", "skills", "widget-maker"])
       File.mkdir_p!(skill_dir)
 
@@ -82,7 +87,10 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
       {:ok, tmp: tmp, touched: touched}
     end
 
-    test "surfaces a SKILL.md at an ancestor of a just-read file, once", %{tmp: tmp, touched: touched} do
+    test "surfaces a SKILL.md at an ancestor of a just-read file, once", %{
+      tmp: tmp,
+      touched: touched
+    } do
       s = sid()
       tc = %{name: "file_read", arguments: %{"path" => touched}, id: "r1"}
       state = %{session_id: s, working_dir: tmp}
@@ -242,7 +250,8 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
       s = sid()
       tc = %{name: "file_edit", arguments: %{"path" => "x.ex"}, id: "e1"}
 
-      out = Reminders.append("Error: old_string not found in x.ex", tc, s |> then(&%{session_id: &1}))
+      out =
+        Reminders.append("Error: old_string not found in x.ex", tc, s |> then(&%{session_id: &1}))
 
       assert out =~ "<system-reminder>"
       assert out =~ "Self-correction"

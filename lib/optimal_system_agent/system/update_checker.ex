@@ -145,7 +145,12 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
       case OptimalSystemAgent.System.Updater.available_update() do
         %{version: latest} = up ->
           current = Map.get(up, :current_version) || current_version()
-          %{available: true, current_version: to_string(current), latest_version: to_string(latest)}
+
+          %{
+            available: true,
+            current_version: to_string(current),
+            latest_version: to_string(latest)
+          }
 
         _ ->
           nil
@@ -179,7 +184,8 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
     _ -> none(current)
   end
 
-  defp none(current), do: %{available: false, current_version: to_string(current), latest_version: nil}
+  defp none(current),
+    do: %{available: false, current_version: to_string(current), latest_version: nil}
 
   defp enabled? do
     Application.get_env(:optimal_system_agent, :update_check_enabled, true)

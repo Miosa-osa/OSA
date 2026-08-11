@@ -23,7 +23,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyStart do
   def aliases, do: ["pty_spawn"]
 
   @impl true
-  def search_hint, do: "run an interactive terminal program that needs a real tty (vim, REPL, ssh)"
+  def search_hint,
+    do: "run an interactive terminal program that needs a real tty (vim, REPL, ssh)"
 
   @impl true
   def description do
@@ -44,15 +45,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyStart do
       "properties" => %{
         "command" => %{
           "type" => "string",
-          "description" => "The command to run under the pty, e.g. \"python3\", \"vim notes.txt\"."
+          "description" =>
+            "The command to run under the pty, e.g. \"python3\", \"vim notes.txt\"."
         },
         "name" => %{
           "type" => "string",
-          "description" => "Optional friendly name to address the session by (in addition to its id)."
+          "description" =>
+            "Optional friendly name to address the session by (in addition to its id)."
         },
-        "cols" => %{"type" => "integer", "description" => "Initial terminal columns (default 80)."},
+        "cols" => %{
+          "type" => "integer",
+          "description" => "Initial terminal columns (default 80)."
+        },
         "rows" => %{"type" => "integer", "description" => "Initial terminal rows (default 24)."},
-        "cwd" => %{"type" => "string", "description" => "Working directory (default: session cwd)."}
+        "cwd" => %{
+          "type" => "string",
+          "description" => "Working directory (default: session cwd)."
+        }
       },
       "required" => ["command"]
     }

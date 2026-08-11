@@ -586,7 +586,10 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       emit_stub(dir, [
         %{
           "type" => "assistant",
-          "message" => %{"model" => "claude-sonnet-4-5-20250929", "content" => [%{"type" => "text", "text" => "hello"}]}
+          "message" => %{
+            "model" => "claude-sonnet-4-5-20250929",
+            "content" => [%{"type" => "text", "text" => "hello"}]
+          }
         },
         %{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "hello"}
       ])
@@ -623,7 +626,9 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       refute content =~ "tool_call"
     end
 
-    test "an API error from the CLI surfaces with its own text, not a generic failure", %{dir: dir} do
+    test "an API error from the CLI surfaces with its own text, not a generic failure", %{
+      dir: dir
+    } do
       emit_stub(dir, [
         %{
           "type" => "result",
@@ -665,7 +670,10 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
             "delta" => %{"type" => "text_delta", "text" => "3"}
           }
         },
-        %{"type" => "assistant", "message" => %{"content" => [%{"type" => "text", "text" => "1, 2, 3"}]}},
+        %{
+          "type" => "assistant",
+          "message" => %{"content" => [%{"type" => "text", "text" => "1, 2, 3"}]}
+        },
         %{"type" => "result", "is_error" => false, "result" => "1, 2, 3"}
       ])
 
@@ -685,7 +693,10 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       emit_stub(dir, [
         %{
           "type" => "stream_event",
-          "event" => %{"type" => "content_block_delta", "delta" => %{"type" => "text_delta", "text" => "ok <tool"}}
+          "event" => %{
+            "type" => "content_block_delta",
+            "delta" => %{"type" => "text_delta", "text" => "ok <tool"}
+          }
         },
         %{
           "type" => "stream_event",
@@ -746,16 +757,22 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       echo '{"type":"result","is_error":false,"result":"ok"}'
       """)
 
-      assert {:ok, _} = ClaudeCli.chat([%{role: "system", content: "OSA prompt"}, %{role: "user", content: "hi"}])
+      assert {:ok, _} =
+               ClaudeCli.chat([
+                 %{role: "system", content: "OSA prompt"},
+                 %{role: "user", content: "hi"}
+               ])
 
       argv = File.read!(argv_file) |> String.split("\n")
 
-      for flag <- ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt) do
+      for flag <-
+            ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt) do
         assert flag in argv,
                "#{flag} is what keeps Claude Code from running its own agent instead of answering OSA's"
       end
 
-      assert "OSA prompt" in argv, "OSA's system prompt must replace Claude Code's, not be dropped"
+      assert "OSA prompt" in argv,
+             "OSA's system prompt must replace Claude Code's, not be dropped"
     end
 
     test "the request's temporary file is private and removed afterwards", %{dir: dir} do
@@ -773,7 +790,9 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       refute File.exists?(path), "the prompt file must not outlive the request"
     end
 
-    test "an inherited ANTHROPIC_API_KEY is cleared, so billing does not silently change", %{dir: dir} do
+    test "an inherited ANTHROPIC_API_KEY is cleared, so billing does not silently change", %{
+      dir: dir
+    } do
       seen = Path.join(dir, "env.txt")
       prev = System.get_env("ANTHROPIC_API_KEY")
       System.put_env("ANTHROPIC_API_KEY", "sk-ant-should-not-leak")

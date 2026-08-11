@@ -35,7 +35,9 @@ defmodule OptimalSystemAgent.Skills.ValidatorTest do
   defp rules(findings), do: findings |> Enum.map(& &1.rule) |> Enum.sort()
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "osa-skill-validator-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "osa-skill-validator-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     {:ok, dir: dir}

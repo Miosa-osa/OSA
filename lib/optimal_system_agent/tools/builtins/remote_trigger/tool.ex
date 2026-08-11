@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.RemoteTrigger.Tool do
-  @moduledoc  """
+  @moduledoc """
   External-trigger management tool.
 
   Pairs with `cron` (recurring schedules) and `monitor` (active polls) as

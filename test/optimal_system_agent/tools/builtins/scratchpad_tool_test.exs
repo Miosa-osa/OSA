@@ -14,7 +14,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ScratchpadToolTest do
     prev_boot = Application.get_env(:optimal_system_agent, :bootstrap_dir)
 
     tmp =
-      Path.join(System.tmp_dir!(), "osa_scratchpad_tool_test_#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "osa_scratchpad_tool_test_#{System.unique_integer([:positive])}"
+      )
 
     File.mkdir_p!(tmp)
     Application.put_env(:optimal_system_agent, :config_dir, tmp)
@@ -50,12 +53,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.ScratchpadToolTest do
     end
 
     test "write without name is rejected" do
-      assert {:error, msg, -32_602} = Handler.validate(%{"action" => "write", "content" => "x"}, nil)
+      assert {:error, msg, -32_602} =
+               Handler.validate(%{"action" => "write", "content" => "x"}, nil)
+
       assert msg =~ "name"
     end
 
     test "write without content is rejected" do
-      assert {:error, msg, -32_602} = Handler.validate(%{"action" => "write", "name" => "a.md"}, nil)
+      assert {:error, msg, -32_602} =
+               Handler.validate(%{"action" => "write", "name" => "a.md"}, nil)
+
       assert msg =~ "content"
     end
   end
@@ -145,7 +152,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ScratchpadToolTest do
 
     test "write emits a compact scratchpad_activity with no file contents", %{session_id: sid} do
       assert {:ok, msg} =
-               run(%{"action" => "write", "name" => "findings.md", "content" => "hello team"}, sid)
+               run(
+                 %{"action" => "write", "name" => "findings.md", "content" => "hello team"},
+                 sid
+               )
 
       assert msg =~ "Wrote findings.md"
 

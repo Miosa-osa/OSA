@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Protocol.TUISchemaTest do
       # request optionals use skip_serializing_if
       assert rust =~
                ~s|#[serde(skip_serializing_if = "Option::is_none")]\n    pub session_id: Option<String>,|
+
       # nested Vec<Struct>
       assert rust =~ "pub messages: Option<Vec<SessionMessage>>,"
       assert rust =~ "pub runs: Vec<RunSummary>,"

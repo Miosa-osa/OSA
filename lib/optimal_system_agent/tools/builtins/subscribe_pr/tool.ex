@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Tool do
-  @moduledoc  """
+  @moduledoc """
   Subscribe to GitHub Pull Request events via periodic cron polling.
 
   Registers a named job in the `cron` scheduler (Agent.Scheduler) that

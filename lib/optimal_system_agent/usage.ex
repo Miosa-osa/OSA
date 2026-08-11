@@ -302,6 +302,7 @@ defmodule OptimalSystemAgent.Usage do
   def ollama_account(base \\ nil) do
     base = base || System.get_env("OLLAMA_HOST") || "http://127.0.0.1:11434"
     base = if String.starts_with?(base, "http"), do: base, else: "http://" <> base
+
     with {:ok, host, port} <- loopback_target(base),
          {:ok, status, body} <- tcp_post(host, port, "/api/me") do
       case status do

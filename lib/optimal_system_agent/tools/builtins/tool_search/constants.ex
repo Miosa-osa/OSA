@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Constants do
   @moduledoc """
   Exported constants for `tool_search`.
 
- Other tools' prompts
+  Other tools' prompts
   reference `tool_name/0` so a rename here propagates automatically.
 
   NOTE: the canonical the upstream agent CLI name is "ToolSearch" (PascalCase). OSA

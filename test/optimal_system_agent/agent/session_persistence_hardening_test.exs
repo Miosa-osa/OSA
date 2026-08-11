@@ -32,7 +32,12 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceHardeningTest do
     on_exit(fn ->
       # save/3 now also maintains the immutable event log; clean its sidecars too.
       Enum.each(
-        [session_file(id), updates_file(id), updates_file(id) <> ".lock", updates_file(id) <> ".corrupt"],
+        [
+          session_file(id),
+          updates_file(id),
+          updates_file(id) <> ".lock",
+          updates_file(id) <> ".corrupt"
+        ],
         &File.rm/1
       )
     end)

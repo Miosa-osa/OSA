@@ -20,8 +20,18 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotTest do
     prev_id = Application.get_env(:optimal_system_agent, :copilot_client_id)
     Application.put_env(:optimal_system_agent, :copilot_client_id, "Iv1.test-client-id")
 
-    Application.put_env(:optimal_system_agent, :github_device_code_url, "https://stub.invalid/device/code")
-    Application.put_env(:optimal_system_agent, :github_token_url, "https://stub.invalid/oauth/token")
+    Application.put_env(
+      :optimal_system_agent,
+      :github_device_code_url,
+      "https://stub.invalid/device/code"
+    )
+
+    Application.put_env(
+      :optimal_system_agent,
+      :github_token_url,
+      "https://stub.invalid/oauth/token"
+    )
+
     Application.put_env(:optimal_system_agent, :github_user_url, "https://stub.invalid/user")
 
     on_exit(fn ->
@@ -111,7 +121,12 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotTest do
       stub(%{
         "/device/code" => {200, @authorization},
         "/oauth/token" =>
-          {200, %{"access_token" => "gho_secret", "refresh_token" => "ghr_secret", "expires_in" => 28_800}},
+          {200,
+           %{
+             "access_token" => "gho_secret",
+             "refresh_token" => "ghr_secret",
+             "expires_in" => 28_800
+           }},
         "/user" => {200, %{"login" => "octocat"}}
       })
 
@@ -195,7 +210,8 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotTest do
       })
 
       stub(%{
-        "/oauth/token" => {200, %{"access_token" => "new", "refresh_token" => "ghr_new", "expires_in" => 28_800}}
+        "/oauth/token" =>
+          {200, %{"access_token" => "new", "refresh_token" => "ghr_new", "expires_in" => 28_800}}
       })
 
       assert {:ok, "new"} = Copilot.access_token()

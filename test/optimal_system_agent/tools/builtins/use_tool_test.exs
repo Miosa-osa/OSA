@@ -88,7 +88,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseToolTest do
     test "invokes a discovered qualified tool and normalizes its result" do
       assert {:ok, "found: roadmap"} =
                UseTool.Handler.execute(
-                 %{"tool_name" => "mcp__notion__notion_search", "tool_input" => %{"query" => "roadmap"}},
+                 %{
+                   "tool_name" => "mcp__notion__notion_search",
+                   "tool_input" => %{"query" => "roadmap"}
+                 },
                  UseContext.empty()
                )
     end

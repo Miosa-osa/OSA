@@ -234,7 +234,12 @@ defmodule OptimalSystemAgent.Workspace.Trust do
             []
 
           unsafe ->
-            [%{kind: :env, label: "Environment variables set by #{rel}: #{Enum.join(unsafe, ", ")}"}]
+            [
+              %{
+                kind: :env,
+                label: "Environment variables set by #{rel}: #{Enum.join(unsafe, ", ")}"
+              }
+            ]
         end
 
       _ ->
@@ -248,8 +253,11 @@ defmodule OptimalSystemAgent.Workspace.Trust do
     |> List.wrap()
     |> Enum.filter(fn r -> is_binary(r) and String.starts_with?(r, "Bash(") end)
     |> case do
-      [] -> []
-      rules -> [%{kind: :bash_allow, label: "Pre-approved Bash rules in #{rel} (#{length(rules)})"}]
+      [] ->
+        []
+
+      rules ->
+        [%{kind: :bash_allow, label: "Pre-approved Bash rules in #{rel} (#{length(rules)})"}]
     end
   end
 

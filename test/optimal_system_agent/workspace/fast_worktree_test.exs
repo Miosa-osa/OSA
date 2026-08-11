@@ -144,7 +144,9 @@ defmodule OptimalSystemAgent.Workspace.FastWorktreeTest do
 
     test "falls through to the next tier when a tier reports failure", %{repo: repo} do
       # A bogus tier is :unsupported → must fall through to :copy and succeed.
-      assert {:ok, info} = FastWorktree.create("agent-fallthrough", repo_dir: repo, prefer: [:bogus])
+      assert {:ok, info} =
+               FastWorktree.create("agent-fallthrough", repo_dir: repo, prefer: [:bogus])
+
       assert info.tier in [:copy, :git]
       FastWorktree.teardown(info.path, repo_dir: repo)
     end

@@ -560,5 +560,4 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   defp schedule_reap do
     Process.send_after(self(), :reap, @reap_interval)
   end
-
 end

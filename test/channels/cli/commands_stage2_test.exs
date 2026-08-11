@@ -219,7 +219,9 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsStage2Test do
       assert out =~ "set to"
 
       assert Application.get_env(:optimal_system_agent, :sandbox_backend) == :docker
-      assert {:ok, %{"backend" => "docker"}} = File.read(tmp) |> then(&(&1 |> elem(1) |> Jason.decode()))
+
+      assert {:ok, %{"backend" => "docker"}} =
+               File.read(tmp) |> then(&(&1 |> elem(1) |> Jason.decode()))
     end
 
     test "rejects an unknown backend" do

@@ -208,6 +208,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   get "/recent" do
     limit = parse_int(conn.params["limit"], 50)
+
     sessions =
       OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
       |> OptimalSystemAgent.Memory.SessionTitler.decorate_rows()

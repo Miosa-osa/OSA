@@ -185,12 +185,14 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotCli do
     with bin when is_binary(bin) <- System.find_executable("gh"),
          {out, 0} <- cmd(bin, ["auth", "status"]) do
       account = Regex.run(~r/account\s+(\S+)/i, out) |> capture()
-      token_type = cond do
-        String.contains?(out, "gho_") -> "gho"
-        String.contains?(out, "github_pat_") -> "github_pat"
-        String.contains?(out, "ghp_") -> "ghp"
-        true -> nil
-      end
+
+      token_type =
+        cond do
+          String.contains?(out, "gho_") -> "gho"
+          String.contains?(out, "github_pat_") -> "github_pat"
+          String.contains?(out, "ghp_") -> "ghp"
+          true -> nil
+        end
 
       if token_type in ["gho", "github_pat"] do
         {:ok, %{account: account, token_type: token_type}}
@@ -400,8 +402,8 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotCli do
 
     if was_connected? do
       Logger.info(
-      "[Auth] Disconnected #{@display_name} from OSA. Your Copilot CLI sign-in is untouched — " <>
-        "run `copilot logout` there if you also want to sign out of it."
+        "[Auth] Disconnected #{@display_name} from OSA. Your Copilot CLI sign-in is untouched — " <>
+          "run `copilot logout` there if you also want to sign out of it."
       )
     end
 

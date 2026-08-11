@@ -81,7 +81,11 @@ defmodule OptimalSystemAgent.Agent.Loop.TelemetryPerIterationTest do
           | messages:
               acc.messages ++
                 [
-                  %{role: "assistant", content: "", tool_calls: [%{id: "call_#{i}", name: "file_read"}]},
+                  %{
+                    role: "assistant",
+                    content: "",
+                    tool_calls: [%{id: "call_#{i}", name: "file_read"}]
+                  },
                   big_tool_result(i)
                 ]
         }

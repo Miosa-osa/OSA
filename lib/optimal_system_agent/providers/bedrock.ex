@@ -197,7 +197,8 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     case bearer_token() do
       token when is_binary(token) ->
         with {:ok, region} <- bearer_region() do
-          {:ok, %{mode: :bearer, token: token, region: region, base_url: Auth.runtime_url(region)}}
+          {:ok,
+           %{mode: :bearer, token: token, region: region, base_url: Auth.runtime_url(region)}}
         end
 
       nil ->
@@ -232,8 +233,11 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   end
 
   defp sign(%{mode: :bearer, token: token}, _method, _url, _payload) do
-    [{"authorization", "Bearer #{token}"}, {"content-type", "application/json"},
-     {"accept", "application/json"}]
+    [
+      {"authorization", "Bearer #{token}"},
+      {"content-type", "application/json"},
+      {"accept", "application/json"}
+    ]
   end
 
   defp sign(%{mode: :sigv4} = auth, method, url, payload) do
@@ -317,7 +321,10 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     # shape, so the empty case gets one empty text block rather than being
     # dropped — dropping it would break the tool_use/tool_result pairing the
     # very next message depends on.
-    %{"role" => converse_role(role(msg)), "content" => if(blocks == [], do: [%{"text" => ""}], else: blocks)}
+    %{
+      "role" => converse_role(role(msg)),
+      "content" => if(blocks == [], do: [%{"text" => ""}], else: blocks)
+    }
   end
 
   defp tool_result(msg) do
@@ -345,7 +352,8 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     messages
     |> Enum.reduce([], fn msg, acc ->
       case acc do
-        [%{"role" => role, "content" => prev} = last | rest] when role == :erlang.map_get("role", msg) ->
+        [%{"role" => role, "content" => prev} = last | rest]
+        when role == :erlang.map_get("role", msg) ->
           [%{last | "content" => prev ++ Map.fetch!(msg, "content")} | rest]
 
         _ ->

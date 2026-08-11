@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool do
-  @moduledoc  """
+  @moduledoc """
   Structured-layout tool implementation for `tool_search`.
 
   This is the lazy-loading mechanism for OSA's Phase 3b prompt-token

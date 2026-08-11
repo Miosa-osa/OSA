@@ -157,7 +157,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
       result = OpenAIResponses.parse_response(resp, [])
 
       assert result.content == "Hello"
-      assert [%{id: "call_9", name: "read_file", arguments: %{"path" => "a.txt"}}] = result.tool_calls
+
+      assert [%{id: "call_9", name: "read_file", arguments: %{"path" => "a.txt"}}] =
+               result.tool_calls
+
       assert result.usage.input_tokens == 12
       assert result.usage.output_tokens == 5
       assert result.usage.cached_tokens == 4
@@ -195,7 +198,12 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
     test "malformed tool arguments degrade to empty rather than crashing the turn" do
       resp = %{
         "output" => [
-          %{"type" => "function_call", "call_id" => "c", "name" => "t", "arguments" => "{not json"}
+          %{
+            "type" => "function_call",
+            "call_id" => "c",
+            "name" => "t",
+            "arguments" => "{not json"
+          }
         ]
       }
 
@@ -278,7 +286,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
       acc =
         drain([
           event("response.output_item.done", %{
-            "item" => %{"type" => "message", "content" => [%{"type" => "output_text", "text" => "hi"}]}
+            "item" => %{
+              "type" => "message",
+              "content" => [%{"type" => "output_text", "text" => "hi"}]
+            }
           })
         ])
 
@@ -330,7 +341,13 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
     end
 
     test "[DONE] and empty frames are tolerated" do
-      acc = drain(["data: [DONE]\n\n", "\n\n", event("response.output_text.delta", %{"delta" => "x"})])
+      acc =
+        drain([
+          "data: [DONE]\n\n",
+          "\n\n",
+          event("response.output_text.delta", %{"delta" => "x"})
+        ])
+
       assert acc.content == "x"
     end
   end

@@ -44,7 +44,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.SubagentJoinRobustnessTest do
     :ok
   end
 
-  defp uniq(prefix), do: prefix <> "-" <> (:crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false))
+  defp uniq(prefix),
+    do: prefix <> "-" <> (:crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false))
 
   defp base_config(subagent_id, parent_id, overrides \\ %{}) do
     Map.merge(

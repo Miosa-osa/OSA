@@ -141,7 +141,9 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
     test "refuses below the ultra effort tier" do
       Effort.set(:high)
       parent = "parent-#{System.unique_integer([:positive])}"
-      assert {:error, :ultra_required} = Fleet.fan_out(parent, ["a", "b"], spawn_fun: fake_spawn())
+
+      assert {:error, :ultra_required} =
+               Fleet.fan_out(parent, ["a", "b"], spawn_fun: fake_spawn())
     end
 
     test "even :max is not enough — ultra is required" do
@@ -177,6 +179,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       end
 
       items = for i <- 1..6, do: "task-#{i}"
+
       assert {:ok, %{total: 6, dropped: 0, results: results}} =
                Fleet.fan_out(parent, items, spawn_fun: spawn_fun)
 
@@ -197,6 +200,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       parent = "parent-#{System.unique_integer([:positive])}"
 
       items = for i <- 1..10, do: "task-#{i}"
+
       assert {:ok, %{total: 3, dropped: 7, results: results}} =
                Fleet.fan_out(parent, items, spawn_fun: fake_spawn())
 
@@ -390,7 +394,15 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       assert length(results) == 4
       # The hung node was reaped; the three fast nodes still completed.
       assert Enum.count(results, &(&1.gate == :pass)) == 3
-      assert Enum.any?(results, &match?(%{gate: :fail, error: :node_timeout}, &1))
+
+      # This node hangs inside the SPAWN, so it never had a node id to cancel —
+      # the outer `async_stream` backstop reaps it and says so. A node that hangs
+      # while RUNNING takes the in-task path instead, which cancels the worker
+      # and keeps its real id and worktree ref (see fleet_node_timeout_test).
+      assert Enum.any?(
+               results,
+               &match?(%{gate: :fail, error: {:node_timeout, :unidentified_task_reaped}}, &1)
+             )
     end
   end
 
@@ -479,7 +491,8 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
 
       # Fake worktree creation — no real git needed.
       worktree_fun = fn _p, _opts ->
-        {:ok, %{path: "/tmp/fake-wt-#{System.unique_integer([:positive])}", branch: "osa-wt-fake"}}
+        {:ok,
+         %{path: "/tmp/fake-wt-#{System.unique_integer([:positive])}", branch: "osa-wt-fake"}}
       end
 
       # The spawn seam records the working_dir it was handed so we can prove the
@@ -593,7 +606,9 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       test_pid = self()
       {:ok, order} = Agent.start_link(fn -> [] end)
 
-      worktree_fun = fn _p, _o -> {:ok, %{path: "/tmp/wt-#{System.unique_integer([:positive])}", branch: "osa-wt-x"}} end
+      worktree_fun = fn _p, _o ->
+        {:ok, %{path: "/tmp/wt-#{System.unique_integer([:positive])}", branch: "osa-wt-x"}}
+      end
 
       # The await seam records that it ran (and returns a terminal status) BEFORE
       # the diff seam is consulted — proving spawn→wait→capture ordering.

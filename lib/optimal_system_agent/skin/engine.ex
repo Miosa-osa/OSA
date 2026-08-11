@@ -74,9 +74,7 @@ defmodule OptimalSystemAgent.Skin.Engine do
       nil ->
         available = Map.keys(all) |> Enum.join(", ")
 
-        {:reply,
-         {:error, "Skin '#{name}' not found. Available: #{available}"},
-         state}
+        {:reply, {:error, "Skin '#{name}' not found. Available: #{available}"}, state}
 
       skin ->
         :persistent_term.put(@persistent_key, skin)

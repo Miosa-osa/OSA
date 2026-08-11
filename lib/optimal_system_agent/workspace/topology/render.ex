@@ -96,7 +96,8 @@ defmodule OptimalSystemAgent.Workspace.Topology.Render do
   end
 
   defp footer(topo) do
-    base = "_#{length(topo.components)} components, #{topo.scanned_dirs} dirs scanned in #{topo.elapsed_ms}ms._"
+    base =
+      "_#{length(topo.components)} components, #{topo.scanned_dirs} dirs scanned in #{topo.elapsed_ms}ms._"
 
     if topo.truncated,
       do: base <> "\n\n> Walk hit its depth/component cap — some subtrees were not classified.",

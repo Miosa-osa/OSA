@@ -33,7 +33,9 @@ defmodule OptimalSystemAgent.MCP.ProtocolTest do
     test "error response round-trips and normalizes" do
       err = JSONRPC.error_response(9, -32601, "Method not found")
       {:ok, json} = JSONRPC.encode(err)
-      assert {:ok, {:error, 9, %{code: -32601, message: "Method not found"}}} = JSONRPC.decode(json)
+
+      assert {:ok, {:error, 9, %{code: -32601, message: "Method not found"}}} =
+               JSONRPC.decode(json)
     end
 
     test "monotonic ids are unique and increasing" do

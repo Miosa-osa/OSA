@@ -128,8 +128,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
            "were already applied:\n" <>
            Enum.map_join(already_applied, "\n", &"  #{&1} (already applied)") <>
            "\nThe files are in the requested state — continue with the next step " <>
-           "rather than retrying.",
-         %{results: [], count: 0, already_applied: already_applied}}
+           "rather than retrying.", %{results: [], count: 0, already_applied: already_applied}}
 
       true ->
         apply_validated(to_apply, already_applied, session)
@@ -209,8 +208,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
           "Edited #{count} #{if count == 1, do: "file", else: "files"}:\n" <>
             summary <> skipped <> hook_note
 
-        {:ok, result,
-         %{results: per_file, count: count, already_applied: already_applied}}
+        {:ok, result, %{results: per_file, count: count, already_applied: already_applied}}
 
       {:error, reason} ->
         # The rollback outcome is stated by `commit_all/1`, which knows whether

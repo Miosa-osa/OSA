@@ -315,7 +315,9 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
       # all: when a dual-mode provider lands, its extra option appears in the
       # desktop/TUI picker without a second, separately-maintained list.
       codex = Enum.find(decoded, &(&1["id"] == "openai_codex"))
-      assert codex["auth_modes"] == ["oauth"], "the TUI must learn about sign-in from this field alone"
+
+      assert codex["auth_modes"] == ["oauth"],
+             "the TUI must learn about sign-in from this field alone"
 
       claude = Enum.find(decoded, &(&1["id"] == "claude_cli"))
 
@@ -344,7 +346,7 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
         assert row["requires_key"] == true
       end
 
-      for entry <- decoded, entry["id"] not in @new_provider_ids ++ @dual_mode_ids do
+      for entry <- decoded, entry["id"] not in (@new_provider_ids ++ @dual_mode_ids) do
         assert entry["auth_modes"] == ["api_key"]
       end
     end

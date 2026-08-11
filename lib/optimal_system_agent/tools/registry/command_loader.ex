@@ -27,6 +27,8 @@ defmodule OptimalSystemAgent.Tools.Registry.CommandLoader do
 
   require Logger
 
+  alias OptimalSystemAgent.Skills.Frontmatter
+
   defp commands_dir do
     Application.get_env(:optimal_system_agent, :commands_dir, "~/.osa/commands")
   end
@@ -111,15 +113,9 @@ defmodule OptimalSystemAgent.Tools.Registry.CommandLoader do
     default_name = path |> Path.basename(".md") |> String.downcase()
 
     {meta, body} =
-      case String.split(content, "---", parts: 3) do
-        ["", frontmatter, rest] ->
-          case YamlElixir.read_from_string(frontmatter) do
-            {:ok, m} when is_map(m) -> {m, rest}
-            _ -> {%{}, content}
-          end
-
-        _ ->
-          {%{}, content}
+      case Frontmatter.parse(content) do
+        {:ok, m, rest} -> {m, rest}
+        {:error, _reason} -> {%{}, OptimalSystemAgent.Utils.Bom.strip(content)}
       end
 
     template = String.trim(body)

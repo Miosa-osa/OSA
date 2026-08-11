@@ -262,9 +262,14 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
 
   defp count_in_content(content) when is_list(content) do
     Enum.reduce(content, 0, fn
-      %{"type" => "image", "source" => %{"data" => data}}, acc when is_binary(data) -> acc + 1
-      %{"type" => "tool_result", "content" => inner}, acc when is_list(inner) -> acc + count_in_content(inner)
-      _, acc -> acc
+      %{"type" => "image", "source" => %{"data" => data}}, acc when is_binary(data) ->
+        acc + 1
+
+      %{"type" => "tool_result", "content" => inner}, acc when is_list(inner) ->
+        acc + count_in_content(inner)
+
+      _, acc ->
+        acc
     end)
   end
 

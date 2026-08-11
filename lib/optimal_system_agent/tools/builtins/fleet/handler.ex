@@ -41,8 +41,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
   def validate(%{"action" => action} = input, _ctx) when is_binary(action) do
     cond do
       action not in @valid_actions ->
-        {:error,
-         "Unknown action '#{action}'. Valid actions: #{Enum.join(@valid_actions, ", ")}", -32_602}
+        {:error, "Unknown action '#{action}'. Valid actions: #{Enum.join(@valid_actions, ", ")}",
+         -32_602}
 
       action == "spawn" and not is_binary(Map.get(input, "task")) ->
         {:error, "action 'spawn' requires a string 'task'", -32_602}
@@ -138,7 +138,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
 
     case Fleet.fan_out(parent, items, base_opts) do
       {:ok, %{total: total, dropped: dropped, results: results}} ->
-        {:ok, format_workflow(total, dropped, results) <> maybe_finalize(parent, args, isolate?, results)}
+        {:ok,
+         format_workflow(total, dropped, results) <>
+           maybe_finalize(parent, args, isolate?, results)}
 
       {:error, :ultra_required} ->
         {:ok,
@@ -230,7 +232,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
           "no isolated worktree diffs to merge."
 
       true ->
-        fin = finalize_fun().(parent, results, gate_cmds: gate_cmds(args), commit: commit_message(args))
+        fin =
+          finalize_fun().(parent, results,
+            gate_cmds: gate_cmds(args),
+            commit: commit_message(args)
+          )
+
         format_finalize(fin)
     end
   end

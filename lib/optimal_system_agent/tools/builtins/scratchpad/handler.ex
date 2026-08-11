@@ -145,7 +145,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
             "- #{e.name} (#{e.size} bytes, mtime #{e.mtime})"
           end)
 
-        {:ok, "## Shared scratchpad (#{length(entries)} entr#{if length(entries) == 1, do: "y", else: "ies"})\n\n#{lines}"}
+        {:ok,
+         "## Shared scratchpad (#{length(entries)} entr#{if length(entries) == 1, do: "y", else: "ies"})\n\n#{lines}"}
     end
   end
 

@@ -31,6 +31,13 @@ defmodule OptimalSystemAgent.Orchestrator do
   # no-cancel-issued, just-plain-stuck case.
   @default_subagent_timeout_ms 2 * 60 * 60 * 1000
 
+  # Slack between the INNER join deadline (inside the task, in
+  # `execute_and_collect/6`) and the OUTER one (`join_subagent_task/3`). The
+  # inner path must always fire first: it is the only one that force-terminates
+  # the orphaned child, snapshots its transcript and settles its run row. The
+  # same window is reused as the post-deadline grace before anything is reaped.
+  @join_grace_ms 60_000
+
   @doc """
   Run a subagent to completion and return its result.
 
@@ -147,38 +154,15 @@ defmodule OptimalSystemAgent.Orchestrator do
                   |> Map.put(:batch_id, team_id)
                   |> Map.put(:wave, wave_num)
 
-                {original_idx,
+                {original_idx, subagent_join_timeout_ms(config),
                  Task.Supervisor.async_nolink(
                    OptimalSystemAgent.TaskSupervisor,
                    fn -> run_subagent(config) end
                  )}
               end)
 
-            Enum.map(tasks, fn {original_idx, task} ->
-              result =
-                try do
-                  Task.await(task, await_timeout)
-                catch
-                  :exit, {:timeout, _} ->
-                    # Reap the async task instead of orphaning it — the underlying
-                    # async_nolink Task keeps running run_subagent with no owner,
-                    # burning tokens. brutal_kill stops the leak.
-                    #
-                    # Classified as a FAILURE (not laundered into {:ok, ...}) so
-                    # `completed_count` below and `dispatch_fanout`'s reconcile
-                    # gate never treat a timed-out workstream as real completed
-                    # output — the parent model must not build on non-existent
-                    # work (D2 — matches grok/opencode marking a failed subagent
-                    # as failed, not success).
-                    Task.shutdown(task, :brutal_kill)
-                    {:error, :timeout}
-
-                  :exit, reason ->
-                    Task.shutdown(task, :brutal_kill)
-                    {:error, {:crashed, reason}}
-                end
-
-              {original_idx, result}
+            Enum.map(tasks, fn {original_idx, inner_timeout, task} ->
+              {original_idx, join_subagent_task(task, await_timeout, inner_timeout)}
             end)
           end)
 
@@ -350,7 +334,15 @@ defmodule OptimalSystemAgent.Orchestrator do
                 "(#{info.tier} tier)"
             )
 
-            info
+            # `:fresh` records that THIS run created the tree, so only this run
+            # may tear it down. A resumed subagent adopts the source run's
+            # worktree (`working_dir` from the source's `worktree_path`); if a
+            # caller also asks for `isolation: :worktree` on that resume, the
+            # deterministic per-id path resolves to the SOURCE tree. Without
+            # this flag, cancelling the resumed child would delete the source
+            # child's worktree — grok guards the same case with
+            # `worktree_freshly_created`.
+            Map.put(info, :fresh, true)
 
           {:error, reason} ->
             Logger.warning(
@@ -450,44 +442,7 @@ defmodule OptimalSystemAgent.Orchestrator do
         stop_event_forwarder(forwarder)
         safely_terminate(pid)
 
-        # P8 — durable-ref snapshot of a COMPLETED child's worktree, taken BEFORE
-        # teardown so a discarded (or merged) worktree's final state is still
-        # inspectable/resumable later via `git show <ref>` / `git worktree add
-        # -b tmp <ref>`, without polluting the parent branch. Config-gated
-        # (off by default) — this is a middle ground between "merge" and
-        # "discard", not a replacement for either.
-        snapshot_ref =
-          if worktree_info && match?({:ok, _}, result) && subagent_worktree_snapshot?() do
-            case OptimalSystemAgent.Workspace.FastWorktree.snapshot_ref(worktree_info.path,
-                   id: subagent_id,
-                   repo_dir: Map.get(worktree_info, :repo_dir)
-                 ) do
-              {:ok, ref} ->
-                Logger.info("[Orchestrator] Worktree snapshot for #{subagent_id}: #{ref}")
-                ref
-
-              {:error, reason} ->
-                Logger.warning(
-                  "[Orchestrator] Worktree snapshot failed for #{subagent_id}: #{inspect(reason)}"
-                )
-
-                nil
-            end
-          end
-
-        if snapshot_ref, do: RunStore.attach_worktree_snapshot(subagent_id, snapshot_ref)
-
-        # Worktree cleanup — merge-back is explicit. Dirty worktrees are
-        # preserved by default so the parent can inspect/apply changes.
-        if worktree_info do
-          merge = match?({:ok, _}, result) and Map.get(config, :merge_worktree, false)
-
-          OptimalSystemAgent.Workspace.FastWorktree.teardown(worktree_info.path,
-            merge: merge,
-            discard: Map.get(config, :discard_worktree, false),
-            repo_dir: Map.get(worktree_info, :repo_dir)
-          )
-        end
+        finish_worktree(worktree_info, subagent_id, config, result)
 
         result
 
@@ -506,17 +461,186 @@ defmodule OptimalSystemAgent.Orchestrator do
         Logger.error("[Orchestrator] Failed to start subagent #{subagent_id}: #{inspect(reason)}")
         RunStore.complete(subagent_id, failure_result(subagent_id, parent_id, role, reason))
 
-        if worktree_info do
-          OptimalSystemAgent.Workspace.FastWorktree.teardown(worktree_info.path,
-            merge: false,
-            discard: Map.get(config, :discard_worktree, false),
-            repo_dir: Map.get(worktree_info, :repo_dir)
-          )
-        end
+        # Same gated teardown as the success path. The failure path used to skip
+        # the snapshot entirely, so a `discard: true` caller whose child failed
+        # to even start lost the tree with no durable record at all.
+        finish_worktree(worktree_info, subagent_id, config, {:error, reason})
 
         emit_event(parent_id, start_failure_event(subagent_id, reason))
 
         {:error, reason}
+    end
+  end
+
+  # ── Joining a spawned subagent task ───────────────────────────────────
+  #
+  # The subagent's transcript snapshot is written INSIDE the task process:
+  # `execute_and_collect/6` calls `force_terminate_orphan/1`,
+  # `RunStore.save_messages/3` and `RunStore.complete/2` after its own inner
+  # join returns. So killing the task process destroys exactly the persistence
+  # `resume_subagent/2` depends on, and leaves the run row `:running` forever.
+  #
+  # It used to do precisely that. Both clocks defaulted to
+  # `@default_subagent_timeout_ms`, but the OUTER one starts first (the inner
+  # one only starts after worktree creation and the Loop spawn), so the outer
+  # `Task.await/2` always expired first and `Task.shutdown(task, :brutal_kill)`
+  # always won the race — making the inner timeout's careful cleanup path dead
+  # code.
+  #
+  # Two changes fix it:
+  #
+  #   1. The outer deadline is forced to be strictly LONGER than the inner one
+  #      (`+ @join_grace_ms`), so the inner path wins and returns a real
+  #      `{:error, :timeout}` with everything persisted.
+  #   2. If the outer deadline is hit anyway, the task gets a further
+  #      grace window to finish persisting BEFORE anything is killed. Only a
+  #      task that is still stuck after that is reaped, and loudly.
+  @doc false
+  # Public only so the deadline ladder can be unit-tested without booting a
+  # subagent Loop.
+  def join_subagent_task(task, await_timeout, inner_timeout) do
+    grace = join_grace_ms()
+    outer = max(await_timeout, inner_timeout + grace)
+
+    case Task.yield(task, outer) do
+      {:ok, value} ->
+        value
+
+      {:exit, reason} ->
+        {:error, {:crashed, reason}}
+
+      nil ->
+        Logger.warning(
+          "[Orchestrator] Subagent task passed its outer deadline (#{outer}ms) — allowing " <>
+            "#{grace}ms for it to persist its transcript before reaping"
+        )
+
+        case Task.yield(task, grace) do
+          {:ok, value} ->
+            value
+
+          {:exit, reason} ->
+            {:error, {:crashed, reason}}
+
+          nil ->
+            # Last resort. Classified as a FAILURE (not laundered into
+            # {:ok, ...}) so `completed_count` and `dispatch_fanout`'s reconcile
+            # gate never treat a timed-out workstream as real completed output.
+            Logger.error(
+              "[Orchestrator] Subagent task did not persist within the grace window — " <>
+                "reaping it. Its transcript snapshot may be incomplete."
+            )
+
+            Task.shutdown(task, :brutal_kill)
+            {:error, :timeout}
+        end
+    end
+  end
+
+  @doc false
+  # Slack between the inner and outer join deadlines, and the post-deadline
+  # persist grace. Overridable so tests need not wait a minute.
+  def join_grace_ms do
+    Application.get_env(:optimal_system_agent, :subagent_join_grace_ms, @join_grace_ms)
+  end
+
+  @doc false
+  # The inner join deadline `execute_and_collect/6` will use for this config —
+  # resolved identically there, so the outer deadline can be derived from it.
+  def subagent_join_timeout_ms(config) do
+    Map.get(config, :timeout_ms) ||
+      Application.get_env(
+        :optimal_system_agent,
+        :subagent_join_timeout_ms,
+        @default_subagent_timeout_ms
+      )
+  end
+
+  # ── Worktree end-of-life ──────────────────────────────────────────────
+  #
+  # A subagent's worktree is the only place its uncommitted work exists.
+  # Removing it is therefore gated on the work having been captured somewhere
+  # durable FIRST — grok's `update_subagent_meta_snapshot_ref` returns a boolean
+  # for exactly this reason, and `remove_subagent_worktree` runs only when that
+  # boolean is true. OSA used to log the snapshot failure and tear down anyway.
+  #
+  # The gate applies to the DESTRUCTIVE option only:
+  #
+  #   * `discard: true` — deletes a dirty tree. Downgraded to `false` when no
+  #     snapshot ref persisted, so `teardown/2` falls back to its
+  #     preserve-dirty-for-review branch. Nothing is ever silently lost.
+  #   * `merge: true`   — folds the work into a real branch; the content
+  #     survives the removal, so it is not gated.
+  #   * default         — `teardown/2` already preserves a dirty tree.
+  #
+  # A clean tree has nothing to lose and is removed either way.
+  defp finish_worktree(nil, _subagent_id, _config, _result), do: :ok
+
+  defp finish_worktree(worktree_info, subagent_id, config, result) do
+    if Map.get(worktree_info, :fresh, false) do
+      snapshot = attempt_worktree_snapshot(worktree_info, subagent_id)
+
+      case snapshot do
+        {:ok, ref} -> RunStore.attach_worktree_snapshot(subagent_id, ref)
+        _ -> :ok
+      end
+
+      merge = match?({:ok, _}, result) and Map.get(config, :merge_worktree, false)
+      discard_requested = Map.get(config, :discard_worktree, false)
+      captured? = match?({:ok, _}, snapshot)
+
+      if discard_requested and not captured? do
+        Logger.warning(
+          "[Orchestrator] Not discarding #{subagent_id}'s worktree — no durable snapshot was " <>
+            "written, so a dirty tree would be lost. Preserving #{worktree_info.path} for review."
+        )
+      end
+
+      OptimalSystemAgent.Workspace.FastWorktree.teardown(worktree_info.path,
+        merge: merge,
+        discard: discard_requested and captured?,
+        repo_dir: Map.get(worktree_info, :repo_dir)
+      )
+    else
+      # A worktree this run adopted rather than created (resume/handoff) belongs
+      # to whoever created it. Cancelling the adopter must not delete it.
+      Logger.info(
+        "[Orchestrator] Leaving adopted worktree #{worktree_info.path} in place " <>
+          "(not created by #{subagent_id})"
+      )
+
+      :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[Orchestrator] finish_worktree failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Durable-ref snapshot of the child's worktree, taken BEFORE teardown so a
+  # merged or discarded tree's final state stays inspectable/resumable via
+  # `git show <ref>` / `git worktree add -b tmp <ref>`, without polluting the
+  # parent branch. Taken on BOTH the success and failure paths: a child that
+  # failed is exactly the one whose partial work a human wants to look at.
+  defp attempt_worktree_snapshot(worktree_info, subagent_id) do
+    if subagent_worktree_snapshot?() do
+      case OptimalSystemAgent.Workspace.FastWorktree.snapshot_ref(worktree_info.path,
+             id: subagent_id,
+             repo_dir: Map.get(worktree_info, :repo_dir)
+           ) do
+        {:ok, ref} ->
+          Logger.info("[Orchestrator] Worktree snapshot for #{subagent_id}: #{ref}")
+          {:ok, ref}
+
+        {:error, reason} = err ->
+          Logger.warning(
+            "[Orchestrator] Worktree snapshot failed for #{subagent_id}: #{inspect(reason)}"
+          )
+
+          err
+      end
+    else
+      :disabled
     end
   end
 
@@ -1892,13 +2016,26 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   defp parent_overdrive?(_), do: false
 
-  # P8 — config gate for completed-child worktree durable-ref snapshotting.
-  #   config :optimal_system_agent, :subagent_worktree_snapshot, true
-  # Off by default: snapshotting commits any dirty state into the source
-  # repo's object store (via a ref), which is unwanted overhead for callers
-  # who don't need post-hoc inspection/resume of discarded worktrees.
+  # P8 — config gate for child-worktree durable-ref snapshotting.
+  #   config :optimal_system_agent, :subagent_worktree_snapshot, false
+  #
+  # ON by default (flipped). It was off because snapshotting commits dirty state
+  # into the source repo's object store via a ref, which is "unwanted overhead".
+  # That trade no longer holds:
+  #
+  #   * The cost is one commit on the CHILD's own branch plus one `update-ref`
+  #     into a dedicated `refs/osa/subagent-snapshots/` namespace. The objects
+  #     already live in the shared ODB, the parent branch is never touched, and
+  #     the whole namespace is deletable with one `git for-each-ref | xargs`.
+  #   * The benefit is the only durable record of a child's uncommitted work.
+  #   * `finish_worktree/4` now gates destructive teardown on a snapshot having
+  #     persisted. With the gate off by default, `discard: true` could never be
+  #     honoured for a dirty tree — the enforcement would be vacuous and the
+  #     option silently dead.
+  #
+  # Bounded overhead on one side, unrecoverable data loss on the other: default on.
   defp subagent_worktree_snapshot? do
-    Application.get_env(:optimal_system_agent, :subagent_worktree_snapshot, false) == true
+    Application.get_env(:optimal_system_agent, :subagent_worktree_snapshot, true) == true
   end
 
   defp emit_event(parent_session_id, event_data) do

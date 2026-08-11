@@ -349,14 +349,14 @@ defmodule OptimalSystemAgent.Workspace.Topology do
   # A directory earns a row when there is *evidence* it is a component, not
   # because it exists. Bare organizational folders are traversed, not listed.
   defp significant?(dir) do
+    # Documentation trees carry no manifest, so naming is the only evidence
+    # there is. It is weak evidence, but it is evidence — and `Role.infer/2`
+    # still refuses to call it `docs` unless the contents agree.
     Role.primary_manifest(dir) != nil or
       File.exists?(Path.join(dir, ".git")) or
       File.regular?(Path.join(dir, "Chart.yaml")) or
       File.regular?(Path.join(dir, "main.tf")) or
       Path.wildcard(Path.join(dir, "*.tf")) != [] or
-      # Documentation trees carry no manifest, so naming is the only evidence
-      # there is. It is weak evidence, but it is evidence — and `Role.infer/2`
-      # still refuses to call it `docs` unless the contents agree.
       Path.basename(dir) in ["docs", "documentation", "website"]
   end
 
@@ -379,10 +379,26 @@ defmodule OptimalSystemAgent.Workspace.Topology do
 
   defp hint(rel) do
     case rel |> Path.split() |> List.first() do
-      seg when seg in ["sdks", "sdk", "clients"] -> :sdk
-      seg when seg in ["infra", "infrastructure", "deploy", "deployment", "terraform", "helm", "charts"] -> :infra
-      seg when seg in ["docs", "documentation", "website"] -> :docs
-      _ -> nil
+      seg when seg in ["sdks", "sdk", "clients"] ->
+        :sdk
+
+      seg
+      when seg in [
+             "infra",
+             "infrastructure",
+             "deploy",
+             "deployment",
+             "terraform",
+             "helm",
+             "charts"
+           ] ->
+        :infra
+
+      seg when seg in ["docs", "documentation", "website"] ->
+        :docs
+
+      _ ->
+        nil
     end
   end
 
@@ -431,7 +447,9 @@ defmodule OptimalSystemAgent.Workspace.Topology do
     # because only exit 0 (= something matched) reads the output at all.
     case System.cmd("git", ["check-ignore", "--"] ++ names, cd: dir, stderr_to_stdout: true) do
       {out, 0} ->
-        ignored = out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1) |> MapSet.new()
+        ignored =
+          out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1) |> MapSet.new()
+
         Enum.reject(names, &MapSet.member?(ignored, &1))
 
       _ ->
@@ -495,7 +513,12 @@ defmodule OptimalSystemAgent.Workspace.Topology do
     with true <- File.regular?(mix),
          {:ok, body} <- File.read(mix),
          [_, apps] <- Regex.run(~r/apps_path:\s*"([^"]+)"/, body) do
-      %{type: :elixir_umbrella, manifest: "mix.exs", globs: [Path.join(apps, "*")], label: "Elixir umbrella"}
+      %{
+        type: :elixir_umbrella,
+        manifest: "mix.exs",
+        globs: [Path.join(apps, "*")],
+        label: "Elixir umbrella"
+      }
     else
       _ -> nil
     end
@@ -530,7 +553,12 @@ defmodule OptimalSystemAgent.Workspace.Topology do
         |> Enum.map(fn [_, g] -> String.trim(g) end)
         |> Enum.reject(&(&1 == "" or String.starts_with?(&1, "!")))
 
-      %{type: :pnpm_workspace, manifest: "pnpm-workspace.yaml", globs: globs, label: "pnpm workspace"}
+      %{
+        type: :pnpm_workspace,
+        manifest: "pnpm-workspace.yaml",
+        globs: globs,
+        label: "pnpm workspace"
+      }
     else
       _ -> nil
     end
@@ -541,9 +569,15 @@ defmodule OptimalSystemAgent.Workspace.Topology do
 
     with true <- File.regular?(file),
          {:ok, body} <- File.read(file),
-         [_, list] <- Regex.run(~r/"workspaces"\s*:\s*(?:\{[^}]*"packages"\s*:\s*)?\[(.*?)\]/s, body) do
+         [_, list] <-
+           Regex.run(~r/"workspaces"\s*:\s*(?:\{[^}]*"packages"\s*:\s*)?\[(.*?)\]/s, body) do
       globs = Regex.scan(~r/"([^"]+)"/, list) |> Enum.map(fn [_, g] -> g end)
-      label = if File.regular?(Path.join(root, "yarn.lock")), do: "yarn workspaces", else: "npm workspaces"
+
+      label =
+        if File.regular?(Path.join(root, "yarn.lock")),
+          do: "yarn workspaces",
+          else: "npm workspaces"
+
       %{type: :node_workspace, manifest: "package.json", globs: globs, label: label}
     else
       _ -> nil

@@ -31,14 +31,18 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
   defp state(overrides \\ []), do: struct(Loop, [session_id: "od-#{unique()}"] ++ overrides)
   defp tool(name, args \\ %{}), do: %{id: "tc-#{unique()}", name: name, arguments: args}
   defp unique, do: System.unique_integer([:positive, :monotonic])
-  defp enable_interactive, do: Application.put_env(:optimal_system_agent, :interactive_permissions, true)
+
+  defp enable_interactive,
+    do: Application.put_env(:optimal_system_agent, :interactive_permissions, true)
 
   # ── BUG 1: overdrive bypasses prompts ───────────────────────────────
 
   describe "overdrive gate" do
     test "allows use_skill (the reported case) without an ask" do
       s = state(permission_mode: :overdrive)
-      assert :allow = ToolExecutor.approve_tool_call(tool("use_skill", %{"skill_name" => "lavish"}), s)
+
+      assert :allow =
+               ToolExecutor.approve_tool_call(tool("use_skill", %{"skill_name" => "lavish"}), s)
     end
 
     test "allows a normal mutating tool without an ask" do
@@ -70,7 +74,10 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
       # the user is not asked, so "ask" was the one answer that could not hold
       # here — the prompt is exactly what overdrive is meant to skip.
       path = Path.join([OptimalSystemAgent.Workspace.Cwd.get(), ".git", "config"])
-      assert {:blocked, msg} = ToolExecutor.approve_tool_call(tool("file_write", %{"path" => path}), s)
+
+      assert {:blocked, msg} =
+               ToolExecutor.approve_tool_call(tool("file_write", %{"path" => path}), s)
+
       assert msg =~ "protected location"
     end
   end
@@ -100,7 +107,8 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
           blocked_tools: ["file_write"]
         )
 
-      assert {:blocked, _} = ToolExecutor.approve_tool_call(tool("file_write", %{"path" => "a.txt"}), s)
+      assert {:blocked, _} =
+               ToolExecutor.approve_tool_call(tool("file_write", %{"path" => "a.txt"}), s)
     end
   end
 
@@ -172,7 +180,10 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
     end
 
     defp summary_for(tool_call) do
-      case ToolExecutor.approve_tool_call(tool_call, state(permission_mode: :ask, permission_tier: :full)) do
+      case ToolExecutor.approve_tool_call(
+             tool_call,
+             state(permission_mode: :ask, permission_tier: :full)
+           ) do
         {:ask, _rid, summary} -> summary
         other -> flunk("expected an :ask, got #{inspect(other)}")
       end
@@ -190,7 +201,11 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
     end
 
     test "file_edit surfaces the path" do
-      s = summary_for(tool("file_edit", %{"path" => "lib/foo.ex", "old_string" => "a", "new_string" => "b"}))
+      s =
+        summary_for(
+          tool("file_edit", %{"path" => "lib/foo.ex", "old_string" => "a", "new_string" => "b"})
+        )
+
       assert s.target == "edit lib/foo.ex"
     end
 

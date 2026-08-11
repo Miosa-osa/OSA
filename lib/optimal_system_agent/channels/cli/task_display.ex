@@ -6,6 +6,7 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   """
 
   alias OptimalSystemAgent.Agent.Tasks.Tracker.Task
+  alias OptimalSystemAgent.CLI.Width, as: W
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -46,8 +47,16 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
     total = length(tasks)
     inner = width - 4
 
-    header =
-      "─ Tasks #{String.duplicate("─", max(inner - 12 - count_width(completed, total), 0))} #{completed}/#{total} ─"
+    # The top border must own exactly the same columns as the rows below it.
+    # It was sized off `inner` (width - 4) with a hand-counted literal allowance,
+    # which came out 3 columns short of `width` for EVERY task box, ascii
+    # included — the header rail visibly stopped before the right-hand corner.
+    # Derive the fill from the pieces actually being concatenated instead.
+    label = " Tasks "
+    tally = " #{completed}/#{total} "
+    # "┌" + "─" + label + fill + tally + "─" + "┐" == width
+    fill = max(width - 4 - W.visible(label) - W.visible(tally), 0)
+    header = "─" <> label <> String.duplicate("─", fill) <> tally <> "─"
 
     top = "#{@dim}┌#{header}┐#{@reset}"
     bottom = "#{@dim}└#{String.duplicate("─", width - 2)}┘#{@reset}"
@@ -62,18 +71,23 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
         title_space = inner - 2
 
         title_space =
-          if tokens != "", do: title_space - String.length(tokens) - 1, else: title_space
+          if tokens != "", do: title_space - W.visible(tokens) - 1, else: title_space
 
-        title = truncate(task.title, title_space)
+        # COLUMNS, not graphemes. Task titles are MODEL-AUTHORED and routinely
+        # contain emoji, each of which is one grapheme but two columns — sized by
+        # `String.length/1` every one of them tore the `│` border.
+        title = W.fit(task.title, title_space)
 
         # Build the row content
         content = "#{icon_color}#{icon}#{@reset} #{title_color(task.status)}#{title}#{@reset}"
-        # Pad to fill the box
-        visible_len = 2 + String.length(title)
+        # Pad to fill the box. Measure the PRE-COLOUR title: `content` above has
+        # ANSI interpolated into it, so measuring that instead would have to
+        # strip it back out again.
+        visible_len = 2 + W.visible(title)
 
         pad =
           if tokens != "" do
-            remaining = inner - visible_len - String.length(tokens)
+            remaining = inner - visible_len - W.visible(tokens)
             String.duplicate(" ", max(remaining, 1)) <> "#{@dim}#{tokens}#{@reset}"
           else
             remaining = inner - visible_len
@@ -142,15 +156,12 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   defp title_color(:in_progress), do: @cyan
   defp title_color(_), do: ""
 
-  defp truncate(str, max_len),
-    do: OptimalSystemAgent.Utils.Text.truncate(str, max_len)
-
   defp format_tokens(0), do: ""
   defp format_tokens(n) when n < 1_000, do: "#{n} ↓"
   defp format_tokens(n), do: "#{Float.round(n / 1_000, 1)}k ↓"
 
   defp count_width(completed, total) do
-    String.length("#{completed}/#{total}")
+    W.visible("#{completed}/#{total}")
   end
 
   defp icon_str(task) do

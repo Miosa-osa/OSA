@@ -351,7 +351,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolErrorContractTest do
       assert {_msg, "wrote it"} =
                ToolExecutor.execute_tool_call(call("test_metadata_tool"), s)
 
-      assert_receive {:osa_event, %{type: :tool_result, diff: "@@ -1 +1 @@", path: "/tmp/x"} = ev},
+      assert_receive {:osa_event,
+                      %{type: :tool_result, diff: "@@ -1 +1 @@", path: "/tmp/x"} = ev},
                      2_000
 
       assert ev.stats == %{added: 1}

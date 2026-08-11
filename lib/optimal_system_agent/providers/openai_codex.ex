@@ -133,7 +133,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   end
 
   defp retry_after_refresh(cred, run, detail) do
-    Logger.info("[Codex] Request rejected as unauthorized; refreshing the token and retrying once.")
+    Logger.info(
+      "[Codex] Request rejected as unauthorized; refreshing the token and retrying once."
+    )
 
     # Scoped to the token that was actually rejected: if another process
     # already rotated it, the fresh one is adopted with no network call and no

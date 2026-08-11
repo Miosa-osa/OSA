@@ -46,6 +46,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
         if interactive?(elem.role) do
           ref = "e#{counter}"
           line = "[#{ref}] #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"
+
           ref_data = %{
             x: elem.x,
             y: elem.y,
@@ -54,6 +55,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
             role: elem.role,
             name: elem.name
           }
+
           {[line | lines], Map.put(refs, ref, ref_data), counter + 1}
         else
           line = "  #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"

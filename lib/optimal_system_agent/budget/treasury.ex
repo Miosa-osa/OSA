@@ -18,7 +18,7 @@ defmodule OptimalSystemAgent.Budget.Treasury do
 
       {:deposit,  amount, reason}       -> {:ok, txn}
       {:withdraw, amount, reason, ref}  -> {:ok, txn} | {:error, reason_string}
-      {:reserve,  amount, ref}          -> {:ok, txn}
+      {:reserve,  amount, ref}          -> {:ok, txn} | {:error, reason_string}
       {:release,  ref}                  -> {:ok, txn} | {:error, reason_string}
       :get_balance                      -> {:ok, balance_map}
       {:get_ledger, opts}               -> {:ok, [txn]}
@@ -125,22 +125,51 @@ defmodule OptimalSystemAgent.Budget.Treasury do
     end
   end
 
+  # A reserve moves money out of `balance` just as a withdrawal does; the only
+  # difference is that it can be handed back. It nonetheless ran with NONE of
+  # the guards `{:withdraw, …}` runs and no lazy reset, so the balance could be
+  # driven arbitrarily negative and straight through `min_reserve`.
+  #
+  # Which guards apply is deliberately narrower than withdraw's four:
+  #
+  #   * `min_reserve` — YES. This is the hole: an earmark that leaves less on
+  #     hand than the floor is exactly what the floor exists to prevent, and it
+  #     is also what keeps the balance from going negative.
+  #   * `max_single` — NO. It is documented as the maximum single WITHDRAWAL,
+  #     and a reserve is not a spend. Applying it here would re-scope an
+  #     existing setting.
+  #   * daily/monthly limits — NO. They are measured against `daily_spent` /
+  #     `monthly_spent`, which a reserve does not increment. Charging them at
+  #     reserve time and again at withdraw time would double-count.
+  #
+  # It also blind-overwrote `reserves[ref]` while having already incremented
+  # `state.reserved`, so two reserves under the same ref left the first amount
+  # permanently orphaned: `{:release, ref}` can only ever return the second, and
+  # `reserved` never comes back down. A duplicate ref is now rejected.
   @impl true
   def handle_call({:reserve, amount, ref}, _from, state) do
+    state = maybe_reset(state)
     amount = amount * 1.0
-    new_balance = state.balance - amount
-    new_reserved = state.reserved + amount
-    txn = make_txn(:reserve, amount, "reserve:#{ref}", ref, new_balance)
+    ref_str = to_string(ref)
 
-    state = %{
-      state
-      | balance: new_balance,
-        reserved: new_reserved,
-        reserves: Map.put(state.reserves, to_string(ref), amount),
-        ledger: [txn | state.ledger]
-    }
+    with :ok <- check_duplicate_ref(ref_str, state),
+         :ok <- check_min_reserve(amount, state) do
+      new_balance = state.balance - amount
+      new_reserved = state.reserved + amount
+      txn = make_txn(:reserve, amount, "reserve:#{ref}", ref, new_balance)
 
-    {:reply, {:ok, txn}, state}
+      state = %{
+        state
+        | balance: new_balance,
+          reserved: new_reserved,
+          reserves: Map.put(state.reserves, ref_str, amount),
+          ledger: [txn | state.ledger]
+      }
+
+      {:reply, {:ok, txn}, state}
+    else
+      {:error, _} = err -> {:reply, err, state}
+    end
   end
 
   @impl true
@@ -200,6 +229,14 @@ defmodule OptimalSystemAgent.Budget.Treasury do
   # ---------------------------------------------------------------------------
   # Private — validation guards
   # ---------------------------------------------------------------------------
+
+  defp check_duplicate_ref(ref_str, %{reserves: reserves}) do
+    if Map.has_key?(reserves, ref_str) do
+      {:error, "a reserve already exists for ref: #{ref_str}"}
+    else
+      :ok
+    end
+  end
 
   defp check_max_single(_amount, %{max_single: :infinity}), do: :ok
 

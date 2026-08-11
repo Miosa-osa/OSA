@@ -247,10 +247,11 @@ impl CommandPalette {
             let name = truncate(&item.name, name_max);
             let desc = truncate(&item.description, desc_max);
 
-            // Pad name to align description column.
-            let name_padded = format!("{:<width$}", name, width = name_max);
-            let desc_padded = format!("  {:<width$}", desc, width = desc_max);
-            let cat_padded = format!("{:>width$}", cat_text, width = cat_len);
+            // Pad name to align description column. COLUMNS, not chars — the `{:<w$}`
+            // formatter pads by char count, so a wide glyph leaves the column short.
+            let name_padded = crate::util::pad_cols(&name, name_max);
+            let desc_padded = format!("  {}", crate::util::pad_cols(&desc, desc_max));
+            let cat_padded = crate::util::pad_cols_start(&cat_text, cat_len);
 
             let line = Line::from(vec![
                 Span::styled(prefix, prefix_style),
@@ -328,17 +329,11 @@ impl Default for CommandPalette {
     }
 }
 
-/// Truncate a string to at most `max` chars, appending "…" if needed.
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_owned()
-    } else {
-        let cut = max.saturating_sub(1);
-        let truncated: String = chars[..cut].iter().collect();
-        format!("{}…", truncated)
-    }
+    crate::util::fit_cols(s, max)
 }

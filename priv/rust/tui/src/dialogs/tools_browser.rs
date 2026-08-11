@@ -345,9 +345,7 @@ impl ToolsBrowser {
                         if selected {
                             // Full-width highlight bar (name + inline description).
                             let raw = format!("  {}   {}", t.name, t.description);
-                            let mut s = truncate_chars(&raw, maxw);
-                            let pad = maxw.saturating_sub(s.chars().count());
-                            s.push_str(&" ".repeat(pad));
+                            let s = crate::util::pad_cols(&raw, maxw);
                             put(
                                 frame,
                                 Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
@@ -355,7 +353,7 @@ impl ToolsBrowser {
                             );
                         } else {
                             let name = truncate_chars(&t.name, maxw.saturating_sub(4));
-                            let used = 2 + name.chars().count();
+                            let used = 2 + crate::util::cols(&name);
                             let mut spans = vec![
                                 Span::raw("  "),
                                 Span::styled(
@@ -404,14 +402,13 @@ impl ToolsBrowser {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte tool names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

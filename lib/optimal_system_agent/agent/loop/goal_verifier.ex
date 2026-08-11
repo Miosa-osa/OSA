@@ -760,9 +760,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       |> String.trim("_")
 
     cond do
-      normalized != "" -> normalized
-      is_binary(fallback_reason) -> "reason_" <> to_string(:erlang.phash2(significant_words(fallback_reason)))
-      true -> "unknown_blocker"
+      normalized != "" ->
+        normalized
+
+      is_binary(fallback_reason) ->
+        "reason_" <> to_string(:erlang.phash2(significant_words(fallback_reason)))
+
+      true ->
+        "unknown_blocker"
     end
   end
 
@@ -1057,9 +1062,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       :optimal_system_agent,
       :goal_verifier_panel_runner,
       fn session_id, configs ->
-        Orchestrator.run_read_only_panel(session_id, configs,
-          await_timeout: skeptic_timeout_ms()
-        )
+        Orchestrator.run_read_only_panel(session_id, configs, await_timeout: skeptic_timeout_ms())
       end
     )
   end
@@ -1246,7 +1249,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # not read properly is logged, not badged.
   defp display_gaps(results) do
     results
-    |> Enum.filter(&(&1.refuted and not internal?(&1) and Map.get(&1, :confidence, :high) != :low))
+    |> Enum.filter(
+      &(&1.refuted and not internal?(&1) and Map.get(&1, :confidence, :high) != :low)
+    )
     |> Enum.map(&lens_prefixed_reason/1)
   end
 
@@ -1450,7 +1455,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     # reason is a harness diagnostic, so it is flagged `internal` and never
     # surfaces as a user-facing gap.
     Logger.warning("[goal-verifier] skeptic did not complete: #{inspect(reason)}")
-    %{refuted: true, off_track: false, reason: "skeptic failed: #{inspect(reason)}", confidence: :low, internal: true}
+
+    %{
+      refuted: true,
+      off_track: false,
+      reason: "skeptic failed: #{inspect(reason)}",
+      confidence: :low,
+      internal: true
+    }
   end
 
   defp parse_skeptic_result(other) do
@@ -1621,13 +1633,31 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
     cond do
       String.contains?(down, "off_track") or String.contains?(down, "off-track") ->
-        %{refuted: true, off_track: true, reason: raw_summary(text), confidence: :medium, internal: false}
+        %{
+          refuted: true,
+          off_track: true,
+          reason: raw_summary(text),
+          confidence: :medium,
+          internal: false
+        }
 
       String.contains?(down, "not_refuted") or String.contains?(down, "not refuted") ->
-        %{refuted: false, off_track: false, reason: raw_summary(text), confidence: :medium, internal: false}
+        %{
+          refuted: false,
+          off_track: false,
+          reason: raw_summary(text),
+          confidence: :medium,
+          internal: false
+        }
 
       String.contains?(down, "refuted") ->
-        %{refuted: true, off_track: false, reason: raw_summary(text), confidence: :medium, internal: false}
+        %{
+          refuted: true,
+          off_track: false,
+          reason: raw_summary(text),
+          confidence: :medium,
+          internal: false
+        }
 
       true ->
         # Deliberately NOT surfaced as a gap (see `display_gaps/1`): a
@@ -1652,9 +1682,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     collapsed = text |> String.replace(~r/\s+/, " ") |> String.trim()
 
     cond do
-      collapsed == "" -> "(reviewer returned an empty response)"
-      String.length(collapsed) > @raw_reason_max -> String.slice(collapsed, 0, @raw_reason_max) <> "\u{2026}"
-      true -> collapsed
+      collapsed == "" ->
+        "(reviewer returned an empty response)"
+
+      String.length(collapsed) > @raw_reason_max ->
+        String.slice(collapsed, 0, @raw_reason_max) <> "\u{2026}"
+
+      true ->
+        collapsed
     end
   end
 

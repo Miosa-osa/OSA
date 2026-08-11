@@ -278,9 +278,7 @@ impl DoctorPanel {
                 if selected {
                     // Full-width highlight bar: glyph + name + inline detail.
                     let raw = format!("{} {}   {}", check.status.glyph(), check.name, check.detail);
-                    let mut s = truncate_chars(&raw, maxw);
-                    let pad = maxw.saturating_sub(s.chars().count());
-                    s.push_str(&" ".repeat(pad));
+                    let s = crate::util::pad_cols(&raw, maxw);
                     put(
                         frame,
                         Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
@@ -289,7 +287,7 @@ impl DoctorPanel {
                 } else {
                     let name = truncate_chars(&check.name, maxw.saturating_sub(4));
                     // glyph(1) + space(1) + name + gap(3)
-                    let used = 2 + name.chars().count();
+                    let used = 2 + crate::util::cols(&name);
                     let mut spans = vec![
                         Span::styled(format!("{} ", check.status.glyph()), Style::default().fg(dot_color)),
                         Span::styled(name, Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
@@ -331,14 +329,13 @@ impl DoctorPanel {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte detail strings can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

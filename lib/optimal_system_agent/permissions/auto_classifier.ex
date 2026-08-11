@@ -121,7 +121,10 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
       :ask
   catch
     kind, reason ->
-      Logger.debug("[auto_classifier] maybe_allow caught #{kind}: #{inspect(reason)} — keeping ask")
+      Logger.debug(
+        "[auto_classifier] maybe_allow caught #{kind}: #{inspect(reason)} — keeping ask"
+      )
+
       :ask
   end
 
@@ -226,7 +229,9 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
 
   defp head_read_only?("git", args), do: git_read_only?(args)
   defp head_read_only?("find", args), do: not Enum.any?(args, &(&1 in @find_mutating))
-  defp head_read_only?("fdfind", args), do: not Enum.any?(args, &(&1 in ["-x", "--exec", "-X", "--exec-batch"]))
+
+  defp head_read_only?("fdfind", args),
+    do: not Enum.any?(args, &(&1 in ["-x", "--exec", "-X", "--exec-batch"]))
 
   # `sed -i` / `sed --in-place` edits files in place — not read-only.
   defp head_read_only?("sed", args) do

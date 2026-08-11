@@ -64,7 +64,7 @@ fn gauge_color(util: f64, c: &crate::style::ThemeColors) -> Color {
 
 /// Middle-ellipsize a long id so both ends stay legible within `max` chars.
 fn shorten(s: &str, max: usize) -> String {
-    let n = s.chars().count();
+    let n = crate::util::cols(&s);
     if n <= max {
         return s.to_string();
     }

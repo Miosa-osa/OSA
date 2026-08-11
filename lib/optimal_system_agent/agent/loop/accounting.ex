@@ -125,7 +125,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     stash_partial(state)
 
     emit_cost_update(state, norm, turn_cost)
-    maybe_bridge_budget(state, norm)
+    maybe_bridge_budget(state, norm, turn_cost)
     maybe_record_trajectory(state, norm, turn_cost)
 
     state
@@ -253,13 +253,35 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   so a child's cost is never double-counted against the parent.
   """
   @spec tree_spend_usd(map()) :: float()
-  def tree_spend_usd(state) when is_map(state) do
+  def tree_spend_usd(state) when is_map(state), do: tree_spend(state).usd
+
+  @doc """
+  The whole-tree bill AND whether it is complete.
+
+  `tree_spend_usd/1` answers with a float because its callers format and compare
+  it. Enforcement needs the other half of the answer: a float alone cannot
+  distinguish "this tree cost $0.00" from "we could not find out what this tree
+  cost", and OSA collapsed the two everywhere — an absent spend sidecar, a
+  failed rollup and a crashed read all produced `0.0`, which reads as "plenty of
+  budget left" to every gate downstream.
+
+  Returns `%{usd: float, complete: boolean, unknown: [term]}` where `:unknown`
+  lists the nodes (or the failure marker) whose spend could not be established.
+  `complete: false` means the number in `:usd` is a LOWER BOUND, and any gate
+  that spends money on the strength of it must fail closed.
+  """
+  @spec tree_spend(map()) :: %{usd: float(), complete: boolean(), unknown: [term()]}
+  def tree_spend(state) when is_map(state) do
     own = own_cost(state)
-    round6(own + descendants_spend_usd(Map.get(state, :session_id)))
+    {desc, unknown} = descendants_spend(Map.get(state, :session_id))
+
+    %{usd: round6(own + desc), complete: unknown == [], unknown: Enum.reverse(unknown)}
   rescue
     e ->
-      Logger.debug("[Accounting] tree_spend_usd rollup failed: #{inspect(e)}")
-      own_cost(state)
+      # We know the parent's own spend and NOTHING about the tree beneath it.
+      # That is an incomplete bill, not a zero one.
+      Logger.debug("[Accounting] tree_spend rollup failed: #{inspect(e)}")
+      %{usd: own_cost(state), complete: false, unknown: [:rollup_failed]}
   end
 
   @doc """
@@ -274,7 +296,34 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   @spec budget_exhausted?(map()) :: boolean()
   def budget_exhausted?(state) when is_map(state) do
     max = Map.get(state, :max_budget_usd)
-    is_number(max) and max > 0 and tree_spend_usd(state) >= max
+
+    if is_number(max) and max > 0 do
+      spend = tree_spend(state)
+
+      cond do
+        spend.usd >= max ->
+          true
+
+        # FAIL CLOSED. A cap exists and part of the bill is unknowable, so we
+        # cannot say the cap has room. Spending real money on the assumption
+        # that an unreadable bill is a zero bill is the failure mode this guard
+        # exists to prevent.
+        not spend.complete ->
+          Logger.warning(
+            "[Accounting] tree spend for #{inspect(Map.get(state, :session_id))} is INCOMPLETE " <>
+              "(#{inspect(spend.unknown)}) under a $#{max} cap — treating the budget as " <>
+              "exhausted rather than assuming the missing spend was free"
+          )
+
+          true
+
+        true ->
+          false
+      end
+    else
+      # No cap configured: nothing to enforce, so an unknown bill changes nothing.
+      false
+    end
   end
 
   @doc """
@@ -286,21 +335,31 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     max = Map.get(state, :max_budget_usd)
 
     if is_number(max) and max > 0 do
-      max(0.0, round6(max - tree_spend_usd(state)))
+      spend = tree_spend(state)
+      # An incomplete bill has no knowable remainder. Reporting one would be the
+      # same lie `budget_exhausted?/1` refuses to tell.
+      if spend.complete, do: max(0.0, round6(max - spend.usd)), else: 0.0
     else
       :infinity
     end
   end
 
-  # Sum the persisted spend of every descendant of `root` in the run tree.
-  defp descendants_spend_usd(nil), do: 0.0
+  # Sum the persisted spend of every descendant of `root`, carrying the nodes
+  # whose spend could NOT be established rather than folding them into the sum
+  # as zeros. Returns `{usd, unknown_nodes}`.
+  defp descendants_spend(nil), do: {0.0, []}
 
-  defp descendants_spend_usd(root) do
+  defp descendants_spend(root) do
     root
     |> collect_descendants()
-    |> Enum.reduce(0.0, fn agent_id, acc -> acc + node_cost_usd(agent_id) end)
+    |> Enum.reduce({0.0, []}, fn agent_id, {sum, unknown} ->
+      case node_spend(agent_id) do
+        {:ok, cost} -> {sum + cost, unknown}
+        :unknown -> {sum, [agent_id | unknown]}
+      end
+    end)
   rescue
-    _ -> 0.0
+    _ -> {0.0, [:walk_failed]}
   end
 
   @doc false
@@ -338,16 +397,36 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   end
 
   # A single node's real spend, from its durable sidecar (never raises).
-  defp node_cost_usd(agent_id) when is_binary(agent_id) do
+  # `{:ok, usd}` when the bill is known, `:unknown` when it is not.
+  defp node_spend(agent_id) when is_binary(agent_id) do
     case SessionPersistence.load_spend(agent_id) do
-      %{cost_usd: c} when is_number(c) and c >= 0 -> c * 1.0
-      _ -> 0.0
+      %{cost_usd: c, complete: true} when is_number(c) and c >= 0 ->
+        {:ok, c * 1.0}
+
+      _ ->
+        # No readable sidecar. Which of the two cases this is matters:
+        #
+        #   * still RUNNING — the node has not reached its first persist point.
+        #     Its spend is bounded by the turn in flight and the next check will
+        #     see it. Counting it as 0 here is a measurement, not a guess.
+        #   * TERMINAL (or no run row at all) — it finished and left no record.
+        #     Whatever it spent is unrecorded and unrecoverable. Unknown.
+        if run_terminal?(agent_id), do: :unknown, else: {:ok, 0.0}
     end
   rescue
-    _ -> 0.0
+    _ -> :unknown
   end
 
-  defp node_cost_usd(_), do: 0.0
+  defp node_spend(_), do: :unknown
+
+  defp run_terminal?(agent_id) do
+    case RunStore.get(agent_id) do
+      %{status: :running} -> false
+      _ -> true
+    end
+  rescue
+    _ -> true
+  end
 
   defp own_cost(state) do
     case Map.get(state, :session_cost_usd, 0.0) do
@@ -388,13 +467,22 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   # Bridge real usage into the global daily/monthly ledger when it is running.
   # Fire-and-forget; never let ledger bookkeeping crash the loop.
-  defp maybe_bridge_budget(state, norm) do
+  #
+  # `turn_cost` is the price `Pricing.cost/2` already computed for this exact
+  # usage, and it is what gets recorded. This used to call
+  # `Budget.record_cost/5` with `effective_input_tokens(norm)` — input PLUS
+  # cache-write PLUS cache-read — which the ledger's own coarse provider table
+  # then billed at the FULL input rate. Cache reads cost a tenth of the input
+  # rate (`Pricing.@cache_read_multiplier`), so the same tokens were billed
+  # twice over at up to 10x on the cached portion, and `/cost` printed that
+  # inflated figure. One usage, one price, one engine.
+  defp maybe_bridge_budget(state, norm, turn_cost) do
     if Process.whereis(OptimalSystemAgent.Budget) do
-      OptimalSystemAgent.Budget.record_cost(
+      OptimalSystemAgent.Budget.record_priced_cost(
         provider_atom(Map.get(state, :provider)),
         to_string(Map.get(state, :model)),
-        effective_input_tokens(norm),
-        norm.output_tokens,
+        turn_cost,
+        effective_input_tokens(norm) + norm.output_tokens,
         Map.get(state, :session_id)
       )
     end

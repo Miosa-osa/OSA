@@ -72,7 +72,8 @@ defmodule OptimalSystemAgent.Auth.LoginBroker do
 
   # ── Public API ────────────────────────────────────────────────────────────
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: opts[:name] || __MODULE__)
+  def start_link(opts \\ []),
+    do: GenServer.start_link(__MODULE__, :ok, name: opts[:name] || __MODULE__)
 
   @doc """
   Begin (or re-attach to) a sign-in for `provider`.

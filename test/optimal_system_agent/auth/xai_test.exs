@@ -103,21 +103,23 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
   describe "connect" do
     test "runs the device grant, shows the code, and persists a marker pinned to the sign-in host" do
       stub(%{
-        "/oauth2/device/code" => {200,
-         %{
-           "device_code" => "dc-secret",
-           "user_code" => "ABCD-1234",
-           "verification_uri" => "https://x.ai/device",
-           "expires_in" => 600,
-           "interval" => 0
-         }},
-        "/oauth2/token" => {200,
-         %{
-           "access_token" => "at-1",
-           "refresh_token" => "rt-1",
-           "expires_in" => 3600,
-           "id_token" => jwt(%{"email" => "grok@example.com"})
-         }}
+        "/oauth2/device/code" =>
+          {200,
+           %{
+             "device_code" => "dc-secret",
+             "user_code" => "ABCD-1234",
+             "verification_uri" => "https://x.ai/device",
+             "expires_in" => 600,
+             "interval" => 0
+           }},
+        "/oauth2/token" =>
+          {200,
+           %{
+             "access_token" => "at-1",
+             "refresh_token" => "rt-1",
+             "expires_in" => 3600,
+             "id_token" => jwt(%{"email" => "grok@example.com"})
+           }}
       })
 
       seen = self()
@@ -151,14 +153,15 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
 
     test "a sign-in that is never approved leaves NOTHING behind" do
       stub(%{
-        "/oauth2/device/code" => {200,
-         %{
-           "device_code" => "dc",
-           "user_code" => "AAAA-1111",
-           "verification_uri" => "https://x.ai/device",
-           "expires_in" => 600,
-           "interval" => 0
-         }},
+        "/oauth2/device/code" =>
+          {200,
+           %{
+             "device_code" => "dc",
+             "user_code" => "AAAA-1111",
+             "verification_uri" => "https://x.ai/device",
+             "expires_in" => 600,
+             "interval" => 0
+           }},
         "/oauth2/token" => {400, %{"error" => "access_denied"}}
       })
 
@@ -182,6 +185,7 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
       refute Subscription.status("xai").connected?
       refute XAI.connected?()
       assert XAI.pinned_base_url() == @pinned
+
       assert Onboarding.decorate_for_ui(%{id: "xai", auth_modes: [:api_key, :oauth]}).auth.state ==
                "needs_sign_in"
 
@@ -274,7 +278,9 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
       # An entry whose token has expired with no refresh token: if the account
       # branch were consulted at all it would error, so returning the key
       # proves it was not.
-      connect!(live_entry(%{"expires_at" => System.system_time(:second) - 1, "refresh_token" => ""}))
+      connect!(
+        live_entry(%{"expires_at" => System.system_time(:second) - 1, "refresh_token" => ""})
+      )
 
       assert {:ok, "xai-key-1", "https://proxy.example/v1"} =
                OpenAICompatProvider.resolved_credential(:xai)
@@ -293,6 +299,7 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
                OpenAICompatProvider.resolved_credential(:groq)
 
       Application.delete_env(:optimal_system_agent, :groq_api_key)
+
       assert {:ok, nil, "https://api.groq.com/openai/v1"} =
                OpenAICompatProvider.resolved_credential(:groq)
     end

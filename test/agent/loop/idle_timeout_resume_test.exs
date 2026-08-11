@@ -35,8 +35,7 @@ defmodule OptimalSystemAgent.Agent.Loop.IdleTimeoutResumeTest do
      %{
        elapsed_ms: elapsed_ms,
        partial: partial,
-       message:
-         "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"
+       message: "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"
      }}
   end
 
@@ -164,7 +163,10 @@ defmodule OptimalSystemAgent.Agent.Loop.IdleTimeoutResumeTest do
       # The ReactLoop error path deletes :osa_streaming_tool_ctx after draining;
       # a nil (or empty) context must be a hard no-op, never a second commit.
       assert :none = StreamingToolExecutor.drain_to_messages(nil, "")
-      assert :none = StreamingToolExecutor.drain_to_messages(StreamingToolExecutor.start(state), "")
+
+      assert :none =
+               StreamingToolExecutor.drain_to_messages(StreamingToolExecutor.start(state), "")
+
       assert :counters.get(counter, 1) == 1
     end
 

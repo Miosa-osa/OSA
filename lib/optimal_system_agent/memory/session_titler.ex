@@ -340,7 +340,10 @@ defmodule OptimalSystemAgent.Memory.SessionTitler do
             broadcast_title(session_id, title)
 
           {:error, reason} ->
-            Logger.debug("[SessionTitler] refinement skipped for #{session_id}: #{inspect(reason)}")
+            Logger.debug(
+              "[SessionTitler] refinement skipped for #{session_id}: #{inspect(reason)}"
+            )
+
             :ok
         end
       end,
@@ -388,7 +391,9 @@ defmodule OptimalSystemAgent.Memory.SessionTitler do
   defp first_user_text(session_id) do
     session_id
     |> SessionTranscript.get_transcript()
-    |> Enum.find(fn r -> r.role == "user" and is_binary(r.content) and String.trim(r.content) != "" end)
+    |> Enum.find(fn r ->
+      r.role == "user" and is_binary(r.content) and String.trim(r.content) != ""
+    end)
     |> case do
       nil -> {:error, :no_content}
       r -> {:ok, r.content}

@@ -62,6 +62,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderSwapTest do
 
       # What GET /stream/:session_id does when the TUI subscribes at startup.
       :ok = SessionManager.track_session(session_id, %{user_id: "anonymous", channel: :sse})
+
       refute SessionManager.live_session?(session_id),
              "precondition: the session must not have a loop yet"
 

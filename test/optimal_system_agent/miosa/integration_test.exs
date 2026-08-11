@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.MIOSA.IntegrationTest do
       if prev_env,
         do: System.put_env("MIOSA_PLATFORM_API_KEY", prev_env),
         else: System.delete_env("MIOSA_PLATFORM_API_KEY")
+
       File.rm_rf(tmp)
     end)
 

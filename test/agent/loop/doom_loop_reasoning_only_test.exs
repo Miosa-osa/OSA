@@ -98,5 +98,6 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnlyTest do
     end
   end
 
-  defp put_resample_config(kw), do: Application.put_env(:optimal_system_agent, :doom_loop_resample, kw)
+  defp put_resample_config(kw),
+    do: Application.put_env(:optimal_system_agent, :doom_loop_resample, kw)
 end

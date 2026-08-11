@@ -71,7 +71,14 @@ defmodule OptimalSystemAgent.Auth.AwsSigV4 do
     * `:service` — required, e.g. `"bedrock"`
     * `:now`     — a `DateTime` in UTC, for deterministic tests
   """
-  @spec sign(String.t(), String.t(), [{String.t(), String.t()}], binary(), credentials(), keyword()) ::
+  @spec sign(
+          String.t(),
+          String.t(),
+          [{String.t(), String.t()}],
+          binary(),
+          credentials(),
+          keyword()
+        ) ::
           [{String.t(), String.t()}]
   def sign(method, url, headers, body, creds, opts) do
     region = Keyword.fetch!(opts, :region)

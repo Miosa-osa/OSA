@@ -14,7 +14,10 @@ defmodule OptimalSystemAgent.Verify.PostEditTest do
 
   # An injected exec that records calls and returns a canned {output, code}.
   defp stub_exec(result) do
-    fn program, args, _cwd -> send(self(), {:exec, program, args}); result end
+    fn program, args, _cwd ->
+      send(self(), {:exec, program, args})
+      result
+    end
   end
 
   describe "lang_for/1" do

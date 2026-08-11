@@ -45,6 +45,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   # (its Task killed, slot freed) and recorded as a timed-out result instead of
   # stalling the whole queue forever (the old `timeout: :infinity`). 5 minutes.
   @default_node_timeout_ms 300_000
+  # Grace a cancelled node gets to wind down and reach a terminal RunStore state.
+  @default_cancel_ack_ms 30_000
+  # Slack on top of (node ceiling + cancel ack) for the outer async_stream
+  # backstop, covering worktree creation and the RunStore poll interval, so the
+  # in-task ceiling always fires first.
+  @task_backstop_slack_ms 30_000
   # ≥ this many in-flight (running + queued) flips the "large fleet" warning (a
   # dim advisory in the roster header — NOT a cap).
   @large_fleet_threshold 25
@@ -185,8 +191,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   BUDGET GUARD: before spawning each item the parent's WHOLE-TREE spend is
   checked via `Accounting.budget_exhausted?/1`. Once exhausted, spawning STOPS —
   every remaining item is marked `gate: :skipped` (dropped-for-budget) instead
-  of being spawned. The check degrades to "not exhausted" (keeps spawning) if
-  the parent state can't be fetched — it never crashes the fan_out.
+  of being spawned. The check FAILS CLOSED: if the parent's spend can't be read
+  (unbillable state shape, a crash in the rollup, a descendant that finished
+  without leaving a spend record) it reports "exhausted" and stops spawning,
+  rather than treating an unknown bill as a $0 one. The one exception is a
+  parent loop that does not exist at all — there is no capped run tree to bill,
+  so spawning proceeds. It never crashes the fan_out.
 
   Returns `{:ok, %{total: T, dropped: D, results: [...]}}` or
   `{:error, :ultra_required}`.
@@ -269,11 +279,23 @@ defmodule OptimalSystemAgent.Agent.Fleet do
         fn item -> run_fan_out_item(parent, item, ctx) end,
         max_concurrency: cap,
         ordered: false,
-        # Per-node timeout (was :infinity). A node that runs past the ceiling is
-        # KILLED — its slot frees for the next queued item and it surfaces as
-        # {:exit, :timeout}, recorded below as a timed-out result. This prevents
-        # one hung node from stalling the queue forever.
-        timeout: node_timeout_ms(),
+        # Backstop only — NOT the per-node ceiling.
+        #
+        # `on_timeout: :kill_task` kills the POLLER, not the node. The node's
+        # own Loop has no cancel token fired for it, `RunStore.complete/2` is
+        # never called, and the reaped result is `fail_result("", :node_timeout)`
+        # — an empty node_id and a nil `worktree_ref`. `Fleet.Finalizer` merges a
+        # node's work with `git checkout <worktree_ref> -- <files>`, so a nil ref
+        # means everything that node wrote is silently never merged and its
+        # branch is orphaned, all while the node is STILL RUNNING and still
+        # writing to that worktree.
+        #
+        # So the per-node ceiling is enforced INSIDE the task instead
+        # (`default_await_completion/1` → `cancel_and_confirm/1`), where the
+        # node id and worktree ref are still in scope and the worker can
+        # actually be cancelled. This outer deadline is set strictly longer, so
+        # it only fires if that machinery itself wedges.
+        timeout: fan_out_task_timeout_ms(),
         on_timeout: :kill_task
       )
       |> Stream.with_index(1)
@@ -291,11 +313,19 @@ defmodule OptimalSystemAgent.Agent.Fleet do
           {:ok, %{} = result} ->
             result
 
-          # Reaped by the per-node timeout: the task was killed so its item
-          # identity is unrecoverable — record a timed-out fail result and keep
-          # draining.
+          # Reaped by the OUTER backstop. The in-task ceiling should have fired
+          # first and returned a real, identified result; reaching here means it
+          # did not, the task is dead, and the item identity died with it. Do
+          # not dress this up as a node we stopped — nothing was cancelled and
+          # the node may well still be running.
           {:exit, :timeout} ->
-            fail_result("", :node_timeout)
+            Logger.error(
+              "[Fleet] a node exceeded the outer backstop (#{fan_out_task_timeout_ms()}ms) and " <>
+                "was reaped WITHOUT being cancelled — it may still be running and writing to " <>
+                "its worktree. Its identity was lost with the task."
+            )
+
+            fail_result("", {:node_timeout, :unidentified_task_reaped})
 
           # Any other task exit (crash we couldn't trap): isolate it as a fail
           # result so remaining items still drain.
@@ -423,7 +453,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   # `:unknown` is deliberately absent: it is what the default await returns for a
   # node that was never registered (fake test spawn / injected seam), and it
   # carries no evidence of failure.
-  @incomplete_await [:failed, :cancelled, :timeout]
+  # Await outcomes that mean the node did NOT finish its work. `:uncancelled` is
+  # the worst of them: the node blew its ceiling AND ignored the cancel, so it
+  # is still running. It is a fail result like the others, but — crucially — one
+  # that carries the node's real id and worktree ref, so the finalizer can still
+  # see (and a human can still salvage) what it wrote.
+  @incomplete_await [:failed, :cancelled, :timeout, :uncancelled]
 
   # Turn the spawn_fun return (plus the node's terminal await status) into a
   # structured result map. A spawn that succeeded but whose node ended in a
@@ -487,8 +522,18 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   defp mark_budget_stopped(%{budget_stopped: ref}), do: :atomics.put(ref, 1, 1)
 
   # Fetch the parent loop's live state and ask Accounting whether the WHOLE-TREE
-  # spend has reached the cap. Degrades to `false` (keep spawning) whenever the
-  # state can't be fetched — never crashes the fan_out.
+  # spend has reached the cap. Never crashes the fan_out.
+  #
+  # The three failure branches used to all return `false` ("keep spawning") with
+  # the comment "degrades to false". That degrade spends real money: it is the
+  # answer "I have no idea what this run has cost, carry on". The branches are
+  # not equivalent, so they no longer share an answer:
+  #
+  #   * `{:error, _}` — there is no such loop, so there is no capped run tree to
+  #     bill and nothing to enforce. Still `false`.
+  #   * anything else — the loop answered, but not in a shape we can bill from,
+  #     or the check itself blew up. A cap may well be set and we cannot see the
+  #     spend, so we FAIL CLOSED and stop spawning.
   defp default_budget_exhausted?(parent) do
     case Loop.get_state(parent) do
       {:ok, %{session_id: sid, spend: spend}} when is_map(spend) ->
@@ -498,13 +543,25 @@ defmodule OptimalSystemAgent.Agent.Fleet do
           max_budget_usd: Map.get(spend, :max_budget_usd)
         })
 
-      _ ->
+      {:error, _} ->
         false
+
+      other ->
+        budget_unknown(parent, "loop state carried no spend map: #{inspect(other)}")
     end
   rescue
-    _ -> false
+    e -> budget_unknown(parent, Exception.message(e))
   catch
-    :exit, _ -> false
+    :exit, reason -> budget_unknown(parent, "exit #{inspect(reason)}")
+  end
+
+  defp budget_unknown(parent, why) do
+    Logger.warning(
+      "[Fleet] tree spend for #{parent} is UNKNOWN (#{why}) — refusing to spawn further " <>
+        "nodes rather than assuming the unread spend was free"
+    )
+
+    true
   end
 
   # ── worktree isolation helpers ─────────────────────────────────────────
@@ -565,7 +622,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
       _running ->
         if System.monotonic_time(:millisecond) >= deadline do
-          :timeout
+          cancel_and_confirm(node_id)
         else
           Process.sleep(await_poll_ms())
           await_loop(node_id, deadline)
@@ -577,8 +634,85 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     :exit, _ -> :unknown
   end
 
+  # The node ran past its ceiling. Cancel the WORKER and wait for it to
+  # acknowledge by reaching a terminal state, instead of killing the poller and
+  # leaving the node running behind a fabricated "failed" result.
+  #
+  # Returns `:timeout` once the node has actually stopped, or `:uncancelled` if
+  # it never acknowledged — a distinct outcome precisely so the result does not
+  # claim a node was stopped when it was not.
+  defp cancel_and_confirm(node_id) do
+    Logger.warning(
+      "[Fleet] node #{node_id} exceeded #{node_timeout_ms()}ms — cancelling it and waiting " <>
+        "for acknowledgement"
+    )
+
+    _ = safe_cancel(node_id)
+    confirm_loop(node_id, System.monotonic_time(:millisecond) + cancel_ack_ms())
+  end
+
+  defp confirm_loop(node_id, deadline) do
+    case RunStore.get(node_id) do
+      %{status: status} when status in [:completed, :failed, :cancelled] ->
+        Logger.info("[Fleet] node #{node_id} acknowledged cancellation (:#{status})")
+        :timeout
+
+      nil ->
+        :timeout
+
+      _running ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          Logger.error(
+            "[Fleet] node #{node_id} did NOT acknowledge cancellation within " <>
+              "#{cancel_ack_ms()}ms — it is still running and still writing to its worktree. " <>
+              "Reporting :uncancelled rather than claiming it was stopped."
+          )
+
+          :uncancelled
+        else
+          Process.sleep(await_poll_ms())
+          confirm_loop(node_id, deadline)
+        end
+    end
+  end
+
+  defp safe_cancel(node_id) do
+    Loop.cancel(node_id)
+  rescue
+    e -> Logger.warning("[Fleet] cancel of #{node_id} failed: #{Exception.message(e)}")
+  catch
+    _, reason -> Logger.warning("[Fleet] cancel of #{node_id} exited: #{inspect(reason)}")
+  end
+
   defp await_poll_ms do
     Application.get_env(:optimal_system_agent, :fleet_await_poll_ms, @default_await_poll_ms)
+  end
+
+  @doc """
+  How long a cancelled node is given to acknowledge (reach a terminal state)
+  before the drain gives up on it and reports `:uncancelled`.
+  """
+  @spec cancel_ack_ms() :: pos_integer()
+  def cancel_ack_ms do
+    configured =
+      Application.get_env(:optimal_system_agent, :fleet_cancel_ack_ms, @default_cancel_ack_ms)
+
+    # Never give a node longer to acknowledge than it was given to run. A caller
+    # that sets a tight ceiling (tests, short jobs) means it, and a fixed 30s
+    # grace on an 80ms ceiling would make the outer backstop 375x the ceiling.
+    min(configured, node_timeout_ms())
+  end
+
+  @doc """
+  Outer `Task.async_stream` backstop, strictly longer than the in-task ceiling
+  (`node_timeout_ms/0` + the cancel-acknowledgement window + slack for worktree
+  creation). The in-task path must win the race — it is the only one that can
+  identify and cancel the node.
+  """
+  @spec fan_out_task_timeout_ms() :: pos_integer()
+  def fan_out_task_timeout_ms do
+    ceiling = node_timeout_ms()
+    ceiling + cancel_ack_ms() + min(@task_backstop_slack_ms, ceiling)
   end
 
   # Repo-relative paths a node modified in its worktree (best-effort `git status

@@ -17,7 +17,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.ScratchpadWiringTest do
     prev_boot = Application.get_env(:optimal_system_agent, :bootstrap_dir)
 
     tmp =
-      Path.join(System.tmp_dir!(), "osa_delegate_scratch_test_#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "osa_delegate_scratch_test_#{System.unique_integer([:positive])}"
+      )
 
     File.mkdir_p!(tmp)
     Application.put_env(:optimal_system_agent, :config_dir, tmp)

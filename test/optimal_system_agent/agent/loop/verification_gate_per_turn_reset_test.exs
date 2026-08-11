@@ -56,6 +56,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGatePerTurnResetTest do
     {_d1, state} = VerificationGate.build_directive(state)
     assert VerificationGate.needs_verification?(state)
     {_d2, state} = VerificationGate.build_directive(state)
+
     refute VerificationGate.needs_verification?(state),
            "the per-turn cap should have stepped the gate aside within this turn"
 

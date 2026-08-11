@@ -187,12 +187,18 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       lease_epoch: 0
     }
 
-    state = persist_and_cache(state, task)
+    case persist_and_cache(state, task) do
+      {:ok, state} ->
+        Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
+        Logger.debug("[Agent.TaskQueue] Enqueued task #{task_id} for agent #{agent_id}")
 
-    Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
-    Logger.debug("[Agent.TaskQueue] Enqueued task #{task_id} for agent #{agent_id}")
+        {:noreply, state}
 
-    {:noreply, state}
+      {:error, reason} ->
+        # Not cached: a task nobody durably recorded must not be leased out.
+        persist_failed(:enqueue, task_id, reason)
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -213,18 +219,24 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             leased_by: nil
         }
 
-        state = persist_update(state, updated)
+        # Write FIRST, advance in-memory only on a durable write.
+        case persist_update(state, updated) do
+          {:ok, state} ->
+            state = %{
+              state
+              | tasks: Map.put(state.tasks, task_id, updated),
+                leased: Map.delete(state.leased, task_id)
+            }
 
-        state = %{
-          state
-          | tasks: Map.put(state.tasks, task_id, updated),
-            leased: Map.delete(state.leased, task_id)
-        }
+            Bus.emit(:system_event, %{event: :task_completed, task_id: task_id})
+            Logger.debug("[Agent.TaskQueue] Task #{task_id} completed")
 
-        Bus.emit(:system_event, %{event: :task_completed, task_id: task_id})
-        Logger.debug("[Agent.TaskQueue] Task #{task_id} completed")
+            {:noreply, state}
 
-        {:noreply, state}
+          {:error, reason} ->
+            persist_failed(:complete, task_id, reason)
+            {:noreply, state}
+        end
     end
   end
 
@@ -259,27 +271,36 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             }
           end
 
-        state = persist_update(state, updated)
+        case persist_update(state, updated) do
+          {:ok, state} ->
+            state = %{
+              state
+              | tasks: Map.put(state.tasks, task_id, updated),
+                leased: Map.delete(state.leased, task_id)
+            }
 
-        state = %{
-          state
-          | tasks: Map.put(state.tasks, task_id, updated),
-            leased: Map.delete(state.leased, task_id)
-        }
+            Bus.emit(:system_event, %{
+              event: :task_failed,
+              task_id: task_id,
+              attempts: new_attempts,
+              max_attempts: task.max_attempts,
+              final: new_attempts >= task.max_attempts
+            })
 
-        Bus.emit(:system_event, %{
-          event: :task_failed,
-          task_id: task_id,
-          attempts: new_attempts,
-          max_attempts: task.max_attempts,
-          final: new_attempts >= task.max_attempts
-        })
+            Logger.debug(
+              "[Agent.TaskQueue] Task #{task_id} failed (attempt #{new_attempts}/#{task.max_attempts})"
+            )
 
-        Logger.debug(
-          "[Agent.TaskQueue] Task #{task_id} failed (attempt #{new_attempts}/#{task.max_attempts})"
-        )
+            {:noreply, state}
 
-        {:noreply, state}
+          {:error, reason} ->
+            # Without the durable write, releasing the lease in memory would let
+            # a second worker lease a task the DB still shows as held — and the
+            # attempts increment would be lost, so `max_attempts` would never
+            # be reached.
+            persist_failed(:fail, task_id, reason)
+            {:noreply, state}
+        end
     end
   end
 
@@ -361,12 +382,17 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       lease_epoch: 0
     }
 
-    state = persist_and_cache(state, task)
+    case persist_and_cache(state, task) do
+      {:ok, state} ->
+        Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
+        Logger.debug("[Agent.TaskQueue] Enqueued (sync) task #{task_id} for agent #{agent_id}")
 
-    Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
-    Logger.debug("[Agent.TaskQueue] Enqueued (sync) task #{task_id} for agent #{agent_id}")
+        {:reply, {:ok, task}, state}
 
-    {:reply, {:ok, task}, state}
+      {:error, reason} ->
+        persist_failed(:enqueue, task_id, reason)
+        {:reply, {:error, :persist_failed}, state}
+    end
   end
 
   @impl true
@@ -401,25 +427,39 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             lease_epoch: epoch
         }
 
-        state = persist_update(state, updated)
+        # Grant the lease in memory only once it is durable. Handing work out on
+        # the strength of a write that failed means the DB still shows the task
+        # pending: after a restart it is leased to nobody and runs a second time
+        # alongside the worker still holding the in-memory lease.
+        case persist_update(state, updated) do
+          {:ok, state} ->
+            lease_info = %{
+              task_id: task.task_id,
+              agent_id: agent_id,
+              leased_at: now,
+              leased_until: leased_until
+            }
 
-        lease_info = %{
-          task_id: task.task_id,
-          agent_id: agent_id,
-          leased_at: now,
-          leased_until: leased_until
-        }
+            state = %{
+              state
+              | tasks: Map.put(state.tasks, task.task_id, updated),
+                leased: Map.put(state.leased, task.task_id, lease_info)
+            }
 
-        state = %{
-          state
-          | tasks: Map.put(state.tasks, task.task_id, updated),
-            leased: Map.put(state.leased, task.task_id, lease_info)
-        }
+            Bus.emit(:system_event, %{
+              event: :task_leased,
+              task_id: task.task_id,
+              agent_id: agent_id
+            })
 
-        Bus.emit(:system_event, %{event: :task_leased, task_id: task.task_id, agent_id: agent_id})
-        Logger.debug("[Agent.TaskQueue] Leased task #{task.task_id} to agent #{agent_id}")
+            Logger.debug("[Agent.TaskQueue] Leased task #{task.task_id} to agent #{agent_id}")
 
-        {:reply, {:ok, updated}, state}
+            {:reply, {:ok, updated}, state}
+
+          {:error, reason} ->
+            persist_failed(:lease, task.task_id, reason)
+            {:reply, {:error, :persist_failed}, state}
+        end
     end
   end
 
@@ -500,32 +540,56 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     end
   end
 
+  # Enqueue. `{:ok, state}` on a durable insert, `{:error, reason}` otherwise —
+  # every branch used to cache the task in memory regardless, so a task whose
+  # row was never written was handed out to a worker and then vanished at the
+  # next restart, mid-flight.
   defp persist_and_cache(state, task) do
+    cached = %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+
     if state.db_available do
       try do
         attrs = TaskSchema.from_map(task)
 
         case Repo.insert(TaskSchema.changeset(attrs), on_conflict: :nothing) do
           {:ok, _record} ->
-            %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+            {:ok, cached}
 
           {:error, changeset} ->
-            Logger.warning(
+            Logger.error(
               "[Agent.TaskQueue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}"
             )
 
-            %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+            {:error, changeset.errors}
         end
       rescue
         e ->
-          Logger.warning("[Agent.TaskQueue] DB insert error for #{task.task_id}: #{inspect(e)}")
-          %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+          Logger.error("[Agent.TaskQueue] DB insert error for #{task.task_id}: #{inspect(e)}")
+          {:error, e}
+      catch
+        :exit, reason ->
+          Logger.error("[Agent.TaskQueue] DB insert exit for #{task.task_id}: #{inspect(reason)}")
+          {:error, reason}
       end
     else
-      %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+      # Memory-only by design: nothing survives a restart, so nothing diverges.
+      {:ok, cached}
     end
   end
 
+  # Durable write for a status transition. Returns `{:ok, state}` or
+  # `{:error, reason}` — it USED to swallow every failure and return the state
+  # unchanged, which is indistinguishable from success, and every caller then
+  # mutated the in-memory map regardless.
+  #
+  # The cost of that was a second execution of real work: a `complete` whose
+  # write failed left `tasks` saying `:completed` and the DB row saying
+  # `"leased"` with no result. On restart `load_from_db/1` recovers the row as
+  # leased, the reaper expires it, and the task RUNS AGAIN — with the first
+  # run's result gone.
+  #
+  # `db_available: false` is not a failure: the queue is memory-only by design
+  # there, nothing survives a restart, and so there is no divergence to create.
   defp persist_update(state, task) do
     if state.db_available do
       try do
@@ -539,29 +603,55 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             leased_until: attrs.leased_until,
             leased_by: attrs.leased_by,
             result: attrs.result,
-            error: attrs.error,
+            error: db_error(attrs.error),
             attempts: attrs.attempts,
             completed_at: attrs.completed_at,
             updated_at: DateTime.utc_now()
           ]
         )
 
-        state
+        {:ok, state}
       rescue
         e ->
-          Logger.warning("[Agent.TaskQueue] DB update failed for #{task.task_id}: #{inspect(e)}")
-          state
+          Logger.error("[Agent.TaskQueue] DB update failed for #{task.task_id}: #{inspect(e)}")
+          {:error, e}
       catch
         :exit, reason ->
-          Logger.warning(
-            "[Agent.TaskQueue] DB update exit for #{task.task_id}: #{inspect(reason)}"
-          )
-
-          state
+          Logger.error("[Agent.TaskQueue] DB update exit for #{task.task_id}: #{inspect(reason)}")
+          {:error, reason}
       end
     else
-      state
+      {:ok, state}
     end
+  end
+
+  # The `error` column is a string. `do_reap_expired/1` sets the in-memory error
+  # to the ATOM `:lease_expired`, and Ecto refuses to cast an atom to :string —
+  # so every reap-to-failed write raised. The old rescue swallowed that and
+  # advanced memory anyway, which is why nobody noticed the row was never
+  # written. Normalize at the DB boundary; the in-memory value stays an atom.
+  defp db_error(nil), do: nil
+  defp db_error(v) when is_binary(v), do: v
+  defp db_error(v) when is_atom(v), do: Atom.to_string(v)
+  defp db_error(v), do: inspect(v)
+
+  # Shared handling for a transition whose durable write failed: in-memory state
+  # is left EXACTLY as it was (the task stays `:leased`, by the same holder, at
+  # the same epoch), so memory and the DB still agree and the holder can simply
+  # retry the same call. Announced rather than swallowed.
+  defp persist_failed(op, task_id, reason) do
+    Logger.error(
+      "[Agent.TaskQueue] refusing to apply #{op} for task #{task_id} in memory — its durable " <>
+        "write failed (#{inspect(reason)}). The task stays leased; retry the #{op}. Advancing " <>
+        "anyway would leave the row leased with no result and re-run the work after a restart."
+    )
+
+    Bus.emit(:system_event, %{
+      event: :task_persist_failed,
+      task_id: task_id,
+      op: op,
+      reason: inspect(reason)
+    })
   end
 
   defp do_reap_expired(state) do
@@ -588,8 +678,8 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     # Rows are written one at a time rather than via a bulk `update_all`: the
     # bulk form had no `where status == "leased"` guard (so it could stomp a
     # task that raced to :completed) and could not carry per-task attempts.
-    state =
-      Enum.reduce(expired_ids, state, fn task_id, acc ->
+    {state, reaped_ids} =
+      Enum.reduce(expired_ids, {state, []}, fn task_id, {acc, reaped} ->
         case Map.get(acc.tasks, task_id) do
           %{status: :leased} = task ->
             attempts = task.attempts + 1
@@ -617,17 +707,32 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
                 }
               end
 
-            acc = persist_reaped(acc, reverted)
-            %{acc | tasks: Map.put(acc.tasks, task_id, reverted)}
+            # Only revert in memory if the row was actually reverted on disk.
+            # A reap that mutates memory on a failed write puts the task back in
+            # the pending pool while the DB still shows it leased — so it is
+            # leased twice, and the attempts increment that enforces
+            # `max_attempts` is lost, making the hang-and-retry loop endless.
+            case persist_reaped(acc, reverted) do
+              {:ok, acc} ->
+                {%{acc | tasks: Map.put(acc.tasks, task_id, reverted)}, [task_id | reaped]}
+
+              {:error, reason} ->
+                # Lease entry deliberately RETAINED: dropping it here would free
+                # the task for a second worker while the DB still shows it held.
+                # The next reap tick retries the write.
+                persist_failed(:reap, task_id, reason)
+                {acc, reaped}
+            end
 
           _ ->
-            # Already terminal or gone — nothing to revert.
-            acc
+            # Already terminal or gone — nothing to revert, but the stale lease
+            # entry should go.
+            {acc, [task_id | reaped]}
         end
       end)
 
     updated_leased =
-      Enum.reduce(expired_ids, state.leased, fn id, leased ->
+      Enum.reduce(reaped_ids, state.leased, fn id, leased ->
         Map.delete(leased, id)
       end)
 
@@ -649,20 +754,26 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             status: attrs.status,
             leased_until: nil,
             leased_by: nil,
-            error: attrs.error,
+            error: db_error(attrs.error),
             attempts: attrs.attempts,
             completed_at: attrs.completed_at,
             updated_at: DateTime.utc_now()
           ]
         )
-      rescue
-        e -> Logger.warning("[Agent.TaskQueue] DB reap failed: #{inspect(e)}")
-      catch
-        :exit, reason -> Logger.warning("[Agent.TaskQueue] DB reap exit: #{inspect(reason)}")
-      end
-    end
 
-    state
+        {:ok, state}
+      rescue
+        e ->
+          Logger.error("[Agent.TaskQueue] DB reap failed: #{inspect(e)}")
+          {:error, e}
+      catch
+        :exit, reason ->
+          Logger.error("[Agent.TaskQueue] DB reap exit: #{inspect(reason)}")
+          {:error, reason}
+      end
+    else
+      {:ok, state}
+    end
   end
 
   # ── Private: History Query ──────────────────────────────────────────

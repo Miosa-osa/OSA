@@ -251,7 +251,8 @@ defmodule OptimalSystemAgent.Agent.Tier do
       model_for(tier, provider)
   end
 
-  def model_for_agent(_), do: auto_model(Application.get_env(:optimal_system_agent, :default_provider, :ollama))
+  def model_for_agent(_),
+    do: auto_model(Application.get_env(:optimal_system_agent, :default_provider, :ollama))
 
   @doc "Get the token budget for a tier."
   @spec budget_for(tier()) :: map()

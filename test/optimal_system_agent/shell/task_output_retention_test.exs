@@ -153,7 +153,9 @@ defmodule OptimalSystemAgent.Shell.TaskOutputRetentionTest do
       refute File.exists?(Path.join([root, "sess-a", "tasks"]))
     end
 
-    test "spares files inside the retention window (a concurrent daemon's live output)", %{root: root} do
+    test "spares files inside the retention window (a concurrent daemon's live output)", %{
+      root: root
+    } do
       stale = seed(root, "dead", "t1", 7200)
       live = seed(root, "other-daemon", "t1", 5)
 
@@ -165,7 +167,9 @@ defmodule OptimalSystemAgent.Shell.TaskOutputRetentionTest do
 
     test "a missing root is not an error" do
       assert {:ok, 0} =
-               TaskOutput.sweep_orphans(root: Path.join(System.tmp_dir!(), "osa_no_such_root_xyz"))
+               TaskOutput.sweep_orphans(
+                 root: Path.join(System.tmp_dir!(), "osa_no_such_root_xyz")
+               )
     end
 
     test "ignores non-.out files", %{root: root} do

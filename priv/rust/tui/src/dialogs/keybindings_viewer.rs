@@ -279,24 +279,20 @@ fn split_bind(s: &str) -> Option<(String, String)> {
     None
 }
 
-/// Char-boundary-safe truncation (multibyte descriptions can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 /// Truncate to `width` chars (char-safe) then right-pad with spaces so the key
 /// column stays aligned regardless of the underlying byte length.
 fn pad_or_truncate(s: &str, width: usize) -> String {
     let t = truncate_chars(s, width);
-    let n = t.chars().count();
+    let n = crate::util::cols(&t);
     if n < width {
         format!("{t}{}", " ".repeat(width - n))
     } else {

@@ -312,17 +312,13 @@ impl RewindDialog {
     }
 }
 
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let take = max.saturating_sub(1);
-        format!("{}…", chars.into_iter().take(take).collect::<String>())
-    }
+    crate::util::fit_cols(s, max)
 }
 
 /// Trim an ISO-8601 timestamp down to `YYYY-MM-DD HH:MM` for compact display.

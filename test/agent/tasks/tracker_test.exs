@@ -404,7 +404,9 @@ defmodule OptimalSystemAgent.Agent.Tasks.TrackerTest do
       {_pid, name} = start_tracker()
       sid = session_id()
 
-      assert {:ok, ids} = Tasks.add_tasks(sid, ["Run the test suite", "Fix the failing case"], name)
+      assert {:ok, ids} =
+               Tasks.add_tasks(sid, ["Run the test suite", "Fix the failing case"], name)
+
       assert length(ids) == 2
 
       tasks = Tasks.get_tasks(sid, name)

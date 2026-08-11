@@ -165,10 +165,18 @@ defmodule OptimalSystemAgent.Auth.Providers.OllamaAccount do
   defp key_note do
     case key_status() do
       :missing ->
-        ["", "  Note: #{key_path()} does not exist yet. Ollama creates it the first time the", "  daemon runs, and `ollama signin` registers it with your account."]
+        [
+          "",
+          "  Note: #{key_path()} does not exist yet. Ollama creates it the first time the",
+          "  daemon runs, and `ollama signin` registers it with your account."
+        ]
 
       {:insecure, mode} ->
-        ["", "  Note: #{key_path()} is mode #{Integer.to_string(mode, 8)} — readable by other users", "  on this machine. Run: chmod 600 #{key_path()}"]
+        [
+          "",
+          "  Note: #{key_path()} is mode #{Integer.to_string(mode, 8)} — readable by other users",
+          "  on this machine. Run: chmod 600 #{key_path()}"
+        ]
 
       :ok ->
         []
@@ -245,8 +253,15 @@ defmodule OptimalSystemAgent.Auth.Providers.OllamaAccount do
         case persist(account) do
           {:ok, entry} ->
             io.("")
-            io.("  ✓ Using your Ollama account#{plan_suffix(entry)} — signed in as #{account.account_id}")
-            io.("    OSA talks to your local Ollama daemon at #{account.daemon_url}, which proxies")
+
+            io.(
+              "  ✓ Using your Ollama account#{plan_suffix(entry)} — signed in as #{account.account_id}"
+            )
+
+            io.(
+              "    OSA talks to your local Ollama daemon at #{account.daemon_url}, which proxies"
+            )
+
             io.("    :cloud models with this machine's device key. No API key is stored.")
             {:ok, entry}
 

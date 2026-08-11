@@ -148,8 +148,13 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   """
   @spec purge_expired(keyword()) :: {:ok, %{by_age: non_neg_integer(), by_cap: non_neg_integer()}}
   def purge_expired(opts \\ []) do
-    days = Keyword.get_lazy(opts, :days, fn -> setting("transcriptRetentionDays", @default_retention_days) end)
-    max_rows = Keyword.get_lazy(opts, :max_rows, fn -> setting("transcriptMaxRows", @default_max_rows) end)
+    days =
+      Keyword.get_lazy(opts, :days, fn ->
+        setting("transcriptRetentionDays", @default_retention_days)
+      end)
+
+    max_rows =
+      Keyword.get_lazy(opts, :max_rows, fn -> setting("transcriptMaxRows", @default_max_rows) end)
 
     by_age = purge_by_age(days)
     by_cap = purge_by_cap(max_rows)

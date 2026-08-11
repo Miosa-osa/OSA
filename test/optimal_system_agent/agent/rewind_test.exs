@@ -21,7 +21,9 @@ defmodule OptimalSystemAgent.Agent.RewindTest do
   alias OptimalSystemAgent.FSCheckpoint.Server, as: FSCheckpoint
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "osa_rewind_coord_test_#{System.unique_integer([:positive])}")
+    tmp =
+      Path.join(System.tmp_dir!(), "osa_rewind_coord_test_#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(tmp)
     file = Path.join(tmp, "scratch.txt")
 
@@ -68,6 +70,7 @@ defmodule OptimalSystemAgent.Agent.RewindTest do
       head1 = write_and_snapshot(session, file, "v1\n")
 
       msgs1 = [%{role: "user", content: "first"}, %{role: "assistant", content: "ack"}]
+
       {:ok, target_id} =
         Checkpoint.create_rewind_checkpoint(
           %{session_id: session, messages: msgs1, iteration: 1, plan_mode: false, turn_count: 1},
@@ -112,10 +115,14 @@ defmodule OptimalSystemAgent.Agent.RewindTest do
   end
 
   describe "unrevert/1" do
-    test "restores files and messages forward to the pre-rewind state", %{session: session, scratch_file: file} do
+    test "restores files and messages forward to the pre-rewind state", %{
+      session: session,
+      scratch_file: file
+    } do
       head1 = write_and_snapshot(session, file, "v1\n")
 
       msgs1 = [%{role: "user", content: "first"}]
+
       {:ok, target_id} =
         Checkpoint.create_rewind_checkpoint(
           %{session_id: session, messages: msgs1, iteration: 1, plan_mode: false, turn_count: 1},
@@ -159,7 +166,13 @@ defmodule OptimalSystemAgent.Agent.RewindTest do
 
       {:ok, target_id} =
         Checkpoint.create_rewind_checkpoint(
-          %{session_id: session, messages: [%{role: "user", content: "x"}], iteration: 0, plan_mode: false, turn_count: 0},
+          %{
+            session_id: session,
+            messages: [%{role: "user", content: "x"}],
+            iteration: 0,
+            plan_mode: false,
+            turn_count: 0
+          },
           fs_head: head1,
           label: "baseline"
         )

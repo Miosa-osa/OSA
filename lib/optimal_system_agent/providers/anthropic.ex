@@ -1221,7 +1221,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         # a Claude-first user is most likely to hit first (P4). Leads with
         # "ANTHROPIC_API_KEY" so the message-level regex
         # (`missing_api_key_message/1`) also names the right env var.
-        {:error, "ANTHROPIC_API_KEY not configured. Run /provider to add a key, or set ANTHROPIC_API_KEY."}
+        {:error,
+         "ANTHROPIC_API_KEY not configured. Run /provider to add a key, or set ANTHROPIC_API_KEY."}
     end
   end
 

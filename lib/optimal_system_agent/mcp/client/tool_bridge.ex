@@ -160,7 +160,9 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
         result
         |> Messages.normalize_tool_result()
         |> OutputLimiter.limit(server, tool)
-      {:error, reason} -> {:error, mcp_error_message(reason)}
+
+      {:error, reason} ->
+        {:error, mcp_error_message(reason)}
     end
   end
 

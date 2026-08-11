@@ -9,6 +9,126 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.78] — displays as `v1.0.078`
+
+### Fixed — text wider than one column sheared every layout it appeared in
+
+`priv/rust/tui/src/util.rs` has one correct display fitter, `fit_cols`, whose own
+docstring warns against the two wrong alternatives. The tree contained **39
+private char-count copies** of it and **15 more places** measuring a column
+budget with `chars().count()` or byte `.len()`.
+
+They render user content — session titles, file paths, memory entries, skill
+descriptions, permission rules, MCP server names. One CJK character or emoji in
+any of them over-ran its reserved span, pushed every column to its right, and
+shoved the trailing badge or timestamp off the pane. All now delegate to
+`fit_cols`, with new width-aware `pad_width`/`pad_cols`/`pad_cols_start`
+primitives for the padding half, and a source guard so the pattern cannot creep
+back.
+
+- **The plan approval box was among them.** `channels/cli/plan_review.ex` held a
+  byte-for-byte copy of the already-known-bad `visible_length/1` — `String.length`
+  as display width, and an ANSI strip matching only SGR, so cursor-movement CSI
+  and OSC-8 hyperlinks counted as visible. Model-authored plan text tore the
+  border of the box the user reads *before approving a plan*. Extracted as
+  `CLI.Width` with a minimal east-asian-width table, deliberately in Elixir
+  rather than calling the TUI: `osa doctor`, `osa usage` and the non-interactive
+  plan gate run where no TUI process exists, and a port round-trip failure mode
+  underneath a consent gate is the wrong trade.
+- **Markdown rows did not own every column.** A table narrower than the pane
+  emitted short rows, so a terminal rendering a glyph wider than `unicode-width`
+  claims caused the overhang to wrap and sheared every row below it — permanently,
+  since finalized content lives in the terminal's own scrollback. Rows are now
+  padded to the full region.
+- Elixir word wrap could not break an over-long token, so a URL or base64 blob
+  blew out every border after it; it also discarded the user's indentation by
+  splitting on `\s+`. Both fixed.
+- The task box's top border was sized from a hand-counted literal and came out
+  **three columns short of every other row, for plain ASCII too**.
+- Multi-line tool headers rendered as `export A=1cd /tmpmake`, because ratatui
+  treats `\n` inside a span as zero-width.
+
+### Fixed — work that was silently destroyed
+
+- **Subagent worktrees were deleted with no durable snapshot**, and the snapshot
+  config defaulted to `false`. The path is deterministic per subagent id, so a
+  retry or resume of the same id destroyed the previous run's *uncommitted* tree
+  and force-deleted its branch. Reclaim now snapshots a dirty tree before
+  removal and **fails rather than destroying** if the ref cannot be written. The
+  default is flipped to `true`: with it off, `discard: true` could never be
+  honoured for a dirty tree, so the enforcement was vacuous.
+- **A fan-out timeout killed the poller, not the worker.** The node kept running
+  and writing while being reported as terminally failed, and its result carried a
+  nil worktree ref — so everything it wrote was never merged and its branch was
+  orphaned. The ceiling now cancels the worker and waits for acknowledgement; a
+  node that never acknowledges gets its own `:uncancelled` outcome rather than a
+  fabricated one.
+- **`Task.await` + `:brutal_kill` destroyed the process that persists the child's
+  transcript** — precisely what `resume_subagent` needs — and left the run row
+  `:running` forever. The outer deadline is now strictly longer than the inner,
+  with a grace window so cleanup lands before anything is killed.
+- **The task queue advanced in-memory state on failed writes**, so a `complete`
+  whose write failed left the row leased with no result, and the reaper ran the
+  task a second time. Writes now happen first. Found while fixing it: every
+  reap-to-failed write was writing an atom into a `:string` column, raising
+  `Ecto.Query.CastError` and being silently swallowed — the row was never
+  persisted at all.
+
+### Fixed — controls that failed open
+
+- **A BOM in `settings.json` silently discarded the whole file** — `permissions`,
+  `env`, `hooks`, `permission_mode` — making the agent *more* permissive than
+  configured. The BOM is now stripped; a file that exists but cannot be parsed
+  logs loudly and **pins `permission_mode` to `ask`** while any layer is
+  unreadable, because deny rules cannot be recovered and nothing should run
+  unprompted in their absence.
+- **Disabled skills still reached the model.** The `.disabled` marker was enforced
+  at a flat path while discovery globbed six roots, so every bundled and every
+  project-scoped skill was undisableable by construction — and the trigger-match
+  path, which injects the full instruction body, checked neither `.disabled` nor
+  the `paths:` gate. One canonical check now, matching the one `osa doctor`
+  already used.
+- **A subagent whose frontmatter would not parse loaded unrestricted**, with
+  `tools_blocked: []` and its raw frontmatter as the system prompt. A file that
+  *declares* frontmatter it cannot parse is now refused; a file with none still
+  loads as a plain prompt, because nothing was declared and nothing discarded.
+  Five sibling parsers collapsed into one BOM-tolerant module.
+- **`use_skill` enforced a hardcoded `~/.osa/skills`** while the loader used six
+  roots, so every repo-scoped skill was advertised and then refused at invoke.
+  Now a path-boundary test against the real roots — `~/.osa/skills-backup/…` no
+  longer passes a prefix check.
+
+### Fixed — budget and unattended execution
+
+- **Budget enforcement collapsed "unknown" into "zero" in five places**, so an
+  absent spend sidecar read as free and kept spawning. An incompleteness signal
+  now travels with the rollup and fails closed when a positive cap exists. A
+  still-running node is not counted as unknown — it simply has not reached its
+  first persist point, which is a measurement rather than a guess.
+- Two pricing engines billed the same tokens differently, one of them re-billing
+  cache reads at full input rate; `/cost` showed the inflated figure. One usage,
+  one price, one engine.
+- `record_cost` now resets before accumulating, so spend between midnight and the
+  first read is no longer accrued into yesterday and then zeroed.
+- **`verification/loop.ex` executed model-authored shell unattended** — any reply
+  line starting `$ ` went straight to the shell with no gate. It now runs through
+  the existing `DangerousCommands` + `Permissions` stack, and only an explicit
+  `allow` executes: `ask` refuses, because nobody is there to ask. A terminated
+  loop also refuses late results, which previously could flip it to passed and
+  execute more shell.
+
+### Known gaps
+
+Several `async: false` suites mutate `HOME` and application env and interfere
+when interleaved — four tests fail in a full run and all pass in isolation. The
+code is correct; the isolation is not. Lease epochs are still per-VM: persisting
+them needs a migration, and an unapplied migration would now hard-fail task
+completion under the new fail-closed writes. OSA still has no in-app scrollback —
+finalized content is handed to the terminal at the width it was wrapped for, so a
+resize cannot re-wrap it; that is architectural, not a defect to patch.
+
+---
+
 ## [1.0.77] — displays as `v1.0.077`
 
 ### Fixed — the TUI kept losing its layout

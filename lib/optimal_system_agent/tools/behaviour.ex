@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
   @moduledoc """
   The contract every OSA tool implements.
 
-Optional
+  Optional
   callbacks have fail-closed defaults injected by
   `use OptimalSystemAgent.Tools.Behaviour`, mirroring `buildTool()` at
   upstream.

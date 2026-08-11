@@ -74,7 +74,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
   # exact prompt text and must NOT be polluted by `git diff HEAD` of this
   # very (dirty, work-in-progress) development checkout.
   defp isolated_clean_repo do
-    dir = Path.join(System.tmp_dir!(), "goal-verifier-clean-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "goal-verifier-clean-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     {_, 0} = System.cmd("git", ["init", "-q"], cd: dir)
     on_exit(fn -> File.rm_rf(dir) end)
@@ -213,9 +215,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       mark_write(sid)
 
       stub_runner(fn _sid, _configs ->
-        [{:ok, "I looked around and it seems fine, no structured answer here."},
-         json_result(false),
-         json_result(false)]
+        [
+          {:ok, "I looked around and it seems fine, no structured answer here."},
+          json_result(false),
+          json_result(false)
+        ]
       end)
 
       {result, _state} = GoalVerifier.verify(base_state(sid))
@@ -259,8 +263,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       Application.put_env(:optimal_system_agent, :goal_verifier_stall_threshold, 2)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "missing test coverage"), json_result(true, reason: "missing test coverage"),
-         json_result(false)]
+        [
+          json_result(true, reason: "missing test coverage"),
+          json_result(true, reason: "missing test coverage"),
+          json_result(false)
+        ]
       end)
 
       state = base_state(sid)
@@ -284,7 +291,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       state = base_state(sid)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "gap A"), json_result(true, reason: "gap A"), json_result(false)]
+        [
+          json_result(true, reason: "gap A"),
+          json_result(true, reason: "gap A"),
+          json_result(false)
+        ]
       end)
 
       {result1, state} = GoalVerifier.verify(state)
@@ -292,8 +303,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       refute GoalVerifier.stalled?(state)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "gap B (different)"),
-         json_result(true, reason: "gap B (different)"), json_result(false)]
+        [
+          json_result(true, reason: "gap B (different)"),
+          json_result(true, reason: "gap B (different)"),
+          json_result(false)
+        ]
       end)
 
       {result2, state} = GoalVerifier.verify(state)
@@ -331,7 +345,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       Application.put_env(:optimal_system_agent, :goal_verifier_max_runs, 2)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "still broken #{System.unique_integer()}"), json_result(true), json_result(false)]
+        [
+          json_result(true, reason: "still broken #{System.unique_integer()}"),
+          json_result(true),
+          json_result(false)
+        ]
       end)
 
       state = base_state(sid)
@@ -353,7 +371,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
   describe "check/1" do
     test "returns {:pass, state} on :complete", %{session_id: sid} do
       mark_write(sid)
-      stub_runner(fn _sid, _configs -> [json_result(false), json_result(false), json_result(false)] end)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
 
       assert {:pass, _state} = GoalVerifier.check(base_state(sid))
     end
@@ -364,8 +385,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       mark_write(sid)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "missing edge-case handling"), json_result(true, reason: "no tests"),
-         json_result(false)]
+        [
+          json_result(true, reason: "missing edge-case handling"),
+          json_result(true, reason: "no tests"),
+          json_result(false)
+        ]
       end)
 
       assert {:gate, directive, state} = GoalVerifier.check(base_state(sid))
@@ -474,16 +498,22 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       state = base_state(sid)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "lib/foo/bar.ex is missing the new function"),
-         json_result(true, reason: "lib/foo/bar.ex is missing the new function"), json_result(false)]
+        [
+          json_result(true, reason: "lib/foo/bar.ex is missing the new function"),
+          json_result(true, reason: "lib/foo/bar.ex is missing the new function"),
+          json_result(false)
+        ]
       end)
 
       {_result1, state} = GoalVerifier.verify(state)
       refute GoalVerifier.stalled?(state)
 
       stub_runner(fn _sid, _configs ->
-        [json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"),
-         json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"), json_result(false)]
+        [
+          json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"),
+          json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"),
+          json_result(false)
+        ]
       end)
 
       {_result2, state} = GoalVerifier.verify(state)
@@ -693,7 +723,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       stub_runner(fn _sid, configs ->
         # All refute with a lens-tagged, concrete gap -> :incomplete with gaps.
         Enum.map(configs, fn _ ->
-          json_result(true, reason: "lib/exporter.ex is missing error handling for the widget path")
+          json_result(true,
+            reason: "lib/exporter.ex is missing error handling for the widget path"
+          )
         end)
       end)
 
@@ -770,8 +802,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       stub_runner(fn _sid, _configs ->
         [
-          {:ok, ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
-          {:ok, ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
+          {:ok,
+           ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
+          {:ok,
+           ~s({"refuted": true, "off_track": false, "reason": "lib/exporter.ex emits CSV, goal asked for JSON"})},
           {:ok, ~s({"refuted": false, "off_track": false, "reason": "looks right"})}
         ]
       end)
@@ -802,7 +836,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       """
 
       stub_runner(fn _sid, _configs ->
-        [{:ok, prose}, {:ok, fenced}, {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}]
+        [
+          {:ok, prose},
+          {:ok, fenced},
+          {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}
+        ]
       end)
 
       {result, _state} = GoalVerifier.verify(base_state(sid))
@@ -824,7 +862,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
         ~s({"refuted": true, "off_track": false, "reason": "missing migration", "evidence": {"file": "lib/repo.ex", "line": 12}})
 
       stub_runner(fn _sid, _configs ->
-        [{:ok, nested}, {:ok, nested}, {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}]
+        [
+          {:ok, nested},
+          {:ok, nested},
+          {:ok, ~s({"refuted": false, "off_track": false, "reason": "ok"})}
+        ]
       end)
 
       {result, _state} = GoalVerifier.verify(base_state(sid))
@@ -839,8 +881,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       stub_runner(fn _sid, _configs ->
         [
-          {:ok, ~s({"refuted": "true", "off_track": "false", "reason": "the export step is stubbed"})},
-          {:ok, ~s({"refuted": "yes", "off_track": "no", "reason": "the export step is stubbed"})},
+          {:ok,
+           ~s({"refuted": "true", "off_track": "false", "reason": "the export step is stubbed"})},
+          {:ok,
+           ~s({"refuted": "yes", "off_track": "no", "reason": "the export step is stubbed"})},
           {:ok, ~s({"refuted": "false", "off_track": "false", "reason": "fine"})}
         ]
       end)
@@ -922,7 +966,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       assert is_integer(timeout)
       assert timeout > 0
-      assert timeout < generic, "a read-only skeptic vote must be bounded far tighter than a delegated workstream"
+
+      assert timeout < generic,
+             "a read-only skeptic vote must be bounded far tighter than a delegated workstream"
     end
   end
 
@@ -971,7 +1017,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       :ok
     end
 
-    defp stub_triage(fun), do: Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fun)
+    defp stub_triage(fun),
+      do: Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fun)
 
     defp triage_json(status, opts \\ []) do
       key = Keyword.get(opts, :blocker_key, "")
@@ -1002,7 +1049,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       stub_triage(fn _state -> flunk("triage must not be called for a trivial turn") end)
 
       state =
-        sid |> base_state() |> Map.put(:iteration, 6) |> Map.put(:working_dir, isolated_clean_repo())
+        sid
+        |> base_state()
+        |> Map.put(:iteration, 6)
+        |> Map.put(:working_dir, isolated_clean_repo())
 
       assert GoalVerifier.trivial_turn?(state)
       assert GoalVerifier.skip_reason(state) == :trivial
@@ -1060,12 +1110,16 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert out.goal_verifier_runs == 1
     end
 
-    test "a refuting panel injects exactly one directive and does not re-enter", %{session_id: sid} do
+    test "a refuting panel injects exactly one directive and does not re-enter", %{
+      session_id: sid
+    } do
       state = complex_state(sid)
       stub_triage(fn _ -> triage_json("candidate_complete") end)
 
       stub_runner(fn _sid, configs ->
-        Enum.map(configs, fn _ -> json_result(true, reason: "lib/widget/exporter.ex writes CSV not JSON") end)
+        Enum.map(configs, fn _ ->
+          json_result(true, reason: "lib/widget/exporter.ex writes CSV not JSON")
+        end)
       end)
 
       out = GoalVerifier.maybe_gate(state)
@@ -1080,7 +1134,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
     test "the same blocker three rounds running auto-pauses", %{session_id: sid} do
       state = complex_state(sid)
-      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key", reason: "no ANTHROPIC_API_KEY") end)
+
+      stub_triage(fn _ ->
+        triage_json("blocked", blocker_key: "missing_api_key", reason: "no ANTHROPIC_API_KEY")
+      end)
 
       s1 = GoalVerifier.maybe_gate(state)
       assert s1.goal_verifier_blocker_streak == 1
@@ -1177,7 +1234,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
     test "a triage that hangs is bounded and skips", %{session_id: sid} do
       state = complex_state(sid)
       Application.put_env(:optimal_system_agent, :goal_verifier_triage_timeout_ms, 80)
-      on_exit(fn -> Application.delete_env(:optimal_system_agent, :goal_verifier_triage_timeout_ms) end)
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :goal_verifier_triage_timeout_ms)
+      end)
 
       stub_triage(fn _ -> Process.sleep(5_000) end)
 
@@ -1185,7 +1245,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       refute_received :panel_ran
     end
 
-    test "unparsable triage output skips rather than guessing candidate_complete", %{session_id: sid} do
+    test "unparsable triage output skips rather than guessing candidate_complete", %{
+      session_id: sid
+    } do
       state = complex_state(sid)
       stub_triage(fn _ -> {:ok, "I'm sorry, I can't help with that."} end)
 
@@ -1197,7 +1259,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       state = complex_state(sid)
 
       stub_triage(fn _ ->
-        {:ok, "Here you go:\n```json\n{\"status\":\"candidate_complete\",\"reason\":\"looks done\",\"blocker_key\":\"\"}\n```\nHope that helps."}
+        {:ok,
+         "Here you go:\n```json\n{\"status\":\"candidate_complete\",\"reason\":\"looks done\",\"blocker_key\":\"\"}\n```\nHope that helps."}
       end)
 
       GoalVerifier.maybe_gate(state)
@@ -1227,5 +1290,4 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
              "triage prompt is #{div(byte_size(text), 4)} est. tokens — no longer cheap"
     end
   end
-
 end

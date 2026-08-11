@@ -67,7 +67,10 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointHardeningTest do
       crash: crash,
       session: session
     } do
-      File.write!(crash_path(crash, session), Jason.encode!(%{"messages" => %{"not" => "a list"}}))
+      File.write!(
+        crash_path(crash, session),
+        Jason.encode!(%{"messages" => %{"not" => "a list"}})
+      )
 
       restored = Checkpoint.restore_checkpoint(session)
       assert restored.messages == []

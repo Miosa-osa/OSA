@@ -15,7 +15,9 @@ defmodule OptimalSystemAgent.Net.PortTest do
       prev_app = Application.get_env(:optimal_system_agent, :http_port)
 
       on_exit(fn ->
-        if prev_env, do: System.put_env("OSA_HTTP_PORT", prev_env), else: System.delete_env("OSA_HTTP_PORT")
+        if prev_env,
+          do: System.put_env("OSA_HTTP_PORT", prev_env),
+          else: System.delete_env("OSA_HTTP_PORT")
 
         if prev_app,
           do: Application.put_env(:optimal_system_agent, :http_port, prev_app),
@@ -86,7 +88,9 @@ defmodule OptimalSystemAgent.Net.PortTest do
     # no bind can ever step over — it would assert something the kernel never
     # promised, and fail regardless of whether `available?/1` is correct.
     test "a TIME_WAIT from a closed client connection does not mark the port occupied" do
-      {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
       {:ok, port} = :inet.port(listener)
 
       {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
@@ -138,7 +142,9 @@ defmodule OptimalSystemAgent.Net.PortTest do
     end
 
     test "classifies a server that returns OSA's /health markers as :osa" do
-      {:ok, listen} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+      {:ok, listen} =
+        :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
       {:ok, port} = :inet.port(listen)
 
       # Minimal fake OSA: accept one connection and reply with the /health

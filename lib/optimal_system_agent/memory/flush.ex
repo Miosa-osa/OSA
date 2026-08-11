@@ -348,12 +348,14 @@ defmodule OptimalSystemAgent.Memory.Flush do
     %{
       before_compaction: %{
         where: "Agent.Loop.ProactiveCompaction — same place should_microcompact?/2 is consulted",
-        call: "if Memory.Flush.should_flush?(state, context_window), " <>
-                "do: Memory.Flush.run(state.messages, session_id: state.session_id)",
+        call:
+          "if Memory.Flush.should_flush?(state, context_window), " <>
+            "do: Memory.Flush.run(state.messages, session_id: state.session_id)",
         why: "writes durable notes while the evidence is still in the window"
       },
       after_compaction: %{
-        where: "Agent.Loop.ProactiveCompaction.compact/3, success branch, next to reset_failures/1",
+        where:
+          "Agent.Loop.ProactiveCompaction.compact/3, success branch, next to reset_failures/1",
         call: "Memory.Flush.reset_cycle(session_id)",
         why: "opens the next compaction cycle so the next approach flushes again"
       }

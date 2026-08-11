@@ -128,8 +128,12 @@ defmodule OptimalSystemAgent.MCP.Client.QuietBootTest do
 
   defp wait_until(fun, retries \\ 200) do
     cond do
-      fun.() -> true
-      retries <= 0 -> false
+      fun.() ->
+        true
+
+      retries <= 0 ->
+        false
+
       true ->
         Process.sleep(5)
         wait_until(fun, retries - 1)

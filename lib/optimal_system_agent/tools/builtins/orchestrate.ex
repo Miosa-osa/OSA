@@ -60,9 +60,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
     # nil strategy defaults to :auto (heuristic single-vs-pipeline decision).
     strategy = params["strategy"] || "auto"
 
-    Logger.info(
-      "[Orchestrate] strategy=#{strategy} task=#{String.slice(task, 0, 100)}"
-    )
+    Logger.info("[Orchestrate] strategy=#{strategy} task=#{String.slice(task, 0, 100)}")
 
     try do
       case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task) do

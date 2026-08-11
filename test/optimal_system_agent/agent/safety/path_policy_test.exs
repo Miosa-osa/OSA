@@ -132,7 +132,10 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicyTest do
     # inspects only the first component under $HOME.
     test "a git control directory inside an allowed project is blocked" do
       assert PathPolicy.blocked_write?(Path.join(@home, "projects/anything/.git/config"))
-      assert PathPolicy.blocked_write?(Path.join(@home, "projects/anything/.git/hooks/pre-commit"))
+
+      assert PathPolicy.blocked_write?(
+               Path.join(@home, "projects/anything/.git/hooks/pre-commit")
+             )
     end
 
     test "an ordinary file in the same project is not blocked" do

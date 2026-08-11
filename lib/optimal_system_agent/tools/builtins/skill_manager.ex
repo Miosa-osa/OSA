@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
   require Logger
 
   alias OptimalSystemAgent.Tools.Registry
+  alias OptimalSystemAgent.Tools.Registry.SkillLoader
 
   defp skills_dir, do: Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills")
 
@@ -72,21 +73,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
 
   @impl true
   def execute(%{"action" => "list"}) do
-    dir = Path.expand(skills_dir())
-
+    # List what the LOADER sees, not one flat directory: a nested or
+    # project-scoped skill is just as real to the model, and its enabled state
+    # comes from the canonical marker check.
     custom_skills =
-      if File.dir?(dir) do
-        dir
-        |> File.ls!()
-        |> Enum.filter(&File.dir?(Path.join(dir, &1)))
-        |> Enum.map(fn skill_name ->
-          disabled? = File.exists?(Path.join([dir, skill_name, ".disabled"]))
-          status = if disabled?, do: "disabled", else: "active"
-          "  #{String.pad_trailing(skill_name, 24)} [#{status}]"
-        end)
-      else
-        []
-      end
+      SkillLoader.load_skills()
+      |> Enum.sort_by(fn {name, _} -> name end)
+      |> Enum.map(fn {skill_name, entry} ->
+        status = if SkillLoader.disabled?(entry), do: "disabled", else: "active"
+        "  #{String.pad_trailing(skill_name, 24)} [#{status}] (#{entry.scope})"
+      end)
 
     builtin_tools = Registry.list_tools_direct()
 
@@ -147,7 +143,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
   end
 
   def execute(%{"action" => "enable", "name" => name}) do
-    with {:ok, skill_dir} <- resolve_skill_dir(name) do
+    with {:ok, skill_dir} <- resolve_installed_skill_dir(name) do
       marker = Path.join(skill_dir, ".disabled")
 
       if File.exists?(marker) do
@@ -165,15 +161,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
   end
 
   def execute(%{"action" => "disable", "name" => name}) do
-    with {:ok, skill_dir} <- resolve_skill_dir(name) do
+    with {:ok, skill_dir} <- resolve_installed_skill_dir(name) do
       marker = Path.join(skill_dir, ".disabled")
 
-      if File.dir?(skill_dir) do
-        File.write!(marker, "disabled at #{DateTime.utc_now() |> DateTime.to_iso8601()}")
-        Registry.reload_skills()
-        {:ok, "Skill '#{name}' disabled."}
-      else
-        {:error, "Skill '#{name}' not found in #{skills_dir()}."}
+      case File.write(marker, "disabled at #{DateTime.utc_now() |> DateTime.to_iso8601()}") do
+        :ok ->
+          Registry.reload_skills()
+          {:ok, "Skill '#{name}' disabled (marker written to #{marker})."}
+
+        {:error, reason} ->
+          {:error,
+           "Could not disable '#{name}': cannot write #{marker} (#{inspect(reason)}). " <>
+             "Bundled skills live in a read-only install directory."}
       end
     end
   end
@@ -251,6 +250,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
   defp resolve_skill_dir(name),
     do: {:error, "Skill name must be a string. Got: #{inspect(name)}"}
 
+  # enable/disable must reach the skill the LOADER actually surfaced, wherever
+  # it lives — nested under a category directory, named differently from its
+  # directory, or in a project/bundled scope. The old flat
+  # `<skills_dir>/<name>/` guess meant those skills could not be disabled at
+  # all while remaining fully visible to the model.
+  #
+  # Containment is still PROVEN, exactly as `resolve_skill_dir/1` does it: the
+  # resolved directory must sit strictly inside one of the loader's own
+  # discovery roots. The name is looked up, never joined into a path, so a
+  # traversal spelling simply fails to match a loaded skill.
+  @spec resolve_installed_skill_dir(term()) :: {:ok, Path.t()} | {:error, String.t()}
+  defp resolve_installed_skill_dir(name) when is_binary(name) do
+    case Map.get(SkillLoader.load_skills(), name) do
+      %{path: path} when is_binary(path) ->
+        dir = Path.expand(Path.dirname(path))
+
+        if SkillLoader.within_roots?(dir) and
+             dir not in Enum.map(SkillLoader.roots(), &Path.expand/1) do
+          {:ok, dir}
+        else
+          {:error,
+           "Skill '#{name}' resolves outside every skills directory — refusing to touch it."}
+        end
+
+      _ ->
+        {:error, "Skill '#{name}' not found. Use action \"list\" to see loaded skills."}
+    end
+  end
+
+  defp resolve_installed_skill_dir(name),
+    do: {:error, "Skill name must be a string. Got: #{inspect(name)}"}
+
   defp do_create_skill(name, desc, instructions, tools) do
     dir = Path.join(Path.expand(skills_dir()), name)
     file = Path.join(dir, "SKILL.md")
@@ -268,10 +299,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillManager do
           "tools:\n" <> Enum.map_join(tools, "\n", fn t -> "  - #{t}" end) <> "\n"
         end
 
+      # `source:` is the provenance marker Skills.Curator classifies on, and
+      # the same field SkillGenerator uses (`auto:<pattern_id>`). Without it a
+      # tool-created skill is indistinguishable from a hand-written one.
       content = """
       ---
       name: #{name}
       description: #{desc}
+      source: skill_manager
       #{tools_yaml}---
 
       #{instructions}

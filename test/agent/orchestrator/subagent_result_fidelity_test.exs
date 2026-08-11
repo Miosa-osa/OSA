@@ -72,7 +72,9 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.SubagentResultFidelityTest do
     end
 
     test "a vanished worktree path is [] and never raises" do
-      gone = Path.join(System.tmp_dir!(), "osa-no-such-worktree-#{System.unique_integer([:positive])}")
+      gone =
+        Path.join(System.tmp_dir!(), "osa-no-such-worktree-#{System.unique_integer([:positive])}")
+
       refute File.exists?(gone)
       assert Orchestrator.changed_files(%{path: gone}) == []
     end

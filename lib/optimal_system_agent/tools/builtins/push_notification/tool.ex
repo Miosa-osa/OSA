@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Tool do
-  @moduledoc  """
+  @moduledoc """
   Send an OS-level push notification to the user's desktop.
 
   macOS: `osascript -e 'display notification ...'`

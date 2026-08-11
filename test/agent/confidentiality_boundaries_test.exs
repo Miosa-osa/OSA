@@ -136,6 +136,7 @@ defmodule OptimalSystemAgent.Agent.ConfidentialityBoundariesTest do
       content = compact_under("sess_b")
 
       assert content
+
       assert String.contains?(content, own_marker),
              "a session must still merge into its OWN previous summary"
     end

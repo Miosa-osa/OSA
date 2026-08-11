@@ -66,7 +66,12 @@ defmodule OptimalSystemAgent.Memory do
   @default_maintenance_timeout_ms 30_000
 
   defp read_timeout,
-    do: Application.get_env(:optimal_system_agent, :memory_call_timeout_ms, @default_read_timeout_ms)
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :memory_call_timeout_ms,
+        @default_read_timeout_ms
+      )
 
   defp maintenance_timeout,
     do:
@@ -91,7 +96,10 @@ defmodule OptimalSystemAgent.Memory do
       fallback
 
     :exit, reason ->
-      Logger.warning("[memory] Store unavailable (#{inspect(reason)}) — returning #{inspect(fallback)}")
+      Logger.warning(
+        "[memory] Store unavailable (#{inspect(reason)}) — returning #{inspect(fallback)}"
+      )
+
       fallback
   end
 
@@ -205,7 +213,11 @@ defmodule OptimalSystemAgent.Memory do
   """
   @spec stats() :: {:ok, map()}
   def stats do
-    bounded_call(:stats, read_timeout(), {:ok, %{total: 0, by_category: %{}, by_scope: %{}, by_source: %{}, avg_relevance: 0.0}})
+    bounded_call(
+      :stats,
+      read_timeout(),
+      {:ok, %{total: 0, by_category: %{}, by_scope: %{}, by_source: %{}, avg_relevance: 0.0}}
+    )
   end
 
   @doc """

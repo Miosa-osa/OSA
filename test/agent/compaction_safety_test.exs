@@ -270,6 +270,7 @@ defmodule OptimalSystemAgent.Agent.CompactionSafetyTest do
     test "honors a custom min_chars floor" do
       short = "12345"
       assert {:ok, ^short} = CS.sample_with_retry(fn -> {:ok, short} end, min_chars: 3)
+
       assert {:error, {:degenerate_summary, _}} =
                CS.sample_with_retry(fn -> {:ok, short} end, min_chars: 100, max_attempts: 1)
     end

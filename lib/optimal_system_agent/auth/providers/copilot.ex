@@ -102,8 +102,13 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
   defp config do
     %{
       device_code_url:
-        Application.get_env(:optimal_system_agent, :github_device_code_url, @default_device_code_url),
-      token_url: Application.get_env(:optimal_system_agent, :github_token_url, @default_token_url),
+        Application.get_env(
+          :optimal_system_agent,
+          :github_device_code_url,
+          @default_device_code_url
+        ),
+      token_url:
+        Application.get_env(:optimal_system_agent, :github_token_url, @default_token_url),
       client_id: client_id(),
       scope: Application.get_env(:optimal_system_agent, :copilot_scope, @default_scope)
     }
@@ -230,12 +235,17 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
 
     expires_at =
       case body["expires_in"] do
-        n when is_integer(n) and n > 0 -> now + n
-        n when is_binary(n) -> case Integer.parse(n) do
-                                 {v, _} when v > 0 -> now + v
-                                 _ -> nil
-                               end
-        _ -> nil
+        n when is_integer(n) and n > 0 ->
+          now + n
+
+        n when is_binary(n) ->
+          case Integer.parse(n) do
+            {v, _} when v > 0 -> now + v
+            _ -> nil
+          end
+
+        _ ->
+          nil
       end
 
     entry =

@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop.InterruptTest do
     assert tool_result.role == "tool"
     assert tool_result.tool_call_id == "tc_1"
     assert tool_result.content =~ "Interrupted by user"
+
     assert marker == %{
              role: "user",
              content: "[Request interrupted by user for tool use]",

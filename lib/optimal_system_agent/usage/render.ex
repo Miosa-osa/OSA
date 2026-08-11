@@ -148,22 +148,10 @@ defmodule OptimalSystemAgent.Usage.Render do
     |> Enum.map(&"    #{@dim}#{&1}#{@reset}")
   end
 
-  defp wrap(text, width) do
-    text
-    |> String.split(~r/\s+/, trim: true)
-    |> Enum.reduce([], fn word, acc ->
-      case acc do
-        [] ->
-          [word]
-
-        [line | rest] ->
-          if String.length(line) + 1 + String.length(word) <= width,
-            do: [line <> " " <> word | rest],
-            else: [word, line | rest]
-      end
-    end)
-    |> Enum.reverse()
-  end
+  # Shared, width-aware wrap. The local copy measured with `String.length/1`
+  # (graphemes, not columns) and could not break a token wider than the box, so a
+  # long URL or path in a usage note blew out every column after it.
+  defp wrap(text, width), do: OptimalSystemAgent.CLI.Width.wrap(text, width)
 
   defp pad(label), do: String.pad_trailing(to_string(label), 14)
 

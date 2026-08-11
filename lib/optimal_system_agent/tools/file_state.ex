@@ -156,6 +156,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
   @spec reset() :: :ok
   def reset do
     ensure_table()
+
     try do
       :ets.delete_all_objects(@table)
     rescue

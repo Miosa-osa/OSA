@@ -87,7 +87,8 @@ defmodule OptimalSystemAgent.Skills.Capture do
     normalize(title) == normalize(body)
   end
 
-  defp normalize(s), do: s |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, " ") |> String.trim()
+  defp normalize(s),
+    do: s |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, " ") |> String.trim()
 
   defp word_count(s), do: s |> String.split(~r/\s+/, trim: true) |> length()
 

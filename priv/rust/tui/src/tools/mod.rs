@@ -506,7 +506,7 @@ pub(crate) fn render_tool_box(
     body: Vec<Line<'static>>,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len() + 1);
-    out.push(header);
+    out.push(flatten_line(header));
 
     for (i, line) in body.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
@@ -516,6 +516,41 @@ pub(crate) fn render_tool_box(
     }
 
     out
+}
+
+/// Collapse control whitespace inside a one-row header into spaces.
+///
+/// A tool header is ONE row, but its content is BACKEND-SUPPLIED — a command
+/// string, a file path, an arg summary — and a multi-line command is routine.
+/// ratatui treats a `\n` inside a `Span` as a zero-width grapheme rather than a
+/// break, so `export A=1\ncd /tmp\nmake` renders as `export A=1cd /tmpmake`:
+/// silently wrong, and wrong in a way that misrepresents what is about to run.
+///
+/// `app/handle_actions.rs` and `components/chat/thinking_box.rs` each guard this
+/// at their own call site; the tool-header path had no guard at all. Doing it
+/// here covers `render_tool_box`'s callers uniformly.
+fn flatten_line(line: Line<'static>) -> Line<'static> {
+    let needs = line
+        .spans
+        .iter()
+        .any(|s| s.content.contains(['\n', '\r', '\t']));
+    if !needs {
+        return line;
+    }
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|mut s| {
+            let flat = s
+                .content
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+                .collect::<String>();
+            s.content = flat.into();
+            s
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 /// Path-ish argument keys. When `args` is a BARE string rather than JSON, it is
@@ -1121,5 +1156,82 @@ mod cell_identity_tests {
                 "{name} did not name its file:\n{out}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_header_newline_guard {
+    use ratatui::{backend::TestBackend, text::{Line, Span}, widgets::Paragraph, Terminal};
+
+    /// Empirical: ratatui treats a `\n` INSIDE a Span as a zero-width grapheme,
+    /// so a multi-line command collapses into one unreadable run rather than
+    /// wrapping. This pins the behaviour that makes the guard necessary.
+    #[test]
+    fn ratatui_silently_eats_a_newline_inside_a_span() {
+        let mut term = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        term.draw(|f| {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::raw("export A=1\ncd /tmp\nmake"))),
+                f.area(),
+            )
+        })
+        .unwrap();
+        let row: String = (0..40)
+            .map(|x| term.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(
+            row.contains("export A=1cd /tmpmake"),
+            "ratatui no longer collapses embedded newlines; re-check the guard: {row:?}"
+        );
+    }
+
+    /// A tool header is ONE row. Backend-supplied command strings reach it, so
+    /// the shared choke point flattens newlines rather than trusting callers.
+    #[test]
+    fn a_tool_header_flattens_newlines_into_spaces() {
+        let header = Line::from(vec![
+            Span::raw("Bash "),
+            Span::raw("export A=1\ncd /tmp\nmake"),
+        ]);
+        let out = super::render_tool_box(header, vec![]);
+        let joined: String = out[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            !joined.contains('\n'),
+            "a newline survived into a tool header: {joined:?}"
+        );
+        assert!(
+            joined.contains("export A=1 cd /tmp make"),
+            "flattening lost or mangled the command: {joined:?}"
+        );
+    }
+
+    /// Carriage returns and tabs are the same hazard.
+    #[test]
+    fn a_tool_header_flattens_cr_and_tab_too() {
+        let header = Line::from(Span::raw("a\r\nb\tc"));
+        let out = super::render_tool_box(header, vec![]);
+        let joined: String = out[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(!joined.contains('\n') && !joined.contains('\r') && !joined.contains('\t'), "{joined:?}");
+    }
+
+    /// A single-line header is passed through byte-identically.
+    #[test]
+    fn a_single_line_header_is_untouched() {
+        let header = Line::from(vec![Span::raw("Read "), Span::raw("/src/main.rs")]);
+        let out = super::render_tool_box(header, vec![]);
+        let joined: String = out[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(joined, "Read /src/main.rs");
     }
 }

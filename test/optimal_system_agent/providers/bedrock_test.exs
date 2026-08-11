@@ -245,7 +245,11 @@ defmodule OptimalSystemAgent.Providers.BedrockTest do
       assert {:ok, _} =
                Bedrock.chat([
                  %{role: "user", content: "go"},
-                 %{role: "assistant", content: "", tool_calls: [%{id: "a", name: "n", arguments: %{}}]}
+                 %{
+                   role: "assistant",
+                   content: "",
+                   tool_calls: [%{id: "a", name: "n", arguments: %{}}]
+                 }
                ])
 
       [_, assistant] = last(seen).body["messages"]
@@ -296,9 +300,16 @@ defmodule OptimalSystemAgent.Providers.BedrockTest do
       seen = stub()
 
       assert {:ok, _} =
-               Bedrock.chat([%{role: "user", content: [%{type: "text", text: "a"}, %{type: "text", text: "b"}]}])
+               Bedrock.chat([
+                 %{
+                   role: "user",
+                   content: [%{type: "text", text: "a"}, %{type: "text", text: "b"}]
+                 }
+               ])
 
-      assert last(seen).body["messages"] == [%{"role" => "user", "content" => [%{"text" => "ab"}]}]
+      assert last(seen).body["messages"] == [
+               %{"role" => "user", "content" => [%{"text" => "ab"}]}
+             ]
     end
   end
 
@@ -342,7 +353,9 @@ defmodule OptimalSystemAgent.Providers.BedrockTest do
     end
 
     test "a 400 suggests the cross-region inference profile form" do
-      stub(400, %{"message" => "Invocation of model ID ... with on-demand throughput isn't supported"})
+      stub(400, %{
+        "message" => "Invocation of model ID ... with on-demand throughput isn't supported"
+      })
 
       assert {:error, message} = Bedrock.chat([%{role: "user", content: "x"}])
       assert message =~ "inference profile"

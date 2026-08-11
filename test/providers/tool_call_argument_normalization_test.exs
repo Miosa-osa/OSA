@@ -234,7 +234,12 @@ defmodule OptimalSystemAgent.Providers.ToolCallArgumentNormalizationTest do
           role: "assistant",
           content: "",
           tool_calls: [
-            %{:id => "t1", :name => "x", :arguments => "[args stripped]", "arguments" => %{"a" => 1}}
+            %{
+              :id => "t1",
+              :name => "x",
+              :arguments => "[args stripped]",
+              "arguments" => %{"a" => 1}
+            }
           ]
         }
       ]

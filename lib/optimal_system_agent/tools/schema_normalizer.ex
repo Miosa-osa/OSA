@@ -259,8 +259,12 @@ defmodule OptimalSystemAgent.Tools.SchemaNormalizer do
 
   defp empty_struct_union?(branches) do
     length(branches) == 2 and
-      Enum.any?(branches, fn b -> is_map(b) and b["type"] == "object" and not has_key_string?(b, "properties") end) and
-      Enum.any?(branches, fn b -> is_map(b) and b["type"] == "array" and not has_key_string?(b, "items") end)
+      Enum.any?(branches, fn b ->
+        is_map(b) and b["type"] == "object" and not has_key_string?(b, "properties")
+      end) and
+      Enum.any?(branches, fn b ->
+        is_map(b) and b["type"] == "array" and not has_key_string?(b, "items")
+      end)
   end
 
   defp has_key_string?(map, key), do: is_map(map) and Map.has_key?(map, key)

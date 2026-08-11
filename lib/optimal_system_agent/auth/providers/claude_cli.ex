@@ -304,6 +304,7 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
   # how a CLI with no `login` subcommand gets one invented for it.
   defp mentions_subcommand?(help, word) when is_binary(help) do
     esc = Regex.escape(word)
+
     Regex.match?(~r/^\s{1,6}#{esc}(?:[\s,|]|$)/m, help) or
       Regex.match?(~r/[<\[|]#{esc}[>\]|]/, help) or
       Regex.match?(~r/^\s*#{esc}\s{2,}\S/m, help)
@@ -380,8 +381,7 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
       # detected subcommand, and the two are only meaningful together.
       login_program: bin,
       login_argv: login_argv,
-      login_display:
-        if(login_argv, do: Enum.join(["claude" | login_argv], " "), else: nil),
+      login_display: if(login_argv, do: Enum.join(["claude" | login_argv], " "), else: nil),
       login_error: login_error,
       install_argv: @install_argv,
       install_url: "https://claude.com/product/claude-code"
@@ -614,8 +614,8 @@ defmodule OptimalSystemAgent.Auth.Providers.ClaudeCli do
 
     if was_connected? do
       Logger.info(
-      "[Auth] Disconnected #{@display_name} from OSA. Your Claude Code sign-in is untouched — " <>
-        "run `claude auth logout` if you also want to sign out there."
+        "[Auth] Disconnected #{@display_name} from OSA. Your Claude Code sign-in is untouched — " <>
+          "run `claude auth logout` if you also want to sign out there."
       )
     end
 

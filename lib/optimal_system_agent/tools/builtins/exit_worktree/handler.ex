@@ -211,7 +211,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
 
           {output, _code} ->
             # Directory is already moved; prune stale bookkeeping.
-            OptimalSystemAgent.Git.cmd(["worktree", "prune"], cd: repo_dir, stderr_to_stdout: true)
+            OptimalSystemAgent.Git.cmd(["worktree", "prune"],
+              cd: repo_dir,
+              stderr_to_stdout: true
+            )
+
             Logger.debug("[exit_worktree] prune after keep: #{String.trim(output)}")
         end
 
@@ -240,7 +244,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
   defp delete_branch_if_needed(_merged, _branch, _repo_dir), do: :ok
 
   defp get_worktree_branch(path) do
-    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"],
+           cd: path,
+           stderr_to_stdout: true
+         ) do
       {branch, 0} -> String.trim(branch)
       _ -> nil
     end

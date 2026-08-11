@@ -58,7 +58,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
 
     test "a successful validation resets the retry counter", %{session_id: sid} do
       bad = %{name: "file_edit", arguments: %{}}
-      good = %{name: "file_edit", arguments: %{"path" => "/tmp/x", "old_string" => "a", "new_string" => "b"}}
+
+      good = %{
+        name: "file_edit",
+        arguments: %{"path" => "/tmp/x", "old_string" => "a", "new_string" => "b"}
+      }
+
       state = %{session_id: sid}
 
       assert {:reask, m1} = ToolArgValidator.validate(bad, state)

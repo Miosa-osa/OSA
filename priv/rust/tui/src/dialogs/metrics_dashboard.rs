@@ -215,7 +215,7 @@ impl MetricsDashboard {
                     Style::default().fg(vcolor).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    truncate_chars(&format!("  {}", card.note), card_w.saturating_sub(card.value.chars().count() + 2)),
+                    truncate_chars(&format!("  {}", card.note), card_w.saturating_sub(crate::util::cols(&card.value) + 2)),
                     Style::default().fg(c.dim),
                 ),
             ])), Rect::new(cx, base + 1, cw, 1));
@@ -298,9 +298,7 @@ impl MetricsDashboard {
                 tag, name, r.count, r.avg_ms, r.p99_ms,
                 tag = 4, nw = name_w,
             );
-            let mut s = truncate_chars(&raw, maxw);
-            let pad = maxw.saturating_sub(s.chars().count());
-            s.push_str(&" ".repeat(pad));
+            let s = crate::util::pad_cols(&raw, maxw);
             put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
             return;
         }
@@ -320,14 +318,13 @@ impl MetricsDashboard {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

@@ -102,7 +102,9 @@ defmodule OptimalSystemAgent.CLI.OpenComputersTest do
     end
 
     test "enabled + key + session mid-handshake -> connecting" do
-      {verdict, hint} = OpenComputers.connection_verdict(true, true, "running (phase=awaiting_hello_ok)")
+      {verdict, hint} =
+        OpenComputers.connection_verdict(true, true, "running (phase=awaiting_hello_ok)")
+
       assert verdict =~ "connecting"
       assert is_binary(hint)
     end

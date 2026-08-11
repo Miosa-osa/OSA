@@ -264,7 +264,9 @@ defmodule OptimalSystemAgent.Providers.AnthropicSystemCacheTest do
       marked = breakpoints(body["system"])
 
       assert length(marked) == @api_breakpoint_limit
-      assert Enum.map(marked, & &1["text"]) == Enum.map(Enum.take(body["system"], 4), & &1["text"])
+
+      assert Enum.map(marked, & &1["text"]) ==
+               Enum.map(Enum.take(body["system"], 4), & &1["text"])
     end
   end
 

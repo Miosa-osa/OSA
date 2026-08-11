@@ -115,7 +115,8 @@ defmodule OptimalSystemAgent.Tools.PrimitiveFailureQualityTest do
       dir = tmpdir("sugg")
       File.mkdir_p!(Path.join(dir, "handlers"))
 
-      assert {:error, msg} = FileGlob.execute(%{"pattern" => "*", "path" => Path.join(dir, "handler")})
+      assert {:error, msg} =
+               FileGlob.execute(%{"pattern" => "*", "path" => Path.join(dir, "handler")})
 
       assert msg =~ "handlers"
     end

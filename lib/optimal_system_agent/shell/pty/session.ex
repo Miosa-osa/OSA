@@ -476,7 +476,10 @@ defmodule OptimalSystemAgent.Shell.Pty.Session do
 
   defp normalize_condition({:text, s}) when is_binary(s), do: {:ok, {:text, s}}
   defp normalize_condition(:gone), do: {:ok, :gone}
-  defp normalize_condition({:stable_ms, n}) when is_integer(n) and n >= 0, do: {:ok, {:stable_ms, n}}
+
+  defp normalize_condition({:stable_ms, n}) when is_integer(n) and n >= 0,
+    do: {:ok, {:stable_ms, n}}
+
   defp normalize_condition({:regex, %Regex{} = re}), do: {:ok, {:regex, re}}
 
   defp normalize_condition({:regex, pattern}) when is_binary(pattern) do

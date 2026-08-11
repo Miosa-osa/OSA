@@ -5958,3 +5958,164 @@ Beta is the one I would pick.
         }
     }
 }
+
+/// **Column-width invariants** — a rendered row must own exactly the columns it
+/// reserved, measured in DISPLAY COLUMNS.
+///
+/// The failure these pin is the owner's loudest complaint: the TUI "loses its
+/// layout". It happens when a row is sized with the wrong unit. `s.len()` is
+/// BYTES, so a CJK/emoji value measures ~3x its true cost and collapses the
+/// column next to it; `s.chars().count()` is CHARS, so a wide glyph occupies two
+/// columns where one was reserved and shoves every column to its right off the
+/// pane. `crate::util::fit_cols` / `pad_cols` are the canonical primitives and
+/// measure grapheme clusters at their true column advance.
+#[cfg(test)]
+mod column_width_invariants {
+    use std::path::{Path, PathBuf};
+
+    fn src_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn rs_files_under(dirs: &[&str]) -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for d in dirs {
+            walk(&src_root().join(d), &mut out);
+        }
+        out.sort();
+        out
+    }
+
+    /// Everything before the `#[cfg(test)]` marker — test bodies legitimately
+    /// assert on `chars().count()` and are not layout code.
+    fn non_test_source(path: &Path) -> String {
+        let src = std::fs::read_to_string(path).unwrap_or_default();
+        match src.find("#[cfg(test)]") {
+            Some(i) => src[..i].to_string(),
+            None => src,
+        }
+    }
+
+    /// No dialog/component/tool may carry its own private char-count fitter.
+    ///
+    /// There were 22 of these, all the same shape — `if s.chars().count() > max {
+    /// … s.chars().take(max - 1) … }` — shadowing `crate::util::fit_cols` and
+    /// its 28 correct callers. They render user-supplied content (session
+    /// titles, file paths, memory entries, skill descriptions, permission rules,
+    /// MCP server names), so any of them could shear a row.
+    #[test]
+    fn no_private_char_count_fitter_shadows_fit_cols() {
+        let mut offenders = Vec::new();
+        for path in rs_files_under(&["dialogs", "components", "tools"]) {
+            let src = non_test_source(&path);
+            for (i, line) in src.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("//") {
+                    continue; // prose about the defect is not the defect
+                }
+                // The tell: a char-count compared against a column budget, or a
+                // char-count taken as a slice length for a fit.
+                let is_fit_shape = (l.contains("chars().count() >") && l.contains("max"))
+                    || l.contains("chars().take(max")
+                    || l.contains("chars().take(cut")
+                    || l.contains("chars().take(take");
+                if is_fit_shape {
+                    offenders.push(format!(
+                        "{}:{}: {l}",
+                        path.strip_prefix(src_root()).unwrap_or(&path).display(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{} private char-count fitter(s) reappeared. `.chars().count()` treats a \
+             wide glyph as 1 column, so it OVERFLOWS its reserved span and shoves the \
+             row's right-hand badge/timestamp off the pane. Call \
+             `crate::util::fit_cols` instead:\n  {}",
+            offenders.len(),
+            offenders.join("\n  ")
+        );
+    }
+
+    /// No layout budget may be computed from a char count or a byte length.
+    ///
+    /// `pad = width - s.chars().count()` and `avail - badge.len()` are the two
+    /// shapes that shear a row without ever fitting anything.
+    #[test]
+    fn no_pad_or_budget_is_measured_in_chars_or_bytes() {
+        let mut offenders = Vec::new();
+        for path in rs_files_under(&["dialogs", "components", "tools"]) {
+            let src = non_test_source(&path);
+            for (i, line) in src.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("//") {
+                    continue; // prose about the defect is not the defect
+                }
+                let is_pad_shape = l.contains("saturating_sub(") && l.contains("chars().count()");
+                if is_pad_shape {
+                    offenders.push(format!(
+                        "{}:{}: {l}",
+                        path.strip_prefix(src_root()).unwrap_or(&path).display(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{} layout budget(s) measured in CHARS rather than display columns. Use \
+             `crate::util::cols` / `pad_width` / `pad_cols`:\n  {}",
+            offenders.len(),
+            offenders.join("\n  ")
+        );
+    }
+
+    /// The behavioural half of the guard: every fitter that survives must keep a
+    /// wide-glyph value inside its reserved span. A char-count fitter given a
+    /// budget of 8 returns 8 CJK chars = 16 columns and blows the span.
+    #[test]
+    fn the_canonical_fitter_never_overflows_its_span() {
+        use crate::util::{cols, fit_cols, pad_cols, pad_cols_start};
+        for s in [
+            "日本語のセッションタイトルです",
+            "🎉🎉🎉🎉🎉🎉🎉🎉",
+            "👨‍👩‍👧‍👦 family emoji run",
+            "ascii only, nothing wide",
+            "混ざったmixed幅のtext",
+        ] {
+            for w in 0usize..24 {
+                assert!(
+                    cols(&fit_cols(s, w)) <= w,
+                    "fit_cols({s:?}, {w}) = {:?} is {} columns, over its {w}-column span",
+                    fit_cols(s, w),
+                    cols(&fit_cols(s, w))
+                );
+                assert_eq!(
+                    cols(&pad_cols(s, w)),
+                    w,
+                    "pad_cols({s:?}, {w}) = {:?} does not own exactly {w} columns",
+                    pad_cols(s, w)
+                );
+                assert_eq!(
+                    cols(&pad_cols_start(s, w)),
+                    w,
+                    "pad_cols_start({s:?}, {w}) = {:?} does not own exactly {w} columns",
+                    pad_cols_start(s, w)
+                );
+            }
+        }
+    }
+}

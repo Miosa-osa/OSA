@@ -121,6 +121,7 @@ defmodule OptimalSystemAgent.Store.SessionTranscriptRetentionTest do
 
     test "under the cap nothing is removed" do
       before = SessionTranscript.count()
+
       assert {:ok, %{by_age: 0, by_cap: 0}} =
                SessionTranscript.purge_expired(days: 0, max_rows: before + 1000)
 

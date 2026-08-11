@@ -101,6 +101,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ResampleTest do
       # spent and Resample falls back to the halt.
       recur = fn recur, state ->
         send(test_pid, {:attempt, Map.get(state, :doom_resamples)})
+
         Resample.handle("still looping", Map.put(state, :halted, true), state, fn s ->
           recur.(recur, s)
         end)

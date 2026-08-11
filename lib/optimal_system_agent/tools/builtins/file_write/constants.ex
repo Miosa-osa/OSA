@@ -27,7 +27,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Constants do
   end
 
   # Single shared policy — see `Agent.Safety.PathPolicy`.
-  defdelegate blocked_write_paths, to: OptimalSystemAgent.Agent.Safety.PathPolicy,
+  defdelegate blocked_write_paths,
+    to: OptimalSystemAgent.Agent.Safety.PathPolicy,
     as: :blocked_write_patterns
 
   @soul_reload_files ~w(USER.md IDENTITY.md SOUL.md)

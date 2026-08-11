@@ -236,7 +236,10 @@ defmodule OptimalSystemAgent.OS.ProcessGroup do
   @doc "`true` when `os_pid` is still running."
   @spec pid_alive?(pos_integer()) :: boolean()
   def pid_alive?(os_pid) when is_integer(os_pid) and os_pid > 1 do
-    match?({_, 0}, System.cmd("ps", ["-o", "pid=", "-p", to_string(os_pid)], stderr_to_stdout: true))
+    match?(
+      {_, 0},
+      System.cmd("ps", ["-o", "pid=", "-p", to_string(os_pid)], stderr_to_stdout: true)
+    )
   rescue
     _ -> false
   catch
@@ -260,9 +263,11 @@ defmodule OptimalSystemAgent.OS.ProcessGroup do
 
   # Poll instead of a flat sleep so a well-behaved tree that exits on SIGTERM
   # does not stall the caller for the whole grace window.
-  defp wait_for_group_exit(pgid, grace_ms), do: poll_until(grace_ms, fn -> not group_alive?(pgid) end)
+  defp wait_for_group_exit(pgid, grace_ms),
+    do: poll_until(grace_ms, fn -> not group_alive?(pgid) end)
 
-  defp wait_for_pid_exit(os_pid, grace_ms), do: poll_until(grace_ms, fn -> not pid_alive?(os_pid) end)
+  defp wait_for_pid_exit(os_pid, grace_ms),
+    do: poll_until(grace_ms, fn -> not pid_alive?(os_pid) end)
 
   defp poll_until(budget_ms, _fun) when budget_ms <= 0, do: :ok
 

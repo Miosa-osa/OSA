@@ -33,7 +33,10 @@ defmodule OptimalSystemAgent.Orchestrator.FailureReportingTest do
       on_exit(fn -> File.rm_rf(tmp) end)
 
       {_, 0} = System.cmd("git", ["init", "-q", tmp], stderr_to_stdout: true)
-      {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.email", "t@t"], stderr_to_stdout: true)
+
+      {_, 0} =
+        System.cmd("git", ["-C", tmp, "config", "user.email", "t@t"], stderr_to_stdout: true)
+
       {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.name", "t"], stderr_to_stdout: true)
 
       {:ok, tmp: tmp}

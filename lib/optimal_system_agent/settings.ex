@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Settings do
 
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.Utils.Bom
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
   # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
@@ -52,6 +53,7 @@ defmodule OptimalSystemAgent.Settings do
     [layer(:user), layer(:project), layer(:local), layer(:flag)]
     |> Enum.reduce(%{}, &deep_merge(&2, &1))
     |> deep_merge(get_all_session())
+    |> harden_if_unparseable()
   end
 
   @doc "Deep-merge two settings maps: maps merge recursively, lists concat + dedupe, scalars override."
@@ -194,6 +196,7 @@ defmodule OptimalSystemAgent.Settings do
     [layer(:user), trusted_layer(:project), layer(:local), layer(:flag)]
     |> Enum.reduce(%{}, &deep_merge(&2, &1))
     |> deep_merge(get_all_session())
+    |> harden_if_unparseable()
   end
 
   @doc "`get/2` resolved through `merged_trusted/0`."
@@ -307,6 +310,10 @@ defmodule OptimalSystemAgent.Settings do
   defp load_json_for_write(path) do
     case File.read(path) do
       {:ok, content} ->
+        # BOM-tolerant on the WRITE path too: a BOM'd-but-valid file is not
+        # corrupt, and refusing to write to it would strand the user.
+        content = Bom.strip(content)
+
         case Jason.decode(content) do
           {:ok, map} when is_map(map) ->
             {:ok, map}
@@ -381,17 +388,97 @@ defmodule OptimalSystemAgent.Settings do
     map
   end
 
+  # A settings file that EXISTS but cannot be parsed must not read as "no
+  # settings". Returning `%{}` dropped the user's `permissions.deny` rules and
+  # their chosen `permission_mode` silently, leaving the agent MORE permissive
+  # than configured — a fail-OPEN on a security control.
+  #
+  # Two changes:
+  #   1. The BOM is stripped first, so the overwhelmingly common cause (a
+  #      Windows editor / PowerShell redirect writing `EF BB BF`) simply parses.
+  #   2. What is still unparseable yields @unparseable_layer, which carries a
+  #      marker key. `merged/0` and `merged_trusted/0` see the marker and pin
+  #      `permission_mode` to "ask" — the deny rules cannot be recovered, but
+  #      nothing runs unprompted while they are missing. And it is LOUD.
+  @unparseable_key "__unparseable_settings__"
+
   defp parse_json_file(path) do
     case File.read(path) do
       {:ok, content} ->
-        case Jason.decode(content) do
-          {:ok, map} when is_map(map) -> map
-          _ -> %{}
+        case content |> Bom.strip() |> Jason.decode() do
+          {:ok, map} when is_map(map) ->
+            map
+
+          _ ->
+            if String.trim(Bom.strip(content)) == "" do
+              %{}
+            else
+              warn_unparseable(path)
+              %{@unparseable_key => [path]}
+            end
         end
 
-      {:error, _} ->
+      {:error, :enoent} ->
         %{}
+
+      {:error, reason} ->
+        warn_unreadable(path, reason)
+        %{@unparseable_key => [path]}
     end
+  end
+
+  @doc """
+  Paths of settings files that exist but could not be parsed, from the merged
+  cascade. Empty list when every layer parsed (or was absent).
+  """
+  @spec unparseable_sources() :: [String.t()]
+  def unparseable_sources do
+    merged() |> Map.get(@unparseable_key, []) |> List.wrap()
+  end
+
+  # Fail CLOSED: while any settings layer is unreadable we cannot know what the
+  # user denied, so nothing is auto-approved. "ask" is the most restrictive
+  # mode that still lets work proceed (unlike "plan", which blocks all writes).
+  defp harden_if_unparseable(%{@unparseable_key => [_ | _]} = merged) do
+    Map.put(merged, "permission_mode", "ask")
+  end
+
+  defp harden_if_unparseable(merged), do: merged
+
+  defp warn_unparseable(path) do
+    once({:unparseable, path}, fn ->
+      Logger.error(
+        "[settings] #{path} exists but is NOT valid JSON — it is being IGNORED. " <>
+          "Any `permissions` (allow/deny/ask), `permission_mode`, `env` and `hooks` in it " <>
+          "are NOT in effect. permission_mode is forced to \"ask\" until this parses, so " <>
+          "nothing runs unprompted while your rules are missing. Fix the JSON syntax."
+      )
+    end)
+  end
+
+  defp warn_unreadable(path, reason) do
+    once({:unreadable, path}, fn ->
+      Logger.error(
+        "[settings] #{path} cannot be read (#{inspect(reason)}) — its permission rules and " <>
+          "permission_mode are NOT in effect. permission_mode is forced to \"ask\"."
+      )
+    end)
+  end
+
+  # Log once per {kind, path, file signature} so a broken file is visible
+  # without a line per tool call, but re-announces after every edit attempt.
+  defp once(key, fun) do
+    {kind, path} = key
+
+    if :ets.insert_new(@cache_table, {{kind, path, file_sig(path)}, :warned, true}) do
+      fun.()
+    end
+
+    :ok
+  rescue
+    _ ->
+      fun.()
+      :ok
   end
 
   defp write_json(path, data) do

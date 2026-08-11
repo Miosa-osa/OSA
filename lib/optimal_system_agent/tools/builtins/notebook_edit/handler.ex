@@ -49,8 +49,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEdit.Handler do
     if action in Constants.actions() do
       {:ok, input}
     else
-      {:error,
-       "Unknown action: #{action}. Use #{Enum.join(Constants.actions(), ", ")}.", -32_602}
+      {:error, "Unknown action: #{action}. Use #{Enum.join(Constants.actions(), ", ")}.", -32_602}
     end
   end
 
@@ -249,8 +248,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEdit.Handler do
   end
 
   defp dispatch(action, _expanded, _display, _params, _session) do
-    {:error,
-     "Unknown action: #{action}. Use #{Enum.join(Constants.actions(), ", ")}."}
+    {:error, "Unknown action: #{action}. Use #{Enum.join(Constants.actions(), ", ")}."}
   end
 
   # ── Notebook I/O ──────────────────────────────────────────────────────
@@ -429,5 +427,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEdit.Handler do
   # allowlist expansion and `dotfile_outside_osa?/1` — five private copies of
   # logic that four sibling tools each also copied, and which had already
   # drifted apart. See `check_permissions/2` and `guard_write/2` above.
-
 end

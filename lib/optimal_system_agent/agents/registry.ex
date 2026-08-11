@@ -13,6 +13,8 @@ defmodule OptimalSystemAgent.Agents.Registry do
   """
   require Logger
 
+  alias OptimalSystemAgent.Skills.Frontmatter
+
   @persistent_key {__MODULE__, :definitions}
 
   # ---------------------------------------------------------------------------
@@ -171,11 +173,11 @@ defmodule OptimalSystemAgent.Agents.Registry do
         dir
         |> File.ls!()
         |> Enum.filter(&File.dir?(Path.join(dir, &1)))
-        |> Enum.reject(fn d -> File.exists?(Path.join([dir, d, ".disabled"])) end)
         |> Enum.map(fn d -> Path.join([dir, d, "AGENT.md"]) end)
         |> Enum.filter(&File.exists?/1)
 
       (md_files ++ agent_dirs)
+      |> Enum.reject(&disabled?/1)
       |> Enum.reduce(%{}, fn path, acc ->
         case parse_agent_file(path, source) do
           {:ok, agent} -> Map.put(acc, agent.name, agent)
@@ -191,26 +193,29 @@ defmodule OptimalSystemAgent.Agents.Registry do
       %{}
   end
 
+  # An agent definition is disabled by a `.disabled` marker BESIDE it: the
+  # directory marker for `<agent>/AGENT.md`, and a `<name>.md.disabled` sibling
+  # for a flat `<name>.md` (which previously had no way to be disabled at all).
+  defp disabled?(path) do
+    File.exists?(Path.join(Path.dirname(path), ".disabled")) or
+      File.exists?(path <> ".disabled")
+  rescue
+    _ -> false
+  end
+
   defp parse_agent_file(path, source) do
     content = File.read!(path)
 
-    case String.split(content, "---", parts: 3) do
-      ["", frontmatter, body] ->
-        case YamlElixir.read_from_string(frontmatter) do
-          {:ok, meta} ->
-            {:ok, build_agent(path, source, meta, String.trim(body))}
+    case Frontmatter.parse(content) do
+      {:ok, meta, body} when is_map(meta) ->
+        {:ok, build_agent(path, source, meta, String.trim(body))}
 
-          _ ->
-            :error
-        end
-
-      _ ->
-        # No frontmatter — treat entire content as system prompt
-        name = Path.basename(path, ".md")
-
+      # The file has NO frontmatter block at all: a plain markdown system
+      # prompt. Nothing was declared, so nothing is being discarded.
+      {:error, :missing} ->
         {:ok,
          %{
-           name: name,
+           name: Path.basename(path, ".md"),
            description: "",
            when_to_use: "",
            tier: :specialist,
@@ -219,10 +224,25 @@ defmodule OptimalSystemAgent.Agents.Registry do
            tools_blocked: [],
            max_iterations: nil,
            permission_tier: :subagent,
-           system_prompt: content,
+           system_prompt: OptimalSystemAgent.Utils.Bom.strip(content),
            source_path: path,
            source: source
          }}
+
+      # The file DECLARES frontmatter that will not parse. It may well declare
+      # `tools_allowed`/`tools_blocked`/`permission_tier`. Loading it anyway
+      # used to hand the model an UNRESTRICTED subagent whose whole file —
+      # frontmatter included — became the system prompt: a security control
+      # silently discarded. Refuse to load instead, and say why.
+      {:error, reason} ->
+        Logger.error(
+          "[AgentRegistry] REFUSING to load subagent #{path}: " <>
+            "#{Frontmatter.explain(reason)}. Any tools_allowed/tools_blocked it declares " <>
+            "cannot be read, and loading it without them would grant the subagent more " <>
+            "access than its author wrote. Fix the frontmatter to load this agent."
+        )
+
+        :error
     end
   rescue
     e ->

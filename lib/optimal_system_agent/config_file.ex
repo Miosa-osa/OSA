@@ -43,6 +43,8 @@ defmodule OptimalSystemAgent.ConfigFile do
 
   require Logger
 
+  alias OptimalSystemAgent.Utils.Bom
+
   @cache_key {__MODULE__, :resolved}
 
   # ── Built-in defaults ────────────────────────────────────────────────
@@ -176,7 +178,7 @@ defmodule OptimalSystemAgent.ConfigFile do
   defp read_json do
     with true <- File.exists?(json_path()),
          {:ok, raw} <- File.read(json_path()),
-         {:ok, %{} = json} <- Jason.decode(raw) do
+         {:ok, %{} = json} <- raw |> Bom.strip() |> Jason.decode() do
       json
     else
       _ -> %{}
@@ -201,8 +203,11 @@ defmodule OptimalSystemAgent.ConfigFile do
     end
   end
 
+  # `:tomerl`'s lexer has no BOM rule (verified: no U+FEFF handling anywhere in
+  # deps/tomerl/src), so a BOM'd config.toml fails to parse and the whole
+  # overlay — permissions.deny included — is dropped. Strip it at the boundary.
   defp parse_toml(raw) do
-    :tomerl.parse(raw)
+    raw |> Bom.strip() |> :tomerl.parse()
   rescue
     e -> {:error, e}
   catch

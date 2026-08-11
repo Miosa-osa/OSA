@@ -132,7 +132,10 @@ defmodule OptimalSystemAgent.Auth.DeviceFlowTest do
       # every one of them.
       stub(%{
         "/device/code" => {200, @authorization},
-        "/oauth/token" => [{400, %{"error" => "authorization_pending"}}, {200, %{"access_token" => "ok"}}]
+        "/oauth/token" => [
+          {400, %{"error" => "authorization_pending"}},
+          {200, %{"access_token" => "ok"}}
+        ]
       })
 
       {:ok, session} = DeviceFlow.start(@config)
@@ -191,7 +194,10 @@ defmodule OptimalSystemAgent.Auth.DeviceFlowTest do
 
   describe "refresh/2" do
     test "exchanges a refresh token for a new access token" do
-      stub(%{"/oauth/token" => {200, %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 28_800}}})
+      stub(%{
+        "/oauth/token" =>
+          {200, %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 28_800}}
+      })
 
       assert {:ok, body} = DeviceFlow.refresh(@config, "rt-1")
       assert body["access_token"] == "at-2"

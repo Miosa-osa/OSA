@@ -61,6 +61,7 @@ defmodule OptimalSystemAgent.Providers.ThinkStreamParser do
   """
   @spec flush(t()) :: {String.t(), String.t(), t()}
   def flush(%__MODULE__{pending: ""} = state), do: {"", "", state}
+
   def flush(%__MODULE__{in_think: true, pending: pending}),
     do: {"", pending, %__MODULE__{}}
 

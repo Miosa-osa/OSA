@@ -173,6 +173,9 @@ defmodule OptimalSystemAgent.Agent.CompactionEvents do
   end
 
   defp describe(reason) when is_binary(reason), do: reason
-  defp describe(reason) when is_atom(reason), do: reason |> to_string() |> String.replace("_", " ")
+
+  defp describe(reason) when is_atom(reason),
+    do: reason |> to_string() |> String.replace("_", " ")
+
   defp describe(reason), do: inspect(reason)
 end

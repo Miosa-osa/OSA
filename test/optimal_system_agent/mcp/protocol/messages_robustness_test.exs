@@ -52,6 +52,7 @@ defmodule OptimalSystemAgent.MCP.Protocol.MessagesRobustnessTest do
   describe "parse_tool_list/1 schema tolerance" do
     test "keeps a tool with a valid outputSchema" do
       tools = [%{"name" => "t", "outputSchema" => %{"type" => "object"}}]
+
       assert [%{"name" => "t", "outputSchema" => %{"type" => "object"}}] =
                Messages.parse_tool_list(%{"tools" => tools})
     end

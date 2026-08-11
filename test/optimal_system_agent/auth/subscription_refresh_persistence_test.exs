@@ -39,7 +39,8 @@ defmodule OptimalSystemAgent.Auth.SubscriptionRefreshPersistenceTest do
     %{dir: dir}
   end
 
-  defp rotated, do: %{"refresh_token" => "new-rt", "access_token" => "new-at", "expires_at" => 999}
+  defp rotated,
+    do: %{"refresh_token" => "new-rt", "access_token" => "new-at", "expires_at" => 999}
 
   # Fail the atomic rename by parking a DIRECTORY at the store path. Deterministic,
   # and independent of the running user's privileges (unlike a chmod).

@@ -300,7 +300,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       think: ThinkStreamParser.new()
     }
 
-    acc = Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
+    acc =
+      Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
+
     finalize_sse_stream(acc, callback, model, messages)
 
     receive do
@@ -362,7 +364,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # `inspect/1` rather than interpolation: a non-binary `message` here would
       # raise inside the SSE accumulator and kill the whole stream over a log line.
       {:ok, %{"error" => %{"message" => msg}}} ->
-        Logger.error("OpenAI-compat stream error: #{if is_binary(msg), do: msg, else: inspect(msg)}")
+        Logger.error(
+          "OpenAI-compat stream error: #{if is_binary(msg), do: msg, else: inspect(msg)}"
+        )
 
         acc
 
@@ -1077,9 +1081,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp deepseek_endpoint?(url) when is_binary(url) do
     host = URI.parse(url).host || ""
 
+    # A user proxying DeepSeek through their own host is still DeepSeek: the
+    # :deepseek provider's configured URL counts however it is spelled.
     String.ends_with?(host, "deepseek.com") or
-      # A user proxying DeepSeek through their own host is still DeepSeek: the
-      # :deepseek provider's configured URL counts however it is spelled.
       url ==
         Application.get_env(
           :optimal_system_agent,

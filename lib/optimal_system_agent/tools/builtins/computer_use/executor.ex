@@ -400,7 +400,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
         Application.get_env(:optimal_system_agent, :ollama_model) || "llama3.2:latest"
 
       "anthropic" ->
-        Application.get_env(:optimal_system_agent, :anthropic_model) || OptimalSystemAgent.Providers.AnthropicModels.default_model()
+        Application.get_env(:optimal_system_agent, :anthropic_model) ||
+          OptimalSystemAgent.Providers.AnthropicModels.default_model()
 
       _ ->
         Application.get_env(:optimal_system_agent, :default_model) || "llama3.2:latest"

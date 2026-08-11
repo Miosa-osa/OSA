@@ -103,13 +103,27 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     fun.()
   rescue
     e ->
-      [row(:malformed, "(section failed)", "-", "inspection",
-         "this check itself raised #{inspect(e.__struct__)}: #{Exception.message(e)} — " <>
-           "the section below is missing, not empty. Treat '#{title}' as unknown.")]
+      [
+        row(
+          :malformed,
+          "(section failed)",
+          "-",
+          "inspection",
+          "this check itself raised #{inspect(e.__struct__)}: #{Exception.message(e)} — " <>
+            "the section below is missing, not empty. Treat '#{title}' as unknown."
+        )
+      ]
   catch
     :exit, reason ->
-      [row(:malformed, "(section failed)", "-", "inspection",
-         "this check exited: #{inspect(reason)} — '#{title}' is unknown, not empty.")]
+      [
+        row(
+          :malformed,
+          "(section failed)",
+          "-",
+          "inspection",
+          "this check exited: #{inspect(reason)} — '#{title}' is unknown, not empty."
+        )
+      ]
   end
 
   @doc """
@@ -189,11 +203,18 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         path = Path.join(dir, name)
 
         cond do
-          readable_nonempty?(path) -> row(:loaded, name, path, "bootstrap dir", bytes(path))
+          readable_nonempty?(path) ->
+            row(:loaded, name, path, "bootstrap dir", bytes(path))
+
           File.exists?(path) ->
-            row(:malformed, name, path, "bootstrap dir",
+            row(
+              :malformed,
+              name,
+              path,
+              "bootstrap dir",
               "exists but is empty after trim — Soul stores nil, so the corresponding " <>
-                "prompt placeholder is interpolated away entirely")
+                "prompt placeholder is interpolated away entirely"
+            )
 
           true ->
             row(:absent, name, path, "bootstrap dir", "not present; placeholder renders empty")
@@ -219,12 +240,23 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
           case present do
             [] ->
-              row(:inert, "agents/#{agent}", agent_dir, "per-agent soul",
+              row(
+                :inert,
+                "agents/#{agent}",
+                agent_dir,
+                "per-agent soul",
                 "directory exists but neither IDENTITY.md nor SOUL.md is readable and " <>
-                  "non-empty, so Soul.for_agent/1 falls back to the default soul")
+                  "non-empty, so Soul.for_agent/1 falls back to the default soul"
+              )
 
             files ->
-              row(:loaded, "agents/#{agent}", agent_dir, "per-agent soul", Enum.join(files, " + "))
+              row(
+                :loaded,
+                "agents/#{agent}",
+                agent_dir,
+                "per-agent soul",
+                Enum.join(files, " + ")
+              )
           end
         end)
 
@@ -232,8 +264,15 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         []
 
       {:error, reason} ->
-        [row(:malformed, "agents/", agents_dir, "per-agent soul",
-           "cannot be listed: #{:file.format_error(reason)} — per-agent souls are silently skipped")]
+        [
+          row(
+            :malformed,
+            "agents/",
+            agents_dir,
+            "per-agent soul",
+            "cannot be listed: #{:file.format_error(reason)} — per-agent souls are silently skipped"
+          )
+        ]
     end
   end
 
@@ -242,8 +281,13 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
     cond do
       is_nil(dir) or not File.dir?(dir) ->
-        row(:absent, "{{RULES}}", dir || "priv/rules", "bundled",
-          "priv/rules/ not found — the RULES placeholder interpolates to empty")
+        row(
+          :absent,
+          "{{RULES}}",
+          dir || "priv/rules",
+          "bundled",
+          "priv/rules/ not found — the RULES placeholder interpolates to empty"
+        )
 
       true ->
         files = Path.wildcard(Path.join(dir, "**/*.md")) |> Enum.sort()
@@ -279,10 +323,15 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
     cond do
       is_nil(tokens) ->
-        row(:absent, "static base (assembled)", "(persistent_term cache)", "runtime",
+        row(
+          :absent,
+          "static base (assembled)",
+          "(persistent_term cache)",
+          "runtime",
           "not assembled yet — the cache is populated lazily on the first turn, and this " <>
             "report deliberately does not trigger it. Run `/doctor --config` from inside a " <>
-            "live session to see the assembled size.")
+            "live session to see the assembled size."
+        )
 
       tokens > 0 and not registry_running?() ->
         # `osa doctor` runs from a cold VM (`mix run --no-start`), where
@@ -290,20 +339,35 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         # nothing. Reporting the resulting ~87 tokens as *the* static base would
         # be off by more than two orders of magnitude — precisely the kind of
         # confidently-wrong number a diagnostic must never print.
-        row(:inert, "static base (assembled)", "(persistent_term cache)", "runtime",
+        row(
+          :inert,
+          "static base (assembled)",
+          "(persistent_term cache)",
+          "runtime",
           "#{tokens} tokens measured WITHOUT tool definitions — Tools.Registry is not " <>
             "running, so {{TOOL_DEFINITIONS}} interpolated to empty. This is not the size " <>
-            "a live session sends. Run `/doctor --config` inside a session for the real figure.")
+            "a live session sends. Run `/doctor --config` inside a session for the real figure."
+        )
 
       tokens > 0 ->
-        row(:loaded, "static base (assembled)", "(persistent_term cache)", "runtime",
+        row(
+          :loaded,
+          "static base (assembled)",
+          "(persistent_term cache)",
+          "runtime",
           "#{tokens} tokens — SYSTEM.md with TOOL_DEFINITIONS, RULES, USER_PROFILE, " <>
-            "SOUL_CONTENT and IDENTITY_PROFILE interpolated")
+            "SOUL_CONTENT and IDENTITY_PROFILE interpolated"
+        )
 
       true ->
-        row(:malformed, "static base (assembled)", "(persistent_term cache)", "runtime",
+        row(
+          :malformed,
+          "static base (assembled)",
+          "(persistent_term cache)",
+          "runtime",
           "assembled to 0 tokens — the template resolved but produced nothing. Every " <>
-            "turn is being sent without a system prompt.")
+            "turn is being sent without a system prompt."
+        )
     end
   end
 
@@ -325,23 +389,43 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
     cond do
       not File.exists?(path) ->
-        row(:absent, "BOOTSTRAP.md", path, "bootstrap dir",
-          "not present — no 'get to know the user' block is injected")
+        row(
+          :absent,
+          "BOOTSTRAP.md",
+          path,
+          "bootstrap dir",
+          "not present — no 'get to know the user' block is injected"
+        )
 
       not readable_nonempty?(path) ->
-        row(:malformed, "BOOTSTRAP.md", path, "bootstrap dir",
-          "exists but is empty after trim — treated as absent")
+        row(
+          :malformed,
+          "BOOTSTRAP.md",
+          path,
+          "bootstrap dir",
+          "exists but is empty after trim — treated as absent"
+        )
 
       known? ->
-        row(:inert, "BOOTSTRAP.md", path, "bootstrap dir",
+        row(
+          :inert,
+          "BOOTSTRAP.md",
+          path,
+          "bootstrap dir",
           "present and well-formed, but NOT injected: #{tilde(user_md)} already has a " <>
             "'- **Name:** …' line, which is the completion signal that switches this " <>
-            "block off. Clear that line to re-enable it.")
+            "block off. Clear that line to re-enable it."
+        )
 
       true ->
-        row(:loaded, "BOOTSTRAP.md", path, "bootstrap dir",
+        row(
+          :loaded,
+          "BOOTSTRAP.md",
+          path,
+          "bootstrap dir",
           "injected each turn as '## GET TO KNOW THE USER' — will switch itself off once " <>
-            "#{tilde(user_md)} has a '- **Name:** …' line")
+            "#{tilde(user_md)} has a '- **Name:** …' line"
+        )
     end
   end
 
@@ -366,16 +450,31 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
     case candidates do
       [] ->
-        [row(:absent, "project context", Enum.join(Enum.map(dirs, &tilde/1), ", "),
-           "ContextDiscovery",
-           "none of #{Enum.join(@context_files, ", ")} found in any search directory")]
+        [
+          row(
+            :absent,
+            "project context",
+            Enum.join(Enum.map(dirs, &tilde/1), ", "),
+            "ContextDiscovery",
+            "none of #{Enum.join(@context_files, ", ")} found in any search directory"
+          )
+        ]
 
       [winner | shadowed] ->
-        [context_row(winner, :loaded, "front-loaded as '## Project Context (#{Path.basename(winner)})'")] ++
+        [
+          context_row(
+            winner,
+            :loaded,
+            "front-loaded as '## Project Context (#{Path.basename(winner)})'"
+          )
+        ] ++
           Enum.map(shadowed, fn p ->
-            context_row(p, :inert,
+            context_row(
+              p,
+              :inert,
               "present but NOT loaded — #{tilde(winner)} won on precedence (directory " <>
-                "order first, then filename order). Only ONE project-context file is ever used.")
+                "order first, then filename order). Only ONE project-context file is ever used."
+            )
           end)
     end
   end
@@ -385,16 +484,28 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   defp context_row(path, status, detail) do
     case injection_status(path) do
       {:blocked, reason} ->
-        row(:malformed, "project context", path, "ContextDiscovery",
+        row(
+          :malformed,
+          "project context",
+          path,
+          "ContextDiscovery",
           "REJECTED by the prompt-injection scanner (#{inspect(reason)}) — the file is " <>
-            "readable but contributes NOTHING to the prompt, and only a debug log says so")
+            "readable but contributes NOTHING to the prompt, and only a debug log says so"
+        )
 
       :ok ->
         row(status, "project context", path, "ContextDiscovery", detail)
     end
   end
 
-  @instruction_files ["AGENTS.md", "agents.md", "CLAUDE.md", "claude.md", "GROK.md", ".grok/GROK.md"]
+  @instruction_files [
+    "AGENTS.md",
+    "agents.md",
+    "CLAUDE.md",
+    "claude.md",
+    "GROK.md",
+    ".grok/GROK.md"
+  ]
 
   # ProjectInstructions is lazy — it only fires for directories the agent has
   # actually touched — so a static report cannot say "this WILL load". It says
@@ -420,24 +531,48 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     root_rows =
       case found do
         [] ->
-          [row(:absent, "root instructions", root, "ProjectInstructions",
-             "no #{Enum.join(@instruction_files, "/")} at the workspace root")]
+          [
+            row(
+              :absent,
+              "root instructions",
+              root,
+              "ProjectInstructions",
+              "no #{Enum.join(@instruction_files, "/")} at the workspace root"
+            )
+          ]
 
         [w | rest] ->
-          [row(:loaded, "root instructions", w, "ProjectInstructions",
-             "front-loaded by ContextDiscovery; explicitly EXCLUDED from the upward walk " <>
-               "so it is never injected twice")] ++
+          [
+            row(
+              :loaded,
+              "root instructions",
+              w,
+              "ProjectInstructions",
+              "front-loaded by ContextDiscovery; explicitly EXCLUDED from the upward walk " <>
+                "so it is never injected twice"
+            )
+          ] ++
             Enum.map(rest, fn p ->
-              row(:inert, "root instructions", p, "ProjectInstructions",
-                "shadowed by #{Path.basename(w)} — one file per directory, first filename wins")
+              row(
+                :inert,
+                "root instructions",
+                p,
+                "ProjectInstructions",
+                "shadowed by #{Path.basename(w)} — one file per directory, first filename wins"
+              )
             end)
       end
 
     nested_rows =
       Enum.map(nested, fn p ->
-        row(:loaded, "nested instructions", p, "ProjectInstructions",
+        row(
+          :loaded,
+          "nested instructions",
+          p,
+          "ProjectInstructions",
           "LAZY — injected only after the agent reads or edits a file under " <>
-            "#{tilde(Path.dirname(p))}, then claimed for the rest of the session")
+            "#{tilde(Path.dirname(p))}, then claimed for the rest of the session"
+        )
       end)
 
     root_rows ++ nested_rows
@@ -453,8 +588,15 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     touched = touched_paths()
 
     if map_size(skills) == 0 do
-      [row(:absent, "(no skills)", skill_roots_hint(), "SkillLoader",
-         "no SKILL.md found in any local/repo/user/bundled scope")]
+      [
+        row(
+          :absent,
+          "(no skills)",
+          skill_roots_hint(),
+          "SkillLoader",
+          "no SKILL.md found in any local/repo/user/bundled scope"
+        )
+      ]
     else
       skills
       |> Map.values()
@@ -463,8 +605,15 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     end
   rescue
     e ->
-      [row(:malformed, "(skill scan failed)", "-", "SkillLoader",
-         "#{inspect(e.__struct__)}: #{Exception.message(e)}")]
+      [
+        row(
+          :malformed,
+          "(skill scan failed)",
+          "-",
+          "SkillLoader",
+          "#{inspect(e.__struct__)}: #{Exception.message(e)}"
+        )
+      ]
   end
 
   defp skill_row(entry, touched) do
@@ -472,11 +621,16 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
     cond do
       fallback_parse?(entry) ->
-        row(:malformed, entry.name, entry.path, scope,
+        row(
+          :malformed,
+          entry.name,
+          entry.path,
+          scope,
           "YAML frontmatter missing, unterminated within the first 4096 bytes, or " <>
             "invalid — the loader fell back to naming the skill after its directory and " <>
             "using the first 100 raw characters as its description. It IS listed to the " <>
-            "model, just not as authored: triggers, tools and paths were all dropped.")
+            "model, just not as authored: triggers, tools and paths were all dropped."
+        )
 
       is_list(entry.paths) and entry.paths != [] ->
         matched =
@@ -485,22 +639,42 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
           end)
 
         if matched do
-          row(:loaded, entry.name, entry.path, scope,
-            "surfaced — paths: #{Enum.join(entry.paths, ", ")} matched touched path #{matched}")
+          row(
+            :loaded,
+            entry.name,
+            entry.path,
+            scope,
+            "surfaced — paths: #{Enum.join(entry.paths, ", ")} matched touched path #{matched}"
+          )
         else
-          row(:inert, entry.name, entry.path, scope,
+          row(
+            :inert,
+            entry.name,
+            entry.path,
+            scope,
             "NOT surfaced — gated behind paths: #{Enum.join(entry.paths, ", ")}, and " <>
-              "#{touched_summary(touched)}. It loads only once a matching file is read or edited.")
+              "#{touched_summary(touched)}. It loads only once a matching file is read or edited."
+          )
         end
 
       disabled?(entry) ->
-        row(:inert, entry.name, entry.path, scope,
-          "NOT surfaced — a .disabled marker exists beside it in the skills directory")
+        row(
+          :inert,
+          entry.name,
+          entry.path,
+          scope,
+          "NOT surfaced — a .disabled marker exists beside it in the skills directory"
+        )
 
       true ->
-        row(:loaded, entry.name, entry.path, scope,
+        row(
+          :loaded,
+          entry.name,
+          entry.path,
+          scope,
           "surfaced unconditionally (no paths: gate) — priority #{entry.priority}, " <>
-            "triggers: #{trigger_summary(entry)}")
+            "triggers: #{trigger_summary(entry)}"
+        )
     end
   end
 
@@ -517,12 +691,22 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
       cond do
         layer == :session ->
-          row(if(map_size(data) == 0, do: :absent, else: :loaded), "session", "(in-memory)",
-            "session", "#{map_size(data)} key(s) — not persisted, lost on exit")
+          row(
+            if(map_size(data) == 0, do: :absent, else: :loaded),
+            "session",
+            "(in-memory)",
+            "session",
+            "#{map_size(data)} key(s) — not persisted, lost on exit"
+          )
 
         is_nil(path) ->
-          row(:absent, to_string(layer), "(unset)", to_string(layer),
-            "OSA_SETTINGS is not set, so there is no flag-file layer")
+          row(
+            :absent,
+            to_string(layer),
+            "(unset)",
+            to_string(layer),
+            "OSA_SETTINGS is not set, so there is no flag-file layer"
+          )
 
         not File.exists?(path) ->
           row(:absent, to_string(layer), path, to_string(layer), "file not present")
@@ -544,20 +728,35 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         # The read path silently degrades a corrupt file to `%{}` with no
         # warning, so "my settings do nothing" and "my settings are invalid
         # JSON" look identical everywhere else in the system.
-        row(:malformed, to_string(layer), path, to_string(layer),
+        row(
+          :malformed,
+          to_string(layer),
+          path,
+          to_string(layer),
           "PARSE/SCHEMA ERRORS — the file is ignored entirely and silently: " <>
-            Enum.map_join(errors, "; ", fn i -> "#{i.key}: #{i.message} (#{i.tip})" end))
+            Enum.map_join(errors, "; ", fn i -> "#{i.key}: #{i.message} (#{i.tip})" end)
+        )
 
       withheld? ->
-        row(:inert, to_string(layer), path, to_string(layer),
+        row(
+          :inert,
+          to_string(layer),
+          path,
+          to_string(layer),
           "#{map_size(data)} key(s) present but WITHHELD — this workspace has not been " <>
             "trusted, so permission rules, permission_mode and env from it are ignored. " <>
-            "They are inert, not broken: run `/trust accept`.")
+            "They are inert, not broken: run `/trust accept`."
+        )
 
       issues != [] ->
-        row(:loaded, to_string(layer), path, to_string(layer),
+        row(
+          :loaded,
+          to_string(layer),
+          path,
+          to_string(layer),
           "#{map_size(data)} key(s); #{length(issues)} warning(s): " <>
-            Enum.map_join(issues, "; ", fn i -> "#{i.key}: #{i.message}" end))
+            Enum.map_join(issues, "; ", fn i -> "#{i.key}: #{i.message}" end)
+        )
 
       true ->
         row(:loaded, to_string(layer), path, to_string(layer), "#{map_size(data)} key(s)")
@@ -601,14 +800,24 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       length(present) > 1 and is_list(value) ->
         combined = present |> Enum.flat_map(&Map.get(by_layer[&1], key, [])) |> Enum.uniq()
 
-        row(:loaded, key, contributor_paths(present, paths), "MERGED (concat)",
+        row(
+          :loaded,
+          key,
+          contributor_paths(present, paths),
+          "MERGED (concat)",
           "list key — #{length(combined)} entries CONCATENATED across " <>
-            "#{Enum.map_join(present, " + ", &to_string/1)}; no single layer owns it")
+            "#{Enum.map_join(present, " + ", &to_string/1)}; no single layer owns it"
+        )
 
       length(present) > 1 and is_map(value) ->
-        row(:loaded, key, contributor_paths(present, paths), "MERGED (deep)",
+        row(
+          :loaded,
+          key,
+          contributor_paths(present, paths),
+          "MERGED (deep)",
           "map key — merged key-by-key across #{Enum.map_join(present, " + ", &to_string/1)}; " <>
-            "run with a specific sub-key to see per-leaf provenance")
+            "run with a specific sub-key to see per-leaf provenance"
+        )
 
       # `merged/0` (what `get/2` reads) includes the project layer; `merged_trusted/0`
       # (what every security-relevant read uses) does not. Reporting a
@@ -617,13 +826,24 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       # the key applies to ordinary reads and is inert for permissions, hooks
       # and env until the workspace is trusted.
       winner == :project and not trusted?() ->
-        row(:inert, key, where, "project (untrusted)",
+        row(
+          :inert,
+          key,
+          where,
+          "project (untrusted)",
           "#{truncate(inspect(value), 70)}#{shadow_note} — visible to Settings.get/2 but " <>
             "WITHHELD from Settings.get_trusted/2, so it does not apply to permission " <>
-            "rules, permission_mode, hooks or env. Run `/trust accept` to make it effective.")
+            "rules, permission_mode, hooks or env. Run `/trust accept` to make it effective."
+        )
 
       true ->
-        row(:loaded, key, where, to_string(winner), "#{truncate(inspect(value), 90)}#{shadow_note}")
+        row(
+          :loaded,
+          key,
+          where,
+          to_string(winner),
+          "#{truncate(inspect(value), 90)}#{shadow_note}"
+        )
     end
   end
 
@@ -685,8 +905,13 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   # ── Helpers ───────────────────────────────────────────────────────────
 
   defp row(status, label, path, layer, detail) do
-    %{status: status, label: to_string(label), path: to_string(path),
-      layer: to_string(layer), detail: detail}
+    %{
+      status: status,
+      label: to_string(label),
+      path: to_string(path),
+      layer: to_string(layer),
+      detail: detail
+    }
   end
 
   defp bootstrap_dir do
@@ -781,8 +1006,9 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   end
 
   defp touched_summary([]),
-    do: "no files have been touched this session (this report runs outside a live session, " <>
-          "so the touched-path set is empty by construction)"
+    do:
+      "no files have been touched this session (this report runs outside a live session, " <>
+        "so the touched-path set is empty by construction)"
 
   defp touched_summary(paths), do: "none of the #{length(paths)} touched path(s) match"
 
@@ -793,11 +1019,9 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       (entry[:description] || "") |> String.starts_with?("---")
   end
 
-  defp disabled?(entry) do
-    File.exists?(Path.join(Path.dirname(entry.path), ".disabled"))
-  rescue
-    _ -> false
-  end
+  # Canonical check, shared with the prompt builder and the CLI listing so the
+  # doctor can never report "NOT surfaced" for a skill the prompt is shipping.
+  defp disabled?(entry), do: OptimalSystemAgent.Tools.Registry.SkillLoader.disabled?(entry)
 
   defp trigger_summary(entry) do
     case entry[:triggers] do

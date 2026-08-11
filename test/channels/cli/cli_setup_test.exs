@@ -83,7 +83,10 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
     end
 
     test "an unconfigured/garbage openrouter key is actually rejected, not blindly :ok" do
-      assert Setup.test_provider(:openrouter, "definitely-not-a-real-key") not in [:ok, :unverified]
+      assert Setup.test_provider(:openrouter, "definitely-not-a-real-key") not in [
+               :ok,
+               :unverified
+             ]
     end
 
     test "an unconfigured/garbage deepseek key is actually rejected, not blindly :ok" do

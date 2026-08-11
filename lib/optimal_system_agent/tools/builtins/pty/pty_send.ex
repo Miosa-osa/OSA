@@ -62,14 +62,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtySend do
 
   defp run(input) do
     with {:ok, session} <- Shared.session_id(input),
-         keys when is_binary(keys) <- input["keys"] || {:error, "Missing required parameter: keys"},
+         keys when is_binary(keys) <-
+           input["keys"] || {:error, "Missing required parameter: keys"},
          :ok <- Manager.send_keys(session, keys) do
       {:ok, "Sent keys to #{session}: #{inspect(keys)}"}
     else
-      {:error, :not_found} -> {:error, "No such pty session: #{input["session"]}"}
-      {:error, :not_alive} -> {:error, "pty session #{input["session"]} is not alive (child exited)"}
-      {:error, reason} when is_binary(reason) -> {:error, reason}
-      {:error, reason} -> {:error, inspect(reason)}
+      {:error, :not_found} ->
+        {:error, "No such pty session: #{input["session"]}"}
+
+      {:error, :not_alive} ->
+        {:error, "pty session #{input["session"]} is not alive (child exited)"}
+
+      {:error, reason} when is_binary(reason) ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
     end
   end
 end

@@ -18,7 +18,10 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionWireContractTest do
 
   test "TUI canonical decision strings map to the right atoms" do
     assert %{decision: :allow_once} = roundtrip(%{"decision" => "allow_once", "note" => nil})
-    assert %{decision: :allow_session} = roundtrip(%{"decision" => "allow_session", "note" => nil})
+
+    assert %{decision: :allow_session} =
+             roundtrip(%{"decision" => "allow_session", "note" => nil})
+
     assert %{decision: :allow_always} = roundtrip(%{"decision" => "allow_always", "note" => nil})
     assert %{decision: :deny} = roundtrip(%{"decision" => "deny", "note" => nil})
   end

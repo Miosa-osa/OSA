@@ -72,10 +72,42 @@ defmodule OptimalSystemAgent.Budget do
     GenServer.call(__MODULE__, :get_status)
   end
 
-  @doc "Record an API call cost. Fire-and-forget."
+  @doc """
+  Record an API call cost, pricing it with this module's coarse per-PROVIDER
+  rate table. Fire-and-forget.
+
+  Prefer `record_priced_cost/5` when the caller already has a per-MODEL price —
+  see its docs for why the two tables must not both bill the same tokens.
+  """
   @spec record_cost(atom(), String.t(), non_neg_integer(), non_neg_integer(), String.t()) :: :ok
   def record_cost(provider, model, tokens_in, tokens_out, session_id) do
     GenServer.cast(__MODULE__, {:record_cost, provider, model, tokens_in, tokens_out, session_id})
+  end
+
+  @doc """
+  Record an API call whose USD cost has ALREADY been computed by
+  `OptimalSystemAgent.Agent.Pricing` — the per-model engine with real cache
+  multipliers (`cache_read * input_rate * 0.1`, `cache_write * 1.25`).
+
+  Two engines were billing the same tokens. `Loop.Accounting` priced each turn
+  with `Pricing.cost/2`, then handed the SAME usage to `record_cost/5`, which
+  re-priced it from the coarse provider table at the FULL input rate — and it
+  was handed `effective_input_tokens` (input + cache-write + cache-read), so
+  every cached token was billed as if it were fresh. On a cache-heavy session
+  that inflates the daily/monthly figure `/cost` prints several-fold, in the
+  direction that makes an operator think they are overspending.
+
+  This entry point keeps `Pricing` the single billing engine: the ledger stores
+  the number the session was actually charged. `record_cost/5` remains for
+  callers (the SDK bridge, the usage hook) that have raw token counts and no
+  priced value.
+  """
+  @spec record_priced_cost(atom(), String.t(), float(), non_neg_integer(), String.t()) :: :ok
+  def record_priced_cost(provider, model, cost_usd, tokens, session_id) do
+    GenServer.cast(
+      __MODULE__,
+      {:record_priced_cost, provider, model, cost_usd, tokens, session_id}
+    )
   end
 
   @doc """
@@ -148,6 +180,11 @@ defmodule OptimalSystemAgent.Budget do
       # per-token pricing such as GLM/Ollama), so the status line can show usage.
       daily_tokens: 0,
       monthly_tokens: 0,
+      daily_calls: 0,
+      monthly_calls: 0,
+      # This ledger lives in memory only — see the `:counting_since` note on
+      # `get_status/0`.
+      counting_since: DateTime.utc_now(),
       daily_limit:
         Keyword.get(opts, :daily_limit) ||
           Application.get_env(:optimal_system_agent, :daily_budget_usd, @daily_default_usd),
@@ -206,7 +243,19 @@ defmodule OptimalSystemAgent.Budget do
       monthly_remaining: remaining(state.monthly_limit, state.monthly_spent),
       daily_reset_at: state.daily_reset_at,
       monthly_reset_at: state.monthly_reset_at,
-      ledger_entries: length(state.entries)
+      ledger_entries: length(state.entries),
+      daily_calls: state.daily_calls,
+      monthly_calls: state.monthly_calls,
+      # HONESTY FIELDS. Every counter above starts at zero in `init/1`: nothing
+      # is loaded from disk and nothing is saved on `terminate/2`. So
+      # `monthly_spent` is not the month's spend — it is the spend since this
+      # OSA process started, which after a restart on the 28th is a few minutes
+      # of data wearing a month's label. Consumers MUST render the period as
+      # "since #{counting_since}" rather than "this month" while
+      # `persisted: false`. The durable per-session record is the
+      # `SessionPersistence` spend sidecar; this ledger is a live meter.
+      persisted: false,
+      counting_since: state.counting_since
     }
 
     {:reply, {:ok, status}, state}
@@ -214,7 +263,15 @@ defmodule OptimalSystemAgent.Budget do
 
   @impl true
   def handle_cast({:record_cost, provider, model, tokens_in, tokens_out, session_id}, state) do
+    # Reset BEFORE accumulating. Resets are lazy, and `:check_budget` /
+    # `:get_status` were the only two callbacks that ran one — so spend recorded
+    # between midnight and the first read landed in the previous day's bucket,
+    # and the next read then zeroed that bucket wholesale. Real post-midnight
+    # spend was erased and the day started with a false $0.
+    state = maybe_reset(state)
+
     cost = calculate_cost(provider, tokens_in, tokens_out)
+    tokens = max(tokens_in, 0) + max(tokens_out, 0)
 
     entry = %{
       provider: provider,
@@ -226,36 +283,72 @@ defmodule OptimalSystemAgent.Budget do
       recorded_at: DateTime.utc_now()
     }
 
-    tokens = max(tokens_in, 0) + max(tokens_out, 0)
+    {:noreply, accumulate(state, cost, tokens, entry)}
+  end
 
-    state = %{
+  @impl true
+  def handle_cast({:record_priced_cost, provider, model, cost_usd, tokens, session_id}, state) do
+    state = maybe_reset(state)
+    cost = if is_number(cost_usd) and cost_usd > 0, do: cost_usd * 1.0, else: 0.0
+    tokens = if is_integer(tokens) and tokens > 0, do: tokens, else: 0
+
+    entry = %{
+      provider: provider,
+      model: model,
+      tokens_in: nil,
+      tokens_out: nil,
+      cost: cost,
+      session_id: session_id,
+      recorded_at: DateTime.utc_now()
+    }
+
+    {:noreply, accumulate(state, cost, tokens, entry)}
+  end
+
+  @impl true
+  def handle_cast(:reset_daily, state) do
+    {:noreply,
+     %{
+       state
+       | daily_spent: 0.0,
+         daily_tokens: 0,
+         daily_calls: 0,
+         daily_reset_at: tomorrow_midnight()
+     }}
+  end
+
+  @impl true
+  def handle_cast(:reset_monthly, state) do
+    {:noreply,
+     %{
+       state
+       | monthly_spent: 0.0,
+         monthly_tokens: 0,
+         monthly_calls: 0,
+         monthly_reset_at: next_month_midnight()
+     }}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
+  defp accumulate(state, cost, tokens, entry) do
+    %{
       state
       | daily_spent: state.daily_spent + cost,
         monthly_spent: state.monthly_spent + cost,
         daily_tokens: state.daily_tokens + tokens,
         monthly_tokens: state.monthly_tokens + tokens,
         # Keep at most 10 000 ledger entries in memory
-        entries: Enum.take([entry | state.entries], 10_000)
+        entries: Enum.take([entry | state.entries], 10_000),
+        # Call counts are their own counters, NOT `length(entries)`. `entries`
+        # is a ring capped at 10 000, so the reported call count silently froze
+        # at 10 000 and every call after that was invisible.
+        daily_calls: state.daily_calls + 1,
+        monthly_calls: state.monthly_calls + 1
     }
-
-    {:noreply, state}
   end
-
-  @impl true
-  def handle_cast(:reset_daily, state) do
-    {:noreply,
-     %{state | daily_spent: 0.0, daily_tokens: 0, daily_reset_at: tomorrow_midnight()}}
-  end
-
-  @impl true
-  def handle_cast(:reset_monthly, state) do
-    {:noreply,
-     %{state | monthly_spent: 0.0, monthly_tokens: 0, monthly_reset_at: next_month_midnight()}}
-  end
-
-  # ---------------------------------------------------------------------------
-  # Private helpers
-  # ---------------------------------------------------------------------------
 
   # A nil limit means "no budget configured": never over limit.
   defp over_limit?(limit, spent) when is_number(limit), do: spent >= limit
@@ -275,7 +368,13 @@ defmodule OptimalSystemAgent.Budget do
 
   defp maybe_reset_daily(state, now) do
     if DateTime.compare(now, state.daily_reset_at) == :gt do
-      %{state | daily_spent: 0.0, daily_tokens: 0, daily_reset_at: tomorrow_midnight()}
+      %{
+        state
+        | daily_spent: 0.0,
+          daily_tokens: 0,
+          daily_calls: 0,
+          daily_reset_at: tomorrow_midnight()
+      }
     else
       state
     end
@@ -283,7 +382,13 @@ defmodule OptimalSystemAgent.Budget do
 
   defp maybe_reset_monthly(state, now) do
     if DateTime.compare(now, state.monthly_reset_at) == :gt do
-      %{state | monthly_spent: 0.0, monthly_tokens: 0, monthly_reset_at: next_month_midnight()}
+      %{
+        state
+        | monthly_spent: 0.0,
+          monthly_tokens: 0,
+          monthly_calls: 0,
+          monthly_reset_at: next_month_midnight()
+      }
     else
       state
     end

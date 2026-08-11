@@ -260,7 +260,9 @@ impl Picker {
                 .as_ref()
                 .map(|b| format!("[{}]", b))
                 .unwrap_or_default();
-            let badge_len = badge_text.len();
+            // COLUMNS, not bytes: `badge_text.len()` triples the measured cost of a
+            // non-ASCII badge and collapses the detail column to nothing.
+            let badge_len = crate::util::cols(&badge_text);
             let glyph_len = 2usize;
             let label_max = (avail / 2).max(8);
             let detail_max = avail
@@ -270,11 +272,16 @@ impl Picker {
             let label = truncate(&item.label, label_max);
             let detail = truncate(&item.detail, detail_max);
 
-            let label_padded = format!("{:<width$}", label, width = label_max);
+            // `format!("{:<width$}")` pads by CHAR count, so a wide glyph in the
+            // label leaves the column one short and shears everything right of it.
+            let label_padded = crate::util::pad_cols(&label, label_max);
             let detail_padded = if detail.is_empty() {
                 " ".repeat(detail_max)
             } else {
-                format!(" {:<width$}", detail, width = detail_max.saturating_sub(1))
+                format!(
+                    " {}",
+                    crate::util::pad_cols(&detail, detail_max.saturating_sub(1))
+                )
             };
 
             let mut spans = vec![
@@ -339,17 +346,11 @@ impl Default for Picker {
     }
 }
 
-/// Truncate a string to at most `max` chars, appending "…" if needed.
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_owned()
-    } else {
-        let cut = max.saturating_sub(1);
-        let t: String = chars[..cut].iter().collect();
-        format!("{}…", t)
-    }
+    crate::util::fit_cols(s, max)
 }

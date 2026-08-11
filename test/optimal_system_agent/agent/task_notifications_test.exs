@@ -73,7 +73,9 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
   # exactly the class of defect reported (stray/duplicated/mismatched tags).
   defp tags(xml) do
     Regex.scan(~r{</?([a-zA-Z0-9_-]+)>}, xml)
-    |> Enum.map(fn [raw, name] -> {if(String.starts_with?(raw, "</"), do: :close, else: :open), name} end)
+    |> Enum.map(fn [raw, name] ->
+      {if(String.starts_with?(raw, "</"), do: :close, else: :open), name}
+    end)
   end
 
   defp assert_well_formed(xml) do
@@ -152,6 +154,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
 
     for tag <- TN.elements() do
       [_, inner] = Regex.run(~r{<#{tag}>(.*?)</#{tag}>}s, xml)
+
       unescaped =
         inner
         |> String.replace("&lt;", "<")

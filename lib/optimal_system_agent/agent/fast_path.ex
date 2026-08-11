@@ -238,6 +238,6 @@ defmodule OptimalSystemAgent.Agent.FastPath do
   defp format_file_hints([]), do: ""
   defp format_file_hints(paths), do: "Mentioned files found:\n" <> Enum.join(paths, "\n")
 
-defp truncate(text, max) when byte_size(text) > max, do: binary_part(text, 0, max) <> "\n..."
-defp truncate(text, _max), do: text
+  defp truncate(text, max) when byte_size(text) > max, do: binary_part(text, 0, max) <> "\n..."
+  defp truncate(text, _max), do: text
 end

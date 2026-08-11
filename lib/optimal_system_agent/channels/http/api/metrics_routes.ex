@@ -91,16 +91,48 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.MetricsRoutes do
     provider_calls = Enum.reduce(providers, 0, fn p, acc -> acc + p.count end)
 
     [
-      %{key: "turns", label: "Turns", value: session.total_turns, note: "this session", tone: "neutral"},
-      %{key: "messages", label: "Messages", value: session.messages_today, note: "today", tone: "neutral"},
-      %{key: "tool_calls", label: "Tool Calls", value: tool_calls,
-        note: "#{length(tools)} tools", tone: "good"},
-      %{key: "provider_calls", label: "LLM Calls", value: provider_calls,
-        note: "#{length(providers)} providers", tone: "good"},
-      %{key: "filter_rate", label: "Noise Filter", value: round(filter_rate),
-        note: "% filtered", tone: filter_tone(filter_rate)},
-      %{key: "sessions", label: "Sessions", value: session.active_sessions,
-        note: "active", tone: "neutral"}
+      %{
+        key: "turns",
+        label: "Turns",
+        value: session.total_turns,
+        note: "this session",
+        tone: "neutral"
+      },
+      %{
+        key: "messages",
+        label: "Messages",
+        value: session.messages_today,
+        note: "today",
+        tone: "neutral"
+      },
+      %{
+        key: "tool_calls",
+        label: "Tool Calls",
+        value: tool_calls,
+        note: "#{length(tools)} tools",
+        tone: "good"
+      },
+      %{
+        key: "provider_calls",
+        label: "LLM Calls",
+        value: provider_calls,
+        note: "#{length(providers)} providers",
+        tone: "good"
+      },
+      %{
+        key: "filter_rate",
+        label: "Noise Filter",
+        value: round(filter_rate),
+        note: "% filtered",
+        tone: filter_tone(filter_rate)
+      },
+      %{
+        key: "sessions",
+        label: "Sessions",
+        value: session.active_sessions,
+        note: "active",
+        tone: "neutral"
+      }
     ]
   end
 

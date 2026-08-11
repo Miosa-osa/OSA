@@ -18,7 +18,12 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifierTest do
   defp with_enabled(opts, fun) do
     prev = Application.get_env(:optimal_system_agent, :auto_mode, [])
     auto_allow = Keyword.merge([enabled: true, use_llm: false], opts)
-    Application.put_env(:optimal_system_agent, :auto_mode, Keyword.put(prev, :auto_allow, auto_allow))
+
+    Application.put_env(
+      :optimal_system_agent,
+      :auto_mode,
+      Keyword.put(prev, :auto_allow, auto_allow)
+    )
 
     try do
       fun.()
@@ -150,21 +155,32 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifierTest do
     defp loop_state(overrides \\ []) do
       struct(
         Loop,
-        [session_id: "auto-#{System.unique_integer([:positive])}", permission_mode: :ask, permission_tier: :full] ++
+        [
+          session_id: "auto-#{System.unique_integer([:positive])}",
+          permission_mode: :ask,
+          permission_tier: :full
+        ] ++
           overrides
       )
     end
 
-    defp scall(cmd), do: %{id: "tc-#{System.unique_integer([:positive])}", name: "shell_execute", arguments: %{"command" => cmd}}
+    defp scall(cmd),
+      do: %{
+        id: "tc-#{System.unique_integer([:positive])}",
+        name: "shell_execute",
+        arguments: %{"command" => cmd}
+      }
 
     test "auto-mode OFF → a default ask is unchanged" do
       # Classifier disabled (default): a shell read still prompts.
-      assert {:ask, _rid, _summary} = ToolExecutor.approve_tool_call(scall("ls -la"), loop_state())
+      assert {:ask, _rid, _summary} =
+               ToolExecutor.approve_tool_call(scall("ls -la"), loop_state())
     end
 
     test "auto-mode ON → a provably-safe read is downgraded to :allow" do
       with_enabled([], fn ->
-        assert :allow = ToolExecutor.approve_tool_call(scall("ls -la && git status"), loop_state())
+        assert :allow =
+                 ToolExecutor.approve_tool_call(scall("ls -la && git status"), loop_state())
       end)
     end
 

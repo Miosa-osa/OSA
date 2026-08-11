@@ -137,7 +137,10 @@ defmodule OptimalSystemAgent.Auth.AwsCredentialsTest do
       """)
 
       assert {:error, {:aws_no_credentials, attempts}} = AwsCredentials.resolve()
-      assert Enum.any?(attempts, fn {_, why} -> why =~ "AWS SSO" and why =~ "export-credentials" end)
+
+      assert Enum.any?(attempts, fn {_, why} ->
+               why =~ "AWS SSO" and why =~ "export-credentials"
+             end)
     end
 
     test "a credential_process profile is reported as unsupported", %{dir: dir} do
@@ -148,7 +151,11 @@ defmodule OptimalSystemAgent.Auth.AwsCredentialsTest do
     end
 
     test "a role_arn profile is reported as unsupported", %{dir: dir} do
-      write!(dir, "credentials", "[default]\nrole_arn = arn:aws:iam::1:role/x\nsource_profile = a\n")
+      write!(
+        dir,
+        "credentials",
+        "[default]\nrole_arn = arn:aws:iam::1:role/x\nsource_profile = a\n"
+      )
 
       assert {:error, {:aws_no_credentials, attempts}} = AwsCredentials.resolve()
       assert Enum.any?(attempts, fn {_, why} -> why =~ "assume_role" end)
@@ -159,19 +166,31 @@ defmodule OptimalSystemAgent.Auth.AwsCredentialsTest do
     test "a '#' inside a secret is not treated as a comment", %{dir: dir} do
       # Truncating a secret at a '#' presents as SignatureDoesNotMatch, which
       # sends the user looking for a clock problem instead of a parser bug.
-      write!(dir, "credentials", "[default]\naws_access_key_id = A\naws_secret_access_key = se#cret\n")
+      write!(
+        dir,
+        "credentials",
+        "[default]\naws_access_key_id = A\naws_secret_access_key = se#cret\n"
+      )
 
       assert {:ok, %{secret_access_key: "se#cret"}} = AwsCredentials.resolve()
     end
 
     test "a trailing comment after whitespace IS stripped", %{dir: dir} do
-      write!(dir, "credentials", "[default]\naws_access_key_id = A ; the key\naws_secret_access_key = B\n")
+      write!(
+        dir,
+        "credentials",
+        "[default]\naws_access_key_id = A ; the key\naws_secret_access_key = B\n"
+      )
 
       assert {:ok, %{access_key_id: "A"}} = AwsCredentials.resolve()
     end
 
     test "keys are case-insensitive and values are trimmed", %{dir: dir} do
-      write!(dir, "credentials", "[default]\nAWS_ACCESS_KEY_ID =   A   \nAws_Secret_Access_Key = B\n")
+      write!(
+        dir,
+        "credentials",
+        "[default]\nAWS_ACCESS_KEY_ID =   A   \nAws_Secret_Access_Key = B\n"
+      )
 
       assert {:ok, %{access_key_id: "A", secret_access_key: "B"}} = AwsCredentials.resolve()
     end

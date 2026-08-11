@@ -259,7 +259,11 @@ defmodule OptimalSystemAgent.Providers.ImageBudgetTest do
         |> List.first()
         |> Map.get("content")
 
-      assert Enum.any?(nested, &(&1["type"] == "text" and &1["text"] == ImageBudget.placeholder()))
+      assert Enum.any?(
+               nested,
+               &(&1["type"] == "text" and &1["text"] == ImageBudget.placeholder())
+             )
+
       refute Enum.any?(nested, &(&1["type"] == "image"))
       assert image?(result, 1)
     end

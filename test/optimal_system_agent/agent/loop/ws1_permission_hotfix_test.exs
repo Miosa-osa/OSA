@@ -71,7 +71,8 @@ defmodule OptimalSystemAgent.Agent.Loop.WS1PermissionHotfixTest do
     end
 
     test "canonical decision string still wins" do
-      assert %{decision: :allow_session} = legacy_round_trip(%{decision: "session", allowed: false})
+      assert %{decision: :allow_session} =
+               legacy_round_trip(%{decision: "session", allowed: false})
     end
   end
 

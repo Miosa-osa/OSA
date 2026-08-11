@@ -29,7 +29,11 @@ defmodule OptimalSystemAgent.Agent.Context.WorldStateTest do
   # What THIS turn actually added to the prompt.
   defp delta(before_text, after_text) do
     if String.starts_with?(after_text, before_text) do
-      binary_part(after_text, byte_size(before_text), byte_size(after_text) - byte_size(before_text))
+      binary_part(
+        after_text,
+        byte_size(before_text),
+        byte_size(after_text) - byte_size(before_text)
+      )
     else
       # ledger compacted — treat the whole thing as newly emitted
       after_text

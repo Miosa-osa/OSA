@@ -1283,15 +1283,10 @@ impl OnboardingWizard {
                 };
                 let dot = if is_selected { "\u{25cf}" } else { "\u{25cb}" };
                 let line = format!("  {} {}", dot, label);
-                // Truncate by chars, not bytes: the leading \u{25cf} dot is 3
-                // bytes and labels can be non-ASCII, so a byte slice at the
-                // width boundary could land mid-char and panic.
-                let truncated = if line.chars().count() > area.width as usize {
-                    let take = area.width.saturating_sub(1) as usize;
-                    format!("{}\u{2026}", line.chars().take(take).collect::<String>())
-                } else {
-                    line
-                };
+                // Fit by DISPLAY COLUMNS, not bytes and not chars: bytes would cut
+                // mid-char on the 3-byte dot glyph, and a char count would let a
+                // wide label overflow the row.
+                let truncated = crate::util::fit_cols(&line, area.width as usize);
                 put(frame, 
                     Paragraph::new(truncated).style(style),
                     Rect::new(area.x, cy, area.width, 1),

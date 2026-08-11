@@ -380,9 +380,7 @@ impl SkillsBrowser {
                             if !trigs.is_empty() {
                                 raw.push_str(&format!("   {trigs}"));
                             }
-                            let mut line = truncate_chars(&raw, maxw);
-                            let pad = maxw.saturating_sub(line.chars().count());
-                            line.push_str(&" ".repeat(pad));
+                            let line = crate::util::pad_cols(&raw, maxw);
                             put(
                                 frame,
                                 Paragraph::new(Line::from(Span::styled(line, theme.button_active()))),
@@ -390,7 +388,7 @@ impl SkillsBrowser {
                             );
                         } else {
                             let name = truncate_chars(&s.name, maxw.saturating_sub(4));
-                            let mut used = 2 + name.chars().count();
+                            let mut used = 2 + crate::util::cols(&name);
                             let mut spans = vec![
                                 Span::raw("  "),
                                 Span::styled(
@@ -398,12 +396,12 @@ impl SkillsBrowser {
                                     Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
                                 ),
                             ];
-                            if !badge.is_empty() && maxw.saturating_sub(used) > badge.chars().count() + 2 {
+                            if !badge.is_empty() && maxw.saturating_sub(used) > crate::util::cols(&badge) + 2 {
                                 spans.push(Span::styled(
                                     format!("  {badge}"),
                                     Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
                                 ));
-                                used += 2 + badge.chars().count();
+                                used += 2 + crate::util::cols(&badge);
                             }
                             // Description then triggers fill the remaining width.
                             let mut tail = String::new();
@@ -451,14 +449,13 @@ impl SkillsBrowser {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte skill names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

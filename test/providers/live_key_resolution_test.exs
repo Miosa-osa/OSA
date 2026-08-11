@@ -27,7 +27,8 @@ defmodule OptimalSystemAgent.Providers.LiveKeyResolutionTest do
 
   @candidate_providers Registry.list_providers() -- @keyless
 
-  defp env_var(provider), do: provider |> Atom.to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
+  defp env_var(provider),
+    do: provider |> Atom.to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
 
   # Wipes every candidate provider's API key from both live System env AND
   # the Application-config snapshot (which may have been populated at boot
@@ -38,10 +39,14 @@ defmodule OptimalSystemAgent.Providers.LiveKeyResolutionTest do
     snapshot =
       for provider <- @candidate_providers do
         var = env_var(provider)
-        {provider, System.get_env(var), Application.get_env(:optimal_system_agent, :"#{provider}_api_key")}
+
+        {provider, System.get_env(var),
+         Application.get_env(:optimal_system_agent, :"#{provider}_api_key")}
       end
 
-    default_provider_snapshot = {System.get_env("OSA_DEFAULT_PROVIDER"), Application.get_env(:optimal_system_agent, :default_provider)}
+    default_provider_snapshot =
+      {System.get_env("OSA_DEFAULT_PROVIDER"),
+       Application.get_env(:optimal_system_agent, :default_provider)}
 
     for provider <- @candidate_providers do
       System.delete_env(env_var(provider))
@@ -52,7 +57,9 @@ defmodule OptimalSystemAgent.Providers.LiveKeyResolutionTest do
 
     ExUnit.Callbacks.on_exit(test_pid, fn ->
       for {provider, sys_val, app_val} <- snapshot do
-        if sys_val, do: System.put_env(env_var(provider), sys_val), else: System.delete_env(env_var(provider))
+        if sys_val,
+          do: System.put_env(env_var(provider), sys_val),
+          else: System.delete_env(env_var(provider))
 
         if app_val,
           do: Application.put_env(:optimal_system_agent, :"#{provider}_api_key", app_val),
@@ -60,7 +67,10 @@ defmodule OptimalSystemAgent.Providers.LiveKeyResolutionTest do
       end
 
       {def_sys, def_app} = default_provider_snapshot
-      if def_sys, do: System.put_env("OSA_DEFAULT_PROVIDER", def_sys), else: System.delete_env("OSA_DEFAULT_PROVIDER")
+
+      if def_sys,
+        do: System.put_env("OSA_DEFAULT_PROVIDER", def_sys),
+        else: System.delete_env("OSA_DEFAULT_PROVIDER")
 
       if def_app,
         do: Application.put_env(:optimal_system_agent, :default_provider, def_app),

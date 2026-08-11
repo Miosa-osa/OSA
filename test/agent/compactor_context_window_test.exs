@@ -78,6 +78,7 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
       used = 110_000
 
       assert Compactor.severity_for(used, @million) == :none
+
       refute Compactor.severity_for(used, 128_000) == :none,
              "sanity: this token count WOULD have compacted against the old 128k default"
 
@@ -149,7 +150,9 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
       assert Compactor.severity_for(used, @thirty_two_k) == :emergency
 
       unchanged = Compactor.maybe_compact(messages, used, nil, context_window: {:ok, @million})
-      compacted = Compactor.maybe_compact(messages, used, nil, context_window: {:ok, @thirty_two_k})
+
+      compacted =
+        Compactor.maybe_compact(messages, used, nil, context_window: {:ok, @thirty_two_k})
 
       assert unchanged == messages
       assert length(compacted) < length(messages)
@@ -248,7 +251,11 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
     end
 
     test "returns :unknown for a model nobody has heard of — never the 128k default" do
-      state = %{model: "totally-made-up-model-#{System.unique_integer([:positive])}", provider: nil}
+      state = %{
+        model: "totally-made-up-model-#{System.unique_integer([:positive])}",
+        provider: nil
+      }
+
       assert ContextWindow.resolve(state) == :unknown
     end
 

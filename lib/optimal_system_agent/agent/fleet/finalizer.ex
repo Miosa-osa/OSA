@@ -159,7 +159,9 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
         # `git add -A` would sweep in unrelated dirty files / secrets under the
         # orchestration commit; scoped staging keeps the commit honest.
         stage_files = staged_files(node_results, merged, conflicts)
-        {committed, commit_note} = maybe_commit(commit_msg, conflicts, gate, stage_files, cwd, git_fun)
+
+        {committed, commit_note} =
+          maybe_commit(commit_msg, conflicts, gate, stage_files, cwd, git_fun)
 
         result = %{
           merged: merged,

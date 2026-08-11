@@ -418,12 +418,19 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
           "delta" => %{"type" => "input_json_delta", "partial_json" => "{\"path\":\"/tmp/x\"}"}
         },
         %{"type" => "content_block_stop"},
-        %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}, "usage" => %{"output_tokens" => 8}}
+        %{
+          "type" => "message_delta",
+          "delta" => %{"stop_reason" => "tool_use"},
+          "usage" => %{"output_tokens" => 8}
+        }
       ]
 
       result = Anthropic.accumulate_stream_events(events)
       assert result.stop_reason == "tool_use"
-      assert [%{id: "tc_1", name: "file_read", arguments: %{"path" => "/tmp/x"}}] = result.tool_calls
+
+      assert [%{id: "tc_1", name: "file_read", arguments: %{"path" => "/tmp/x"}}] =
+               result.tool_calls
+
       assert result.usage.input_tokens == 300
       assert result.usage.output_tokens == 8
     end

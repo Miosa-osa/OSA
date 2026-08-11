@@ -73,7 +73,10 @@ defmodule OptimalSystemAgent.MCP.Client.OutputLimiter do
         instructions(path, String.length(text))
 
       {:error, reason} ->
-        Logger.warning("[MCP.OutputLimiter] Failed to spill #{server}/#{tool}: #{inspect(reason)}")
+        Logger.warning(
+          "[MCP.OutputLimiter] Failed to spill #{server}/#{tool}: #{inspect(reason)}"
+        )
+
         truncate(text)
     end
   rescue
@@ -110,7 +113,9 @@ defmodule OptimalSystemAgent.MCP.Client.OutputLimiter do
   end
 
   defp results_dir do
-    config_dir = Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+    config_dir =
+      Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+
     Path.join(config_dir, "tool-results")
   end
 end

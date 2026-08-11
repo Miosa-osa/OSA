@@ -21,7 +21,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.ReplaceAllGuardTest do
     DriftGuard.reset()
     sid = "replace-all-guard-#{System.unique_integer([:positive])}"
     ctx = %UseContext{session_id: sid, permission_tier: :full}
-    path = Path.join(System.tmp_dir!(), "osa_replace_all_#{System.unique_integer([:positive])}.txt")
+
+    path =
+      Path.join(System.tmp_dir!(), "osa_replace_all_#{System.unique_integer([:positive])}.txt")
+
     on_exit(fn -> File.rm(path) end)
     {:ok, ctx: ctx, path: path}
   end
@@ -94,7 +97,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.ReplaceAllGuardTest do
     File.write!(path, "value   =   compute()\n")
     assert {:ok, _} = FileRead.execute(%{"path" => path}, ctx)
 
-    assert {:ok, _} = edit(path, "value = compute()", "value = cached()", ctx, false) |> normalize()
+    assert {:ok, _} =
+             edit(path, "value = compute()", "value = cached()", ctx, false) |> normalize()
+
     assert File.read!(path) == "value = cached()\n"
   end
 

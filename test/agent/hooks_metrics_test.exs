@@ -46,7 +46,9 @@ defmodule OptimalSystemAgent.Agent.HooksMetricsTest do
         hook_name,
         fn _payload ->
           {:block, "test block for metrics"}
-        end, priority: 1)
+        end,
+        priority: 1
+      )
 
       # Small sleep to let registration cast process
       Process.sleep(10)

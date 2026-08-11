@@ -223,7 +223,9 @@ defmodule OptimalSystemAgent.System.Updater do
           }
         }
 
-        Logger.info("[Updater] Verified update available: #{current_version} -> #{latest_version}")
+        Logger.info(
+          "[Updater] Verified update available: #{current_version} -> #{latest_version}"
+        )
 
         Bus.emit(:system_event, %{
           event: :update_available,
@@ -288,7 +290,9 @@ defmodule OptimalSystemAgent.System.Updater do
   @spec pinned_root_keys() :: {:ok, [{binary(), binary()}], pos_integer()} | {:error, atom()}
   def pinned_root_keys do
     raw = Application.get_env(:optimal_system_agent, :update_root_keys, [])
-    threshold = Application.get_env(:optimal_system_agent, :update_root_threshold, @default_threshold)
+
+    threshold =
+      Application.get_env(:optimal_system_agent, :update_root_threshold, @default_threshold)
 
     keys =
       raw
@@ -423,9 +427,14 @@ defmodule OptimalSystemAgent.System.Updater do
     previous = Map.get(seen, role)
 
     cond do
-      not is_integer(version) -> {:error, :missing_metadata_version}
-      is_integer(previous) and version < previous -> {:error, {:rollback_detected, version, previous}}
-      true -> {:ok, Map.put(seen, role, version)}
+      not is_integer(version) ->
+        {:error, :missing_metadata_version}
+
+      is_integer(previous) and version < previous ->
+        {:error, {:rollback_detected, version, previous}}
+
+      true ->
+        {:ok, Map.put(seen, role, version)}
     end
   end
 

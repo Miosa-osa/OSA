@@ -19,7 +19,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
   require Logger
 
   alias OptimalSystemAgent.Orchestrator
+  alias OptimalSystemAgent.Skills.Frontmatter
   alias OptimalSystemAgent.Tools.Registry, as: Tools
+  alias OptimalSystemAgent.Tools.Registry.SkillLoader
 
   @impl true
   def available?, do: true
@@ -72,23 +74,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
   # ── Private ──────────────────────────────────────────────────────────
 
   defp run_skill(%{path: path} = skill, task) when is_binary(path) do
-    if safe_path?(path) do
-      case File.read(path) do
-        {:ok, content} ->
-          instructions = extract_body(content)
-          prompt = build_prompt(skill[:name] || skill.name, instructions, task)
+    cond do
+      not SkillLoader.within_roots?(path) ->
+        {:error, "path outside skills directory"}
 
-          Logger.info(
-            "[UseSkill] Invoking skill '#{skill[:name]}' as subagent for task: #{String.slice(task, 0, 80)}"
-          )
+      SkillLoader.disabled?(path) ->
+        {:error,
+         "Skill '#{skill[:name] || skill.name}' is disabled (a .disabled marker sits beside its SKILL.md)."}
 
-          run_as_subagent(prompt, skill, task)
-
-        {:error, reason} ->
-          {:error, "Could not read skill file at #{path}: #{inspect(reason)}"}
-      end
-    else
-      {:error, "path outside skills directory"}
+      true ->
+        read_and_run(skill, path, task)
     end
   end
 
@@ -96,18 +91,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
     {:error, "Skill '#{skill.name}' has no file path — cannot load instructions."}
   end
 
-  defp safe_path?(path) do
-    expanded = Path.expand(path)
-    skills_base = Path.expand("~/.osa/skills")
-    priv_base = Application.app_dir(:optimal_system_agent, "priv/skills")
-    String.starts_with?(expanded, skills_base) or String.starts_with?(expanded, priv_base)
-  end
+  defp read_and_run(skill, path, task) do
+    case File.read(path) do
+      {:ok, content} ->
+        instructions = Frontmatter.body(content)
+        prompt = build_prompt(skill[:name] || skill.name, instructions, task)
 
-  # Strip the YAML frontmatter, return just the instruction body.
-  defp extract_body(content) do
-    case String.split(content, "---", parts: 3) do
-      ["", _frontmatter, body] -> String.trim(body)
-      _ -> String.trim(content)
+        Logger.info(
+          "[UseSkill] Invoking skill '#{skill[:name]}' as subagent for task: #{String.slice(task, 0, 80)}"
+        )
+
+        run_as_subagent(prompt, skill, task)
+
+      {:error, reason} ->
+        {:error, "Could not read skill file at #{path}: #{inspect(reason)}"}
     end
   end
 

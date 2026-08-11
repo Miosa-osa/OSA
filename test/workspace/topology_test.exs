@@ -18,7 +18,11 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
   alias OptimalSystemAgent.Workspace.Topology.Role
 
   setup do
-    root = build_fixture(Path.join(System.tmp_dir!(), "osa_topo_#{System.unique_integer([:positive])}"))
+    root =
+      build_fixture(
+        Path.join(System.tmp_dir!(), "osa_topo_#{System.unique_integer([:positive])}")
+      )
+
     on_exit(fn -> File.rm_rf(root) end)
     on_exit(fn -> Topology.invalidate(:all) end)
     %{root: root}
@@ -309,6 +313,7 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
       dirs = ContextDiscovery.search_dirs(inner)
 
       assert Path.expand(inner) in dirs
+
       assert Path.expand(root) in dirs,
              "the enclosing constellation root must be searched — this is the bug"
     end
@@ -570,12 +575,22 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
     """)
 
     # ── pnpm members ──
-    write(root, "web/ui/package.json", ~s({"name":"@c/ui","dependencies":{"react":"19"},"scripts":{"start":"vite"}}))
+    write(
+      root,
+      "web/ui/package.json",
+      ~s({"name":"@c/ui","dependencies":{"react":"19"},"scripts":{"start":"vite"}})
+    )
+
     write(root, "web/core/package.json", ~s({"name":"@c/core","main":"index.js"}))
     write(root, "web/ui/node_modules/junk/package.json", ~s({"name":"junk"}))
 
     # ── SDK / infra / docs ──
-    write(root, "sdks/python/pyproject.toml", "[project]\nname = \"constellation-sdk\"\ndependencies = [\"httpx\"]\n")
+    write(
+      root,
+      "sdks/python/pyproject.toml",
+      "[project]\nname = \"constellation-sdk\"\ndependencies = [\"httpx\"]\n"
+    )
+
     write(root, "infra/tf/main.tf", "resource \"null_resource\" \"x\" {}\n")
     write(root, "docs/overview.md", "# Overview\n")
 
@@ -611,7 +626,15 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
 
     {_, 0} =
       git(
-        ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule_src, "vendor/subm"],
+        [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "-q",
+          submodule_src,
+          "vendor/subm"
+        ],
         root
       )
 

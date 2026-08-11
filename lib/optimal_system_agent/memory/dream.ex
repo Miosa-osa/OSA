@@ -366,7 +366,9 @@ defmodule OptimalSystemAgent.Memory.Dream do
       end
     end)
     |> Enum.sort_by(
-      fn s -> parse_ts(s[:last_active] || s["last_active"]) |> NaiveDateTime.to_gregorian_seconds() end,
+      fn s ->
+        parse_ts(s[:last_active] || s["last_active"]) |> NaiveDateTime.to_gregorian_seconds()
+      end,
       :desc
     )
     |> Enum.take(max_sessions)
@@ -430,7 +432,10 @@ defmodule OptimalSystemAgent.Memory.Dream do
     case Regex.run(~r/^\[(\w+)\]\s*(.+)$/, line) do
       [_, cat, content] ->
         content = String.trim(content)
-        if String.length(content) >= 3, do: [%{category: coerce_category(cat), content: content}], else: []
+
+        if String.length(content) >= 3,
+          do: [%{category: coerce_category(cat), content: content}],
+          else: []
 
       _ ->
         []

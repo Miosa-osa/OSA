@@ -263,7 +263,10 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
         lines =
           Enum.map(list, fn t ->
             id = Map.get(t, :id, "?")
-            title = one_line(safe_to_string(Map.get(t, :title) || Map.get(t, :subject) || ""), 200)
+
+            title =
+              one_line(safe_to_string(Map.get(t, :title) || Map.get(t, :subject) || ""), 200)
+
             "- #{status_tag(Map.get(t, :status))} #{id}: #{title}"
           end)
 

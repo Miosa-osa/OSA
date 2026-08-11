@@ -133,7 +133,9 @@ defmodule OptimalSystemAgent.Tools.FileStateEnforcementTest do
       ctx: ctx,
       path: path
     } do
-      read_path = Path.join(System.tmp_dir!(), "osa_fs_mfe_read_#{System.unique_integer([:positive])}.txt")
+      read_path =
+        Path.join(System.tmp_dir!(), "osa_fs_mfe_read_#{System.unique_integer([:positive])}.txt")
+
       on_exit(fn -> File.rm(read_path) end)
 
       File.write!(read_path, "keep\nreplaceme\n")
@@ -145,7 +147,11 @@ defmodule OptimalSystemAgent.Tools.FileStateEnforcementTest do
                MultiFileEdit.execute(
                  %{
                    "edits" => [
-                     %{"path" => read_path, "old_string" => "replaceme", "new_string" => "REPLACED"},
+                     %{
+                       "path" => read_path,
+                       "old_string" => "replaceme",
+                       "new_string" => "REPLACED"
+                     },
                      %{"path" => path, "old_string" => "target", "new_string" => "TARGET"}
                    ]
                  },

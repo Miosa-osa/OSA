@@ -326,33 +326,77 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
   defp default_configs(:pact, task) do
     [
-      %{task: "Plan the approach for the following goal. Produce a concrete, ordered plan.\n\nGoal: #{task}", role: "planner", tier: :specialist},
-      %{task: "Execute the plan for the following goal, implementing the required changes.\n\nGoal: #{task}", role: "implementer", tier: :specialist},
-      %{task: "Coordinate and integrate the work done so far for the following goal, resolving conflicts.\n\nGoal: #{task}", role: "coordinator", tier: :specialist},
-      %{task: "Test and verify the result for the following goal. Report pass/fail and any gaps.\n\nGoal: #{task}", role: "tester", tier: :specialist}
+      %{
+        task:
+          "Plan the approach for the following goal. Produce a concrete, ordered plan.\n\nGoal: #{task}",
+        role: "planner",
+        tier: :specialist
+      },
+      %{
+        task:
+          "Execute the plan for the following goal, implementing the required changes.\n\nGoal: #{task}",
+        role: "implementer",
+        tier: :specialist
+      },
+      %{
+        task:
+          "Coordinate and integrate the work done so far for the following goal, resolving conflicts.\n\nGoal: #{task}",
+        role: "coordinator",
+        tier: :specialist
+      },
+      %{
+        task:
+          "Test and verify the result for the following goal. Report pass/fail and any gaps.\n\nGoal: #{task}",
+        role: "tester",
+        tier: :specialist
+      }
     ]
   end
 
   defp default_configs(:pipeline, task) do
     [
-      %{task: "Research and outline an approach for: #{task}", role: "researcher", tier: :specialist},
-      %{task: "Implement the following, using the prior research: #{task}", role: "implementer", tier: :specialist},
-      %{task: "Review and finalize the following, fixing any issues: #{task}", role: "reviewer", tier: :specialist}
+      %{
+        task: "Research and outline an approach for: #{task}",
+        role: "researcher",
+        tier: :specialist
+      },
+      %{
+        task: "Implement the following, using the prior research: #{task}",
+        role: "implementer",
+        tier: :specialist
+      },
+      %{
+        task: "Review and finalize the following, fixing any issues: #{task}",
+        role: "reviewer",
+        tier: :specialist
+      }
     ]
   end
 
   defp default_configs(:debate, task) do
     [
       %{task: "Propose a solution for: #{task}", role: "proposer-a", tier: :specialist},
-      %{task: "Propose a DIFFERENT, alternative solution for: #{task}", role: "proposer-b", tier: :specialist},
-      %{task: "Evaluate the proposals and produce the best synthesized answer for: #{task}", role: "critic", tier: :specialist}
+      %{
+        task: "Propose a DIFFERENT, alternative solution for: #{task}",
+        role: "proposer-b",
+        tier: :specialist
+      },
+      %{
+        task: "Evaluate the proposals and produce the best synthesized answer for: #{task}",
+        role: "critic",
+        tier: :specialist
+      }
     ]
   end
 
   defp default_configs(:review_loop, task) do
     [
       %{task: task, role: "worker", tier: :specialist},
-      %{task: "Review the worker's output for correctness and completeness for: #{task}", role: "reviewer", tier: :specialist}
+      %{
+        task: "Review the worker's output for correctness and completeness for: #{task}",
+        role: "reviewer",
+        tier: :specialist
+      }
     ]
   end
 

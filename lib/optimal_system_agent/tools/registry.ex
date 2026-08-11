@@ -468,23 +468,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
     if map_size(skills) == 0 do
       nil
     else
-      skills_dir =
-        Path.expand(Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills"))
-
       # Progressive disclosure: skills declaring `paths:` globs stay hidden from
       # the model-facing listing until a matching file is touched this session.
-      touched =
-        case Process.get(:osa_session_id) do
-          nil -> []
-          session_id -> SkillTouch.list(session_id)
-        end
+      touched = touched_paths()
 
       active =
         skills
         |> SkillLoader.list_for_model(touched)
-        |> Enum.reject(fn skill ->
-          File.exists?(Path.join([skills_dir, skill.name, ".disabled"]))
-        end)
+        |> SkillLoader.reject_disabled()
 
       if active == [] do
         nil
@@ -596,20 +587,42 @@ defmodule OptimalSystemAgent.Tools.Registry do
   def match_skill_triggers(message) when is_binary(message) do
     skills = :persistent_term.get({__MODULE__, :skills}, %{})
     message_lower = String.downcase(message)
+    touched = touched_paths()
 
     Enum.filter(skills, fn {_name, skill} ->
-      triggers = Map.get(skill, :triggers, [])
-
-      Enum.any?(triggers, fn t ->
-        t = to_string(t)
-        t != "*" and t != "" and String.contains?(message_lower, String.downcase(t))
-      end)
+      # This path INJECTS THE FULL INSTRUCTION BODY into the prompt, so it must
+      # honour exactly the gates the listing honours — it used to honour
+      # neither. A `.disabled` skill had its whole body shipped to the provider
+      # on a trigger word, and a `paths:`-gated skill leaked before any matching
+      # file was touched, defeating the withholding control outright.
+      not SkillLoader.disabled?(skill) and
+        SkillLoader.surfaced?(skill, touched) and
+        trigger_match?(skill, message_lower)
     end)
   rescue
     _ -> []
   end
 
   def match_skill_triggers(_), do: []
+
+  defp trigger_match?(skill, message_lower) do
+    skill
+    |> Map.get(:triggers, [])
+    |> List.wrap()
+    |> Enum.any?(fn t ->
+      t = to_string(t)
+      t != "*" and t != "" and String.contains?(message_lower, String.downcase(t))
+    end)
+  end
+
+  defp touched_paths do
+    case Process.get(:osa_session_id) do
+      nil -> []
+      session_id -> SkillTouch.list(session_id)
+    end
+  rescue
+    _ -> []
+  end
 
   @doc "Search existing tools and skills by keyword matching against names and descriptions."
   @spec search(String.t()) :: list({String.t(), String.t(), float()})

@@ -273,13 +273,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
           do: {:mode, :ask},
           else: {:mode, :overdrive}
 
-      Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) -> {:mode, :overdrive}
+      Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) ->
+        {:mode, :overdrive}
+
       Enum.any?(tokens, &(&1 in ~w(accept-edits accept_edits auto-edit auto_edit edits))) ->
         {:mode, :accept_edits}
 
-      Enum.any?(tokens, &(&1 in ~w(plan plan-mode plan_mode))) -> {:mode, :plan}
-      Enum.any?(tokens, &(&1 in ~w(ask default prompt))) -> {:mode, :ask}
-      true -> :tier
+      Enum.any?(tokens, &(&1 in ~w(plan plan-mode plan_mode))) ->
+        {:mode, :plan}
+
+      Enum.any?(tokens, &(&1 in ~w(ask default prompt))) ->
+        {:mode, :ask}
+
+      true ->
+        :tier
     end
   end
 
@@ -361,43 +368,43 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
     if cmd_name in @blocked_http_commands do
-        body =
-          Jason.encode!(%{
-            output: "Command '#{cmd_name}' is not available via HTTP.",
-            command: command
-          })
+      body =
+        Jason.encode!(%{
+          output: "Command '#{cmd_name}' is not available via HTTP.",
+          command: command
+        })
 
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
-      else
-        session_id =
-          conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    else
+      session_id =
+        conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
-        output =
+      output =
+        try do
+          {:ok, string_io} = StringIO.open("")
+          original_gl = Process.group_leader()
+          Process.group_leader(self(), string_io)
+
           try do
-            {:ok, string_io} = StringIO.open("")
-            original_gl = Process.group_leader()
-            Process.group_leader(self(), string_io)
-
-            try do
-              OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
-            after
-              Process.group_leader(self(), original_gl)
-            end
-
-            {:ok, {_input, captured}} = StringIO.close(string_io)
-            captured
-          rescue
-            e -> "Error: #{Exception.message(e)}"
+            OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+          after
+            Process.group_leader(self(), original_gl)
           end
 
-        clean_output =
-          output
-          |> String.replace(~r/\e\[[0-9;]*m/, "")
-          |> String.trim()
+          {:ok, {_input, captured}} = StringIO.close(string_io)
+          captured
+        rescue
+          e -> "Error: #{Exception.message(e)}"
+        end
 
-        body = Jason.encode!(%{output: clean_output, command: command})
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
-      end
+      clean_output =
+        output
+        |> String.replace(~r/\e\[[0-9;]*m/, "")
+        |> String.trim()
+
+      body = Jason.encode!(%{output: clean_output, command: command})
+      conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    end
   end
 
   # ── POST /:name/execute (tools) ────────────────────────────────────

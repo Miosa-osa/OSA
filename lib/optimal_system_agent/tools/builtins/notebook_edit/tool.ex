@@ -67,7 +67,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEdit.Tool do
         "cell_type" => %{
           "type" => "string",
           "enum" => ["code", "markdown"],
-          "description" => "Cell type — required for add_cell, optional for edit_cell (default: code)"
+          "description" =>
+            "Cell type — required for add_cell, optional for edit_cell (default: code)"
         },
         "source" => %{
           "type" => "string",

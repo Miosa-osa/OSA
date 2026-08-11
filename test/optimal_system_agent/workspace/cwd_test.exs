@@ -18,7 +18,10 @@ defmodule OptimalSystemAgent.Workspace.CwdTest do
       System.put_env("OSA_ORIGINAL_CWD", dir)
 
       on_exit(fn ->
-        if prev, do: System.put_env("OSA_ORIGINAL_CWD", prev), else: System.delete_env("OSA_ORIGINAL_CWD")
+        if prev,
+          do: System.put_env("OSA_ORIGINAL_CWD", prev),
+          else: System.delete_env("OSA_ORIGINAL_CWD")
+
         File.rm_rf!(dir)
         # Re-capture so later tests/app see a sane value.
         Cwd.set_original_cwd()

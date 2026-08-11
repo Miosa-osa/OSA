@@ -260,7 +260,7 @@ fn pair_columns(entries: &[String], col_width: usize, style: Style) -> Vec<Line<
     let mut lines = Vec::new();
     let mut iter = entries.iter().peekable();
     while let Some(left) = iter.next() {
-        let left_padded = format!("{:<width$}", left, width = col_width);
+        let left_padded = crate::util::pad_cols(left, col_width);
         if let Some(right) = iter.next() {
             lines.push(Line::from(vec![
                 Span::styled(left_padded, style),

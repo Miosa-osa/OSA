@@ -168,20 +168,18 @@ impl MemoryBrowser {
                 let ts = fmt_time(&e.created_at);
                 if selected {
                     let raw = format!("{cat} {}   {ts}", e.content);
-                    let mut s = truncate_chars(&raw, maxw);
-                    let pad = maxw.saturating_sub(s.chars().count());
-                    s.push_str(&" ".repeat(pad));
+                    let s = crate::util::pad_cols(&raw, maxw);
                     put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), Rect::new(inner.x, ry, iw, 1));
                 } else {
                     let mut spans = vec![Span::styled(format!("{cat} "), Style::default().fg(Self::cat_color(&e.category, c)).add_modifier(Modifier::BOLD))];
-                    let used = cat.chars().count() + 1;
-                    let ts_w = if ts.is_empty() { 0 } else { ts.chars().count() + 2 };
+                    let used = crate::util::cols(&cat) + 1;
+                    let ts_w = if ts.is_empty() { 0 } else { crate::util::cols(&ts) + 2 };
                     let body_w = maxw.saturating_sub(used + ts_w);
                     let body = truncate_chars(&e.content, body_w);
-                    let body_used = used + body.chars().count();
+                    let body_used = used + crate::util::cols(&body);
                     spans.push(Span::styled(body, Style::default().fg(c.secondary)));
                     if ts_w > 0 {
-                        let gap = maxw.saturating_sub(body_used + ts.chars().count());
+                        let gap = maxw.saturating_sub(body_used + crate::util::cols(&ts));
                         spans.push(Span::styled(format!("{}{ts}", " ".repeat(gap)), Style::default().fg(c.dim)));
                     }
                     put(frame, Paragraph::new(Line::from(spans)), Rect::new(inner.x, ry, iw, 1));
@@ -212,13 +210,20 @@ fn fmt_time(ts: &str) -> String {
     truncate_plain(&cleaned, 16)
 }
 
-fn truncate_plain(s: &str, max: usize) -> String { s.chars().take(max).collect() }
+/// Fit into `max` DISPLAY COLUMNS. This used to be `s.chars().take(max)`: no
+/// width awareness, a hard cut mid-cluster, and no ellipsis — so the user could
+/// not tell the value had been cut at all.
+fn truncate_plain(s: &str, max: usize) -> String {
+    crate::util::fit_cols(s, max)
+}
 
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else { s.to_string() }
+    crate::util::fit_cols(s, max)
 }
 
 // Full file (with #[cfg(test)] module: filter_narrows_case_insensitively,

@@ -131,7 +131,15 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
   # Inside a CC matcher group, "type": "command" is the default.
   defp command_spec(event, matcher, %{"command" => cmd} = hook) when is_binary(cmd) do
     if Map.get(hook, "type", "command") == "command" do
-      [%{event: event, matcher: matcher, command: cmd, timeout_ms: parse_timeout(hook), mode: :command}]
+      [
+        %{
+          event: event,
+          matcher: matcher,
+          command: cmd,
+          timeout_ms: parse_timeout(hook),
+          mode: :command
+        }
+      ]
     else
       []
     end

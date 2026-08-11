@@ -186,8 +186,12 @@ defmodule OptimalSystemAgent.MCP.Client.ReconnectCapTest do
 
   defp wait_until(fun, retries \\ 100) do
     cond do
-      fun.() -> true
-      retries <= 0 -> false
+      fun.() ->
+        true
+
+      retries <= 0 ->
+        false
+
       true ->
         Process.sleep(10)
         wait_until(fun, retries - 1)

@@ -83,8 +83,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   end
 
   def connection_verdict(false, true, _session) do
-    {"NOT connected — extension disabled",
-     "run `osa opencomputers enable` then restart OSA"}
+    {"NOT connected — extension disabled", "run `osa opencomputers enable` then restart OSA"}
   end
 
   def connection_verdict(true, true, session) do

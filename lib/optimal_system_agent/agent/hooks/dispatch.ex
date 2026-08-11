@@ -200,23 +200,38 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
   def run_chain([hook | rest], payload, event) do
     case invoke(hook, payload, event) do
       # Allow / continue unchanged
-      :allow -> run_chain(rest, payload, event)
-      :continue -> run_chain(rest, payload, event)
-      :skip -> run_chain(rest, payload, event)
+      :allow ->
+        run_chain(rest, payload, event)
+
+      :continue ->
+        run_chain(rest, payload, event)
+
+      :skip ->
+        run_chain(rest, payload, event)
+
       # Allow with (possibly modified) full payload
-      {:ok, updated} when is_map(updated) -> run_chain(rest, updated, event)
+      {:ok, updated} when is_map(updated) ->
+        run_chain(rest, updated, event)
+
       # Deny — stop the chain
-      {:block, reason} -> deny(hook, event, payload, reason)
-      {:deny, reason} -> deny(hook, event, payload, reason)
+      {:block, reason} ->
+        deny(hook, event, payload, reason)
+
+      {:deny, reason} ->
+        deny(hook, event, payload, reason)
+
       # Rewrite the tool input (:arguments) or the user message (:message)
       {:rewrite_input, new_input} ->
         run_chain(rest, apply_rewrite_input(payload, new_input), event)
+
       # Rewrite the tool output (:result)
       {:rewrite_output, new_output} ->
         run_chain(rest, Map.put(payload, :result, new_output), event)
+
       # Inject additional context to be surfaced to the model
       {:inject_context, content} ->
         run_chain(rest, apply_inject_context(payload, content), event)
+
       # Unknown / legacy return — do not let it break the chain
       other ->
         Logger.warning("[Hooks] #{hook.name} returned unexpected: #{inspect(other)}")

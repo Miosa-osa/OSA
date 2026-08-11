@@ -234,7 +234,9 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
       assert actual == expected
       # A fraction-scaled implementation would land ~100x lower.
-      assert actual > 1.0, "expected a percent (got #{actual}) — this looks like a 0.0-1.0 fraction"
+      assert actual > 1.0,
+             "expected a percent (got #{actual}) — this looks like a 0.0-1.0 fraction"
+
       assert_in_delta actual, expected, 0.05
     end
 
@@ -519,7 +521,10 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       # (non-turn-anchored) summary message.
       rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
       total_tokens = Compactor.estimate_tokens(messages)
-      assert rest_tokens < total_tokens, "test fixture must actually require cold-zone compression"
+
+      assert rest_tokens < total_tokens,
+             "test fixture must actually require cold-zone compression"
+
       target = rest_tokens + div(total_tokens - rest_tokens, 2)
       force_background_stop_at(target)
 
@@ -539,7 +544,10 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       # It must be PREPENDED (structurally separate from, and before) the
       # LLM-produced body — not interleaved into the paraphrased section.
       [before_tag, after_tag] = String.split(content, "</user_query>", parts: 2)
-      assert String.trim(after_tag) != "", "expected an LLM-produced body after the user_query block"
+
+      assert String.trim(after_tag) != "",
+             "expected an LLM-produced body after the user_query block"
+
       assert String.starts_with?(String.trim(before_tag), "[Context Summary]\n<user_query>")
 
       # The raw text must appear exactly once — it was excluded from the
@@ -582,6 +590,7 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
       # Budget fits exactly the last 3 whole turns but not a 4th.
       budget = Compactor.estimate_tokens(last_three) + 5
+
       assert budget < Compactor.estimate_tokens(last_four),
              "test fixture must make the 4th-from-last turn genuinely not fit"
 
@@ -617,10 +626,32 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
       filler = String.duplicate("word ", 300)
 
-      tool_call_1 = %{role: "assistant", content: "", tool_calls: [%{name: "shell", arguments: "call1"}]}
-      tool_result_1 = %{role: "tool", content: filler <> " TOOL1_MARKER", tool_call_id: "t1", name: "shell"}
-      tool_call_2 = %{role: "assistant", content: "", tool_calls: [%{name: "shell", arguments: "call2"}]}
-      tool_result_2 = %{role: "tool", content: filler <> " TOOL2_MARKER", tool_call_id: "t2", name: "shell"}
+      tool_call_1 = %{
+        role: "assistant",
+        content: "",
+        tool_calls: [%{name: "shell", arguments: "call1"}]
+      }
+
+      tool_result_1 = %{
+        role: "tool",
+        content: filler <> " TOOL1_MARKER",
+        tool_call_id: "t1",
+        name: "shell"
+      }
+
+      tool_call_2 = %{
+        role: "assistant",
+        content: "",
+        tool_calls: [%{name: "shell", arguments: "call2"}]
+      }
+
+      tool_result_2 = %{
+        role: "tool",
+        content: filler <> " TOOL2_MARKER",
+        tool_call_id: "t2",
+        name: "shell"
+      }
+
       final_reply = asst("FINAL_TAIL_MARKER short reply")
 
       oversized_turn = [
@@ -724,7 +755,12 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       filler = String.duplicate("word ", 50)
       per_tool_tokens = Compactor.estimate_tokens(filler <> "MARKER")
 
-      Application.put_env(:optimal_system_agent, :compaction_prune_protect_tokens, per_tool_tokens)
+      Application.put_env(
+        :optimal_system_agent,
+        :compaction_prune_protect_tokens,
+        per_tool_tokens
+      )
+
       Application.put_env(:optimal_system_agent, :compaction_prune_minimum_tokens, 10)
       Application.put_env(:optimal_system_agent, :compaction_prune_protected_tools, ["skill"])
 
@@ -788,7 +824,10 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
           tool_call_id: "t1",
           content: [
             %{"type" => "text", "text" => "TEXT_MARKER before the image"},
-            %{"type" => "image", "source" => %{"data" => fake_base64, "media_type" => "image/png"}}
+            %{
+              "type" => "image",
+              "source" => %{"data" => fake_base64, "media_type" => "image/png"}
+            }
           ]
         }
       ]
@@ -797,6 +836,7 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
       assert String.contains?(formatted, "TEXT_MARKER before the image")
       assert String.contains?(formatted, "[Attached image]")
+
       refute String.contains?(formatted, fake_base64),
              "raw media payload must never reach the summarization prompt"
     end
@@ -878,6 +918,7 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
         end)
 
       assert summary_msg
+
       refute String.contains?(Map.get(summary_msg, :content), "<chunk_summary"),
              "a short cold zone should use the single-call path, not divide-and-conquer"
     after

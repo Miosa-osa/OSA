@@ -203,13 +203,25 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
           if content in [nil, ""] do
             []
           else
-            [%{type: "message", role: "assistant", content: [%{type: "output_text", text: content}]}]
+            [
+              %{
+                type: "message",
+                role: "assistant",
+                content: [%{type: "output_text", text: content}]
+              }
+            ]
           end
 
         text_item ++ Enum.map(tool_calls, &call_item/1)
 
       _ ->
-        [%{type: "message", role: "user", content: [%{type: "input_text", text: to_string(content || "")}]}]
+        [
+          %{
+            type: "message",
+            role: "user",
+            content: [%{type: "input_text", text: to_string(content || "")}]
+          }
+        ]
     end
   end
 
@@ -486,7 +498,11 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     %{acc | content: acc.content <> delta}
   end
 
-  defp handle(acc, %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item}, _cb) do
+  defp handle(
+         acc,
+         %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item},
+         _cb
+       ) do
     %{acc | tool_calls: acc.tool_calls ++ [decode_call(item)]}
   end
 

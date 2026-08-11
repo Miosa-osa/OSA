@@ -130,7 +130,10 @@ defmodule OptimalSystemAgent.Runtime.Identity do
   defp redact(url) do
     url
     |> String.replace(~r{//[^/@\s]+@}, "//<redacted>@")
-    |> String.replace(~r{([?&](?:api_?key|token|access_token|password)=)[^&\s]+}i, "\\1<redacted>")
+    |> String.replace(
+      ~r{([?&](?:api_?key|token|access_token|password)=)[^&\s]+}i,
+      "\\1<redacted>"
+    )
   end
 
   @doc "OSA's own version — the same value `/health` reports to the TUI."
@@ -216,7 +219,8 @@ defmodule OptimalSystemAgent.Runtime.Identity do
     session_provider = fetch(state, :provider)
 
     %{
-      model: if(is_binary(session_model) and session_model != "", do: session_model, else: model()),
+      model:
+        if(is_binary(session_model) and session_model != "", do: session_model, else: model()),
       provider: session_provider || provider(),
       overridden?: is_binary(session_model) and session_model != ""
     }
@@ -275,10 +279,11 @@ defmodule OptimalSystemAgent.Runtime.Identity do
       provider: p,
       base_url: base_url(p),
       version: version(),
-      context_window: (case context_window(m, p) do
-                         {:ok, cw} -> cw
-                         :unknown -> nil
-                       end),
+      context_window:
+        case context_window(m, p) do
+          {:ok, cw} -> cw
+          :unknown -> nil
+        end,
       source: src,
       source_label: label
     }

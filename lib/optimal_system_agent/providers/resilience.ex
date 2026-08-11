@@ -351,11 +351,31 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     backoff_and_recurse(delay, false, false, reason, fun, attempt, max, opts, oc, stripped?)
   end
 
-  defp act_on({:retry_with_backoff, delay, _rl?}, _result, reason, fun, attempt, max, opts, oc, stripped?) do
+  defp act_on(
+         {:retry_with_backoff, delay, _rl?},
+         _result,
+         reason,
+         fun,
+         attempt,
+         max,
+         opts,
+         oc,
+         stripped?
+       ) do
     backoff_and_recurse(delay, false, false, reason, fun, attempt, max, opts, oc, stripped?)
   end
 
-  defp act_on({:retry_with_client_rebuild, delay}, _result, reason, fun, attempt, max, opts, oc, stripped?) do
+  defp act_on(
+         {:retry_with_client_rebuild, delay},
+         _result,
+         reason,
+         fun,
+         attempt,
+         max,
+         opts,
+         oc,
+         stripped?
+       ) do
     # First 5xx / transport failure: retry forcing HTTP/1.1 to escape a
     # poisoned HTTP/2 pool. HTTP/1.1 is a best-effort optimization — a 0-arity
     # (legacy) closure that can't honor the flag simply retries over the normal
@@ -386,7 +406,17 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     end
   end
 
-  defp act_on({:emit_to_session, _reason}, result, _reason, _fun, _attempt, _max, _opts, _oc, _stripped?) do
+  defp act_on(
+         {:emit_to_session, _reason},
+         result,
+         _reason,
+         _fun,
+         _attempt,
+         _max,
+         _opts,
+         _oc,
+         _stripped?
+       ) do
     # Auth / credential errors: not a same-provider retry. Surface up so the
     # caller can re-auth or fall back.
     result
@@ -396,7 +426,18 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     result
   end
 
-  defp backoff_and_recurse(delay, force_http1?, strip?, reason, fun, attempt, max, opts, oc, stripped?) do
+  defp backoff_and_recurse(
+         delay,
+         force_http1?,
+         strip?,
+         reason,
+         fun,
+         attempt,
+         max,
+         opts,
+         oc,
+         stripped?
+       ) do
     notify_retry(opts, attempt, max, delay, reason)
     sleep_fn = Keyword.get(opts, :sleep, &Process.sleep/1)
     sleep_fn.(delay)
@@ -443,6 +484,9 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   def reason_to_string({:rate_limited, ra}), do: "rate-limited (retry-after: #{inspect(ra)})"
   def reason_to_string({:http_error, status, msg}), do: "HTTP #{status}: #{reason_to_string(msg)}"
   def reason_to_string({:stream_error, r}), do: "mid-stream error: #{reason_to_string(r)}"
-  def reason_to_string({:stream_error, r, _partial}), do: "mid-stream error: #{reason_to_string(r)}"
+
+  def reason_to_string({:stream_error, r, _partial}),
+    do: "mid-stream error: #{reason_to_string(r)}"
+
   def reason_to_string(other), do: inspect(other)
 end

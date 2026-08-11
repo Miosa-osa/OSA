@@ -101,8 +101,12 @@ defmodule OptimalSystemAgent.MCP.Client.PaginationTest do
 
   defp wait_until(fun, retries \\ 50) do
     cond do
-      fun.() -> true
-      retries <= 0 -> false
+      fun.() ->
+        true
+
+      retries <= 0 ->
+        false
+
       true ->
         Process.sleep(20)
         wait_until(fun, retries - 1)

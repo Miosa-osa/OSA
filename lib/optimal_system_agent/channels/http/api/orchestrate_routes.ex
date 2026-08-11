@@ -155,9 +155,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
                 emit_terminal_error(session_id, "Agent error: #{Exception.message(e)}")
             catch
               :exit, reason ->
-                Logger.error(
-                  "[OrchestrateRoutes] Agent loop exited: #{inspect(reason)}"
-                )
+                Logger.error("[OrchestrateRoutes] Agent loop exited: #{inspect(reason)}")
 
                 emit_terminal_error(session_id, "Agent error: the agent loop crashed")
             end

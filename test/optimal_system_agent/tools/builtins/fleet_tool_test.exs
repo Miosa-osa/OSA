@@ -254,7 +254,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
 
       Application.put_env(:optimal_system_agent, :fleet_finalize_fun, fn parent, results, opts ->
         send(test_pid, {:finalized, parent, results, opts})
-        %{merged: ["lib/a.ex"], conflicts: [], gate: :pass, gate_output: "", committed: true, message: "ok"}
+
+        %{
+          merged: ["lib/a.ex"],
+          conflicts: [],
+          gate: :pass,
+          gate_output: "",
+          committed: true,
+          message: "ok"
+        }
       end)
 
       on_exit(fn ->

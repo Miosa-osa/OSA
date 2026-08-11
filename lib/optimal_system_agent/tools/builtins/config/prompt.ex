@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config.Prompt do
   @moduledoc """
   Dynamic prompt for `config`.
 
- The prompt
+  The prompt
   body is a function so it can be extended with dynamic setting lists in
   the future.
   """

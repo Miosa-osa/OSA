@@ -26,8 +26,9 @@
         id: "kimi-k3:cloud",
         name: "Kimi K3",
         tools: true,
-        note: "requires Ollama Pro or Max (extra credits) · 1M ctx, 2.8T MoE — vision + thinking, frontier agentic",
-        ctx: 1048576,
+        note:
+          "requires Ollama Pro or Max (extra credits) · 1M ctx, 2.8T MoE — vision + thinking, frontier agentic",
+        ctx: 1_048_576,
         recommended: false
       },
       %{
@@ -35,7 +36,7 @@
         name: "GLM-5.2",
         tools: true,
         note: "Z.ai flagship — long-horizon agentic + coding",
-        ctx: 1000000,
+        ctx: 1_000_000,
         recommended: true
       },
       %{
@@ -43,7 +44,7 @@
         name: "GLM-5.1",
         tools: true,
         note: "agentic, state-of-the-art coding",
-        ctx: 202752,
+        ctx: 202_752,
         recommended: false
       },
       %{
@@ -51,7 +52,7 @@
         name: "Kimi K2.7 Code",
         tools: true,
         note: "Moonshot coding-focused agentic",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -59,7 +60,7 @@
         name: "Kimi K2.6",
         tools: true,
         note: "multimodal agentic, long-horizon coding",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -67,7 +68,7 @@
         name: "MiniMax M3",
         tools: true,
         note: "512K ctx, native multimodal + agentic",
-        ctx: 524288,
+        ctx: 524_288,
         recommended: false
       },
       %{
@@ -75,7 +76,7 @@
         name: "DeepSeek V4 Pro",
         tools: true,
         note: "512K ctx, frontier MoE, multiple reasoning modes",
-        ctx: 524288,
+        ctx: 524_288,
         recommended: false
       },
       %{
@@ -83,7 +84,7 @@
         name: "DeepSeek V4 Flash",
         tools: true,
         note: "1M ctx, 284B MoE / 13B active — fast",
-        ctx: 1048576,
+        ctx: 1_048_576,
         recommended: false
       },
       %{
@@ -91,7 +92,7 @@
         name: "GPT-OSS 120B",
         tools: true,
         note: "OpenAI open-weight, strong reasoning",
-        ctx: 131072,
+        ctx: 131_072,
         recommended: false
       },
       %{
@@ -99,7 +100,7 @@
         name: "Qwen 3.5",
         tools: true,
         note: "multimodal, vision + tools",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -107,7 +108,7 @@
         name: "Nemotron 3 Super",
         tools: true,
         note: "262K ctx, 120B MoE — efficient agentic",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -115,7 +116,7 @@
         name: "Gemma 4",
         tools: true,
         note: "262K ctx, frontier reasoning + vision",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -123,7 +124,7 @@
         name: "Gemma 4 31B",
         tools: true,
         note: "262K ctx, pinned 31B tag of Gemma 4",
-        ctx: 262144,
+        ctx: 262_144,
         recommended: false
       },
       %{
@@ -131,7 +132,7 @@
         name: "GPT-OSS 20B",
         tools: true,
         note: "OpenAI open-weight, fast — light utility tier",
-        ctx: 131072,
+        ctx: 131_072,
         recommended: false
       }
     ],
@@ -166,7 +167,7 @@
         name: "Claude Sonnet 4.6",
         tools: true,
         note: "1M ctx — best for coding",
-        ctx: 1000000,
+        ctx: 1_000_000,
         recommended: true
       },
       %{
@@ -174,35 +175,35 @@
         name: "Claude Opus 4.6",
         tools: true,
         note: "1M ctx — strongest reasoning",
-        ctx: 1000000
+        ctx: 1_000_000
       },
       %{
         id: "openai/gpt-5.4-pro",
         name: "GPT-5.4 Pro",
         tools: true,
         note: "1M ctx — latest frontier",
-        ctx: 1050000
+        ctx: 1_050_000
       },
       %{
         id: "google/gemini-2.5-pro",
         name: "Gemini 2.5 Pro",
         tools: true,
         note: "1M context",
-        ctx: 1000000
+        ctx: 1_000_000
       },
       %{
         id: "meta-llama/llama-4-maverick",
         name: "Llama 4 Maverick",
         tools: true,
         note: "400B MoE, 1M ctx",
-        ctx: 1000000
+        ctx: 1_000_000
       },
       %{
         id: "deepseek/deepseek-r1",
         name: "DeepSeek R1",
         tools: false,
         note: "reasoning only",
-        ctx: 163840
+        ctx: 163_840
       }
     ],
     env_var: "OPENROUTER_API_KEY",
@@ -223,7 +224,7 @@
         name: "Claude Opus 5",
         tools: true,
         note: "1M ctx — best agentic coding + deep reasoning. Default.",
-        ctx: 1000000,
+        ctx: 1_000_000,
         recommended: true
       },
       %{
@@ -231,7 +232,7 @@
         name: "Claude Sonnet 5",
         tools: true,
         note: "1M ctx — near-Opus quality at Sonnet cost, best speed/intelligence",
-        ctx: 1000000,
+        ctx: 1_000_000,
         recommended: false
       },
       %{
@@ -239,7 +240,7 @@
         name: "Claude Fable 5",
         tools: true,
         note: "1M ctx — most capable; hardest long-horizon work. Premium pricing.",
-        ctx: 1000000,
+        ctx: 1_000_000,
         recommended: false
       },
       %{
@@ -247,7 +248,7 @@
         name: "Claude Haiku 4.5",
         tools: true,
         note: "200K ctx — fastest and cheapest, for simple high-volume tasks",
-        ctx: 200000,
+        ctx: 200_000,
         recommended: false
       }
     ],
@@ -268,7 +269,7 @@
         name: "GPT-5.6 Terra",
         tools: true,
         note: "1.05M ctx — best balance of capability and cost. Default.",
-        ctx: 1050000,
+        ctx: 1_050_000,
         recommended: true
       },
       %{
@@ -276,7 +277,7 @@
         name: "GPT-5.6 Sol",
         tools: true,
         note: "1.05M ctx — most capable, for the hardest reasoning work",
-        ctx: 1050000,
+        ctx: 1_050_000,
         recommended: false
       },
       %{
@@ -284,7 +285,7 @@
         name: "GPT-5.6 Luna",
         tools: true,
         note: "1.05M ctx — cheapest 5.6; high-throughput and simple tasks",
-        ctx: 1050000,
+        ctx: 1_050_000,
         recommended: false
       }
     ],

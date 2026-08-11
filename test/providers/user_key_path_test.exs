@@ -85,7 +85,9 @@ defmodule OptimalSystemAgent.Providers.UserKeyPathTest do
       name = stub_name(:anthropic_401)
 
       Req.Test.stub(name, fn conn ->
-        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => %{"message" => "bad key"}})
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => %{"message" => "bad key"}})
       end)
 
       assert {:error, %{verified: :key_rejected, error: "unauthorized"}} =

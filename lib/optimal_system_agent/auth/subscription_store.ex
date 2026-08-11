@@ -396,7 +396,8 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   already spent a token to obtain; see that function's docs.)
   """
   @spec with_lock((-> result) | (ctx() -> result)) ::
-          result | {:error, :lock_timeout} when result: term()
+          result | {:error, :lock_timeout}
+        when result: term()
   def with_lock(fun) when is_function(fun, 0) or is_function(fun, 1) do
     # Resolve the store path ONCE, here, and thread it through the body. An
     # `OSA_HOME` that changes mid-operation must not be able to make the body
@@ -528,8 +529,12 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   new token and the spent one stayed on disk to fail `:refresh_token_invalid`
   forever after.)
   """
-  @spec refresh_within_lock(String.t() | atom(), (entry() -> {:ok, entry()} | {:error, term()}), (entry() ->
-                                                                                                    boolean())) ::
+  @spec refresh_within_lock(
+          String.t() | atom(),
+          (entry() -> {:ok, entry()} | {:error, term()}),
+          (entry() ->
+             boolean())
+        ) ::
           {:ok, entry()} | {:error, term()}
   def refresh_within_lock(provider_id, refresh_fun, needs_refresh?)
       when is_function(refresh_fun, 1) and is_function(needs_refresh?, 1) do
@@ -542,7 +547,14 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           {:error, {:unsafe_read, reason}}
 
         {:ok, all} ->
-          refresh_fresh_entry(ctx, provider_id, Map.get(all, to_string(provider_id)), all, refresh_fun, needs_refresh?)
+          refresh_fresh_entry(
+            ctx,
+            provider_id,
+            Map.get(all, to_string(provider_id)),
+            all,
+            refresh_fun,
+            needs_refresh?
+          )
       end
     end)
   end
@@ -556,17 +568,17 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
         if needs_refresh?.(fresh) do
           case refresh_fun.(fresh) do
             {:ok, updated} ->
-                # PAST THE POINT OF NO RETURN. The refresh POST has already
-                # gone out and come back, so for a rotating-refresh-token
-                # provider the token still on disk is SPENT — it can never be
-                # exchanged again. From here `updated` is the only working
-                # credential that exists anywhere, and it must reach the caller
-                # no matter what the disk does.
-                #
-                # The lock check still governs whether we WRITE (a lock we no
-                # longer hold means somebody else took over and our copy may be
-                # the older one, so writing it would undo their work) — but not
-                # whether we RETURN. Failing to persist costs a re-refresh next
+              # PAST THE POINT OF NO RETURN. The refresh POST has already
+              # gone out and come back, so for a rotating-refresh-token
+              # provider the token still on disk is SPENT — it can never be
+              # exchanged again. From here `updated` is the only working
+              # credential that exists anywhere, and it must reach the caller
+              # no matter what the disk does.
+              #
+              # The lock check still governs whether we WRITE (a lock we no
+              # longer hold means somebody else took over and our copy may be
+              # the older one, so writing it would undo their work) — but not
+              # whether we RETURN. Failing to persist costs a re-refresh next
               # boot; failing to return costs the grant.
               if still_holding?(ctx) do
                 # `all` is the map read under THIS lock a moment ago and

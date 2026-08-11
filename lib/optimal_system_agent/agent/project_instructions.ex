@@ -219,7 +219,10 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
 
   defp ascend(current, root, target, candidates, system, already, claimed, seen) do
     parent = parent_dir(current)
-    if parent == current, do: nil, else: do_walk(parent, root, target, candidates, system, already, claimed, seen)
+
+    if parent == current,
+      do: nil,
+      else: do_walk(parent, root, target, candidates, system, already, claimed, seen)
   end
 
   # ── system paths (front-loaded file) ────────────────────────────────────
@@ -243,8 +246,12 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
 
       _ ->
         cond do
-          root != nil and dir == root -> nil
-          root != nil and not under_or_equal?(dir, root) -> nil
+          root != nil and dir == root ->
+            nil
+
+          root != nil and not under_or_equal?(dir, root) ->
+            nil
+
           true ->
             parent = parent_dir(dir)
             if parent == dir, do: nil, else: nearest_inclusive(parent, root, candidates)
@@ -302,7 +309,10 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
   defp git_root(nil), do: nil
 
   defp git_root(dir) do
-    case OptimalSystemAgent.Git.cmd(["rev-parse", "--show-toplevel"], cd: dir, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "--show-toplevel"],
+           cd: dir,
+           stderr_to_stdout: true
+         ) do
       {root, 0} -> String.trim(root)
       _ -> nil
     end

@@ -244,7 +244,11 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   def backoff_with_jitter(attempt) do
     shift = max(attempt - 1, 0)
     # Guard against overflow blowing past the cap for large shifts.
-    base = if shift >= 16, do: @backoff_cap_ms, else: min(@backoff_base_ms * pow2(shift), @backoff_cap_ms)
+    base =
+      if shift >= 16,
+        do: @backoff_cap_ms,
+        else: min(@backoff_base_ms * pow2(shift), @backoff_cap_ms)
+
     jitter_range = div(base, @jitter_fraction)
 
     # Symmetric jitter in [-jitter_range, +jitter_range].
@@ -339,6 +343,7 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   # is recovered the same way as a 413: strip images and retry.
   defp image_processing_error?(reason) do
     text = reason_text(reason)
+
     String.contains?(text, "could not process image") or
       String.contains?(text, "image processing") or
       String.contains?(text, "failed to process image")

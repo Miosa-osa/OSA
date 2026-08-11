@@ -57,7 +57,9 @@ defmodule OptimalSystemAgent.Runtime.BannerIdentityTest do
 
     test "a matching provider keeps the model" do
       assert OsaApp.model_for_provider(:ollama, "glm-5.2:cloud", "ollama") == "glm-5.2:cloud"
-      assert OsaApp.model_for_provider(:anthropic, "claude-opus-5", "anthropic") == "claude-opus-5"
+
+      assert OsaApp.model_for_provider(:anthropic, "claude-opus-5", "anthropic") ==
+               "claude-opus-5"
     end
 
     test "a config that names no provider is unchanged (old behaviour preserved)" do

@@ -177,7 +177,9 @@ defmodule OptimalSystemAgent.OS.Env do
   When the scrub is disabled by config this still normalizes `extra`, so call
   sites do not need a second code path.
   """
-  @spec port_env(keyword() | [{String.t(), String.t() | false}]) :: [{charlist(), charlist() | false}]
+  @spec port_env(keyword() | [{String.t(), String.t() | false}]) :: [
+          {charlist(), charlist() | false}
+        ]
   def port_env(extra \\ []) do
     scrubbed =
       if enabled?() do

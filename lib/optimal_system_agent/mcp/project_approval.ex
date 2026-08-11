@@ -33,7 +33,8 @@ defmodule OptimalSystemAgent.MCP.ProjectApproval do
         %{value: :yes, label: "Use this MCP server"},
         %{value: :no, label: "Continue without using this MCP server"}
       ],
-      multiselect_hint: "Space to toggle · Enter to confirm · Esc to reject all (all pre-selected)"
+      multiselect_hint:
+        "Space to toggle · Enter to confirm · Esc to reject all (all pre-selected)"
     }
   end
 
@@ -85,7 +86,11 @@ defmodule OptimalSystemAgent.MCP.ProjectApproval do
   @spec approve(String.t()) :: :ok | {:error, term()}
   def approve(name) do
     update(fn c ->
-      Map.put(c, "enabled_mcpjson_servers", Enum.uniq([to_string(name) | list(c, "enabled_mcpjson_servers")]))
+      Map.put(
+        c,
+        "enabled_mcpjson_servers",
+        Enum.uniq([to_string(name) | list(c, "enabled_mcpjson_servers")])
+      )
     end)
   end
 
@@ -99,7 +104,11 @@ defmodule OptimalSystemAgent.MCP.ProjectApproval do
   @spec reject(String.t()) :: :ok | {:error, term()}
   def reject(name) do
     update(fn c ->
-      Map.put(c, "disabled_mcpjson_servers", Enum.uniq([to_string(name) | list(c, "disabled_mcpjson_servers")]))
+      Map.put(
+        c,
+        "disabled_mcpjson_servers",
+        Enum.uniq([to_string(name) | list(c, "disabled_mcpjson_servers")])
+      )
     end)
   end
 

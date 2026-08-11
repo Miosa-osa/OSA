@@ -81,7 +81,9 @@ defmodule OptimalSystemAgent.Providers.ThinkStreamParserTest do
     end
 
     test "unclosed block that closes in a later chunk splits correctly" do
-      {visible, thinking} = run(["<think>reasoning here", " still reasoning</think>", "the answer"])
+      {visible, thinking} =
+        run(["<think>reasoning here", " still reasoning</think>", "the answer"])
+
       assert visible == "the answer"
       assert thinking == "reasoning here still reasoning"
     end

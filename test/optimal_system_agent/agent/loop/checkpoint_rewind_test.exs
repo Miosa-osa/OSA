@@ -45,7 +45,13 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
   describe "create_rewind_checkpoint/2" do
     test "creates a checkpoint and returns its id", %{session: session} do
       msgs = [%{role: "user", content: "hi"}, %{role: "assistant", content: "hello"}]
-      assert {:ok, id} = Checkpoint.create_rewind_checkpoint(state(session, msgs), fs_head: nil, label: "next prompt")
+
+      assert {:ok, id} =
+               Checkpoint.create_rewind_checkpoint(state(session, msgs),
+                 fs_head: nil,
+                 label: "next prompt"
+               )
+
       assert is_binary(id)
 
       path = Path.join(Checkpoint.rewind_session_dir(session), id <> ".json")
@@ -56,7 +62,10 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
       long = String.duplicate("x", 500)
 
       assert {:ok, id} =
-               Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "  a\n\nb  " <> long)
+               Checkpoint.create_rewind_checkpoint(state(session, []),
+                 fs_head: nil,
+                 label: "  a\n\nb  " <> long
+               )
 
       assert {:ok, entry} = Checkpoint.get_rewind_checkpoint(session, id)
       assert String.length(entry.label) <= 120
@@ -65,7 +74,10 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
 
     test "non-binary label falls back to 'checkpoint'", %{session: session} do
       assert {:ok, id} =
-               Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: [%{type: "image"}])
+               Checkpoint.create_rewind_checkpoint(state(session, []),
+                 fs_head: nil,
+                 label: [%{type: "image"}]
+               )
 
       assert {:ok, entry} = Checkpoint.get_rewind_checkpoint(session, id)
       assert entry.label == "checkpoint"
@@ -74,9 +86,20 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
 
   describe "list_rewind_checkpoints/2" do
     test "returns metadata newest-first without message payloads", %{session: session} do
-      {:ok, _} = Checkpoint.create_rewind_checkpoint(state(session, [%{role: "user", content: "1"}]), fs_head: nil, label: "one")
+      {:ok, _} =
+        Checkpoint.create_rewind_checkpoint(state(session, [%{role: "user", content: "1"}]),
+          fs_head: nil,
+          label: "one"
+        )
+
       Process.sleep(2)
-      {:ok, _} = Checkpoint.create_rewind_checkpoint(state(session, [%{role: "user", content: "1"}, %{role: "user", content: "2"}]), fs_head: nil, label: "two")
+
+      {:ok, _} =
+        Checkpoint.create_rewind_checkpoint(
+          state(session, [%{role: "user", content: "1"}, %{role: "user", content: "2"}]),
+          fs_head: nil,
+          label: "two"
+        )
 
       list = Checkpoint.list_rewind_checkpoints(session)
       assert length(list) == 2
@@ -89,12 +112,15 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
     end
 
     test "empty for unknown session" do
-      assert Checkpoint.list_rewind_checkpoints("nope_#{System.unique_integer([:positive])}") == []
+      assert Checkpoint.list_rewind_checkpoints("nope_#{System.unique_integer([:positive])}") ==
+               []
     end
 
     test "respects the limit argument", %{session: session} do
       for i <- 1..5 do
-        {:ok, _} = Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "l#{i}")
+        {:ok, _} =
+          Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "l#{i}")
+
         Process.sleep(2)
       end
 
@@ -107,7 +133,10 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
       msgs = [%{role: "user", content: "remember this"}, %{role: "assistant", content: "ok"}]
 
       {:ok, id} =
-        Checkpoint.create_rewind_checkpoint(state(session, msgs, iteration: 4, turn_count: 2), fs_head: nil, label: "p")
+        Checkpoint.create_rewind_checkpoint(state(session, msgs, iteration: 4, turn_count: 2),
+          fs_head: nil,
+          label: "p"
+        )
 
       assert {:ok, result} = Checkpoint.restore_rewind(session, id, :conversation)
       assert result.scope == :conversation
@@ -125,7 +154,8 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
 
   describe "restore_rewind/3 code scope" do
     test "reports unavailable when no code snapshot was captured", %{session: session} do
-      {:ok, id} = Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "p")
+      {:ok, id} =
+        Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "p")
 
       assert {:ok, result} = Checkpoint.restore_rewind(session, id, :code)
       assert result.conversation == :skipped
@@ -140,7 +170,9 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
     end
 
     test "invalid scope is rejected", %{session: session} do
-      {:ok, id} = Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "p")
+      {:ok, id} =
+        Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "p")
+
       assert {:error, :invalid_scope} = Checkpoint.restore_rewind(session, id, :bogus)
     end
   end
@@ -148,7 +180,9 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointRewindTest do
   describe "prune_rewind/2" do
     test "keeps only the newest N checkpoints", %{session: session} do
       for i <- 1..6 do
-        {:ok, _} = Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "l#{i}")
+        {:ok, _} =
+          Checkpoint.create_rewind_checkpoint(state(session, []), fs_head: nil, label: "l#{i}")
+
         Process.sleep(2)
       end
 

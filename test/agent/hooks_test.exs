@@ -224,7 +224,9 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
         "crasher_hook",
         fn _payload ->
           raise "kaboom"
-        end, priority: 1)
+        end,
+        priority: 1
+      )
 
       Process.sleep(50)
 
@@ -289,7 +291,9 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
           else
             {:ok, payload}
           end
-        end, priority: 1)
+        end,
+        priority: 1
+      )
 
       Process.sleep(50)
 

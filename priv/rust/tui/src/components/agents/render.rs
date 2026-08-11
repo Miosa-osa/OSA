@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SynthesisState, SwarmStatus};
 use super::Agents;
@@ -1083,29 +1083,17 @@ fn shorten_model_name(model: &str) -> &str {
     }
 }
 
-/// Truncate `s` to at most `max_w` DISPLAY columns, appending `…` (1 col) when
-/// it doesn't fit. Wide (CJK/emoji) chars count as their true 2-column advance,
-/// so the result never overflows the reserved span (unlike `.chars().count()`).
+/// Fit `s` into at most `max_w` DISPLAY columns, appending `…` (1 col) when it
+/// doesn't fit.
+///
+/// This was a second, per-`char` fitter living twenty lines from the correct
+/// `truncate_str` below. Summing `UnicodeWidthChar` over an emoji ZWJ sequence
+/// over-counts (each part measured separately), and breaking between `char`s
+/// splits ZWJ sequences and regional-indicator pairs. `crate::util::fit_cols`
+/// measures whole grapheme clusters, which is the same fix `render/markdown.rs`
+/// already applies in `visible_width`.
 fn truncate_display(s: &str, max_w: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_w {
-        return s.to_string();
-    }
-    if max_w == 0 {
-        return String::new();
-    }
-    let budget = max_w - 1; // reserve 1 col for the ellipsis
-    let mut out = String::new();
-    let mut acc = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + cw > budget {
-            break;
-        }
-        out.push(ch);
-        acc += cw;
-    }
-    out.push('\u{2026}');
-    out
+    crate::util::fit_cols(s, max_w)
 }
 
 /// Assemble one FleetView roster row with the `<elapsed> · ↓<tokens>` meta column

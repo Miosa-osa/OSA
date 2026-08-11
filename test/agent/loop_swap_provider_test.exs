@@ -22,7 +22,10 @@ defmodule OptimalSystemAgent.Agent.LoopSwapProviderTest do
   alias OptimalSystemAgent.Agent.Loop
 
   defp base_state(overrides \\ %{}) do
-    struct(%Loop{session_id: "swap-provider-test", provider: :anthropic, model: "claude-x"}, overrides)
+    struct(
+      %Loop{session_id: "swap-provider-test", provider: :anthropic, model: "claude-x"},
+      overrides
+    )
   end
 
   test "swaps provider and model on the live state" do
@@ -53,7 +56,11 @@ defmodule OptimalSystemAgent.Agent.LoopSwapProviderTest do
     state = base_state()
 
     assert {:reply, {:error, msg}, unchanged} =
-             Loop.handle_call({:swap_provider, "not_a_real_provider", "some-model"}, self(), state)
+             Loop.handle_call(
+               {:swap_provider, "not_a_real_provider", "some-model"},
+               self(),
+               state
+             )
 
     assert msg =~ "unknown provider"
     assert unchanged == state

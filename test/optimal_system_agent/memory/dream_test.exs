@@ -143,7 +143,9 @@ defmodule OptimalSystemAgent.Memory.DreamTest do
 
       assert {:ok, items} = Dream.parse_response(response)
       assert length(items) == 3
+
       assert %{category: :decision, content: "The team standardized on Ecto over raw SQL."} in items
+
       assert %{category: :lesson, content: "Test workers above 16 cause flaky failures."} in items
     end
 

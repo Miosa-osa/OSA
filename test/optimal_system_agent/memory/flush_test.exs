@@ -87,9 +87,18 @@ defmodule OptimalSystemAgent.Memory.FlushTest do
   describe "harvest/1 — what counts as hard-won knowledge" do
     test "captures root causes, fixes, decisions and constraints" do
       messages = [
-        msg("assistant", "The root cause was a stale symlink in ~/.local/bin shadowing the build."),
-        msg("assistant", "The fix was to pin the resolver to the workspace root before compiling."),
-        msg("user", "We decided to keep the SQLite bridge synchronous for now, despite the stall risk."),
+        msg(
+          "assistant",
+          "The root cause was a stale symlink in ~/.local/bin shadowing the build."
+        ),
+        msg(
+          "assistant",
+          "The fix was to pin the resolver to the workspace root before compiling."
+        ),
+        msg(
+          "user",
+          "We decided to keep the SQLite bridge synchronous for now, despite the stall risk."
+        ),
         msg("assistant", "That command only works if the gateway is already bound to port 18789.")
       ]
 
@@ -107,8 +116,14 @@ defmodule OptimalSystemAgent.Memory.FlushTest do
       by_category =
         [
           msg("assistant", "The root cause was an unflushed write buffer in the session store."),
-          msg("assistant", "We decided to route every provider call through the registry facade."),
-          msg("assistant", "The migration must not be run while the replica is still catching up.")
+          msg(
+            "assistant",
+            "We decided to route every provider call through the registry facade."
+          ),
+          msg(
+            "assistant",
+            "The migration must not be run while the replica is still catching up."
+          )
         ]
         |> Flush.harvest()
         |> Map.new(&{&1.category, &1.content})

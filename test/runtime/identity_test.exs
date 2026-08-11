@@ -98,7 +98,9 @@ defmodule OptimalSystemAgent.Runtime.IdentityTest do
       Application.put_env(@app, :default_provider, :ollama)
 
       assert %{overridden?: false, model: "glm-5.2:cloud"} = Identity.resolve(nil)
-      assert %{overridden?: true, model: "other:cloud"} = Identity.resolve(%{model: "other:cloud"})
+
+      assert %{overridden?: true, model: "other:cloud"} =
+               Identity.resolve(%{model: "other:cloud"})
     end
 
     test "tolerates partial state maps and keyword lists" do

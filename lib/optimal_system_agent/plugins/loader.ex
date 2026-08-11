@@ -118,6 +118,7 @@ defmodule OptimalSystemAgent.Plugins.Loader do
 
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Settings
+  alias OptimalSystemAgent.Utils.Bom
 
   @plugin_dir "plugins"
 
@@ -232,7 +233,10 @@ defmodule OptimalSystemAgent.Plugins.Loader do
 
         case File.read(real_path) do
           {:ok, source} ->
-            compile_and_register(source, real_path)
+            # A BOM makes `Code.compile_string/2` fail on the very first token
+            # with an unhelpful syntax error, so a plugin saved by a Windows
+            # editor never loads. Strip it before compiling.
+            compile_and_register(Bom.strip(source), real_path)
 
           {:error, reason} ->
             refuse(real_path, "cannot read: #{inspect(reason)}")

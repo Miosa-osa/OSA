@@ -272,9 +272,7 @@ impl McpServers {
                 format!("  [{off_tag}]")
             };
             let raw = format!("  \u{25CF} {}   {}{}", s.name, meta, off_suffix);
-            let mut line = truncate_chars(&raw, maxw);
-            let pad = maxw.saturating_sub(line.chars().count());
-            line.push_str(&" ".repeat(pad));
+            let line = crate::util::pad_cols(&raw, maxw);
             put(
                 frame,
                 Paragraph::new(Line::from(Span::styled(line, theme.button_active()))),
@@ -284,12 +282,12 @@ impl McpServers {
         }
 
         // Reserve space for a right-aligned "off" tag when present.
-        let tag_w = if off_tag.is_empty() { 0 } else { off_tag.chars().count() + 1 };
+        let tag_w = if off_tag.is_empty() { 0 } else { crate::util::cols(&off_tag) + 1 };
         let body_w = maxw.saturating_sub(tag_w);
 
         let dot = Span::styled("\u{25CF} ", Style::default().fg(dot_color));
         let name = truncate_chars(&s.name, body_w.saturating_sub(6));
-        let used = 2 + 2 + name.chars().count(); // "  " + dot + name.
+        let used = 2 + 2 + crate::util::cols(&name); // "  " + dot + name.
         let mut spans = vec![
             Span::raw("  "),
             dot,
@@ -335,14 +333,13 @@ fn status_color(status: &str, c: &crate::style::ThemeColors) -> Color {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte server names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

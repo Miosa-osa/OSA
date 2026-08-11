@@ -27,9 +27,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutesTest do
   defp put_json(path, body) do
     conn(:put, path, Jason.encode!(body))
     |> put_req_header("content-type", "application/json")
-    |> Plug.Parsers.call(
-      Plug.Parsers.init(parsers: [:json], json_decoder: Jason, pass: ["*/*"])
-    )
+    |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason, pass: ["*/*"]))
     |> call()
   end
 

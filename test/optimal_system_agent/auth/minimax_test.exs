@@ -259,7 +259,9 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMaxTest do
     end
 
     test "an unknown region is refused rather than silently defaulted to global" do
-      assert {:error, {:unknown_region, "atlantis"}} = MiniMax.login(io: silent(), region: "atlantis")
+      assert {:error, {:unknown_region, "atlantis"}} =
+               MiniMax.login(io: silent(), region: "atlantis")
+
       refute SubscriptionStore.connected?("minimax")
 
       assert MiniMax.region_hosts("atlantis") == nil
@@ -289,7 +291,9 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMaxTest do
       refute MiniMax.expires_at(ms, now) > now + 100_000
     end
 
-    test "absent, zero, negative and non-numeric values yield nil, not a bogus expiry", %{now: now} do
+    test "absent, zero, negative and non-numeric values yield nil, not a bogus expiry", %{
+      now: now
+    } do
       for bad <- [nil, 0, -1, "", "soon", %{}] do
         assert MiniMax.expires_at(bad, now) == nil
       end
@@ -361,9 +365,14 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMaxTest do
     end
 
     test "the refresh goes to the PORTAL pinned at sign-in, not the inference host" do
-      connect!(live_entry(%{"expires_at" => System.system_time(:second) + 10, "region" => "cn",
-                            "portal_base_url" => "https://api.minimaxi.com",
-                            "base_url" => @cn_inference}))
+      connect!(
+        live_entry(%{
+          "expires_at" => System.system_time(:second) + 10,
+          "region" => "cn",
+          "portal_base_url" => "https://api.minimaxi.com",
+          "base_url" => @cn_inference
+        })
+      )
 
       {:ok, agent} = Agent.start_link(fn -> [] end)
 

@@ -44,7 +44,8 @@ defmodule OptimalSystemAgent.MIOSA.MCP do
     * `{:ok, :skipped, why}` — gate not met (`:not_installed` | `:not_authenticated`)
     * `{:error, reason}`     — read/parse/write failure
   """
-  @spec ensure_registered() :: {:ok, :registered | :already} | {:ok, :skipped, atom()} | {:error, term()}
+  @spec ensure_registered() ::
+          {:ok, :registered | :already} | {:ok, :skipped, atom()} | {:error, term()}
   def ensure_registered do
     cond do
       not CLI.installed?() -> {:ok, :skipped, :not_installed}

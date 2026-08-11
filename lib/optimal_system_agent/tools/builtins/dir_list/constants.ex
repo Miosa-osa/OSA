@@ -14,7 +14,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Constants do
 
   # Single shared policy — see `Agent.Safety.PathPolicy`. This accessor is a
   # description for prompts/tests; decisions go through `PathPolicy.sensitive?/1`.
-  defdelegate sensitive_paths, to: OptimalSystemAgent.Agent.Safety.PathPolicy,
+  defdelegate sensitive_paths,
+    to: OptimalSystemAgent.Agent.Safety.PathPolicy,
     as: :sensitive_patterns
 
   @max_suggestions 3

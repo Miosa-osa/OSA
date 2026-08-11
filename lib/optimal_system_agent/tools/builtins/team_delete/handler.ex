@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamDelete.Handler do
     end
   rescue
     e ->
-      {:error, "Failed to dissolve team #{Map.get(%{}, "team_id", "unknown")}: #{Exception.message(e)}"}
+      {:error,
+       "Failed to dissolve team #{Map.get(%{}, "team_id", "unknown")}: #{Exception.message(e)}"}
   end
 end

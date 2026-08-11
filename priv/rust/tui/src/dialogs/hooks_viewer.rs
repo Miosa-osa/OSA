@@ -249,15 +249,13 @@ impl HooksViewer {
             } else {
                 format!("{name}   {metric}")
             };
-            let mut s = truncate_chars(&raw, maxw);
-            let pad = maxw.saturating_sub(s.chars().count());
-            s.push_str(&" ".repeat(pad));
+            let s = crate::util::pad_cols(&raw, maxw);
             put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
             return;
         }
 
-        let name_len = name.chars().count();
-        let metric_len = metric.chars().count();
+        let name_len = crate::util::cols(&name);
+        let metric_len = crate::util::cols(&metric);
         let mut spans = vec![Span::styled(
             name,
             Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
@@ -275,14 +273,12 @@ impl HooksViewer {
         let hook = &self.events[ei].hooks[hi];
         if selected {
             let raw = format!("  {:>4}  {}", hook.priority, hook.name);
-            let mut s = truncate_chars(&raw, maxw);
-            let pad = maxw.saturating_sub(s.chars().count());
-            s.push_str(&" ".repeat(pad));
+            let s = crate::util::pad_cols(&raw, maxw);
             put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
             return;
         }
         let prio = format!("  {:>4}  ", hook.priority);
-        let used = prio.chars().count();
+        let used = crate::util::cols(&prio);
         let name = truncate_chars(&hook.name, maxw.saturating_sub(used));
         put(
             frame,
@@ -295,14 +291,13 @@ impl HooksViewer {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte hook/event names can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 #[cfg(test)]

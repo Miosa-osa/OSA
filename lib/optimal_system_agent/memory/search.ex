@@ -355,7 +355,9 @@ defmodule OptimalSystemAgent.Memory.Search do
         %VectorEntry{} |> VectorEntry.changeset(attrs) |> Repo.insert()
 
       existing ->
-        existing |> VectorEntry.changeset(Map.put(attrs, :created_at, existing.created_at)) |> Repo.update()
+        existing
+        |> VectorEntry.changeset(Map.put(attrs, :created_at, existing.created_at))
+        |> Repo.update()
     end
 
     :ok

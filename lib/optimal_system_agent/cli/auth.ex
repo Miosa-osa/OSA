@@ -94,8 +94,14 @@ defmodule OptimalSystemAgent.CLI.Auth do
     if Enum.all?(rows, &(not &1.connected?)) do
       IO.puts("  #{@dim}No provider is connected by account sign-in.#{@reset}")
       IO.puts("")
-      IO.puts("  #{@dim}Providers that support it:#{@reset} #{Enum.join(Subscription.supported(), ", ")}")
-      IO.puts("  #{@dim}Connect one with#{@reset}  #{@cyan}osa auth login <provider>#{@reset}  #{@dim}or#{@reset}  #{@cyan}osa setup#{@reset}")
+
+      IO.puts(
+        "  #{@dim}Providers that support it:#{@reset} #{Enum.join(Subscription.supported(), ", ")}"
+      )
+
+      IO.puts(
+        "  #{@dim}Connect one with#{@reset}  #{@cyan}osa auth login <provider>#{@reset}  #{@dim}or#{@reset}  #{@cyan}osa setup#{@reset}"
+      )
     else
       Enum.each(rows, &print_row/1)
       IO.puts("")
@@ -167,7 +173,11 @@ defmodule OptimalSystemAgent.CLI.Auth do
       not Subscription.supported?(provider) ->
         IO.puts("")
         IO.puts("  #{@yellow}#{provider} does not support account sign-in.#{@reset}")
-        IO.puts("  #{@dim}Providers that do:#{@reset} #{Enum.join(Subscription.supported(), ", ")}")
+
+        IO.puts(
+          "  #{@dim}Providers that do:#{@reset} #{Enum.join(Subscription.supported(), ", ")}"
+        )
+
         IO.puts("")
         {:error, :unsupported_provider}
 
@@ -330,10 +340,18 @@ defmodule OptimalSystemAgent.CLI.Auth do
     IO.puts("")
     IO.puts("  #{@bold}osa auth#{@reset} #{@dim}— account sign-ins#{@reset}")
     IO.puts("")
-    IO.puts("    #{@cyan}osa auth status#{@reset}              #{@dim}show every connected account#{@reset}")
+
+    IO.puts(
+      "    #{@cyan}osa auth status#{@reset}              #{@dim}show every connected account#{@reset}"
+    )
+
     IO.puts("    #{@cyan}osa auth login <provider>#{@reset}    #{@dim}sign in#{@reset}")
     IO.puts("    #{@cyan}osa auth logout <provider>#{@reset}   #{@dim}sign out of OSA#{@reset}")
-    IO.puts("    #{@cyan}osa auth logout --all#{@reset}        #{@dim}sign out of everything#{@reset}")
+
+    IO.puts(
+      "    #{@cyan}osa auth logout --all#{@reset}        #{@dim}sign out of everything#{@reset}"
+    )
+
     IO.puts("")
     IO.puts("  #{@dim}Supports:#{@reset} #{Enum.join(Subscription.supported(), ", ")}")
     IO.puts("")

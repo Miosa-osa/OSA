@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.CompletionSummaryTest do
   describe "completion_summary/1 — extraction contract" do
     test "derives the first meaningful line from a structured result map" do
       structured = %{summary: "Refactored the parser and added tests.", status: :completed}
+
       assert Orchestrator.completion_summary(structured) ==
                "Refactored the parser and added tests."
     end

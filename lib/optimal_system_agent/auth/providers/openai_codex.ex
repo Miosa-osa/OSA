@@ -345,7 +345,14 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
             if transport_errors + 1 >= DeviceFlow.max_consecutive_transport_errors() do
               {:error, reason}
             else
-              do_poll(device_auth_id, user_code, interval, on_tick, deadline, transport_errors + 1)
+              do_poll(
+                device_auth_id,
+                user_code,
+                interval,
+                on_tick,
+                deadline,
+                transport_errors + 1
+              )
             end
         end
     end

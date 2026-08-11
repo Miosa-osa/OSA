@@ -451,7 +451,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
 
     # Pad name + dots to 24 chars for alignment
     label = " #{name} "
-    dots_needed = max(24 - String.length(label), 3)
+    dots_needed = max(24 - OptimalSystemAgent.CLI.Width.visible(label), 3)
     padded = "#{label}#{String.duplicate(".", dots_needed)}"
     IO.puts("#{icon}#{padded} #{detail}")
   end

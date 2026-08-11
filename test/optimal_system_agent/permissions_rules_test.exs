@@ -168,8 +168,7 @@ defmodule OptimalSystemAgent.PermissionsRulesTest do
     end
 
     test "the subscription credential store is unreadable by the file tool" do
-      assert ".osa/subscriptions.json" in
-               OptimalSystemAgent.Tools.Builtins.FileRead.Constants.sensitive_paths(),
+      assert ".osa/subscriptions.json" in OptimalSystemAgent.Tools.Builtins.FileRead.Constants.sensitive_paths(),
              "an agent that can read its own credential store is an exfiltration primitive"
     end
 

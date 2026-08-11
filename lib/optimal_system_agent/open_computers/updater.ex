@@ -172,7 +172,10 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
         latest = manifest["version"]
 
         if is_binary(latest) and version_newer?(latest, current) do
-          Logger.info("[OC.Updater] update available #{current} -> #{latest} (run `osa update` to apply)")
+          Logger.info(
+            "[OC.Updater] update available #{current} -> #{latest} (run `osa update` to apply)"
+          )
+
           notify_control_plane(current, latest, detect_platform())
           {{:ok, {:available, latest}}, %{state | last_check: DateTime.utc_now()}}
         else

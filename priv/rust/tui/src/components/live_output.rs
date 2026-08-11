@@ -404,3 +404,97 @@ mod tests {
         assert!(out.lines().is_empty());
     }
 }
+
+/// **Row accounting** — the preview must never silently drop a row it claims to
+/// be showing.
+///
+/// The head/tail elision path deliberately discards MIDDLE lines, which is
+/// correct and is the whole point. What must not happen is the buffer reporting
+/// one row count while rendering another: that count is what the activity feed
+/// reserves against, so a disagreement is a dead-row gap or an overdraw. These
+/// assert the reported total equals the rendered total — the technique that
+/// makes a dropped row fail loudly instead of silently.
+#[cfg(test)]
+mod row_accounting {
+    use super::*;
+
+    fn flood(lines: usize) -> LiveCommandOutput {
+        let mut out = LiveCommandOutput::new();
+        let filler = "x".repeat(MAX_BYTES / 200);
+        for i in 0..lines {
+            out.push_str(&format!("line {i} {filler}\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn retained_lines_always_equals_the_number_of_rendered_rows() {
+        for n in [0usize, 1, 5, 49, 50, 51, 99, 100, 101, 250] {
+            let out = flood(n);
+            assert_eq!(
+                out.retained_lines(),
+                out.lines().len(),
+                "{n} lines in: reported {} retained rows but rendered {}",
+                out.retained_lines(),
+                out.lines().len()
+            );
+        }
+    }
+
+    #[test]
+    fn an_elided_preview_renders_exactly_head_plus_tail_rows() {
+        let out = flood(400);
+        assert!(out.truncated(), "400 flooded lines did not trip the budget");
+        assert_eq!(
+            out.lines().len(),
+            2 * MAX_LINES,
+            "an elided preview should render exactly {} rows",
+            2 * MAX_LINES
+        );
+    }
+
+    #[test]
+    fn elision_keeps_the_true_head_and_the_true_tail() {
+        let out = flood(400);
+        let rendered = out.lines();
+        assert!(
+            rendered[0].starts_with("line 0 "),
+            "the first retained row is not the true head"
+        );
+        assert!(
+            rendered.last().unwrap().starts_with("line 399 "),
+            "the last retained row is not the true tail"
+        );
+    }
+
+    #[test]
+    fn total_lines_never_shrinks_as_output_arrives() {
+        let mut out = LiveCommandOutput::new();
+        let filler = "y".repeat(MAX_BYTES / 200);
+        let mut high = 0usize;
+        for i in 0..300 {
+            out.push_str(&format!("l{i} {filler}\n"));
+            let t = out.total_lines();
+            assert!(t >= high, "total_lines went backwards: {high} -> {t}");
+            high = t;
+        }
+        assert_eq!(out.total_lines(), 300);
+    }
+
+    #[test]
+    fn tail_lines_returns_exactly_what_was_asked_for_when_available() {
+        let out = flood(400);
+        for n in [1usize, 3, 10, 2 * MAX_LINES] {
+            assert_eq!(out.tail_lines(n).len(), n.min(out.lines().len()));
+        }
+    }
+
+    #[test]
+    fn a_partial_line_is_counted_as_a_row() {
+        let mut out = LiveCommandOutput::new();
+        out.push_str("done\n");
+        out.push_str("in progress, no newline yet");
+        assert_eq!(out.retained_lines(), out.lines().len());
+        assert_eq!(out.lines().len(), 2);
+    }
+}

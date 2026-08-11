@@ -125,7 +125,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ScratchpadTest do
 
       # A subsequent coordination write must NOT crash — it re-seeds the dir and
       # the entry lands, so the in-flight workflow keeps coordinating.
-      assert {:ok, msg} = run(%{"action" => "write", "name" => "step2.md", "content" => "resumed"}, sid)
+      assert {:ok, msg} =
+               run(%{"action" => "write", "name" => "step2.md", "content" => "resumed"}, sid)
+
       assert msg =~ "Wrote step2.md"
       assert {:ok, "resumed"} = run(%{"action" => "read", "name" => "step2.md"}, sid)
     end

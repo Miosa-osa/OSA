@@ -70,7 +70,11 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
         {:ok, bytes} ->
           %{
             type: "image",
-            source: %{type: "base64", media_type: media_type_for(entry), data: Base.encode64(bytes)}
+            source: %{
+              type: "base64",
+              media_type: media_type_for(entry),
+              data: Base.encode64(bytes)
+            }
           }
 
         _ ->

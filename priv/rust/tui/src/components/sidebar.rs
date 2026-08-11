@@ -341,17 +341,13 @@ impl Sidebar {
         }
     }
 
+    /// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+    ///
+    /// Delegates to the canonical fitter: a private char-count copy of this used to
+    /// let a CJK/emoji value over-run its reserved span and shove every column to
+    /// its right off the pane.
     fn truncate_value(&self, s: &str, max: usize) -> String {
-        if max == 0 {
-            return String::new();
-        }
-        let char_count: usize = s.chars().count();
-        if char_count <= max {
-            s.to_string()
-        } else {
-            let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-            format!("{}…", truncated)
-        }
+        crate::util::fit_cols(s, max)
     }
 
     fn truncate_session_id(&self, id: &str) -> String {
@@ -440,7 +436,10 @@ impl Component for Sidebar {
                 };
 
                 let line = Line::from(vec![
-                    Span::styled(format!("{:<5} ", label_trunc), theme.sidebar_label()),
+                    Span::styled(
+                        format!("{} ", crate::util::pad_cols(&label_trunc, 5)),
+                        theme.sidebar_label(),
+                    ),
                     Span::styled(value_trunc, value_style),
                 ]);
 

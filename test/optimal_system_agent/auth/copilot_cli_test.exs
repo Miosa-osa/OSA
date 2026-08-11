@@ -101,7 +101,9 @@ defmodule OptimalSystemAgent.Auth.CopilotCliTest do
   end
 
   describe "zero-cost sign-in signals" do
-    test "an explicit token env var is a positive signal, and its value is never returned", %{dir: dir} do
+    test "an explicit token env var is a positive signal, and its value is never returned", %{
+      dir: dir
+    } do
       stub_copilot(dir, version_stub())
       System.put_env("GH_TOKEN", "gho_supersecretvalue")
 
@@ -309,6 +311,7 @@ defmodule OptimalSystemAgent.Auth.CopilotCliTest do
       stub_copilot(dir, ~S"""
       case "$1" in --version) echo "0.0.397" ;; esac
       """)
+
       assert {:error, {:cli_too_old, "0.0.397"}} = Auth.login(io: fn _ -> :ok end)
     end
   end
@@ -407,7 +410,10 @@ defmodule OptimalSystemAgent.Auth.CopilotCliTest do
 
     test "a plain reply comes back as content", %{dir: dir} do
       emit_stub(dir, [
-        %{"type" => "assistant.message", "data" => %{"model" => "gpt-5-mini", "content" => "hello"}},
+        %{
+          "type" => "assistant.message",
+          "data" => %{"model" => "gpt-5-mini", "content" => "hello"}
+        },
         %{"type" => "result", "exitCode" => 0, "usage" => %{"premiumRequests" => 0.33}}
       ])
 
@@ -488,7 +494,8 @@ defmodule OptimalSystemAgent.Auth.CopilotCliTest do
              "an EMPTY --available-tools is ignored by the CLI and tools stay live; the " <>
                "nonexistent-tool-name form is what actually disables Copilot's agent loop"
 
-      for flag <- ~w(--disable-builtin-mcps --no-ask-user --no-custom-instructions --no-remote --no-auto-update) do
+      for flag <-
+            ~w(--disable-builtin-mcps --no-ask-user --no-custom-instructions --no-remote --no-auto-update) do
         assert flag in argv
       end
 

@@ -35,7 +35,9 @@ defmodule OptimalSystemAgent.Scripts.LauncherArgsTest do
     assert String.contains?(block, "OSA_VERB")
     assert String.contains?(block, "--resume")
 
-    dir = System.tmp_dir!() |> Path.join("osa-launcher-test-#{System.unique_integer([:positive])}")
+    dir =
+      System.tmp_dir!() |> Path.join("osa-launcher-test-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
 
@@ -88,6 +90,7 @@ defmodule OptimalSystemAgent.Scripts.LauncherArgsTest do
       assert run(h, ["resume", "abc"])["args"] == "--resume abc"
       assert run(h, ["--overdrive", "resume", "abc"])["args"] == "--overdrive --resume abc"
       assert run(h, ["resume", "abc", "--overdrive"])["args"] == "--overdrive --resume abc"
+
       assert run(h, ["--profile", "work", "resume", "abc"])["args"] ==
                "--profile work --resume abc"
     end

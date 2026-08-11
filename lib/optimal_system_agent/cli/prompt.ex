@@ -49,9 +49,13 @@ defmodule OptimalSystemAgent.CLI.Prompt do
   def note(message, title) do
     lines = String.split(message, "\n")
 
+    # COLUMNS, not graphemes: a wide glyph anywhere in the note sized the box one
+    # column short per glyph and the right-hand `│` fell inside the text.
+    alias OptimalSystemAgent.CLI.Width, as: W
+
     max_len =
-      Enum.reduce(lines, String.length(title) + 4, fn line, acc ->
-        max(acc, String.length(line) + 4)
+      Enum.reduce(lines, W.visible(title) + 4, fn line, acc ->
+        max(acc, W.visible(line) + 4)
       end)
 
     border_top = String.duplicate("─", max_len)
@@ -60,7 +64,7 @@ defmodule OptimalSystemAgent.CLI.Prompt do
     IO.puts("\e[2m◇  #{title} #{border_top}╮\e[0m")
 
     Enum.each(lines, fn line ->
-      padding = String.duplicate(" ", max(max_len - String.length(line) - 2, 0))
+      padding = String.duplicate(" ", max(max_len - W.visible(line) - 2, 0))
       IO.puts("\e[2m#{@bar}  #{line}#{padding}  #{@bar}\e[0m")
     end)
 

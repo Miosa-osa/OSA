@@ -235,7 +235,8 @@ defmodule OptimalSystemAgent.Auth.Subscription do
   def message(reason, provider_name \\ "this provider")
 
   def message(:cancelled, name),
-    do: "Sign-in cancelled. Nothing was saved — re-run setup to try again, or paste #{a_an(name)} API key instead."
+    do:
+      "Sign-in cancelled. Nothing was saved — re-run setup to try again, or paste #{a_an(name)} API key instead."
 
   def message(:access_denied, name),
     do:
@@ -354,10 +355,12 @@ defmodule OptimalSystemAgent.Auth.Subscription do
         "Retry in a moment; if it persists, no other OSA process should be running."
 
   def message({:transport_error, detail}, name),
-    do: "Could not reach #{name} to sign in (#{detail}). Check your connection and retry, or paste an API key."
+    do:
+      "Could not reach #{name} to sign in (#{detail}). Check your connection and retry, or paste an API key."
 
   def message({:http_error, status}, name),
-    do: "#{name} returned an unexpected HTTP #{status} during sign-in. Retry, or paste an API key."
+    do:
+      "#{name} returned an unexpected HTTP #{status} during sign-in. Retry, or paste an API key."
 
   def message({:oauth_error, detail}, name),
     do: "#{name} rejected the sign-in: #{detail}. Retry, or paste an API key."

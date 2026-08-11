@@ -52,6 +52,7 @@ defmodule OptimalSystemAgent.Skills.Curator do
   use GenServer
   require Logger
 
+  alias OptimalSystemAgent.Skills.Frontmatter
   alias OptimalSystemAgent.Tools.Registry.SkillUsage
 
   @interval_ms 24 * 60 * 60 * 1000
@@ -148,11 +149,10 @@ defmodule OptimalSystemAgent.Skills.Curator do
   @doc "Names of every currently archived skill."
   @spec archived() :: [String.t()]
   def archived do
-    dir = skills_dir()
-
-    dir
-    |> skill_names()
-    |> Enum.filter(&File.exists?(Path.join([dir, &1, ".archived"])))
+    skills_dir()
+    |> skill_entries()
+    |> Enum.filter(&File.exists?(Path.join(&1.dir, ".archived")))
+    |> Enum.map(& &1.name)
   end
 
   # ── GenServer ──────────────────────────────────────────────────────────
@@ -195,17 +195,16 @@ defmodule OptimalSystemAgent.Skills.Curator do
     mode = mode()
     skills_dir = skills_dir()
     now = DateTime.utc_now()
-    skill_dirs = skill_names(skills_dir)
+    entries = skill_entries(skills_dir)
 
     decisions =
-      Enum.map(skill_dirs, fn name ->
-        decide(name, Path.join(skills_dir, name), now)
-      end)
-
-    decisions = Enum.map(decisions, fn d -> apply_decision(d, mode, now) end)
+      entries
+      |> Enum.map(fn %{name: name, dir: dir} -> decide(name, dir, now) end)
+      |> Enum.map(fn d -> apply_decision(d, mode, now) end)
 
     stats = %{
-      total: length(skill_dirs),
+      total: length(entries),
+      unclassifiable: Enum.count(decisions, &(&1.provenance == :unclassifiable)),
       staled: count(decisions, :stale),
       archived: count(decisions, :archive),
       reactivated: count(decisions, :reactivate),
@@ -228,17 +227,37 @@ defmodule OptimalSystemAgent.Skills.Curator do
     usage = SkillUsage.get_usage(name)
     days_idle = idle_days(usage, skill_dir, now)
     pinned = pinned_dir?(name, skill_dir)
+    provenance = provenance(skill_dir)
     already_archived = File.exists?(Path.join(skill_dir, ".archived"))
     stale_marked = File.exists?(Path.join(skill_dir, ".stale"))
 
     action =
       cond do
-        already_archived -> :none
-        pinned -> if stale_marked, do: :reactivate, else: :none
-        days_idle >= @archive_days and usage.use_count < @archive_min_uses -> :archive
-        days_idle >= @stale_days -> if stale_marked, do: :none, else: :stale
-        stale_marked -> :reactivate
-        true -> :none
+        already_archived ->
+          :none
+
+        pinned ->
+          if stale_marked, do: :reactivate, else: :none
+
+        # A skill whose SKILL.md the curator cannot even parse is a population
+        # it does not understand. Switching it off on an idleness timer is a
+        # guess, and the failure mode (a working skill silently disabled, with
+        # no frontmatter left to explain what it was) is not recoverable by
+        # anyone who does not already know about `.disabled`. Refuse.
+        provenance == :unclassifiable ->
+          if stale_marked, do: :reactivate, else: :none
+
+        days_idle >= @archive_days and usage.use_count < @archive_min_uses ->
+          :archive
+
+        days_idle >= @stale_days ->
+          if stale_marked, do: :none, else: :stale
+
+        stale_marked ->
+          :reactivate
+
+        true ->
+          :none
       end
 
     %{
@@ -247,6 +266,7 @@ defmodule OptimalSystemAgent.Skills.Curator do
       action: action,
       applied: false,
       pinned: pinned,
+      provenance: provenance,
       days_idle: days_idle,
       use_count: usage.use_count
     }
@@ -345,6 +365,7 @@ defmodule OptimalSystemAgent.Skills.Curator do
             "action" => to_string(d.action),
             "applied" => d.applied,
             "pinned" => d.pinned,
+            "provenance" => to_string(d.provenance),
             "days_idle" => d.days_idle,
             "use_count" => d.use_count
           }
@@ -381,16 +402,69 @@ defmodule OptimalSystemAgent.Skills.Curator do
       archived_names = names.(:archive)
 
       if archived_names != "" and mode == :archive do
+        by_provenance =
+          changed
+          |> Enum.filter(&(&1.action == :archive))
+          |> Enum.group_by(& &1.provenance)
+          |> Enum.map_join(", ", fn {p, ds} -> "#{length(ds)} #{p}" end)
+
         Logger.warning(
-          "[Curator] Disabled skill(s): #{archived_names}. " <>
+          "[Curator] Disabled skill(s): #{archived_names} (#{by_provenance}). " <>
             "Restore with Skills.Curator.unarchive/1, or keep them forever with " <>
             "Skills.Curator.pin/1."
         )
       end
     end
 
+    unclassifiable = Enum.filter(decisions, &(&1.provenance == :unclassifiable))
+
+    if unclassifiable != [] do
+      Logger.warning(
+        "[Curator] Left #{length(unclassifiable)} skill(s) alone — their SKILL.md frontmatter " <>
+          "will not parse, so the curator cannot classify them and refuses to act: " <>
+          Enum.map_join(unclassifiable, ", ", & &1.name)
+      )
+    end
+
     :ok
   end
+
+  # ── Provenance ─────────────────────────────────────────────────────────
+
+  @doc """
+  Who wrote this skill:
+
+    * `:generated`      — `Memory.SkillGenerator`, frontmatter `source: auto:<pattern_id>`
+    * `:managed`        — `Tools.Builtins.SkillManager`, frontmatter `source: skill_manager`
+    * `:authored`       — a human, or any writer that left a parseable SKILL.md
+    * `:unclassifiable` — no SKILL.md, or frontmatter that will not parse
+
+  The directory the curator walks holds all of these populations mixed
+  together and it used to apply one idleness rule to the lot without ever
+  asking which was which. It still applies one rule — but it will not perform
+  a destructive write against a skill it cannot classify, because "I could not
+  read this file" is not evidence that switching it off is safe.
+  """
+  @spec provenance(Path.t()) :: :generated | :managed | :authored | :unclassifiable
+  def provenance(skill_dir) do
+    case File.read(Path.join(skill_dir, "SKILL.md")) do
+      {:ok, content} ->
+        case Frontmatter.parse(content) do
+          {:ok, meta, _body} -> classify_source(to_string(meta["source"] || ""))
+          {:error, :missing} -> :authored
+          {:error, _} -> :unclassifiable
+        end
+
+      _ ->
+        :unclassifiable
+    end
+  rescue
+    _ -> :unclassifiable
+  end
+
+  defp classify_source("auto:" <> _), do: :generated
+  defp classify_source("skill_manager"), do: :managed
+  defp classify_source(_), do: :authored
 
   # ── Filesystem helpers ─────────────────────────────────────────────────
 
@@ -398,12 +472,23 @@ defmodule OptimalSystemAgent.Skills.Curator do
     Path.expand(Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills"))
   end
 
-  defp skill_names(skills_dir) do
+  # Every skill under the configured skills dir, at ANY depth. The old
+  # `File.ls!` + `File.dir?` walk saw only immediate children, so a skill
+  # nested under a category directory had no pin, no un-archive and no
+  # `skill_dir/1` — `pin/1` on it just returned `:not_found`.
+  #
+  # Deliberately scoped to the configured skills dir: the loader also
+  # discovers project- and bundled-scope skills, and the curator must never
+  # write marker files into a checked-out repo or a read-only install tree.
+  defp skill_entries(skills_dir) do
     if File.dir?(skills_dir) do
       skills_dir
-      |> File.ls!()
-      |> Enum.filter(&File.dir?(Path.join(skills_dir, &1)))
-      |> Enum.filter(&File.exists?(Path.join([skills_dir, &1, "SKILL.md"])))
+      |> Path.join("**/SKILL.md")
+      |> Path.wildcard()
+      |> Enum.map(fn path ->
+        dir = Path.dirname(path)
+        %{name: entry_name(path, dir), dir: dir}
+      end)
     else
       []
     end
@@ -411,9 +496,48 @@ defmodule OptimalSystemAgent.Skills.Curator do
     _ -> []
   end
 
+  # Usage records are keyed by the name the registry surfaced, which comes
+  # from frontmatter — not from the directory.
+  defp entry_name(path, dir) do
+    with {:ok, content} <- File.read(path),
+         {:ok, meta, _body} <- Frontmatter.parse(content),
+         name when is_binary(name) and name != "" <- meta["name"] do
+      name
+    else
+      _ -> Path.basename(dir)
+    end
+  rescue
+    _ -> Path.basename(dir)
+  end
+
+  # Resolve by the name the registry uses, then by directory basename, so both
+  # a flat `<skills_dir>/<name>/` and a nested `<skills_dir>/<cat>/<name>/`
+  # are reachable. Containment is proven on the resolved directory.
   defp skill_dir(name) do
-    dir = Path.join(skills_dir(), name)
-    if File.dir?(dir), do: {:ok, dir}, else: {:error, :not_found}
+    root = skills_dir()
+    flat = Path.join(root, name)
+
+    cond do
+      File.dir?(flat) and File.exists?(Path.join(flat, "SKILL.md")) ->
+        {:ok, flat}
+
+      true ->
+        entry =
+          root
+          |> skill_entries()
+          |> Enum.find(fn e -> e.name == name or Path.basename(e.dir) == name end)
+
+        case entry do
+          %{dir: dir} -> if contained?(dir, root), do: {:ok, dir}, else: {:error, :not_found}
+          nil -> {:error, :not_found}
+        end
+    end
+  end
+
+  defp contained?(dir, root) do
+    dir = Path.expand(dir)
+    root = Path.expand(root)
+    dir != root and String.starts_with?(dir, root <> "/")
   end
 
   defp now_iso, do: DateTime.utc_now() |> DateTime.to_iso8601()

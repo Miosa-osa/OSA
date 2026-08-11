@@ -89,6 +89,7 @@ defmodule OptimalSystemAgent.MCP.PluginManifest do
 
   alias OptimalSystemAgent.MCP.Config
   alias OptimalSystemAgent.MCP.Config.Server
+  alias OptimalSystemAgent.Utils.Bom
 
   @plugins_subdir "plugins"
   @data_subdir "plugin-data"
@@ -188,7 +189,7 @@ defmodule OptimalSystemAgent.MCP.PluginManifest do
 
   defp read_json(path) do
     with {:ok, raw} <- File.read(path),
-         {:ok, decoded} when is_map(decoded) <- Jason.decode(raw) do
+         {:ok, decoded} when is_map(decoded) <- raw |> Bom.strip() |> Jason.decode() do
       decoded
     else
       _ -> %{}

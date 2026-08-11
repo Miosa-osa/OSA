@@ -61,7 +61,14 @@ defmodule OptimalSystemAgent.Verification.Loop do
             status: :idle,
             steering_guidance: nil,
             started_at: nil,
-            task_ref: nil
+            task_ref: nil,
+            task: nil
+
+  # A loop that has reported a verdict is DONE. Anything arriving afterwards is
+  # a late message from a task the loop already stopped waiting on, and must not
+  # be able to rewrite the verdict, overwrite the checkpoint, re-emit an event,
+  # or reach `apply_fix/1` and run more shell.
+  @terminal_statuses [:passed, :escalated]
 
   # --- Client API ---
 
@@ -167,20 +174,50 @@ defmodule OptimalSystemAgent.Verification.Loop do
 
   @impl true
   def handle_info({ref, {:test_result, exit_code, output}}, state)
-      when is_reference(ref) and ref == state.task_ref do
+      when is_reference(ref) and ref == state.task_ref and state.status == :running do
     # Task completed — demonitor to clean up the :DOWN message.
     Process.demonitor(ref, [:flush])
-    state = %{state | task_ref: nil}
+    state = %{state | task_ref: nil, task: nil}
     state = process_test_result(state, {exit_code, output})
     {:noreply, state}
   end
 
   # Task crashed unexpectedly — treat as a test failure.
   def handle_info({:DOWN, ref, :process, _pid, reason}, state)
-      when ref == state.task_ref do
+      when ref == state.task_ref and state.status == :running do
     Logger.warning("[Verification.Loop] #{state.loop_id} test task crashed: #{inspect(reason)}")
-    state = %{state | task_ref: nil}
+    state = %{state | task_ref: nil, task: nil}
     state = process_test_result(state, {1, "Test task crashed: #{inspect(reason)}"})
+    {:noreply, state}
+  end
+
+  # A result for the task this loop was waiting on, arriving AFTER the loop
+  # already reported a verdict — the `:overall_timeout` race. `escalate/2` fires
+  # while the test task is still running, so its result lands here moments
+  # later. Before the `status` guards above, it flipped an escalated loop to
+  # `:passed`, overwrote the checkpoint, emitted `:verification_passed`, or (on
+  # the failing branch) called the LLM and executed more shell. Discarded.
+  def handle_info({ref, {:test_result, _exit_code, _output}}, %{status: status} = state)
+      when is_reference(ref) and status in @terminal_statuses do
+    Process.demonitor(ref, [:flush])
+
+    Logger.info(
+      "[Verification.Loop] #{state.loop_id} discarding late test result — already :#{status}"
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{status: status} = state)
+      when is_reference(ref) and status in @terminal_statuses do
+    {:noreply, state}
+  end
+
+  # A next-iteration timer that outlived the verdict (scheduled by
+  # `diagnose_and_fix/2` right before the overall timeout fired). Spawning here
+  # would restart a finished loop.
+  def handle_info(:schedule_next_iteration, %{status: status} = state)
+      when status in @terminal_statuses do
     {:noreply, state}
   end
 
@@ -239,7 +276,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
         {:test_result, exit_code, output}
       end)
 
-    %{state | iteration: iteration, task_ref: task.ref}
+    %{state | iteration: iteration, task_ref: task.ref, task: task}
   end
 
   defp process_test_result(state, {exit_code, output}) do
@@ -293,8 +330,25 @@ defmodule OptimalSystemAgent.Verification.Loop do
     })
 
     Logger.info("[Verification.Loop] #{state.loop_id} terminated with :passed")
-    %{state | status: :passed}
+    %{state | status: :passed} |> abandon_task()
   end
+
+  # Detach from (and stop) any still-running test task. Clearing `task_ref` is
+  # what makes the `ref == state.task_ref` guards stop matching; killing the
+  # task also stops the shell command it is still blocked on, which on the
+  # `:overall_timeout` path is the very command that blew the deadline.
+  defp abandon_task(%{task: nil} = state), do: %{state | task_ref: nil}
+
+  defp abandon_task(%{task: %Task{} = task} = state) do
+    # `Task.shutdown/2` (not a bare `Process.exit(pid, :kill)`) — the task is
+    # LINKED to this GenServer, so killing it directly takes the loop down with
+    # it, and the loop is in turn linked to whoever started it. `Task.shutdown`
+    # unlinks first, then kills, then flushes the mailbox.
+    _ = Task.shutdown(task, :brutal_kill)
+    %{state | task_ref: nil, task: nil}
+  end
+
+  defp abandon_task(state), do: %{state | task_ref: nil, task: nil}
 
   defp escalate(state, reason) do
     status = :escalated
@@ -322,7 +376,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
       "[Verification.Loop] #{state.loop_id} escalated (#{reason}) after #{state.iteration} iterations"
     )
 
-    %{state | status: status}
+    %{state | status: status} |> abandon_task()
   end
 
   defp diagnose_and_fix(state, failure_output) do
@@ -429,6 +483,23 @@ defmodule OptimalSystemAgent.Verification.Loop do
   # Apply fix instructions by executing embedded shell commands.
   # Looks for lines prefixed with `$ ` and runs them. When no such lines
   # exist, logs the instructions for a human operator to act on manually.
+  #
+  # Every command is a MODEL-AUTHORED string, and this loop runs unattended —
+  # there is no session, no channel, and nobody to prompt. So each command goes
+  # through the same two gates `Loop.ToolExecutor` puts a `shell_execute` tool
+  # call through, and anything those gates do not explicitly ALLOW is refused:
+  #
+  #   1. `Agent.Safety.DangerousCommands.blocked?/1` — the circuit breaker that
+  #      no permission mode can override.
+  #   2. `Permissions.check_detailed/2` for `shell_execute` — the operator's own
+  #      deny/ask/allow rules from the settings cascade.
+  #
+  # `check_detailed/2` defaults to `:ask` when no rule matches. On an
+  # interactive channel that becomes a prompt; here it can only become a
+  # REFUSAL, which is the point — an unattended loop must not be a hole through
+  # which the model runs whatever it likes. An operator who wants the loop to
+  # act autonomously grants it explicitly, e.g.
+  # `{"permissions": {"allow": ["shell_execute(mix format)"]}}`.
   defp apply_fix(instructions) do
     commands =
       instructions
@@ -441,7 +512,13 @@ defmodule OptimalSystemAgent.Verification.Loop do
         "[Verification.Loop] No shell commands found in fix — human operator must act:\n#{String.slice(instructions, 0, 500)}"
       )
     else
-      Enum.each(commands, fn cmd ->
+      Enum.each(commands, &run_gated_fix_command/1)
+    end
+  end
+
+  defp run_gated_fix_command(cmd) do
+    case gate_fix_command(cmd) do
+      :allow ->
         Logger.info("[Verification.Loop] Applying fix: #{cmd}")
 
         case OptimalSystemAgent.OS.Shell.cmd(cmd, stderr_to_stdout: true) do
@@ -455,9 +532,55 @@ defmodule OptimalSystemAgent.Verification.Loop do
               "[Verification.Loop] Fix command exited #{code}: #{String.slice(output, 0, 400)}"
             )
         end
-      end)
+
+      {:refused, reason} ->
+        Logger.warning(
+          "[Verification.Loop] REFUSED model-authored fix command: #{cmd} — #{reason}"
+        )
     end
   end
+
+  @doc false
+  # Public only so the gate can be unit-tested without spawning a loop.
+  # Returns `:allow` or `{:refused, reason}`.
+  @spec gate_fix_command(String.t()) :: :allow | {:refused, String.t()}
+  def gate_fix_command(cmd) when is_binary(cmd) do
+    trimmed = String.trim(cmd)
+
+    tool_call = %{name: "shell_execute", arguments: %{"command" => trimmed}}
+
+    cond do
+      trimmed == "" ->
+        {:refused, "empty command"}
+
+      match?({:blocked, _}, OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)) ->
+        {:blocked, reason} = OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
+        {:refused, "circuit breaker: #{reason}"}
+
+      true ->
+        case OptimalSystemAgent.Permissions.check_detailed("shell_execute", %{
+               "command" => trimmed
+             }) do
+          {:allow, _meta} ->
+            :allow
+
+          {:deny, meta} ->
+            {:refused,
+             "denied by permission rule #{inspect(meta.rule)} (#{inspect(meta.source)})"}
+
+          {:ask, _meta} ->
+            {:refused,
+             "requires approval, and the verification loop runs unattended — add an explicit " <>
+               "allow rule for it if this loop should run commands on its own"}
+        end
+    end
+  rescue
+    e ->
+      # A gate that cannot evaluate must not fall through to execution.
+      {:refused, "permission check failed: #{Exception.message(e)}"}
+  end
+
+  def gate_fix_command(_), do: {:refused, "non-string command"}
 
   defp build_checkpoint_map(state) do
     %{

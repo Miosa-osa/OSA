@@ -22,7 +22,8 @@ defmodule OptimalSystemAgent.CLI.DoctorTest do
     default_provider = Application.get_env(:optimal_system_agent, :default_provider)
 
     on_exit(fn ->
-      if default_model, do: Application.put_env(:optimal_system_agent, :default_model, default_model),
+      if default_model,
+        do: Application.put_env(:optimal_system_agent, :default_model, default_model),
         else: Application.delete_env(:optimal_system_agent, :default_model)
 
       if default_provider,

@@ -210,7 +210,7 @@ defmodule OptimalSystemAgent.Skills.Validator do
 
   Format: `  <SEVERITY>  <rule>  <path>\\n      <message>`
   """
-  @spec format(([finding()])) :: String.t()
+  @spec format([finding()]) :: String.t()
   def format([]), do: ""
 
   def format(findings) when is_list(findings) do
@@ -229,6 +229,11 @@ defmodule OptimalSystemAgent.Skills.Validator do
   # shape, but distinguishes the three ways it can fail so the author gets an
   # actionable message instead of a silent fallback.
   defp split_frontmatter(content) do
+    # BOM first: `String.trim_leading/1` does NOT remove U+FEFF (category Cf,
+    # not whitespace), so a BOM'd file that plainly starts with `---` used to
+    # be reported as :frontmatter_missing.
+    content = OptimalSystemAgent.Utils.Bom.strip(content)
+
     cond do
       not String.starts_with?(String.trim_leading(content), "---") ->
         {:error, :frontmatter_missing,

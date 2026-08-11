@@ -94,6 +94,7 @@ defmodule OptimalSystemAgent.Providers.RegistryProviderResolutionTest do
             {"gpt-4o", :openai, 128_000}
           ] do
         assert Registry.effective_context_window(model, provider) == window
+
         assert Registry.effective_context_window(model, provider) >
                  OptimalSystemAgent.Providers.ModelLimits.max_output(model)
       end

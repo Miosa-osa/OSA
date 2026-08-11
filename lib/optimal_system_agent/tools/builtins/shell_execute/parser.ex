@@ -549,14 +549,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser do
   end
 
   # Connective operators (multi-char before single-char).
-  defp lex(<<?&, ?&, rest::binary>>, cur, toks), do: lex(rest, [], [{:op, "&&"} | flush(cur, toks)])
+  defp lex(<<?&, ?&, rest::binary>>, cur, toks),
+    do: lex(rest, [], [{:op, "&&"} | flush(cur, toks)])
+
   defp lex(<<?&, rest::binary>>, cur, toks), do: lex(rest, [], [{:op, "&"} | flush(cur, toks)])
-  defp lex(<<?|, ?|, rest::binary>>, cur, toks), do: lex(rest, [], [{:op, "||"} | flush(cur, toks)])
+
+  defp lex(<<?|, ?|, rest::binary>>, cur, toks),
+    do: lex(rest, [], [{:op, "||"} | flush(cur, toks)])
+
   defp lex(<<?|, rest::binary>>, cur, toks), do: lex(rest, [], [{:op, "|"} | flush(cur, toks)])
   defp lex(<<?;, rest::binary>>, cur, toks), do: lex(rest, [], [{:op, ";"} | flush(cur, toks)])
 
   # Redirections (kept as their own token; do not split segments).
-  defp lex(<<?>, ?>, rest::binary>>, cur, toks), do: lex(rest, [], [{:redir, ">>"} | flush(cur, toks)])
+  defp lex(<<?>, ?>, rest::binary>>, cur, toks),
+    do: lex(rest, [], [{:redir, ">>"} | flush(cur, toks)])
+
   defp lex(<<?>, rest::binary>>, cur, toks), do: lex(rest, [], [{:redir, ">"} | flush(cur, toks)])
   defp lex(<<?<, rest::binary>>, cur, toks), do: lex(rest, [], [{:redir, "<"} | flush(cur, toks)])
 
@@ -571,7 +578,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser do
 
   # Quote / substitution readers. Each returns {raw_including_delimiters, rest}.
 
-  defp read_single(<<?', rest::binary>>, acc), do: { io([acc, ?']), rest}
+  defp read_single(<<?', rest::binary>>, acc), do: {io([acc, ?']), rest}
   defp read_single(<<c, rest::binary>>, acc), do: read_single(rest, [acc, c])
   defp read_single(<<>>, acc), do: {io(acc), ""}
 

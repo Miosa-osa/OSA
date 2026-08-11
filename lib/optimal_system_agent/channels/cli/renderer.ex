@@ -284,42 +284,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
   # ── Text Wrapping ───────────────────────────────────────────────────
 
-  def wrap_text(text, width) do
-    text
-    |> String.split("\n")
-    |> Enum.flat_map(fn line ->
-      if visible_length(line) <= width do
-        [line]
-      else
-        wrap_line(line, width)
-      end
-    end)
-  end
+  defdelegate wrap_text(text, width), to: OptimalSystemAgent.CLI.Width, as: :wrap
 
-  defp wrap_line(line, width) do
-    line
-    |> String.split(~r/\s+/)
-    |> Enum.reduce([""], fn word, [current | rest] ->
-      if visible_length(current) + visible_length(word) + 1 <= width do
-        if current == "" do
-          [word | rest]
-        else
-          [current <> " " <> word | rest]
-        end
-      else
-        [word, current | rest]
-      end
-    end)
-    |> Enum.reverse()
-  end
-
-  # Strip ANSI escape codes before measuring visible character width.
-  # ANSI codes (\e[...m) have zero display width but add to String.length.
-  defp visible_length(str) do
-    str
-    |> String.replace(~r/\e\[[0-9;]*m/, "")
-    |> String.length()
-  end
+  # Display width in terminal COLUMNS. This was `String.length/1` over an
+  # SGR-only strip, which counted a CJK/emoji grapheme as one column (tearing the
+  # box border) and counted cursor-movement CSI and OSC-8 hyperlinks as visible.
+  defp visible_length(str), do: OptimalSystemAgent.CLI.Width.visible(str)
 
   # ── Directory Display ──────────────────────────────────────────────
 

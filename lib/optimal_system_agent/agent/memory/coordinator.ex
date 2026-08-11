@@ -117,17 +117,26 @@ defmodule OptimalSystemAgent.Agent.Memory.Coordinator do
     # corrupt/unreadable progress ledger (which can raise inside summarize) can't
     # escape recall/3 and break its documented best-effort contract.
     core =
-      safe(fn ->
-        case ProgressLedger.summarize(session_id) do
-          {:ok, summary} -> summary
-          _ -> nil
-        end
-      end, nil)
+      safe(
+        fn ->
+          case ProgressLedger.summarize(session_id) do
+            {:ok, summary} -> summary
+            _ -> nil
+          end
+        end,
+        nil
+      )
 
     episodic =
-      safe(fn ->
-        EpisodicStore.recall(query, Keyword.merge([limit: limit], Keyword.take(opts, [:project])))
-      end, [])
+      safe(
+        fn ->
+          EpisodicStore.recall(
+            query,
+            Keyword.merge([limit: limit], Keyword.take(opts, [:project]))
+          )
+        end,
+        []
+      )
 
     semantic = safe(fn -> SkillLibrary.find_skills(query, limit: limit) end, [])
 

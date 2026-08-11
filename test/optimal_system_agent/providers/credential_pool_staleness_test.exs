@@ -29,7 +29,11 @@ defmodule OptimalSystemAgent.Providers.CredentialPoolStalenessTest do
 
     on_exit(fn ->
       if prev_home, do: System.put_env("OSA_HOME", prev_home), else: System.delete_env("OSA_HOME")
-      if prev_key, do: System.put_env("GROQ_API_KEY", prev_key), else: System.delete_env("GROQ_API_KEY")
+
+      if prev_key,
+        do: System.put_env("GROQ_API_KEY", prev_key),
+        else: System.delete_env("GROQ_API_KEY")
+
       Application.delete_env(:optimal_system_agent, :groq_api_key)
       if pid, do: CredentialPool.reload()
       File.rm_rf(dir)
@@ -50,7 +54,12 @@ defmodule OptimalSystemAgent.Providers.CredentialPoolStalenessTest do
       # The user corrects it. This is the shared write path that every
       # surface — the wizard, `osa setup`, and the authenticated HTTP
       # `POST /key` route — funnels through.
-      :ok = Onboarding.upsert_provider_key(%{provider: "groq", api_key: "gsk-corrected", set_active: false})
+      :ok =
+        Onboarding.upsert_provider_key(%{
+          provider: "groq",
+          api_key: "gsk-corrected",
+          set_active: false
+        })
 
       assert CredentialPool.get_key(:groq) == "gsk-corrected",
              "the pool outranks Application env, so a stale snapshot here means the " <>
@@ -62,7 +71,12 @@ defmodule OptimalSystemAgent.Providers.CredentialPoolStalenessTest do
       CredentialPool.reload()
       assert CredentialPool.get_key(:groq) == "gsk-old-and-revoked"
 
-      :ok = Onboarding.upsert_provider_key(%{provider: "groq", api_key: "gsk-corrected", set_active: true})
+      :ok =
+        Onboarding.upsert_provider_key(%{
+          provider: "groq",
+          api_key: "gsk-corrected",
+          set_active: true
+        })
 
       assert CredentialPool.get_key(:groq) == "gsk-corrected"
     end
@@ -82,7 +96,9 @@ defmodule OptimalSystemAgent.Providers.CredentialPoolStalenessTest do
     test "it never raises, even with no keys configured at all" do
       System.delete_env("GROQ_API_KEY")
       assert CredentialPool.reload() == :ok
-      assert CredentialPool.get_key(:groq) in [nil, ""] or is_binary(CredentialPool.get_key(:groq))
+
+      assert CredentialPool.get_key(:groq) in [nil, ""] or
+               is_binary(CredentialPool.get_key(:groq))
     end
   end
 end

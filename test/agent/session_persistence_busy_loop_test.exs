@@ -160,7 +160,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceBusyLoopTest do
     cond do
       fun.() -> true
       attempts <= 0 -> false
-      true -> (Process.sleep(20) && eventually(fun, attempts - 1))
+      true -> Process.sleep(20) && eventually(fun, attempts - 1)
     end
   end
 end

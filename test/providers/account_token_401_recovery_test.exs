@@ -66,7 +66,12 @@ defmodule OptimalSystemAgent.Providers.AccountToken401RecoveryTest do
   describe "a 401 on an account token triggers exactly one re-resolution" do
     test "the retried call carries the RENEWED token, not the rejected one" do
       connect_xai("dead-token")
-      stub_token(200, %{"access_token" => "renewed", "refresh_token" => "rt-new", "expires_in" => 3600})
+
+      stub_token(200, %{
+        "access_token" => "renewed",
+        "refresh_token" => "rt-new",
+        "expires_in" => 3600
+      })
 
       seen = :ets.new(:seen, [:public, :bag])
 
@@ -91,7 +96,12 @@ defmodule OptimalSystemAgent.Providers.AccountToken401RecoveryTest do
 
     test "it retries ONCE — a second 401 surfaces instead of looping" do
       connect_xai("dead-token")
-      stub_token(200, %{"access_token" => "renewed", "refresh_token" => "rt-new", "expires_in" => 3600})
+
+      stub_token(200, %{
+        "access_token" => "renewed",
+        "refresh_token" => "rt-new",
+        "expires_in" => 3600
+      })
 
       calls = :counters.new(1, [])
 

@@ -77,8 +77,13 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveResumeNoticeTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     assert_receive {:osa_event,
-                     %{type: :system_event, event: :overdrive_resumed, session_id: ^session, message: msg}},
-                    2_000
+                    %{
+                      type: :system_event,
+                      event: :overdrive_resumed,
+                      session_id: ^session,
+                      message: msg
+                    }},
+                   2_000
 
     assert msg =~ "overdrive"
 

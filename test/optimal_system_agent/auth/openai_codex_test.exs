@@ -133,7 +133,8 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodexTest do
 
       stub(%{
         "/api/accounts/deviceauth/usercode" => {200, @usercode},
-        "/api/accounts/deviceauth/token" => {200, %{"authorization_code" => "c", "code_verifier" => "v"}},
+        "/api/accounts/deviceauth/token" =>
+          {200, %{"authorization_code" => "c", "code_verifier" => "v"}},
         "/oauth/token" => {200, %{"access_token" => token, "expires_in" => 3600}}
       })
 
@@ -313,7 +314,8 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodexTest do
       # re-authenticate would be nonsense.
       stub(%{"/api/accounts/deviceauth/usercode" => {429, %{}}})
 
-      assert {:error, :login_rate_limited} = OpenAICodex.login(io: collector(), open_browser: false)
+      assert {:error, :login_rate_limited} =
+               OpenAICodex.login(io: collector(), open_browser: false)
 
       message = Subscription.message(:login_rate_limited, "ChatGPT")
       refute message =~ ~r/re-?auth|sign in again/i

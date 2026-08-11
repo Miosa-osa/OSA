@@ -159,6 +159,7 @@ defmodule OptimalSystemAgent.Providers.CatalogTest do
       assert %Model{model_id: "claude-haiku-4-5"} = Catalog.small_model("anthropic")
 
       assert %Model{model_id: openai_small} = Catalog.small_model("openai")
+
       assert Regex.match?(small_re, String.downcase(openai_small)),
              "expected a small-named openai model, got #{openai_small}"
     end
@@ -208,7 +209,9 @@ defmodule OptimalSystemAgent.Providers.CatalogTest do
 
   describe "cache_fresh?/2 (TTL via file mtime)" do
     setup do
-      path = Path.join(System.tmp_dir!(), "osa-catalog-ttl-#{System.unique_integer([:positive])}.json")
+      path =
+        Path.join(System.tmp_dir!(), "osa-catalog-ttl-#{System.unique_integer([:positive])}.json")
+
       File.write!(path, ~s({"ok":true}))
       on_exit(fn -> File.rm(path) end)
       {:ok, path: path}
@@ -248,8 +251,13 @@ defmodule OptimalSystemAgent.Providers.CatalogTest do
     end
 
     test "prefers the bundled file when present and cache is absent", %{} do
-      bundled = Application.get_env(:optimal_system_agent, :models_path) ||
-                  Path.join([to_string(:code.priv_dir(:optimal_system_agent)), "catalog", "models_dev.json"])
+      bundled =
+        Application.get_env(:optimal_system_agent, :models_path) ||
+          Path.join([
+            to_string(:code.priv_dir(:optimal_system_agent)),
+            "catalog",
+            "models_dev.json"
+          ])
 
       {_raw, source} = Catalog.load_chain("/no/cache.json", bundled)
       assert source == :bundled

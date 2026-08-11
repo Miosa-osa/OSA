@@ -62,7 +62,9 @@ defmodule OptimalSystemAgent.OnboardingByokTest do
     System.put_env("OSA_HOME", tmp)
 
     on_exit(fn ->
-      if prior_home, do: System.put_env("OSA_HOME", prior_home), else: System.delete_env("OSA_HOME")
+      if prior_home,
+        do: System.put_env("OSA_HOME", prior_home),
+        else: System.delete_env("OSA_HOME")
 
       Enum.each(prior_env, fn
         {k, nil} -> System.delete_env(k)
@@ -164,7 +166,8 @@ defmodule OptimalSystemAgent.OnboardingByokTest do
       assert OptimalSystemAgent.Providers.CredentialPool.get_key(:anthropic) ==
                "sk-ant-CORRECTED"
 
-      assert {:api_key, "sk-ant-CORRECTED"} = OptimalSystemAgent.Providers.Anthropic.resolve_auth()
+      assert {:api_key, "sk-ant-CORRECTED"} =
+               OptimalSystemAgent.Providers.Anthropic.resolve_auth()
     end
 
     test "openai stores its key and a custom base URL that is actually read back",
@@ -605,7 +608,8 @@ defmodule OptimalSystemAgent.OnboardingByokTest do
       # Only the LAST provider is active.
       assert content =~ "OSA_DEFAULT_PROVIDER=deepseek"
 
-      assert content |> String.split("\n")
+      assert content
+             |> String.split("\n")
              |> Enum.count(&String.starts_with?(&1, "OSA_DEFAULT_PROVIDER=")) == 1
     end
 

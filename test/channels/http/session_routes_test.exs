@@ -448,7 +448,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
     # Asserting on `live_session?/1` rather than the response body is the point:
     # the old code returned exactly the same 200 `"resumed"` JSON.
     test "resumes the existing session AND brings its loop back up" do
-      working_dir = Path.join(System.tmp_dir!(), "osa-resume-#{System.unique_integer([:positive])}")
+      working_dir =
+        Path.join(System.tmp_dir!(), "osa-resume-#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(working_dir)
       on_exit(fn -> File.rm_rf(working_dir) end)
 
@@ -541,7 +543,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
 
       # Persist something so <id>.json + <id>.updates.jsonl actually exist —
       # the same files a live session's turns are saved to.
-      :ok = OptimalSystemAgent.Agent.SessionPersistence.save(session_id, [%{role: "user", content: "hi"}])
+      :ok =
+        OptimalSystemAgent.Agent.SessionPersistence.save(session_id, [
+          %{role: "user", content: "hi"}
+        ])
 
       # Runtime-resolved, not a frozen `~/.osa`: the suite runs against an
       # isolated per-run config dir, so expanding the real home here asserted
@@ -609,7 +614,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
     end
 
     test "404s on an unknown id instead of falling back to a fresh session" do
-      conn = json_get("/resolve?id=definitely-not-a-session-#{System.unique_integer([:positive])}")
+      conn =
+        json_get("/resolve?id=definitely-not-a-session-#{System.unique_integer([:positive])}")
 
       assert conn.status == 404
       body = decode_body(conn)
@@ -652,7 +658,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
 
   describe "resume round-trip" do
     test "a persisted conversation is resolvable and its messages come back" do
-      session_id = "session-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"
+      session_id =
+        "session-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"
 
       SessionTranscript.save_turn(session_id, "user", "what is 2 + 2?")
       SessionTranscript.save_turn(session_id, "assistant", "4")

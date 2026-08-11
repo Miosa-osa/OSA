@@ -29,8 +29,20 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
       unrelated_child = "agent:#{unrelated}:1"
 
       RunStore.start_run(%{agent_id: child, parent_session_id: root, role: "agent", task: "t"})
-      RunStore.start_run(%{agent_id: grandchild, parent_session_id: child, role: "agent", task: "t"})
-      RunStore.start_run(%{agent_id: unrelated_child, parent_session_id: unrelated, role: "agent", task: "t"})
+
+      RunStore.start_run(%{
+        agent_id: grandchild,
+        parent_session_id: child,
+        role: "agent",
+        task: "t"
+      })
+
+      RunStore.start_run(%{
+        agent_id: unrelated_child,
+        parent_session_id: unrelated,
+        role: "agent",
+        task: "t"
+      })
 
       descendants = Loop.descendant_session_ids(root)
 
@@ -70,7 +82,13 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
       grandchild = "agent:#{child}:1"
 
       RunStore.start_run(%{agent_id: child, parent_session_id: root, role: "agent", task: "t"})
-      RunStore.start_run(%{agent_id: grandchild, parent_session_id: child, role: "agent", task: "t"})
+
+      RunStore.start_run(%{
+        agent_id: grandchild,
+        parent_session_id: child,
+        role: "agent",
+        task: "t"
+      })
 
       Loop.cancel(root)
 

@@ -422,7 +422,7 @@ impl ConfigEditor {
             let spans = vec![
                 Span::styled(format!("{} ", cursor_char), label_style),
                 Span::styled(
-                    format!("{:<width$}", row.field.label(), width = label_w),
+                    crate::util::pad_cols(row.field.label(), label_w),
                     label_style,
                 ),
                 Span::styled(value_text, value_style),

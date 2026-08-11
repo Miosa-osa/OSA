@@ -332,9 +332,14 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     pinned = is_map(stored) && Map.get(stored, "base_url")
 
     cond do
-      is_binary(pinned) and pinned != "" -> pinned
-      is_map(entry) and is_binary(get_in(entry, [:subscription, :base_url])) -> entry.subscription.base_url
-      true -> entry && entry.base_url
+      is_binary(pinned) and pinned != "" ->
+        pinned
+
+      is_map(entry) and is_binary(get_in(entry, [:subscription, :base_url])) ->
+        entry.subscription.base_url
+
+      true ->
+        entry && entry.base_url
     end
   end
 

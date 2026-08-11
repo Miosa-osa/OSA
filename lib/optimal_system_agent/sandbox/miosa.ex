@@ -254,7 +254,8 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
     Logger.info("[Sandbox.MIOSA] exec: #{String.slice(command, 0, 80)}")
     secs = div(timeout, 1000)
 
-    case request(:post, "/sandboxes/#{id}/exec", key, json: %{command: command, timeout: secs},
+    case request(:post, "/sandboxes/#{id}/exec", key,
+           json: %{command: command, timeout: secs},
            receive_timeout: timeout + 5_000
          ) do
       {:ok, %{"stdout" => out} = b} -> {:ok, out <> (b["stderr"] || "")}

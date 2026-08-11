@@ -211,10 +211,22 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoaderTest do
       )
 
       # repo-scope copy (at root/.osa/skills, an ancestor of cwd)
-      write_skill(root, ".osa", "dup-skill", "name: dup-skill\ndescription: from-repo", "repo body")
+      write_skill(
+        root,
+        ".osa",
+        "dup-skill",
+        "name: dup-skill\ndescription: from-repo",
+        "repo body"
+      )
 
       # local-scope copy (at cwd/.osa/skills)
-      write_skill(cwd, ".osa", "dup-skill", "name: dup-skill\ndescription: from-local", "local body")
+      write_skill(
+        cwd,
+        ".osa",
+        "dup-skill",
+        "name: dup-skill\ndescription: from-local",
+        "local body"
+      )
 
       skills = SkillLoader.load_skills(cwd: cwd)
       entry = skills["dup-skill"]

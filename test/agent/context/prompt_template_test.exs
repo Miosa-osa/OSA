@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Agent.Context.PromptTemplateTest do
   describe "PromptTemplate.render/2,3 — variable substitution" do
     test "injects the live tool name for a present tool" do
       tools = %{"read" => "read_file"}
+
       assert PromptTemplate.render("Use ${{ tools.read }} to read.", tools) ==
                "Use read_file to read."
     end

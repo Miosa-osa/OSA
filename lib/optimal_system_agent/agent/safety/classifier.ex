@@ -140,7 +140,9 @@ defmodule OptimalSystemAgent.Agent.Safety.Classifier do
   defp reason_for(:secret_exfiltration, label),
     do: "possible secret exfiltration detected (#{label})"
 
-  defp reason_for(:mass_delete, label), do: "mass-deletion / destructive operation detected (#{label})"
+  defp reason_for(:mass_delete, label),
+    do: "mass-deletion / destructive operation detected (#{label})"
+
   defp reason_for(:untrusted_network, label), do: "network call to #{label}"
 
   defp reason_for(:prompt_injection_driven, label),

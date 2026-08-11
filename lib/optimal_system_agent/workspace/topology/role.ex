@@ -99,7 +99,10 @@ defmodule OptimalSystemAgent.Workspace.Topology.Role do
     {language, framework, declared_name, manifest_ev} = from_manifest(dir, manifest)
 
     evidence =
-      Enum.reject([manifest && elem(manifest, 0), infra && elem(infra, 1)] ++ manifest_ev, &is_nil/1)
+      Enum.reject(
+        [manifest && elem(manifest, 0), infra && elem(infra, 1)] ++ manifest_ev,
+        &is_nil/1
+      )
 
     role =
       cond do

@@ -6,7 +6,10 @@ defmodule OptimalSystemAgent.ContextRefs.Resolvers.Diff do
     case OptimalSystemAgent.Git.cmd(["diff"], stderr_to_stdout: true) do
       {output, 0} ->
         truncated = String.slice(output, 0, budget)
-        content = if truncated == "", do: "[No unstaged changes]", else: "```diff\n#{truncated}\n```"
+
+        content =
+          if truncated == "", do: "[No unstaged changes]", else: "```diff\n#{truncated}\n```"
+
         {:ok, %{type: :diff, source: "@diff", content: content}}
 
       {err, _} ->

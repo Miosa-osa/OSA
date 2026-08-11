@@ -372,7 +372,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       cost = budget[:monthly_spent] || budget[:total_cost_usd] || 0
 
       IO.puts(
-        "  #{@dim}Cost:#{@reset}      $#{fmt_usd(cost)} #{@dim}(month, OSA-measured)#{@reset}"
+        "  #{@dim}Cost:#{@reset}      $#{fmt_usd(cost)} " <>
+          "#{@dim}(#{cost_period_label(budget)}, OSA-measured)#{@reset}"
       )
     rescue
       _ -> :ok
@@ -408,12 +409,19 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       budget = unwrap_budget(Budget.get_status())
       total = budget[:monthly_spent] || budget[:total_cost_usd] || 0
       tokens = budget[:monthly_tokens] || 0
-      sessions = budget[:ledger_entries] || budget[:sessions] || 0
+      # `ledger_entries` is the size of a list capped at 10 000, so it stopped
+      # being a call count at 10 000. `monthly_calls` is the real counter.
+      calls = budget[:monthly_calls] || budget[:ledger_entries] || budget[:sessions] || 0
 
-      IO.puts("  #{@dim}├─ Tokens:#{@reset}   #{format_tokens(tokens)} tokens this month")
+      # The ledger is in-memory only — nothing is loaded at boot and nothing is
+      # saved at shutdown — so "this month" is a claim it cannot support. Label
+      # the period by what it actually covers.
+      period = cost_period_label(budget)
+
+      IO.puts("  #{@dim}├─ Tokens:#{@reset}   #{format_tokens(tokens)} tokens #{period}")
       IO.puts("  #{@dim}├─ Today:#{@reset}    $#{fmt_usd(budget[:daily_spent] || 0)}")
-      IO.puts("  #{@dim}├─ Calls:#{@reset}    #{sessions}")
-      IO.puts("  #{@dim}└─ Month:#{@reset}    $#{fmt_usd(total)}")
+      IO.puts("  #{@dim}├─ Calls:#{@reset}    #{calls}")
+      IO.puts("  #{@dim}└─ Total:#{@reset}    $#{fmt_usd(total)} #{@dim}(#{period})#{@reset}")
 
       IO.puts("")
 
@@ -439,6 +447,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n / 1, decimals: 4)
   defp fmt_usd(_), do: "0.0000"
+
+  # What period the ledger's totals actually cover. `Budget` keeps its counters
+  # in memory only — `init/1` starts them at zero, there is no load and no save
+  # on shutdown — so "this month" would be a lie on any run started after the
+  # 1st, and badly wrong right after a restart. Say what is true instead.
+  defp cost_period_label(%{persisted: false, counting_since: %DateTime{} = since}) do
+    "since #{Calendar.strftime(since, "%Y-%m-%d %H:%M")}"
+  end
+
+  defp cost_period_label(%{persisted: true}), do: "this month"
+  defp cost_period_label(_), do: "this session"
 
   @doc """
   `/usage` — the provider's report on your account, and OSA's own measurement,
@@ -752,12 +771,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     skills = ToolsRegistry.list_skills()
 
-    skills_dir =
-      Path.expand(Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills"))
-
-    disabled? = fn name ->
-      File.exists?(Path.join([skills_dir, to_string(name), ".disabled"]))
-    end
+    # Canonical marker location (beside the skill's own SKILL.md) — the flat
+    # `<skills_dir>/<name>/.disabled` guess this used to make was wrong for
+    # every nested, renamed or non-user-scope skill.
+    disabled? = &OptimalSystemAgent.Tools.Registry.SkillLoader.disabled?/1
 
     if length(skills) > 0 do
       Enum.each(skills, fn skill ->
@@ -767,14 +784,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         padded = String.pad_trailing(name, 22)
 
         {status, color} =
-          if disabled?.(name), do: {"disabled", @yellow}, else: {"active", @green}
+          if disabled?.(skill), do: {"disabled", @yellow}, else: {"active", @green}
 
         IO.puts(
           "  #{@cyan}#{padded}#{@reset} #{color}[#{status}]#{@reset} #{@dim}#{truncated}#{@reset}"
         )
       end)
 
-      disabled_count = Enum.count(skills, fn s -> disabled?.(s[:name] || "?") end)
+      disabled_count = Enum.count(skills, disabled?)
       active_count = length(skills) - disabled_count
 
       IO.puts("")

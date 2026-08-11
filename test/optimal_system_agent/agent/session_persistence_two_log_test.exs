@@ -98,7 +98,9 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
 
   describe "Jsonl.read/1 corruption tolerance" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "osa_jsonl_c_#{System.unique_integer([:positive])}.jsonl")
+      tmp =
+        Path.join(System.tmp_dir!(), "osa_jsonl_c_#{System.unique_integer([:positive])}.jsonl")
+
       on_exit(fn -> Enum.each([tmp, tmp <> ".corrupt"], &File.rm/1) end)
       {:ok, tmp: tmp}
     end
@@ -138,7 +140,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
 
     test "a growing conversation only appends the new tail (no dup of prior turns)", %{id: id} do
       SessionPersistence.save(id, [%{role: "user", content: "q1"}])
-      SessionPersistence.save(id, [%{role: "user", content: "q1"}, %{role: "assistant", content: "a1"}])
+
+      SessionPersistence.save(id, [
+        %{role: "user", content: "q1"},
+        %{role: "assistant", content: "a1"}
+      ])
 
       SessionPersistence.save(id, [
         %{role: "user", content: "q1"},

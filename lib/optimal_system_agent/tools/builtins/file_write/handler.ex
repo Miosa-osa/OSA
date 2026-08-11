@@ -260,5 +260,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
       end
     end
   end
-
 end

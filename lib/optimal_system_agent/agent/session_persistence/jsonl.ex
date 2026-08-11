@@ -191,8 +191,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence.Jsonl do
 
     unless File.exists?(q) do
       case File.cp(path, q) do
-        :ok -> :ok
-        {:error, reason} -> Logger.warning("[session_persist] quarantine copy failed: #{inspect(reason)}")
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("[session_persist] quarantine copy failed: #{inspect(reason)}")
       end
     end
 

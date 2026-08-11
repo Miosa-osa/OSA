@@ -6,7 +6,10 @@ defmodule OptimalSystemAgent.ContextRefs.Resolvers.Staged do
     case OptimalSystemAgent.Git.cmd(["diff", "--cached"], stderr_to_stdout: true) do
       {output, 0} ->
         truncated = String.slice(output, 0, budget)
-        content = if truncated == "", do: "[No staged changes]", else: "```diff\n#{truncated}\n```"
+
+        content =
+          if truncated == "", do: "[No staged changes]", else: "```diff\n#{truncated}\n```"
+
         {:ok, %{type: :staged, source: "@staged", content: content}}
 
       {err, _} ->

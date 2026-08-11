@@ -41,7 +41,11 @@ defmodule OptimalSystemAgent.Auth.OllamaAccountTest do
 
     on_exit(fn ->
       if prev_home, do: System.put_env("OSA_HOME", prev_home), else: System.delete_env("OSA_HOME")
-      if prev_host, do: System.put_env("OLLAMA_HOST", prev_host), else: System.delete_env("OLLAMA_HOST")
+
+      if prev_host,
+        do: System.put_env("OLLAMA_HOST", prev_host),
+        else: System.delete_env("OLLAMA_HOST")
+
       File.rm_rf(dir)
     end)
 
@@ -56,7 +60,13 @@ defmodule OptimalSystemAgent.Auth.OllamaAccountTest do
 
   defp daemon(status, body) do
     {:ok, lsock} =
-      :gen_tcp.listen(0, [:binary, active: false, packet: :raw, reuseaddr: true, ip: {127, 0, 0, 1}])
+      :gen_tcp.listen(0, [
+        :binary,
+        active: false,
+        packet: :raw,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
 
     {:ok, port} = :inet.port(lsock)
     test = self()
@@ -96,7 +106,7 @@ defmodule OptimalSystemAgent.Auth.OllamaAccountTest do
 
   # A port nothing is listening on: bind, learn the number, release it.
   defp dead_port do
-    {:ok, s} = :gen_tcp.listen(0, [ip: {127, 0, 0, 1}])
+    {:ok, s} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
     {:ok, port} = :inet.port(s)
     :gen_tcp.close(s)
     port
@@ -127,7 +137,8 @@ defmodule OptimalSystemAgent.Auth.OllamaAccountTest do
       # owns the machine's Ed25519 key and signs its own cloud requests. A
       # regression that started holding one here would have quietly turned a
       # proxy into a credential store.
-      for forbidden <- ~w(access_token refresh_token id_token client_id token code_verifier api_key) do
+      for forbidden <-
+            ~w(access_token refresh_token id_token client_id token code_verifier api_key) do
         refute Map.has_key?(stored, forbidden),
                "the Ollama account mode must never store #{forbidden} — the daemon owns the credential"
       end
@@ -375,7 +386,8 @@ defmodule OptimalSystemAgent.Auth.OllamaAccountTest do
     test "a signed-in daemon offering nothing shows nothing, rather than the full catalog" do
       port = daemon(200, ~s({"models":[]}))
 
-      assert {:ok, []} = Onboarding.model_list("ollama_cloud", base_url: "http://127.0.0.1:#{port}")
+      assert {:ok, []} =
+               Onboarding.model_list("ollama_cloud", base_url: "http://127.0.0.1:#{port}")
     end
 
     test "an unreachable daemon falls back to the catalog — not knowing is not the same as empty" do

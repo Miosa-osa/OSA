@@ -57,6 +57,45 @@ pub fn cols(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
+/// Spaces needed to pad `s` out to `width` DISPLAY COLUMNS.
+///
+/// **Use this, never `width - s.chars().count()` and never `width - s.len()`.**
+/// A pad computed from a char count leaves a wide glyph occupying two columns
+/// where one was reserved, so everything to its right is pushed over and the
+/// trailing badge/timestamp falls off the pane; a pad computed from bytes
+/// over-counts non-ASCII and collapses the column instead.
+pub fn pad_width(s: &str, width: usize) -> usize {
+    width.saturating_sub(cols(s))
+}
+
+/// Fit `s` to `width` DISPLAY COLUMNS and right-pad it with spaces so the result
+/// occupies exactly `width` columns — the left-aligned column primitive.
+pub fn pad_cols(s: &str, width: usize) -> String {
+    let t = fit_cols(s, width);
+    let pad = pad_width(&t, width);
+    if pad == 0 {
+        return t;
+    }
+    let mut out = String::with_capacity(t.len() + pad);
+    out.push_str(&t);
+    out.push_str(&" ".repeat(pad));
+    out
+}
+
+/// Fit `s` to `width` DISPLAY COLUMNS and LEFT-pad it with spaces — the
+/// right-aligned column primitive (tags, counts, timestamps).
+pub fn pad_cols_start(s: &str, width: usize) -> String {
+    let t = fit_cols(s, width);
+    let pad = pad_width(&t, width);
+    if pad == 0 {
+        return t;
+    }
+    let mut out = String::with_capacity(t.len() + pad);
+    out.push_str(&" ".repeat(pad));
+    out.push_str(&t);
+    out
+}
+
 /// Strip the inline-markdown emphasis markers the model routinely writes into
 /// short backend-supplied strings (todo subjects, task titles) that are rendered
 /// as PLAIN styled spans rather than through the markdown renderer — otherwise a

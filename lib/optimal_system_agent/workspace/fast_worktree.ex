@@ -106,8 +106,17 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
 
       File.exists?(path) ->
         # Idempotency: reclaim a stale worktree left at this path.
-        _ = fast_remove(path, repo_dir)
-        do_create(safe_id, branch, path, repo_dir, ref, opts)
+        #
+        # `path` is DETERMINISTIC per id, so "stale" is frequently not stale at
+        # all: a retry, or a RESUME of the same subagent id, lands on the tree
+        # the previous run left behind — uncommitted work and all. Removing it
+        # unconditionally (rm -rf + `branch -D`) is unrecoverable. `reclaim/3`
+        # captures a dirty tree in a durable ref first and only removes once
+        # that ref actually persisted.
+        case reclaim(path, repo_dir, opts) do
+          :ok -> do_create(safe_id, branch, path, repo_dir, ref, opts)
+          {:error, _} = err -> err
+        end
 
       true ->
         do_create(safe_id, branch, path, repo_dir, ref, opts)
@@ -375,10 +384,24 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
 
   With `stale_only: false`, **all** managed worktrees are reclaimed (hard reset).
   Returns `{:ok, %{removed: [path], kept: [path]}}`.
+
+  ## Dirty worktrees are never swept
+
+  "Orphan" here means *a previous VM booted this sidecar*, which is NOT the same
+  as *nobody wants this tree*. `teardown/2` deliberately PRESERVES a dirty
+  worktree so the parent can review or apply it, and those preserved trees keep
+  their sidecar — so an unguarded sweep would delete exactly the work teardown
+  went out of its way to save. A worktree with uncommitted changes is therefore
+  reported in `kept` and left on disk, whatever `stale_only` says. Pass
+  `force: true` for the true hard reset that removes dirty trees too.
+
+  This function has no caller in `lib/` today; the gate exists so wiring it up
+  later cannot silently destroy uncommitted work.
   """
   @spec sweep(keyword()) :: {:ok, %{removed: [String.t()], kept: [String.t()]}}
   def sweep(opts \\ []) do
     stale_only = Keyword.get(opts, :stale_only, true)
+    force = Keyword.get(opts, :force, false)
     current = Metadata.boot_token()
     default_repo = Path.expand(opts[:repo_dir] || Cwd.get())
 
@@ -396,14 +419,27 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
             true -> false
           end
 
-        if orphan? do
-          repo = rec["repo_dir"] || default_repo
-          if is_binary(wt_path), do: fast_remove(wt_path, repo, rec["branch"])
-          Metadata.delete(worktrees_dir(), rec["id"])
-          Logger.info("[fast_worktree] swept orphan worktree #{wt_path}")
-          {[wt_path | rm], kp}
-        else
-          {rm, [wt_path | kp]}
+        dirty? =
+          is_binary(wt_path) and File.dir?(wt_path) and worktree_has_changes?(wt_path)
+
+        cond do
+          orphan? and dirty? and not force ->
+            Logger.warning(
+              "[fast_worktree] sweep: keeping orphan worktree #{wt_path} — it has " <>
+                "uncommitted changes (pass force: true to remove anyway)"
+            )
+
+            {rm, [wt_path | kp]}
+
+          orphan? ->
+            repo = rec["repo_dir"] || default_repo
+            if is_binary(wt_path), do: fast_remove(wt_path, repo, rec["branch"])
+            Metadata.delete(worktrees_dir(), rec["id"])
+            Logger.info("[fast_worktree] swept orphan worktree #{wt_path}")
+            {[wt_path | rm], kp}
+
+          true ->
+            {rm, [wt_path | kp]}
         end
       end)
 
@@ -421,6 +457,48 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
   end
 
   # ── Private ────────────────────────────────────────────────────────────
+
+  # Reclaim a worktree directory already sitting at the deterministic path.
+  #
+  # A CLEAN tree has nothing to lose and is removed directly. A DIRTY tree is
+  # snapshotted into a durable ref FIRST, and only a ref that actually persisted
+  # licenses the removal — the same gate grok applies via
+  # `update_subagent_meta_snapshot_ref`'s boolean return. When the snapshot
+  # cannot be written, creation FAILS rather than destroying uncommitted work;
+  # the caller falls back to running without isolation, which is recoverable.
+  #
+  # `reclaim: :force` opts out for callers that genuinely mean "nuke it".
+  defp reclaim(path, repo_dir, opts) do
+    cond do
+      opts[:reclaim] == :force ->
+        _ = fast_remove(path, repo_dir)
+        :ok
+
+      not worktree_has_changes?(path) ->
+        _ = fast_remove(path, repo_dir)
+        :ok
+
+      true ->
+        case snapshot_ref(path, repo_dir: repo_dir, id: Path.basename(path)) do
+          {:ok, ref} ->
+            Logger.warning(
+              "[fast_worktree] reclaiming dirty worktree #{path} — uncommitted state " <>
+                "preserved at #{ref}"
+            )
+
+            _ = fast_remove(path, repo_dir)
+            :ok
+
+          {:error, reason} ->
+            Logger.error(
+              "[fast_worktree] refusing to reclaim dirty worktree #{path}: snapshot failed " <>
+                "(#{inspect(reason)}) — uncommitted work would be lost"
+            )
+
+            {:error, {:dirty_worktree_not_snapshotted, path, reason}}
+        end
+    end
+  end
 
   # O(1)-ish removal: bulk rm then deregister, instead of git worktree remove
   # walking every file. Reads the branch first (needs the worktree to exist);

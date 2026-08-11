@@ -46,7 +46,8 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
 
   defp unique, do: System.unique_integer([:positive, :monotonic])
 
-  defp enable_interactive, do: Application.put_env(:optimal_system_agent, :interactive_permissions, true)
+  defp enable_interactive,
+    do: Application.put_env(:optimal_system_agent, :interactive_permissions, true)
 
   # ── permission_mode gating ──────────────────────────────────────────
 
@@ -113,7 +114,9 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
     test ":accept_edits still defers non-edit mutating tools to tier/ask" do
       # interactive OFF → tier (:full) decision stands → allow
       s = state(permission_mode: :accept_edits)
-      assert :allow = ToolExecutor.approve_tool_call(tool("shell_execute", %{"command" => "ls"}), s)
+
+      assert :allow =
+               ToolExecutor.approve_tool_call(tool("shell_execute", %{"command" => "ls"}), s)
 
       # interactive ON → a non-edit mutating tool must ask, not silently run
       enable_interactive()
@@ -195,9 +198,11 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
 
       task = Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000) end)
       Process.sleep(50)
+
       PermissionBroker.respond(rid, %{"decision" => "clarify", "note" => "use a temp dir instead"})
 
-      assert {:ok, %{decision: :clarify, note: "use a temp dir instead"}} = Task.await(task, 6_000)
+      assert {:ok, %{decision: :clarify, note: "use a temp dir instead"}} =
+               Task.await(task, 6_000)
     end
 
     test "session-scoped allow is remembered" do
@@ -221,7 +226,10 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
     test ":deny_always persists a reusable deny rule and blocks" do
       name = "probe_#{unique()}"
       s = state()
-      assert {:blocked, _} = ToolExecutor.apply_permission_decision(:deny_always, nil, tool(name), s)
+
+      assert {:blocked, _} =
+               ToolExecutor.apply_permission_decision(:deny_always, nil, tool(name), s)
+
       assert Permissions.check(name) == :deny
     end
 

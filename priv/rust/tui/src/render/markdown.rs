@@ -687,7 +687,40 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         )));
     }
 
-    result
+    // ── Every row OWNS every column of the region ────────────────────────────
+    //
+    // `allocate_col_widths` returns the natural widths unchanged when the table
+    // fits, so a table narrower than the pane emits lines of
+    // `chrome + sum(col_widths)` columns and simply stops — the columns to its
+    // right are never written.
+    //
+    // That is not merely cosmetic, and it is PERMANENT. When the terminal
+    // renders a glyph wider than `unicode-width` claims (an emoji-presentation
+    // `U+FE0F` sequence, or an ambiguous-width CJK codepoint under a non-CJK
+    // locale), the row physically occupies more columns than were reserved, the
+    // overhang wraps onto the next line, and every row after it shears down by
+    // one. OSA hands finalized content to the terminal's own scrollback via
+    // `insert_before`, so a sheared row can NEVER be repainted.
+    //
+    // Padding each line out to the full region width makes the row own the
+    // whole span: an overhang then lands on space this row already owns.
+    pad_lines_to_width(result, width as usize)
+}
+
+/// Pad every line out to exactly `width` display columns, so each rendered row
+/// owns every column of its region. See the note at the end of [`render_table`]
+/// for why a row that does not own its full width can corrupt the scrollback.
+fn pad_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut l| {
+            let w: usize = l.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+            if w < width {
+                l.spans.push(Span::raw(" ".repeat(width - w)));
+            }
+            l
+        })
+        .collect()
 }
 
 /// One horizontal grid line: `left`, a `─` run per column (plus the one column
@@ -983,19 +1016,62 @@ fn visible_width(s: &str) -> usize {
     crate::util::cols(&strip_escapes(s))
 }
 
-/// Strip OSC-8 escape wrappers (`ESC … ST`) from `s`, leaving visible text.
+/// Strip ANSI escape wrappers from `s`, leaving visible text.
+///
+/// **This used to delete the remainder of the string.** It scanned forward from
+/// `\x1b` for a `\` (the second byte of an ST terminator) and nothing else, so an
+/// SGR sequence — `\x1b[0m`, which contains no `\` — drained the iterator and
+/// dropped everything after it. Consumers are [`visible_width`] (which sizes
+/// table columns) and `inline_plain` (which produces rendered text), so a single
+/// stray SGR would have silently truncated a cell AND mis-sized its column.
+///
+/// It was LATENT rather than live: `render()` scrubs `\x1b` out of its input via
+/// `render/sanitize.rs` before anything reaches here, so no input could actually
+/// carry an escape this far. Fixed anyway — the scrubber is a separate module
+/// and nothing pins the ordering.
+///
+/// Terminating an escape correctly needs the INTRODUCER, because CSI and OSC end
+/// differently: a CSI ends at its final byte (`@`-`~`), while an OSC payload is
+/// arbitrary text (a URL, in OSC-8) that ends only at BEL or ST.
 fn strip_escapes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            for n in chars.by_ref() {
-                if n == '\\' {
-                    break;
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // OSC: ESC ] … (BEL | ESC \). The payload may contain anything.
+            Some(']') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '\x07' {
+                        break;
+                    }
+                    if n == '\x1b' {
+                        // ST is ESC \ — consume the backslash too.
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
                 }
             }
-        } else {
-            out.push(c);
+            // CSI: ESC [ <params 0x30-0x3F> <intermediates 0x20-0x2F> <final 0x40-0x7E>.
+            Some('[') => {
+                chars.next();
+                for n in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // Two-character escape (ESC M, ESC 7, …).
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
         }
     }
     out
@@ -1948,5 +2024,132 @@ mod tests {
         for word in ["one", "two", "three"] {
             assert!(joined.contains(word), "lost {word:?}: {l:?}");
         }
+    }
+
+    // ── Row ownership: a rendered row must own EVERY column of its region ────
+    //
+    // `allocate_col_widths` returns the natural widths unchanged when the table
+    // fits, so a table narrower than the pane emitted lines of
+    // `chrome + sum(col_widths)` columns and simply stopped — the columns to its
+    // right were never written.
+    //
+    // That is not cosmetic and it is PERMANENT. When the terminal renders a glyph
+    // wider than `unicode-width` claims (emoji-presentation `U+FE0F`, or
+    // ambiguous-width CJK under a non-CJK locale) the row physically occupies
+    // more columns than were reserved, the overhang wraps, and every row below
+    // shears down by one. OSA hands finalized content to the terminal's own
+    // scrollback via `insert_before`, so a sheared row can never be repainted.
+    //
+    // The existing invariants nearby check adjacent properties and cannot see
+    // this: `layout_invariants.rs` asserts rows equal EACH OTHER, and separately
+    // that there is no ink BELOW the reserved rows. Neither asserts that every
+    // column WITHIN a row was written.
+
+    fn line_cols(l: &ratatui::text::Line<'_>) -> usize {
+        l.spans.iter().map(|s| crate::util::cols(&s.content)).sum()
+    }
+
+    fn rows_of(src: &str) -> Vec<String> {
+        src.lines().map(|s| s.to_string()).collect()
+    }
+
+    const NARROW_TABLE: &str = "| a | b |\n|---|---|\n| 1 | 2 |";
+    const WIDE_GLYPH_TABLE: &str =
+        "| name | note |\n|------|------|\n| \u{65e5}\u{672c}\u{8a9e} | ok |\n| \u{1f389} | done |\n| plain | \u{2714}\u{fe0f} |";
+
+    #[test]
+    fn a_table_narrower_than_the_pane_still_owns_every_column() {
+        let theme = crate::style::theme();
+        for width in [40u16, 60, 80, 120] {
+            for (i, l) in super::render_table(&rows_of(NARROW_TABLE), width, &theme)
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    line_cols(l),
+                    width as usize,
+                    "row {i} of a {width}-column region owns only {} columns — the \
+                     unwritten tail is where a wider-than-declared glyph wraps and \
+                     shears every row below it, permanently",
+                    line_cols(l)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_table_of_wide_glyphs_owns_every_column() {
+        let theme = crate::style::theme();
+        for width in [30u16, 48, 80] {
+            for (i, l) in super::render_table(&rows_of(WIDE_GLYPH_TABLE), width, &theme)
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    line_cols(l),
+                    width as usize,
+                    "row {i} of a {width}-column region owns {} columns",
+                    line_cols(l)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_table_row_ever_exceeds_its_region() {
+        let theme = crate::style::theme();
+        for src in [NARROW_TABLE, WIDE_GLYPH_TABLE] {
+            for width in 20u16..90 {
+                for l in super::render_table(&rows_of(src), width, &theme) {
+                    assert!(
+                        line_cols(&l) <= width as usize,
+                        "a row overhung its {width}-column region by {} columns",
+                        line_cols(&l) - width as usize
+                    );
+                }
+            }
+        }
+    }
+
+    // ── The escape stripper that used to eat the rest of the string ──────────
+
+    /// `strip_escapes` scanned forward from `\x1b` for a `\` and nothing else, so
+    /// an SGR sequence (which contains no `\`) drained the iterator and DELETED
+    /// the remainder of the string. Consumers are `visible_width` (sizes table
+    /// columns) and `inline_plain` (produces rendered text).
+    ///
+    /// LATENT, not live: `render_markdown` scrubs `\x1b` via `render/sanitize.rs`
+    /// before anything reaches here. Pinned anyway — the scrubber is a separate
+    /// module and nothing enforces the ordering.
+    #[test]
+    fn an_sgr_sequence_does_not_swallow_the_rest_of_the_line() {
+        let w = super::visible_width("a\x1b[0mbcdef");
+        assert_eq!(
+            w, 6,
+            "an SGR sequence swallowed the tail: measured {w} columns instead of 6"
+        );
+    }
+
+    #[test]
+    fn a_bare_sgr_reset_leaves_the_following_text_intact() {
+        assert_eq!(super::strip_escapes("keep\x1b[0mthis"), "keepthis");
+    }
+
+    #[test]
+    fn an_osc8_hyperlink_still_measures_only_its_label() {
+        let s = "\x1b]8;;https://example.com/very/long\x07click\x1b]8;;\x07";
+        assert_eq!(super::visible_width(s), 5);
+    }
+
+    #[test]
+    fn an_st_terminated_osc_still_measures_only_its_label() {
+        let s = "\x1b]8;;https://example.com\x1b\\label\x1b]8;;\x1b\\";
+        assert_eq!(super::visible_width(s), 5);
+    }
+
+    #[test]
+    fn escape_stripping_leaves_plain_text_alone() {
+        assert_eq!(super::visible_width("hello"), 5);
+        assert_eq!(super::visible_width("\u{65e5}\u{672c}\u{8a9e}"), 6);
     }
 }

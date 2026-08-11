@@ -29,7 +29,9 @@ defmodule OptimalSystemAgent.Swarm.PatternsParallelTest do
 
     # THE assertion: the timed-out slot must not be an success-shaped result, and
     # must carry no fabricated output text.
-    refute match?({:ok, _}, timed_out), "a timeout was laundered into success: #{inspect(results)}"
+    refute match?({:ok, _}, timed_out),
+           "a timeout was laundered into success: #{inspect(results)}"
+
     assert timed_out == {:error, :timeout}
 
     # Nothing anywhere in the results invents work for the killed agent.

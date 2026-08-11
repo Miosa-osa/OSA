@@ -112,7 +112,12 @@ defmodule OptimalSystemAgent.Auth.ForceRefreshTest do
       seed("minimax", "rejected")
       refute MiniMax.needs_refresh?(SubscriptionStore.fetch("minimax"))
 
-      stub(200, %{"status" => "success", "access_token" => "renewed", "refresh_token" => "rt-new", "expired_in" => 3600})
+      stub(200, %{
+        "status" => "success",
+        "access_token" => "renewed",
+        "refresh_token" => "rt-new",
+        "expired_in" => 3600
+      })
 
       assert {:ok, "renewed"} = MiniMax.force_refresh("rejected")
       assert SubscriptionStore.fetch("minimax")["access_token"] == "renewed"

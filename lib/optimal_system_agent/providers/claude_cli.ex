@@ -116,8 +116,11 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
   @spec chat(list(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
     case run(messages, opts, nil) do
-      {:ok, %{content: content, tool_calls: calls}} -> {:ok, %{content: content, tool_calls: calls}}
-      {:error, reason} -> {:error, error_message(reason)}
+      {:ok, %{content: content, tool_calls: calls}} ->
+        {:ok, %{content: content, tool_calls: calls}}
+
+      {:error, reason} ->
+        {:error, error_message(reason)}
     end
   end
 
@@ -674,7 +677,8 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
         "You can also use the `anthropic` provider with an API key."
 
   def error_message(:no_shell),
-    do: "OSA could not find a POSIX shell to launch Claude Code with. This is a broken environment."
+    do:
+      "OSA could not find a POSIX shell to launch Claude Code with. This is a broken environment."
 
   def error_message(:timeout),
     do:

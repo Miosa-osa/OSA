@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
 
   require Logger
 
+  alias OptimalSystemAgent.Skills.Frontmatter
   alias OptimalSystemAgent.Tools.Registry.SkillTouch
 
   @frontmatter_max_bytes 4_096
@@ -106,6 +107,77 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
   end
 
   def surfaced?(_entry, _touched), do: true
+
+  @doc """
+  Canonical "is this skill switched off?" check — the ONE definition.
+
+  The marker is a `.disabled` file **next to the skill's own SKILL.md**, so it
+  works for every skill discovery can see: nested under a category directory,
+  named differently from its directory, or living in any scope (local, repo,
+  user, bundled).
+
+  Callers used to compute `<skills_dir>/<frontmatter-name>/.disabled` instead —
+  a flat path in ONE root. That made every bundled `priv/skills` skill and
+  every project-scoped `.claude/skills` skill undisableable by construction,
+  and it disagreed with `osa doctor`, which already used the path below.
+  """
+  @spec disabled?(map() | String.t() | nil) :: boolean()
+  def disabled?(%{path: path}), do: disabled?(path)
+  def disabled?(entry) when is_map(entry), do: disabled?(Map.get(entry, "path"))
+
+  def disabled?(path) when is_binary(path) and path != "" do
+    dir = if File.dir?(path), do: path, else: Path.dirname(path)
+    File.exists?(Path.join(dir, ".disabled"))
+  rescue
+    _ -> false
+  end
+
+  def disabled?(_), do: false
+
+  @doc """
+  Drop every disabled skill from a list or `name => entry` map.
+
+  Returns the same shape it was given.
+  """
+  @spec reject_disabled(%{optional(String.t()) => map()} | [map()]) ::
+          %{optional(String.t()) => map()} | [map()]
+  def reject_disabled(skills) when is_map(skills) do
+    skills |> Enum.reject(fn {_name, entry} -> disabled?(entry) end) |> Map.new()
+  end
+
+  def reject_disabled(skills) when is_list(skills), do: Enum.reject(skills, &disabled?/1)
+
+  @doc """
+  Absolute roots skills are discovered from, for the given cwd.
+
+  Exposed so invoke-time containment checks test against the SAME set of
+  directories discovery used, rather than re-hardcoding one of them.
+  """
+  @spec roots(String.t() | nil) :: [String.t()]
+  def roots(cwd \\ nil) do
+    (cwd || cwd_default())
+    |> scope_roots()
+    |> dedupe_roots()
+    |> Enum.map(fn {_scope, path} -> path end)
+  end
+
+  @doc """
+  True when `path` lies inside one of the skill discovery roots.
+
+  Compares on path BOUNDARIES: a plain `String.starts_with?` would accept
+  `~/.osa/skills-backup/evil/SKILL.md` for the root `~/.osa/skills`.
+  """
+  @spec within_roots?(String.t(), String.t() | nil) :: boolean()
+  def within_roots?(path, cwd \\ nil) when is_binary(path) do
+    expanded = Path.expand(path)
+
+    Enum.any?(roots(cwd), fn root ->
+      root = Path.expand(root)
+      expanded == root or String.starts_with?(expanded, root <> "/")
+    end)
+  rescue
+    _ -> false
+  end
 
   @doc "Match a path against a gitignore-style glob (`**`, `*`, `?`)."
   @spec path_matches_glob?(String.t(), String.t()) :: boolean()
@@ -324,16 +396,11 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
 
   # Parse only the frontmatter block. If the closing `---` is not within the
   # bounded window (or YAML is invalid) return :error so the caller falls back.
+  # Delegates to the ONE frontmatter parser so BOM tolerance is not re-derived.
   defp parse_frontmatter(data) do
-    case String.split(data, "---", parts: 3) do
-      ["", frontmatter, _rest] ->
-        case YamlElixir.read_from_string(frontmatter) do
-          {:ok, meta} when is_map(meta) -> {:ok, meta}
-          _ -> :error
-        end
-
-      _ ->
-        :error
+    case Frontmatter.parse(data) do
+      {:ok, meta, _body} -> {:ok, meta}
+      {:error, _reason} -> :error
     end
   end
 
@@ -368,12 +435,7 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
   end
 
   # Strip YAML frontmatter, returning only the instruction body.
-  defp extract_body(content) do
-    case String.split(content, "---", parts: 3) do
-      ["", _frontmatter, body] -> String.trim(body)
-      _ -> String.trim(content)
-    end
-  end
+  defp extract_body(content), do: Frontmatter.body(content)
 
   # ── Bundled-catalog summaries (priv/skills) ───────────────────────────
 

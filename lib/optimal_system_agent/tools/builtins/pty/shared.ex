@@ -23,7 +23,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.Shared do
   def parse_condition(%{"text" => s}) when is_binary(s), do: {:ok, {:text, s}}
   def parse_condition(%{"regex" => s}) when is_binary(s), do: {:ok, {:regex, s}}
   def parse_condition(%{"gone" => true}), do: {:ok, :gone}
-  def parse_condition(%{"stable_ms" => n}) when is_integer(n) and n >= 0, do: {:ok, {:stable_ms, n}}
+
+  def parse_condition(%{"stable_ms" => n}) when is_integer(n) and n >= 0,
+    do: {:ok, {:stable_ms, n}}
 
   def parse_condition(cond) when is_map(cond),
     do: {:error, "condition must have exactly one of: text, regex, gone, stable_ms"}

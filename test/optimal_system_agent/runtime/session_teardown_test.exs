@@ -67,7 +67,12 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
 
     test "the WorldState ledger is covered — it pins rendered payload text" do
       s = sid()
-      WorldState.assemble(s, [blk(hd(WorldState.managed_labels()), "payload the ledger would otherwise pin")], [])
+
+      WorldState.assemble(
+        s,
+        [blk(hd(WorldState.managed_labels()), "payload the ledger would otherwise pin")],
+        []
+      )
 
       assert :ets.lookup(:osa_world_state_ledger, s) != []
 

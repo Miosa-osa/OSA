@@ -26,7 +26,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
 
     {:ok, id} =
       Checkpoint.create_rewind_checkpoint(
-        %{session_id: session, messages: [%{role: "user", content: "hi"}], iteration: 1, plan_mode: false, turn_count: 1},
+        %{
+          session_id: session,
+          messages: [%{role: "user", content: "hi"}],
+          iteration: 1,
+          plan_mode: false,
+          turn_count: 1
+        },
         fs_head: nil,
         label: "first prompt"
       )
@@ -87,7 +93,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
 
   describe "POST /restore" do
     test "restores conversation", %{session: session, checkpoint_id: id} do
-      conn = post_json("/restore", %{"session_id" => session, "checkpoint_id" => id, "scope" => "conversation"})
+      conn =
+        post_json("/restore", %{
+          "session_id" => session,
+          "checkpoint_id" => id,
+          "scope" => "conversation"
+        })
+
       assert conn.status == 200
       body = decode(conn)
       assert body["scope"] == "conversation"
@@ -95,7 +107,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
     end
 
     test "restores code (unavailable without snapshot)", %{session: session, checkpoint_id: id} do
-      conn = post_json("/restore", %{"session_id" => session, "checkpoint_id" => id, "scope" => "code"})
+      conn =
+        post_json("/restore", %{"session_id" => session, "checkpoint_id" => id, "scope" => "code"})
+
       assert conn.status == 200
       assert decode(conn)["code"]["status"] == "unavailable"
     end
@@ -107,7 +121,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
     end
 
     test "400 on invalid scope", %{session: session, checkpoint_id: id} do
-      conn = post_json("/restore", %{"session_id" => session, "checkpoint_id" => id, "scope" => "bogus"})
+      conn =
+        post_json("/restore", %{
+          "session_id" => session,
+          "checkpoint_id" => id,
+          "scope" => "bogus"
+        })
+
       assert conn.status == 400
       assert decode(conn)["error"] == "invalid_scope"
     end
@@ -118,14 +138,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
     end
 
     test "404 for unknown checkpoint", %{session: session} do
-      conn = post_json("/restore", %{"session_id" => session, "checkpoint_id" => "missing", "scope" => "both"})
+      conn =
+        post_json("/restore", %{
+          "session_id" => session,
+          "checkpoint_id" => "missing",
+          "scope" => "both"
+        })
+
       assert conn.status == 404
     end
   end
 
   describe "POST /to and POST /unrevert" do
-    test "atomically rewinds, returns a diff, and can be undone", %{session: session, checkpoint_id: id} do
-      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => id, "scope" => "conversation"})
+    test "atomically rewinds, returns a diff, and can be undone", %{
+      session: session,
+      checkpoint_id: id
+    } do
+      conn =
+        post_json("/to", %{
+          "session_id" => session,
+          "checkpoint_id" => id,
+          "scope" => "conversation"
+        })
+
       assert conn.status == 200
       body = decode(conn)
       assert body["scope"] == "conversation"
@@ -147,12 +182,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
     end
 
     test "404 for unknown checkpoint on /to", %{session: session} do
-      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => "missing", "scope" => "both"})
+      conn =
+        post_json("/to", %{
+          "session_id" => session,
+          "checkpoint_id" => "missing",
+          "scope" => "both"
+        })
+
       assert conn.status == 404
     end
 
     test "400 on invalid scope for /to", %{session: session, checkpoint_id: id} do
-      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => id, "scope" => "bogus"})
+      conn =
+        post_json("/to", %{"session_id" => session, "checkpoint_id" => id, "scope" => "bogus"})
+
       assert conn.status == 400
     end
 

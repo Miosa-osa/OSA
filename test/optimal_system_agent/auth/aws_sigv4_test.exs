@@ -84,7 +84,11 @@ defmodule OptimalSystemAgent.Auth.AwsSigV4Test do
 
     test "adds host and x-amz-date itself, and keeps them out of the caller's hands" do
       headers =
-        AwsSigV4.sign("GET", "https://example.amazonaws.com/", [{"host", "wrong.example"}], "",
+        AwsSigV4.sign(
+          "GET",
+          "https://example.amazonaws.com/",
+          [{"host", "wrong.example"}],
+          "",
           @creds,
           region: "us-east-1",
           service: "service",

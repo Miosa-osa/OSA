@@ -83,7 +83,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.SpliceFidelityTest do
       content = "    a = 1\n    b = 2\n"
 
       assert {:ok, result, 1, :whitespace} =
-               Matcher.replace(content, "      a = 1\n      b = 2", "      a = 9\n      b = 8", false)
+               Matcher.replace(
+                 content,
+                 "      a = 1\n      b = 2",
+                 "      a = 9\n      b = 8",
+                 false
+               )
 
       assert result == "    a = 9\n    b = 8\n"
     end

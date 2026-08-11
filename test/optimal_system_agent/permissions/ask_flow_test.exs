@@ -64,7 +64,10 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
   end
 
   test "an :ask-tier call prompts instead of erroring", %{session_id: sid} do
-    task = Task.async(fn -> AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky") end)
+    task =
+      Task.async(fn ->
+        AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky")
+      end)
 
     payload = await_prompt()
     assert payload.tool == "shell_execute"
@@ -78,7 +81,11 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
   end
 
   test "approving runs the call", %{session_id: sid} do
-    task = Task.async(fn -> AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky") end)
+    task =
+      Task.async(fn ->
+        AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky")
+      end)
+
     payload = await_prompt()
     PermissionBroker.respond(payload.request_id, %{"decision" => "allow"})
     assert Task.await(task, 10_000) == :allow
@@ -87,7 +94,12 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
   test "no 'always' suggestion is offered for an unconstrainable command", %{session_id: sid} do
     task =
       Task.async(fn ->
-        AskFlow.request("shell_execute", %{"command" => "bash -lc 'rm -rf /tmp/x'"}, ctx(sid), "risky")
+        AskFlow.request(
+          "shell_execute",
+          %{"command" => "bash -lc 'rm -rf /tmp/x'"},
+          ctx(sid),
+          "risky"
+        )
       end)
 
     payload = await_prompt()
@@ -117,7 +129,11 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
     end
 
     test "cancelled session", %{session_id: sid} do
-      task = Task.async(fn -> AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky") end)
+      task =
+        Task.async(fn ->
+          AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky")
+        end)
+
       _payload = await_prompt()
 
       ensure_cancel_table()
@@ -153,7 +169,12 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
     Application.put_env(:optimal_system_agent, :interactive_permissions, false)
 
     assert {:error, msg} =
-             AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx("no-prompt"), "risky")
+             AskFlow.request(
+               "shell_execute",
+               %{"command" => @ask_command},
+               ctx("no-prompt"),
+               "risky"
+             )
 
     assert msg =~ "requires interactive approval"
     refute msg =~ "not yet wired"
@@ -164,7 +185,12 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
   test "an already-approved tool_use does not prompt twice", %{session_id: sid} do
     AskFlow.mark_call_approved(sid, "tu-1")
 
-    assert AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid, "tu-1"), "risky") ==
+    assert AskFlow.request(
+             "shell_execute",
+             %{"command" => @ask_command},
+             ctx(sid, "tu-1"),
+             "risky"
+           ) ==
              :allow
 
     refute_received {:osa_event, %{event: :permission_required}}
@@ -192,7 +218,11 @@ defmodule OptimalSystemAgent.Permissions.AskFlowTest do
   # ── helpers ──────────────────────────────────────────────────────────
 
   defp decide(sid, raw) do
-    task = Task.async(fn -> AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky") end)
+    task =
+      Task.async(fn ->
+        AskFlow.request("shell_execute", %{"command" => @ask_command}, ctx(sid), "risky")
+      end)
+
     payload = await_prompt()
     PermissionBroker.respond(payload.request_id, raw)
     Task.await(task, 10_000)

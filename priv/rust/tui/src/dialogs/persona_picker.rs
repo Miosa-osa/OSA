@@ -286,9 +286,7 @@ impl PersonaPicker {
                 if selected {
                     // Full-width highlight bar (marker + label + inline description).
                     let raw = format!("{marker}{}   {}", p.display, p.description);
-                    let mut s = truncate_chars(&raw, maxw);
-                    let pad = maxw.saturating_sub(s.chars().count());
-                    s.push_str(&" ".repeat(pad));
+                    let s = crate::util::pad_cols(&raw, maxw);
                     put(
                         frame,
                         Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
@@ -301,7 +299,7 @@ impl PersonaPicker {
                         Style::default().fg(c.dim)
                     };
                     let label = truncate_chars(&p.display, maxw.saturating_sub(2));
-                    let used = 2 + label.chars().count();
+                    let used = 2 + crate::util::cols(&label);
                     let mut spans = vec![
                         Span::styled(marker, marker_style),
                         Span::styled(
@@ -345,14 +343,13 @@ impl PersonaPicker {
     }
 }
 
-/// Char-boundary-safe truncation (multi-byte labels can never panic).
+/// Fit into `max` DISPLAY COLUMNS on grapheme boundaries.
+///
+/// Delegates to the canonical fitter: a private char-count copy of this used to
+/// let a CJK/emoji value over-run its reserved span and shove every column to
+/// its right off the pane.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let take = max.saturating_sub(1);
-        format!("{}\u{2026}", s.chars().take(take).collect::<String>())
-    } else {
-        s.to_string()
-    }
+    crate::util::fit_cols(s, max)
 }
 
 // (full #[cfg(test)] module included in the written file: preselects_current_persona,

@@ -118,8 +118,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler do
 
     run =
       OptimalSystemAgent.Agent.RunStore.get(handle) ||
-        (OptimalSystemAgent.Agent.RunStore.list(limit: 100)
-         |> Enum.find(fn r -> String.ends_with?(r.agent_id, ":" <> handle) end))
+        OptimalSystemAgent.Agent.RunStore.list(limit: 100)
+        |> Enum.find(fn r -> String.ends_with?(r.agent_id, ":" <> handle) end)
 
     cond do
       is_nil(run) -> :mailbox

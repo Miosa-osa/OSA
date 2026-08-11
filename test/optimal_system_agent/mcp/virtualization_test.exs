@@ -30,7 +30,13 @@ defmodule OptimalSystemAgent.MCP.VirtualizationTest do
   defp restore(key, val), do: Application.put_env(:optimal_system_agent, key, val)
 
   defp entry(defer?),
-    do: %{original_name: "t", server: "s", description: "d", input_schema: %{}, should_defer?: defer?}
+    do: %{
+      original_name: "t",
+      server: "s",
+      description: "d",
+      input_schema: %{},
+      should_defer?: defer?
+    }
 
   describe "mode/0" do
     test "defaults to :auto" do

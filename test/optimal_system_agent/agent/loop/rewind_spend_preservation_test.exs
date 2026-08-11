@@ -88,7 +88,8 @@ defmodule OptimalSystemAgent.Agent.Loop.RewindSpendPreservationTest do
       # ...then the run continues and spends money.
       Checkpoint.checkpoint_state(spent_state(session, later))
 
-      assert %{session_cost_usd: 48.25, max_budget_usd: 50.0} = Checkpoint.restore_checkpoint(session)
+      assert %{session_cost_usd: 48.25, max_budget_usd: 50.0} =
+               Checkpoint.restore_checkpoint(session)
 
       {:ok, result} = Checkpoint.restore_rewind(session, id, :conversation)
       assert %{status: "restored"} = result.conversation

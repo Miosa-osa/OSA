@@ -76,11 +76,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyRead do
   defp run(input) do
     with {:ok, session} <- Shared.session_id(input) do
       case input["mode"] || "screen" do
-        "screen" -> reply(Manager.screen(session), session, & &1)
-        "cursor" -> reply(Manager.cursor(session), session, &"cursor: row #{&1.row}, col #{&1.col}")
-        "status" -> reply(Manager.status(session), session, &format_status/1)
-        "scrollback" -> read_scrollback(session, input["lines"])
-        other -> {:error, "unknown mode: #{other}"}
+        "screen" ->
+          reply(Manager.screen(session), session, & &1)
+
+        "cursor" ->
+          reply(Manager.cursor(session), session, &"cursor: row #{&1.row}, col #{&1.col}")
+
+        "status" ->
+          reply(Manager.status(session), session, &format_status/1)
+
+        "scrollback" ->
+          read_scrollback(session, input["lines"])
+
+        other ->
+          {:error, "unknown mode: #{other}"}
       end
     end
   end

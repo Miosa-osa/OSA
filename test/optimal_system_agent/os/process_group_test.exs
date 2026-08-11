@@ -89,7 +89,7 @@ defmodule OptimalSystemAgent.OS.ProcessGroupTest do
     cond do
       fun.() -> true
       System.monotonic_time(:millisecond) > deadline -> false
-      true -> (Process.sleep(50) && do_eventually(fun, deadline))
+      true -> Process.sleep(50) && do_eventually(fun, deadline)
     end
   end
 
@@ -148,115 +148,115 @@ defmodule OptimalSystemAgent.OS.ProcessGroupTest do
   # Compile-time gate: on a host with no `setsid` there is no process group to
   # reap and these tests are meaningless rather than failing.
   if System.find_executable("setsid") do
-  describe "reaping a process tree" do
-    # The pid handed to BackgroundManager on adoption must be the COMMAND, not
-    # the setsid wrapper — BackgroundManager kills a single pid, and killing the
-    # wrapper would leave the command running.
-    test "leader_pid/1 returns the command, not the setsid wrapper", %{tmp_dir: tmp} do
-      {port, wrapper, grandchild} = spawn_tree(tmp)
-      leader = ProcessGroup.leader_pid(wrapper)
-      pgid = ProcessGroup.resolve_pgid(wrapper)
+    describe "reaping a process tree" do
+      # The pid handed to BackgroundManager on adoption must be the COMMAND, not
+      # the setsid wrapper — BackgroundManager kills a single pid, and killing the
+      # wrapper would leave the command running.
+      test "leader_pid/1 returns the command, not the setsid wrapper", %{tmp_dir: tmp} do
+        {port, wrapper, grandchild} = spawn_tree(tmp)
+        leader = ProcessGroup.leader_pid(wrapper)
+        pgid = ProcessGroup.resolve_pgid(wrapper)
 
-      try do
-        assert is_integer(leader)
-        assert leader != wrapper
-        # The group leader's pid IS the pgid, by definition of setsid.
-        assert leader == pgid
-        assert ProcessGroup.pid_alive?(leader)
-      after
+        try do
+          assert is_integer(leader)
+          assert leader != wrapper
+          # The group leader's pid IS the pgid, by definition of setsid.
+          assert leader == pgid
+          assert ProcessGroup.pid_alive?(leader)
+        after
+          assert_safe_own_group!(pgid, grandchild)
+          _ = ProcessGroup.terminate_group(pgid, 500)
+          _ = safe_close(port)
+        end
+      end
+
+      test "resolves the child's own group, never the BEAM's", %{tmp_dir: tmp} do
+        {port, wrapper, grandchild} = spawn_tree(tmp)
+        pgid = ProcessGroup.resolve_pgid(wrapper)
+
+        try do
+          assert_safe_own_group!(pgid, grandchild)
+        after
+          _ = ProcessGroup.terminate_group(pgid, 500)
+          _ = safe_close(port)
+        end
+      end
+
+      # THE regression. On the original code `kill_os_process/1` sent
+      # `kill -TERM <wrapper>` then `kill -KILL <wrapper>` — one pid, no group —
+      # and this grandchild survived, holding whatever ports and file handles it
+      # had open. This test asserts it dies.
+      test "terminate_group/2 kills the detached grandchild too", %{tmp_dir: tmp} do
+        {port, wrapper, grandchild} = spawn_tree(tmp)
+        pgid = ProcessGroup.resolve_pgid(wrapper)
         assert_safe_own_group!(pgid, grandchild)
+
+        assert ProcessGroup.pid_alive?(grandchild)
+        assert ProcessGroup.terminate_group(pgid, 500) == :ok
+
+        assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end),
+               "grandchild #{grandchild} survived the group kill — still orphaned"
+
+        safe_close(port)
+      end
+
+      # Characterizes the OLD behavior so the difference is not a matter of
+      # opinion: killing the single wrapper pid leaves the tree running. The
+      # orphan is cleaned up by the group kill at the end of the test.
+      test "killing only the wrapper pid leaves the grandchild orphaned", %{tmp_dir: tmp} do
+        {port, wrapper, grandchild} = spawn_tree(tmp)
+        pgid = ProcessGroup.resolve_pgid(wrapper)
+        assert_safe_own_group!(pgid, grandchild)
+
+        ProcessGroup.terminate_pid(wrapper, 200)
+
+        assert ProcessGroup.pid_alive?(grandchild),
+               "expected the single-pid kill to orphan the grandchild"
+
+        # Clean up the orphan we just demonstrated, via the guarded group path.
         _ = ProcessGroup.terminate_group(pgid, 500)
-        _ = safe_close(port)
+        assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end)
+        safe_close(port)
+      end
+
+      # TERM and KILL used to be sent back to back, so a cleanup handler could
+      # never run — the TERM was functionally a KILL. Here the child TRAPS
+      # SIGTERM and writes a marker; the marker only exists if the TERM arrived
+      # and the process was given time to act on it before the KILL.
+      test "SIGTERM is delivered with a grace window, not merged into the KILL",
+           %{tmp_dir: tmp} do
+        marker = Path.join(tmp, "termed")
+
+        script = """
+        trap 'printf caught > #{marker}; exit 0' TERM
+        sleep 300 &
+        printf 'GC:%s\\n' "$!"
+        wait
+        """
+
+        plan = ProcessGroup.spawn_plan(OptimalSystemAgent.OS.Shell.executable(), ["-c", script])
+
+        port =
+          Port.open(
+            {:spawn_executable, plan.exe},
+            [:binary, :exit_status, :hide, {:args, plan.args}, {:cd, tmp}]
+          )
+
+        {:os_pid, wrapper} = Port.info(port, :os_pid)
+        grandchild = await_grandchild(port, "")
+
+        pgid = ProcessGroup.resolve_pgid(wrapper)
+        assert_safe_own_group!(pgid, grandchild)
+
+        assert ProcessGroup.terminate_group(pgid, 2_000) == :ok
+
+        assert eventually(fn -> File.exists?(marker) end),
+               "the SIGTERM handler never ran — TERM and KILL were not separated"
+
+        assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end)
+        safe_close(port)
       end
     end
-
-    test "resolves the child's own group, never the BEAM's", %{tmp_dir: tmp} do
-      {port, wrapper, grandchild} = spawn_tree(tmp)
-      pgid = ProcessGroup.resolve_pgid(wrapper)
-
-      try do
-        assert_safe_own_group!(pgid, grandchild)
-      after
-        _ = ProcessGroup.terminate_group(pgid, 500)
-        _ = safe_close(port)
-      end
-    end
-
-    # THE regression. On the original code `kill_os_process/1` sent
-    # `kill -TERM <wrapper>` then `kill -KILL <wrapper>` — one pid, no group —
-    # and this grandchild survived, holding whatever ports and file handles it
-    # had open. This test asserts it dies.
-    test "terminate_group/2 kills the detached grandchild too", %{tmp_dir: tmp} do
-      {port, wrapper, grandchild} = spawn_tree(tmp)
-      pgid = ProcessGroup.resolve_pgid(wrapper)
-      assert_safe_own_group!(pgid, grandchild)
-
-      assert ProcessGroup.pid_alive?(grandchild)
-      assert ProcessGroup.terminate_group(pgid, 500) == :ok
-
-      assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end),
-             "grandchild #{grandchild} survived the group kill — still orphaned"
-
-      safe_close(port)
-    end
-
-    # Characterizes the OLD behavior so the difference is not a matter of
-    # opinion: killing the single wrapper pid leaves the tree running. The
-    # orphan is cleaned up by the group kill at the end of the test.
-    test "killing only the wrapper pid leaves the grandchild orphaned", %{tmp_dir: tmp} do
-      {port, wrapper, grandchild} = spawn_tree(tmp)
-      pgid = ProcessGroup.resolve_pgid(wrapper)
-      assert_safe_own_group!(pgid, grandchild)
-
-      ProcessGroup.terminate_pid(wrapper, 200)
-
-      assert ProcessGroup.pid_alive?(grandchild),
-             "expected the single-pid kill to orphan the grandchild"
-
-      # Clean up the orphan we just demonstrated, via the guarded group path.
-      _ = ProcessGroup.terminate_group(pgid, 500)
-      assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end)
-      safe_close(port)
-    end
-
-    # TERM and KILL used to be sent back to back, so a cleanup handler could
-    # never run — the TERM was functionally a KILL. Here the child TRAPS
-    # SIGTERM and writes a marker; the marker only exists if the TERM arrived
-    # and the process was given time to act on it before the KILL.
-    test "SIGTERM is delivered with a grace window, not merged into the KILL",
-         %{tmp_dir: tmp} do
-      marker = Path.join(tmp, "termed")
-
-      script = """
-      trap 'printf caught > #{marker}; exit 0' TERM
-      sleep 300 &
-      printf 'GC:%s\\n' "$!"
-      wait
-      """
-
-      plan = ProcessGroup.spawn_plan(OptimalSystemAgent.OS.Shell.executable(), ["-c", script])
-
-      port =
-        Port.open(
-          {:spawn_executable, plan.exe},
-          [:binary, :exit_status, :hide, {:args, plan.args}, {:cd, tmp}]
-        )
-
-      {:os_pid, wrapper} = Port.info(port, :os_pid)
-      grandchild = await_grandchild(port, "")
-
-      pgid = ProcessGroup.resolve_pgid(wrapper)
-      assert_safe_own_group!(pgid, grandchild)
-
-      assert ProcessGroup.terminate_group(pgid, 2_000) == :ok
-
-      assert eventually(fn -> File.exists?(marker) end),
-             "the SIGTERM handler never ran — TERM and KILL were not separated"
-
-      assert eventually(fn -> not ProcessGroup.pid_alive?(grandchild) end)
-      safe_close(port)
-    end
-  end
   end
 
   defp safe_close(port) do

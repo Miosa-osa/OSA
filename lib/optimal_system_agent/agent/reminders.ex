@@ -588,6 +588,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   @spec claim(String.t(), term()) :: boolean()
   def claim(session_id, key) do
     ensure_table()
+
     OptimalSystemAgent.Infra.BoundedTable.insert_new(
       @claims_table,
       {session_id, key},

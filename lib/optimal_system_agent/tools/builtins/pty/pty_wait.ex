@@ -57,7 +57,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyWait do
         },
         "timeout_ms" => %{
           "type" => "integer",
-          "description" => "Max time to wait in ms (default #{@default_timeout_ms}, max #{@max_timeout_ms})."
+          "description" =>
+            "Max time to wait in ms (default #{@default_timeout_ms}, max #{@max_timeout_ms})."
         }
       },
       "required" => ["session", "condition"]
