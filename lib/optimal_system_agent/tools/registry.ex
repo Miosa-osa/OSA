@@ -193,6 +193,25 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   Uses :persistent_term for lock-free reads. Safe to call from inside
   GenServer callbacks (e.g., during orchestration) without deadlocking.
+
+  ## Ordering is part of the prompt-cache contract
+
+  The returned list becomes the provider `tools` array, which Anthropic renders
+  FIRST in the request — ahead of `system` and `messages`. Prompt caching is a
+  prefix match, so the byte order of this list determines whether the entire
+  ~48k-token static prefix is a cache read or a cache write.
+
+  Both sources here are maps, and Erlang leaves map iteration order
+  unspecified: it is a function of the key set and the runtime's internal
+  hashing, not of insertion order, and it carries no stability guarantee across
+  OTP versions. Two nodes, or the same node before and after an upgrade, could
+  therefore emit the same tools in a different order and miss the cache for the
+  whole prefix with nothing in the diff to explain why.
+
+  Sorting by name makes the order a pure function of the tool NAMES, which is
+  the only property that is actually stable. Builtins are sorted independently
+  of MCP tools and kept ahead of them, so a connecting MCP server appends to the
+  tail instead of interleaving into — and rewriting — the builtin prefix.
   """
   def list_tools_direct do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
@@ -207,6 +226,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
           parameters: mod.parameters()
         }
       end)
+      |> Enum.sort_by(& &1.name)
 
     mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
@@ -218,6 +238,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
           parameters: Map.get(info, :input_schema, %{"type" => "object", "properties" => %{}})
         }
       end)
+      |> Enum.sort_by(& &1.name)
 
     builtin ++ mcp
   end

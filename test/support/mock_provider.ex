@@ -42,6 +42,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   @impl true
   def chat(_messages, _opts) do
     maybe_sleep()
+    bump_round_trips()
 
     case forced_final_text() do
       nil -> chat_scripted()
@@ -79,6 +80,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   @impl true
   def chat_stream(_messages, callback, _opts) do
     maybe_sleep()
+    bump_round_trips()
 
     case forced_final_text() do
       nil ->
@@ -126,6 +128,59 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def reset do
     Process.delete(:mock_provider_call_count)
     :ok
+  end
+
+  # ── Cross-process round-trip counter ─────────────────────────────────────
+  #
+  # `chat/2` and `chat_stream/3` are invoked from short-lived task processes
+  # that do NOT inherit the test process's dictionary, so the per-process
+  # counter above cannot answer "how many model round-trips did that turn
+  # cost?". This counter lives in a public named ETS table owned by whichever
+  # process first touches it, which makes it readable from the test process
+  # after the loop has finished.
+
+  @counter_table :osa_mock_provider_round_trips
+
+  defp counter_table do
+    case :ets.whereis(@counter_table) do
+      :undefined ->
+        try do
+          :ets.new(@counter_table, [:named_table, :public, :set])
+        rescue
+          # Lost the race with a concurrent creator — the table now exists.
+          ArgumentError -> @counter_table
+        end
+
+      _ref ->
+        @counter_table
+    end
+  end
+
+  defp bump_round_trips do
+    :ets.update_counter(counter_table(), :round_trips, {2, 1}, {:round_trips, 0})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Number of provider round-trips since the last `reset_round_trips/0`."
+  @spec round_trips() :: non_neg_integer()
+  def round_trips do
+    case :ets.lookup(counter_table(), :round_trips) do
+      [{:round_trips, n}] -> n
+      _ -> 0
+    end
+  rescue
+    ArgumentError -> 0
+  end
+
+  @doc "Zero the cross-process round-trip counter (call in test setup)."
+  @spec reset_round_trips() :: :ok
+  def reset_round_trips do
+    :ets.insert(counter_table(), {:round_trips, 0})
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   # When `:mock_provider_final_text` is set, EVERY call answers with that text

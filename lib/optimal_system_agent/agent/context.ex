@@ -104,24 +104,21 @@ defmodule OptimalSystemAgent.Agent.Context do
     # <=32k window (and so num_ctx isn't forced up to 32k+).
     lite? = provider in [:ollama, :lmstudio, :llamacpp] or max_tok < 40_000
 
+    # Which flavour of the cached static base this provider gets.
+    variant = static_base_variant(provider, lite?)
+
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
     # This gives each agent role its own focused prompt from AGENT.md.
     static_base =
       case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] ->
-          if lite?, do: Soul.static_base(:lite), else: Soul.static_base()
-
-        override ->
-          override
+        override when override in [nil, ""] -> Soul.static_base(variant)
+        override -> override
       end
 
     static_tokens =
       case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] ->
-          if lite?, do: Soul.static_token_count(:lite), else: Soul.static_token_count()
-
-        override ->
-          estimate_tokens(override)
+        override when override in [nil, ""] -> Soul.static_token_count(variant)
+        override -> estimate_tokens(override)
       end
 
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
@@ -191,6 +188,30 @@ defmodule OptimalSystemAgent.Agent.Context do
       headroom: max_tok - total_tokens,
       blocks: block_details
     }
+  end
+
+  # Which cached static base this request gets.
+  #
+  #   :lite          — small/local window. Unchanged: only the core allowlist is
+  #                    inlined, and the tool list is separately capped by
+  #                    ToolFilter, so the prose and the native array do NOT
+  #                    describe the same set and dropping prose there would lose
+  #                    information. This branch wins whenever it applies.
+  #   :native_tools  — the transport carries full tool schemas in the request
+  #                    body, so the duplicated prose spans are dropped.
+  #   :full          — everything else, including `claude_cli` / `copilot_cli`,
+  #                    which have no native tool channel at all.
+  @doc false
+  @spec static_base_variant(atom(), boolean()) :: :lite | :native_tools | :full
+  def static_base_variant(_provider, true), do: :lite
+
+  def static_base_variant(provider, _lite?) do
+    if Soul.dedupe_native_tool_prompt?() and
+         OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider) do
+      :native_tools
+    else
+      :full
+    end
   end
 
   # ---------------------------------------------------------------------------

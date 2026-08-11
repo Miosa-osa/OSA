@@ -119,7 +119,10 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
     """
   end
 
-  defp format_transcript(transcript) do
+  @doc false
+  # Public for testing: the truncation policy is a correctness concern (it decides
+  # which half of a long conversation the summariser is allowed to see).
+  def format_transcript(transcript) do
     full =
       transcript
       |> Enum.map_join("\n\n", fn {agent, msg, _ts} ->
@@ -127,7 +130,31 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
       end)
 
     if String.length(full) > @max_transcript_chars do
-      String.slice(full, 0, @max_transcript_chars) <> "\n\n[transcript truncated]"
+      # Keep BOTH ends, not just the opening.
+      #
+      # This used to be `String.slice(full, 0, @max_transcript_chars)` — the
+      # first 12,000 characters — which for any conversation long enough to be
+      # truncated discards exactly the part being summarised: the later turns
+      # where the group converges, decides, and dissents. The head carries the
+      # framing, the tail carries the conclusions, so both are kept and the
+      # elision is stated explicitly so the model does not present a partial
+      # transcript as a complete one.
+      # Keep BOTH ends, not just the opening.
+      #
+      # This used to be `String.slice(full, 0, @max_transcript_chars)` — the
+      # first 12,000 characters — which for any conversation long enough to be
+      # cut discards exactly the part being summarised: the later turns where
+      # the group converges, decides, and dissents. The head carries the
+      # framing, the tail carries the conclusions, so both are kept and the
+      # elision is stated explicitly so the model does not present a partial
+      # transcript as a complete one.
+      head_len = div(@max_transcript_chars, 3)
+      tail_len = @max_transcript_chars - head_len
+      dropped = String.length(full) - @max_transcript_chars
+
+      String.slice(full, 0, head_len) <>
+        "\n\n[... #{dropped} characters of the middle of this transcript omitted ...]\n\n" <>
+        String.slice(full, -tail_len, tail_len)
     else
       full
     end
@@ -135,6 +162,20 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
 
   defp parse_and_store(raw, state) do
     case parse_summary(raw, state) do
+      # A degraded summary is the SHAPE of a summary with none of the content:
+      # empty decisions, empty action items, empty dissent, and a 500-char slice
+      # of whatever the model actually said. It used to be indistinguishable
+      # from a real one here and was written to memory as canonical, so a later
+      # reader saw "this conversation reached no decisions" as a fact. It is
+      # still returned to the caller — but it is not recorded as knowledge.
+      {:ok, %{degraded: true} = summary} ->
+        Logger.warning(
+          "[Weaver] summary for conversation #{summary.conversation_id} could not be parsed — " <>
+            "not storing it in memory"
+        )
+
+        {:ok, summary}
+
       {:ok, summary} ->
         store_in_memory(summary, state)
         {:ok, summary}
@@ -144,7 +185,8 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
     end
   end
 
-  defp parse_summary(raw, state) do
+  @doc false
+  def parse_summary(raw, state) do
     cleaned =
       raw
       |> String.trim()
@@ -163,6 +205,7 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
           dissenting_views: list_field(parsed, "dissenting_views"),
           open_questions: list_field(parsed, "open_questions"),
           summary: to_string(parsed["summary"] || ""),
+          degraded: false,
           generated_at: DateTime.utc_now()
         }
 
@@ -183,6 +226,13 @@ defmodule OptimalSystemAgent.Conversations.Weaver do
            dissenting_views: [],
            open_questions: [],
            summary: String.slice(raw, 0, 500),
+           # Marks this as "we could not read the model's answer", NOT as "the
+           # conversation produced no decisions". Callers and `parse_and_store/2`
+           # must be able to tell those apart.
+           degraded: true,
+           # Marks this as "we could not read the model's answer", NOT as "the
+           # conversation produced no decisions". Callers and `parse_and_store/2`
+           # must be able to tell those apart.
            generated_at: DateTime.utc_now()
          }}
     end

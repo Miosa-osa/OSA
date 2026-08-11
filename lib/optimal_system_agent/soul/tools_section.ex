@@ -44,14 +44,27 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   def build, do: do_build([])
 
   @doc """
-  LITE variant of `build/0`: only the core-tool allowlist (`@core_tools`) is
-  inlined; EVERY other tool is forced to the deferred side — advertised by name
-  in the `<system-reminder>` block and loadable via tool_search — REGARDLESS of
-  its `always_load?/0`. This is what drops the static base from ~24k to ~4-6k for
-  local providers / small windows.
+  Named variants of `build/0`.
+
+  `:lite` — only the core-tool allowlist (`@core_tools`) is inlined; EVERY other
+  tool is forced to the deferred side, advertised by name in the
+  `<system-reminder>` block and loadable via tool_search, REGARDLESS of its
+  `always_load?/0`. Used for local providers / small windows.
+
+  `:native_tools` — for a transport that ships full tool schemas in the request
+  body (see `Providers.Registry.native_tool_schemas?/1`). Every tool that will
+  appear in that native `tools` array has its duplicated spans — the
+  `description/0` text and the re-encoded `parameters/0` JSON — removed from the
+  prose block, because the model receives those exact bytes through the tool
+  definitions on the very same request. Tools NOT in the array, and every
+  non-duplicated section of a tool that is, render unchanged. Array membership
+  is read from `Registry.list_active/0`, the same function that feeds the
+  provider `tools` option, so the two sides cannot drift.
   """
-  @spec build(:lite) :: String.t() | nil
+  @spec build(:lite | :native_tools) :: String.t() | nil
   def build(:lite), do: do_build(only: &(&1 in @core_tools))
+
+  def build(:native_tools), do: do_build(native_schema_names: native_schema_names())
 
   defp do_build(opts) do
     tool_modules = fetch_builtin_modules()
@@ -66,12 +79,25 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
         {loaded_section, deferred_names} =
           PromptAssembler.assemble(mods, ctx, opts)
 
-        render(loaded_section, deferred_names)
+        render(loaded_section, deferred_names, opts)
     end
   rescue
     err ->
       Logger.warning("[Soul.ToolsSection] build failed: #{Exception.message(err)}")
       nil
+  end
+
+  # Names whose full schema the provider `tools` array will carry. Same source
+  # as the array itself (`Registry.list_active/0`), so a tool that is NOT sent
+  # natively can never have its prose silently dropped.
+  defp native_schema_names do
+    Registry.list_active()
+    |> Enum.map(& &1.name)
+    |> MapSet.new()
+  rescue
+    _ -> MapSet.new()
+  catch
+    :exit, _ -> MapSet.new()
   end
 
   # ── Private ───────────────────────────────────────────────────────────────
@@ -99,21 +125,50 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
     UseContext.new(%{}, tools: tool_modules, agents: [])
   end
 
-  defp render("", []), do: nil
-  defp render("", _deferred), do: nil
+  # Non-native build with nothing loaded: the block would say nothing at all.
+  defp render("", [], opts) do
+    if native?(opts), do: render_native_header([], opts), else: nil
+  end
 
-  defp render(loaded_section, deferred_names) do
-    base = "## Available Tools\n\n#{loaded_section}"
+  defp render("", deferred_names, opts) do
+    if native?(opts), do: render_native_header(deferred_names, opts), else: nil
+  end
 
-    parts =
-      [
-        base,
-        if(deferred_names == [], do: nil, else: build_deferred_reminder(deferred_names)),
-        build_mcp_catalog()
-      ]
-      |> Enum.reject(&is_nil/1)
+  defp render(loaded_section, deferred_names, opts) do
+    base =
+      if native?(opts) do
+        "## Available Tools\n\n#{native_preamble()}\n\n#{loaded_section}"
+      else
+        "## Available Tools\n\n#{loaded_section}"
+      end
 
-    Enum.join(parts, "\n\n")
+    join_sections(base, deferred_names)
+  end
+
+  # Native build where EVERY loaded tool was fully covered by its native schema
+  # (the normal case): the prose collapses to the pointer plus the sections the
+  # tool definitions cannot express — deferred names and the MCP catalog.
+  defp render_native_header(deferred_names, _opts) do
+    join_sections("## Available Tools\n\n#{native_preamble()}", deferred_names)
+  end
+
+  defp join_sections(base, deferred_names) do
+    [
+      base,
+      if(deferred_names == [], do: nil, else: build_deferred_reminder(deferred_names)),
+      build_mcp_catalog()
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
+  end
+
+  defp native?(opts), do: Keyword.get(opts, :native_schema_names) != nil
+
+  defp native_preamble do
+    "Your tools are supplied with this request as structured tool definitions — " <>
+      "each one carries its full name, description, and parameter schema. Read them " <>
+      "there; they are not repeated here. Anything written below is guidance that " <>
+      "the schemas do not cover."
   end
 
   # ── MCP catalog ───────────────────────────────────────────────────────────

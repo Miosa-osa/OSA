@@ -112,6 +112,15 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
 
   @impl true
   def init(_opts) do
+    # The ephemeral diagnostician/fixer are started with `start_link/1`, so they
+    # are LINKED to this process, and this process owns `@table` — the only copy
+    # of every healing session record. Without trapping exits an abnormal
+    # ephemeral exit propagated straight through the link, killed the
+    # orchestrator, deleted the table, and skipped `terminate/2` (which is what
+    # wakes suspended agents). Trapping turns those exits into `{:EXIT, …}`
+    # messages that the catch-all `handle_info/2` drops; the crash is already
+    # handled properly through the `Process.monitor/1` DOWN path.
+    Process.flag(:trap_exit, true)
     :ets.new(@table, [:named_table, :public, :set])
     Logger.info("[Healing.Orchestrator] Started")
     # monitors: %{monitor_ref => {session_id, role}}
@@ -132,6 +141,8 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
 
     session =
       Session.new(agent_id, classification,
+        agent_pid: Map.get(healing_context, :agent_pid),
+        healing_context: healing_context,
         budget_usd: Map.get(healing_context, :budget_usd, 0.50),
         timeout_ms: Map.get(healing_context, :timeout_ms, 300_000),
         max_attempts: Map.get(healing_context, :max_attempts, 1)
@@ -147,7 +158,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       |> Map.put(:attempt_count, 0)
 
     session = %{session | attempt_count: 1}
-    BoundedTable.insert(@table, session.id, session, max: @max_rows)
+    store(session)
 
     Logger.info(
       "[Healing.Orchestrator] Session #{session.id} created for agent #{agent_id} " <>
@@ -293,9 +304,9 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   # -- Phase execution --
 
   defp start_diagnosis(session, context, state) do
-    {:ok, session} = Session.transition(session, :diagnosing)
+    session = force_transition(session, :diagnosing)
     session = arm_session_timer(session)
-    BoundedTable.insert(@table, session.id, session, max: @max_rows)
+    store(session)
 
     budget = Session.diagnosis_budget(session)
 
@@ -308,11 +319,11 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       model: Map.get(context, :model)
     ]
 
-    case EphemeralAgent.start_link(opts) do
+    case ephemeral_module().start_link(opts) do
       {:ok, pid} ->
         mon_ref = Process.monitor(pid)
         session_updated = %{session | diagnostician_pid: pid}
-        BoundedTable.insert(@table, session.id, session_updated, max: @max_rows)
+        store(session_updated)
 
         monitors = Map.put(state.monitors, mon_ref, {session.id, :diagnostician})
         pid_to_session = Map.put(state.pid_to_session, pid, session.id)
@@ -330,9 +341,9 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   end
 
   defp start_fixing(session, diagnosis, context, state) do
-    {:ok, session} = Session.transition(session, :fixing)
+    session = force_transition(session, :fixing)
     session = %{session | diagnosis: diagnosis}
-    BoundedTable.insert(@table, session.id, session, max: @max_rows)
+    store(session)
 
     broadcast(:system_event, session, %{
       event: :healing_diagnosis_complete,
@@ -353,11 +364,11 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       model: Map.get(context, :model)
     ]
 
-    case EphemeralAgent.start_link(opts) do
+    case ephemeral_module().start_link(opts) do
       {:ok, pid} ->
         mon_ref = Process.monitor(pid)
         session_updated = %{session | fixer_pid: pid}
-        BoundedTable.insert(@table, session.id, session_updated, max: @max_rows)
+        store(session_updated)
 
         monitors = Map.put(state.monitors, mon_ref, {session.id, :fixer})
         pid_to_session = Map.put(state.pid_to_session, pid, session.id)
@@ -383,10 +394,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   end
 
   defp handle_fix_result(session, fix_result, state) do
-    {:ok, session} = Session.transition(session, :completed)
+    session = force_transition(session, :completed)
     session = %{session | fix_result: fix_result}
     cancel_session_timer(session)
-    BoundedTable.insert(@table, session.id, session, max: @max_rows)
+    store(session)
 
     summary = %{
       session_id: session.id,
@@ -419,32 +430,38 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   end
 
   defp handle_phase_failure(session, _role, reason, state) do
-    # Transition to :failed first so retryable?/1 can evaluate correctly
-    {:ok, failed_session} = Session.transition(session, :escalated)
-    failed_session = %{failed_session | error: reason}
-
-    can_retry = failed_session.attempt_count < failed_session.max_attempts
+    can_retry = session.attempt_count < session.max_attempts
 
     if can_retry do
       Logger.info(
         "[Healing.Orchestrator] Retrying session #{session.id} " <>
-          "(attempt #{failed_session.attempt_count}/#{failed_session.max_attempts})"
+          "(attempt #{session.attempt_count}/#{session.max_attempts})"
       )
 
-      retry_context =
-        rebuild_context(session) |> Map.put(:attempt_count, failed_session.attempt_count)
+      # Kill the failed phase's ephemerals BEFORE starting the retry. A fixer
+      # writes into the user's working tree; two of them running concurrently
+      # on the same session was a real corruption path.
+      state = stop_ephemerals(session, state)
 
-      # Reset to diagnosing for the retry pass
+      retry_context =
+        rebuild_context(session) |> Map.put(:attempt_count, session.attempt_count)
+
+      # Reset to :pending, not :diagnosing. `start_diagnosis/3` transitions to
+      # :diagnosing, and :diagnosing -> :diagnosing is not a legal move, so the
+      # old code fed `Session.transition/2` an illegal transition on every
+      # retry. Combined with the `{:ok, _} =` match at the call site that raised
+      # a MatchError and killed the orchestrator (and its ETS table) outright.
       retry_session = %{
-        failed_session
-        | status: :diagnosing,
-          attempt_count: failed_session.attempt_count + 1,
+        session
+        | status: :pending,
+          error: reason,
+          attempt_count: session.attempt_count + 1,
           diagnosis: nil,
           diagnostician_pid: nil,
           fixer_pid: nil
       }
 
-      BoundedTable.insert(@table, retry_session.id, retry_session, max: @max_rows)
+      store(retry_session)
 
       state = start_diagnosis(retry_session, retry_context, state)
       {:noreply, state}
@@ -454,6 +471,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   end
 
   defp escalate(session, reason, state) do
+    state = stop_ephemerals(session, state)
     escalate_session(session, reason)
 
     Bus.emit_algedonic(
@@ -472,10 +490,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   end
 
   defp escalate_session(session, reason) do
-    {:ok, session} = Session.transition(session, :escalated)
+    session = force_transition(session, :escalated)
     session = %{session | error: reason}
     cancel_session_timer(session)
-    BoundedTable.insert(@table, session.id, session, max: @max_rows)
+    store(session)
 
     broadcast(:system_event, session, %{
       event: :healing_session_failed,
@@ -486,8 +504,97 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
 
   # -- Helpers --
 
+  # The ephemeral agent implementation. Overridable so the orchestrator's own
+  # lifecycle (crash isolation, retry, escalation, wake-up) can be exercised
+  # without a live LLM call — `EphemeralAgent` issues a real provider request,
+  # which makes the orchestrator untestable and any test of it billable.
+  defp ephemeral_module do
+    Application.get_env(:optimal_system_agent, :healing_ephemeral_module, EphemeralAgent)
+  end
+
+  # Write a session row, then enforce the row cap OURSELVES.
+  #
+  # This used to be a straight `BoundedTable.insert/4` with `max: @max_rows`,
+  # whose eviction policy is oldest-by-insertion-recency with no notion of
+  # whether a row is still live. Under load that deleted sessions that were
+  # mid-`:diagnosing`: the row vanished, and the ephemeral's later `:diagnosis`
+  # / `:fix_applied` message found no matching session and was dropped on the
+  # floor while the suspended Loop kept waiting. A row cap is history
+  # management; it must never reap work in progress. Terminal rows only.
+  defp store(session) do
+    # max: 0 disables BoundedTable's own eviction but keeps its ordering
+    # bookkeeping accurate, so a row evicted later is still cleaned up properly.
+    BoundedTable.insert(@table, session.id, session, max: 0)
+    enforce_cap()
+    :ok
+  end
+
+  defp enforce_cap do
+    overflow = BoundedTable.size(@table) - @max_rows
+
+    if overflow > 0 do
+      :ets.tab2list(@table)
+      |> Enum.filter(fn {_id, s} -> Session.terminal?(s) end)
+      |> Enum.sort_by(fn {_id, s} -> s.completed_at || s.started_at end, DateTime)
+      |> Enum.take(overflow)
+      |> Enum.each(fn {id, _s} -> BoundedTable.delete(@table, id) end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # Stop any ephemeral still attached to this session and drop its bookkeeping.
+  #
+  # Retry used to nil `diagnostician_pid`/`fixer_pid` without stopping the
+  # processes behind them, and escalation never touched them at all. A fixer is
+  # a process that edits the user's working tree; leaving one running while a
+  # second one starts means two agents writing the same files, and its eventual
+  # result message routing to a session that has already moved on.
+  defp stop_ephemerals(session, state) do
+    pids = Enum.filter([session.diagnostician_pid, session.fixer_pid], &is_pid/1)
+
+    monitors =
+      Enum.reduce(state.monitors, state.monitors, fn {ref, {sid, _role}}, acc ->
+        if sid == session.id do
+          Process.demonitor(ref, [:flush])
+          Map.delete(acc, ref)
+        else
+          acc
+        end
+      end)
+
+    pid_to_session = Map.drop(state.pid_to_session, pids)
+
+    Enum.each(pids, fn pid ->
+      if Process.alive?(pid), do: Process.exit(pid, :kill)
+    end)
+
+    %{state | monitors: monitors, pid_to_session: pid_to_session}
+  end
+
+  # `Session.transition/2` refuses illegal moves, and several call sites used to
+  # bind its result with `{:ok, s} = …`, so an illegal move raised a MatchError
+  # inside the orchestrator — taking the ETS table and every session with it.
+  # Nothing here is worth killing the orchestrator over: log and carry on.
+  defp force_transition(session, status) do
+    case Session.transition(session, status) do
+      {:ok, updated} ->
+        updated
+
+      {:error, :invalid_transition} ->
+        Logger.warning(
+          "[Healing.Orchestrator] session #{session.id}: illegal transition " <>
+            "#{session.status} -> #{status}; forcing"
+        )
+
+        %{session | status: status}
+    end
+  end
+
   defp notify_agent(session, message) do
-    agent_pid = get_in(session.classification, [:agent_pid])
+    agent_pid = session.agent_pid
 
     if is_pid(agent_pid) and Process.alive?(agent_pid) do
       send(agent_pid, message)
@@ -527,7 +634,7 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
       error: session.classification.error,
       attempt_count: session.attempt_count
     }
-    |> Map.merge(Map.get(session.classification, :healing_context, %{}))
+    |> then(&Map.merge(session.healing_context || %{}, &1))
   end
 
   # Pop the session_id associated with a given ephemeral agent PID.

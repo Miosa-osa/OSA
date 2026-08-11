@@ -20,10 +20,25 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
     |> Path.expand()
   end
 
-  @doc "Full path to the checkpoint file for `loop_id`."
+  @doc """
+  Full path to the checkpoint file for `loop_id`.
+
+  `loop_id` reaches here from tool input (`verify_loop` accepts a caller-chosen
+  `task_id`, and a loop can be started with an explicit `:loop_id`), so it is
+  sanitised before it becomes a filename: without that, an id like
+  `"../../.ssh/authorized_keys"` made `save/2` write, and `delete/1` `File.rm`,
+  an arbitrary path outside `checkpoint_dir/0`. Same replacement
+  `Agent.SessionPersistence` uses for session ids.
+  """
   @spec checkpoint_path(String.t()) :: String.t()
   def checkpoint_path(loop_id) do
-    Path.join(checkpoint_dir(), "#{loop_id}.json")
+    Path.join(checkpoint_dir(), "#{safe_id(loop_id)}.json")
+  end
+
+  @doc false
+  @spec safe_id(String.t()) :: String.t()
+  def safe_id(loop_id) do
+    Regex.replace(~r/[^a-zA-Z0-9_\-]/, to_string(loop_id), "_")
   end
 
   @doc """
@@ -53,6 +68,7 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
         case File.write(path, json, [:utf8]) do
           :ok ->
             Logger.debug("[Verification.Checkpoint] Saved #{loop_id} at #{path}")
+            prune()
             :ok
 
           {:error, reason} ->
@@ -147,6 +163,47 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
   end
 
   # --- Private ---
+
+  # Retention cap for `~/.osa/verification_checkpoints/`.
+  #
+  # Nothing calls `restore/1` or `delete/1` — `Verification.Loop.init/1` always
+  # builds a fresh struct at `iteration: 0` — so every loop that ever ran left a
+  # JSON file behind and the directory grew for the life of the install. The
+  # files are still written (they are the only forensic record of a loop's
+  # iterations), but oldest-first pruning keeps the directory bounded.
+  @max_checkpoints 200
+
+  defp prune do
+    dir = checkpoint_dir()
+
+    files =
+      dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.map(&Path.join(dir, &1))
+
+    overflow = length(files) - @max_checkpoints
+
+    if overflow > 0 do
+      files
+      |> Enum.map(fn path ->
+        mtime =
+          case File.stat(path, time: :posix) do
+            {:ok, %{mtime: m}} -> m
+            _ -> 0
+          end
+
+        {mtime, path}
+      end)
+      |> Enum.sort()
+      |> Enum.take(overflow)
+      |> Enum.each(fn {_mtime, path} -> File.rm(path) end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn

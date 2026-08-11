@@ -121,6 +121,20 @@ defmodule OptimalSystemAgent.Teams.AgentState do
   # ---------------------------------------------------------------------------
   # Mutations
   # ---------------------------------------------------------------------------
+  #
+  # Every mutation below is an accumulate-or-transition on a row that more than
+  # one process can hold at once (the team Manager, the nervous system's
+  # rebalancer, and each agent's own reporting path). They used to be plain
+  # get -> struct-update -> `:ets.insert/2` sequences with no serialisation and
+  # no `update_counter`, so two concurrent `record_cost/4` calls both read the
+  # same totals and the second insert silently discarded the first's tokens and
+  # spend. Cost accounting that loses writes under concurrency is worse than no
+  # accounting, because it reads as authoritative.
+  #
+  # `update/3` below closes that with a compare-and-swap: `:ets.select_replace/2`
+  # only rewrites the row if it still holds exactly the struct we read, and
+  # otherwise we re-read and retry. (A struct has a fixed key set, so ETS map
+  # patterns — which match on the listed keys — are an exact match here.)
 
   @doc """
   Update the status of an agent in the team's ETS table.
@@ -130,15 +144,7 @@ defmodule OptimalSystemAgent.Teams.AgentState do
   @spec update_status(String.t(), String.t(), status()) ::
           {:ok, t()} | {:error, :not_found}
   def update_status(team_id, agent_id, new_status) do
-    case get(team_id, agent_id) do
-      nil ->
-        {:error, :not_found}
-
-      state ->
-        updated = %{state | status: new_status}
-        put(team_id, updated)
-        {:ok, updated}
-    end
+    update(team_id, agent_id, &%{&1 | status: new_status})
   end
 
   @doc """
@@ -149,15 +155,7 @@ defmodule OptimalSystemAgent.Teams.AgentState do
   @spec assign_task(String.t(), String.t(), String.t()) ::
           {:ok, t()} | {:error, :not_found}
   def assign_task(team_id, agent_id, task_id) do
-    case get(team_id, agent_id) do
-      nil ->
-        {:error, :not_found}
-
-      state ->
-        updated = %{state | status: :working, task_id: task_id}
-        put(team_id, updated)
-        {:ok, updated}
-    end
+    update(team_id, agent_id, &%{&1 | status: :working, task_id: task_id})
   end
 
   @doc """
@@ -169,34 +167,53 @@ defmodule OptimalSystemAgent.Teams.AgentState do
   @spec record_cost(String.t(), String.t(), non_neg_integer(), float()) ::
           {:ok, t()} | {:error, :not_found}
   def record_cost(team_id, agent_id, tokens, cost_usd) do
-    case get(team_id, agent_id) do
-      nil ->
-        {:error, :not_found}
-
-      state ->
-        updated = %{
-          state
-          | token_usage: state.token_usage + tokens,
-            cost_usd: state.cost_usd + cost_usd
-        }
-
-        put(team_id, updated)
-        {:ok, updated}
-    end
+    update(
+      team_id,
+      agent_id,
+      &%{&1 | token_usage: &1.token_usage + tokens, cost_usd: &1.cost_usd + cost_usd}
+    )
   end
 
   @doc "Increment the escalation counter (model tier up-shift) for an agent."
   @spec increment_escalation(String.t(), String.t()) ::
           {:ok, t()} | {:error, :not_found}
   def increment_escalation(team_id, agent_id) do
+    update(team_id, agent_id, &%{&1 | escalation_count: &1.escalation_count + 1})
+  end
+
+  @doc """
+  Apply `fun` to an agent's record atomically.
+
+  Retries on a lost compare-and-swap; returns `{:error, :not_found}` when the
+  agent has no row and `{:error, :contended}` if the row could not be claimed
+  within the retry budget (only reachable under pathological contention).
+  """
+  @spec update(String.t(), String.t(), (t() -> t())) ::
+          {:ok, t()} | {:error, :not_found | :contended}
+  def update(team_id, agent_id, fun) when is_function(fun, 1) do
+    TableRegistry.ensure_tables(team_id)
+    do_update(team_id, agent_id, fun, 50)
+  end
+
+  defp do_update(_team_id, _agent_id, _fun, 0), do: {:error, :contended}
+
+  defp do_update(team_id, agent_id, fun, retries) do
     case get(team_id, agent_id) do
       nil ->
         {:error, :not_found}
 
       state ->
-        updated = %{state | escalation_count: state.escalation_count + 1}
-        put(team_id, updated)
-        {:ok, updated}
+        updated = fun.(state)
+        key = TableRegistry.agent_key(team_id, agent_id)
+
+        spec = [{{key, state}, [], [{{{:const, key}, {:const, updated}}}]}]
+
+        case :ets.select_replace(TableRegistry.agents_table(), spec) do
+          1 -> {:ok, updated}
+          _ -> do_update(team_id, agent_id, fun, retries - 1)
+        end
     end
+  rescue
+    _ -> {:error, :not_found}
   end
 end

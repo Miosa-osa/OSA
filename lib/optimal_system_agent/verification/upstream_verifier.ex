@@ -56,7 +56,20 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
   def verify(task_id, verification_criteria)
       when is_binary(task_id) and is_map(verification_criteria) do
     ensure_table()
-    :ets.insert(@table, {task_id, :pending})
+
+    # Every attempt gets its own token. The table is keyed on `task_id` alone,
+    # so a slow first attempt used to land its stale `{:failed, …}` on top of a
+    # retry's `:passed` — the retry's own dependents then stayed blocked on a
+    # verdict that no longer applied. Writes are now conditional on still being
+    # the current run (`put_status/3`); a superseded run's writes are dropped.
+    run_ref = make_ref()
+    :ets.insert(@table, {task_id, :pending, run_ref})
+
+    # A verifier is documented to run inside a `Task`, and a killed Task left
+    # the row at `:pending` forever — every `block_until_passed/2` then burned
+    # its full timeout (5 minutes by default) before giving up. Watch this
+    # process and resolve the row if it dies without recording a verdict.
+    watchdog = start_watchdog(task_id, run_ref)
 
     Logger.info("[UpstreamVerifier] Starting verification for task #{task_id}")
 
@@ -72,7 +85,7 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
 
     result =
       if failures == [] do
-        :ets.insert(@table, {task_id, :passed})
+        put_status(task_id, run_ref, :passed)
         Logger.info("[UpstreamVerifier] task #{task_id} PASSED all checks")
 
         Bus.emit(:system_event, %{
@@ -83,7 +96,7 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
         :passed
       else
         failure_contexts = Enum.map(failures, fn {:fail, ctx} -> ctx end)
-        :ets.insert(@table, {task_id, {:failed, failure_contexts}})
+        put_status(task_id, run_ref, {:failed, failure_contexts})
         Logger.warning("[UpstreamVerifier] task #{task_id} FAILED: #{inspect(failure_contexts)}")
 
         Bus.emit(:system_event, %{
@@ -94,6 +107,8 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
 
         {:failed, %{task_id: task_id, failures: failure_contexts}}
       end
+
+    stop_watchdog(watchdog)
 
     # Send task back on failure so it can be retried / escalated.
     case result do
@@ -124,10 +139,23 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
     ensure_table()
 
     case :ets.lookup(@table, task_id) do
-      [{^task_id, st}] -> st
+      [{^task_id, st, _run_ref}] -> st
       [] -> :unknown
     end
   end
+
+  @doc """
+  Create the verification table from a long-lived process.
+
+  Called from `Application.start/2`. A named ETS table belongs to whichever
+  process created it and dies with that process; left to `ensure_table/0`, the
+  first `verify/2` in the VM became the owner — and `verify/2` is documented to
+  run inside a short-lived `Task`. When that Task finished, the table vanished,
+  taking every recorded verdict with it and turning `block_until_passed/2`'s
+  lookups into `[]`. Same reasoning as `Infra.BoundedTable.init_tables/0`.
+  """
+  @spec init_table() :: :ok
+  def init_table, do: ensure_table()
 
   @doc "Clear the verification record for `task_id`."
   @spec clear(String.t()) :: :ok
@@ -139,26 +167,71 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
 
   # --- Private ---
 
+  # Build the check list.
+  #
+  # Two things used to go wrong here. `Map.get(criteria, "test_command")` only
+  # matched STRING keys, so a criteria map written with atom keys (the natural
+  # shape for internal Elixir callers) produced no checks at all. And an empty
+  # check list fell straight through `failures == []` to `:passed` — a task
+  # whose criteria were mistyped, or written with the wrong key style, verified
+  # *vacuously* and released every blocked dependent. Keys are now read in both
+  # styles, and criteria that specify something we do not recognise are
+  # reported (`:unrecognized`) rather than silently passing. A genuinely empty
+  # criteria map still passes: that is an explicit "nothing to verify", and
+  # failing it would deadlock dependents instead.
   defp build_checks(criteria) do
     checks = []
 
     checks =
-      case Map.get(criteria, "test_command") do
+      case fetch_criterion(criteria, "test_command") do
         nil -> checks
         cmd -> [{:test_command, cmd} | checks]
       end
 
     checks =
-      case Map.get(criteria, "output_spec") do
+      case fetch_criterion(criteria, "output_spec") do
         nil ->
           checks
 
         spec ->
-          task_output = Map.get(criteria, "task_output", "")
+          task_output = fetch_criterion(criteria, "task_output") || ""
           [{:output_spec, spec, task_output} | checks]
       end
 
-    checks
+    case {checks, Map.keys(criteria)} do
+      {[], []} -> []
+      {[], keys} -> [{:unrecognized, keys}]
+      {checks, _} -> checks
+    end
+  end
+
+  @known_keys ["test_command", "output_spec", "task_output", "no_regressions"]
+
+  # Listed so the atoms exist in the VM before `fetch_criterion/2` reaches for
+  # them — `String.to_existing_atom/1` is deliberately used there (never
+  # `to_atom/1`: criteria maps come from task metadata and must not be able to
+  # mint atoms), and it would otherwise raise on the very keys we support.
+  @known_atoms [:test_command, :output_spec, :task_output, :no_regressions]
+  @doc false
+  def known_atoms, do: @known_atoms
+
+  defp fetch_criterion(criteria, key) do
+    case Map.get(criteria, key) do
+      nil -> Map.get(criteria, String.to_existing_atom(key))
+      value -> value
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp run_check({:unrecognized, keys}) do
+    {:fail,
+     %{
+       check: :criteria,
+       reason: "verification_criteria specified no runnable check",
+       keys: Enum.map(keys, &to_string/1),
+       known_keys: @known_keys
+     }}
   end
 
   defp run_check({:test_command, cmd}) do
@@ -213,7 +286,7 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
 
   defp poll_for_result(task_id, deadline) do
     case :ets.lookup(@table, task_id) do
-      [{^task_id, :pending}] ->
+      [{^task_id, :pending, _run_ref}] ->
         if System.monotonic_time(:millisecond) >= deadline do
           {:error, :timeout}
         else
@@ -221,16 +294,67 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
           poll_for_result(task_id, deadline)
         end
 
-      [{^task_id, :passed}] ->
+      [{^task_id, :passed, _run_ref}] ->
         :passed
 
-      [{^task_id, {:failed, ctx}}] ->
+      [{^task_id, {:failed, ctx}, _run_ref}] ->
         {:failed, ctx}
 
       [] ->
         {:error, :timeout}
     end
   end
+
+  # Record `status` for `task_id` only if `run_ref` is still the current run.
+  defp put_status(task_id, run_ref, status) do
+    case :ets.lookup(@table, task_id) do
+      [{^task_id, _st, ^run_ref}] ->
+        :ets.insert(@table, {task_id, status, run_ref})
+        :ok
+
+      [] ->
+        # Row was cleared underneath us; do not resurrect a stale verdict.
+        :ok
+
+      _superseded ->
+        Logger.debug(
+          "[UpstreamVerifier] dropping superseded #{inspect(status)} for task #{task_id}"
+        )
+
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # Resolve a still-`:pending` row if the verifying process dies without a
+  # verdict, so dependents fail fast instead of polling to the deadline.
+  defp start_watchdog(task_id, run_ref) do
+    verifier = self()
+
+    spawn(fn ->
+      ref = Process.monitor(verifier)
+
+      receive do
+        {:DOWN, ^ref, :process, ^verifier, :normal} ->
+          :ok
+
+        {:DOWN, ^ref, :process, ^verifier, reason} ->
+          put_status(task_id, run_ref, {:failed, [%{check: :verifier, reason: inspect(reason)}]})
+
+        :verifier_done ->
+          Process.demonitor(ref, [:flush])
+          :ok
+      end
+    end)
+  end
+
+  defp stop_watchdog(pid) when is_pid(pid) do
+    send(pid, :verifier_done)
+    :ok
+  end
+
+  defp stop_watchdog(_), do: :ok
 
   defp ensure_table do
     case :ets.whereis(@table) do

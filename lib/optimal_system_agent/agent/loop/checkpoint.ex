@@ -15,9 +15,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     |> Path.expand()
   end
 
-  @doc "Returns the full path to the checkpoint file for the given session."
+  @doc """
+  Returns the full path to the checkpoint file for the given session.
+
+  The id is run through `sanitize_session/1` — the same guard the rewind path
+  below already applied — so a session id carrying `/` or `..` cannot steer the
+  write (or the `File.rm` in `clear_checkpoint/1`) outside `checkpoint_dir/0`.
+  """
   def checkpoint_path(session_id) do
-    Path.join(checkpoint_dir(), "#{session_id}.json")
+    Path.join(checkpoint_dir(), "#{sanitize_session(session_id)}.json")
   end
 
   # Every field the crash-recovery record carries. `checkpoint_state/1` writes
@@ -143,10 +149,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
 
   @doc "Restore a checkpoint for the given session. Returns a map of state fields, or %{} if none exists."
   def restore_checkpoint(session_id) do
-    path =
-      Application.get_env(:optimal_system_agent, :checkpoint_dir, "~/.osa/checkpoints")
-      |> Path.expand()
-      |> Path.join("#{session_id}.json")
+    path = checkpoint_path(session_id)
 
     if File.exists?(path) do
       case File.read(path) do
@@ -336,10 +339,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
 
   @doc "Delete the checkpoint file for the given session."
   def clear_checkpoint(session_id) do
-    path =
-      Application.get_env(:optimal_system_agent, :checkpoint_dir, "~/.osa/checkpoints")
-      |> Path.expand()
-      |> Path.join("#{session_id}.json")
+    path = checkpoint_path(session_id)
 
     File.rm(path)
     :ok

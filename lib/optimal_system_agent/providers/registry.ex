@@ -219,6 +219,39 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   @doc """
+  Does `provider` carry tool schemas over a native tool channel?
+
+  Resolves the provider atom to the module that will actually build the request
+  (including the `{:compat, _}` indirection and any runtime-registered provider)
+  and asks it via the optional `native_tool_schemas?/0` callback.
+
+  Defaults to `false` for anything that does not export the callback — including
+  runtime-registered providers, which live in GenServer state this function
+  deliberately does not call into. That default is the safe one: it is what
+  keeps the full prose tool documentation in the system prompt for transports
+  that have nowhere else to put it. Two routed providers really are in that
+  position — `claude_cli` and `copilot_cli` drive a CLI subprocess and fold the
+  tool list into `build_system_prompt/2`, i.e. into prompt TEXT — so this is a
+  live distinction, not a hypothetical.
+  """
+  @spec native_tool_schemas?(atom()) :: boolean()
+  def native_tool_schemas?(provider) when is_atom(provider) do
+    case Map.get(@providers, provider) do
+      nil -> false
+      {:compat, _} -> module_declares_native_tools?(@compat)
+      mod when is_atom(mod) -> module_declares_native_tools?(mod)
+    end
+  end
+
+  def native_tool_schemas?(_), do: false
+
+  defp module_declares_native_tools?(module) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :native_tool_schemas?, 0) and
+      module.native_tool_schemas?() == true
+  end
+
+  @doc """
   Register a custom provider module at runtime.
 
   The module must implement the `OptimalSystemAgent.Providers.Behaviour`.

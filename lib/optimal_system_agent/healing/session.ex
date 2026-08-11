@@ -20,6 +20,8 @@ defmodule OptimalSystemAgent.Healing.Session do
   @type t :: %__MODULE__{
           id: String.t(),
           agent_id: String.t(),
+          agent_pid: pid() | nil,
+          healing_context: map(),
           status: status(),
           classification: map(),
           budget_usd: float(),
@@ -39,6 +41,11 @@ defmodule OptimalSystemAgent.Healing.Session do
   defstruct [
     :id,
     :agent_id,
+    # PID of the suspended Loop awaiting {:healing_complete, _} / {:healing_failed, _}.
+    # Kept as a first-class field: it used to be read back out of `classification`,
+    # which `Orchestrator` builds as exactly %{category, severity, retryable, error},
+    # so the lookup was unconditionally nil and no suspended agent was ever woken.
+    :agent_pid,
     :classification,
     :diagnostician_pid,
     :fixer_pid,
@@ -52,7 +59,11 @@ defmodule OptimalSystemAgent.Healing.Session do
     timeout_ms: 300_000,
     max_attempts: 1,
     attempt_count: 0,
-    started_at: nil
+    started_at: nil,
+    # The caller-supplied healing context, kept so retry passes can rebuild the
+    # ephemeral agent's prompt context. Same reason as `agent_pid`: it was read
+    # from `classification[:healing_context]`, which is never populated.
+    healing_context: %{}
   ]
 
   # Valid state transitions
@@ -71,6 +82,8 @@ defmodule OptimalSystemAgent.Healing.Session do
     %__MODULE__{
       id: generate_id(),
       agent_id: agent_id,
+      agent_pid: Keyword.get(opts, :agent_pid),
+      healing_context: Keyword.get(opts, :healing_context, %{}),
       status: :pending,
       classification: classification,
       budget_usd: Keyword.get(opts, :budget_usd, 0.50),

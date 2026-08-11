@@ -299,21 +299,29 @@ defmodule OptimalSystemAgent.Decisions.Graph do
   # Traversal — BFS with visited set for cycle detection
   # ---------------------------------------------------------------------------
 
-  defp do_traverse(start_id, direction, max_depth, _team_id) do
-    do_bfs([start_id], MapSet.new([start_id]), direction, max_depth, 0)
+  # `team_id` is enforced DURING the walk, not only as a post-hoc filter on the
+  # collected nodes. Edges are not team-scoped, so a blind walk crosses into
+  # other teams' subgraphs and keeps going: the foreign nodes were dropped at
+  # the end by `maybe_filter_team/2`, but any of THIS team's nodes reachable
+  # only *through* a foreign node were still collected, which is exactly the
+  # isolation `descendants/2` documents that it provides. Stopping at the
+  # boundary makes the promise true. `team_id: nil` means an unrestricted
+  # global/system walk, as documented.
+  defp do_traverse(start_id, direction, max_depth, team_id) do
+    do_bfs([start_id], MapSet.new([start_id]), direction, max_depth, 0, team_id)
   end
 
-  defp do_bfs([], visited, _direction, _max_depth, _depth) do
+  defp do_bfs([], visited, _direction, _max_depth, _depth, _team_id) do
     {:ok, MapSet.to_list(visited)}
   end
 
-  defp do_bfs(_queue, visited, _direction, max_depth, depth)
+  defp do_bfs(_queue, visited, _direction, max_depth, depth, _team_id)
        when depth >= max_depth do
     Logger.warning("[Decisions.Graph] traversal hit max depth #{max_depth} — stopping")
     {:ok, MapSet.to_list(visited)}
   end
 
-  defp do_bfs(queue, visited, direction, max_depth, depth) do
+  defp do_bfs(queue, visited, direction, max_depth, depth, team_id) do
     next_ids =
       queue
       |> Enum.flat_map(fn node_id ->
@@ -325,9 +333,19 @@ defmodule OptimalSystemAgent.Decisions.Graph do
       end)
       |> Enum.reject(&MapSet.member?(visited, &1))
       |> Enum.uniq()
+      |> Enum.filter(&same_team?(&1, team_id))
 
     new_visited = Enum.reduce(next_ids, visited, &MapSet.put(&2, &1))
-    do_bfs(next_ids, new_visited, direction, max_depth, depth + 1)
+    do_bfs(next_ids, new_visited, direction, max_depth, depth + 1, team_id)
+  end
+
+  defp same_team?(_node_id, nil), do: true
+
+  defp same_team?(node_id, team_id) do
+    case get_node(node_id) do
+      {:ok, node} -> node.team_id == team_id
+      _ -> false
+    end
   end
 
   # ---------------------------------------------------------------------------

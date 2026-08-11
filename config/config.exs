@@ -34,8 +34,45 @@ config :optimal_system_agent,
   # config's default; verified present in the live GET /api/v1/models catalog.
   openrouter_model: "anthropic/claude-opus-5",
 
+  # Drop, from the cached system prompt, the tool documentation that the
+  # request's own native tool definitions already carry byte-for-byte.
+  # Applies ONLY to providers that declare `native_tool_schemas?/0` (the
+  # schemas ride in the request body, not in prompt text) and never to the
+  # `:lite` local-provider path. Set to `false` to restore the full prose tool
+  # block everywhere without a code change.
+  dedupe_native_tool_prompt: true,
+
+  # Honor the `alwaysApply: false` declared in a bundled rule's own frontmatter
+  # instead of injecting every rule into every request, and strip the frontmatter
+  # itself (metadata, not instructions) from what the model sees. Set to `false`
+  # to restore the previous concatenate-everything behaviour.
+  rules_respect_always_apply: true,
+
   # Agent configuration
   max_iterations: 200,
+
+  # Should a text-only answer (visible text, no tool calls) be nudged back into
+  # the ReAct loop because of how its PROSE reads?
+  #
+  # `false` (the default) ends the turn there, matching Codex, grok-build and
+  # Claude Code. When the model returns text and calls no tools, that text IS
+  # the answer — and it has already streamed to the user, so a continuation
+  # cannot replace it, only append a second ending at the cost of another
+  # full-context request.
+  #
+  # `true` restores the old wording-based nudges (`wants_to_continue?` /
+  # `code_in_text?` / the zero-successful-tools gate) for a weak local model
+  # that narrates ("Let me check…") instead of calling tools. Note these key on
+  # phrasing, not on behaviour, so they also fire on a correct explanatory
+  # answer: "check how the retry budget works and explain it" answered in prose
+  # measured 3 round-trips, and an answer containing a fenced code block
+  # measured `max_iterations + 1` before the gate was given a bound.
+  #
+  # Continuation driven by something REAL is unaffected either way and stays on:
+  # an empty generation, pending unverified writes from tools that actually ran,
+  # an explicit output-token target, a just-crossed compaction boundary, and
+  # stop hooks / goal tracking forcing continuation.
+  continue_on_text_only: false,
 
   # Goal verification — an INDEPENDENT, read-only skeptic panel that judges
   # whether the user's GOAL was actually met (not just "a file compiles"), plus

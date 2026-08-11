@@ -291,6 +291,11 @@ defmodule OptimalSystemAgent.Application do
     # Context Mesh registry table
     OptimalSystemAgent.ContextMesh.Registry.init_table()
 
+    # Upstream verification verdicts. `verify/2` is documented to run inside a
+    # Task, so the lazy path made a transient Task the table's owner and every
+    # recorded verdict died with it.
+    OptimalSystemAgent.Verification.UpstreamVerifier.init_table()
+
     # Peer protocol tables (handoffs, reviews, negotiations, discovery)
     OptimalSystemAgent.Peer.Protocol.init_table()
     OptimalSystemAgent.Peer.Review.init_table()

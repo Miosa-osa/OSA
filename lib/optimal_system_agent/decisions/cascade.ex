@@ -25,6 +25,16 @@ defmodule OptimalSystemAgent.Decisions.Cascade do
 
   Each updated node fires a PubSub broadcast on `"osa:dg:team:<team_id>"` so
   live consumers (dashboards, other agents) see updates in real time.
+
+  ## Team isolation
+
+  Propagation stops at a team boundary. Edges are not team-scoped — an edge can
+  point at a node owned by a different team — so a walk that followed edges
+  blindly would (a) rewrite another team's confidence values and (b) broadcast
+  that other team's whole node map (`title`, `description`, `metadata`) onto the
+  ORIGIN team's topic, which is a cross-team content leak. When the origin node
+  has a `team_id`, only nodes carrying the same `team_id` are visited; a `nil`
+  origin `team_id` means a global/system walk and is not restricted.
   """
 
   require Logger
@@ -90,6 +100,12 @@ defmodule OptimalSystemAgent.Decisions.Cascade do
               []
             else
               case Graph.get_node(target_id) do
+                {:ok, target} when not is_nil(team_id) and target.team_id != team_id ->
+                  # Cross-team edge — do not update, do not broadcast, do not
+                  # enqueue. Stopping here also prevents the walk from re-entering
+                  # the origin team through the far side of the other team.
+                  []
+
                 {:ok, target} ->
                   weight = edge.weight || 1.0
                   blended = blend(target.confidence, source_confidence, weight)
@@ -100,7 +116,11 @@ defmodule OptimalSystemAgent.Decisions.Cascade do
                   else
                     case Graph.update_node(target_id, %{confidence: blended}) do
                       {:ok, updated} ->
-                        broadcast_update(updated, team_id)
+                        # Broadcast on the UPDATED node's own team topic, not the
+                        # origin's. Belt-and-braces with the cross-team guard
+                        # above: a node's content must only ever reach the team
+                        # that owns it.
+                        broadcast_update(updated, updated.team_id)
                         [{target_id, blended}]
 
                       _ ->

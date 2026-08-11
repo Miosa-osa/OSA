@@ -46,5 +46,24 @@ defmodule OptimalSystemAgent.Providers.Behaviour do
   @doc "Return the list of models this provider supports."
   @callback available_models() :: list(String.t())
 
-  @optional_callbacks [chat_stream: 3, available_models: 0]
+  @doc """
+  Does this provider transmit tool schemas over a NATIVE tool channel?
+
+  True when the provider reads `opts[:tools]` and puts each tool's name,
+  description, and parameter schema into a dedicated field of the request
+  body (Anthropic `tools`, OpenAI `tools`, Gemini `functionDeclarations`,
+  Bedrock `toolConfig`, Ollama `tools`, …).
+
+  False — the conservative default — for providers that have no such channel
+  and can only learn about a tool from the system prompt text. Those providers
+  MUST keep the full prose tool documentation; a provider that answers `true`
+  can have the duplicated prose dropped from the cached system prompt because
+  the same bytes already ride in the request's tool definitions.
+
+  Consumed by `Providers.Registry.native_tool_schemas?/1`, which defaults to
+  `false` for any provider that does not export this callback.
+  """
+  @callback native_tool_schemas?() :: boolean()
+
+  @optional_callbacks [chat_stream: 3, available_models: 0, native_tool_schemas?: 0]
 end

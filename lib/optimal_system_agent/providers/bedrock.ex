@@ -67,6 +67,10 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   @impl true
   def name, do: :bedrock
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   @impl true
   # Matched on shape, not on `Application.get_env/3`'s default argument:
   # `config/runtime.exs` sets this key to `System.get_env("BEDROCK_MODEL")`,

@@ -22,6 +22,10 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   @impl true
   def name, do: :cohere
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   # `command-r-plus` was the default until 2026-08-01. Cohere deprecated AND
   # shut down the undated `command-r-plus` / `command-r` aliases on the same
   # day — 2025-09-15, with no grace period — so this default had been dead for

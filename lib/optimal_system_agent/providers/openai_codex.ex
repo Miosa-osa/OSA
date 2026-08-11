@@ -61,6 +61,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   @spec name() :: atom()
   def name, do: :openai_codex
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   @spec default_model() :: String.t()
   def default_model,
     do: Application.get_env(:optimal_system_agent, :openai_codex_model, @default_model)

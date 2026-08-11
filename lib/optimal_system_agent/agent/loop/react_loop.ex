@@ -50,6 +50,59 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Max auto-continues when a token-budget output target is set (token_target_unmet?/1).
   @max_target_continues 5
 
+  # Bound on the zero-successful-tools verification gate (`needs_verification_gate?/1`).
+  #
+  # That predicate reads iteration count, task context and "no tool has
+  # succeeded" — none of which the gate's own nudge changes. Firing it therefore
+  # did not make it stop firing, and unlike every other continuation clause it
+  # carried no counter: it re-fired on every subsequent text-only answer, and
+  # because it RESET `auto_continues` to 2 while the code-in-text clause accepts
+  # anything under 3, the two ping-ponged (gate → 2, code-in-text → 3, gate → 2,
+  # …) until the global iteration cap. Measured at exactly `max_iterations + 1`
+  # round-trips for a single text-only answer — 101 at the default effort.
+  @max_zero_tool_gate_prompts 1
+
+  # Should a text-only answer (visible content, no tool calls) be nudged back
+  # into the loop on the strength of how its PROSE reads?
+  #
+  # Default **false**, which makes a text-only answer end the turn — the same
+  # thing Codex, grok-build and Claude Code do. When the model returns visible
+  # text and calls no tools, that text IS the answer; it has already streamed to
+  # the user (`LLMClient.llm_chat_stream` broadcasts every `:text_delta` live),
+  # so a continuation cannot un-present it, it can only bolt a second ending
+  # onto the turn at the price of a full-context round-trip.
+  #
+  # The three clauses this gates all key on wording rather than on anything the
+  # model actually did:
+  #
+  #   * `Guardrails.wants_to_continue?/1` — "Let me check…" / "I'll look at…".
+  #     A perfectly ordinary sentence in an explanatory answer.
+  #   * `Guardrails.code_in_text?/1` — a fenced block of 5+ lines. Also the
+  #     correct answer to "show me what this function looks like".
+  #   * `Guardrails.needs_verification_gate?/1` — any action verb anywhere in
+  #     the user's message plus no successful tool. Fires on "check how the
+  #     retry budget is configured and explain it to me", which is answerable
+  #     in prose and needs no tool at all.
+  #
+  # Continuation that keys on something REAL is unaffected and stays on:
+  # a genuinely empty generation (the reasoning-only backstop below), pending
+  # unverified writes from tools that actually ran (`VerificationGate`), an
+  # explicit output-token target, a just-crossed compaction boundary, and stop
+  # hooks / goal tracking forcing continuation from `finish_turn/2`.
+  #
+  # Opt back in for a weak local model that narrates instead of acting:
+  #   config :optimal_system_agent, :continue_on_text_only, true
+  # or per-session by setting `:continue_on_text_only` on the loop state.
+  defp prose_continue?(state) do
+    case Map.get(state, :continue_on_text_only) do
+      flag when is_boolean(flag) ->
+        flag
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :continue_on_text_only, false) == true
+    end
+  end
+
   defp max_iterations do
     # Explicit config wins; otherwise fall back to the effort ceiling. Effort
     # should RAISE the ceiling for effort-driven callers, never clamp an
@@ -628,7 +681,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     content = if String.trim(content) == "", do: "...", else: content
 
     cond do
-      state.auto_continues < 2 and Guardrails.wants_to_continue?(content) ->
+      prose_continue?(state) and state.auto_continues < 2 and
+          Guardrails.wants_to_continue?(content) ->
         Logger.info(
           "[loop] Auto-continue: model described intent without tool calls (nudge #{state.auto_continues + 1}/2)"
         )
@@ -652,7 +706,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         run(state)
 
-      state.auto_continues < 3 and Guardrails.code_in_text?(content) ->
+      prose_continue?(state) and state.auto_continues < 3 and Guardrails.code_in_text?(content) ->
         Logger.info(
           "[loop] Coding nudge: model wrote code in markdown instead of calling file_write/file_edit (nudge #{state.auto_continues + 1}/3)"
         )
@@ -674,7 +728,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         run(state)
 
-      Guardrails.needs_verification_gate?(state) ->
+      prose_continue?(state) and
+        Map.get(state, :zero_tool_gate_prompts, 0) < @max_zero_tool_gate_prompts and
+          Guardrails.needs_verification_gate?(state) ->
         Logger.info(
           "[loop] Verification gate: iteration #{state.iteration}, task context present, zero successful tools — injecting verification"
         )
@@ -688,12 +744,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "Do NOT return a final answer without tool-backed evidence.]"
         }
 
-        state = %{
-          state
-          | messages: state.messages ++ [%{role: "assistant", content: content}, verification],
-            iteration: state.iteration + 1,
-            auto_continues: 2
-        }
+        state =
+          %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}, verification],
+              iteration: state.iteration + 1,
+              auto_continues: 2
+          }
+          |> Map.put(
+            :zero_tool_gate_prompts,
+            Map.get(state, :zero_tool_gate_prompts, 0) + 1
+          )
 
         run(state)
 

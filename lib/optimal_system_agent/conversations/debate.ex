@@ -31,7 +31,7 @@ defmodule OptimalSystemAgent.Conversations.Debate do
       %{
         final_proposition:    String.t(),
         vote_tally:           %{voter_name => [round_score]},
-        average_scores:       [float()],           # one per round
+        average_scores:       [float()],           # one per round that produced votes
         critique_log:         [{round, critic, critique}],
         convergence_history:  [float()],           # score deltas
         rounds_completed:     pos_integer(),
@@ -87,6 +87,10 @@ defmodule OptimalSystemAgent.Conversations.Debate do
       round: 0,
       critique_log: [],
       vote_tally: build_empty_tally(voters),
+      # Scores indexed by the round they were cast in: %{round => %{name => score}}.
+      # `vote_tally` alone cannot express "this voter did not score THIS round",
+      # which is what made `consensus_met?/1` count a stale score as current.
+      round_votes: %{},
       average_scores: [],
       convergence_history: []
     }
@@ -134,6 +138,17 @@ defmodule OptimalSystemAgent.Conversations.Debate do
     # Step 3: Voters score
     {state, round_avg} = collect_votes(state, round)
 
+    if is_nil(round_avg) do
+      # Every voter failed this round. There is nothing to converge on and no
+      # consensus to evaluate, so the round is discarded rather than scored.
+      Logger.warning("[Debate] round #{round}: no voter produced a score — round discarded")
+      run_debate(state)
+    else
+      evaluate_round(state, round, round_avg)
+    end
+  end
+
+  defp evaluate_round(state, round, round_avg) do
     # Convergence check
     convergence_delta = compute_convergence(state.average_scores, round_avg)
     state = %{state | convergence_history: state.convergence_history ++ [convergence_delta]}
@@ -195,7 +210,7 @@ defmodule OptimalSystemAgent.Conversations.Debate do
         """
       else
         critique_summary = summarise_critiques(state.critique_log, state.round - 1)
-        latest_scores = latest_round_scores(state)
+        latest_scores = round_scores(state, state.round - 1)
 
         """
         You are #{state.proposer.name} (#{state.proposer.role}).
@@ -276,13 +291,13 @@ defmodule OptimalSystemAgent.Conversations.Debate do
   defp collect_votes(state, round) do
     critique_summary = summarise_critiques(state.critique_log, round)
 
-    {updated_tally, scores} =
-      Enum.reduce(state.voters, {state.vote_tally, []}, fn voter, {tally, round_scores} ->
+    {updated_tally, this_round} =
+      Enum.reduce(state.voters, {state.vote_tally, %{}}, fn voter, {tally, round_scores} ->
         case score_proposition(voter, state, round, critique_summary) do
           {:ok, score} ->
             voter_history = Map.get(tally, voter.name, [])
             new_tally = Map.put(tally, voter.name, voter_history ++ [score])
-            {new_tally, round_scores ++ [score]}
+            {new_tally, Map.put(round_scores, voter.name, score)}
 
           {:error, reason} ->
             Logger.warning("[Debate] voter #{voter.name} failed: #{inspect(reason)}")
@@ -290,12 +305,20 @@ defmodule OptimalSystemAgent.Conversations.Debate do
         end
       end)
 
-    avg = if scores == [], do: 0.0, else: Enum.sum(scores) / length(scores)
+    scores = Map.values(this_round)
+
+    # A round in which nobody scored has NO average. It used to record a
+    # fabricated `0.0`, which then fed `compute_convergence/2` and
+    # `List.last(average_scores)` as if the panel had unanimously rejected the
+    # proposition. `nil` is propagated so the caller can discard the round
+    # instead of drawing a conclusion from a number no voter produced.
+    avg = if scores == [], do: nil, else: Enum.sum(scores) / length(scores)
 
     new_state = %{
       state
       | vote_tally: updated_tally,
-        average_scores: state.average_scores ++ [avg]
+        round_votes: Map.put(state.round_votes, round, this_round),
+        average_scores: if(avg, do: state.average_scores ++ [avg], else: state.average_scores)
     }
 
     {new_state, avg}
@@ -332,7 +355,8 @@ defmodule OptimalSystemAgent.Conversations.Debate do
     end
   end
 
-  defp parse_score(raw) do
+  @doc false
+  def parse_score(raw) do
     cleaned =
       raw
       |> String.trim()
@@ -348,8 +372,14 @@ defmodule OptimalSystemAgent.Conversations.Debate do
         {:ok, round(score)}
 
       _ ->
-        # Try extracting a bare integer from the response
-        case Regex.run(~r/\b([0-9]|10)\b/, raw) do
+        # Fall back to a number the model actually LABELLED as a score.
+        #
+        # The old fallback was `~r/\b([0-9]|10)\b/` over the raw text — the
+        # first standalone digit anywhere in the reply. "Evaluated against the
+        # 3 criteria" scored 3; "I have 0 objections" scored 0. A vote invented
+        # from arbitrary prose is worse than a failed vote, because
+        # `consensus_met?/1` treats it as a real ballot.
+        case Regex.run(~r/\bscores?\b\D{0,20}?\b(10|[0-9])\b/i, raw) do
           [_, n] -> {:ok, String.to_integer(n)}
           _ -> {:error, :parse_failed}
         end
@@ -360,17 +390,24 @@ defmodule OptimalSystemAgent.Conversations.Debate do
   # Consensus
   # ---------------------------------------------------------------------------
 
-  defp consensus_met?(%{vote_tally: tally, consensus_policy: policy, round: round}) do
-    if round == 0 or map_size(tally) == 0 do
+  # Consensus is a statement about the CURRENT round.
+  #
+  # This used to read `List.last(scores)` out of the whole `vote_tally`, which
+  # for a voter that failed this round is last round's number — and it counted
+  # that voter in `voter_count` too. An entire final round of failed voters
+  # therefore reported `consensus_reached: true` from scores nobody cast in it.
+  # Only scores actually recorded for `round` count, on both sides of the ratio.
+  @doc false
+  def consensus_met?(%{round_votes: round_votes, consensus_policy: policy, round: round}) do
+    scores = Map.get(round_votes, round, %{})
+
+    if round == 0 or map_size(scores) == 0 do
       false
     else
-      voter_count = map_size(tally)
+      voter_count = map_size(scores)
 
       passing_voters =
-        Enum.count(tally, fn {_name, scores} ->
-          latest = List.last(scores)
-          latest != nil and latest >= @passing_score
-        end)
+        Enum.count(scores, fn {_name, score} -> score >= @passing_score end)
 
       case policy do
         :majority -> passing_voters > voter_count / 2
@@ -402,10 +439,13 @@ defmodule OptimalSystemAgent.Conversations.Debate do
     |> Enum.map_join("\n\n", fn {_, critic, text} -> "#{critic}:\n#{text}" end)
   end
 
-  defp latest_round_scores(state) do
-    state.vote_tally
-    |> Enum.map(fn {name, scores} -> {name, List.last(scores)} end)
-    |> Enum.reject(fn {_, s} -> is_nil(s) end)
+  # Scores cast in a SPECIFIC round. Callers must say which: the proposer's
+  # revision prompt wants the previous round's numbers, and the current round has
+  # not voted yet when that prompt is built.
+  defp round_scores(state, round) do
+    state.round_votes
+    |> Map.get(round, %{})
+    |> Enum.to_list()
   end
 
   defp format_voter_scores([]), do: ""

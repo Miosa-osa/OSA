@@ -31,6 +31,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @impl true
   def name, do: :ollama
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   @impl true
   def default_model do
     # Return whatever auto-detect found, not a hardcoded small model

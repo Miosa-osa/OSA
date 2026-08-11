@@ -9,6 +9,104 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.80] — displays as `v1.0.080`
+
+### Changed — every request is 16,145 tokens smaller
+
+The static prefix measured **47,689 tokens**, roughly 5x comparable harnesses. It
+is now **31,544** — a 33.9% cut on every request to a provider with a native
+tool channel.
+
+The cause was duplication, not verbosity. `Soul.ToolsSection` rendered each
+tool's documentation as prose into the cached system prompt while the same tools
+also shipped as the JSON `tools` array. Measured per tool: for **all 36 loaded
+tools, `prompt/1` returns byte-identical output to `description/0`** — the
+residual after subtracting the description is **0 bytes for every one of them**.
+The additional 22,178 bytes of `Parameters:` lines are `parameters/0` re-encoded,
+i.e. the same map already shipping as `input_schema`. The tool-definitions block
+went from 15,297 tokens to 384.
+
+It is implemented as span subtraction rather than deletion: the description span
+is removed from wherever it sits inside the `prompt/1` body and the `Parameters:`
+line dropped, with everything else surviving verbatim. If anyone enriches a
+`prompt/1` later, that surplus is kept automatically.
+
+**Gated on a transport capability, not a provider allowlist** — new optional
+`native_tool_schemas?/0`, defaulting to false. This is not a stylistic
+preference: `claude_cli` and `copilot_cli` have **no native tool channel** and
+fold the tool list into prompt text, so an allowlist matching on "Claude" would
+have blinded them entirely. Membership is read per tool from the same
+`Registry.list_active/0` that feeds the provider's `:tools` option, which caught a
+real divergence — `computer_use` is documented in the prose but absent from the
+array, so it still renders in full.
+
+**Rules that said not to apply were applied anyway.** `{{RULES}}` concatenated
+every `priv/rules/**/*.md` while ignoring their own frontmatter, so four files
+declaring `alwaysApply: false` with narrow globs shipped on every request — a
+session editing Elixir carried `.tsx` component rules. Their raw YAML
+(`globs:`, `description: "…EDIT THIS FILE…"`) also reached the model as
+instruction text. The flag is now honored and frontmatter always stripped.
+
+Both behaviours are config flags defaulting on: `dedupe_native_tool_prompt` and
+`rules_respect_always_apply`.
+
+### Fixed — a tool that hung forever, and a healing path that never woke anyone
+
+- **`team_create` deadlocked permanently.** `Manager.init/1` called
+  `NervousSystem.start_all/1`, which issues `DynamicSupervisor.start_child`
+  against the supervisor that was itself blocked in `proc_lib.sync_start/2`
+  waiting for that `init/1`. No timeout on either side. Confirmed with a live
+  stack dump. The existing 33-test suite never calls `create_team`, which is why
+  it survived. Startup now defers to `handle_continue`.
+- **No suspended agent was ever woken.** `notify_agent/2` read
+  `session.classification[:agent_pid]`, a key `handle_call/3` never writes — so
+  it was unconditionally nil, every wake fell through, and the log said
+  "completed". `rebuild_context/1` had the same dead lookup.
+- The healing orchestrator did not `trap_exit` while owning its ETS table and
+  `start_link`ing its ephemerals, so one abnormal exit deleted every session
+  record and skipped the teardown that wakes suspended agents. Its retry path
+  also attempted `:diagnosing → :diagnosing`, failing a `{:ok, _} =` match and
+  killing the orchestrator outright.
+- The session cap evicted **live** sessions; it now only evicts terminal ones.
+- **Cross-team leak in the decision graph**: propagation followed edges with no
+  team filter while broadcasting on the origin's topic, and `do_traverse/4`
+  discarded its `team_id` argument despite the docstring promising isolation.
+- **`verify_loop` could steer the wrong session** — it selected over all
+  registry keys and took the newest, so guidance could land in another session's
+  prompt. It now uses the pid `start_child` returned.
+- Upstream verifier: empty criteria passed **vacuously**, releasing every blocked
+  dependent; unrecognized keys are now reported. A stale verdict can no longer
+  overwrite a retry's result, and a dead verifying process resolves its row
+  instead of leaving every waiter to sleep out the full timeout.
+- Checkpoint filenames are sanitized on both the verification and crash-recovery
+  paths (the rewind path already was).
+- Teams: child registration serialized through the manager; agent-state mutations
+  moved to compare-and-swap; lock holders monitored so a dead agent's lock is
+  released; a rendezvous barrier can no longer be clobbered while waiters are
+  blocked on it.
+- Conversations: a degraded summary is no longer written to memory as canonical,
+  transcript elision keeps head **and** tail, and a debate no longer counts a
+  failed voter's previous-round score as current — an all-fail final round used
+  to report consensus.
+
+### Known gaps
+
+`priv/rules/projects/bos.md` ships BusinessOS project rules — scoped in their own
+text to one machine and one repository — in the bundled prompt to every user on
+every request. Flagged, not removed; deleting a bundled asset is an owner
+decision. `:lite` mode documents itself as "~4-6k instead of ~24k" and actually
+measures **25,925 tokens**. `CLI.Doctor` reads the full static-base slot and will
+under-report against a deduplicated session. Tool arrays are not yet tier-aware:
+a `:subagent` receives ~2,700 tokens of schemas for tools the executor will
+refuse. Three suites pass alone and fail in a full run; the two new ones may
+reflect the dedup's new read of `Registry.list_active/0` at render time, which is
+correct in production — that is a hypothesis, not a diagnosis.
+
+No live provider was reachable from this machine, so the token counts are
+request-body measurements and no `cache_read_input_tokens` figures were observed.
+
+---
+
 ## [1.0.79] — displays as `v1.0.079`
 
 ### Fixed — the dead rows, and the escape codes painting as text

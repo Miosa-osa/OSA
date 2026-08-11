@@ -11,6 +11,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
   alias OptimalSystemAgent.Providers.OpenAICompat
 
+  # Every provider routed through here goes out via `OpenAICompat`, which puts
+  # the tool schemas in the request body's `tools` field.
+  # See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   @provider_configs %{
     openai: %{
       default_url: "https://api.openai.com/v1",

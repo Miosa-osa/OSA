@@ -300,15 +300,22 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     @impl true
     def init(team_id) do
-      {:ok, %{team_id: team_id, file_locks: %{}, task_locks: %{}}}
+      # `holders` maps a monitor ref to the {agent_id, file_path} it holds.
+      # Without it a lock taken by an agent that then crashed was held forever:
+      # nothing released it, `file_locks` only ever grew, and every later writer
+      # of that path was told it was conflicted by a process that no longer
+      # exists.
+      {:ok, %{team_id: team_id, file_locks: %{}, task_locks: %{}, holders: %{}}}
     end
 
     @impl true
-    def handle_call({:register_file, agent_id, file_path}, _from, state) do
+    def handle_call({:register_file, agent_id, file_path}, {caller, _tag}, state) do
       case Map.get(state.file_locks, file_path) do
         nil ->
           new_locks = Map.put(state.file_locks, file_path, agent_id)
-          {:reply, :ok, %{state | file_locks: new_locks}}
+          ref = Process.monitor(caller)
+          holders = Map.put(state.holders, ref, {agent_id, file_path})
+          {:reply, :ok, %{state | file_locks: new_locks, holders: holders}}
 
         ^agent_id ->
           {:reply, :ok, state}
@@ -330,9 +337,39 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     @impl true
     def handle_cast({:release_file, _agent_id, file_path}, state) do
+      {holders, refs} =
+        Enum.reduce(state.holders, {%{}, []}, fn
+          {ref, {_a, ^file_path}}, {acc, refs} -> {acc, [ref | refs]}
+          {ref, held}, {acc, refs} -> {Map.put(acc, ref, held), refs}
+        end)
+
+      Enum.each(refs, &Process.demonitor(&1, [:flush]))
+
       new_locks = Map.delete(state.file_locks, file_path)
-      {:noreply, %{state | file_locks: new_locks}}
+      {:noreply, %{state | file_locks: new_locks, holders: holders}}
     end
+
+    # A lock holder died without releasing. Drop its lock rather than leaving
+    # the path blocked for the life of the team.
+    @impl true
+    def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+      case Map.pop(state.holders, ref) do
+        {nil, _holders} ->
+          {:noreply, state}
+
+        {{agent_id, file_path}, holders} ->
+          Logger.warning(
+            "[ConflictDetector:#{state.team_id}] Lock holder for #{file_path} " <>
+              "(#{agent_id}) went down — releasing"
+          )
+
+          {:noreply,
+           %{state | file_locks: Map.delete(state.file_locks, file_path), holders: holders}}
+      end
+    end
+
+    @impl true
+    def handle_info(_msg, state), do: {:noreply, state}
   end
 
   # ---------------------------------------------------------------------------
@@ -423,7 +460,14 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
       )
     end
 
-    @doc "Submit a bid for a task. Returns `:won` or `{:lost, winner_agent_id}`."
+    @doc """
+    Submit a bid for a task. Returns `:ok` once the bid is recorded.
+
+    (This used to be documented as returning `:won` / `{:lost, winner}`, which
+    it never did and structurally cannot: bidding is open until someone calls
+    `close_auction/2`, so at bid time there is no winner to report. The winner
+    is `close_auction/2`'s return value.)
+    """
     def bid(team_id, task_id, agent_id, confidence) do
       GenServer.call(
         {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}},
@@ -534,9 +578,19 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     @impl true
     def handle_call({:create, name, expected}, _from, state) do
-      barrier = %{expected: expected, arrived: [], waiters: []}
-      new_barriers = Map.put(state.barriers, name, barrier)
-      {:reply, :ok, %{state | barriers: new_barriers}}
+      case Map.get(state.barriers, name) do
+        # Re-creating a barrier that already has agents blocked on it used to
+        # `Map.put` a fresh one straight over it, discarding the `from` refs of
+        # everyone parked in a 60-second `GenServer.call` — no reply could ever
+        # reach them, so they all timed out and crashed. A live barrier is never
+        # clobbered.
+        %{waiters: [_ | _]} ->
+          {:reply, {:error, :already_exists}, state}
+
+        _ ->
+          barrier = %{expected: expected, arrived: [], waiters: []}
+          {:reply, :ok, %{state | barriers: Map.put(state.barriers, name, barrier)}}
+      end
     end
 
     @impl true

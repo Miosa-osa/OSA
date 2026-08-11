@@ -63,6 +63,10 @@ defmodule OptimalSystemAgent.Providers.Google do
   @impl true
   def name, do: :google
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   # Single source of truth: Providers.GoogleModels. `gemini-2.0-flash` (OSA's
   # default until 2026-08-01) was shut down 2026-06-01; the `gemini-2.5-*`
   # family shuts down 2026-10-16, inside the 90-day guard, so it is no longer

@@ -71,10 +71,12 @@ defmodule OptimalSystemAgent.Teams.Manager do
     case OptimalSystemAgent.Teams.Supervisor.start_team(config) do
       {:ok, _pid} ->
         # Manager is alive; fetch the meta it wrote during init
+        await_ready(team_id)
         meta = get_meta(team_id)
         {:ok, meta}
 
       {:error, {:already_started, _pid}} ->
+        await_ready(team_id)
         {:ok, get_meta(team_id)}
 
       {:error, reason} ->
@@ -415,12 +417,32 @@ defmodule OptimalSystemAgent.Teams.Manager do
     # Also initialise the legacy Team budget table for iteration tracking
     OptimalSystemAgent.Team.init_budget(team_id)
 
-    # Start the nervous system for this team
-    NervousSystem.start_all(team_id)
-
     Logger.info("[Manager] Team #{team_id} (#{name}) started at depth #{depth}")
 
-    {:ok, %{team_id: team_id}}
+    # The nervous system MUST NOT be started from init/1.
+    #
+    # `NervousSystem.start_all/1` calls `DynamicSupervisor.start_child/2` on
+    # `Teams.Supervisor` — the very supervisor that is at this moment blocked in
+    # `proc_lib.sync_start/2` waiting for THIS init/1 to return. That is a hard
+    # deadlock with no timeout on either side: `Manager.create_team/1` never
+    # returned, and the `team_create` tool that calls it hung forever. Deferring
+    # to handle_continue lets init/1 return first, which releases the supervisor
+    # before the nested start_child is issued.
+    {:ok, %{team_id: team_id}, {:continue, :start_nervous_system}}
+  end
+
+  @impl true
+  def handle_continue(:start_nervous_system, state) do
+    NervousSystem.start_all(state.team_id)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:ready, _from, state), do: {:reply, :ok, state}
+
+  def handle_call({:register_child, child_team_id}, _from, state) do
+    do_register_child(state.team_id, child_team_id)
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -472,15 +494,59 @@ defmodule OptimalSystemAgent.Teams.Manager do
 
   defp check_depth(_meta), do: :ok
 
+  # Append `child_team_id` to the parent's `:child_ids`.
+  #
+  # `create_sub_team/3` runs in the CALLER's process, and this is a
+  # read-modify-write over shared ETS with no serialisation: two sub-teams
+  # created concurrently under the same parent both read the same `child_ids`
+  # and the second write dropped the first child. A dropped child id is not
+  # cosmetic — `dissolve_team/1` walks `child_ids` to tear a subtree down, so
+  # the forgotten team's agents, ETS rows and nervous-system processes leaked
+  # permanently.
+  #
+  # The parent's own Manager GenServer is the natural serialisation point, so
+  # the update runs there. The direct path is kept only for the case where the
+  # parent has no live Manager (recovery, tests), where there is no concurrency
+  # to lose to anyway.
   defp register_child(parent_team_id, child_team_id) do
+    case GenServer.call(via(parent_team_id), {:register_child, child_team_id}, 5_000) do
+      :ok -> :ok
+    end
+  catch
+    :exit, _ -> do_register_child(parent_team_id, child_team_id)
+  end
+
+  defp do_register_child(parent_team_id, child_team_id) do
     case get_meta(parent_team_id) do
       nil ->
         :ok
 
       meta ->
-        updated = Map.update(meta, :child_ids, [child_team_id], &[child_team_id | &1])
+        child_ids = Map.get(meta, :child_ids) || []
+
+        updated =
+          if child_team_id in child_ids do
+            meta
+          else
+            Map.put(meta, :child_ids, [child_team_id | child_ids])
+          end
+
         write_meta(parent_team_id, updated)
     end
+  end
+
+  defp via(team_id),
+    do: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
+
+  # Block until the Manager has drained its `:start_nervous_system` continue.
+  # A GenServer processes a queued continue before any queued call, so a reply
+  # to `:ready` proves the nervous system is up — callers of `create_team/1`
+  # keep the "team is fully formed on return" guarantee that starting the
+  # nervous system inside init/1 used to give (before it deadlocked).
+  defp await_ready(team_id) do
+    GenServer.call(via(team_id), :ready, 30_000)
+  catch
+    :exit, _ -> :ok
   end
 
   defp stop_all_agents(team_id) do

@@ -80,6 +80,9 @@ defmodule OptimalSystemAgent.Soul do
     # Also invalidate the LITE variant (rebuilt lazily on next static_base(:lite) call)
     :persistent_term.put({__MODULE__, :static_base_lite}, nil)
     :persistent_term.put({__MODULE__, :static_token_count_lite}, 0)
+    # ...and the NATIVE-TOOLS variant (static_base(:native_tools))
+    :persistent_term.put({__MODULE__, :static_base_native}, nil)
+    :persistent_term.put({__MODULE__, :static_token_count_native}, 0)
 
     loaded_count = Enum.count([identity, soul, user], &(&1 != nil))
     agent_count = map_size(agent_souls)
@@ -118,15 +121,26 @@ defmodule OptimalSystemAgent.Soul do
   end
 
   @doc """
-  Returns the cached LITE static base — the same SYSTEM.md template but with only
-  the core-tool allowlist inlined (non-core tools advertised by name via the
-  `<system-reminder>` and loadable through tool_search). Used for local providers
-  and small context windows so the static base stays ~4-6k instead of ~24k.
+  Returns a named variant of the cached static base.
 
-  The full and lite bases are cached in SEPARATE persistent_term slots because the
-  static base is process-wide cached and cannot vary per-request from a single slot.
+    * `:full`         — `static_base/0` unmodified.
+    * `:lite`         — the same SYSTEM.md template with only the core-tool
+      allowlist inlined; non-core tools are advertised by name via the
+      `<system-reminder>` and loadable through tool_search. Used for local
+      providers and small context windows.
+    * `:native_tools` — the FULL tool set, but with the spans that duplicate
+      the request's own native tool definitions removed from
+      `{{TOOL_DEFINITIONS}}`. Only meaningful for a provider whose transport
+      actually carries those schemas (`Providers.Registry.native_tool_schemas?/1`);
+      selected in `Agent.Context` and gated by
+      `config :optimal_system_agent, :dedupe_native_tool_prompt`.
+
+  Each variant gets its OWN persistent_term slot: the static base is
+  process-wide cached and cannot vary per request from a single slot.
   """
-  @spec static_base(:lite) :: String.t()
+  @spec static_base(:full | :lite | :native_tools) :: String.t()
+  def static_base(:full), do: static_base()
+
   def static_base(:lite) do
     case :persistent_term.get({__MODULE__, :static_base_lite}, nil) do
       nil -> interpolate_and_cache(:lite)
@@ -134,12 +148,41 @@ defmodule OptimalSystemAgent.Soul do
     end
   end
 
-  @doc "Returns the token count of the cached LITE static base."
-  @spec static_token_count(:lite) :: non_neg_integer()
+  def static_base(:native_tools) do
+    case :persistent_term.get({__MODULE__, :static_base_native}, nil) do
+      nil -> interpolate_and_cache(:native_tools)
+      cached -> cached
+    end
+  end
+
+  @doc "Token count of the given static-base variant. See `static_base/1`."
+  @spec static_token_count(:full | :lite | :native_tools) :: non_neg_integer()
+  def static_token_count(:full), do: static_token_count()
+
   def static_token_count(:lite) do
     # Ensure lite static base is built
     _ = static_base(:lite)
     :persistent_term.get({__MODULE__, :static_token_count_lite}, 0)
+  end
+
+  def static_token_count(:native_tools) do
+    _ = static_base(:native_tools)
+    :persistent_term.get({__MODULE__, :static_token_count_native}, 0)
+  end
+
+  @doc """
+  Is the native-tool-schema de-duplication enabled?
+
+  Defaults to `true`. Set
+
+      config :optimal_system_agent, :dedupe_native_tool_prompt, false
+
+  to fall back to the full prose tool block for every provider, without a
+  code change.
+  """
+  @spec dedupe_native_tool_prompt?() :: boolean()
+  def dedupe_native_tool_prompt? do
+    Application.get_env(:optimal_system_agent, :dedupe_native_tool_prompt, true) == true
   end
 
   @doc "Get the user profile content (USER.md)."
@@ -206,6 +249,19 @@ defmodule OptimalSystemAgent.Soul do
     :persistent_term.put({__MODULE__, :static_token_count_lite}, token_count)
 
     Logger.info("[Soul] Static base (lite) cached: #{token_count} tokens")
+    base
+  end
+
+  # NATIVE-TOOLS variant — same template and same tool set as the full base,
+  # minus the spans the request's own tool definitions already carry.
+  defp interpolate_and_cache(:native_tools) do
+    base = build_base(tools_content(:native_tools))
+
+    token_count = estimate_tokens(base)
+    :persistent_term.put({__MODULE__, :static_base_native}, base)
+    :persistent_term.put({__MODULE__, :static_token_count_native}, token_count)
+
+    Logger.info("[Soul] Static base (native tools) cached: #{token_count} tokens")
     base
   end
 
@@ -278,6 +334,11 @@ defmodule OptimalSystemAgent.Soul do
     ToolsSection.build(:lite)
   end
 
+  # NATIVE tools section: full tool set, duplicated spans removed.
+  defp tools_content(:native_tools) do
+    ToolsSection.build(:native_tools)
+  end
+
   defp rules_content do
     rules_dir =
       case :code.priv_dir(:optimal_system_agent) do
@@ -292,9 +353,14 @@ defmodule OptimalSystemAgent.Soul do
       |> Enum.sort()
       |> Enum.map(fn path ->
         name = Path.relative_to(path, rules_dir) |> String.replace_suffix(".md", "")
-        content = File.read!(path)
-        "## Rule: #{name}\n#{content}"
+        {meta, body} = split_rule_frontmatter(File.read!(path))
+
+        cond do
+          respect_always_apply?() and meta.always_apply? == false -> nil
+          true -> "## Rule: #{name}\n#{body}"
+        end
       end)
+      |> Enum.reject(&is_nil/1)
       |> case do
         [] -> nil
         parts -> "# Active Rules\n\n" <> Enum.join(parts, "\n\n")
@@ -304,6 +370,62 @@ defmodule OptimalSystemAgent.Soul do
     end
   rescue
     _ -> nil
+  end
+
+  # Every bundled rule carries a YAML frontmatter block declaring `globs:` and,
+  # for the narrow ones, `alwaysApply: false`. Nothing read it: the loader
+  # concatenated the raw file, so
+  #
+  #   * `typescript.md`, `testing.md`, `api/security.md` and
+  #     `frontend/components.md` — 5,812 bytes that say in their OWN metadata
+  #     that they do not always apply — were nonetheless in the system prompt of
+  #     every request, telling a model editing Elixir about `.tsx` conventions;
+  #   * the frontmatter itself, `---` fences and all, was shipped to the model
+  #     as if it were instruction text.
+  #
+  # A rule with no frontmatter, or with no `alwaysApply` key, is kept: absence
+  # of the flag is not a claim that it should be dropped.
+  defp split_rule_frontmatter(content) do
+    case String.split(content, ~r/\A---\r?\n/, parts: 2) do
+      [_, rest] ->
+        case String.split(rest, ~r/\r?\n---\r?\n/, parts: 2) do
+          [meta, body] -> {parse_rule_meta(meta), String.trim_leading(body)}
+          _ -> {%{always_apply?: nil}, content}
+        end
+
+      _ ->
+        {%{always_apply?: nil}, content}
+    end
+  end
+
+  defp parse_rule_meta(meta) do
+    always_apply? =
+      cond do
+        Regex.match?(~r/^\s*alwaysApply\s*:\s*false\s*$/mi, meta) -> false
+        Regex.match?(~r/^\s*alwaysApply\s*:\s*true\s*$/mi, meta) -> true
+        true -> nil
+      end
+
+    %{always_apply?: always_apply?}
+  end
+
+  @doc """
+  Should a bundled rule's `alwaysApply: false` be honored?
+
+  Defaults to `true`. Set
+
+      config :optimal_system_agent, :rules_respect_always_apply, false
+
+  to restore the previous behaviour of injecting every rule file into the
+  static base regardless of what it declares.
+
+  Frontmatter STRIPPING is not gated: a `---`/`globs:`/`alwaysApply:` block is
+  loader metadata in every case, and there is no reading under which sending it
+  to the model as instruction text is correct.
+  """
+  @spec respect_always_apply?() :: boolean()
+  def respect_always_apply? do
+    Application.get_env(:optimal_system_agent, :rules_respect_always_apply, true) == true
   end
 
   defp user_content do

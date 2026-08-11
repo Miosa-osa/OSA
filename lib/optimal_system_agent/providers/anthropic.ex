@@ -27,6 +27,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @impl true
   def name, do: :anthropic
 
+  # Tool schemas ride in a dedicated field of the request body, not in the
+  # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  def native_tool_schemas?, do: true
+
   alias OptimalSystemAgent.Providers.AnthropicModels
 
   @impl true
@@ -1004,12 +1008,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
-  defp cap_cache_breakpoints(blocks) do
+  defp cap_cache_breakpoints(blocks), do: cap_cache_breakpoints(blocks, @max_cache_breakpoints)
+
+  defp cap_cache_breakpoints(blocks, budget) do
     {kept, _} =
       Enum.map_reduce(blocks, 0, fn block, seen ->
         cond do
           not Map.has_key?(block, "cache_control") -> {block, seen}
-          seen < @max_cache_breakpoints -> {block, seen + 1}
+          seen < budget -> {block, seen + 1}
           true -> {Map.delete(block, "cache_control"), seen}
         end
       end)
@@ -1226,11 +1232,29 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
+  # Tool definitions render FIRST in an Anthropic request — ahead of `system`
+  # and `messages` — and they are the single most stable thing in it. OSA sends
+  # ~62 KB (~15.5k tokens) of them on every turn.
+  #
+  # Until now they carried no `cache_control` of their own. They were still
+  # cached, because caching is a prefix match and the first `system` breakpoint
+  # covers everything before it — but only as part of ONE segment welded to the
+  # static base. Anthropic's invalidation hierarchy is tiered: a change to the
+  # system prompt invalidates the system cache while LEAVING the tools cache
+  # intact — but only if a tools breakpoint exists to define that tier. Without
+  # one, editing a rules file, connecting an MCP server, or changing the user
+  # profile re-wrote all ~48k tokens at the 1.25x write rate instead of
+  # re-writing the ~32k that actually changed and reading the ~15.5k that did
+  # not.
+  #
+  # Context uses 2 of the 4 available breakpoints, so this one is free. It costs
+  # nothing when nothing changes (both segments are reads) and saves the tools
+  # segment whenever the system prompt alone moves.
   defp maybe_add_tools(body, opts) do
     case Keyword.get(opts, :tools) do
       nil -> body
       [] -> body
-      tools -> Map.put(body, :tools, format_tools(tools))
+      tools -> body |> Map.put(:tools, format_tools(tools)) |> mark_tools_cache_boundary()
     end
   end
 
@@ -1242,6 +1266,57 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         "input_schema" => tool.parameters
       }
     end)
+  end
+
+  # Anthropic's minimum cacheable prefix is 1024 tokens on most models (512 on
+  # Opus 5, 2048-4096 on others). Below it a breakpoint silently does nothing —
+  # no error, just no cache entry — so spending one of four on a small tool list
+  # would be pure waste. ~4 KB is the conservative 1024-token equivalent, the
+  # same threshold the string-system path uses.
+  @min_cacheable_tools_bytes 4_000
+
+  defp mark_tools_cache_boundary(%{tools: tools} = body) when is_list(tools) and tools != [] do
+    if prompt_caching_enabled?() and tools_payload_bytes(tools) >= @min_cacheable_tools_bytes do
+      {leading, [last]} = Enum.split(tools, length(tools) - 1)
+      marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})]
+
+      body
+      |> Map.put(:tools, marked)
+      |> enforce_breakpoint_budget()
+    else
+      body
+    end
+  end
+
+  defp mark_tools_cache_boundary(body), do: body
+
+  defp tools_payload_bytes(tools) do
+    Enum.reduce(tools, 0, fn tool, acc ->
+      acc + byte_size(to_string(tool["name"])) + byte_size(to_string(tool["description"]))
+    end)
+  end
+
+  # Global cap across the whole body. `maybe_add_system/2` caps the SYSTEM array
+  # on its own, and runs before tools are added, so it cannot know a tools
+  # breakpoint is coming. Walk the body in wire order — tools, then system — and
+  # drop any marker past the limit. Wire order is also stable-prefix order: an
+  # earlier marker covers a longer stable prefix than a later one, so keeping
+  # the earliest is the right policy, and it is the same rule
+  # `cap_cache_breakpoints/1` already applies within the system array.
+  defp enforce_breakpoint_budget(body) do
+    tools = Map.get(body, :tools) || []
+    system = Map.get(body, :system)
+
+    tool_markers = Enum.count(tools, &Map.has_key?(&1, "cache_control"))
+
+    case system do
+      blocks when is_list(blocks) ->
+        remaining = @max_cache_breakpoints - tool_markers
+        Map.put(body, :system, cap_cache_breakpoints(blocks, remaining))
+
+      _ ->
+        body
+    end
   end
 
   defp extract_content(%{"content" => blocks}) when is_list(blocks) do

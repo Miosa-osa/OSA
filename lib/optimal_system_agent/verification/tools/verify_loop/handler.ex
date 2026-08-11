@@ -49,8 +49,8 @@ defmodule OptimalSystemAgent.Verification.Tools.VerifyLoop.Handler do
              OptimalSystemAgent.Verification.LoopSupervisor,
              {Loop, opts}
            ) do
-        {:ok, _pid} ->
-          loop_id = discover_loop_id()
+        {:ok, pid} ->
+          loop_id = loop_id_for(pid)
 
           result = %{
             "loop_id" => loop_id,
@@ -72,23 +72,23 @@ defmodule OptimalSystemAgent.Verification.Tools.VerifyLoop.Handler do
 
   # ── Private ───────────────────────────────────────────────────────────
 
-  # Discover the most recently registered "vloop:" key in the SessionRegistry.
-  # Falls back to "unknown" on race or registry absence.
-  defp discover_loop_id do
-    try do
-      matches =
-        Registry.select(OptimalSystemAgent.SessionRegistry, [
-          {{:"$1", :_, :_}, [{:is_binary, :"$1"}], [:"$1"]}
-        ])
-        |> Enum.filter(&String.starts_with?(&1, "vloop:"))
-        |> Enum.sort(:desc)
-
-      case matches do
-        [latest | _] -> String.replace_prefix(latest, "vloop:", "")
-        [] -> "unknown"
-      end
-    rescue
-      _ -> "unknown"
+  # Resolve the loop_id of the loop WE just started, by asking the registry
+  # which key the returned pid holds.
+  #
+  # This replaces a `Registry.select/2` over every `"vloop:"` key in the
+  # SessionRegistry that sorted `:desc` and took the head. The pid from
+  # `start_child/2` was discarded, so with two verification loops alive the
+  # handler happily reported some other session's loop_id — and everything keyed
+  # off that id goes to the wrong process: `Loop.steer/2` injects this session's
+  # operator guidance into a different session's LLM prompt, and
+  # `Loop.get_state/1` returns a different session's `task_id`/`team_id`.
+  # `Registry.keys/2` is exact and race-free: it is the pid's own registration.
+  defp loop_id_for(pid) do
+    case Registry.keys(OptimalSystemAgent.SessionRegistry, pid) do
+      [key | _] -> String.replace_prefix(key, "vloop:", "")
+      [] -> "unknown"
     end
+  rescue
+    _ -> "unknown"
   end
 end
