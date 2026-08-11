@@ -496,6 +496,23 @@ impl DampedSlot {
             self.shrink_since = None;
             return self.reserved;
         }
+        // **Gone is not oscillating.** The hold below exists to absorb a band
+        // whose height wobbles while it is still being written to — a fenced
+        // block opening and closing, a feed gaining and losing a row. A band
+        // that now draws NOTHING is not wobbling: the turn settled, the feed was
+        // cleared, the stream ended. There is no future frame for the hold to
+        // protect, so waiting it out only means holding blank rows on screen for
+        // another `SLOT_SHRINK_HOLD` after the content is provably gone.
+        //
+        // Measured on a real PTY (`test/pty/smoothness_probe.py`): the live
+        // region kept moving for ~890ms after the final token, against ~46ms
+        // before the damping landed. This is the half of that which the slot
+        // owns.
+        if want == 0 {
+            self.reserved = 0;
+            self.shrink_since = None;
+            return 0;
+        }
         // The reply is drawing fewer rows than are reserved: the dead-row state.
         // Arm the timer on the first such frame, and honour it once it matures —
         // shrinking to the CURRENT want, not to whatever height armed it, so a
@@ -675,7 +692,34 @@ impl App {
         // *smaller* height has been wanted and only give the rows back once it
         // settles; grows still commit immediately.
         let mut shrink_streak: u8 = 0;
-        const SHRINK_SETTLE_TICKS: u8 = 4; // ~0.8s at the 200ms tick cadence
+        // Iterations, not milliseconds — and that distinction is why this number
+        // had to come down. While events are flowing the loop spins many times a
+        // second and the streak fills almost instantly; while the app is QUIET it
+        // iterates once per 200ms tick, so four of them is ~0.8s. The quiet case
+        // is exactly the case this delay is worst in: the turn has ended, the
+        // chrome is retired, and the only thing left to do is give the rows back.
+        //
+        // It is also the SECOND damper on the same motion, and that is what
+        // makes four wrong rather than merely conservative. Each band already
+        // holds its own shrink for `SLOT_SHRINK_HOLD` (`DampedSlot`), so a
+        // transient dip is absorbed there and never reaches this streak. What
+        // is left for the streak to catch is a dip that survived a 200ms hold,
+        // which one confirming iteration is enough for: a single-frame wobble
+        // still cannot trigger a rebuild, and a real shrink is committed on the
+        // next tick instead of the fourth.
+        //
+        // Measured end to end, `test/pty/smoothness_probe.py`, last token ->
+        // live region stops moving, 100x30:
+        //
+        //     v1.0.076 (no damping)              46 ms
+        //     v1.0.080 (hold + 4 ticks)         897 ms
+        //     + zero-content shrink, 2 ticks    441 ms
+        //     + zero-content shrink, 1 tick     265 ms   <- here
+        //
+        // over the same stub turn, with live-region movement staying at ~0.4
+        // moves/sec during the stream (i.e. the churn this guards against does
+        // not come back).
+        const SHRINK_SETTLE_TICKS: u8 = 1;
         // Height of the slash-completions popup on the previous frame. Opening a
         // popup grows the viewport (already committed immediately); CLOSING it
         // (running a command) shrinks it, which the debounce above would hold for
@@ -1064,6 +1108,7 @@ impl App {
                         };
                         if let Some(top) = surgical_top {
                             let max_row = size.rows.saturating_sub(1);
+                            let top = surgical_clear_top(top, new_top);
                             let _ = execute!(
                                 std::io::stdout(),
                                 crossterm::cursor::MoveTo(0, top.min(max_row)),
@@ -2344,6 +2389,39 @@ pub(crate) fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16
     term_rows.saturating_sub(inline_h)
 }
 
+/// First row the surgical resize clear must erase.
+///
+/// **The erase must cover every row the rebuild will land on.** Two independent
+/// rows were being conflated: the clear was anchored at `last_inline_top` (where
+/// the OLD chrome starts) while the region is rebuilt at
+/// `resize_clear_top_from_bottom` (`rows - h`, where the NEW chrome starts).
+/// Whenever the new region is taller than the old one — every turn start, every
+/// growth of the streaming preview — `rebuild_top < last_inline_top`, and the
+/// rows between them were never erased.
+///
+/// That gap is not cosmetic. `rebuild_inline` installs a fresh
+/// `Terminal::with_options`, whose two buffers are `Buffer::empty` — cells of
+/// `" "` with the default style — and which never clears the screen itself. So
+/// the first draw after a rebuild diffs against all-spaces and emits ONLY the
+/// non-space cells. Any uncleared row underneath therefore keeps its old glyphs
+/// at exactly the positions where the new chrome has blanks.
+///
+/// Taking the minimum keeps the surgical strategy's purpose intact — it still
+/// erases in place, never with ED2/ED3, so nothing is pushed into or purged
+/// from scroll history — while guaranteeing the erased span is a superset of
+/// the rebuilt region. The extra rows it now takes (`rebuild_top ..
+/// last_inline_top`) are rows the rebuilt region is about to occupy anyway, so
+/// clearing them destroys nothing that was going to survive; it only decides
+/// whether they are overwritten cleanly or bled through.
+///
+/// NOT verified to be the cause of any specific report. This closes a
+/// confirmed uncleared-rows gap, measured live on a real binary
+/// (`rows=15 old_top=15 rebuild_top=6` — nine uncleared rows; `rows=21
+/// old_top=15 rebuild_top=12` — three), which is a defect on its own terms.
+pub(crate) fn surgical_clear_top(last_inline_top: u16, rebuild_top: u16) -> u16 {
+    last_inline_top.min(rebuild_top)
+}
+
 /// Leave the alternate screen and rebuild the inline viewport, restoring the
 /// host terminal's scrollback untouched.
 ///
@@ -3218,7 +3296,7 @@ mod render_tests {
     // INSIDE the old chrome, not above it. Rebuilding there without clearing
     // strands the old chrome's rows above the new viewport, still holding the
     // previous frame's rendered characters — the visible duplicate.
-    use super::{clamp_inline_top, resize_clear_top_from_bottom};
+    use super::{clamp_inline_top, resize_clear_top_from_bottom, surgical_clear_top};
 
     #[test]
     fn clamp_inline_top_accepts_row_within_current_terminal() {
@@ -3263,6 +3341,41 @@ mod render_tests {
         assert_eq!(resize_clear_top_from_bottom(24, 6), 18);
         // Height-1 region on a 24-row terminal starts on the last row.
         assert_eq!(resize_clear_top_from_bottom(24, 1), 23);
+    }
+
+    /// The erased span must be a superset of the region the rebuild occupies.
+    ///
+    /// Both numbers below are measurements from an instrumented binary driven
+    /// through `test/pty/stream_paint_probe.py --stress --surgical`, not
+    /// invented cases: a 15-row screen with the old chrome remembered at row 15
+    /// rebuilding a height-9 region at row 6, and a 21-row screen rebuilding at
+    /// row 12 with the old chrome at 15. Under the old code the clear anchored
+    /// at 15 in both, leaving nine and three rows respectively for the fresh
+    /// all-space buffers to paint over without erasing.
+    #[test]
+    fn surgical_clear_covers_every_row_the_rebuild_lands_on() {
+        for (last_top, rows, h) in [(15u16, 15u16, 9u16), (15, 21, 9), (20, 24, 9)] {
+            let rebuild_top = resize_clear_top_from_bottom(rows, h);
+            let clear_top = surgical_clear_top(last_top, rebuild_top);
+            assert!(
+                clear_top <= rebuild_top,
+                "clear anchored at {clear_top} leaves rows {clear_top}..{rebuild_top} \
+                 uncleared under a region rebuilt at {rebuild_top} \
+                 (last_inline_top={last_top}, rows={rows}, h={h})"
+            );
+        }
+    }
+
+    /// A region that MOVES DOWN (it shrank, or the screen grew) must not drag
+    /// the erase up with it: clearing from the old top would wipe transcript
+    /// rows the new region never reaches. The minimum is the identity here.
+    #[test]
+    fn surgical_clear_never_erases_above_the_old_chrome() {
+        // Old chrome at row 12, region rebuilt lower at row 15 — erase from 12,
+        // which is where the old chrome actually starts.
+        assert_eq!(surgical_clear_top(12, 15), 12);
+        // Identical anchors are the common case and must be untouched.
+        assert_eq!(surgical_clear_top(15, 15), 15);
     }
 
     #[test]

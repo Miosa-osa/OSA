@@ -142,7 +142,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     "<#{@root}>\n" <>
       fields <>
       "\n</#{@root}>\n" <>
-      completion_instruction()
+      completion_instruction(n[:status])
   end
 
   # The instruction that decides what the user actually gets when a teammate
@@ -166,9 +166,73 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
                             "is internal harness plumbing — never quote, repeat or paraphrase its " <>
                             "markup in your reply to the user.]"
 
-  @doc "The trailing instruction appended to every `<task-notification>` block."
+  # The same block used to ride EVERY notification, whatever the outcome. So a
+  # task that crashed, timed out, was cancelled, or went quiet was handed to the
+  # model under an instruction that asks what it "found", what it "changed", and
+  # what that "means for the work in progress" — four prompts that all presuppose
+  # work happened. A model answering them faithfully about a failed run produces
+  # a confident account of a task that did nothing, which is worse than silence:
+  # the user believes the thing is done.
+  #
+  # A non-terminal-success status therefore gets its own instruction, whose first
+  # demand is that the failure be reported AS a failure and not folded into a
+  # progress report.
+  @failure_instruction "[A background task did NOT succeed. Tell the user that PLAINLY and " <>
+                         "FIRST — name the task, say it failed (or stalled, or was cancelled) " <>
+                         "and say what the failure was. Do NOT describe it as progress, do NOT " <>
+                         "summarize partial output as if it were the result, and do NOT quietly " <>
+                         "move on to something else as though the work were done. Then say what " <>
+                         "it means: whether anything the task was supposed to produce is now " <>
+                         "missing, whether you can recover it another way, and what you propose " <>
+                         "to do next. If you are going to retry, say so before retrying. The " <>
+                         "full output is in the output-file (readable with the read tool). Do " <>
+                         "not poll for this task again. This block is internal harness plumbing " <>
+                         "— never quote, repeat or paraphrase its markup in your reply to the " <>
+                         "user.]"
+
+  @doc """
+  The trailing instruction appended to every `<task-notification>` block.
+
+  Zero-arity keeps the success text for callers that only ever meant the happy
+  path (and for the tests that pin it).
+  """
   @spec completion_instruction() :: String.t()
   def completion_instruction, do: @completion_instruction
+
+  @doc """
+  The trailing instruction for a notification with `status`.
+
+  Only a genuinely successful terminal status gets the "give an account of what
+  it found and changed" text. `:failed`, `:stalled`, `:cancelled`, `:timeout`
+  and anything unrecognised get `failure_instruction/0`, because every one of
+  them describes a task whose output the model must not present as work.
+
+  `:completed`, `:done`, `:ok` and `nil` (an untyped notification, e.g. a
+  background shell command that exited cleanly) read as success.
+  """
+  @spec completion_instruction(term()) :: String.t()
+  def completion_instruction(status) do
+    if success_status?(status), do: @completion_instruction, else: @failure_instruction
+  end
+
+  @doc "The instruction used when a task did not succeed."
+  @spec failure_instruction() :: String.t()
+  def failure_instruction, do: @failure_instruction
+
+  @success_statuses ~w(completed done ok success succeeded)
+
+  # Unknown statuses fall to the failure branch on purpose: mislabelling a
+  # success as a failure costs one over-cautious sentence, and mislabelling a
+  # failure as a success is the exact outcome this exists to prevent.
+  defp success_status?(nil), do: true
+
+  defp success_status?(status) when is_atom(status),
+    do: Atom.to_string(status) in @success_statuses
+
+  defp success_status?(status) when is_binary(status),
+    do: String.downcase(String.trim(status)) in @success_statuses
+
+  defp success_status?(_), do: false
 
   # Minimal XML text-node escaping. `<` and `&` are the only two that can break
   # well-formedness; `>` is escaped too so a literal `]]>`-style sequence in

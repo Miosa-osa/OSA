@@ -255,14 +255,14 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             // wraps instead of clipping at the pane edge.
             let prefix_width = UnicodeWidthStr::width(icon_str.as_str());
             let wrap_width = (width as usize).saturating_sub(prefix_width);
-            for (i, wline) in wrap_text(text, wrap_width).iter().enumerate() {
+            for (i, row) in parse_and_wrap(text, wrap_width, &theme).into_iter().enumerate() {
                 let mut spans = Vec::new();
                 if i == 0 {
                     spans.push(Span::styled(icon_str.clone(), icon_style));
                 } else {
                     spans.push(Span::styled(" ".repeat(prefix_width), Style::default()));
                 }
-                for s in parse_inline(wline, &theme) {
+                for s in row {
                     spans.push(Span::styled(s.content, text_style));
                 }
                 lines.push(Line::from(spans));
@@ -291,8 +291,8 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             // above already measures correctly with `UnicodeWidthStr`.
             let prefix_cols = UnicodeWidthStr::width(prefix.as_str());
             let wrap_width = (width as usize).saturating_sub(prefix_cols);
-            let wrapped = wrap_text(text, wrap_width);
-            for (i, wline) in wrapped.iter().enumerate() {
+            let wrapped = parse_and_wrap(text, wrap_width, &theme);
+            for (i, row) in wrapped.into_iter().enumerate() {
                 let mut spans = vec![];
                 if i == 0 {
                     spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
@@ -300,7 +300,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                     // Continuation lines align under the first line's text.
                     spans.push(Span::styled(" ".repeat(prefix_cols), Style::default()));
                 }
-                spans.extend(parse_inline(wline, &theme));
+                spans.extend(row);
                 lines.push(Line::from(spans));
             }
             continue;
@@ -326,14 +326,14 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 let prefix = format!("{}{} ", indent_str, marker);
                 let prefix_len = prefix.len();
                 let wrap_width = (width as usize).saturating_sub(prefix_len);
-                for (i, wline) in wrap_text(text, wrap_width).iter().enumerate() {
+                for (i, row) in parse_and_wrap(text, wrap_width, &theme).into_iter().enumerate() {
                     let mut spans = Vec::new();
                     if i == 0 {
                         spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
                     } else {
                         spans.push(Span::styled(" ".repeat(prefix_len), Style::default()));
                     }
-                    spans.extend(parse_inline(wline, &theme));
+                    spans.extend(row);
                     lines.push(Line::from(spans));
                 }
                 continue;
@@ -434,8 +434,12 @@ fn flush_paragraph(
         segments.push(cur);
     }
     for seg in segments {
-        for wline in wrap_text(&seg, width as usize) {
-            out.push(Line::from(parse_inline(&wline, theme)));
+        // Parse the WHOLE segment for inline markup first, then wrap the styled
+        // spans. Wrapping the raw markdown first (what this used to do) let the
+        // break land inside `**bold**` or inside a link label, which rendered
+        // the markers as literal text and dropped the link entirely.
+        for row in parse_and_wrap(&seg, width as usize, theme) {
+            out.push(Line::from(row));
         }
     }
     para.clear();
@@ -459,8 +463,8 @@ fn push_heading_inline(
     style: Style,
     theme: &crate::style::Theme,
 ) {
-    for wline in wrap_text(text, (width as usize).max(1)) {
-        let spans: Vec<Span<'static>> = parse_inline(&wline, theme)
+    for row in parse_and_wrap(text, (width as usize).max(1), theme) {
+        let spans: Vec<Span<'static>> = row
             .into_iter()
             .map(|s| Span::styled(s.content, style))
             .collect();
@@ -1145,6 +1149,176 @@ fn detect_checkbox(line: &str) -> Option<(bool, &str)> {
 /// Word-wrap a string to fit within `max_width` columns.
 /// Breaks on word boundaries (spaces), preserving words intact when possible.
 /// Lines longer than `max_width` with no spaces are force-broken.
+/// Word-wrap ALREADY-STYLED spans, preserving each span's style.
+///
+/// **Wrap the styled representation, never the raw markdown.** `wrap_text`
+/// measures source bytes, so a wrap computed on `**bold phrase**` lands inside
+/// the run and each half is then parsed on its own — where an unpaired `**` is
+/// correctly literal, and the reader sees the asterisks. `[label](url)` split
+/// inside the label is worse: the tail falls through `parse_inline`'s
+/// `plain.push('[')` branch and the whole URL is printed as prose with no link
+/// emitted at all. Long streamed prose wraps on almost every line, so both fire
+/// constantly, not in a corner case.
+///
+/// Wrapping the styled form also measures the RIGHT width: markers are already
+/// gone, so a row fills to the pane edge instead of stopping N columns short.
+///
+/// Word semantics mirror `wrap_text` exactly (break before a word that would
+/// overflow; force-break a word wider than the pane; trailing spaces trimmed),
+/// with two additions the plain-text version has no need of:
+///
+///   * a word may SPAN several styled spans (`**bold**tail` is one word in two
+///     spans), so words are grouped across span boundaries and never broken at
+///     one;
+///   * a span carrying an escape sequence (an OSC-8 hyperlink) is atomic. Its
+///     bytes are a matched pair — splitting it would emit an unterminated
+///     escape — and it is measured with `util::cols`, which skips escapes,
+///     rather than `UnicodeWidthStr`, which would count them as glyphs.
+pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    let max_width = max_width.max(1);
+    let total: usize = spans.iter().map(|s| crate::util::cols(s.content.as_ref())).sum();
+    if total <= max_width {
+        return vec![spans];
+    }
+
+    // ── 1. Atoms: (text, style, ends_a_word) ─────────────────────────────────
+    // `split_inclusive(' ')` keeps the separating space attached to the word it
+    // follows, exactly as `wrap_text` does, so trailing-space handling and the
+    // column arithmetic stay identical.
+    let mut atoms: Vec<(String, Style, bool)> = Vec::new();
+    for span in spans {
+        let style = span.style;
+        let text = span.content.into_owned();
+        if text.is_empty() {
+            continue;
+        }
+        if text.as_bytes().contains(&0x1b) {
+            // Atomic: an escape-carrying span is one indivisible unit. Whether
+            // it ends a word is decided by its last visible byte.
+            let ends = text.ends_with(' ');
+            atoms.push((text, style, ends));
+            continue;
+        }
+        let mut it = text.split_inclusive(' ').peekable();
+        while let Some(piece) = it.next() {
+            let ends = piece.ends_with(' ');
+            // A piece that neither ends in a space nor is the span's last piece
+            // cannot happen with `split_inclusive`; the last piece continues
+            // into the NEXT span, which is what `ends` = false expresses.
+            let _ = it.peek();
+            atoms.push((piece.to_string(), style, ends));
+        }
+    }
+
+    // ── 2. Group atoms into words ────────────────────────────────────────────
+    let mut words: Vec<Vec<(String, Style)>> = Vec::new();
+    let mut cur_word: Vec<(String, Style)> = Vec::new();
+    for (text, style, ends) in atoms {
+        cur_word.push((text, style));
+        if ends {
+            words.push(std::mem::take(&mut cur_word));
+        }
+    }
+    if !cur_word.is_empty() {
+        words.push(cur_word);
+    }
+
+    // ── 3. Wrap, word by word ────────────────────────────────────────────────
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+
+    for word in words {
+        let word_w: usize = word.iter().map(|(t, _)| crate::util::cols(t)).sum();
+        if col + word_w > max_width && col > 0 {
+            trim_row_end(&mut cur);
+            rows.push(std::mem::take(&mut cur));
+            col = 0;
+        }
+        if word_w > max_width && col == 0 {
+            // Force-break, grapheme by grapheme, keeping each grapheme's style.
+            // Escape-carrying pieces are never broken: they go out whole even if
+            // that overshoots, because a split escape corrupts the terminal.
+            let mut chunk: Vec<Span<'static>> = Vec::new();
+            let mut chunk_w = 0usize;
+            for (text, style) in word {
+                if text.as_bytes().contains(&0x1b) {
+                    let w = crate::util::cols(&text);
+                    if !chunk.is_empty() && chunk_w + w > max_width {
+                        rows.push(std::mem::take(&mut chunk));
+                        chunk_w = 0;
+                    }
+                    chunk.push(Span::styled(text, style));
+                    chunk_w += w;
+                    continue;
+                }
+                let mut buf = String::new();
+                let mut buf_w = 0usize;
+                for g in UnicodeSegmentation::graphemes(text.as_str(), true) {
+                    let gw = UnicodeWidthStr::width(g);
+                    if chunk_w + buf_w + gw > max_width && (chunk_w + buf_w) > 0 {
+                        if !buf.is_empty() {
+                            chunk.push(Span::styled(std::mem::take(&mut buf), style));
+                        }
+                        rows.push(std::mem::take(&mut chunk));
+                        chunk_w = 0;
+                        buf_w = 0;
+                    }
+                    buf.push_str(g);
+                    buf_w += gw;
+                }
+                if !buf.is_empty() {
+                    chunk.push(Span::styled(buf, style));
+                    chunk_w += buf_w;
+                }
+            }
+            cur = chunk;
+            col = chunk_w;
+        } else {
+            for (text, style) in word {
+                cur.push(Span::styled(text, style));
+            }
+            col += word_w;
+        }
+    }
+
+    trim_row_end(&mut cur);
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
+/// Drop trailing spaces from a wrapped row, mirroring `wrap_text`'s
+/// `trim_end`. A row that becomes empty keeps no zero-width spans.
+fn trim_row_end(row: &mut Vec<Span<'static>>) {
+    while let Some(last) = row.last_mut() {
+        let trimmed = last.content.trim_end().to_string();
+        if trimmed.is_empty() {
+            row.pop();
+            continue;
+        }
+        if trimmed.len() != last.content.len() {
+            *last = Span::styled(trimmed, last.style);
+        }
+        break;
+    }
+}
+
+/// Parse `text` for inline markup, then word-wrap the STYLED result to `width`.
+///
+/// The one-call form of "parse first, wrap second" that every prose block wants.
+fn parse_and_wrap(
+    text: &str,
+    width: usize,
+    theme: &crate::style::Theme,
+) -> Vec<Vec<Span<'static>>> {
+    wrap_spans(parse_inline(text, theme), width)
+}
+
 pub(crate) fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || UnicodeWidthStr::width(input) <= max_width {
         return vec![input.to_string()];
@@ -2153,3 +2327,143 @@ mod tests {
         assert_eq!(super::visible_width("\u{65e5}\u{672c}\u{8a9e}"), 6);
     }
 }
+
+#[cfg(test)]
+mod wrap_across_inline_markup_tests {
+    use super::render_markdown;
+    use ratatui::style::Modifier;
+
+    /// Every visible character of a render, per line, with OSC-8 wrappers gone.
+    fn visible(src: &str, width: u16) -> Vec<String> {
+        render_markdown(src, width)
+            .lines
+            .iter()
+            .map(|l| {
+                let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                strip_osc8(&joined)
+            })
+            .collect()
+    }
+
+    fn strip_osc8(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n == '\\' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// True if any span anywhere in the render carries BOLD.
+    fn has_bold(src: &str, width: u16) -> bool {
+        render_markdown(src, width)
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)))
+    }
+
+    /// A bold phrase split by the wrap must still be bold, and its `**` markers
+    /// must not survive as visible text.
+    ///
+    /// Wrapping BEFORE inline parsing is what broke this: `wrap_text` measures
+    /// the RAW markdown, so the wrap lands inside `**bold phrase**` and each
+    /// half is then handed to `parse_inline` on its own, where an unpaired `**`
+    /// is (correctly) literal. Long streamed prose wraps constantly, so this
+    /// fires on ordinary replies, not on a corner case.
+    #[test]
+    fn bold_split_by_a_wrap_stays_bold_and_drops_its_markers() {
+        // 20 columns puts the wrap INSIDE the bold run (measured: the raw text
+        // breaks as `jumped **over the` / `lazy dog** today`).
+        let src = "the quick brown fox jumped **over the lazy dog** today\n";
+        let lines = visible(src, 20);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("**"),
+            "literal ** survived the wrap:\n{joined}"
+        );
+        assert!(has_bold(src, 20), "no span kept BOLD across the wrap");
+    }
+
+    /// The same defect inside a list item, which is where replies put most of
+    /// their emphasis.
+    #[test]
+    fn bold_split_by_a_wrap_inside_a_bullet_stays_bold() {
+        let src = "- the quick brown fox jumped **over the lazy dog** today\n";
+        let lines = visible(src, 20);
+        let joined = lines.join("\n");
+        assert!(!joined.contains("**"), "literal ** survived:\n{joined}");
+        assert!(has_bold(src, 20), "no span kept BOLD across the wrap");
+    }
+
+    /// An inline link whose LABEL straddles the wrap. Before the fix the split
+    /// half fell through `parse_inline`'s `plain.push('[')` path, so the second
+    /// row read `label](https://…)` verbatim and no link span was emitted at
+    /// all — the URL was shown to the user as prose.
+    #[test]
+    fn link_label_split_by_a_wrap_still_renders_as_one_label() {
+        let src = "see the [very long link label here](https://example.com/x) for more\n";
+        let lines = visible(src, 28);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains('[') && !joined.contains(']'),
+            "a raw link bracket survived the wrap:\n{joined}"
+        );
+        // Every word of the label must carry the link style, on BOTH rows the
+        // wrap produced. Before the fix the second row had no link span at all.
+        use ratatui::style::Modifier;
+        let labelled: Vec<String> = render_markdown(src, 28)
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+                    .map(|s| strip_osc8(s.content.as_ref()))
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(
+            labelled.join(" ").split_whitespace().collect::<Vec<_>>(),
+            vec!["very", "long", "link", "label", "here"],
+            "the link label did not survive the wrap as one styled label"
+        );
+    }
+
+    /// Inline code split by a wrap must not leave backticks on screen.
+    #[test]
+    fn inline_code_split_by_a_wrap_drops_its_backticks() {
+        let src = "run `cargo build --release --features everything` now\n";
+        let lines = visible(src, 26);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains('`'),
+            "a literal backtick survived the wrap:\n{joined}"
+        );
+    }
+
+    /// The wrap must still respect the width once styling is applied — the
+    /// styled text is SHORTER than the raw markdown, so a naive fix that wraps
+    /// the raw text and strips markers afterwards would under-fill rows.
+    #[test]
+    fn wrapped_rows_never_exceed_the_width() {
+        use unicode_width::UnicodeWidthStr;
+        let src = "alpha **beta gamma** delta epsilon zeta eta theta iota kappa lambda mu\n";
+        for width in [12u16, 20, 30, 44] {
+            for line in visible(src, width) {
+                assert!(
+                    UnicodeWidthStr::width(line.as_str()) <= width as usize,
+                    "row wider than {width}: {line:?}"
+                );
+            }
+        }
+    }
+}
+

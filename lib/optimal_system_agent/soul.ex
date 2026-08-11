@@ -74,15 +74,8 @@ defmodule OptimalSystemAgent.Soul do
     agent_souls = load_agent_souls(agents_dir)
     :persistent_term.put({__MODULE__, :agent_souls}, agent_souls)
 
-    # Invalidate cached static base (rebuilt lazily on next static_base/0 call)
-    :persistent_term.put({__MODULE__, :static_base}, nil)
-    :persistent_term.put({__MODULE__, :static_token_count}, 0)
-    # Also invalidate the LITE variant (rebuilt lazily on next static_base(:lite) call)
-    :persistent_term.put({__MODULE__, :static_base_lite}, nil)
-    :persistent_term.put({__MODULE__, :static_token_count_lite}, 0)
-    # ...and the NATIVE-TOOLS variant (static_base(:native_tools))
-    :persistent_term.put({__MODULE__, :static_base_native}, nil)
-    :persistent_term.put({__MODULE__, :static_token_count_native}, 0)
+    # Drop every cached variant; each is rebuilt lazily on its next read.
+    invalidate_static_base()
 
     loaded_count = Enum.count([identity, soul, user], &(&1 != nil))
     agent_count = map_size(agent_souls)
@@ -95,6 +88,46 @@ defmodule OptimalSystemAgent.Soul do
   def reload do
     load()
     :ok
+  end
+
+  @doc """
+  Drop every cached static-base variant so the next read re-renders it.
+
+  Call this from anywhere the TOOL SET changes. `{{TOOL_DEFINITIONS}}` is
+  rendered from the live registry (`Tools.Registry` builtins, the aggregate
+  `mcp_tools` map, and — for the `:native_tools` variant — `list_active/0`),
+  but the rendered result is process-wide cached in `:persistent_term`. Without
+  this hook the prompt froze at whatever tool set existed on the first read:
+  `MCP.Client.Manager` starts after `Tools.Registry` and its sessions connect
+  asynchronously, so MCP tools always arrive later, and plugin tools later
+  still.
+
+  Deliberately does NOT rebuild. Rebuilding is expensive (every tool's
+  `prompt/1` callback plus a full SYSTEM.md interpolation) and this runs inside
+  registration paths that fire in bursts during boot — one cast per connecting
+  MCP server. Lazy rebuild on next read is the existing contract and stays.
+
+  Writing over an already-`nil` slot is skipped, so a burst of registrations
+  costs one `:persistent_term.put/2` in total rather than one per registration.
+  """
+  @spec invalidate_static_base() :: :ok
+  def invalidate_static_base do
+    clear_variant(:static_base, :static_token_count)
+    clear_variant(:static_base_lite, :static_token_count_lite)
+    clear_variant(:static_base_native, :static_token_count_native)
+    :ok
+  end
+
+  defp clear_variant(base_key, count_key) do
+    case :persistent_term.get({__MODULE__, base_key}, nil) do
+      nil ->
+        :ok
+
+      _cached ->
+        :persistent_term.put({__MODULE__, base_key}, nil)
+        :persistent_term.put({__MODULE__, count_key}, 0)
+        :ok
+    end
   end
 
   @doc """

@@ -314,11 +314,17 @@ impl App {
                 // like a single flowing response rather than multiple separate
                 // "◈ OSA" blocks.
                 //
-                // agent_header_sent is set unconditionally here — even when
-                // the buffer is empty (LLM went straight to a tool call with no
-                // preamble). Without this, the flag would stay false and the
-                // next non-empty ToolCallStart flush would call add_agent_message
-                // again, emitting a duplicate "◈ OSA" header mid-turn.
+                // The flag is set by whoever actually DRAWS the header —
+                // `commit_assistant_block` / `commit_assistant_chunk` — and by
+                // nobody else. It used to be set unconditionally here, on the
+                // theory that a later flush would otherwise emit a "duplicate"
+                // header mid-turn; but every path that draws a header already
+                // sets the flag, so there was no duplicate to prevent. What the
+                // unconditional set DID do is suppress the one header the turn
+                // was owed whenever the model opened with a tool call and no
+                // preamble — the overwhelmingly common shape in tool-heavy use,
+                // where it meant the answer rendered under no label at all.
+                // Proven by `test/pty/header_probe.py` (shape T1).
                 //
                 // Finalize any still-pending tool call into native scrollback
                 // first, so ordering stays: [prior text][prior tool][this text].
@@ -340,7 +346,6 @@ impl App {
                         None,
                     );
                 }
-                self.agent_header_sent = true;
 
                 // The reasoning box REPLACES the activity row in draw_inline
                 // (event_loop draws thinking_box INSTEAD of the activity feed

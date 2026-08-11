@@ -23,10 +23,18 @@ use message::{Message, MessageType, SurveyQAData, ToolCallData};
 
 /// Cached parse of the in-flight streaming reply. See `Chat::stream_cache`.
 struct StreamCache {
-    /// Byte length of `streaming_content` this cache was parsed from. The
-    /// streaming buffer only ever grows within a turn, so a length change is a
-    /// reliable "content changed" signal and a valid cache key.
-    content_len: usize,
+    /// `Chat::stream_gen` at the moment this cache was parsed.
+    ///
+    /// This used to be the streaming buffer's byte LENGTH, on the premise that
+    /// "the buffer only ever grows within a turn". `update_streaming` does not
+    /// grow it — it takes a full replacement string and rewrites the buffer in
+    /// place, so any same-length rewrite (a retry that re-sends a corrected
+    /// reply, an edit-in-place delta, a resumed stream restating its tail)
+    /// keyed identically and served a STALE body. And because the cache hit,
+    /// `StreamingRenderer::update`'s own prefix check never ran to catch the
+    /// divergence. A generation counter bumped by every mutation of
+    /// `streaming_content` identifies the content instead of guessing at it.
+    generation: u64,
     /// Viewport width the body was wrapped at.
     width: u16,
     /// Parsed markdown body (includes the trailing block cursor). Cloned once
@@ -48,6 +56,9 @@ pub struct Chat {
     height: u16,
     /// Streaming content (live while processing).
     streaming_content: Option<String>,
+    /// Bumped by every mutation of `streaming_content`. The `stream_cache` key,
+    /// so a rewrite that happens to preserve the byte length still misses.
+    stream_gen: u64,
     /// Whether we have produced any content (used to gate the welcome banner).
     pub has_messages: bool,
     /// Welcome screen metadata (Hermes-style inventory).
@@ -105,6 +116,7 @@ impl Chat {
             width: 80,
             height: 20,
             streaming_content: None,
+            stream_gen: 0,
             has_messages: false,
             welcome_provider: None,
             welcome_model: None,
@@ -500,6 +512,7 @@ impl Chat {
         // each token. No markdown parse happens here — the cache is rebuilt
         // lazily on the next render, so multiple tokens arriving between two
         // frames coalesce into a single parse.
+        self.stream_gen = self.stream_gen.wrapping_add(1);
         match self.streaming_content {
             Some(ref mut s) => {
                 s.clear();
@@ -511,6 +524,7 @@ impl Chat {
     }
 
     pub fn clear_streaming(&mut self) {
+        self.stream_gen = self.stream_gen.wrapping_add(1);
         self.streaming_content = None;
         *self.stream_cache.borrow_mut() = None;
         self.stream_renderer.borrow_mut().reset();
@@ -527,12 +541,12 @@ impl Chat {
         if content.is_empty() {
             return None;
         }
-        let content_len = content.len();
+        let generation = self.stream_gen;
 
         {
             let cache = self.stream_cache.borrow();
             if let Some(c) = cache.as_ref() {
-                if c.content_len == content_len && c.width == width {
+                if c.generation == generation && c.width == width {
                     return Some(c.height);
                 }
             }
@@ -552,7 +566,7 @@ impl Chat {
         let height = (body.lines.len() as u16).max(1) + 1; // +1 for the "◈ OSA" label
 
         *self.stream_cache.borrow_mut() = Some(StreamCache {
-            content_len,
+            generation,
             width,
             body,
             height,
@@ -573,6 +587,7 @@ impl Chat {
         self.messages.clear();
         self.scrollback.clear();
         self.has_messages = false;
+        self.stream_gen = self.stream_gen.wrapping_add(1);
         self.streaming_content = None;
         *self.stream_cache.borrow_mut() = None;
         self.stream_renderer.borrow_mut().reset();
@@ -812,7 +827,7 @@ mod stream_cache_tests {
         assert!(h1 >= 2, "label row + at least one body row");
         let cache = chat.stream_cache.borrow();
         let cached = cache.as_ref().expect("cache populated after render");
-        assert_eq!(cached.content_len, "hello world".len());
+        assert_eq!(cached.generation, chat.stream_gen);
         assert_eq!(cached.width, 80);
         assert_eq!(cached.height, h1);
     }
@@ -826,8 +841,8 @@ mod stream_cache_tests {
         chat.update_streaming(grown);
         let _ = chat.streaming_height(80);
         assert_eq!(
-            chat.stream_cache.borrow().as_ref().unwrap().content_len,
-            grown.len(),
+            chat.stream_cache.borrow().as_ref().unwrap().generation,
+            chat.stream_gen,
             "cache re-parses when the streaming buffer grows"
         );
     }
@@ -870,6 +885,67 @@ mod stream_cache_tests {
             .unwrap_or(0);
         assert!(cap_after >= cap_before);
         assert_eq!(chat.streaming_content.as_deref(), Some("b"));
+    }
+
+    /// The rendered body of a rendered line, flattened.
+    fn cached_body(chat: &Chat, width: u16) -> String {
+        let _ = chat.streaming_height(width);
+        let cache = chat.stream_cache.borrow();
+        let c = cache.as_ref().expect("cache populated");
+        c.body
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A same-length rewrite of the streaming buffer must not be served from
+    /// cache.
+    ///
+    /// The cache was keyed on `(content.len(), width)`, so a replacement of the
+    /// same byte length hit and returned the PREVIOUS body — and because it
+    /// hit, `StreamingRenderer::update`'s prefix check never ran to notice the
+    /// divergence. `update_streaming` takes a whole replacement string, so this
+    /// is reachable from any retry, correction or resumed stream that restates
+    /// its tail at the same length.
+    #[test]
+    fn same_length_rewrite_is_not_served_from_a_stale_cache() {
+        let mut chat = Chat::new();
+        chat.update_streaming("the build is green");
+        let first = cached_body(&chat, 80);
+        assert!(first.contains("green"), "{first:?}");
+
+        // Same byte length, completely different text.
+        chat.update_streaming("the build is BROKE");
+        let second = cached_body(&chat, 80);
+        assert!(
+            second.contains("BROKE"),
+            "stale body served for a same-length rewrite: {second:?}"
+        );
+        assert!(
+            !second.contains("green"),
+            "the superseded text survived in the cache: {second:?}"
+        );
+    }
+
+    /// The cache must still HIT when nothing changed — the whole point of it is
+    /// to keep `draw_live` and `streaming_height` from parsing twice per frame.
+    #[test]
+    fn unchanged_content_still_hits_the_cache() {
+        let mut chat = Chat::new();
+        chat.update_streaming("stable text");
+        let _ = chat.streaming_height(80);
+        let gen_after_first = chat.stream_cache.borrow().as_ref().unwrap().generation;
+        // Three more measurement passes, no mutation in between.
+        let _ = chat.streaming_height(80);
+        let _ = chat.streaming_height(80);
+        let _ = chat.streaming_height(80);
+        assert_eq!(
+            chat.stream_cache.borrow().as_ref().unwrap().generation,
+            gen_after_first,
+            "the cache was rebuilt even though the content never changed"
+        );
     }
 }
 

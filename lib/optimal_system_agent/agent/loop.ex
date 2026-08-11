@@ -308,14 +308,78 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   Always returns `:ok`; a steer for an unknown/dead session is simply never
   drained.
+
+  ## Reaching subagents
+
+  The queue is keyed by session id and a subagent Loop runs under its OWN id, so
+  a steer aimed at the session the user is actually looking at stopped dead at
+  the parent. When the visible work is being done by a teammate — which, with
+  delegation defaulting to background, is most of the time — the steer reached
+  the one participant that was not doing anything, and the UI's "folding into
+  the current turn" was true only in the narrowest sense.
+
+  So the directive is queued for the session AND for every `:running`
+  descendant of it (`steer_targets/1`). Each recipient drains its own copy at
+  its own next step boundary; the drain is per-session and destructive, so no
+  one sees it twice and a child that finishes first simply never picks it up.
   """
   @spec steer(String.t(), String.t()) :: :ok
   def steer(session_id, text) when is_binary(session_id) and is_binary(text) do
-    Steer.queue(session_id, text)
-    GenServer.cast(via(session_id), {:steer, text})
+    for target <- steer_targets(session_id) do
+      Steer.queue(target, text)
+
+      try do
+        GenServer.cast(via(target), {:steer, text})
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
     :ok
   catch
     :exit, _ -> :ok
+  end
+
+  @doc """
+  The session itself plus every `:running` descendant subagent of it.
+
+  Walks `RunStore.children_of/1` breadth-first, keeping only runs still marked
+  `:running` — a finished child has no loop left to fold anything into — and
+  guarding against a cycle in the edge ledger, which is append-only and not
+  validated. The session id itself is always first and always present, so a
+  session with no children behaves exactly as before.
+  """
+  @spec steer_targets(String.t()) :: [String.t()]
+  def steer_targets(session_id) when is_binary(session_id) do
+    [session_id | running_descendants([session_id], MapSet.new([session_id]), [])]
+  rescue
+    _ -> [session_id]
+  catch
+    :exit, _ -> [session_id]
+  end
+
+  defp running_descendants([], _seen, acc), do: Enum.reverse(acc)
+
+  defp running_descendants([id | rest], seen, acc) do
+    children =
+      id
+      |> OptimalSystemAgent.Agent.RunStore.children_of()
+      |> Enum.reject(&MapSet.member?(seen, &1))
+      |> Enum.filter(&running_run?/1)
+
+    seen = Enum.reduce(children, seen, &MapSet.put(&2, &1))
+    running_descendants(rest ++ children, seen, Enum.reverse(children) ++ acc)
+  end
+
+  defp running_run?(agent_id) do
+    case OptimalSystemAgent.Agent.RunStore.get(agent_id) do
+      %{status: :running} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   @doc """

@@ -38,7 +38,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     - You need codebase context fast and cheap: dispatch role='explore' first
     - You need an implementation plan: dispatch role='plan'
     - Open-ended multi-step work: dispatch role='general-purpose'
-    - Long-running research: use background=true so you can keep working
+    - Long-running research: it already runs in the background, so keep working
     - Agent needs your conversation context: use fork=true
 
     ## When NOT to Use
@@ -47,12 +47,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     - Quick file reads (use #{file_read_name} directly)
 
     ## Foreground vs Background
-    - Foreground (default): you BLOCK until the agent returns. Use when the result
-      gates your next step.
-    - background=true: returns immediately with an agentId + output_file; a
-      <task-notification> is injected here when it finishes. Use for long-running
-      or independent work. While it runs: do NOT poll with task_output, do NOT
-      read its output file, and do NOT redo its work yourself.
+    - Background (DEFAULT): returns immediately with an agentId + output_file; a
+      <task-notification> is injected here when it finishes, whether you are still
+      working or have gone idle. While it runs: do NOT poll with task_output, do
+      NOT read its output file, and do NOT redo its work yourself.
+    - background=false: you BLOCK until the agent returns, and so does the user —
+      no message they type can reach you until it finishes. Only ask for this when
+      the result gates your VERY NEXT step and the agent is genuinely quick.
     - Parallel work: prefer ONE call with tasks:[...] (a single wave with grouped
       display) over sequential delegate calls.
     - Continue a finished agent with task_resume or message_agent (send to its

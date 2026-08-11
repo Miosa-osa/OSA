@@ -158,14 +158,12 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
 
     # WS7 — structured usage rendered as a compact string so the model reads
     # real numbers in the <usage> field instead of an inspected map.
-    usage =
-      case Map.get(ev, :usage) do
-        %{total_tokens: t, tool_uses: u, duration_ms: d} ->
-          "total_tokens=#{t} tool_uses=#{u} duration_ms=#{d}"
-
-        other ->
-          other
-      end
+    #
+    # Built key-by-key rather than by matching a fixed shape. `total_tokens` and
+    # `tool_uses` are omitted by `Orchestrator.reported_usage/2` when the run row
+    # is gone, and a whole-map pattern match on the three-key shape would miss —
+    # dropping the duration we DO know and handing the model an inspected map.
+    usage = format_usage(Map.get(ev, :usage))
 
     # WS6: queue + poke instead of a bare transcript append — an idle parent
     # now reacts to the completion instead of the result rotting in history.
@@ -191,6 +189,25 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")
   end
+
+  # Render whichever usage counters are actually present as `k=v` pairs, in a
+  # fixed order. Returns nil for an empty/absent map so `to_xml/1` drops the
+  # <usage> element entirely rather than emitting an empty one.
+  @doc false
+  @spec format_usage(map() | nil | term()) :: String.t() | nil | term()
+  def format_usage(usage) when is_map(usage) do
+    case Enum.flat_map([:total_tokens, :tool_uses, :duration_ms], fn key ->
+           case Map.get(usage, key) do
+             v when is_number(v) -> ["#{key}=#{v}"]
+             _ -> []
+           end
+         end) do
+      [] -> nil
+      parts -> Enum.join(parts, " ")
+    end
+  end
+
+  def format_usage(other), do: other
 
   # Hand a stall report to the parent Loop the same way a completion is handed
   # over: queue a `<task-notification>` and poke. The summary carries the

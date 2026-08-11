@@ -9,6 +9,84 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.81] — displays as `v1.0.081`
+
+### Fixed — the answer had no name on it
+
+**Every turn that opened with a tool call rendered under no `◈ OSA` header at
+all.** In overdrive the model almost always leads with a tool call and no
+preamble, so the whole answer appeared as text from nobody. `handle_backend.rs`
+set `agent_header_sent = true` unconditionally in the `ToolCallStart` arm, even
+when nothing had been committed and no header had ever been drawn. Every path
+that actually draws a header already sets that flag, so the line prevented no
+duplicate — it only ever suppressed the one header the turn was owed. Measured
+on a real PTY: `tool-first turn: 0 headers` before, `1` after.
+
+### Fixed — one answer split into two blocks
+
+`llm_client.ex` minted a new `message_id` on every provider call, and the moduledoc
+said so plainly: *"Every generation is a distinct assistant message."* The TUI
+correctly treats a changed id as a new message, so any continuation with no tool
+call between — a verification gate, an output-token target, a crossed compaction
+boundary — tore one answer into two `◈ OSA` blocks mid-thought, permanently,
+since committed blocks go to the terminal's own scrollback.
+
+A message id now identifies a **segment**, not a generation: it is reused across
+consecutive generations and re-minted only after a tool call, because a tool cell
+genuinely separates the text around it. Intermediate generations are never
+finalized (`agent_response` is emitted once, at turn end), so reusing an id
+cannot trip the client's repeat-finalization guard.
+
+### Fixed — the layout took a second to settle
+
+Bands damped their shrink to avoid flicker: a 200ms hold plus four settle ticks
+(~0.8s), with any upward move resetting the clock — so a streaming turn held its
+tallest reservation throughout and then took about a second to converge. A band
+whose content height is zero now shrinks immediately: gone is not oscillating,
+and the hold exists to absorb wobble in a band still being written to.
+
+Measured last-token-to-settled on a real PTY, against a turn that actually runs:
+**852ms before, 37/99/33ms after**. Stream churn is unchanged at ~0-0.4 region
+moves per second, so the jitter the damping guarded against does not return.
+
+### Fixed — the probes were not testing anything
+
+`stream_paint_probe.py` and `smoothness_probe.py` answered the orchestrate call
+with `{"status": "accepted"}`, but the client requires `session_id`. The TUI
+failed to decode the response, never entered `Processing`, and **silently dropped
+every streaming token** — so both probes had been measuring a turn that never
+started. The earlier 852ms figure was itself measured that way. One field fixes
+both, and the markdown check that had been passing vacuously now runs.
+
+### Measured, and found correct
+
+Written to the record because they were suspected and are not defects: terminal
+write volume is 10.9 KiB/s at 40 tok/s and 17.5 KiB/s at 80 (no redraw storm);
+stream coalescing works (342 deltas produce 233 draws at 80 tok/s); the surgical
+resize path under stress shows no space substitution, no bleed and no duplicated
+region across 90 sampled frames; 40x10 terminals render correctly; Esc-to-interrupt
+arms and fires with the in-flight tool cell intact.
+
+### Known gaps
+
+The owner's reported `Build's1greene— 976rmodules,xclean` corruption is still
+**not reproduced** — 90 frames across plain, stress and surgical runs, at two
+widths, with both the broken and fixed stubs. It remains unexplained rather than
+quietly folded into the escape or anchor fixes.
+
+Raw `**` renders as literal text in the *live streaming preview* while an emphasis
+run is unterminated; the settled block is correct. CommonMark does treat an
+unclosed run as literal, so this is a deliberate-versus-defect call the renderer's
+owner should make.
+
+The system prompt is cached at boot and **not invalidated when the tool set
+changes**, so tools registered later — including MCP tools, which connect
+asynchronously after `Tools.Registry` starts — may not be reflected in the prose
+block. Under investigation; it is also the mechanism behind several tests that
+fail only inside a full run.
+
+---
+
 ## [1.0.80] — displays as `v1.0.080`
 
 ### Changed — every request is 16,145 tokens smaller

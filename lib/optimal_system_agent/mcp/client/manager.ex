@@ -309,6 +309,20 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
       |> Virtualization.apply_decision()
 
     :persistent_term.put(@pt_key, aggregate)
+
+    # The system prompt's {{TOOL_DEFINITIONS}} block — the <mcp-servers>
+    # catalog, and in the :native_tools variant the per-tool strip decision — is
+    # rendered from this aggregate and then cached process-wide. Sessions
+    # connect asynchronously and this module starts AFTER Tools.Registry, so
+    # every MCP tool arrives after boot: without dropping that cache the prompt
+    # keeps describing the toolset from before the servers connected.
+    #
+    # Invalidation only, never a rebuild. republish/1 fires once per connecting
+    # server (12 of them is normal), and re-rendering the prompt in each of
+    # those casts would serialize a dozen full SYSTEM.md interpolations behind
+    # the manager's mailbox during boot. The next reader rebuilds once, after
+    # the connect wave has settled.
+    OptimalSystemAgent.Soul.invalidate_static_base()
     :ok
   end
 

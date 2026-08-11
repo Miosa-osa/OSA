@@ -834,11 +834,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       # parent model receives (CC enqueueAgentNotification parity).
       final_run = RunStore.get(subagent_id)
 
-      usage = %{
-        total_tokens: (final_run && final_run.tokens_used) || 0,
-        tool_uses: (final_run && final_run.tool_count) || 0,
-        duration_ms: duration_ms
-      }
+      usage = reported_usage(final_run, duration_ms)
 
       output_file = RunStore.transcript_path_for(subagent_id)
 
@@ -1692,6 +1688,33 @@ defmodule OptimalSystemAgent.Orchestrator do
       _ -> nil
     end
   end
+
+  @doc """
+  The `usage` map that rides a terminal background-agent broadcast.
+
+  `duration_ms` is always known — it is measured here, not looked up. The two
+  COUNTERS are not: they live on the run's `RunStore` row, and a run whose row
+  was evicted, never written, or reaped by a crash has no counters at all.
+
+  Those keys are therefore OMITTED rather than defaulted to `0`. The TUI decodes
+  `usage.total_tokens` / `usage.tool_uses` as `Option<u32>` and applies them
+  non-destructively (`Agents::agent_completed`), specifically so an absent
+  number leaves the counters accumulated from progress events alone. Sending a
+  literal `0` defeats that: it decodes as `Some(0)` — an assertion that the
+  teammate used no tokens and ran no tools — and erases a real 40k/12 that the
+  panel had already been told about, at the exact moment the user looks at it.
+
+  Unmeasured and zero are different facts. Only one of them is ever true here.
+  """
+  @spec reported_usage(map() | nil, non_neg_integer()) :: map()
+  def reported_usage(final_run, duration_ms) do
+    %{duration_ms: duration_ms}
+    |> put_if_number(:total_tokens, final_run && Map.get(final_run, :tokens_used))
+    |> put_if_number(:tool_uses, final_run && Map.get(final_run, :tool_count))
+  end
+
+  defp put_if_number(map, key, value) when is_number(value), do: Map.put(map, key, value)
+  defp put_if_number(map, _key, _value), do: map
 
   defp append_cost_note(summary, agent_id) when is_binary(summary) do
     case run_cost_usd(agent_id) do

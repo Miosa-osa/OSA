@@ -115,8 +115,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
         "background" => %{
           "type" => "boolean",
           "description" =>
-            "Run in background — returns immediately, notifies on completion. " <>
-              "Use for long-running research or analysis that doesn't block your current work."
+            "Defaults to true: the delegation returns immediately and a " <>
+              "<task-notification> reaches you when it completes. Pass false only to " <>
+              "BLOCK until the agent returns — which also blocks the user, since " <>
+              "nothing they type can reach you while you are waiting inside a tool call."
         },
         "permissionMode" => %{
           "type" => "string",

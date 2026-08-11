@@ -218,9 +218,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       merge_worktree: Map.get(args, "merge_worktree") == true,
       discard_worktree: Map.get(args, "discard_worktree") == true,
       working_dir: Map.get(args, "cwd") || Map.get(args, "working_dir"),
-      # Preserve the agent definition's background default so background?/2 can
-      # fall back to it when the caller omits an explicit "background" arg.
-      background: (agent_def && agent_def[:background]) || false,
+      # Default posture for a delegation the caller did not classify. See
+      # `background?/2` — an agent definition may still opt back into
+      # foreground, and an explicit `background:` arg always wins.
+      background: default_background(agent_def),
       # Parent's depth — Orchestrator.run_subagent increments this for the child
       # so ToolFilter can strip spawning tools once the max nesting is reached.
       delegation_depth: parent_depth,
@@ -231,12 +232,60 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     }
   end
 
-  defp background?(args, config) do
+  @doc """
+  Whether this delegation runs detached from the parent's turn.
+
+  Precedence, highest first:
+
+    1. an explicit `background` arg on the call — the model asked for a posture
+       and gets it, in either direction;
+    2. the agent definition's own `background:` key, when it HAS one — a
+       definition that says `background: false` is asking to be joined;
+    3. `true`.
+
+  ## Why the default is `true`
+
+  A foreground delegation blocks the parent INSIDE its tool phase, and a
+  subagent's tool phase can last hours. Everything the parent's loop services
+  between ReAct steps — the mid-turn steer drain, the background
+  task-notification drain, cancellation — happens at the TOP of an iteration,
+  which is not reached again until the child returns. So a foreground
+  delegation does not merely make the parent wait: it takes the user's own
+  channel to the parent offline for the child's entire life. The TUI accepts a
+  typed message during that window and toasts "folding into the current turn",
+  which is a promise the loop structurally cannot keep.
+
+  Backgrounding costs nothing in reach: the result comes back as a
+  `<task-notification>` that re-enters the SAME turn if the parent is still
+  working (`ReactLoop.inject_pending_task_notifications/1`) and as a synthetic
+  turn if it has gone idle (`Loop.poke/1`). Claude Code made the same default
+  flip in 2.1.198.
+
+  Note the third clause is `Map.has_key?`, not truthiness: `background: false`
+  in a definition has to be distinguishable from a definition that never
+  mentioned it, or the flip would silently override deliberate opt-outs.
+  """
+  @spec background?(map(), map()) :: boolean()
+  def background?(args, config) do
     case Map.fetch(args, "background") do
       {:ok, value} -> value == true
-      :error -> Map.get(config, :background, false) == true
+      :error -> Map.get(config, :background, true) == true
     end
   end
+
+  # An agent definition that explicitly carries `background:` keeps its choice;
+  # one that is silent gets the background default.
+  defp default_background(agent_def) when is_map(agent_def) do
+    if Map.has_key?(agent_def, :background), do: agent_def[:background] == true, else: true
+  end
+
+  defp default_background(agent_def) when is_list(agent_def) do
+    if Keyword.has_key?(agent_def, :background),
+      do: agent_def[:background] == true,
+      else: true
+  end
+
+  defp default_background(_), do: true
 
   # ── Task quality gate ─────────────────────────────────────────────────
   #

@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Agent.Loop.ToolError
@@ -958,7 +959,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     end
   end
 
-  defp emit_permission_required(state, request_id, tool_call, summary) do
+  @doc false
+  # Public (@doc false) so the routing can be asserted against a real PubSub
+  # subscriber, which is the only way to prove the event reaches a session other
+  # than the one running the tool.
+  def emit_permission_required(state, request_id, tool_call, summary) do
     # `args` is the flat human hint STRING (the TUI deserializes it as a
     # string — the previous nested summary map failed serde parsing and the
     # dialog never opened via this path); enriched fields ride at top level.
@@ -978,11 +983,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       suggestions: Map.get(summary, :suggestions, [])
     }
 
-    Phoenix.PubSub.broadcast(
-      OptimalSystemAgent.PubSub,
-      "osa:session:#{state.session_id}",
-      {:osa_event, payload}
-    )
+    # Who is asking. Empty for a top-level session (the lead's own calls are
+    # already attributed by context); populated for a subagent so the same
+    # dialog, seen from the root session, names the teammate.
+    payload = Map.merge(payload, permission_attribution(state.session_id))
+
+    # The request goes to every session that could answer it: the one running
+    # the tool, and — when that is a SUBAGENT — the root session the user is
+    # actually attached to. See `permission_topics/1`.
+    for target <- permission_topics(state.session_id) do
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{target}",
+        {:osa_event, Map.put(payload, :session_id, target)}
+      )
+    end
 
     Bus.emit(
       :system_event,
@@ -995,6 +1010,80 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Attribution for a permission request raised by a subagent: who is asking,
+  # so the dialog can say "@researcher wants to run …" instead of presenting a
+  # tool call the user never made as if the lead had made it.
+  defp permission_attribution(session_id) do
+    case RunStore.get(session_id) do
+      %{} = run ->
+        %{
+          agent_id: session_id,
+          display_name: Map.get(run, :role) || session_id,
+          role: Map.get(run, :role)
+        }
+
+      _ ->
+        %{}
+    end
+  rescue
+    _ -> %{}
+  catch
+    :exit, _ -> %{}
+  end
+
+  @doc """
+  Every session topic a `permission_required` event for `session_id` must reach.
+
+  A subagent runs under its own session id, and this event was published only
+  on that id. Nothing is subscribed there: the TUI streams the ROOT session, so
+  a teammate that hit a permission prompt emitted into a topic with no readers.
+  `PermissionBroker.await/3` then blocked for its full 300s ceiling and returned
+  `{:error, :timeout}`, and the tool was skipped with a message only the
+  subagent's own transcript ever saw.
+
+  The user's experience of that is a teammate that appears to be working and
+  then quietly does less than it was asked, with no prompt, no error, and a
+  five-minute stall in the middle.
+
+  So the event is published on the running session AND on each ancestor up to
+  the root. `PermissionBroker.respond/2` is keyed by `request_id` alone — not by
+  session — so an answer given at the root satisfies the child's wait with no
+  further plumbing. Delivery is idempotent per topic (the list is deduped) and
+  the running session stays FIRST so a client attached directly to a subagent
+  keeps its existing behaviour.
+  """
+  @spec permission_topics(String.t() | nil) :: [String.t()]
+  def permission_topics(session_id) when is_binary(session_id) do
+    [session_id | ancestors(session_id, MapSet.new([session_id]), [])]
+  rescue
+    _ -> [session_id]
+  catch
+    :exit, _ -> [session_id]
+  end
+
+  def permission_topics(_), do: []
+
+  # Walk `parent_session_id` up the RunStore chain. `seen` guards a cycle in the
+  # ledger; "unknown"/"" are the sentinel non-parents written at spawn time.
+  defp ancestors(id, seen, acc) do
+    case RunStore.get(id) do
+      %{parent_session_id: parent}
+      when is_binary(parent) and parent not in ["", "unknown"] ->
+        if MapSet.member?(seen, parent) do
+          Enum.reverse(acc)
+        else
+          ancestors(parent, MapSet.put(seen, parent), [parent | acc])
+        end
+
+      _ ->
+        Enum.reverse(acc)
+    end
+  rescue
+    _ -> Enum.reverse(acc)
+  catch
+    :exit, _ -> Enum.reverse(acc)
   end
 
   # CONCERN 2 — execution.

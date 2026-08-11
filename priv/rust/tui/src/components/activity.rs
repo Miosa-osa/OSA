@@ -3313,3 +3313,47 @@ mod duration_render_tests {
         assert!(out.contains("2.5s"), "expected 2.5s: {out:?}");
     }
 }
+
+#[cfg(test)]
+mod turn_start_indicator_tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// **A turn that has started must SAY so, before any token arrives.**
+    ///
+    /// `App::submit_prompt` commits the user's prompt, transitions to
+    /// `Processing` and calls `Activity::start()`. Between that moment and the
+    /// model's first token — seconds, on a large context — the activity band is
+    /// the only thing on screen that reports a turn is running. Measured on a
+    /// real PTY (`test/pty/smoothness_probe.py`), that window rendered the
+    /// prompt, two blank rows and an idle-looking composer: the band was
+    /// RESERVED and painted nothing, which reads as a freeze.
+    #[test]
+    fn a_started_turn_paints_something_before_the_first_token() {
+        let mut activity = Activity::new();
+        activity.start();
+
+        assert!(
+            activity.height() > 0,
+            "a started turn must reserve at least the spinner row"
+        );
+
+        let h = activity.height();
+        let mut term = Terminal::new(TestBackend::new(80, h)).unwrap();
+        term.draw(|f| activity.draw(f, Rect::new(0, 0, 80, h))).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let painted: String = (0..h)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+
+        assert!(
+            !painted.trim().is_empty(),
+            "the activity band reserved {} row(s) and painted nothing — the user \
+             sees a blank gap and an idle composer while the turn runs",
+            activity.height()
+        );
+    }
+}

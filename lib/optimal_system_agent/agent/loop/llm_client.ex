@@ -24,6 +24,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # being generated. See `mint_message_id/1`.
   @message_id_key :osa_stream_message_id
 
+  # Process-dictionary flag: the open assistant segment has ended, so the next
+  # generation must mint a NEW id rather than continue the current one. See
+  # `start_new_message_segment/0`.
+  @new_segment_key :osa_stream_new_segment
+
   # Hard ceiling on a server-directed `Retry-After` pause taken in THIS module.
   #
   # `Providers.Resilience.backoff_ms/2` caps its own honouring of the header at
@@ -58,18 +63,33 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   @doc """
   Identity of the assistant message currently being generated in THIS process.
 
-  One turn can run several LLM generations back to back with no tool call
-  between them (auto-continue / coding nudge / verification gate / goal
-  verifier all re-enter `ReactLoop.run/1` after a text-only response). Every
-  generation is a distinct assistant message, but on the wire they were
-  indistinguishable: the TUI saw one undifferentiated run of `streaming_token`
-  deltas and appended them all into a single buffer, so a superseded
-  generation and its replacement rendered concatenated with no separator.
-
   `message_id` is to assistant text what `tool_call_id` is to tool calls — the
   backend's stable per-message identity. It rides every `streaming_token` and
   the terminal `agent_response` so the client can tell "more of the same
   message" from "a new message", and can recognise a repeated finalization.
+
+  ## A message is a SEGMENT, not a generation
+
+  This id used to be minted on every provider call, on the reading that "every
+  generation is a distinct assistant message". One turn runs several
+  generations back to back with no tool call between them — the verification
+  gate, an output-token target, a just-crossed compaction boundary, a stop hook
+  forcing continuation — and each re-entry into `ReactLoop.run/1` minted a new
+  id.
+
+  The client is right to trust the id: a new id means a new message, so it
+  closes the current block and opens another. Minting per generation therefore
+  tore ONE answer into two `◈ OSA` blocks, split wherever the continuation
+  happened to land — mid-thought, and permanently, because a committed block
+  goes to the terminal's native scrollback and cannot be re-joined.
+
+  What the user perceives as one message is a SEGMENT: an uninterrupted run of
+  assistant text. It ends when something genuinely separates it on screen —
+  a tool call (whose cell is drawn between the two halves), or a new user turn.
+  It does NOT end because the loop decided to ask the model to keep going.
+
+  So the id is minted on the first generation of a segment and REUSED by every
+  continuation, and `start_new_message_segment/0` is what arms the next mint.
 
   Returns `nil` when no generation has run in this process this turn (a genre
   reply, a canned error frame) — clients must treat that as "no id" and fall
@@ -86,14 +106,45 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   @spec reset_message_id() :: :ok
   def reset_message_id do
     Process.delete(@message_id_key)
+    Process.delete(@new_segment_key)
     :ok
   end
 
-  # Mint + publish the id for a new generation. Monotonic, session-scoped, and
+  @doc """
+  End the current assistant segment: the NEXT generation in this process mints
+  a fresh `message_id` instead of continuing the current one.
+
+  Called from `ReactLoop.continue_after_tools/4` — tool results have just been
+  folded into the conversation, so the client will draw a tool cell between the
+  text before it and the text after it. Those two really are separate blocks.
+
+  Deliberately does NOT clear `current_message_id/0`. The turn-final
+  `agent_response` (`Loop.run_and_reply/2`) stamps whatever id is current, and
+  a tool run that turns out to be the last thing in the turn must still
+  finalize the segment it belongs to rather than send `nil` and drop the client
+  back to its id-less legacy path.
+  """
+  @spec start_new_message_segment() :: :ok
+  def start_new_message_segment do
+    Process.put(@new_segment_key, true)
+    :ok
+  end
+
+  # The id for the generation about to run: a fresh one when no segment is open
+  # or one was explicitly ended, otherwise the open segment's id continued.
+  defp ensure_message_id(session_id) do
+    case {Process.get(@message_id_key), Process.get(@new_segment_key)} do
+      {id, nil} when is_binary(id) -> id
+      _ -> mint_message_id(session_id)
+    end
+  end
+
+  # Mint + publish the id for a new segment. Monotonic, session-scoped, and
   # only ever compared for equality by clients.
   defp mint_message_id(session_id) do
     id = "#{session_id}-m#{:erlang.unique_integer([:positive, :monotonic])}"
     Process.put(@message_id_key, id)
+    Process.delete(@new_segment_key)
     id
   end
 
@@ -105,11 +156,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       "[llm] chat — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))}"
     )
 
-    # A non-streaming round-trip is still a distinct assistant message — mint an
-    # id for it too, so the terminal `agent_response` never carries the id of an
-    # EARLIER generation (which the client would treat as a repeat finalization
-    # and drop).
-    _ = mint_message_id(Map.get(state, :session_id, "session"))
+    # A non-streaming round-trip carries an id too, so the terminal
+    # `agent_response` always names the segment it finalizes. Continues the open
+    # segment; mints only when none is open or one was just ended by a tool run.
+    _ = ensure_message_id(Map.get(state, :session_id, "session"))
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
@@ -135,10 +185,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     heartbeat = :atomics.new(1, signed: false)
     :atomics.put(heartbeat, 1, 1)
 
-    # Identity of the assistant message this stream produces. Minted HERE, in
-    # the Loop process, so the terminal `agent_response` (broadcast later from
-    # the same process) can stamp the SAME id via `current_message_id/0`.
-    message_id = mint_message_id(session_id)
+    # Identity of the assistant SEGMENT this stream contributes to. Resolved
+    # HERE, in the Loop process, so the terminal `agent_response` (broadcast
+    # later from the same process) stamps the SAME id via `current_message_id/0`.
+    # A continuation with no tool call in between keeps the open id, so the
+    # client appends to the block the user is already reading instead of opening
+    # a second one mid-answer.
+    message_id = ensure_message_id(session_id)
 
     # WS5 — reset this session's partial-text buffer for the new stream so an
     # interrupt persists only THIS stream's text.

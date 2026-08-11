@@ -1219,6 +1219,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp continue_after_tools(results, tool_calls, state, resample_snapshot) do
+    # A tool ran, so the assistant text before it and the text after it are two
+    # different blocks on screen — the tool's own cell is drawn between them.
+    # End the segment so the next generation mints a fresh `message_id`.
+    #
+    # Every OTHER re-entry into `run/1` (the verification gate, an output-token
+    # target, a just-crossed compaction boundary, a stop hook) continues the
+    # open id, because the user sees one uninterrupted answer and splitting it
+    # is what tore a single reply into two `◈ OSA` headers mid-thought.
+    LLMClient.start_new_message_segment()
+
     # Per-iteration context-pressure emit (mid-turn meter fix): previously
     # Telemetry.emit_context_pressure/1 only fired at turn boundaries (loop.ex),
     # so the TUI context bar stayed frozen while a single turn ran many tool

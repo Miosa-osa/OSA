@@ -764,6 +764,11 @@ defmodule OptimalSystemAgent.Tools.Registry do
     :persistent_term.put({__MODULE__, :builtin_tools}, builtin_tools)
     :persistent_term.put({__MODULE__, :tools}, tools)
 
+    # The system prompt renders {{TOOL_DEFINITIONS}} from this exact map and
+    # caches the result process-wide. A tool registered here (plugin load, hot
+    # reload) is invisible to the model until that cache is dropped.
+    OptimalSystemAgent.Soul.invalidate_static_base()
+
     Logger.info("Registered tool: #{name} (hot reload)")
     {:reply, :ok, %{state | builtin_tools: builtin_tools, tools: tools}}
   end
