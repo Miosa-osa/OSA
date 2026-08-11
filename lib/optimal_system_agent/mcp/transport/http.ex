@@ -183,6 +183,40 @@ defmodule OptimalSystemAgent.MCP.Transport.Http do
   defp handle_streamable_response(status, resp_headers, body, state) do
     state = capture_session_id(resp_headers, state)
 
+    # A 404 means two completely different things depending on whether we are
+    # carrying a session id, and conflating them is a real misbehaviour:
+    #
+    #   * WITHOUT a session id it is "this endpoint does not speak
+    #     StreamableHTTP", which is the legacy-SSE probe below.
+    #   * WITH one it is the spec's session-expiry signal. The transport
+    #     section is explicit: "When a client receives HTTP 404 in response to
+    #     a request containing an Mcp-Session-Id, it MUST start a new session
+    #     by sending a new InitializeRequest without a session id attached."
+    #
+    # Treating the second as the first downgrades a healthy modern server to a
+    # DEPRECATED transport the moment its session times out — so a long-lived
+    # OSA session silently loses StreamableHTTP after an idle period.
+    if status == 404 and is_binary(state.session_id) do
+      Logger.info(
+        "[MCP.Http:#{state.name}] session expired (404 with Mcp-Session-Id); re-initializing"
+      )
+
+      notify_session_expired(%{state | session_id: nil})
+    else
+      dispatch_streamable(status, resp_headers, body, state)
+    end
+  end
+
+  # The server terminated our session. Drop the id so the next request is a
+  # fresh InitializeRequest, and tell the client to re-handshake. `probed?`
+  # deliberately stays true: the endpoint has already proven it speaks
+  # StreamableHTTP, so a later 404 must not be mistaken for a protocol probe.
+  defp notify_session_expired(state) do
+    notify_closed(state, :session_expired)
+    state
+  end
+
+  defp dispatch_streamable(status, resp_headers, body, state) do
     case classify_probe(status) do
       :ok ->
         deliver_body(body, resp_headers, state)
@@ -337,8 +371,21 @@ defmodule OptimalSystemAgent.MCP.Transport.Http do
   end
 
   # Base headers plus the negotiated session id (StreamableHTTP) if present.
+  #
+  # `MCP-Protocol-Version` is required by the transport spec on every HTTP
+  # request after initialization, and OSA was not sending it. The consequence
+  # is not a hard failure, which is why it went unnoticed: the spec tells a
+  # server that receives no version header to ASSUME `2025-03-26`. So OSA was
+  # being silently version-negotiated by omission — every server guessing,
+  # none of them told.
   defp streamable_headers(state) do
-    base = [{"content-type", "application/json"}, {"accept", @accept}] ++ state.headers
+    base =
+      [
+        {"content-type", "application/json"},
+        {"accept", @accept},
+        {"mcp-protocol-version", OptimalSystemAgent.MCP.Protocol.Messages.protocol_version()}
+      ] ++ state.headers
+
     if state.session_id, do: [{"mcp-session-id", state.session_id} | base], else: base
   end
 

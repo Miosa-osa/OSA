@@ -9,6 +9,47 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.73] — displays as `v1.0.073`
+
+MCP conformance. The spec moved — HTTP+SSE was replaced by **Streamable HTTP**
+in revision `2025-03-26` and is now deprecated — and OSA had drifted from it in
+three places, one of which degraded a working connection.
+
+### Fixed — an expired session downgraded OSA to the deprecated transport
+
+- A `404` was classified purely as "this endpoint does not speak Streamable
+  HTTP", which is correct only when no session is in play. The transport spec
+  is explicit that a 404 **in response to a request carrying `Mcp-Session-Id`**
+  means the server terminated the session and the client MUST start a new one
+  with a fresh `InitializeRequest`.
+- Conflating them meant a healthy modern server that timed a session out sent
+  OSA back to the **deprecated** HTTP+SSE transport, so a long-lived session
+  silently lost Streamable HTTP after an idle period. The two cases are now
+  separated: no session id → protocol probe; session id → re-initialize.
+
+### Fixed — `MCP-Protocol-Version` was never sent
+
+- The spec requires it on every HTTP request after initialization. It failed
+  quietly rather than loudly because a server receiving no version header is
+  told to **assume `2025-03-26`** — so OSA was being version-negotiated by
+  omission, with every server guessing and none of them told.
+- Now sent on every Streamable HTTP request, read from the same constant the
+  handshake uses so the header and the announcement cannot disagree.
+
+### Noted, deliberately not "fixed" — OSA announces the original revision
+
+- `protocolVersion` is `2024-11-05`: the first MCP revision, whose transport is
+  the deprecated HTTP+SSE one. OSA therefore announces a 2024 protocol while
+  implementing a 2025 transport, and a server honouring the announcement may
+  withhold everything added since.
+- Raising it is real work rather than a string edit — later revisions add
+  capabilities (structured tool output, elicitation, resource links) a client
+  must not claim without implementing, and OSA's own MCP *server* reads the
+  same constant. It is left at the honest value with the consequences written
+  down, instead of being raised to look current.
+
+---
+
 ## [1.0.72] — displays as `v1.0.072`
 
 Same fix as 1.0.71, done properly: the stacked composers are gone **and** your

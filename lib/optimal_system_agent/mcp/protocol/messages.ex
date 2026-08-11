@@ -18,7 +18,31 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
   alias OptimalSystemAgent.MCP.Protocol.JSONRPC
 
   # MCP protocol revision OSA speaks. Servers may negotiate down.
+  #
+  # NOTE: this is the ORIGINAL revision, and it is inconsistent with the
+  # transport OSA actually uses. `MCP.Transport.Http` implements **Streamable
+  # HTTP**, which was introduced in `2025-03-26` and replaced the HTTP+SSE
+  # transport that `2024-11-05` defines — the one now marked deprecated. So OSA
+  # announces a 2024 protocol while speaking a 2025 transport, and a server
+  # that honours the announcement may withhold everything added since.
+  #
+  # Raising it is a real change, not a string edit: later revisions add
+  # capabilities (structured tool output, elicitation, resource links) that a
+  # client should not claim without implementing, and OSA's own MCP *server*
+  # side reads the same constant. Left at the honest value until that work is
+  # done, rather than raised to look current.
   @protocol_version "2024-11-05"
+
+  @doc """
+  The MCP revision OSA announces.
+
+  Exposed because the transport must send it in the `MCP-Protocol-Version`
+  header on every HTTP request after initialization. Reading it from here
+  rather than restating it is what stops the header and the handshake from
+  ever disagreeing.
+  """
+  @spec protocol_version() :: String.t()
+  def protocol_version, do: @protocol_version
 
   @client_info %{
     "name" => "osa",
