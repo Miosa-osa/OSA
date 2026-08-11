@@ -9,6 +9,102 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.76] — displays as `v1.0.076`
+
+### Fixed — surfaces that reported things which were not true
+
+A sweep against the fix histories of four other agent harnesses, plus a dead
+code audit. The theme is the same in every case: a surface that stated
+something confidently while the underlying value said otherwise.
+
+- **Tool durations rendered `0.0s`.** The activity feed formatted every
+  completed call with `{:.1}s`, so anything under 50ms floored to a literal
+  zero — while the transcript renderer one line below showed the same call as
+  `40ms`. The timing was never wrong; only that one formatter was. On screen
+  since March.
+- **Failed tool calls arrived labelled successful.** The `:end` event hardcoded
+  `success: true` in the PubSub broadcast — which is the one the TUI's SSE
+  stream actually carries — while the sibling `Bus.emit` two lines above had
+  already computed the real value. Failed reads and greps compounded it,
+  summarising the error text as though it were content (`Read 1 line`).
+- **Outcome was carried in colour alone.** Success and error shared one glyph,
+  leaving them indistinguishable under `NO_COLOR`, on a monochrome terminal,
+  and to a red/green colour-blind reader. Error is now `✗`.
+- **`/rewind` zeroed the spend ledger and removed the budget ceiling.**
+  `restore_conversation/1` passed a five-key map to a full-record writer, so
+  seven omitted fields were written as defaults: session cost to `$0.0`, four
+  token counters to `0`, and `max_budget_usd` to `nil` — uncapped. The sidecar
+  then mirrored the zeros to disk. A partial write is now completed from the
+  persisted record, never from struct defaults, and the crash checkpoint
+  reconciles against the never-cleared sidecar with `max` per accumulator.
+- **A successful OAuth refresh whose disk write failed destroyed the
+  credential.** Past `{:ok, updated}` the rotation is already spent, so the
+  write is retried and the token returned regardless; a failure names the file
+  and the recovery instead of silently signing the user out.
+- **Silent background agents were reported as failed.** `prune_stale` flipped a
+  quiet `Running` row straight to `Failed`, so an agent that was merely slow to
+  report appeared to have crashed. It now becomes `Unknown`, and is removed
+  rather than libelled if it stays hopeless.
+- **`background_agent_stalled` had no consumers on either side.** The TUI now
+  renders it and the notifier acts on it — without burning the terminal-result
+  token, which would have swallowed the later completion.
+- **Usage counters were overwritten with zeros.** The wire type could not
+  distinguish absent from zero, so a silent frame wiped accumulated totals.
+  `Option`-typed end to end.
+- **Swarm timeouts were laundered into `{:ok, "[Agent timed out]"}`**, letting
+  the parent model build on work that never happened. `Orchestrator` already
+  handled this correctly; `Swarm.Patterns` now matches it.
+
+### Added — compaction is visible, and says what it did
+
+Compaction could run for minutes with nothing on screen. `/compact` fired, showed
+a three-second toast, then went quiet for the duration of the call.
+
+- A live line while it runs: spinner, ticking elapsed, `esc to interrupt`.
+- A measured `▰▱` progress bar **only on the path that genuinely chunks**
+  (`compactor.ex`'s cold-zone step, driven by real `chunk_index/chunk_total`).
+  The `/compact` path is a single summarizer call and reports no progress, so
+  it shows no bar rather than animating a number the system does not have.
+- A completion line with real figures — `✓ Compacted ~84.0k → ~21.0k tokens
+  (38 messages folded) · 2m 14s` — and a failure line that says the
+  conversation is unchanged, because a vanishing indicator reads as success.
+- The events dual-emit on session PubSub as well as the Bus. Emitting on the
+  Bus alone is invisible to the TUI, which is the same trap that hid the tool
+  success flag above; the test asserts against PubSub specifically, since
+  asserting on the Bus would have passed on the broken code.
+
+### Removed — dead code, and five surfaces that were broken rather than unused
+
+Roughly 2,400 lines. The deletions are the least interesting part:
+
+- **`semantic_search` had never returned a result.** Registered and
+  model-reachable, but aliasing two modules that do not exist; both branches
+  raised and a `rescue` turned it into "search error" text.
+- **`team_create` would have crashed on first use.** The supervisor started
+  `Teams.Registry`, referenced nowhere, while 27 call sites used a name nothing
+  started. Only `validate/2` had test coverage.
+- **The DingTalk webhook accepted unauthenticated bodies.** `verify_dingtalk/3`
+  existed with zero callers while config advertised the secret as enabling
+  verification.
+- **Three documented computer-use adapters were unreachable** — Docker,
+  RemoteSSH and PlatformVM had no dispatch clause, so even the documented
+  override fell through to `Unknown platform`.
+- **~50 config keys read as settings but controlled nothing**, including a
+  budget cap (`Budget` reads a different key) and twelve `sandbox_*` keys
+  (`Sandbox.Docker` reads a nested map). A mix task was instructing users to
+  set one of them.
+
+### Known gaps
+
+Carried forward, verified but not yet fixed: the credential store degrading a
+failed read to `%{}` before a whole-file write; the single-level `readlink` in
+the write guards; subprocesses inheriting provider API keys; command output
+truncated head-first; and fleet merging a failed node's worktree. Full-suite
+counts are order-dependent — `LiveKeyResolutionTest` and one `UsageTest` case
+share a boot snapshot and pass in isolation.
+
+---
+
 ## [1.0.75] — displays as `v1.0.075`
 
 ### Fixed — the composer no longer jumps to the top of the screen after a resize
