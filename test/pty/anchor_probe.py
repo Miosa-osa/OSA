@@ -74,6 +74,19 @@ def main() -> int:
             s.resize(100, 30)
             s.pump(SETTLE * 3)
             show(s, "after a SECOND width resize")
+
+            # Consequence check. `last_inline_top` is refreshed from the rebuilt
+            # viewport, so if the region re-anchored at row 0 the tracked top is
+            # now 0 — and the surgical clear used for PURE HEIGHT CHANGES
+            # (`MoveTo(0, top)` + `FromCursorDown`) becomes a whole-screen wipe
+            # on the next keystroke that changes the composer's height. That is
+            # the "it eats the transcript" half of the report.
+            s.write(b"a message that lands in the transcript after the resize\r")
+            s.pump(SETTLE * 3)
+            show(s, "after committing a message post-resize")
+            s.write(b"x")
+            s.pump(SETTLE * 3)
+            show(s, "after ONE keystroke (pure height change, surgical clear)")
     return 0
 
 

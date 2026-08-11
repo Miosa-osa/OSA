@@ -103,7 +103,7 @@ def main() -> int:
         # user's wezterm was started from — including `$TMUX` when that was a
         # tmux session, which would make this "WezTerm" test measure tmux.
         prefix = term_env.sh_env_prefix(
-            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+            **term_env.backend_vars(backend.base_url), **term_env.passthrough_override()
         )
         # A scrollback of WRAPPED lines, so a widen actually re-joins content
         # above the live region and the drag can strand something. With an

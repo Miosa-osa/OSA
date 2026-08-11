@@ -97,7 +97,7 @@ def main() -> int:
         # identity (TERM_PROGRAM, WEZTERM_*, VTE_VERSION) would otherwise leak
         # straight through it and misidentify the terminal. See `term_env.py`.
         env = term_env.clean_env(
-            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+            **term_env.backend_vars(backend.base_url), **term_env.passthrough_override()
         )
 
         subprocess.run(

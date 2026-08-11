@@ -101,7 +101,7 @@ def main() -> int:
         # a branch is forced here to prove the gate's table is keyed on the
         # right terminal rather than passing by luck.
         env = term_env.clean_env_list(
-            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
+            **term_env.backend_vars(backend.base_url), **term_env.passthrough_override()
         )
 
         # Fill the scrollback with WRAPPED lines before the binary starts.

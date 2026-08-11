@@ -66,9 +66,14 @@ def main() -> int:
             s.write(b"\r")
             s.pump(SETTLE * 2)
             raw = s.emitted_since(m)
+            # NB: these counts must not be written inline in an f-string --
+            # `b'\\x1b'` inside one is a literal backslash, not ESC, and every
+            # count silently comes back zero.
+            enters = raw.count(b"\x1b[?1049h")
+            leaves = raw.count(b"\x1b[?1049l")
             print(
-                f"\n--- after /help --- alt_screen_enter={raw.count(b'\\x1b[?1049h')} "
-                f"alt_screen_leave={raw.count(b'\\x1b[?1049l')} in_alt={s.in_alt_screen()}"
+                f"\n--- after /help --- alt_screen_enter={enters} "
+                f"alt_screen_leave={leaves} in_alt={s.in_alt_screen()}"
             )
             show(s, "with /help open")
 
@@ -91,10 +96,10 @@ def main() -> int:
             s.write(b"\r")
             s.pump(SETTLE * 2)
             raw = s.emitted_since(m)
-            print(
-                f"\n--- /clear: ED3(purge)={raw.count(b'\\x1b[3J')} "
-                f"ED0={raw.count(b'\\x1b[J')} ED2={raw.count(b'\\x1b[2J')} ---"
-            )
+            ed3 = raw.count(b"\x1b[3J")
+            ed0 = raw.count(b"\x1b[J")
+            ed2 = raw.count(b"\x1b[2J")
+            print(f"\n--- /clear: ED3(purge)={ed3} ED0={ed0} ED2={ed2} ---")
             show(s, "after /clear")
     return 0
 

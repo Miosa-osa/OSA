@@ -64,6 +64,27 @@ def clean_env(**extra: str) -> dict[str, str]:
     return env
 
 
+def backend_vars(base_url: str) -> dict[str, str]:
+    """The variables that actually point `osagent` at a stub backend.
+
+    **`OSA_BASE_URL` is not one of them.** Every real-terminal harness here used
+    to pass exactly that and nothing else, and the binary has never read it:
+    `priv/rust/tui/src/config/mod.rs` reads `OSA_URL` (defaulting to
+    `http://localhost:9089`) and `OSA_PORT`. So each of those harnesses spawned
+    a stub, ignored it, and drove OSA against whatever real backend happened to
+    be listening on the developer's machine — which is why their transcripts
+    show a live model and a real tool count instead of the stub's `pty-stub /
+    pty-stub · 0 tools`.
+
+    That is not a cosmetic mix-up. It makes the runs depend on a service the
+    harness does not control: with nothing on 9089 the binary never reaches a
+    composer and the harness reports SKIPPED, and a SKIP is a green run that
+    asserted nothing. `osa_pty.py` had it right all along; this function exists
+    so there is one place to be right in.
+    """
+    return {"OSA_URL": base_url, "OSA_PORT": base_url.rsplit(":", 1)[-1]}
+
+
 def clean_env_list(**extra: str) -> list[str]:
     """`clean_env` as the `KEY=VALUE` list that `Vte.spawn_sync` wants."""
     return [f"{k}={v}" for k, v in clean_env(**extra).items()]

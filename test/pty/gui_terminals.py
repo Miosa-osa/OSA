@@ -122,22 +122,38 @@ def await_new_window(wm_class: str, before: set[str], timeout: float = 25.0) -> 
 
 
 def window_geometry(wid: str) -> tuple[int, int, int, int] | None:
-    """`(x, y, w, h)` of a window in root coordinates, for a screenshot bbox."""
-    r = subprocess.run(
-        ["xdotool", "getwindowgeometry", "--shell", wid],
-        capture_output=True,
-        text=True,
-    )
+    """`(x, y, w, h)` of a window in TRUE ROOT coordinates, for a screenshot bbox.
+
+    Read from `xwininfo`, deliberately not from `xdotool getwindowgeometry`.
+    Under a reparenting window manager the client window is a child of a
+    decoration frame, and `xdotool` reports its origin relative to that frame.
+    Measured on this box: `xdotool` said the kitty window was at (93, 1408)
+    while it really began at (79, 1359) — a 49-pixel vertical error, about
+    three text rows.
+
+    That error is not cosmetic. A bbox shifted three rows down crops the top of
+    the live region away and runs off the bottom of the window into the
+    desktop, so the rule the pixel counter exists to find is not in the image
+    at all. It reported ZERO bands for a screen that plainly had one — a false
+    reading in the direction that hides the bug.
+    """
+    r = subprocess.run(["xwininfo", "-id", wid], capture_output=True, text=True)
     if r.returncode != 0:
         return None
     vals: dict[str, int] = {}
     for line in r.stdout.splitlines():
-        if "=" in line:
-            k, _, v = line.partition("=")
-            try:
-                vals[k.strip()] = int(v.strip())
-            except ValueError:
-                pass
+        line = line.strip()
+        for key, name in (
+            ("Absolute upper-left X:", "X"),
+            ("Absolute upper-left Y:", "Y"),
+            ("Width:", "WIDTH"),
+            ("Height:", "HEIGHT"),
+        ):
+            if line.startswith(key):
+                try:
+                    vals[name] = int(line[len(key):].strip())
+                except ValueError:
+                    pass
     try:
         return vals["X"], vals["Y"], vals["WIDTH"], vals["HEIGHT"]
     except KeyError:
@@ -195,7 +211,7 @@ def child_command(base_url: str, prelude_lines: int | None = None,
         prelude_lines = int(os.environ.get("OSA_PTY_PRELUDE_LINES", "12"))
     prelude = scrollback_prelude.prelude_text(lines=prelude_lines)
     prefix = term_env.sh_env_prefix(
-        OSA_BASE_URL=base_url, **term_env.passthrough_override()
+        **term_env.backend_vars(base_url), **term_env.passthrough_override()
     )
     binary = shlex.quote(str(osagent_binary()))
     parts = [

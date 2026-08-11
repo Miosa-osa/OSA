@@ -1,169 +1,223 @@
 #!/usr/bin/env python3
-"""Resize assertions with OSA running inside **Ghostty** — and an honest account
-of the one assertion that cannot be made there.
+"""Resize assertions with OSA running inside **Ghostty** — with a real band count.
 
-What this can and cannot check
-------------------------------
-The other emulator harnesses count how many copies of each singleton band
-survive a width drag, by reading the terminal's scrollback back out: tmux has
-`capture-pane`, WezTerm has `cli get-text`, libvte has `get_text_range_format`.
+Ghostty DOES have a text-extraction API
+---------------------------------------
+This file used to open by stating that Ghostty has "no CLI, no control socket
+and no escape sequence that reports screen or scrollback contents", and
+therefore asserted only that OSA *survived* a drag. That was wrong, and it left
+the one terminal the owner is most likely to be running as the only one whose
+band count nobody had ever measured.
 
-**Ghostty has no text-extraction API.** There is no CLI, no control socket and
-no escape sequence that reports screen or scrollback contents, so the band count
-— the assertion this family of harnesses exists to make — is not available here.
-Pretending otherwise by, say, screenshotting and eyeballing would produce a test
-that cannot fail on its own, which is exactly the failure this whole
-investigation was caused by: `test_resize.py` rendering with pyte (which does not
-reflow) reported clean for months while users watched chrome stack up.
+Ghostty ships two keybind actions that dump the terminal's own text:
 
-So this harness asserts the two things that ARE decidable without reading the
-screen, and says plainly that it is not asserting the third:
+    write_screen_file       the visible screen
+    write_scrollback_file   the scroll history
 
-  1. **Ghostty's reflow behaviour**, via `reflow_probe.py`, which reports on
-     itself through a DSR cursor query and needs no text extraction at all.
-     Measured: Ghostty 1.2.3 reflows.
-  2. **OSA survives the drag.** The resize path has a documented crash mode —
-     `rebuild_inline` issues a DSR cursor query, and a terminal that drops it
-     mid-resize surfaced as "cursor position could not be read" and killed the
-     session. A process that is gone after the drag is a regression this can
-     see, and it is the failure users notice first.
+Each takes a target, and `:copy` puts the path of a plain-text dump on the
+clipboard. `ghostty +list-keybinds` lists both, and Ghostty 1.2.3 binds
+`write_screen_file:open` by default. Bind them to keys, press the keys, read
+the clipboard, read the files: that is exact text, the same currency
+`capture-pane` and `wezterm cli get-text` pay in.
 
-For the band count on Ghostty, see `test/pty/README.md`: it needs a human, or a
-Ghostty release with a text-reading control API.
+Three details make it actually work, each of which silently produces an empty
+clipboard if got wrong:
 
-Requires the `ghostty` binary, `xdotool` and a display. Skips otherwise.
+1. **The keybinds must arrive via `$XDG_CONFIG_HOME`, not the command line.**
+   Ghostty accepts config keys as `--key=value` flags for the emulator, but
+   `+list-keybinds` shows they do not register from there, and `--config-file`
+   makes the action exit non-zero with no output. Pointing `$XDG_CONFIG_HOME`
+   at a scratch directory containing `ghostty/config` registers them, and has
+   the added virtue of not touching the user's real configuration.
 
-Run: `python3 test/pty/ghostty_resize.py`
+2. **The keystroke must be a REAL X event, not a synthetic one.** Ghostty is a
+   GTK application and GTK ignores `XSendEvent` key events by default, so
+   `xdotool key --window <id>` never fires the binding. The window has to be
+   activated and the key injected through XTEST (`gui_terminals.focus_and_key`).
+
+3. **`F9` not `f9`.** xdotool's keysym table is case-sensitive for function
+   keys and answers a lowercase `f9` with "No such key name", on stderr, while
+   still exiting zero.
+
+So the band count IS available here, and this harness now makes the same
+assertion every other emulator harness makes. The surviving honest caveat is
+that the two dumps are separate files: history and screen are concatenated in
+that order, which is the same thing `wezterm cli get-text --start-line -2000`
+returns as one string.
+
+It also keeps the older, weaker assertion — that OSA is still alive after the
+drag — because the resize path has a documented crash mode (`rebuild_inline`
+issues a DSR cursor query, and a terminal that drops it mid-resize surfaced as
+"cursor position could not be read" and killed the session). That is the
+failure a user notices first, and it is worth catching separately from a band
+count that a dead process cannot produce at all.
+
+Requires the `ghostty` binary, `xdotool`, `xclip` and a display. Skips otherwise.
+
+Run:
+    python3 test/pty/ghostty_resize.py
+    OSA_RESIZE_CLEAR=surgical python3 test/pty/ghostty_resize.py
 """
 
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import scrollback_prelude  # noqa: E402  (needs the sys.path line above)
-import term_env  # noqa: E402
+import gui_terminals as gt  # noqa: E402  (needs the sys.path line above)
 
 STUB_PORT = 12797
 GHOSTTY_CLASS = "com.mitchellh.ghostty"
 
+SCREEN_KEY = "ctrl+shift+F9"
+SCROLLBACK_KEY = "ctrl+shift+F10"
 
-def _skip(reason: str) -> int:
-    print(f"SKIPPED: {reason}")
-    return 0
+CONFIG = """\
+keybind = ctrl+shift+F9=write_screen_file:copy
+keybind = ctrl+shift+F10=write_scrollback_file:copy
+gtk-single-instance = false
+confirm-close-surface = false
+"""
 
 
-def _x_windows() -> set[str]:
+def _clipboard() -> str:
     r = subprocess.run(
-        ["xdotool", "search", "--onlyvisible", "--class", GHOSTTY_CLASS],
-        capture_output=True, text=True,
+        ["xclip", "-selection", "clipboard", "-o"], capture_output=True, text=True
     )
-    return {w for w in r.stdout.split() if w.strip()}
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _clear_clipboard() -> None:
+    subprocess.run(
+        ["xclip", "-selection", "clipboard", "-i", "/dev/null"], capture_output=True
+    )
+
+
+def _dump(wid: str, key: str) -> str:
+    """Trigger a Ghostty dump action and read back the file it wrote.
+
+    The clipboard is cleared first so a stale path from the previous dump
+    cannot be mistaken for this one's — the two actions write to different
+    temp directories, but a failed keypress would otherwise read the previous
+    success and report it as fresh.
+    """
+    _clear_clipboard()
+    gt.focus_and_key(wid, key)
+    # The action writes a file and then sets the clipboard; both are async with
+    # respect to the keypress.
+    for _ in range(20):
+        time.sleep(0.25)
+        path = _clipboard()
+        if path and Path(path).is_file():
+            try:
+                return Path(path).read_text(errors="replace")
+            except OSError:
+                return ""
+    return ""
 
 
 def main() -> int:
-    if not shutil.which("ghostty"):
-        return _skip("ghostty not installed")
-    if not shutil.which("xdotool"):
-        return _skip("xdotool not installed")
+    for tool in ("ghostty", "xdotool", "xclip", "xwininfo"):
+        if not shutil.which(tool):
+            return gt.skip(f"{tool} not installed")
     if not os.environ.get("DISPLAY"):
-        return _skip("no DISPLAY")
-
-    repo = Path(__file__).resolve().parents[2]
-    binary = repo / "priv/rust/tui/target/release/osagent"
+        return gt.skip("no DISPLAY")
+    binary = gt.osagent_binary()
     if not binary.exists():
-        return _skip(f"{binary} not built")
+        return gt.skip(f"{binary} not built")
 
     from stub_backend import StubBackend  # noqa: E402
 
     failures: list[str] = []
-    windows_before = _x_windows()
+    windows_before = gt.x_windows(GHOSTTY_CLASS)
+
+    # An isolated config directory: the keybinds have to be registered somehow,
+    # and editing the user's own ~/.config/ghostty/config to run a test would
+    # be an unacceptable side effect.
+    cfgroot = Path(tempfile.mkdtemp(prefix="osa-ghostty-cfg-"))
+    (cfgroot / "ghostty").mkdir()
+    (cfgroot / "ghostty" / "config").write_text(CONFIG)
 
     with StubBackend(STUB_PORT) as backend:
-        # A marker file the child touches on exit. Ghostty closes its window
-        # when the child dies, so "did OSA survive" cannot be read from the
-        # window alone — a closed window and a never-opened one look identical
-        # by the time we look.
-        alive = repo / f".ghostty-probe-{os.getpid()}"
-        alive_flag = str(alive)
+        # Ghostty closes its window when the child dies, so "did OSA survive"
+        # cannot be read from the window alone — a closed window and a
+        # never-opened one look identical by the time anyone looks.
+        alive = Path(tempfile.gettempdir()) / f"osa-ghostty-probe-{os.getpid()}"
+        cmd = gt.child_command(backend.base_url, exit_flag=str(alive))
 
-        prefix = term_env.sh_env_prefix(
-            OSA_BASE_URL=backend.base_url, **term_env.passthrough_override()
-        )
-        prelude = scrollback_prelude.prelude_text(
-            lines=int(os.environ.get("OSA_PTY_PRELUDE_LINES", "12"))
-        )
-        # The leading sleep lets the harness enlarge the window before the
-        # prelude prints: OSA wedges on startup if the screen it inherits has
-        # too little room left for the inline viewport.
-        #
-        # `exec` comes BEFORE `env`, because `exec` is a shell builtin — the
-        # other order makes `env` search for a program named "exec".
-        cmd = (
-            "sleep 5; "
-            f"printf %s {shlex.quote(prelude)}; "
-            f"{prefix} {shlex.quote(str(binary))}; "
-            f"echo exited > {shlex.quote(alive_flag)}"
-        )
-
+        env = dict(os.environ, XDG_CONFIG_HOME=str(cfgroot))
         proc = subprocess.Popen(
             ["ghostty", "-e", "/bin/sh", "-c", cmd],
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        wid = None
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            new = _x_windows() - windows_before
-            if new:
-                wid = sorted(new)[-1]
-                break
-            time.sleep(0.25)
+        wid = gt.await_new_window(GHOSTTY_CLASS, windows_before)
         if wid is None:
             proc.terminate()
-            return _skip("could not find a new ghostty window")
+            shutil.rmtree(cfgroot, ignore_errors=True)
+            return gt.skip("could not find a new ghostty window")
+
+        def get_text() -> str:
+            """History then screen, concatenated — the whole readable buffer.
+
+            Order matters: stranded chrome ends up ABOVE the live region, i.e.
+            in history, and a count taken from the visible screen alone would
+            miss exactly the copies this harness is looking for.
+            """
+            history = _dump(wid, SCROLLBACK_KEY)
+            screen = _dump(wid, SCREEN_KEY)
+            return history + "\n" + screen
 
         try:
-            subprocess.run(["xdotool", "windowsize", wid, "1200", "900"],
-                           capture_output=True)
-            # No way to poll for a composer here, so wait long enough for the
-            # `sleep 5`, the prelude and a backend handshake.
-            time.sleep(20)
+            gt.resize_window(wid, gt.WINDOW_W, gt.WINDOW_H)
 
-            if alive.exists():
-                return _skip("OSA exited before the drag; nothing to assert about")
+            before = gt.await_composer(get_text, tries=20, interval=1.5)
+            if before is None:
+                if alive.exists():
+                    return gt.skip("OSA exited before the drag; nothing to assert about")
+                return gt.skip(
+                    "binary did not reach a composer inside ghostty "
+                    "(or the dump keybinds never fired)"
+                )
 
-            for w in (1100, 1000, 900, 820, 900, 1000, 1100, 1200):
-                subprocess.run(["xdotool", "windowsize", wid, str(w), "900"],
-                               capture_output=True)
-                time.sleep(0.5)
-            time.sleep(3)
+            gt.perform_drag(wid)
 
-            # THE assertion: the drag did not kill the session. The resize path
-            # issues a DSR cursor query through `rebuild_inline`, and a dropped
-            # reply used to surface as "cursor position could not be read" and
-            # take the whole session down.
+            # The older, weaker assertion, kept: a drag that kills the session
+            # is the failure a user notices first.
             if alive.exists():
                 failures.append(
                     "OSA exited during the width drag — the resize path did not "
                     "survive Ghostty (historically: a dropped DSR cursor query "
                     "surfacing as 'cursor position could not be read')"
                 )
-            elif not _x_windows() & {wid}:
-                failures.append(
-                    "the ghostty window vanished during the drag, which means "
-                    "the child died"
+                after = ""
+            else:
+                after = get_text()
+
+            if after:
+                counts = gt.count_bands(after)
+                failures += gt.failures_from_counts(counts, "ghostty scrollback")
+                label = gt.branch_label()
+                dumpfile = gt.artifact_dir() / f"ghostty-{label}.txt"
+                dumpfile.write_text(after)
+                print(
+                    f"ghostty[{label}] text band counts: {counts}  "
+                    f"(artifact: {dumpfile})"
                 )
+                if failures:
+                    print("--- ghostty text after drag (tail) ---")
+                    print("\n".join(after.splitlines()[-50:]))
         finally:
-            subprocess.run(["xdotool", "windowkill", wid], capture_output=True)
+            gt.kill_window(wid)
             try:
                 proc.terminate()
             except Exception:
@@ -172,17 +226,13 @@ def main() -> int:
                 alive.unlink()
             except FileNotFoundError:
                 pass
+            shutil.rmtree(cfgroot, ignore_errors=True)
 
     for f in failures:
         print(f"FAIL: {f}")
     if failures:
         return 1
-    print(
-        "ok — OSA survived a width drag in Ghostty.\n"
-        "NOTE: the stranded-chrome band count is NOT asserted here — Ghostty "
-        "has no text-extraction API. Ghostty's reflow behaviour is measured "
-        "separately by test/pty/reflow_matrix.py."
-    )
+    print("ok — one copy of each band survives a window drag in Ghostty")
     return 0
 
 

@@ -956,6 +956,60 @@ impl App {
                         );
                     }
 
+                    // Anchor the rebuild DELIBERATELY, at the bottom.
+                    //
+                    // This is the root cause of the long-running "composer jumps
+                    // to the top / duplicates on resize" report, and it is not
+                    // about which clear runs — it is about what happens after.
+                    //
+                    // `Viewport::Inline` does not choose a position: ratatui's
+                    // `compute_inline_size` anchors the new region on WHEREVER IT
+                    // FINDS THE CURSOR. `clear_screen_for_resize` ends with the
+                    // cursor at row 0 (it homes, then erases forward), so the
+                    // rebuild landed the live region at the TOP of the screen.
+                    // Measured on a 30-row terminal: chrome at rows 25-28 before
+                    // a width resize, rows 1-4 after exactly one — permanently
+                    // inverting the bottom-anchored invariant this whole design
+                    // rests on, the one `resize_clear_top_from_bottom` states as
+                    // `old_top = old_rows - old_h`.
+                    //
+                    // That single inversion produces all three reported symptoms:
+                    //
+                    //   * the composer sitting at the top with dead space below —
+                    //     visible, and NOT a duplicate, which is exactly why
+                    //     band-counting harnesses never caught it;
+                    //   * stacked copies — with the region at rows 0..h, the next
+                    //     `insert_before` scrolls at the bottom and pushes those
+                    //     rows (the chrome) into scrollback, where no erase can
+                    //     reach them; on a reflowing terminal a later widen pulls
+                    //     them back onto the visible screen;
+                    //   * an occasional transcript wipe — `last_inline_top` is
+                    //     refreshed from the rebuilt viewport below and becomes 0,
+                    //     so the next pure height change clears from row 0 down.
+                    //
+                    // The multiplexer branch escaped only incidentally: it homes
+                    // to `last_inline_top` instead of row 0, so it happened to
+                    // preserve the anchor. That is why the defect looked
+                    // terminal-specific for so long when it never was.
+                    //
+                    // Homing to `rows - h` makes the anchor explicit and makes
+                    // both clear branches agree on geometry. Clamped so a
+                    // viewport taller than the screen cannot underflow.
+                    //
+                    // The row comes from `resize_clear_top_from_bottom`, which
+                    // is the same arithmetic spelled inline — but that function
+                    // used to be `#[cfg(test)]`, annotated "no longer used by
+                    // the resize path … retained as a tested pure helper
+                    // documenting the bottom-anchored geometry". That demotion
+                    // IS the defect, recorded in a comment: the invariant went
+                    // on being asserted in tests after the code stopped obeying
+                    // it, so the tests stayed green while the screen inverted.
+                    // Calling it here makes the helper load-bearing again.
+                    {
+                        let anchor = resize_clear_top_from_bottom(size.rows, desired_inline_h);
+                        let _ = execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, anchor));
+                    }
+
                     // Rebuild fresh to bypass ratatui's in-place inline-resize
                     // (which can misplace the viewport on a shrink).
                     rebuild_inline(&mut terminal, desired_inline_h)?;
@@ -2115,10 +2169,17 @@ fn clamp_inline_top(top: Option<u16>, term_rows: u16) -> Option<u16> {
 /// taller than the terminal (mid-shrink) clamps to row 0 instead of underflowing
 /// to a huge row that would move the clear off-screen.
 ///
-/// No longer used by the resize path (which now does a DSR-free full-screen wipe,
-/// the only approach robust to terminals that drop the cursor query), but retained
-/// as a tested pure helper documenting the bottom-anchored geometry.
-#[cfg(test)]
+/// This function was once `#[cfg(test)]`, carrying the note "no longer used by
+/// the resize path … but retained as a tested pure helper documenting the
+/// bottom-anchored geometry". That demotion is the whole defect, written down:
+/// the invariant kept being asserted in tests while the code stopped honouring
+/// it. `clear_screen_for_resize` homes to row 0, and the `rebuild_inline` that
+/// follows anchors `Viewport::Inline` on the cursor, so the live region was
+/// rebuilt at the TOP of the screen after every width resize — with the tests
+/// that "document the geometry" still green, because nothing called this.
+///
+/// It is production code again, and the resize path calls it. A pure helper
+/// that states an invariant nothing enforces is a comment with a test suite.
 fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
     term_rows.saturating_sub(inline_h)
 }
@@ -3052,6 +3113,88 @@ mod render_tests {
         assert_eq!(resize_clear_top_from_bottom(4, 6), 0);
         assert_eq!(resize_clear_top_from_bottom(0, 10), 0);
         assert_eq!(resize_clear_top_from_bottom(6, 6), 0);
+    }
+
+    /// Ratatui 0.29's `compute_inline_size`, reproduced exactly.
+    ///
+    /// It is four lines, and those four lines are the entire reason a resize
+    /// moved the live region to the top of the screen. Modelling them here
+    /// makes the consequence of the cursor row assertable in-process; the real
+    /// thing needs a terminal that answers a DSR query, which is precisely the
+    /// dependency `VT100Backend` satisfies by construction and therefore cannot
+    /// test honestly.
+    fn ratatui_inline_top(cursor_row: u16, term_rows: u16, inline_h: u16) -> u16 {
+        let lines_after_cursor = inline_h.saturating_sub(1);
+        let available_lines = term_rows.saturating_sub(cursor_row).saturating_sub(1);
+        let missing_lines = lines_after_cursor.saturating_sub(available_lines);
+        cursor_row.saturating_sub(missing_lines)
+    }
+
+    #[test]
+    fn rebuilding_the_inline_viewport_from_row_zero_moves_the_chrome_to_the_top() {
+        // The shipped defect, stated as arithmetic. `clear_screen_for_resize`
+        // is an ED0 from home, so it leaves the cursor at row 0; the
+        // `rebuild_inline` that follows anchors the region wherever the cursor
+        // is. On a 30-row screen with a 4-row region that puts the chrome at
+        // rows 0..=3 — the TOP — while every erase in this file is written
+        // against it being at rows 26..=29.
+        assert_eq!(ratatui_inline_top(0, 30, 4), 0);
+
+        // Which is not merely "a different row": it is the inversion of the
+        // bottom-anchored invariant, so the two disagree by nearly a screen.
+        assert_ne!(ratatui_inline_top(0, 30, 4), resize_clear_top_from_bottom(30, 4));
+
+        // Measured against the real binary at 30 rows before the fix
+        // (`test/pty/anchor_probe.py`): chrome at rows 25-28 when booted and
+        // after a pure height change, and rows 1-4 after ONE width resize,
+        // never recovering.
+    }
+
+    #[test]
+    fn anchoring_the_rebuild_at_the_bottom_row_keeps_the_region_bottom_anchored() {
+        // The fix: home to `resize_clear_top_from_bottom` before
+        // `rebuild_inline` instead of leaving the cursor wherever the erase
+        // left it. The region then lands exactly on the bottom-anchored rows.
+        for (rows, h) in [(30u16, 4u16), (24, 6), (50, 3), (24, 1)] {
+            let anchor = resize_clear_top_from_bottom(rows, h);
+            assert_eq!(
+                ratatui_inline_top(anchor, rows, h),
+                rows - h,
+                "a region of height {h} on {rows} rows must start at {}",
+                rows - h,
+            );
+        }
+    }
+
+    #[test]
+    fn anchoring_at_the_bottom_costs_the_transcript_no_scrolling() {
+        // Anchoring is not just about the resulting row. `compute_inline_size`
+        // reaches a given row either by finding room below the cursor or by
+        // calling `append_lines`, and `append_lines` SCROLLS — pushing rows off
+        // the top into scrollback, where no erase this program may emit can
+        // reach them. That is the mechanism behind the stacked copies.
+        //
+        // With the cursor already on the bottom-anchored row there are exactly
+        // `inline_h - 1` lines below it, so nothing is missing and nothing
+        // scrolls.
+        for (rows, h) in [(30u16, 4u16), (24, 6), (50, 3)] {
+            let anchor = resize_clear_top_from_bottom(rows, h);
+            let lines_after_cursor = h - 1;
+            let available = rows - anchor - 1;
+            assert_eq!(
+                lines_after_cursor, available,
+                "anchoring at {anchor} on {rows} rows must need no scroll",
+            );
+        }
+    }
+
+    #[test]
+    fn a_region_taller_than_the_screen_anchors_at_row_zero() {
+        // The one case where row 0 is right: there is nowhere else to start.
+        // Saturating arithmetic has to cover it, because mid-shrink the desired
+        // region height briefly exceeds the terminal height.
+        assert_eq!(resize_clear_top_from_bottom(4, 6), 0);
+        assert_eq!(ratatui_inline_top(0, 4, 6), 0);
     }
 
     #[test]

@@ -9,6 +9,71 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.75] — displays as `v1.0.075`
+
+### Fixed — the composer no longer jumps to the top of the screen after a resize
+
+The long-running "the TUI breaks and the chat goes all the way to the top, and
+I have to scroll down" report. The cause was not the erase — which four
+successive fixes targeted — but the **re-anchor immediately after it**.
+
+- `Viewport::Inline` does not choose a position. ratatui's `compute_inline_size`
+  anchors the new region on **wherever it finds the cursor**. The resize clear
+  homes the cursor to row 0 and erases forward, so the rebuild placed the live
+  region at the **top** of the screen.
+- Measured on a 30-row terminal: chrome at rows 25-28 before a width resize,
+  **rows 1-4 after exactly one** — permanently inverting the bottom-anchored
+  invariant the whole inline design rests on.
+- The rebuild now homes to `rows - inline_h` explicitly. Same probe, after the
+  fix: 25-28 booted, 25-28 after one resize, 25-28 after a second, 24-28 after
+  committing a message and after a keystroke.
+
+**One inversion produced three separate symptoms**, which is why they were
+chased independently for so long:
+
+1. The composer sitting at the top with dead space below — visible, and *not* a
+   duplicate, which is precisely why band-counting harnesses never flagged it.
+2. Stacked copies — with the region at rows 0..h, the next `insert_before`
+   scrolls at the bottom and pushes those rows into scrollback, where no erase
+   can reach them; on a reflowing terminal a later widen pulls them back.
+3. Occasional transcript loss — `last_inline_top` is refreshed from the rebuilt
+   viewport and becomes 0, so the next pure height change clears from row 0.
+
+The multiplexer branch escaped only incidentally: it homes to the remembered
+top rather than row 0, so it happened to preserve the anchor. That is why the
+defect looked terminal-specific when it never was.
+
+### Still open — stated honestly
+
+- **One scenario still strands on real libvte**: a width drag with a live
+  transcript. Three of four previously-failing scenarios now pass; that one
+  reports 5. The shape has changed — what repeats now looks like committed
+  transcript lines re-emitted per width step, not chrome at row 0 — so it is a
+  different mechanism on the `insert_before` path, or a counting artefact
+  (the probe counts `❯`, and committed user messages also begin with `❯`).
+  Under investigation; not claimed as fixed.
+- Ghostty's band count remains unverified (no text API); Alacritty, kitty and
+  xterm are untested. `OSA_RESIZE_CLEAR=surgical|full` overrides the branch.
+
+### Why this took four attempts
+
+Three independent harness flaws made every earlier green result meaningless,
+and all three are worth recording:
+
+- The harnesses inherited `$TMUX` from the development shell, so the libvte
+  harness had been exercising the multiplexer branch all along — it never once
+  tested the path it existed to test.
+- They ran with an essentially empty transcript. With nothing above the live
+  region, nothing moves on a widen and both branches pass.
+- All three real-terminal harnesses pass `OSA_BASE_URL`, which the binary does
+  not read (`config/mod.rs:215` reads `OSA_URL`/`OSA_PORT`).
+
+And the assertion itself was the wrong shape: counting band occurrences cannot
+see a region that **moved** to row 0 — there is still exactly one of it. The
+invariant that catches this class is `viewport.top() == rows - inline_h`.
+
+---
+
 ## [1.0.74] — displays as `v1.0.074`
 
 The largest release this project has taken. Boot is **20× faster**, a command
