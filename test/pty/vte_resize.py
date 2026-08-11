@@ -82,6 +82,22 @@ def main() -> int:
 
         env = [f"{k}={v}" for k, v in os.environ.items() if k != "LINES" and k != "COLUMNS"]
         env.append(f"OSA_BASE_URL={backend.base_url}")
+        # FORCE_MUX_PATH lies about TERM so the binary takes its
+        # multiplexer branch (the surgical clear from the remembered
+        # live-region top) on a terminal that genuinely reflows. Used to check
+        # whether that branch could simply be the default everywhere.
+        #
+        # It passes here — but this session's transcript is nearly empty. On a
+        # reflowing terminal that is WIDENING, wrapped lines join and content
+        # moves UP, so the remembered top can sit BELOW the chrome and a clear
+        # from it would miss the rows above. tmux cannot do that because it
+        # never reflows. That is why the branch stays gated rather than
+        # becoming the default, and why this switch is a diagnostic rather
+        # than a supported mode.
+        import os as _os
+        if _os.environ.get("FORCE_MUX_PATH"):
+            env = [e for e in env if not e.startswith("TERM=")]
+            env.append("TERM=tmux-256color")
 
         ok, _pid = term.spawn_sync(
             Vte.PtyFlags.DEFAULT,
