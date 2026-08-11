@@ -88,11 +88,11 @@ defmodule OptimalSystemAgent.Soul.StaticBaseInvalidationTest do
   describe "MCP tools that connect after the first render" do
     test "appear in the <mcp-servers> catalog of the full static base" do
       before = Soul.static_base()
-      refute before =~ "mcp__late_server__late_tool"
+      refute before =~ "**late_server**"
 
       put_mcp_catalog()
 
-      assert Soul.static_base() =~ "mcp__late_server__late_tool",
+      assert Soul.static_base() =~ "**late_server**",
              "the owner's MCP servers connect asynchronously AFTER boot; if the prompt " <>
                "cache is not invalidated they leave no trace in the prompt at all."
     end
@@ -102,7 +102,7 @@ defmodule OptimalSystemAgent.Soul.StaticBaseInvalidationTest do
 
       put_mcp_catalog()
 
-      assert Soul.static_base(:native_tools) =~ "mcp__late_server__late_tool"
+      assert Soul.static_base(:native_tools) =~ "**late_server**"
     end
   end
 

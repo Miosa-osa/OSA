@@ -34,12 +34,22 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.SshKeysTest do
     auth_keys = Path.join(ssh_dir, "authorized_keys")
     File.mkdir_p!(ssh_dir)
 
-    # Override the home directory for this test process
+    # Override the home directory for this test process. HOME is per-OS-process,
+    # not per-test-process, so it must be RESTORED, not deleted: `delete_env`
+    # here left the whole VM without a HOME for every test that ran afterwards,
+    # breaking any assertion that reads `System.get_env("HOME")` (the trajectory
+    # home-anonymization test) or compares a child process's HOME against it
+    # (`OS.EnvTest`, "a real subprocess still sees PATH and HOME").
+    prev_home = System.get_env("HOME")
     System.put_env("HOME", tmp_dir)
 
     on_exit(fn ->
       File.rm_rf!(tmp_dir)
-      System.delete_env("HOME")
+
+      case prev_home do
+        nil -> System.delete_env("HOME")
+        home -> System.put_env("HOME", home)
+      end
     end)
 
     %{auth_keys: auth_keys, ssh_dir: ssh_dir, tmp_dir: tmp_dir}

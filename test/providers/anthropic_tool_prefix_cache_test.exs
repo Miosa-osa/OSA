@@ -79,11 +79,27 @@ defmodule OptimalSystemAgent.Providers.AnthropicToolPrefixCacheTest do
                "sorting by name is what makes the prefix reproducible.\ngot: #{inspect(names)}"
     end
 
-    test "the model-facing active set is sorted too" do
+    # `list_tools_direct/0` returns `builtin ++ mcp`, each half sorted, ON
+    # PURPOSE: keeping builtins ahead of MCP means a server that connects
+    # mid-session APPENDS to the tail instead of interleaving into — and so
+    # rewriting — the cached builtin prefix. Asserting the concatenation is
+    # globally sorted contradicts that design and only ever passed because the
+    # test VM usually has no MCP tools published: every builtin name from
+    # `memory_recall` onward sorts AFTER the `mcp__` prefix, so a single live
+    # MCP tool (one real ServerSession reporting into the global
+    # `{Registry, :mcp_tools}` term) flipped this test to failing.
+    test "the model-facing active set is sorted within each segment, builtins first" do
       names = Registry.list_active() |> Enum.map(& &1.name)
-
       assert names != []
-      assert names == Enum.sort(names)
+
+      {builtin, mcp} = Enum.split_with(names, &(not String.starts_with?(&1, "mcp__")))
+
+      assert names == builtin ++ mcp,
+             "builtins must stay ahead of MCP tools so a connecting server cannot " <>
+               "rewrite the cached prefix.\ngot: #{inspect(names)}"
+
+      assert builtin == Enum.sort(builtin)
+      assert mcp == Enum.sort(mcp)
     end
 
     # REGRESSION GUARD, not a fix. `{{TOOL_DEFINITIONS}}` is interpolated into

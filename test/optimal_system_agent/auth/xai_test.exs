@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
     # A stray `.env` in the CWD or in a developer's real `~/.osa` must not be
     # able to hand these tests an API key and quietly flip every assertion
     # about the account path onto the key path.
+    prev_fallback = Application.fetch_env(:optimal_system_agent, :live_env_file_fallback)
     Application.put_env(:optimal_system_agent, :live_env_file_fallback, false)
 
     on_exit(fn ->
@@ -41,8 +42,18 @@ defmodule OptimalSystemAgent.Auth.Providers.XAITest do
         do: System.put_env("XAI_API_KEY", prev_key),
         else: System.delete_env("XAI_API_KEY")
 
-      for k <- [:auth_req_options, :xai_api_key, :xai_url, :live_env_file_fallback] do
+      for k <- [:auth_req_options, :xai_api_key, :xai_url] do
         Application.delete_env(:optimal_system_agent, k)
+      end
+
+      # RESTORE, don't delete. `config/test.exs` sets this to `false` for the
+      # whole suite for the reason stated above; `delete_env` drops it back to
+      # its code default of `true`, so every test that ran AFTER this file
+      # started reading the operator's real `./.env` and `~/.osa/.env`. That is
+      # what made `Providers.LiveKeyResolutionTest` fail only in a full run.
+      case prev_fallback do
+        {:ok, v} -> Application.put_env(:optimal_system_agent, :live_env_file_fallback, v)
+        :error -> Application.delete_env(:optimal_system_agent, :live_env_file_fallback)
       end
 
       File.rm_rf(dir)

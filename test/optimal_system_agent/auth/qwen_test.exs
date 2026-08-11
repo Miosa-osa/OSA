@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Auth.Providers.QwenTest do
     prev_key = System.get_env("QWEN_API_KEY")
     System.put_env("OSA_HOME", dir)
     System.delete_env("QWEN_API_KEY")
+    prev_fallback = Application.fetch_env(:optimal_system_agent, :live_env_file_fallback)
     Application.put_env(:optimal_system_agent, :live_env_file_fallback, false)
 
     on_exit(fn ->
@@ -41,8 +42,17 @@ defmodule OptimalSystemAgent.Auth.Providers.QwenTest do
         do: System.put_env("QWEN_API_KEY", prev_key),
         else: System.delete_env("QWEN_API_KEY")
 
-      for k <- [:auth_req_options, :qwen_api_key, :qwen_url, :live_env_file_fallback] do
+      for k <- [:auth_req_options, :qwen_api_key, :qwen_url] do
         Application.delete_env(:optimal_system_agent, k)
+      end
+
+      # RESTORE, don't delete — see the note in xai_test.exs. `config/test.exs`
+      # pins this to `false`; deleting it re-enables the `.env` fallback for
+      # every later test in the VM and lets the operator's real credentials
+      # leak into assertions that assume an isolated environment.
+      case prev_fallback do
+        {:ok, v} -> Application.put_env(:optimal_system_agent, :live_env_file_fallback, v)
+        :error -> Application.delete_env(:optimal_system_agent, :live_env_file_fallback)
       end
 
       File.rm_rf(dir)

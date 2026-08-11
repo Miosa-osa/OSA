@@ -25,7 +25,16 @@ defmodule OptimalSystemAgent.CLI.UpdateConfigWriteTest do
         do: Application.put_env(:optimal_system_agent, :config_dir, prev),
         else: Application.delete_env(:optimal_system_agent, :config_dir)
 
-      File.chmod(Path.join(dir, "open_computers.toml"), 0o600)
+      # The EACCES test chmods the config to 0o000, so restore a readable mode
+      # before deleting — but ONLY when it is a regular file. The EISDIR test
+      # puts a DIRECTORY at that path, and 0o600 strips its traverse bit, which
+      # made `rm_rf` fail silently and leave the tree on disk. Since the
+      # directory name comes from `System.unique_integer/1` — which restarts low
+      # on every VM boot — a later run recycled the number, found a directory
+      # where its config should be, and blew up in an unrelated test.
+      path = Path.join(dir, "open_computers.toml")
+      if File.regular?(path), do: File.chmod(path, 0o600)
+      File.chmod(dir, 0o700)
       File.rm_rf(dir)
     end)
 

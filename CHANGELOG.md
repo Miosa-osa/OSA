@@ -9,6 +9,68 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.82] — displays as `v1.0.082`
+
+### Fixed — the system prompt was frozen at boot
+
+`Soul.static_base/0` caches the rendered system prompt, and that prompt contains
+the tool documentation. The cache was invalidated only inside `Soul.load/0` at
+boot and by a manual `reload/0` — **nothing invalidated it when the tool set
+changed.**
+
+`MCP.Client.Manager` starts after `Tools.Registry` and its servers connect
+asynchronously, so MCP tools register after the prompt has already been rendered
+and cached. Whatever tool set existed at the first render was frozen for the life
+of the node. With a dozen MCP servers configured, the model could be working from
+a tool list that no longer matched reality. The `:native_tools` variant made it
+sharper still: its decision about which descriptions to strip is read from the
+live registry at render time and then cached, so the prose could be computed
+against a set that no longer existed.
+
+`Soul.invalidate_static_base/0` is now called from the registry's module
+registration and from the single writer of the MCP tool map. It invalidates only
+— the lazy rebuild on next read is preserved — and skips writing over an
+already-cleared slot, so twelve servers connecting cost one write in total.
+Proven by tests that drive the production paths (`Registry.register/1` and
+`Manager.report_tools/2`) rather than poking the cache: five of six fail on the
+old code.
+
+### Fixed — the test suite was lying, in three unrelated ways
+
+A full run is green for the first time: **8103 tests, 0 failures.** Seven tests
+had been failing only inside full runs. The cause was not one mechanism, and it
+was not the prompt cache:
+
+- **`HOME` was being deleted, not restored.** One suite's `on_exit` called
+  `System.delete_env("HOME")`, leaving the whole VM without a home directory for
+  everything that ran afterwards.
+- **A directory was left behind where a config file belongs.** One suite chmods
+  its fixture path to `0600` on the way out, but another test makes that path a
+  *directory* — and `0600` strips the traverse bit, so the cleanup silently
+  failed. Since `System.unique_integer/1` restarts low on each VM boot, a later
+  run recycled the number and found a directory where its config should be. This
+  one failed running *alone*, on four of seven seeds, and had been misfiled as
+  cross-suite pollution. Twenty stale directories were found on disk.
+- **`:live_env_file_fallback` was being deleted rather than restored**, so every
+  test after that point read the developer's real `.env` files. That is what had
+  been breaking provider-resolution tests all along.
+
+One test was simply asserting the wrong thing: the active tool list is
+`builtin ++ mcp` with each half sorted, deliberately, so a connecting server
+appends to the tail instead of rewriting the cached prefix. The test asserted
+global sortedness, which a single live MCP tool breaks. It now asserts what the
+design actually guarantees.
+
+### Known gaps
+
+Three `FleetTest` cases were seen failing once in a full run and could not be
+reproduced — green alone, green in a 2317-test directory run, and green under
+saturating CPU load. No mechanism is claimed for them. One case in the tool-prefix
+cache suite is a pre-existing intra-file flake, present at HEAD before any of this
+work, and its mechanism is likewise undetermined.
+
+---
+
 ## [1.0.81] — displays as `v1.0.081`
 
 ### Fixed — the answer had no name on it
