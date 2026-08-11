@@ -855,7 +855,43 @@ impl App {
                         // kitty and Alacritty alike, so it wipes the screen without
                         // touching scroll history. Every other inline clear in this
                         // file already uses it; this was the one hole.
-                        let _ = clear_screen_for_resize(&mut std::io::stdout());
+                        //
+                        // EXCEPT inside a multiplexer, where the premise above
+                        // is false. The whole justification for the
+                        // full-screen wipe is "the emulator reflowed, so the
+                        // old chrome's row is unknowable" — but tmux and
+                        // screen do NOT reflow on a width change. The remembered
+                        // `last_inline_top` therefore stays valid, and the
+                        // surgical clear used for height changes is both
+                        // sufficient and non-destructive.
+                        //
+                        // This matters because the full-screen path was the
+                        // stranding: under tmux the live region scrolls into
+                        // pane history as it redraws at each new width, and no
+                        // erase reaches history — a 12-step drag left 13 copies
+                        // (`test/pty/tmux_resize.py`). Clearing from the known
+                        // top instead means the old chrome is overwritten in
+                        // place and never becomes history in the first place,
+                        // which is how Claude Code survives the identical drag
+                        // with one prompt box (measured, same harness).
+                        //
+                        // The rejected alternative was ED3 (purge pane
+                        // history). It worked, but destroyed the user's
+                        // scrollback on every resize to clean up a mess this
+                        // branch did not need to make.
+                        let surgical_top = if in_multiplexer() { last_inline_top } else { None };
+                        if let Some(top) = surgical_top {
+                            let max_row = size.rows.saturating_sub(1);
+                            let _ = execute!(
+                                std::io::stdout(),
+                                crossterm::cursor::MoveTo(0, top.min(max_row)),
+                                crossterm::terminal::Clear(
+                                    crossterm::terminal::ClearType::FromCursorDown
+                                ),
+                            );
+                        } else {
+                            let _ = clear_screen_for_resize(&mut std::io::stdout());
+                        }
                     } else if let Some(top) = last_inline_top {
                         // Pure HEIGHT change (composer grew/shrank, a transient notice
                         // appeared) — NOT a resize. The terminal did NOT reflow, so the
@@ -2186,44 +2222,6 @@ pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<(
         out,
         crossterm::cursor::MoveTo(0, 0),
         crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-    )?;
-    clear_multiplexer_history(out)
-}
-
-/// Inside a multiplexer only, also purge the pane's scroll history.
-///
-/// This is the fix for "one width drag leaves N stacked composers", and it is
-/// a deliberate, narrow exception to the rule that a resize never destroys
-/// history. The reasoning, since the exception looks alarming on its own:
-///
-/// * The stranded copies are **already in tmux's pane history** by the time
-///   this runs. They arrive there through ordinary scrolling as the live
-///   region redraws at each new width — not through the rebuild's cursor
-///   anchoring, which was the first theory and was tested and disproved
-///   (resizing the viewport in place instead of reconstructing it changed
-///   nothing: still 13 copies).
-/// * An erase — any erase — cannot reach scroll history. ED3 is the only
-///   sequence that can, so it is the only available repair.
-/// * It is scoped to multiplexers because the problem is scoped to them.
-///   `test/pty/vte_resize.py` drives real libvte and shows no stranding
-///   there, so purging outside a multiplexer would destroy real scrollback to
-///   solve a problem that does not exist.
-///
-/// **The cost, stated plainly:** resizing inside tmux discards that pane's
-/// scroll history. The conversation itself is not lost — every finalized
-/// message is retained in `transcript_log` and stays reachable with Ctrl+O —
-/// but scrolling the pane back past the resize will not show it. That is a
-/// real trade against visibly corrupted chrome on every drag; if it proves
-/// the worse half, the fix to reach for is keeping the live region from
-/// scrolling into history in the first place, which is a larger change.
-fn clear_multiplexer_history(out: &mut impl std::io::Write) -> Result<()> {
-    if !in_multiplexer() {
-        return Ok(());
-    }
-    execute!(
-        out,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-        crossterm::cursor::MoveTo(0, 0),
     )?;
     Ok(())
 }

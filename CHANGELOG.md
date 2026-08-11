@@ -9,6 +9,52 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.72] — displays as `v1.0.072`
+
+Same fix as 1.0.71, done properly: the stacked composers are gone **and** your
+scroll history survives a resize.
+
+### Fixed — the resize fix no longer costs you your scrollback
+
+- 1.0.71 removed the stranded copies by purging tmux's pane history (`ESC[3J`)
+  on every resize. It worked, and it was the wrong trade: it destroyed the
+  user's scrollback to clean up a mess the resize path did not need to make.
+- **The stranding is now prevented rather than cleaned up.** The full-screen
+  wipe exists because "a resize reflows the emulator, so the old chrome's row
+  is unknowable" — and that premise is simply false inside a multiplexer.
+  tmux and screen do **not** reflow on a width change, so the remembered
+  live-region top stays valid and the same surgical clear used for height
+  changes is both sufficient and non-destructive. Under a multiplexer the
+  resize now clears from that row down; everywhere else the full-screen path
+  is unchanged.
+- Result: the old chrome is overwritten in place and never becomes pane
+  history at all. Verified on the same harness that reproduced the defect —
+  one copy of each band after both a slow 12-step drag and a fast one.
+
+### How the answer was found
+
+- Claude Code was measured through the same tmux harness, driven through the
+  identical 12-step drag: **one prompt box, no stranding.** That proved the
+  defect was avoidable rather than inherent to inline rendering, which is what
+  ruled the history-purge trade unacceptable.
+- grok's pager takes the other available route — it owns its scrollback
+  outright (`ScrollbackState` with a width-keyed layout cache) and never
+  deposits into the terminal's. That is the larger refactor this fix does not
+  need.
+
+### Rejected, recorded so they are not re-tried
+
+- **ED3 history purge** (shipped in 1.0.71): works, destroys scrollback.
+- **Resizing the viewport in place instead of reconstructing it**, on the
+  theory that tmux drops the DSR cursor query the rebuild issues: removed the
+  query entirely and changed nothing — still 13 copies. The copies arrive
+  through ordinary scrolling, not through anchoring.
+
+The `ED3`-on-resize ban in `layout_invariants` is unconditional again, with a
+note explaining that a future stranding must be fixed by not creating it.
+
+---
+
 ## [1.0.71] — displays as `v1.0.071`
 
 Dragging the window no longer leaves a stack of composers behind. This one has
