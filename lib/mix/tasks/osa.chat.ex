@@ -208,26 +208,28 @@ defmodule Mix.Tasks.Osa.Chat do
     # Apply the chosen provider
     Application.put_env(:optimal_system_agent, :default_provider, provider)
 
-    # Write .env file
-    env_lines = ["OSA_DEFAULT_PROVIDER=#{provider}"]
-
-    env_lines =
-      if System.get_env("ANTHROPIC_API_KEY"),
-        do: env_lines ++ ["ANTHROPIC_API_KEY=#{System.get_env("ANTHROPIC_API_KEY")}"],
-        else: env_lines
-
-    env_lines =
-      if System.get_env("OPENAI_API_KEY"),
-        do: env_lines ++ ["OPENAI_API_KEY=#{System.get_env("OPENAI_API_KEY")}"],
-        else: env_lines
-
-    env_lines =
-      if System.get_env("GROQ_API_KEY"),
-        do: env_lines ++ ["GROQ_API_KEY=#{System.get_env("GROQ_API_KEY")}"],
-        else: env_lines
-
-    env_path = Path.expand("~/.osa/.env")
-    File.write!(env_path, Enum.join(env_lines, "\n") <> "\n")
+    # Write .env file.
+    #
+    # This used to rebuild the entire file from three `System.get_env` lookups
+    # and `File.write!` it, which had two independent defects:
+    #
+    #   1. No mode. The result was 0644 on a default Linux install — every API
+    #      key in it readable by any local user. `File.write!` followed by
+    #      `File.chmod!` would not fix that either; it just narrows the window.
+    #   2. No read-merge. Any key already in ~/.osa/.env that was not one of
+    #      the three looked up here was destroyed on save.
+    #
+    # `Setup.save_env/2` is the correct implementation of exactly this write —
+    # line-anchored upsert of the existing file, then an atomic replace whose
+    # temp file is chmod'ed 0600 BEFORE the secret is written to it.
+    [
+      {"OSA_DEFAULT_PROVIDER", to_string(provider)},
+      {"ANTHROPIC_API_KEY", System.get_env("ANTHROPIC_API_KEY")},
+      {"OPENAI_API_KEY", System.get_env("OPENAI_API_KEY")},
+      {"GROQ_API_KEY", System.get_env("GROQ_API_KEY")}
+    ]
+    |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
+    |> Enum.each(fn {k, v} -> OptimalSystemAgent.CLI.Setup.save_env(k, v) end)
 
     IO.puts(
       "  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Configuration saved to #{IO.ANSI.faint()}~/.osa/.env#{IO.ANSI.reset()}"

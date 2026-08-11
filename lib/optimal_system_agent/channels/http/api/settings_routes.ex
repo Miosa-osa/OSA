@@ -13,6 +13,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
+
   plug(:match)
   plug(:dispatch)
 
@@ -35,19 +38,33 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
       if not is_map(params) or params == %{} do
         json_error(conn, 400, "invalid_request", "Request body must be a non-empty JSON object")
       else
-        existing = read_config()
-        sanitized = sanitize_params(params)
-        updated = Map.merge(existing, sanitized)
+        # Presence-aware read: the display path can degrade an unreadable
+        # config to `%{}`, but this path MERGES into it and writes the result
+        # back over the file. Degrading here means one PATCH replaces the whole
+        # of ~/.osa/config.json with just the patched keys and returns 200.
+        case JsonStore.read_map_for_write(config_path()) do
+          {:error, :corrupt} ->
+            json_error(
+              conn,
+              500,
+              "config_unreadable",
+              JsonStore.corrupt_message("settings", config_path())
+            )
 
-        case validate_provider(Map.get(sanitized, "provider")) do
-          :ok ->
-            apply_runtime_changes(existing, updated)
-            write_config(updated)
-            settings = build_settings(updated)
-            json(conn, 200, settings)
+          {:ok, existing} ->
+            sanitized = sanitize_params(params)
+            updated = Map.merge(existing, sanitized)
 
-          {:error, msg} ->
-            json_error(conn, 400, "invalid_provider", msg)
+            case validate_provider(Map.get(sanitized, "provider")) do
+              :ok ->
+                apply_runtime_changes(existing, updated)
+                write_config(updated)
+                settings = build_settings(updated)
+                json(conn, 200, settings)
+
+              {:error, msg} ->
+                json_error(conn, 400, "invalid_provider", msg)
+            end
         end
       end
     rescue
@@ -90,7 +107,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
 
     case Jason.encode(config, pretty: true) do
       {:ok, json} ->
-        File.write!(path, json)
+        AtomicFile.write!(path, json)
 
       {:error, reason} ->
         Logger.warning("[Settings] Failed to encode config: #{inspect(reason)}")
@@ -159,7 +176,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
 
       :error ->
         known = OptimalSystemAgent.Providers.Registry.list_providers()
-        {:error, "Unknown provider '#{provider}'. Known: #{Enum.map_join(known, ", ", &to_string/1)}"}
+
+        {:error,
+         "Unknown provider '#{provider}'. Known: #{Enum.map_join(known, ", ", &to_string/1)}"}
     end
   end
 

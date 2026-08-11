@@ -364,4 +364,157 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStoreTest do
       File.rm(SubscriptionStore.path() <> ".lock")
     end
   end
+
+  # Every write in this module is a WHOLE-FILE rewrite of the map a read
+  # returned. That makes "what does a failed read return?" a data-destruction
+  # question, not an ergonomics one: a read that degrades to `%{}` hands the
+  # writer a map asserting that every provider is disconnected, and the writer
+  # then makes that true on disk.
+  #
+  # The corruption tests above only ever assert `fetch == nil`. Neither of them
+  # WRITES after a corrupt read, which is precisely why a whole-store wipe
+  # lived here undetected — the read half was loud and correct, and the write
+  # half quietly destroyed the file anyway. These tests write.
+  describe "a degraded read can never reach a whole-file writer" do
+    test "put/2 refuses rather than wiping every other provider after an unreadable store" do
+      :ok = SubscriptionStore.put("copilot", %{"access_token" => "a"})
+      :ok = SubscriptionStore.put("openai_codex", %{"access_token" => "b"})
+
+      # One `chmod 0644` — from a hand edit, a restore, a permissive umask.
+      File.chmod!(SubscriptionStore.path(), 0o644)
+
+      assert {:error, {:unsafe_read, :insecure_permissions}} =
+               SubscriptionStore.put("xai", %{"access_token" => "c"})
+
+      # The pre-existing credentials must still be on disk, byte for byte. On
+      # the original code this single `put` rewrote the file from `%{}` and
+      # both other subscriptions were gone forever.
+      File.chmod!(SubscriptionStore.path(), 0o600)
+
+      assert SubscriptionStore.fetch("copilot")["access_token"] == "a"
+      assert SubscriptionStore.fetch("openai_codex")["access_token"] == "b"
+      assert map_size(SubscriptionStore.list()) == 2
+    end
+
+    test "put/2 refuses after a truncated/corrupt store and leaves the bytes untouched" do
+      :ok = SubscriptionStore.put("copilot", %{"access_token" => "a"})
+      File.write!(SubscriptionStore.path(), "{not json")
+      File.chmod!(SubscriptionStore.path(), 0o600)
+
+      assert {:error, {:unsafe_read, _}} = SubscriptionStore.put("xai", %{"access_token" => "c"})
+
+      # Refusing keeps the damaged file available for recovery. Overwriting it
+      # would have destroyed whatever a partial write had left recoverable.
+      assert File.read!(SubscriptionStore.path()) == "{not json"
+    end
+
+    test "delete/1 does not unlink the whole store when the read failed" do
+      :ok = SubscriptionStore.put("copilot", %{"access_token" => "a"})
+      :ok = SubscriptionStore.put("openai_codex", %{"access_token" => "b"})
+      File.chmod!(SubscriptionStore.path(), 0o644)
+
+      # The original `delete/1` computed `remaining = Map.delete(%{}, id)`,
+      # saw `map_size == 0`, and `File.rm`'d the entire credential file —
+      # signing the user out of every provider because of a mode bit.
+      assert {:error, {:unsafe_read, :insecure_permissions}} = SubscriptionStore.delete("copilot")
+
+      assert File.exists?(SubscriptionStore.path()),
+             "an unreadable store must never be deleted as though it were empty"
+
+      File.chmod!(SubscriptionStore.path(), 0o600)
+      assert map_size(SubscriptionStore.list()) == 2
+    end
+
+    test "refresh_within_lock/3 reports an unreadable store instead of calling it 'not connected'" do
+      :ok = SubscriptionStore.put("copilot", %{"access_token" => "old", "refresh_token" => "r1"})
+      File.chmod!(SubscriptionStore.path(), 0o644)
+
+      called? = :counters.new(1, [])
+
+      result =
+        SubscriptionStore.refresh_within_lock(
+          "copilot",
+          fn e ->
+            :counters.add(called?, 1, 1)
+            {:ok, e}
+          end,
+          fn _ -> true end
+        )
+
+      # `:not_connected` (what the old code returned, because `fetch/1`
+      # collapses every failure to `nil`) tells the caller to sign in again —
+      # destructive advice for a file that is merely mis-permissioned.
+      assert {:error, {:unsafe_read, :insecure_permissions}} = result
+      assert :counters.get(called?, 1) == 0, "must not spend a refresh token against a store it could not read"
+
+      File.chmod!(SubscriptionStore.path(), 0o600)
+      assert SubscriptionStore.fetch("copilot")["access_token"] == "old"
+    end
+  end
+
+  describe "store version" do
+    test "a file written by a newer OSA is refused, not silently downgraded to v1" do
+      future =
+        Jason.encode!(%{
+          "version" => 99,
+          "providers" => %{"copilot" => %{"access_token" => "a", "some_future_field" => "keep me"}}
+        })
+
+      File.mkdir_p!(Path.dirname(SubscriptionStore.path()))
+      File.write!(SubscriptionStore.path(), future)
+      File.chmod!(SubscriptionStore.path(), 0o600)
+
+      # The writer has always stamped `"version"`; the reader ignored it
+      # entirely, which made the field decoration rather than a contract.
+      assert SubscriptionStore.fetch("copilot") == nil
+
+      assert {:error, {:unsafe_read, {:unsupported_version, 99}}} =
+               SubscriptionStore.put("xai", %{"access_token" => "c"})
+
+      # The original code re-serialised the whole store at v1 here, dropping
+      # every field this binary has no code for — including, plausibly, the
+      # refresh token of a provider it does not know about.
+      assert File.read!(SubscriptionStore.path()) == future
+    end
+
+    test "a v1 file, and one with no version key at all, still read" do
+      File.mkdir_p!(Path.dirname(SubscriptionStore.path()))
+
+      for body <- [
+            Jason.encode!(%{"version" => 1, "providers" => %{"copilot" => %{"access_token" => "a"}}}),
+            Jason.encode!(%{"providers" => %{"copilot" => %{"access_token" => "a"}}})
+          ] do
+        File.write!(SubscriptionStore.path(), body)
+        File.chmod!(SubscriptionStore.path(), 0o600)
+        assert SubscriptionStore.fetch("copilot")["access_token"] == "a"
+      end
+    end
+  end
+
+  describe "path stability" do
+    test "the path is resolved once per lock, not per call" do
+      # `path/0` reads OSA_HOME on every call, and the read, the lock and the
+      # rename each used to call it independently. A home directory that
+      # changes mid-operation therefore locked one file and wrote another —
+      # an unlocked write, to a store nobody had read.
+      original = SubscriptionStore.path()
+      elsewhere = Path.join(System.tmp_dir!(), "osa-substore-moved-#{System.unique_integer([:positive])}")
+
+      observed =
+        SubscriptionStore.with_lock(fn ctx ->
+          System.put_env("OSA_HOME", elsewhere)
+          ctx
+        end)
+
+      System.put_env("OSA_HOME", Path.dirname(original))
+
+      assert observed.path == original,
+             "the body must operate on the path the lock was taken against"
+
+      assert observed.lock == original <> ".lock",
+             "the lockfile must sit beside the file it protects, not beside a later OSA_HOME"
+
+      File.rm_rf(elsewhere)
+    end
+  end
 end

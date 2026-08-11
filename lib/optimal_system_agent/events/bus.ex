@@ -43,8 +43,15 @@ defmodule OptimalSystemAgent.Events.Bus do
   @doc """
   Emit an event through the goldrush-compiled router.
 
-  Wraps the payload in an `Event` struct with UUID, timestamp, and tracing fields
-  before dispatching to goldrush. Returns `{:ok, event}` with the created Event.
+  Wraps the payload in an `Event` struct with UUID, sequence number, timestamp,
+  and tracing fields before dispatching to goldrush. Returns `{:ok, event}` with
+  the created Event.
+
+  The struct is built on the caller's process, so `event.seq` (strictly
+  increasing, see `Event.next_seq/0`) and `event.time` reflect the order emit was
+  called in. Delivery remains asynchronous, so consumers that care about order
+  must sort on `seq` (`Event.sort/1`) rather than trusting arrival order or the
+  wall clock.
 
   ## Options
 
@@ -57,12 +64,20 @@ defmodule OptimalSystemAgent.Events.Bus do
     * `:signal_sn` - signal-to-noise ratio (0.0-1.0)
   """
   def emit(event_type, payload \\ %{}, opts \\ []) when event_type in @event_types do
-    # Run entire emit body in a supervised task to never block the caller.
+    # Build the Event struct SYNCHRONOUSLY, on the caller's process, before any
+    # task is spawned. `seq` (strictly increasing) and `time` therefore record
+    # the order the caller emitted in. Building it inside the task instead let
+    # two events emitted in a known order be stamped — and appended — reversed,
+    # because task scheduling order is arbitrary.
+    source = Keyword.get(opts, :source, "bus")
+    typed_event = Event.new(event_type, source, payload, opts)
+
+    # Run the rest of emit in a supervised task to never block the caller.
     # Using start_child (fire-and-forget) so crashes are observed by the supervisor
     # and the caller is never blocked or killed by a Bus.emit failure.
     case Task.Supervisor.start_child(
            OptimalSystemAgent.Events.TaskSupervisor,
-           fn -> do_emit(event_type, payload, opts) end
+           fn -> do_emit(typed_event) end
          ) do
       {:ok, _} ->
         :ok
@@ -71,12 +86,11 @@ defmodule OptimalSystemAgent.Events.Bus do
         Logger.warning("[Bus] Could not dispatch emit task: #{inspect(reason)}")
     end
 
-    {:ok, nil}
+    {:ok, typed_event}
   end
 
-  defp do_emit(event_type, payload, opts) do
-    source = Keyword.get(opts, :source, "bus")
-    typed_event = Event.new(event_type, source, payload, opts)
+  defp do_emit(%Event{} = typed_event) do
+    event_type = typed_event.type
 
     # Auto-classify signal dimensions if not explicitly set
     typed_event =

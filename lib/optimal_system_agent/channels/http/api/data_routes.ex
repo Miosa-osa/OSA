@@ -15,6 +15,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   require Logger
 
   alias OptimalSystemAgent.SDK.Memory
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
   alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
@@ -79,11 +81,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       json_error(conn, 400, "invalid_request", "Missing required query param: q")
     else
       mode = conn.query_params["mode"] || "keyword"
+
       limit =
         case parse_int(conn.query_params["limit"]) do
           n when is_integer(n) and n > 0 -> min(n, 100)
           _ -> 10
         end
+
       category = conn.query_params["category"]
       sort = parse_sort_atom(conn.query_params["sort"])
 
@@ -494,24 +498,25 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       |> Path.expand()
       |> Path.join("config.json")
 
-    existing =
-      with true <- File.exists?(config_path),
-           {:ok, content} <- File.read(config_path),
-           {:ok, parsed} <- Jason.decode(content) do
-        parsed
-      else
-        _ -> %{}
-      end
+    # An unreadable config used to degrade to `%{}` here, so a model switch
+    # rewrote ~/.osa/config.json containing only "provider" and "model" and
+    # discarded everything else in it. Refuse instead — the merge is only
+    # meaningful if the read succeeded.
+    case JsonStore.read_map_for_write(config_path) do
+      {:error, :corrupt} ->
+        Logger.error("[Models] #{JsonStore.corrupt_message("model selection", config_path)}")
 
-    updated = Map.merge(existing, %{"provider" => provider, "model" => model})
+      {:ok, existing} ->
+        updated = Map.merge(existing, %{"provider" => provider, "model" => model})
 
-    case Jason.encode(updated, pretty: true) do
-      {:ok, json} ->
-        File.mkdir_p!(Path.dirname(config_path))
-        File.write!(config_path, json)
+        case Jason.encode(updated, pretty: true) do
+          {:ok, json} ->
+            File.mkdir_p!(Path.dirname(config_path))
+            AtomicFile.write!(config_path, json)
 
-      {:error, reason} ->
-        Logger.warning("[Models] Failed to persist model selection: #{inspect(reason)}")
+          {:error, reason} ->
+            Logger.warning("[Models] Failed to persist model selection: #{inspect(reason)}")
+        end
     end
   rescue
     e -> Logger.warning("[Models] Config persist error: #{Exception.message(e)}")

@@ -33,6 +33,12 @@ defmodule OptimalSystemAgent.Events.DLQTest do
         end
     end
 
+    try do
+      :ets.delete_all_objects(:osa_dlq_dead)
+    rescue
+      ArgumentError -> :ok
+    end
+
     :ok
   end
 
@@ -112,6 +118,93 @@ defmodule OptimalSystemAgent.Events.DLQTest do
   describe "depth/0" do
     test "returns 0 for empty DLQ" do
       assert DLQ.depth() == 0
+    end
+  end
+
+  describe "non-retryable errors" do
+    # A retry re-`apply`s the original handler, so anything the handler did
+    # before failing (writing a file, sending a message, spending budget) is
+    # replayed. Errors the classifier already knows are fatal must therefore
+    # never be retried.
+    setup do
+      test_pid = self()
+      handler = fn payload -> send(test_pid, {:handler_ran, payload}) end
+      {:ok, handler: handler}
+    end
+
+    test "a permission error is never re-applied", %{handler: handler} do
+      DLQ.enqueue(:tool_call, %{path: "/etc/shadow"}, handler, "permission denied: /etc/shadow")
+
+      # Not queued for retry at all.
+      assert DLQ.depth() == 0
+
+      assert [dead] = DLQ.dead_entries()
+      assert dead.event_type == :tool_call
+      assert dead.dead_reason == :permission_denied
+      assert dead.error == "permission denied: /etc/shadow"
+
+      assert {0, 0} = DLQ.drain()
+      refute_received {:handler_ran, _}
+    end
+
+    test "a budget error is never re-applied", %{handler: handler} do
+      DLQ.enqueue(:llm_request, %{}, handler, "budget exceeded for session")
+
+      assert DLQ.depth() == 0
+      assert [dead] = DLQ.dead_entries()
+      assert dead.dead_reason == :budget_exceeded
+
+      DLQ.drain()
+      refute_received {:handler_ran, _}
+    end
+
+    test "an auth error is never re-applied", %{handler: handler} do
+      DLQ.enqueue(:llm_response, %{}, handler, "unauthorized: invalid api key")
+
+      assert DLQ.depth() == 0
+      assert [dead] = DLQ.dead_entries()
+      assert dead.dead_reason == :llm_error
+
+      DLQ.drain()
+      refute_received {:handler_ran, _}
+    end
+
+    test "a retryable error still retries — the gate is not blanket-on", %{handler: handler} do
+      DLQ.enqueue(:tool_call, %{n: 1}, handler, "connection timed out")
+
+      assert DLQ.depth() == 1
+      assert DLQ.dead_entries() == []
+
+      force_ready_for_retry()
+      assert {1, 0} = DLQ.drain()
+      assert_received {:handler_ran, %{n: 1}}
+    end
+
+    test "an entry whose retry fails non-retryably stops after that one attempt" do
+      test_pid = self()
+
+      handler = fn payload ->
+        send(test_pid, {:handler_ran, payload})
+        raise "permission denied while writing"
+      end
+
+      # Enqueued under a retryable error, so it does get one attempt.
+      DLQ.enqueue(:tool_call, %{n: 2}, handler, "transient")
+      assert DLQ.depth() == 1
+
+      force_ready_for_retry()
+      DLQ.drain()
+
+      assert_received {:handler_ran, %{n: 2}}
+
+      # ...and is retired instead of being scheduled for two more replays.
+      assert DLQ.depth() == 0
+      assert [dead] = DLQ.dead_entries()
+      assert dead.dead_reason == :permission_denied
+      assert dead.error == "permission denied while writing"
+
+      DLQ.drain()
+      refute_received {:handler_ran, _}
     end
   end
 

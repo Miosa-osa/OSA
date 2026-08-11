@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
 
   alias OptimalSystemAgent.Agent.Scheduler.JobExecutor
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   @circuit_breaker_limit 3
 
@@ -30,7 +31,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
   Run a heartbeat cycle against the given scheduler state. Checks quiet hours,
   reads pending tasks, executes them, and marks completions. Returns updated state.
   """
-  def run(state) do
+  def run(state, executor \\ &JobExecutor.execute_task/2) do
     quiet = false
 
     if quiet do
@@ -42,7 +43,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
 
       return
     else
-      run_heartbeat_tasks(state)
+      run_heartbeat_tasks(state, executor)
     end
   end
 
@@ -71,7 +72,10 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
 
   # ── Private Helpers ───────────────────────────────────────────────────
 
-  defp run_heartbeat_tasks(state) do
+  # `executor` is injected so the write-back behaviour can be tested without
+  # standing up a real agent loop and a provider (same seam as
+  # `Verify.PostEdit.analyze/2`). Defaults to the real JobExecutor.
+  defp run_heartbeat_tasks(state, executor) do
     heartbeat_path = path()
 
     if File.exists?(heartbeat_path) do
@@ -100,7 +104,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
 
               {done, acc}
             else
-              case JobExecutor.execute_task(task, "heartbeat_#{System.system_time(:second)}") do
+              case executor.(task, "heartbeat_#{System.system_time(:second)}") do
                 {:ok, _result} ->
                   Logger.info("Heartbeat: completed '#{task}'")
                   {[task | done], %{acc | failures: Map.delete(acc.failures, task)}}
@@ -113,8 +117,34 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Heartbeat do
           end)
 
         if completed != [] do
-          updated = mark_completed(content, completed)
-          File.write!(heartbeat_path, updated)
+          # `content` was read BEFORE the task loop above, which runs every
+          # task synchronously through JobExecutor and can take minutes. The
+          # agent itself edits HEARTBEAT.md (see the module doc on
+          # `Agent.Scheduler`), and so may the user — writing the pre-execution
+          # snapshot back would silently revert everything added in that
+          # window. Re-read, apply the completion marks to the CURRENT file,
+          # and replace it atomically.
+          case File.read(heartbeat_path) do
+            {:ok, current} ->
+              updated = mark_completed(current, completed)
+
+              case AtomicFile.write(heartbeat_path, updated) do
+                :ok ->
+                  :ok
+
+                {:error, reason} ->
+                  Logger.warning(
+                    "Heartbeat: failed to write #{heartbeat_path}: #{inspect(reason)}"
+                  )
+              end
+
+            {:error, reason} ->
+              Logger.warning(
+                "Heartbeat: could not re-read #{heartbeat_path} (#{inspect(reason)}); " <>
+                  "not marking #{length(completed)} completed task(s) rather than " <>
+                  "overwriting it with a stale snapshot"
+              )
+          end
         end
 
         Bus.emit(:system_event, %{

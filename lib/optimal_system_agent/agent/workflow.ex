@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.System.AtomicFile
 
   # ── Structs ──────────────────────────────────────────────────────────
 
@@ -62,22 +63,39 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     GenServer.call(__MODULE__, {:active_workflow, session_id})
   end
 
-  @doc "Advance to the next step (called when current step is completed)."
-  @spec advance(String.t(), term()) :: {:ok, map()} | {:error, term()}
-  def advance(workflow_id, result \\ nil) do
-    GenServer.call(__MODULE__, {:advance, workflow_id, result})
+  @doc """
+  Advance to the next step (called when current step is completed).
+
+  Pass `expected_step:` — the 0-based index of the step the caller believes is
+  current — to make the advance CONDITIONAL. Without it a duplicated advance
+  (tool retry, redelivered event, two callers) advances twice: step N is
+  recorded with caller A's result and step N+1 is marked completed with caller
+  B's result and NEVER RUNS. A mismatch returns
+  `{:error, {:step_conflict, expected, actual}}` and changes nothing.
+  """
+  @spec advance(String.t(), term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def advance(workflow_id, result \\ nil, opts \\ []) do
+    GenServer.call(__MODULE__, {:advance, workflow_id, result, opts})
   end
 
-  @doc "Mark current step as completed with a result."
-  @spec complete_step(String.t(), term()) :: {:ok, map()} | {:error, term()}
-  def complete_step(workflow_id, result) do
-    GenServer.call(__MODULE__, {:complete_step, workflow_id, result})
+  @doc """
+  Mark current step as completed with a result.
+
+  Accepts the same `expected_step:` guard as `advance/3`.
+  """
+  @spec complete_step(String.t(), term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def complete_step(workflow_id, result, opts \\ []) do
+    GenServer.call(__MODULE__, {:complete_step, workflow_id, result, opts})
   end
 
-  @doc "Skip a step."
-  @spec skip_step(String.t(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def skip_step(workflow_id, reason \\ nil) do
-    GenServer.call(__MODULE__, {:skip_step, workflow_id, reason})
+  @doc """
+  Skip a step.
+
+  Accepts the same `expected_step:` guard as `advance/3`.
+  """
+  @spec skip_step(String.t(), String.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
+  def skip_step(workflow_id, reason \\ nil, opts \\ []) do
+    GenServer.call(__MODULE__, {:skip_step, workflow_id, reason, opts})
   end
 
   @doc "Pause a workflow."
@@ -202,7 +220,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   end
 
   @impl true
-  def handle_call({:advance, workflow_id, result}, _from, state) do
+  def handle_call({:advance, workflow_id, result, opts}, _from, state) do
     case Map.get(state.workflows, workflow_id) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -211,34 +229,60 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         {:reply, {:error, {:invalid_status, status}}, state}
 
       workflow ->
-        # Complete current step with result
-        workflow = complete_current_step(workflow, result)
+        with :ok <- check_expected_step(workflow, opts) do
+          do_advance(state, workflow_id, workflow, result)
+        else
+          {:error, _} = err -> {:reply, err, state}
+        end
+    end
+  end
 
-        # Advance to the next step
-        next_index = workflow.current_step + 1
+  defp do_advance(state, workflow_id, workflow, result) do
+    # Complete current step with result
+    workflow = complete_current_step(workflow, result)
 
-        workflow =
-          if next_index >= length(workflow.steps) do
-            # All steps done
-            %{workflow | status: :completed, updated_at: now_iso()}
-          else
-            workflow = %{workflow | current_step: next_index, updated_at: now_iso()}
-            mark_current_step_in_progress(workflow)
-          end
+    # Advance to the next step
+    next_index = workflow.current_step + 1
 
-        state = put_workflow(state, workflow)
-        persist_workflow(state.dir, workflow)
+    workflow =
+      if next_index >= length(workflow.steps) do
+        # All steps done
+        %{workflow | status: :completed, updated_at: now_iso()}
+      else
+        workflow = %{workflow | current_step: next_index, updated_at: now_iso()}
+        mark_current_step_in_progress(workflow)
+      end
 
-        Logger.info(
-          "Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})"
-        )
+    state = put_workflow(state, workflow)
+    persist_workflow(state.dir, workflow)
 
-        {:reply, {:ok, serialize_workflow(workflow)}, state}
+    Logger.info(
+      "Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})"
+    )
+
+    {:reply, {:ok, serialize_workflow(workflow)}, state}
+  end
+
+  # Optimistic-concurrency guard shared by advance / complete_step / skip_step.
+  # `expected_step` is the 0-based index the caller believes is current; a
+  # duplicated call (tool retry, redelivered event, two callers) carries a stale
+  # index and is refused instead of silently consuming a step nobody ran.
+  defp check_expected_step(workflow, opts) do
+    case Keyword.get(opts, :expected_step) do
+      nil ->
+        :ok
+
+      expected ->
+        if expected == workflow.current_step do
+          :ok
+        else
+          {:error, {:step_conflict, expected, workflow.current_step}}
+        end
     end
   end
 
   @impl true
-  def handle_call({:complete_step, workflow_id, result}, _from, state) do
+  def handle_call({:complete_step, workflow_id, result, opts}, _from, state) do
     case Map.get(state.workflows, workflow_id) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -247,27 +291,33 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         {:reply, {:error, {:invalid_status, status}}, state}
 
       workflow ->
-        workflow = complete_current_step(workflow, result)
+        case check_expected_step(workflow, opts) do
+          {:error, _} = err ->
+            {:reply, err, state}
 
-        # Accumulate result into context
-        current = Enum.at(workflow.steps, workflow.current_step)
-        context_key = current.name |> String.downcase() |> String.replace(~r/\s+/, "_")
+          :ok ->
+            workflow = complete_current_step(workflow, result)
 
-        workflow = %{
-          workflow
-          | context: Map.put(workflow.context, context_key, result),
-            updated_at: now_iso()
-        }
+            # Accumulate result into context
+            current = Enum.at(workflow.steps, workflow.current_step)
+            context_key = current.name |> String.downcase() |> String.replace(~r/\s+/, "_")
 
-        state = put_workflow(state, workflow)
-        persist_workflow(state.dir, workflow)
+            workflow = %{
+              workflow
+              | context: Map.put(workflow.context, context_key, result),
+                updated_at: now_iso()
+            }
 
-        {:reply, {:ok, serialize_workflow(workflow)}, state}
+            state = put_workflow(state, workflow)
+            persist_workflow(state.dir, workflow)
+
+            {:reply, {:ok, serialize_workflow(workflow)}, state}
+        end
     end
   end
 
   @impl true
-  def handle_call({:skip_step, workflow_id, reason}, _from, state) do
+  def handle_call({:skip_step, workflow_id, reason, opts}, _from, state) do
     case Map.get(state.workflows, workflow_id) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -276,27 +326,39 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         {:reply, {:error, {:invalid_status, status}}, state}
 
       workflow ->
-        steps =
-          List.update_at(workflow.steps, workflow.current_step, fn step ->
-            %{step | status: :skipped, result: reason, completed_at: now_iso()}
-          end)
+        case check_expected_step(workflow, opts) do
+          {:error, _} = err ->
+            {:reply, err, state}
 
-        next_index = workflow.current_step + 1
+          :ok ->
+            steps =
+              List.update_at(workflow.steps, workflow.current_step, fn step ->
+                %{step | status: :skipped, result: reason, completed_at: now_iso()}
+              end)
 
-        workflow =
-          if next_index >= length(steps) do
-            %{workflow | steps: steps, status: :completed, updated_at: now_iso()}
-          else
-            workflow = %{workflow | steps: steps, current_step: next_index, updated_at: now_iso()}
-            mark_current_step_in_progress(workflow)
-          end
+            next_index = workflow.current_step + 1
 
-        state = put_workflow(state, workflow)
-        persist_workflow(state.dir, workflow)
+            workflow =
+              if next_index >= length(steps) do
+                %{workflow | steps: steps, status: :completed, updated_at: now_iso()}
+              else
+                workflow = %{
+                  workflow
+                  | steps: steps,
+                    current_step: next_index,
+                    updated_at: now_iso()
+                }
 
-        Logger.info("Workflow #{workflow_id}: step #{workflow.current_step} skipped")
+                mark_current_step_in_progress(workflow)
+              end
 
-        {:reply, {:ok, serialize_workflow(workflow)}, state}
+            state = put_workflow(state, workflow)
+            persist_workflow(state.dir, workflow)
+
+            Logger.info("Workflow #{workflow_id}: step #{workflow.current_step} skipped")
+
+            {:reply, {:ok, serialize_workflow(workflow)}, state}
+        end
     end
   end
 
@@ -612,7 +674,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
 
     case Jason.encode(data, pretty: true) do
       {:ok, json} ->
-        File.write!(path, json)
+        AtomicFile.write!(path, json)
 
       {:error, reason} ->
         Logger.error("Failed to persist workflow #{workflow.id}: #{inspect(reason)}")

@@ -70,6 +70,12 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
 
   @type entry :: %{optional(String.t()) => term()}
 
+  @typedoc """
+  What a `with_lock/1` body is handed: the store path resolved once at
+  acquisition, the lockfile beside it, and this holder's ownership token.
+  """
+  @type ctx :: %{path: String.t(), lock: String.t(), token: String.t()}
+
   # ── Paths ────────────────────────────────────────────────────────────────
 
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
@@ -78,7 +84,13 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   @spec path() :: String.t()
   def path, do: Path.join(osa_dir(), @filename)
 
-  defp lock_path, do: path() <> @lock_suffix
+  # `path/0` reads `OSA_HOME` on EVERY call, so two calls inside one
+  # read-modify-write can disagree — a home directory changed between lock
+  # acquisition and rename would lock one file and write another, which is
+  # both an unlocked write and a write to a store nobody read. Everything
+  # inside `with_lock/1` therefore threads the single path captured at
+  # acquisition (see the `ctx` map) rather than calling `path/0` again.
+  defp lock_path(file), do: file <> @lock_suffix
 
   # ── Reads (never network, never mutate) ──────────────────────────────────
 
@@ -103,22 +115,95 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   @spec connected?(String.t() | atom()) :: boolean()
   def connected?(provider_id), do: not is_nil(fetch(provider_id))
 
-  defp read_all do
-    file = path()
+  defp read_all(file \\ path()) do
+    case read_state(file) do
+      {:ok, providers} -> providers
+      {:error, _} -> %{}
+    end
+  end
 
-    with true <- File.regular?(file),
-         :ok <- check_permissions(file),
-         {:ok, body} <- File.read(file),
-         {:ok, %{"providers" => providers}} when is_map(providers) <- Jason.decode(body) do
-      providers
+  @doc """
+  Read the whole store, distinguishing "empty" from "could not be read".
+
+  This distinction is the difference between a working store and a wiped one.
+  Every write here is a **whole-file rewrite** of the map a read returned, so
+  a read that degrades to `%{}` on failure hands the writer a map that claims
+  every other provider is disconnected. One `chmod 0644`, one truncated JSON
+  from a crash, one unreadable home directory — plus one routine token
+  refresh on any single provider — and every other subscription on the
+  machine is silently discarded, by a code path whose read half logged a loud
+  warning and whose write half then destroyed the file anyway.
+
+  So the failure never reaches a writer as data:
+
+    * `{:ok, providers}` — the file was absent (an empty store, which IS a
+      safe base for the first write) or was read and validated in full.
+    * `{:error, reason}` — permissions, IO, malformed JSON, or a version this
+      binary does not understand. Callers that write MUST abort.
+
+  Reads that only display state (`fetch/1`, `list/0`) still collapse errors
+  to "not connected", because from a caller's point of view a missing
+  credential and a broken one are the same thing. Writers must not.
+  """
+  @spec read_state(String.t()) :: {:ok, %{optional(String.t()) => entry()}} | {:error, term()}
+  def read_state(file \\ path()) do
+    if File.regular?(file) do
+      with :ok <- check_permissions(file),
+           {:ok, body} <- File.read(file),
+           {:ok, decoded} <- Jason.decode(body) do
+        extract_providers(decoded)
+      else
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:unreadable, other}}
+      end
     else
-      _ -> %{}
+      # No file at all is not a failure: it is an empty store, and it is the
+      # only "degraded" read a writer may safely build on.
+      {:ok, %{}}
     end
   rescue
-    _ -> %{}
+    e -> {:error, e}
   catch
-    _, _ -> %{}
+    _, reason -> {:error, reason}
   end
+
+  # Validate the envelope, INCLUDING the version the writer stamps.
+  #
+  # `write_all/2` has always written `"version" => 1` and the reader always
+  # ignored it, which made the field decoration rather than a contract: an
+  # older binary reading a file written by a newer one saw only the keys it
+  # recognised, and `put/2`'s whole-file rewrite then re-serialised the store
+  # at v1 — permanently dropping every field the old binary did not
+  # understand, including, plausibly, the refresh token of a provider it had
+  # no code for. Refusing to read a future version turns a silent downgrade
+  # into "this file was written by a newer OSA", which is recoverable.
+  #
+  # Older versions get a migration hook here. There is only v1 today, so the
+  # hook is the identity, but the branch is where a v0 -> v1 upgrade goes.
+  defp extract_providers(%{"providers" => providers} = decoded) when is_map(providers) do
+    case Map.get(decoded, "version", @version) do
+      v when is_integer(v) and v == @version ->
+        {:ok, providers}
+
+      v when is_integer(v) and v < @version ->
+        migrate(v, providers)
+
+      v ->
+        Logger.warning(
+          "[Auth] #{path()} was written by a newer OSA (store version #{inspect(v)}, this " <>
+            "binary understands #{@version}). Refusing to read or rewrite it rather than " <>
+            "silently dropping fields it contains. Upgrade OSA, or delete the file and " <>
+            "reconnect your providers."
+        )
+
+        {:error, {:unsupported_version, v}}
+    end
+  end
+
+  defp extract_providers(_), do: {:error, :malformed}
+
+  # No older on-disk versions exist yet; this is where they would be upgraded.
+  defp migrate(_version, providers), do: {:ok, providers}
 
   # Refuse to load a group/world-readable credential file, LOUDLY.
   #
@@ -156,10 +241,31 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   """
   @spec put(String.t() | atom(), entry()) :: :ok | {:error, term()}
   def put(provider_id, entry) when is_map(entry) do
-    with_lock(fn ->
-      all = read_all()
-      write_all(Map.put(all, to_string(provider_id), stringify(entry)))
+    with_lock(fn ctx ->
+      case read_state(ctx.path) do
+        {:ok, all} ->
+          write_all(ctx.path, Map.put(all, to_string(provider_id), stringify(entry)))
+
+        {:error, reason} ->
+          refuse_write(provider_id, ctx.path, reason)
+      end
     end)
+  end
+
+  # A write derived from a read that failed is a wipe. Refuse it, loudly.
+  #
+  # The caller gets an error instead of a false `:ok`, so a sign-in reports
+  # "could not be saved" rather than appearing to succeed while it silently
+  # deleted every other provider on the way through.
+  defp refuse_write(provider_id, file, reason) do
+    Logger.error(
+      "[Auth] #{provider_id}: refusing to write #{file} because the existing store could not " <>
+        "be read (#{inspect(reason)}). Writing now would rewrite the whole file from an empty " <>
+        "map and discard every other connected provider. Fix the file first — usually " <>
+        "`chmod 600 #{file}`, or delete it and reconnect."
+    )
+
+    {:error, {:unsafe_read, reason}}
   end
 
   @doc """
@@ -170,17 +276,25 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   """
   @spec delete(String.t() | atom()) :: :ok | {:error, term()}
   def delete(provider_id) do
-    with_lock(fn ->
-      all = read_all()
-      remaining = Map.delete(all, to_string(provider_id))
+    with_lock(fn ctx ->
+      case read_state(ctx.path) do
+        {:ok, all} ->
+          remaining = Map.delete(all, to_string(provider_id))
 
-      if map_size(remaining) == 0 do
-        # Don't leave an empty credential file lying around advertising that
-        # this machine once had subscriptions configured.
-        _ = File.rm(path())
-        :ok
-      else
-        write_all(remaining)
+          if map_size(remaining) == 0 do
+            # Don't leave an empty credential file lying around advertising
+            # that this machine once had subscriptions configured. Safe only
+            # because the read SUCCEEDED and genuinely returned nothing else —
+            # on a failed read this branch used to unlink the entire store on
+            # the strength of a `%{}` that meant "unreadable", not "empty".
+            _ = File.rm(ctx.path)
+            :ok
+          else
+            write_all(ctx.path, remaining)
+          end
+
+        {:error, reason} ->
+          refuse_write(provider_id, ctx.path, reason)
       end
     end)
   end
@@ -194,8 +308,7 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   # over the target means the credential is never observable at a permissive
   # mode, and readers only ever see a complete file (rename is atomic within a
   # filesystem) rather than a half-written one.
-  defp write_all(providers) do
-    file = path()
+  defp write_all(file, providers) do
     dir = Path.dirname(file)
     File.mkdir_p!(dir)
 
@@ -282,23 +395,28 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   it skips the write and logs — it still hands the caller the rotation it
   already spent a token to obtain; see that function's docs.)
   """
-  @spec with_lock((-> result) | (String.t() -> result)) ::
+  @spec with_lock((-> result) | (ctx() -> result)) ::
           result | {:error, :lock_timeout} when result: term()
   def with_lock(fun) when is_function(fun, 0) or is_function(fun, 1) do
-    lock = lock_path()
+    # Resolve the store path ONCE, here, and thread it through the body. An
+    # `OSA_HOME` that changes mid-operation must not be able to make the body
+    # write a different file than the one this lock protects.
+    file = path()
+    lock = lock_path(file)
     File.mkdir_p!(Path.dirname(lock))
 
     token = mint_token()
+    ctx = %{path: file, lock: lock, token: token}
 
     case acquire(lock, token, System.monotonic_time(:millisecond)) do
       :ok ->
         try do
-          if is_function(fun, 1), do: fun.(token), else: fun.()
+          if is_function(fun, 1), do: fun.(ctx), else: fun.()
         after
           # Only remove a lock we still own. Removing one that has been broken
           # and re-taken would hand a third process a lock the second still
           # thinks it holds.
-          if still_holding?(token), do: File.rm(lock)
+          if still_holding?(ctx), do: File.rm(lock)
         end
 
       {:error, _} = err ->
@@ -313,9 +431,9 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   a holder whose lock was broken as stale aborts instead of overwriting
   whoever took it.
   """
-  @spec still_holding?(String.t()) :: boolean()
-  def still_holding?(token) when is_binary(token) do
-    case File.read(lock_path()) do
+  @spec still_holding?(ctx()) :: boolean()
+  def still_holding?(%{lock: lock, token: token}) when is_binary(token) do
+    case File.read(lock) do
       {:ok, contents} -> String.contains?(contents, token)
       _ -> false
     end
@@ -415,15 +533,29 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
           {:ok, entry()} | {:error, term()}
   def refresh_within_lock(provider_id, refresh_fun, needs_refresh?)
       when is_function(refresh_fun, 1) and is_function(needs_refresh?, 1) do
-    with_lock(fn token ->
-      case fetch(provider_id) do
-        nil ->
-          {:error, :not_connected}
+    with_lock(fn ctx ->
+      # Re-read under the lock from the SAME path the lock protects, and keep
+      # the error: an unreadable store must not present as "not connected"
+      # here either, because the branch below it writes.
+      case read_state(ctx.path) do
+        {:error, reason} ->
+          {:error, {:unsafe_read, reason}}
 
-        fresh ->
-          if needs_refresh?.(fresh) do
-            case refresh_fun.(fresh) do
-              {:ok, updated} ->
+        {:ok, all} ->
+          refresh_fresh_entry(ctx, provider_id, Map.get(all, to_string(provider_id)), all, refresh_fun, needs_refresh?)
+      end
+    end)
+  end
+
+  defp refresh_fresh_entry(ctx, provider_id, fresh, all, refresh_fun, needs_refresh?) do
+    case fresh do
+      nil ->
+        {:error, :not_connected}
+
+      fresh ->
+        if needs_refresh?.(fresh) do
+          case refresh_fun.(fresh) do
+            {:ok, updated} ->
                 # PAST THE POINT OF NO RETURN. The refresh POST has already
                 # gone out and come back, so for a rotating-refresh-token
                 # provider the token still on disk is SPENT — it can never be
@@ -435,33 +567,35 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
                 # longer hold means somebody else took over and our copy may be
                 # the older one, so writing it would undo their work) — but not
                 # whether we RETURN. Failing to persist costs a re-refresh next
-                # boot; failing to return costs the grant.
-                if still_holding?(token) do
-                  all = read_all()
-                  merged = Map.put(all, to_string(provider_id), stringify(updated))
-                  persist_rotated(provider_id, merged)
-                else
-                  Logger.error(
-                    "[Auth] #{provider_id}: the store lock was broken while a refresh was in " <>
-                      "flight, so the rotated token was NOT written (a peer's credential is on " <>
-                      "disk and must not be clobbered). Returning it to the live session; it " <>
-                      "will be re-refreshed on the next start."
-                  )
-                end
+              # boot; failing to return costs the grant.
+              if still_holding?(ctx) do
+                # `all` is the map read under THIS lock a moment ago and
+                # already known-good — re-reading here would reintroduce the
+                # very "read failed, so rewrite the file from `%{}`" wipe this
+                # module now refuses to perform.
+                merged = Map.put(all, to_string(provider_id), stringify(updated))
+                persist_rotated(provider_id, ctx.path, merged)
+              else
+                Logger.error(
+                  "[Auth] #{provider_id}: the store lock was broken while a refresh was in " <>
+                    "flight, so the rotated token was NOT written (a peer's credential is on " <>
+                    "disk and must not be clobbered). Returning it to the live session; it " <>
+                    "will be re-refreshed on the next start."
+                )
+              end
 
-                {:ok, updated}
+              {:ok, updated}
 
-              {:error, _} = err ->
-                # Nothing was spent — the exchange never completed — so the
-                # on-disk token is still good. Pass the error through untouched.
-                err
-            end
-          else
-            # A peer already rotated it. Adopt, do not spend.
-            {:ok, fresh}
+            {:error, _} = err ->
+              # Nothing was spent — the exchange never completed — so the
+              # on-disk token is still good. Pass the error through untouched.
+              err
           end
-      end
-    end)
+        else
+          # A peer already rotated it. Adopt, do not spend.
+          {:ok, fresh}
+        end
+    end
   end
 
   # Persist a rotation that has ALREADY been consumed.
@@ -474,8 +608,8 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   @persist_attempts 3
   @persist_retry_ms 25
 
-  defp persist_rotated(provider_id, merged, attempt \\ 1) do
-    case write_all(merged) do
+  defp persist_rotated(provider_id, file, merged, attempt \\ 1) do
+    case write_all(file, merged) do
       :ok ->
         :ok
 
@@ -486,7 +620,7 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
         )
 
         Process.sleep(@persist_retry_ms)
-        persist_rotated(provider_id, merged, attempt + 1)
+        persist_rotated(provider_id, file, merged, attempt + 1)
 
       {:error, reason} ->
         Logger.error(

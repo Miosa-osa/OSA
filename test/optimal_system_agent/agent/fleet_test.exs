@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
 
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Fleet
+  alias OptimalSystemAgent.Agent.Fleet.Finalizer
   alias OptimalSystemAgent.Agent.RunStore
 
   setup do
@@ -663,6 +664,108 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       # It genuinely blocked until the async completion (~60ms), not returned at
       # spawn time.
       assert elapsed >= 40
+    end
+  end
+
+  describe "fan_out/3 honours the node's terminal await status" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    for status <- [:failed, :cancelled, :timeout] do
+      test "a non-isolated node that ends #{inspect(status)} is a FAIL result, not a pass" do
+        status = unquote(status)
+        parent = "parent-await-#{status}-#{System.unique_integer([:positive])}"
+
+        assert {:ok, %{results: [result]}} =
+                 Fleet.fan_out(parent, ["do-work"],
+                   spawn_fun: fn _p, opts -> {:ok, Keyword.get(opts, :task)} end,
+                   await_fun: fn _node_id -> status end
+                 )
+
+        assert result.gate == :fail
+        assert result.error == {:node_incomplete, status}
+        assert result.summary =~ "failed"
+        assert result.node_id == "do-work"
+      end
+    end
+
+    test "an isolated node that ends :failed keeps its ref but exposes NO files to merge" do
+      parent = "parent-await-iso-fail-#{System.unique_integer([:positive])}"
+
+      worktree_fun = fn _p, _o -> {:ok, %{path: "/tmp/wt-fail", branch: "osa-wt-fail"}} end
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["do-work"],
+                 isolation: :worktree,
+                 worktree_fun: worktree_fun,
+                 spawn_fun: fn _p, opts -> {:ok, Keyword.get(opts, :task)} end,
+                 await_fun: fn _node_id -> :failed end,
+                 # The crashed node DID leave partial edits behind — this is
+                 # exactly the tree that must never reach the user's branch.
+                 diff_fun: fn _path -> ["lib/half_written.ex"] end
+               )
+
+      assert result.gate == :fail
+      assert result.error == {:node_incomplete, :failed}
+      assert result.worktree_ref == "osa-wt-fail"
+      assert result.files_changed == []
+    end
+
+    test "the finalizer refuses to check out a node that never completed" do
+      parent = "parent-await-merge-#{System.unique_integer([:positive])}"
+      {:ok, calls} = Agent.start_link(fn -> [] end)
+
+      git_fun = fn args, _cwd ->
+        Agent.update(calls, &(&1 ++ [args]))
+        {"ok", 0}
+      end
+
+      spawn_fun = fn _p, opts -> {:ok, Keyword.get(opts, :task)} end
+
+      # "good" completes; "bad" crashes mid-run leaving a partial worktree.
+      await_fun = fn
+        "bad" -> :failed
+        _ -> :completed
+      end
+
+      worktree_fun = fn _p, opts ->
+        task = Keyword.get(opts, :task)
+        {:ok, %{path: "/tmp/wt-#{task}", branch: "osa-wt-#{task}"}}
+      end
+
+      diff_fun = fn
+        "/tmp/wt-good" -> ["lib/good.ex"]
+        "/tmp/wt-bad" -> ["lib/partial.ex"]
+      end
+
+      assert {:ok, %{results: results}} =
+               Fleet.fan_out(parent, ["good", "bad"],
+                 max_concurrency: 1,
+                 isolation: :worktree,
+                 worktree_fun: worktree_fun,
+                 spawn_fun: spawn_fun,
+                 await_fun: await_fun,
+                 diff_fun: diff_fun
+               )
+
+      res =
+        Finalizer.finalize(parent, results,
+          git_fun: git_fun,
+          cmd_fun: fn _c, _d -> {"", 0} end
+        )
+
+      checked_out =
+        calls
+        |> Agent.get(& &1)
+        |> Enum.filter(&match?(["checkout" | _], &1))
+        |> Enum.map(&List.last/1)
+
+      assert "lib/good.ex" in checked_out
+      refute "lib/partial.ex" in checked_out
+      refute "lib/partial.ex" in res.merged
+      Agent.stop(calls)
     end
   end
 

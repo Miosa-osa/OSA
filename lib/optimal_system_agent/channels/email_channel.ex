@@ -109,6 +109,68 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
     {:noreply, %{state | poll_timer: timer}}
   end
 
+  # ── TLS ──────────────────────────────────────────────────────────────
+
+  @doc false
+  @spec tls_opts(charlist()) :: keyword()
+  def tls_opts(host) do
+    # Both the IMAP socket and the SMTP session used to be opened with a flat,
+    # ungated `verify: :verify_none`. That does not weaken the encryption, it
+    # removes the counterparty check entirely: anything that can answer for
+    # the host — a hostile DNS answer, a captive portal, an attacker on the
+    # same LAN — presents any certificate it likes and OSA hands it the
+    # mailbox PASSWORD in an IMAP `LOGIN`, in cleartext inside the tunnel it
+    # just accepted, and then streams every message body through it.
+    #
+    # `OpenComputers.Session.TlsOpts` already got this right. This is the same
+    # thing: OTP's bundled CA store plus the hostname match function, so the
+    # certificate has to be issued for the host we asked for.
+    base = [
+      verify: :verify_peer,
+      depth: 3,
+      customize_hostname_check: [
+        match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+      ],
+      server_name_indication: host
+    ]
+
+    case Application.get_env(:optimal_system_agent, :email_tls_cacertfile) do
+      path when is_binary(path) and path != "" ->
+        # A self-hosted mail server behind a private CA is a legitimate setup,
+        # and it does not need verification turned OFF — it needs the right
+        # trust anchor. Offering this is what makes the escape hatch below
+        # almost never the right answer.
+        Keyword.put(base, :cacertfile, to_charlist(path))
+
+      _ ->
+        Keyword.put(base, :cacerts, :public_key.cacerts_get())
+    end
+    |> apply_verify_override()
+  end
+
+  # The only way to get the old behaviour back is to ask for it explicitly, in
+  # config, and it says so in the log every time it is used — because the
+  # symptom of a silently unverified mail connection is nothing at all until
+  # the credentials are already gone.
+  defp apply_verify_override(opts) do
+    if Application.get_env(:optimal_system_agent, :email_tls_verify, true) == false do
+      Logger.warning(
+        "[Email] TLS certificate verification is DISABLED by config " <>
+          "(:email_tls_verify false). The mailbox password and every message body on this " <>
+          "connection can be read and modified by anything able to intercept it. Prefer " <>
+          ":email_tls_cacertfile to trust a private CA instead."
+      )
+
+      opts
+      |> Keyword.put(:verify, :verify_none)
+      |> Keyword.delete(:cacerts)
+      |> Keyword.delete(:cacertfile)
+      |> Keyword.delete(:customize_hostname_check)
+    else
+      opts
+    end
+  end
+
   # ── IMAP Polling ─────────────────────────────────────────────────────
 
   defp poll_imap(state) do
@@ -128,9 +190,7 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
     host = to_charlist(state.imap_host)
     port = state.imap_port
 
-    ssl_opts = [verify: :verify_none]
-
-    case :ssl.connect(host, port, ssl_opts, 10_000) do
+    case :ssl.connect(host, port, tls_opts(host), 10_000) do
       {:ok, socket} ->
         # Read greeting
         :ssl.recv(socket, 0, 5_000)
@@ -246,7 +306,8 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
            password: to_charlist(state.password),
            tls: :always,
            auth: :always,
-           ssl_options: [verify: :verify_none]
+           tls_options: tls_opts(to_charlist(state.smtp_host)),
+           ssl_options: tls_opts(to_charlist(state.smtp_host))
          ) do
       binary when is_binary(binary) -> :ok
       {:error, reason} -> {:error, reason}

@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from osa_pty import SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
+from osa_pty import COMPOSER_TOP, SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
 from stub_backend import StubBackend, set_claude_cli_state  # noqa: E402
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
@@ -43,36 +43,82 @@ def assert_single_live_region(session: PtySession, context: str) -> None:
         )
 
 
+def _region_top(session: PtySession) -> int | None:
+    """Row the live region begins on, read off the screen.
+
+    The composer's top divider is the first row of the composer band and the
+    LAST full-width rule on screen (a turn separator draws the same glyph, but
+    always above the chrome). The region starts one row higher, on the hint
+    band, which is blank while nothing is being announced.
+    """
+    rows = [line.rstrip() for line in session.screen.display]
+    tops = [i for i, line in enumerate(rows) if COMPOSER_TOP.match(line)]
+    return max(tops) - 1 if tops else None
+
+
+def assert_chrome_follows_the_transcript(session: PtySession, context: str) -> None:
+    """**No dead band between the conversation and the chrome.**
+
+    This replaces an unconditional `top == rows - inline_h` assertion, which was
+    wrong in a way worth writing down, because it is the same mistake the
+    product made.
+
+    The live region has ONE correct position: immediately below the last line
+    committed to the terminal. When the conversation is long enough to fill the
+    screen that is also the bottom of the screen, and the two statements
+    coincide — which is why "bottom-anchored" looked like the invariant. It is
+    not; it is a consequence. Before the screen is full, demanding the bottom
+    means demanding that the chrome detach from the transcript and leave a band
+    of dead rows in between, which is precisely the "most of a screen of blank
+    rows" the report describes.
+
+    The product asserted the consequence and then implemented it, on a path
+    where the premise did not hold: an ordinary height change (a spinner coming
+    up, a turn ending — several times a turn) re-homed the region to
+    `rows - inline_h` regardless of where the transcript ended. So it stated the
+    invariant here and, on every turn, violated the real one.
+
+    What is asserted instead is the real one, and it holds at every size and at
+    every point in a session: the rows between the end of the transcript and the
+    start of the chrome are the region's own (blank) hint row, and nothing more.
+    """
+    rows = [line.rstrip() for line in session.screen.display]
+    top = _region_top(session)
+    if top is None:
+        raise AssertionError(
+            f"{context}: no composer on screen at all — the live region is "
+            f"missing, not merely misplaced.\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+    ink_above = [i for i in range(top) if rows[i].strip()]
+    if not ink_above:
+        return  # nothing committed yet; there is no transcript to follow.
+    gap = top - (ink_above[-1] + 1)
+    if gap > 1:
+        raise AssertionError(
+            f"{context}: {gap} dead rows sit between the last line of the "
+            f"conversation (row {ink_above[-1]}) and the top of the live region "
+            f"(row {top}). The chrome must sit against the transcript; a band of "
+            f"blank rows between them is the region having been re-homed "
+            f"somewhere the transcript is not.\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+
+
 def assert_chrome_bottom_anchored(session: PtySession, context: str) -> None:
     """The live region occupies the LAST rows of the screen.
 
-    Band counting cannot express this, and that is exactly why the defect it
-    guards against shipped through a thousand passing tests. `clear_screen_for_resize`
-    homes the cursor to row 0 before erasing, and the `rebuild_inline` that
-    follows anchors `Viewport::Inline` on wherever the cursor is
-    (ratatui 0.29 `compute_inline_size`: `row = pos.y`). So after one width
-    resize the whole live region was rebuilt at the TOP of the screen — and
-    there was still exactly ONE of it, so every assertion in this file passed
-    while the user watched "the chat thing go all the way to the top".
-
-    The invariant the inline design actually rests on is bottom-anchoring:
-    `top == rows - inline_h`, the same equation `resize_clear_top_from_bottom`
-    states in `event_loop.rs`. Externally the region's top is not directly
-    readable, but its LAST row is: the status bar is the final row the region
-    draws, so a bottom-anchored region puts the status bar on the last
-    non-blank row of the screen, with nothing but blanks under it.
-
-    Checking the bottom rather than the top is deliberate — it needs no
-    knowledge of the region's height, which changes as the composer grows.
+    Only true where the premise holds — after a REAL resize. The emulator has
+    reflowed, so the region's previous top is unknowable and the bottom is the
+    only row the rebuild can defensibly pick (`resize_clear_top_from_bottom`).
+    That is the v1.0.75 fix, and this is what pins it.
 
     It measures the status bar's distance from the SCREEN BOTTOM, not from the
     last non-blank row. That distinction is the whole assertion: when the region
     is rebuilt at the top, everything below it is blank, so the status bar is
     *still* the last non-blank row and a check written that way passes on the
     broken screen. (It did. This function's first version asserted exactly that
-    and stayed green with the fix reverted.) The reported symptom is literally
-    "the composer is at the top and there is dead space below it", so the dead
-    space is the evidence and must not be ignored.
+    and stayed green with the fix reverted.)
     """
     rows = [line.rstrip() for line in session.screen.display]
     status_rows = [i for i, line in enumerate(rows) if STATUS.search(line)]
@@ -101,7 +147,12 @@ def assert_chrome_bottom_anchored(session: PtySession, context: str) -> None:
 def assert_live_region_ok(session: PtySession, context: str) -> None:
     """Both invariants: exactly one live region, and it is at the bottom."""
     assert_single_live_region(session, context)
-    assert_chrome_bottom_anchored(session, context)
+    assert_chrome_follows_the_transcript(session, context)
+    # Bottom-anchoring is only the contract where the premise holds: after a
+    # REAL resize. `after boot` and `after a height change` are checked by
+    # `assert_chrome_follows_the_transcript` above instead.
+    if "resize" in context or "sweep" in context:
+        assert_chrome_bottom_anchored(session, context)
 
 
 # --- tests -----------------------------------------------------------------

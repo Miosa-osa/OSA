@@ -229,7 +229,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     cond do
       status.connected? and status.expired? ->
-        IO.puts("  #{@dim}Auth:#{@reset}      account sign-in #{@dim}(expired — re-run setup)#{@reset}")
+        IO.puts(
+          "  #{@dim}Auth:#{@reset}      account sign-in #{@dim}(expired — re-run setup)#{@reset}"
+        )
 
       status.connected? ->
         IO.puts("  #{@dim}Auth:#{@reset}      account sign-in#{plan_and_account(status)}")
@@ -252,7 +254,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp print_resolved_model(:claude_cli, alias_name) do
     case OptimalSystemAgent.Providers.ClaudeCli.last_resolved_model() do
       resolved when is_binary(resolved) and resolved != alias_name ->
-        IO.puts("  #{@dim}Running:#{@reset}   #{resolved} #{@dim}(resolved by Claude Code)#{@reset}")
+        IO.puts(
+          "  #{@dim}Running:#{@reset}   #{resolved} #{@dim}(resolved by Claude Code)#{@reset}"
+        )
 
       _ ->
         :ok
@@ -366,7 +370,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     try do
       budget = unwrap_budget(Budget.get_status())
       cost = budget[:monthly_spent] || budget[:total_cost_usd] || 0
-      IO.puts("  #{@dim}Cost:#{@reset}      $#{fmt_usd(cost)} #{@dim}(month, OSA-measured)#{@reset}")
+
+      IO.puts(
+        "  #{@dim}Cost:#{@reset}      $#{fmt_usd(cost)} #{@dim}(month, OSA-measured)#{@reset}"
+      )
     rescue
       _ -> :ok
     end
@@ -414,7 +421,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         "  #{@dim}This is OSA's own count of what it ran, priced from a static rate#{@reset}"
       )
 
-      IO.puts("  #{@dim}table. For what your account has left, use#{@reset} #{@cyan}/usage#{@reset}")
+      IO.puts(
+        "  #{@dim}table. For what your account has left, use#{@reset} #{@cyan}/usage#{@reset}"
+      )
     rescue
       _ ->
         IO.puts("  #{@dim}  No cost data available#{@reset}")
@@ -2795,21 +2804,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp persist_sandbox_backend(backend) do
     path = sandbox_config_path()
 
-    existing =
-      case File.read(path) do
-        {:ok, json} ->
-          case Jason.decode(json) do
-            {:ok, m} when is_map(m) -> m
-            _ -> %{}
-          end
+    # Degrading an unreadable config.json to `%{}` here would rewrite the file
+    # containing only "backend", discarding provider selection, API keys and
+    # every other setting stored alongside it.
+    case OptimalSystemAgent.System.JsonStore.read_map_for_write(path) do
+      {:error, :corrupt} ->
+        IO.puts(
+          "  #{@yellow}error: #{OptimalSystemAgent.System.JsonStore.corrupt_message("sandbox backend", path)}#{@reset}"
+        )
 
-        _ ->
-          %{}
-      end
+        {:error, :corrupt}
 
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(Map.put(existing, "backend", backend), pretty: true))
-    :ok
+      {:ok, existing} ->
+        File.mkdir_p!(Path.dirname(path))
+
+        OptimalSystemAgent.System.AtomicFile.write!(
+          path,
+          Jason.encode!(Map.put(existing, "backend", backend), pretty: true)
+        )
+
+        :ok
+    end
   rescue
     _ -> :ok
   end

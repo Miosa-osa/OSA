@@ -122,10 +122,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
     end)
   end
 
+  # The shared structural predicate, not a substring scan over
+  # `Constants.sensitive_paths/0` — that accessor now returns human-readable
+  # DESCRIPTIONS of the rules for prompts and tests, and matching against them
+  # textually would be both wrong and a re-introduction of the bug the shared
+  # policy exists to remove.
   defp sensitive?(expanded_path) do
-    Enum.any?(Constants.sensitive_paths(), fn pattern ->
-      String.contains?(expanded_path, pattern)
-    end)
+    OptimalSystemAgent.Agent.Safety.PathPolicy.sensitive?(expanded_path)
   end
 
   defp allowed?(expanded_path) do

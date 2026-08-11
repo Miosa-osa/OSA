@@ -5,8 +5,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   ## Responsibilities
 
   1. On `desktop_start_request`: detect OS, start the appropriate VNC server
-     (x11vnc on Linux, stub on macOS/Windows), connect a local TCP socket to
-     127.0.0.1:5900, and register the session in the per-session state map.
+     (x11vnc on Linux, the native helper on macOS/Windows), connect a local TCP
+     socket to 127.0.0.1 on the port THAT SERVER REPORTED BINDING, and register
+     the session in the per-session state map. If the backend does not report a
+     port the session is refused — never fall back to a fixed port, which would
+     relay whatever unrelated server happens to hold it.
 
   2. VNC → Control plane: reads raw RFB bytes from the local TCP socket using
      `{:active, :once}` for backpressure, wraps them in a
@@ -47,7 +50,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   alias OptimalSystemAgent.OpenComputers.FrameRouter
 
   @vnc_host ~c"127.0.0.1"
-  @vnc_port 5900
   @connect_timeout_ms 5_000
   @max_queue_bytes 16 * 1024 * 1024
 
@@ -69,12 +71,17 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   @impl true
   def init(opts) when is_list(opts) do
     # sessions: %{session_id => %{vnc_socket, vnc_pid, queued_bytes}}
-    # vnc_port_override: integer — used in tests to redirect to a fake VNC server
-    # vnc_start_fn: fn() -> {:ok, vnc_pid_or_port} | {:error, reason} — test hook
+    # vnc_port_override: integer — ONLY honoured together with vnc_start_fn, i.e.
+    #   in tests that point at a fake VNC server they started themselves. There
+    #   is deliberately no way to force a fixed port in production: connecting to
+    #   a port this controller did not watch the server bind is how OSA ended up
+    #   piping whatever held :5900 (potentially the user's own desktop-sharing
+    #   server) to the control plane.
+    # vnc_start_fn: fn() -> {:ok, handle} | {:error, reason} — test hook
     # frame_router_pid: pid — used in tests to capture outbound frames without hijacking the global name
     state = %{
       sessions: %{},
-      vnc_port: Keyword.get(opts, :vnc_port_override, @vnc_port),
+      vnc_port_override: Keyword.get(opts, :vnc_port_override, nil),
       vnc_start_fn: Keyword.get(opts, :vnc_start_fn, nil),
       frame_router_pid: Keyword.get(opts, :frame_router_pid, nil)
     }
@@ -97,10 +104,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       {:ok, session_state} ->
         new_sessions = Map.put(state.sessions, session_id, session_state)
 
+        # The VNC server now requires a per-session password, and the RFB
+        # client lives on the far side of the relay — it has to be told the
+        # secret or the handshake fails.
         send_frame_via_router(
           {:desktop_ready,
            %{
              session_id: session_id,
+             vnc_password: session_state.vnc_secret,
              capabilities: %{mouse: true, keyboard: true, clipboard: false}
            }},
           state
@@ -235,13 +246,16 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # ── Private — session lifecycle ───────────────────────────────────────────────
 
   defp start_session(session_id, _opts, controller_state) do
-    with {:ok, vnc_pid} <- start_vnc(controller_state),
+    with {:ok, vnc_handle} <- start_vnc(controller_state),
          # Give x11vnc a moment to bind its port (skip in tests via vnc_start_fn)
          :ok <- maybe_sleep(controller_state),
-         {:ok, socket} <- connect_vnc(controller_state) do
+         {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
+         {:ok, socket} <- connect_vnc(vnc_port) do
       session = %{
         vnc_socket: socket,
-        vnc_pid: vnc_pid,
+        vnc_pid: vnc_handle,
+        vnc_port: vnc_port,
+        vnc_secret: vnc_secret(vnc_handle),
         queued_bytes: 0
       }
 
@@ -268,11 +282,42 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   defp maybe_sleep(%{vnc_start_fn: fun}) when is_function(fun, 0), do: :ok
   defp maybe_sleep(_), do: :timer.sleep(500) |> elem(0) |> then(fn _ -> :ok end)
 
+  @doc false
+  # The RFB port must come from the server this controller actually started.
+  # `vnc_port_override` is honoured only alongside the `vnc_start_fn` test
+  # hook, where the test also owns the listening socket.
+  def resolve_vnc_port(_handle, %{vnc_start_fn: fun, vnc_port_override: override})
+      when is_function(fun, 0) and is_integer(override) and override > 0,
+      do: {:ok, override}
+
+  def resolve_vnc_port(%{vnc_port: port}, _state) when is_integer(port) and port > 0,
+    do: {:ok, port}
+
+  def resolve_vnc_port(handle, _state) do
+    Logger.error(
+      "[Desktop.Controller] VNC backend did not report the port it bound " <>
+        "(handle=#{inspect(handle)}); refusing to connect to a port we did not start."
+    )
+
+    {:error, :vnc_port_unknown}
+  end
+
+  defp vnc_secret(%{secret: secret}) when is_binary(secret), do: secret
+  defp vnc_secret(_), do: nil
+
   # Stop whichever VNC backend was used — the ref type tells us which adapter.
   # x11vnc returns an integer OS pid; macOS/Windows return a Port reference.
+  defp stop_vnc(%{os_pid: os_pid}) when is_integer(os_pid), do: X11vnc.stop(os_pid)
+
+  defp stop_vnc(%{port_ref: port_ref}) when is_port(port_ref), do: stop_native(port_ref)
+
   defp stop_vnc(pid_or_port) when is_integer(pid_or_port), do: X11vnc.stop(pid_or_port)
 
-  defp stop_vnc(port_ref) when is_port(port_ref) do
+  defp stop_vnc(port_ref) when is_port(port_ref), do: stop_native(port_ref)
+
+  defp stop_vnc(_), do: :ok
+
+  defp stop_native(port_ref) do
     case os_family() do
       :macos -> MacOS.stop(port_ref)
       :windows -> Windows.stop(port_ref)
@@ -280,9 +325,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
-  defp stop_vnc(_), do: :ok
-
-  defp connect_vnc(%{vnc_port: port}) do
+  defp connect_vnc(port) when is_integer(port) do
     case :gen_tcp.connect(
            @vnc_host,
            port,

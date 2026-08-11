@@ -146,6 +146,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       Keyword.get(opts, :model) ||
         Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
+    with :ok <- context_floor_error(model, opts) do
+      do_chat(url, model, messages, opts)
+    end
+  end
+
+  defp do_chat(url, model, messages, opts) do
     body =
       %{
         model: model,
@@ -190,6 +196,19 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   @impl true
   def chat_stream(messages, callback, opts \\ []) do
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+
+    # Fail fast BEFORE any bytes go out. `effective_context_window/2` applies
+    # the local ceiling only to non-cloud tags, so an Ollama Cloud model passes
+    # this untouched.
+    with :ok <- context_floor_error(model, opts) do
+      do_chat_stream(messages, callback, opts)
+    end
+  end
+
+  defp do_chat_stream(messages, callback, opts) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
     # Ollama Cloud (HTTPS) — streaming via Erlang port + curl --no-buffer.
@@ -627,6 +646,59 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     case OptimalSystemAgent.Providers.ModelLimits.max_output(model) do
       cap when is_integer(cap) and cap > 0 -> min(n, cap)
       _ -> n
+    end
+  end
+
+  # Smallest window in which a tool-using turn is coherent. The tool schema
+  # block alone runs to thousands of tokens before a single message is added,
+  # so at 4096 the system prompt and the schemas cannot both fit — and Ollama
+  # does not say so. It LEFT-TRUNCATES server-side, discarding the system
+  # prompt and the earlier turns, and the model answers from an incoherent
+  # tail. `round_up_ctx/1`'s 4096 floor and the `min(max_ctx)` cap between them
+  # meant a too-small configured window was simply requested and honoured.
+  @min_ctx_with_tools 8192
+
+  @doc """
+  `:ok`, or `{:error, message}` when this model's effective window is too small
+  to run a tool-using turn.
+
+  Fail fast and say which knob to turn. The alternative — the pre-existing
+  behaviour — is silent server-side truncation: no error, no warning, just a
+  model that has lost its instructions and its history. `maybe_add_tools/3`
+  already drops TOOLS for models it considers too small, which produces the
+  same silence from the other direction.
+
+  Public as a test seam; called from `chat/2` and `chat_stream/3`.
+  """
+  @spec context_floor_error(String.t(), keyword()) :: :ok | {:error, String.t()}
+  def context_floor_error(model, opts) do
+    if Keyword.get(opts, :tools) in [nil, []] do
+      :ok
+    else
+      max_ctx = OptimalSystemAgent.Providers.Registry.effective_context_window(model, :ollama)
+
+      if is_integer(max_ctx) and max_ctx < @min_ctx_with_tools do
+        ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+
+        cause =
+          if ceiling < @min_ctx_with_tools do
+            "The limit is your configured :ollama_num_ctx (#{ceiling}) — raise it to at " <>
+              "least #{@min_ctx_with_tools} (config :optimal_system_agent, :ollama_num_ctx, " <>
+              "#{@min_ctx_with_tools}, or OLLAMA_NUM_CTX=#{@min_ctx_with_tools})."
+          else
+            "The limit is the model's own trained context length as reported by " <>
+              "/api/show — #{model} cannot hold a tool-using turn. Choose a model with " <>
+              "at least #{@min_ctx_with_tools} tokens of context."
+          end
+
+        {:error,
+         "Ollama context window for #{model} is #{max_ctx} tokens, below the " <>
+           "#{@min_ctx_with_tools} needed for a turn that carries tool schemas. " <>
+           "Sending it anyway would let Ollama silently truncate the prompt and drop " <>
+           "the system instructions. " <> cause}
+      else
+        :ok
+      end
     end
   end
 

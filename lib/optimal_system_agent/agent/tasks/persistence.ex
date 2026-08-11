@@ -21,7 +21,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
 
     case Jason.encode(data, pretty: true) do
       {:ok, json} ->
-        File.write!(path, json)
+        # The moduledoc claims atomic tmp→rename for this module and
+        # `save_tasks/2` below does exactly that; this one was a plain
+        # `File.write!`, so a crash mid-write left a truncated workflow file.
+        AtomicFile.write!(path, json)
         :ok
 
       {:error, reason} ->

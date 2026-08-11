@@ -51,9 +51,20 @@ defmodule OptimalSystemAgent.Speculative.Executor do
 
   @table :osa_speculative_executions
 
-  # Row cap. A finished speculative execution is history and was never deleted.
-  # Oldest-first eviction; see Infra.BoundedTable.
+  # Row cap. A FINISHED speculative execution is history and was never deleted.
+  # An unfinished one is not history: it owns a staged temp dir that promote/1
+  # still has to apply or discard/1 still has to clean. `BoundedTable` evicts
+  # strictly by insertion recency and knows nothing about status, so handing it
+  # the cap directly would let it drop a `:running` row — after which promote/1
+  # answers `:not_found` and the staged artifacts are stranded on disk. Rows are
+  # therefore written with eviction disabled and pruned here, terminal-only.
   @max_rows 500
+
+  @terminal_statuses [:promoted, :invalidated, :discarded, :failed]
+
+  # Ids this module mints. `discard/1` will only clean a staged directory for an
+  # id of this exact shape, so an unknown id can never be aimed at another path.
+  @id_pattern ~r/^spec_[0-9a-f]{16}$/
 
   # ── Child Spec ─────────────────────────────────────────────────────────────
 
@@ -183,7 +194,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
       resolved_at: nil
     }
 
-    BoundedTable.insert(@table, spec_id, record, max: @max_rows)
+    put_record(spec_id, record)
 
     Bus.emit(:system_event, %{
       event: :speculative_started,
@@ -208,7 +219,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         case Assumption.check_assumptions(record.assumptions, context, effective_check) do
           {:ok, confirmed_assumptions} ->
             updated = %{record | assumptions: confirmed_assumptions}
-            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
+            put_record(spec_id, updated)
             {:reply, {:ok, updated}, state}
 
           {:invalidated, failed} ->
@@ -223,7 +234,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
                 resolved_at: now
             }
 
-            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
+            put_record(spec_id, updated)
 
             Bus.emit(:system_event, %{
               event: :speculative_invalidated,
@@ -261,7 +272,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
                 resolved_at: now
             }
 
-            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
+            put_record(spec_id, updated)
 
             Bus.emit(:system_event, %{
               event: :speculative_promoted,
@@ -276,7 +287,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
           {:error, reason} ->
             now = DateTime.utc_now()
             updated = %{record | status: :failed, resolved_at: now}
-            BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
+            put_record(spec_id, updated)
             Logger.warning("[Speculative.Executor] #{spec_id} promotion failed: #{reason}")
             {:reply, {:error, reason}, state}
         end
@@ -295,7 +306,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         WorkProduct.discard(record.work_product)
         now = DateTime.utc_now()
         updated = %{record | status: :discarded, resolved_at: now}
-        BoundedTable.insert(@table, spec_id, updated, max: @max_rows)
+        put_record(spec_id, updated)
 
         Bus.emit(:system_event, %{
           event: :speculative_discarded,
@@ -314,6 +325,16 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         {:reply, :ok, state}
 
       [] ->
+        # Unknown id — never started, or its row is gone. Returning a bare `:ok`
+        # here is what made an evicted speculation leak: the caller is told the
+        # work was cleaned up while the staged directory is still on disk,
+        # neither applied nor removed. Rebuild the work product from the id (the
+        # temp dir is a pure function of it, owned by `WorkProduct`) and clean it
+        # for real.
+        if staged_id?(spec_id) do
+          spec_id |> WorkProduct.new() |> WorkProduct.discard()
+        end
+
         {:reply, :ok, state}
     end
   end
@@ -322,7 +343,7 @@ defmodule OptimalSystemAgent.Speculative.Executor do
     case :ets.lookup(@table, spec_id) do
       [{_, %{status: :running} = record}] ->
         updated_wp = update_fn.(record.work_product)
-        BoundedTable.insert(@table, spec_id, %{record | work_product: updated_wp}, max: @max_rows)
+        put_record(spec_id, %{record | work_product: updated_wp})
         {:reply, :ok, state}
 
       [{_, %{status: status}}] ->
@@ -334,6 +355,56 @@ defmodule OptimalSystemAgent.Speculative.Executor do
   end
 
   # ── Private ────────────────────────────────────────────────────────────────
+
+  # Write with eviction disabled (`max: 0`) so `BoundedTable` keeps the recency
+  # bookkeeping but never decides on its own what to drop, then prune here where
+  # status is known.
+  defp put_record(spec_id, record) do
+    BoundedTable.insert(@table, spec_id, record, max: 0)
+    enforce_cap()
+  end
+
+  defp enforce_cap do
+    case BoundedTable.size(@table) - @max_rows do
+      over when over > 0 -> evict_terminal(over)
+      _ -> :ok
+    end
+  end
+
+  # Oldest-first, but only among rows that are actually finished. If there are
+  # not enough of those, the table stays over cap: an in-flight speculation is
+  # live state, and silently dropping it to satisfy a size bound would trade a
+  # bounded memory cost for lost work and orphaned files. Say so instead.
+  defp evict_terminal(over) do
+    victims =
+      @table
+      |> :ets.tab2list()
+      |> Enum.filter(fn {_id, record} -> record.status in @terminal_statuses end)
+      |> Enum.sort_by(fn {_id, record} ->
+        DateTime.to_unix(record.resolved_at || record.started_at, :microsecond)
+      end)
+      |> Enum.take(over)
+
+    Enum.each(victims, fn {id, _record} -> BoundedTable.delete(@table, id) end)
+
+    case over - length(victims) do
+      0 ->
+        :ok
+
+      short ->
+        Logger.warning(
+          "[Speculative.Executor] #{short} row(s) over the #{@max_rows} cap with only " <>
+            "in-flight (:running) speculations left — keeping them rather than dropping live work"
+        )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp staged_id?(id) when is_binary(id), do: Regex.match?(@id_pattern, id)
+  defp staged_id?(_), do: false
 
   defp generate_id do
     "spec_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)

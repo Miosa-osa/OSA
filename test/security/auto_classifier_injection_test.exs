@@ -193,7 +193,10 @@ defmodule OptimalSystemAgent.Security.AutoClassifierInjectionTest do
 
       assert AutoClassifier.classify(shell("rm -rf build"), state) in [:ask, :allow]
       # It must at minimum not crash the permission path.
-      assert AutoClassifier.maybe_allow(shell("rm -rf build"), Map.put(state, :auto_permission, true)) in [:ask, :allow]
+      assert AutoClassifier.maybe_allow(
+               shell("rm -rf build"),
+               Map.put(state, :auto_permission, true)
+             ) in [:ask, :allow]
     end
   end
 

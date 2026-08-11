@@ -117,22 +117,27 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
   @impl true
   def handle_info(:poll, state) do
     now = System.monotonic_time(:millisecond)
+    expired? = now >= state.deadline_ms
+
+    # Sample BEFORE deciding to retire. `schedule_poll/1` clamps the last timer
+    # to land exactly ON the deadline, so returning here on `expired?` without
+    # sampling would leave the entire final poll window unobserved and report a
+    # real change inside it as "no change". Observe first, conclude after: a
+    # watch that was asked to cover N seconds actually covers all N.
+    current = sample(state.input)
+    {fired?, state} = evaluate(state, current)
 
     cond do
-      now >= state.deadline_ms ->
+      fired? ->
+        handle_fire(state, current, now, expired?)
+
+      expired? ->
         emit(state, :monitor_timeout, %{elapsed_ms: now - state.started_at})
         {:stop, :normal, %{state | status: :timeout}}
 
       true ->
-        current = sample(state.input)
-        {fired?, state} = evaluate(state, current)
-
-        if fired? do
-          handle_fire(state, current, now)
-        else
-          schedule_poll(state)
-          {:noreply, state}
-        end
+        schedule_poll(state)
+        {:noreply, state}
     end
   end
 
@@ -147,7 +152,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
 
   # ── Fire handling ─────────────────────────────────────────────────────
 
-  defp handle_fire(state, current, now) do
+  defp handle_fire(state, current, now, expired?) do
     elapsed_ms = now - state.started_at
     fires = state.fires + 1
 
@@ -162,7 +167,10 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
 
     state = %{state | baseline: current, fires: fires}
 
-    if state.mode == :once or fires >= state.max_fires do
+    # `expired?` means this was the deadline sample: the change was reported,
+    # and there is no window left to keep watching, so retire instead of
+    # re-scheduling a zero-delay poll that could only time out.
+    if state.mode == :once or fires >= state.max_fires or expired? do
       {:stop, :normal, %{state | status: :done}}
     else
       schedule_poll(state)

@@ -514,18 +514,34 @@ defmodule OptimalSystemAgent.Orchestrator do
           )
         end
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_completed",
-          agent_name: subagent_id,
-          status: "failed",
-          error: inspect(reason),
-          summary: completion_summary(inspect(reason)),
-          tool_uses: 0,
-          tokens_used: 0
-        })
+        emit_event(parent_id, start_failure_event(subagent_id, reason))
 
         {:error, reason}
     end
+  end
+
+  @doc """
+  Completion event for a subagent that never STARTED (the `Loop` child failed
+  to spawn), so no usage was ever observed.
+
+  Deliberately carries NO `:tool_uses` / `:tokens_used` keys. Those used to be
+  sent as literal `0`s, and zero is a real wire value: the TUI decodes them as
+  `Some(0)` and applies them, wiping the counters it had already accumulated for
+  that agent. The TUI half distinguishes absent from zero, so ABSENCE is how
+  "no measurement" is expressed — never a zero.
+
+  Public + `@doc false` so the omission is pinned by a test.
+  """
+  @doc false
+  @spec start_failure_event(String.t(), term()) :: map()
+  def start_failure_event(subagent_id, reason) do
+    %{
+      event: "orchestrator_agent_completed",
+      agent_name: subagent_id,
+      status: "failed",
+      error: inspect(reason),
+      summary: completion_summary(inspect(reason))
+    }
   end
 
   @doc """
@@ -1172,11 +1188,18 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         RunStore.complete(subagent_id, structured)
 
+        # A deliberate user cancel is NOT a failure. RunStore models `:cancelled`
+        # first-class and LATCHES terminal states, so the durable status must be
+        # stamped correctly here (see `terminal_status/1`), and the wire status
+        # must agree with it — the TUI agents panel already understands
+        # "cancelled" (components/agents/mod.rs).
+        wire_status = to_string(terminal_status(reason))
+
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
           display_name: display_name,
-          status: "failed",
+          status: wire_status,
           error: to_string(reason),
           summary: completion_summary(to_string(reason)),
           tool_uses: tool_uses,
@@ -1185,7 +1208,14 @@ defmodule OptimalSystemAgent.Orchestrator do
           batch_id: batch_id
         })
 
-        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :failed)
+        emit_agent_finished(
+          parent_id,
+          subagent_id,
+          display_name,
+          duration_ms,
+          batch_id,
+          terminal_status(reason)
+        )
 
         {:error, reason}
 
@@ -1562,13 +1592,30 @@ defmodule OptimalSystemAgent.Orchestrator do
     }
   end
 
-  defp failure_result(agent_id, parent_id, role, reason, opts \\ []) do
+  @doc """
+  Structured result for a subagent that did NOT finish its task.
+
+  The durable status is derived from the reason via `terminal_status/1`: a
+  deliberate user cancel settles as `:cancelled`, everything else as `:failed`.
+  Public + `@doc false` so the status/summary mapping is unit-testable without
+  booting a full orchestrator run.
+  """
+  @doc false
+  def failure_result(agent_id, parent_id, role, reason, opts \\ []) do
+    status = terminal_status(reason)
+
+    verb =
+      case status do
+        :cancelled -> "CANCELLED"
+        _ -> "FAILED"
+      end
+
     structured_result(%{
       agent_id: agent_id,
       parent_session_id: parent_id,
       role: role,
-      status: :failed,
-      summary: "Subagent #{role} FAILED: #{failure_reason_text(reason)}",
+      status: status,
+      summary: "Subagent #{role} #{verb}: #{failure_reason_text(reason)}",
       files_changed: Keyword.get(opts, :files_changed, []),
       commands_run: [],
       tool_count: Keyword.get(opts, :tool_count, 0),
@@ -1579,6 +1626,20 @@ defmodule OptimalSystemAgent.Orchestrator do
       resumed_from: Keyword.get(opts, :resumed_from)
     })
   end
+
+  @doc """
+  Terminal `RunStore` status for a non-completion reason.
+
+  `:cancelled` (an explicit user interrupt/Esc reaching the child, see
+  `execute_and_collect/7`'s `:exit, :killed` handling) is a first-class RunStore
+  status — persisting it as `:failed` durably mislabels deliberate user action
+  as a fault. Every other reason (timeout, crash, already_started, ...) is a
+  genuine failure.
+  """
+  @doc false
+  @spec terminal_status(term()) :: :cancelled | :failed
+  def terminal_status(:cancelled), do: :cancelled
+  def terminal_status(_reason), do: :failed
 
   # Human-readable classification for a failed subagent — surfaced to the
   # parent model so it does not mistake a timeout/cancel/crash for real
@@ -1635,21 +1696,50 @@ defmodule OptimalSystemAgent.Orchestrator do
     |> String.trim()
   end
 
-  defp changed_files(nil), do: []
+  @doc """
+  Repo-relative paths a subagent modified inside its worktree.
 
-  defp changed_files(%{path: path}) do
-    case OptimalSystemAgent.Git.cmd(["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.map(fn line -> line |> String.slice(3..-1//1) |> String.trim() end)
-        |> Enum.reject(&(&1 == ""))
+  Uses the NUL-separated `-z` porcelain format and delegates parsing to
+  `OptimalSystemAgent.Agent.Fleet.parse_porcelain_z/1`, which is the single
+  correct implementation of that format (it is public + `@doc false` there
+  precisely so it can be shared/unit-tested; nothing in fleet.ex changes).
 
-      _ ->
-        []
+  Without `-z`, git QUOTES any path containing a space or a non-ASCII byte
+  (`"my file.txt"`, `"caf\\303\\251.txt"`) and renders a rename as the single
+  bogus field `old -> new` — so the previous
+  `split("\\n") |> slice(3..-1)` here produced paths that do not exist on disk.
+
+  Public + `@doc false` so the porcelain contract is testable against a real
+  throwaway repo without booting an orchestrator run.
+  """
+  @doc false
+  @spec changed_files(nil | map()) :: [binary()]
+  def changed_files(nil), do: []
+
+  def changed_files(%{path: path}) when is_binary(path) do
+    # Guard on existence: cd-ing into a vanished worktree prints a noisy
+    # `spawn: Could not cd` to stderr and there is nothing to diff anyway.
+    if not File.dir?(path) do
+      []
+    else
+      changed_files_git(path)
+    end
+  end
+
+  def changed_files(_), do: []
+
+  defp changed_files_git(path) do
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain", "-z"],
+           cd: path,
+           stderr_to_stdout: true
+         ) do
+      {output, 0} -> OptimalSystemAgent.Agent.Fleet.parse_porcelain_z(output)
+      _ -> []
     end
   rescue
     _ -> []
+  catch
+    _, _ -> []
   end
 
   # Event forwarder — spawns a Task that listens for subagent tool_call

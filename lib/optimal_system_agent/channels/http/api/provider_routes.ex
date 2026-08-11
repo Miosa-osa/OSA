@@ -11,6 +11,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
+
   plug(:match)
   plug(:dispatch)
 
@@ -143,34 +146,37 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
       true ->
         case conn.body_params do
           %{"api_key" => api_key} when is_binary(api_key) and api_key != "" ->
-            env_var = "#{String.upcase(slug)}_API_KEY"
-            System.put_env(env_var, api_key)
+            # This file holds every provider's key in plaintext. Degrading an
+            # unreadable read to `%{}` meant storing one key DESTROYED all the
+            # others — and the endpoint still answered
+            # `200 {"status":"connected"}`, so the user had no way to know.
+            case store_api_key(slug, api_key) do
+              {:error, msg} ->
+                json_error(conn, 500, "config_unreadable", msg)
 
-            config = read_config()
-            api_keys = Map.get(config, "api_keys", %{})
-            updated_config = Map.put(config, "api_keys", Map.put(api_keys, slug, api_key))
-            write_config(updated_config)
+              :ok ->
+                System.put_env("#{String.upcase(slug)}_API_KEY", api_key)
+                Logger.info("[Providers] API key stored for #{slug}")
 
-            Logger.info("[Providers] API key stored for #{slug}")
+                # Optional connection test — never fail the request if it errors
+                try do
+                  provider = String.to_existing_atom(slug)
+                  test_messages = [%{role: "user", content: "hi"}]
 
-            # Optional connection test — never fail the request if it errors
-            try do
-              provider = String.to_existing_atom(slug)
-              test_messages = [%{role: "user", content: "hi"}]
+                  OptimalSystemAgent.Providers.Registry.chat(test_messages,
+                    provider: provider,
+                    max_tokens: 5
+                  )
 
-              OptimalSystemAgent.Providers.Registry.chat(test_messages,
-                provider: provider,
-                max_tokens: 5
-              )
+                  Logger.info("[Providers] Connection verified for #{slug}")
+                rescue
+                  _ -> :ok
+                catch
+                  :exit, _ -> :ok
+                end
 
-              Logger.info("[Providers] Connection verified for #{slug}")
-            rescue
-              _ -> :ok
-            catch
-              :exit, _ -> :ok
+                json(conn, 200, %{status: "connected", provider: slug})
             end
-
-            json(conn, 200, %{status: "connected", provider: slug})
 
           _ ->
             json_error(conn, 400, "invalid_request", "Missing required field: api_key")
@@ -186,14 +192,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
     env_var = "#{String.upcase(slug)}_API_KEY"
     System.delete_env(env_var)
 
-    config = read_config()
-    api_keys = Map.get(config, "api_keys", %{})
-    updated_config = Map.put(config, "api_keys", Map.delete(api_keys, slug))
-    write_config(updated_config)
+    case update_api_keys(&Map.delete(&1, slug)) do
+      {:error, msg} ->
+        json_error(conn, 500, "config_unreadable", msg)
 
-    Logger.info("[Providers] API key removed for #{slug}")
-
-    json(conn, 200, %{status: "disconnected", provider: slug})
+      :ok ->
+        Logger.info("[Providers] API key removed for #{slug}")
+        json(conn, 200, %{status: "disconnected", provider: slug})
+    end
   end
 
   match _ do
@@ -220,19 +226,55 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
     end
   end
 
-  defp write_config(data) do
+  defp store_api_key(slug, api_key), do: update_api_keys(&Map.put(&1, slug, api_key))
+
+  # Read-modify-write of the `api_keys` object, refusing on a degraded read.
+  @spec update_api_keys((map() -> map())) :: :ok | {:error, String.t()}
+  defp update_api_keys(fun) do
     path = config_path()
 
-    case Jason.encode(data, pretty: true) do
-      {:ok, json} ->
-        File.mkdir_p!(Path.dirname(path))
-        File.write!(path, json)
+    with {:ok, config} <- JsonStore.read_map_for_write(path),
+         api_keys = Map.get(config, "api_keys", %{}),
+         api_keys = if(is_map(api_keys), do: api_keys, else: %{}),
+         updated = Map.put(config, "api_keys", fun.(api_keys)),
+         {:ok, json} <- Jason.encode(updated, pretty: true) do
+      write_config_json(path, json)
+    else
+      {:error, :corrupt} ->
+        msg = JsonStore.corrupt_message("provider API keys", path)
+        Logger.error("[Providers] #{msg}")
+        {:error, msg}
 
       {:error, reason} ->
-        Logger.warning("[Providers] Failed to write config: #{inspect(reason)}")
+        msg = "Failed to encode provider config: #{inspect(reason)}"
+        Logger.warning("[Providers] #{msg}")
+        {:error, msg}
+    end
+  end
+
+  # `config.json` carries every provider's API key in plaintext, so it must
+  # never exist at the process umask (0644 on a default Linux install). The
+  # mode is applied to AtomicFile's temp file BEFORE the secret is written and
+  # the temp file is then renamed into place, so the key is never observable at
+  # a permissive mode — as opposed to `File.write!` followed by `File.chmod!`,
+  # which leaves a readable window between the two calls.
+  defp write_config_json(path, json) do
+    File.mkdir_p!(Path.dirname(path))
+
+    case AtomicFile.write(path, json, mode: 0o600) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        msg = "Failed to write #{path}: #{inspect(reason)}"
+        Logger.warning("[Providers] #{msg}")
+        {:error, msg}
     end
   rescue
-    e -> Logger.warning("[Providers] Config write error: #{Exception.message(e)}")
+    e ->
+      msg = "Config write error: #{Exception.message(e)}"
+      Logger.warning("[Providers] #{msg}")
+      {:error, msg}
   end
 
   # Detailed model metadata from the catalog for the TUI model-picker.

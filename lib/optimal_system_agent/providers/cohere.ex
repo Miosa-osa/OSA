@@ -183,7 +183,10 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   defp extract_tool_calls(_), do: []
 
   defp extract_error(%{"message" => msg}) when is_binary(msg), do: msg
-  defp extract_error(%{"error" => %{"message" => msg}}), do: msg
+  # Guarded: a non-binary `message` (nested object, validation list) would
+  # otherwise reach a string interpolation at the call site and raise
+  # Protocol.UndefinedError instead of producing a classifiable error.
+  defp extract_error(%{"error" => %{"message" => msg}}) when is_binary(msg), do: msg
   defp extract_error(body), do: inspect(body)
 
   defp generate_id,

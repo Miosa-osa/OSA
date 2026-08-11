@@ -153,7 +153,9 @@ defmodule OptimalSystemAgent.Security.UpdaterMetadataVerificationTest do
       doc = %{"signed" => %{"version" => 42, "expires" => future()}}
 
       assert {:error, :missing_signatures} = Updater.verify_metadata(doc, [{keyid(pub), pub}], 1)
-      assert {:error, :missing_signatures} = Updater.verify_metadata(Map.put(doc, "signatures", []), [{keyid(pub), pub}], 1)
+
+      assert {:error, :missing_signatures} =
+               Updater.verify_metadata(Map.put(doc, "signatures", []), [{keyid(pub), pub}], 1)
     end
 
     @tag :security
@@ -192,10 +194,17 @@ defmodule OptimalSystemAgent.Security.UpdaterMetadataVerificationTest do
       other = {other_pub, _} = keypair()
       doc = signed_doc(%{"version" => 42, "expires" => future()}, kp)
 
-      relabeled = put_in(doc, ["signatures"], [%{"keyid" => keyid(other_pub), "sig" => hd(doc["signatures"])["sig"]}])
+      relabeled =
+        put_in(doc, ["signatures"], [
+          %{"keyid" => keyid(other_pub), "sig" => hd(doc["signatures"])["sig"]}
+        ])
 
       assert {:error, {:signature_threshold_not_met, 0, 1}} =
-               Updater.verify_metadata(relabeled, [{keyid(pub), pub}, {keyid(other_pub), other_pub}], 1)
+               Updater.verify_metadata(
+                 relabeled,
+                 [{keyid(pub), pub}, {keyid(other_pub), other_pub}],
+                 1
+               )
 
       _ = other
     end
@@ -207,13 +216,18 @@ defmodule OptimalSystemAgent.Security.UpdaterMetadataVerificationTest do
       doc = signed_doc(%{"version" => 42, "expires" => future()}, kp)
       sig = hd(doc["signatures"])["sig"]
 
-      duplicated = Map.put(doc, "signatures", [
-        %{"keyid" => keyid(pub), "sig" => sig},
-        %{"keyid" => keyid(pub), "sig" => sig}
-      ])
+      duplicated =
+        Map.put(doc, "signatures", [
+          %{"keyid" => keyid(pub), "sig" => sig},
+          %{"keyid" => keyid(pub), "sig" => sig}
+        ])
 
       assert {:error, {:signature_threshold_not_met, 1, 2}} =
-               Updater.verify_metadata(duplicated, [{keyid(pub), pub}, {keyid(other_pub), other_pub}], 2)
+               Updater.verify_metadata(
+                 duplicated,
+                 [{keyid(pub), pub}, {keyid(other_pub), other_pub}],
+                 2
+               )
 
       _ = other
     end
@@ -249,10 +263,14 @@ defmodule OptimalSystemAgent.Security.UpdaterMetadataVerificationTest do
   describe "check_rollback/3" do
     @tag :security
     test "accepts a monotonically increasing version and records it" do
-      assert {:ok, seen} = Updater.check_rollback("targets", %{"signed" => %{"version" => 5}}, %{})
+      assert {:ok, seen} =
+               Updater.check_rollback("targets", %{"signed" => %{"version" => 5}}, %{})
+
       assert seen["targets"] == 5
 
-      assert {:ok, seen} = Updater.check_rollback("targets", %{"signed" => %{"version" => 6}}, seen)
+      assert {:ok, seen} =
+               Updater.check_rollback("targets", %{"signed" => %{"version" => 6}}, seen)
+
       assert seen["targets"] == 6
     end
 

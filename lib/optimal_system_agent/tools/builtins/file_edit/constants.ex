@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Constants do
   automatically.
   """
 
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
+
   @tool_name "file_edit"
   def tool_name, do: @tool_name
 
@@ -15,36 +17,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Constants do
   @default_allowed_paths ["~", "/tmp"]
   def default_allowed_paths, do: @default_allowed_paths
 
-  # Files that must never be read from (symlink-traversal & credential guard).
-  @sensitive_paths [
-    ".ssh/id_rsa",
-    ".ssh/id_ed25519",
-    ".ssh/id_ecdsa",
-    ".ssh/id_dsa",
-    ".gnupg/",
-    ".aws/credentials",
-    ".env",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/master.passwd",
-    ".netrc",
-    ".npmrc",
-    ".pypirc"
-  ]
-  def sensitive_paths, do: @sensitive_paths
-
-  # Paths that must never be written to (OS / system directories).
-  @blocked_write_paths [
-    ".ssh/",
-    ".gnupg/",
-    "/etc/",
-    "/boot/",
-    "/usr/",
-    "/bin/",
-    "/sbin/",
-    "/var/",
-    ".aws/",
-    ".env"
-  ]
-  def blocked_write_paths, do: @blocked_write_paths
+  # Files that must never be read from, and locations that must never be
+  # written to. Both lists now come from `Agent.Safety.PathPolicy`, the single
+  # shared policy — these accessors are descriptions for prompts and tests. Use
+  # `PathPolicy.sensitive?/1` / `PathPolicy.blocked_write?/1` to make a
+  # decision; substring-matching these strings is what the shared module exists
+  # to stop.
+  defdelegate sensitive_paths, to: PathPolicy, as: :sensitive_patterns
+  defdelegate blocked_write_paths, to: PathPolicy, as: :blocked_write_patterns
 end

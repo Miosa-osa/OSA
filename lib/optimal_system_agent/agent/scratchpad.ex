@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Agent.Scratchpad do
   """
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Agent.Trajectory
 
   @think_instruction """
   ## Private Reasoning
@@ -98,7 +99,11 @@ defmodule OptimalSystemAgent.Agent.Scratchpad do
     {clean_text, thinking_parts} = extract(text)
 
     if thinking_parts != [] do
-      combined_thinking = Enum.join(thinking_parts, "\n\n---\n\n")
+      # Same rule as the streaming `:thinking_delta` path in Loop.LLMClient:
+      # reasoning quotes file contents verbatim, and both events below end up
+      # on screen or on disk. Redact before either emission.
+      combined_thinking =
+        thinking_parts |> Enum.join("\n\n---\n\n") |> Trajectory.redact()
 
       # Emit thinking delta for TUI display
       Bus.emit(:system_event, %{

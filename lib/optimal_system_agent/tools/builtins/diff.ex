@@ -1,22 +1,23 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Diff do
+  @moduledoc """
+  Show differences between two files or two text strings.
+
+  ## Read guard
+
+  `diff` renders arbitrary file contents into a tool observation, so it is a
+  read primitive and carries exactly the read guard `file_read` does — via the
+  shared `Agent.Safety.PathPolicy`, not a private copy. It used to keep its own
+  blocklist, and that copy had drifted: it never learned about
+  `~/.osa/subscriptions.json`, so `diff(file_a: "~/.osa/subscriptions.json",
+  file_b: "/dev/null")` handed the operator's subscription bearer tokens
+  straight to the model.
+
+  Paths are canonicalised before the check, so a symlink cannot be used to
+  reach a denied file either.
+  """
   @behaviour MiosaTools.Behaviour
 
-  @default_allowed_paths ["~", "/tmp"]
-  @sensitive_paths [
-    ".ssh/id_rsa",
-    ".ssh/id_ed25519",
-    ".ssh/id_ecdsa",
-    ".ssh/id_dsa",
-    ".gnupg/",
-    ".aws/credentials",
-    ".env",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/master.passwd",
-    ".netrc",
-    ".npmrc",
-    ".pypirc"
-  ]
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
 
   @impl true
   def safety, do: :read_only
@@ -62,8 +63,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
   end
 
   defp diff_files(path_a, path_b) when is_binary(path_a) and is_binary(path_b) do
-    expanded_a = Path.expand(path_a)
-    expanded_b = Path.expand(path_b)
+    expanded_a = PathPolicy.canonical(path_a)
+    expanded_b = PathPolicy.canonical(path_b)
 
     cond do
       not path_allowed?(expanded_a) ->
@@ -89,24 +90,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
 
   defp diff_files(_, _), do: {:error, "file_a and file_b must be strings"}
 
-  defp path_allowed?(expanded_path) do
-    sensitive = Enum.any?(@sensitive_paths, fn p -> String.contains?(expanded_path, p) end)
-
-    if sensitive do
-      false
-    else
-      check =
-        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-      allowed =
-        Application.get_env(:optimal_system_agent, :allowed_read_paths, @default_allowed_paths)
-        |> Enum.map(fn p ->
-          e = Path.expand(p)
-          if String.ends_with?(e, "/"), do: e, else: e <> "/"
-        end)
-
-      Enum.any?(allowed, fn a -> String.starts_with?(check, a) end)
-    end
+  defp path_allowed?(canonical_path) do
+    not PathPolicy.sensitive?(canonical_path) and
+      PathPolicy.within_roots?(canonical_path, PathPolicy.read_roots())
   end
 
   defp diff_texts(text_a, text_b) do

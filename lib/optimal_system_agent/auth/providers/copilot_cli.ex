@@ -411,8 +411,36 @@ defmodule OptimalSystemAgent.Auth.Providers.CopilotCli do
   # ── helpers ─────────────────────────────────────────────────────────────
 
   defp cmd(bin, args) do
-    System.cmd(bin, args, stderr_to_stdout: true, env: [{"NO_COLOR", "1"}])
+    System.cmd(bin, args, stderr_to_stdout: true, env: probe_env())
   rescue
     e -> {Exception.message(e), 1}
+  end
+
+  # Keep the probe on the user's OWN Copilot CLI sign-in.
+  #
+  # This provider's entire claim is "you are already signed in to the Copilot
+  # CLI, so use that". A `GITHUB_TOKEN` or `GH_TOKEN` inherited from OSA's
+  # environment — a workspace `.env`, a CI runner, a `gh auth` shell export —
+  # makes the CLI answer about THAT token instead, so `verified?/0` reports a
+  # sign-in, and every later request is spent, against an account the
+  # workspace supplied rather than the one the user connected. On a shared or
+  # untrusted workspace that is a credential-confusion hole, not a cosmetic
+  # one: the user is told they are connected as themselves.
+  #
+  # `GH_HOST` is nulled for the same reason one step out — it silently
+  # redirects the probe at a GitHub Enterprise instance, so the answer can be
+  # about a different *server* as well as a different account.
+  #
+  # Same discipline as `ClaudeCli.probe_env/0`; `NO_COLOR` is kept so the
+  # output stays parseable.
+  @doc false
+  @spec probe_env() :: [{String.t(), String.t() | nil}]
+  def probe_env do
+    nulled =
+      (@token_env_vars ++ ~w(GITHUB_ENTERPRISE_TOKEN GH_ENTERPRISE_TOKEN GH_HOST))
+      |> Enum.uniq()
+      |> Enum.map(&{&1, nil})
+
+    [{"NO_COLOR", "1"} | nulled]
   end
 end

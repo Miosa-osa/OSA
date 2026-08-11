@@ -18,8 +18,17 @@ pub mod fuzzy;
 ///
 /// Wide chars are counted at their true 2-column advance, so the result never
 /// overflows `max_cols`.
+///
+/// The break point is a GRAPHEME CLUSTER, never a `char`. Cutting between chars
+/// splits user-perceived glyphs: half a regional-indicator flag renders as a
+/// stray boxed letter, and a cut inside an emoji ZWJ sequence turns 👨‍👩‍👧 into two
+/// unrelated people. (Zero-width combining marks happen to survive char
+/// iteration because they never trip the budget check — clusters whose parts
+/// both have width are the ones that break.) `render/diff.rs` already segments
+/// this way; this is the same rule.
 pub fn fit_cols(s: &str, max_cols: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
     if UnicodeWidthStr::width(s) <= max_cols {
         return s.to_string();
     }
@@ -29,13 +38,15 @@ pub fn fit_cols(s: &str, max_cols: usize) -> String {
     let budget = max_cols - 1; // reserve 1 column for the ellipsis
     let mut out = String::new();
     let mut acc = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + cw > budget {
+    for g in s.graphemes(true) {
+        // Width of the whole cluster, not of its first char: a base + combining
+        // mark is one cell, and an emoji ZWJ sequence is two.
+        let gw = UnicodeWidthStr::width(g);
+        if acc + gw > budget {
             break;
         }
-        out.push(ch);
-        acc += cw;
+        out.push_str(g);
+        acc += gw;
     }
     out.push('\u{2026}');
     out
@@ -433,6 +444,98 @@ pub fn elide_shared_prefix(prev: &str, cur: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shared assertion for the grapheme-cluster tests: `out` must be a prefix of
+    // `s` cut only at CLUSTER boundaries (plus the trailing ellipsis), and must
+    // fit the column budget. Restores the helper the cluster tests share.
+    fn assert_whole_cluster_prefix(s: &str, out: &str, budget: usize) {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        assert!(
+            cols(out) <= budget,
+            "overflowed budget {budget}: {out:?}"
+        );
+
+        let body = out.strip_suffix('\u{2026}').unwrap_or(out);
+
+        // Every cluster emitted must be a whole cluster of the input, in order.
+        let src: Vec<&str> = s.graphemes(true).collect();
+        let got: Vec<&str> = body.graphemes(true).collect();
+
+        assert!(
+            got.len() <= src.len(),
+            "emitted more clusters than the input had: {out:?}"
+        );
+
+        for (i, g) in got.iter().enumerate() {
+            assert_eq!(
+                *g, src[i],
+                "cluster {i} was split or altered at budget {budget}: {out:?}"
+            );
+        }
+    }
+
+    // NOTE on halfwidth kana: ｶ + U+FF9E VOICED SOUND MARK is one cluster, but
+    // unicode-width reports the sound mark as ZERO columns, so a char-wise walk
+    // never stops between them — that case cannot actually be split and has no
+    // test here. The clusters that DO break are the ones whose parts each have
+    // non-zero width: regional-indicator flags and emoji ZWJ sequences, below.
+    #[test]
+    fn fit_cols_never_splits_a_regional_indicator_flag() {
+        // A flag is TWO regional indicators forming one cluster, and unlike a
+        // combining mark both halves have non-zero width — so a char-wise walk
+        // really does stop between them and render half a flag as a stray boxed
+        // letter. This is the same class of bug as the ZWJ case below.
+        let flag = "\u{1F1EF}\u{1F1F5}"; // 🇯🇵
+        let s = format!("ab{flag}cd");
+        for budget in 3..=9 {
+            assert_whole_cluster_prefix(&s, &fit_cols(&s, budget), budget);
+        }
+    }
+
+    // Regression guard, not a discriminator: a zero-width combining mark is
+    // already safe under char iteration (width 0 never trips the budget check),
+    // so this passed before the grapheme fix too. It is kept so a future
+    // "optimization" back to chars — or a width table change — cannot silently
+    // start orphaning accents.
+    #[test]
+    fn fit_cols_keeps_combining_marks_with_their_base() {
+        let s = "abce\u{0301}defg";
+        for budget in 1..=8 {
+            assert_whole_cluster_prefix(s, &fit_cols(s, budget), budget);
+        }
+    }
+
+    #[test]
+    fn fit_cols_never_cuts_inside_an_emoji_zwj_sequence() {
+        // Family emoji: 4 people joined by ZWJ = ONE grapheme cluster.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let s = format!("ab{family}cd");
+        // The sequence is either kept whole or dropped whole — never half of it.
+        // Char-wise iteration keeps "man + ZWJ + woman" and drops the girl,
+        // which renders as two unrelated people.
+        for budget in 3..=9 {
+            let out = fit_cols(&s, budget);
+            assert!(
+                !out.contains('\u{1F468}') || out.contains(family),
+                "ZWJ sequence split at budget {budget}: {out:?}"
+            );
+            assert!(
+                !out.ends_with("\u{200D}\u{2026}"),
+                "cut left a dangling ZWJ at budget {budget}: {out:?}"
+            );
+            assert!(cols(&out) <= budget);
+        }
+    }
+
+    #[test]
+    fn fit_cols_still_respects_the_column_budget_and_short_circuits() {
+        assert_eq!(fit_cols("short", 10), "short");
+        assert_eq!(fit_cols("anything", 0), "");
+        assert!(cols(&fit_cols("日本語のテキストです", 7)) <= 7);
+        assert!(fit_cols("abcdefghij", 5).ends_with('\u{2026}'));
+        assert!(cols(&fit_cols("abcdefghij", 5)) <= 5);
+    }
 
     #[test]
     fn display_path_prefers_the_workspace_root_then_sandbox_then_home() {

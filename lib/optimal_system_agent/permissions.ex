@@ -47,6 +47,8 @@ defmodule OptimalSystemAgent.Permissions do
   """
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
   alias OptimalSystemAgent.MCP.Client.ToolBridge
   alias OptimalSystemAgent.Settings
 
@@ -283,7 +285,7 @@ defmodule OptimalSystemAgent.Permissions do
         :ok
 
       true ->
-        write_legacy(Map.put(load_legacy(), rule, action))
+        update_legacy(&Map.put(&1, rule, action))
     end
   end
 
@@ -294,7 +296,7 @@ defmodule OptimalSystemAgent.Permissions do
 
   @doc "Remove a saved legacy rule by its exact rule string."
   def remove_rule(rule) do
-    write_legacy(Map.delete(load_legacy(), rule))
+    update_legacy(&Map.delete(&1, rule))
   end
 
   @doc """
@@ -794,7 +796,11 @@ defmodule OptimalSystemAgent.Permissions do
 
   defp legacy_rules do
     for {key, action} <- load_legacy(), is_binary(key), action in ["allow", "deny", "ask"] do
-      %{behavior: String.to_existing_atom(action), rule: migrate_legacy_rule(key), source: :legacy}
+      %{
+        behavior: String.to_existing_atom(action),
+        rule: migrate_legacy_rule(key),
+        source: :legacy
+      }
     end
   end
 
@@ -995,7 +1001,9 @@ defmodule OptimalSystemAgent.Permissions do
   # The grapheme of `value` immediately after `prefix` (`nil` when there is none
   # — that case is already handled by the `value == prefix` branch).
   defp next_grapheme(value, prefix) do
-    case String.next_grapheme(binary_part(value, byte_size(prefix), byte_size(value) - byte_size(prefix))) do
+    case String.next_grapheme(
+           binary_part(value, byte_size(prefix), byte_size(value) - byte_size(prefix))
+         ) do
       {g, _rest} -> g
       nil -> nil
     end
@@ -1104,11 +1112,43 @@ defmodule OptimalSystemAgent.Permissions do
     _ -> %{}
   end
 
-  defp write_legacy(rules) do
+  # Read-modify-write of the legacy rule store.
+  #
+  # Two defects this replaces. First, the read degraded to `%{}` on ANY failure
+  # — so a permissions.json that had picked up a stray byte meant the next
+  # "always allow" rewrote the file with that single rule and discarded every
+  # stored allow AND deny the user had accumulated. Second, the write was a
+  # plain `File.write!` under `rescue _ -> :ok`, so a failed write reported
+  # success: the user was told their rule was saved when it was not, and would
+  # only find out the next time the prompt reappeared.
+  #
+  # Both halves now fail loudly instead: refuse to write over a store we could
+  # not read, and surface write errors.
+  @spec update_legacy((map() -> map())) :: :ok | {:error, String.t()}
+  defp update_legacy(fun) do
     file = permissions_file()
-    File.mkdir_p!(Path.dirname(file))
-    File.write!(file, Jason.encode!(rules, pretty: true))
+
+    with {:ok, rules} <- JsonStore.read_map_for_write(file),
+         :ok <- File.mkdir_p(Path.dirname(file)),
+         :ok <- AtomicFile.write(file, Jason.encode!(fun.(rules), pretty: true)) do
+      :ok
+    else
+      {:error, :corrupt} ->
+        msg = JsonStore.corrupt_message("permission rules", file)
+        require Logger
+        Logger.error("[permissions] #{msg}")
+        {:error, msg}
+
+      {:error, reason} ->
+        msg = "Failed to write #{file}: #{inspect(reason)}"
+        require Logger
+        Logger.error("[permissions] #{msg}")
+        {:error, msg}
+    end
   rescue
-    _ -> :ok
+    e ->
+      require Logger
+      Logger.error("[permissions] Failed to update #{permissions_file()}: #{inspect(e)}")
+      {:error, Exception.message(e)}
   end
 end

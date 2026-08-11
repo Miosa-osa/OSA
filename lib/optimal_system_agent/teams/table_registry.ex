@@ -73,6 +73,29 @@ defmodule OptimalSystemAgent.Teams.TableRegistry do
     _ -> :ok
   end
 
+  @doc """
+  Create the shared tables up front, from a long-lived process.
+
+  Called from `Application.start/2` (Phase 2) for exactly the reason
+  `Infra.BoundedTable.init_tables/0` is: a named ETS table is owned by the
+  process that created it and is destroyed when that process exits. With only
+  the lazy `ensure_tables/1` path, whichever team happened to be created first
+  owned `:osa_team_meta` and `:osa_team_agents` for the entire node — usually
+  a team Manager. Dissolving that one team stopped its Manager, the tables
+  went with it, and every OTHER live team's metadata and agent roster vanished
+  at the same instant. `ensure_tables/1` would then recreate them EMPTY, so
+  the loss presented as teams that still "exist" but have no members.
+
+  The lazy path stays as a fallback for callers running without the
+  application started (unit tests, scripts).
+  """
+  @spec init_tables() :: :ok
+  def init_tables do
+    ensure_table(@meta_table)
+    ensure_table(@agents_table)
+    :ok
+  end
+
   @doc "Idempotently create one of the shared named ETS tables."
   @spec ensure_table(atom()) :: :ok
   def ensure_table(name) do

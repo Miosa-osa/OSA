@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   Ollama). Falls back to the full agent loop when the intent doesn't match.
   """
 
+  alias OptimalSystemAgent.Security.TypedText
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{AppAllowlist, Executor}
 
   @reset IO.ANSI.reset()
@@ -210,7 +211,12 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   defp format_cu_params(%{"action" => "click", "x" => x, "y" => y}), do: " (#{x}, #{y})"
   defp format_cu_params(%{"action" => "double_click", "x" => x, "y" => y}), do: " (#{x}, #{y})"
   defp format_cu_params(%{"action" => "move_mouse", "x" => x, "y" => y}), do: " → (#{x}, #{y})"
-  defp format_cu_params(%{"action" => "type", "text" => t}), do: " \"#{String.slice(t, 0, 30)}\""
+  # Typed text is where a password goes. Printing it puts the credential in the
+  # terminal and in scrollback, so the CLI shows its shape, never its value.
+  # `OSA_REVEAL_TYPED_TEXT=1` opts back in to the literal string.
+  defp format_cu_params(%{"action" => "type", "text" => t}),
+    do: " \"#{TypedText.mask_for_action("type", t)}\""
+
   defp format_cu_params(%{"action" => "key", "text" => t}), do: " #{t}"
   defp format_cu_params(%{"action" => "scroll", "direction" => d}), do: " #{d}"
   defp format_cu_params(%{"action" => "get_tree"}), do: " (accessibility)"

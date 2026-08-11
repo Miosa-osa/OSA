@@ -72,27 +72,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.AtomicTest do
 
   describe "apply-phase atomicity (BUG B)" do
     @tag :tmp
-    test "a write failure on one target rolls back the others" do
+    test "an unwritable target aborts the batch with no file modified" do
       dir = tmp_dir()
-      # A sub-directory made read-only so temp-file staging fails inside it,
-      # even though the target file itself passes validation.
-      ro_dir = Path.join(dir, "readonly")
-      File.mkdir_p!(ro_dir)
 
       try do
         a = Path.join(dir, "a.txt")
-        b = Path.join(ro_dir, "b.txt")
+        b = Path.join(dir, "b.txt")
         File.write!(a, "alpha\n")
         File.write!(b, "beta\n")
 
-        # Verify we can actually make staging fail (skip when running as root,
-        # which ignores directory permissions).
-        File.chmod!(ro_dir, 0o500)
-        probe = Path.join(ro_dir, ".probe-#{System.unique_integer([:positive])}")
+        # The unwritable target is now the FILE, not its directory. The apply
+        # phase writes each file in place instead of staging a sibling temp and
+        # renaming it (which swapped the inode and destroyed mode, hard links
+        # and symlinks — see preservation_test), so a read-only *directory*
+        # holding a writable file no longer blocks the edit at all: POSIX
+        # directory permissions govern creating and removing entries, not
+        # modifying an existing file. Making the file itself read-only is what
+        # exercises the failure path now.
+        File.chmod!(b, 0o444)
 
-        if File.write(probe, "x") == :ok do
-          File.rm(probe)
-          # Root / permissive FS — cannot exercise the failure path here.
+        # Skip when running as root, which ignores file permissions.
+        if File.write(b, "probe") == :ok do
+          File.write!(b, "beta\n")
           :skipped
         else
           edits = [
@@ -101,15 +102,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.AtomicTest do
           ]
 
           assert {:error, reason} = Handler.execute(%{"edits" => edits}, ctx())
-          assert reason =~ "rolled back"
 
-          # The writable file must be untouched — no partial application.
+          # The precheck refuses before ANY file is written, which is a stronger
+          # guarantee than rolling back afterwards — and the message says only
+          # what is actually true.
+          assert reason =~ "no files were modified"
+
           assert File.read!(a) == "alpha\n"
-          # No stray temp files left behind in the writable dir.
+          assert File.read!(b) == "beta\n"
           refute Enum.any?(File.ls!(dir), &String.contains?(&1, ".osa-tmp-"))
         end
       after
-        File.chmod(ro_dir, 0o700)
+        File.chmod(Path.join(dir, "b.txt"), 0o600)
         File.rm_rf!(dir)
       end
     end

@@ -57,6 +57,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   alias OptimalSystemAgent.Agent.Scheduler.{CronEngine, Persistence, JobExecutor, Heartbeat}
   alias OptimalSystemAgent.Agent.Scheduler.CronPresets
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   defp heartbeat_interval,
     do: Application.get_env(:optimal_system_agent, :heartbeat_interval, 1_800_000)
@@ -393,7 +394,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       {:ok, content} ->
         new_line = "- [ ] #{text}"
         updated = String.trim_trailing(content) <> "\n#{new_line}\n"
-        File.write!(path, updated)
+        AtomicFile.write!(path, updated)
         {:reply, :ok, state}
 
       {:error, reason} ->

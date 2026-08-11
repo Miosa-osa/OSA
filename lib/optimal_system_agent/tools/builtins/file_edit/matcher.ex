@@ -12,10 +12,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
     2. **line endings**   — compare line-by-line after normalising CRLF/CR to LF,
                             so `\\r\\n` vs `\\n` drift no longer breaks the match.
     3. **whitespace**     — additionally trim leading/trailing whitespace on each
-                            line. Indentation stays *significant* for the output:
-                            the matched region of the ORIGINAL file is replaced,
-                            and `new_string` is inserted exactly as supplied, so
-                            no reflow or de-indentation is applied.
+                            line.
+
+  The fuzzy stages put back what they ignored in order to match. A match found
+  by ignoring `\\r` re-emits the region's own line ending; a match found by
+  ignoring indentation shifts `new_string` by the difference between the file's
+  actual indentation and the indentation `old_string` claimed, preserving the
+  relative indentation inside `new_string`.
+
+  Both of those used to be dropped: `new_string` was spliced in exactly as
+  supplied, which put LF lines inside a CRLF file and wrote the model's
+  indentation over the file's — silently re-indenting code no edit had asked to
+  touch, which is a syntax change in Python and diff noise everywhere else.
 
   Fuzzy stages only ever splice out a contiguous run of whole lines, so they can
   never partially match inside a line. `replace_all: false` requires the match to
@@ -90,7 +98,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
           if count > 1 and not replace_all do
             {:halt, {:error, :ambiguous, count}}
           else
-            new_content = splice(content_lines, matches, length(old_lines), new_lines)
+            new_content =
+              splice(content_lines, matches, length(old_lines), new_lines, old_lines, stage)
+
             {:halt, {:ok, new_content, count, stage}}
           end
       end
@@ -106,8 +116,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
   end
 
   # Normalisation applied to each line before comparison, per stage.
-  defp normalizer(:line_endings), do: &String.replace(&1, "\r", "")
-  defp normalizer(:whitespace), do: &(&1 |> String.replace("\r", "") |> String.trim())
+  #
+  # Only a TRAILING `\r` is stripped. `String.replace(&1, "\r", "")` removed
+  # every `\r` anywhere in the line, so a line with an embedded carriage return
+  # (progress-bar output in a fixture, a `"\r"` inside a string literal) was
+  # compared with that character silently deleted, and could match an
+  # `old_string` that does not describe it.
+  defp normalizer(:line_endings), do: &String.replace_trailing(&1, "\r", "")
+
+  defp normalizer(:whitespace),
+    do: &(&1 |> String.replace_trailing("\r", "") |> String.trim())
 
   # Return the 0-based start indices of every NON-OVERLAPPING window in
   # `content_lines` whose normalised lines equal the normalised `old_lines`.
@@ -140,15 +158,87 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
 
   # Replace each matched window (highest index first, so earlier indices stay
   # valid) with `new_lines`, then rejoin.
-  defp splice(content_lines, starts, window, new_lines) do
+  #
+  # The replacement lines are ADAPTED to the region they land in. Both stages
+  # matched by ignoring something; writing the model's raw lines back in put
+  # that something back wrong:
+  #
+  #   * `:line_endings` matched a CRLF file against an LF `old_string` and then
+  #     spliced in the model's LF-only lines, leaving a run of LF lines inside
+  #     an otherwise-CRLF file. Every editor, and `git diff`, then shows the
+  #     whole hunk as changed, and a second edit of the same region no longer
+  #     matches the file it just wrote.
+  #
+  #   * `:whitespace` matched by trimming indentation, so it fires precisely
+  #     when the model's indentation differs from the file's — and then wrote
+  #     the model's indentation over the file's, silently re-indenting code that
+  #     the edit never asked to touch (fatal in Python, noise everywhere else).
+  #     The whole region is shifted by the difference between the file's actual
+  #     indentation and what the model believed it to be, which preserves the
+  #     RELATIVE indentation inside `new_string`.
+  defp splice(content_lines, starts, window, new_lines, old_lines, stage) do
     starts
     |> Enum.sort(:desc)
     |> Enum.reduce(content_lines, fn start, lines ->
       before = Enum.slice(lines, 0, start)
+      matched = Enum.slice(lines, start, window)
       rest = Enum.slice(lines, (start + window)..-1//1) || []
-      before ++ new_lines ++ rest
+
+      replacement =
+        new_lines
+        |> reindent(stage, matched, old_lines)
+        |> match_line_endings(matched)
+
+      before ++ replacement ++ rest
     end)
     |> Enum.join("\n")
+  end
+
+  # Shift every replacement line by (file indent − old_string indent), taken
+  # from the first line of each. Only the `:whitespace` stage can disagree
+  # about indentation; the other stages compared it exactly.
+  defp reindent(new_lines, :whitespace, matched, old_lines) do
+    delta = indent_of(List.first(matched)) - indent_of(List.first(old_lines))
+
+    cond do
+      delta == 0 -> new_lines
+      delta > 0 -> Enum.map(new_lines, &shift_right(&1, delta))
+      true -> Enum.map(new_lines, &shift_left(&1, -delta))
+    end
+  end
+
+  defp reindent(new_lines, _stage, _matched, _old_lines), do: new_lines
+
+  defp indent_of(nil), do: 0
+
+  defp indent_of(line) do
+    trimmed = String.trim_leading(line)
+    if trimmed == "", do: 0, else: String.length(line) - String.length(trimmed)
+  end
+
+  # A blank line stays blank rather than becoming trailing whitespace.
+  defp shift_right(line, n) do
+    if String.trim(line) == "", do: line, else: String.duplicate(" ", n) <> line
+  end
+
+  defp shift_left(line, n) do
+    if String.trim(line) == "" do
+      line
+    else
+      removable = min(n, indent_of(line))
+      String.slice(line, removable..-1//1)
+    end
+  end
+
+  # Give the replacement the line ending the region it replaces actually used.
+  defp match_line_endings(new_lines, matched) do
+    if Enum.any?(matched, &String.ends_with?(&1, "\r")) do
+      Enum.map(new_lines, fn line ->
+        if String.ends_with?(line, "\r"), do: line, else: line <> "\r"
+      end)
+    else
+      new_lines
+    end
   end
 
   defp count_occurrences(content, pattern) do

@@ -22,11 +22,6 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Events.Bus
 
-  # Upper bound on run rows scanned when rolling up tree spend. Matches the
-  # fleet-total kill switch (`Fleet.@default_max_fleet_total`) so a full fan_out
-  # tree is always covered; keeps the read bounded on a huge/long-lived store.
-  @tree_scan_limit 2_000
-
   @usage_keys [
     :input_tokens,
     :output_tokens,
@@ -301,33 +296,45 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   defp descendants_spend_usd(nil), do: 0.0
 
   defp descendants_spend_usd(root) do
-    runs = RunStore.list(limit: @tree_scan_limit)
-
-    children_by_parent =
-      Enum.group_by(runs, fn run -> Map.get(run, :parent_session_id) end, fn run ->
-        Map.get(run, :agent_id)
-      end)
-
     root
-    |> collect_descendants(children_by_parent, MapSet.new())
+    |> collect_descendants()
     |> Enum.reduce(0.0, fn agent_id, acc -> acc + node_cost_usd(agent_id) end)
   rescue
     _ -> 0.0
   end
 
-  # Breadth-first walk of the run tree collecting every descendant agent_id.
-  # `seen` guards against cycles / a node re-parented to an ancestor.
-  defp collect_descendants(node, children_by_parent, seen) do
-    children = Map.get(children_by_parent, node, [])
+  @doc false
+  # Every descendant agent_id of `root`, walked over `RunStore.children_of/1`.
+  #
+  # This deliberately does NOT go through `RunStore.list/1`: that list is capped
+  # AND machine-wide AND fed by a table `prune_terminal/0`
+  # evicts from, so a wide fan-out would drop its own finished nodes out of the
+  # rollup, unrelated sessions could evict tree members, and an exhausted budget
+  # would flip back to "not exhausted" mid-spawn. The edge ledger is unpruned.
+  def collect_descendants(root) do
+    bfs([root], MapSet.new([root]), [])
+  end
 
-    Enum.reduce(children, [], fn child, acc ->
-      if MapSet.member?(seen, child) do
-        acc
-      else
-        seen = MapSet.put(seen, child)
-        [child | collect_descendants(child, children_by_parent, seen)] ++ acc
-      end
-    end)
+  # Iterative BFS with a SINGLE `seen` set threaded across the whole frontier.
+  # The previous recursive form rebound `seen` inside the reduce closure, so the
+  # guard was per-path: two sibling branches converging on the same node counted
+  # that node's cost twice.
+  defp bfs([], _seen, acc), do: Enum.reverse(acc)
+
+  defp bfs([node | rest], seen, acc) do
+    {next, seen} =
+      node
+      |> RunStore.children_of()
+      |> Enum.reduce({[], seen}, fn child, {queued, seen} ->
+        if MapSet.member?(seen, child) do
+          {queued, seen}
+        else
+          {[child | queued], MapSet.put(seen, child)}
+        end
+      end)
+
+    next = Enum.reverse(next)
+    bfs(rest ++ next, seen, Enum.reverse(next, acc))
   end
 
   # A single node's real spend, from its durable sidecar (never raises).

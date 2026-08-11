@@ -621,10 +621,31 @@ impl StatusBar {
         }
     }
 
+    /// `max == 0` means "this source could not resolve the window", which is not
+    /// the same claim as "the window is 0" and must never overwrite a window
+    /// another source already resolved.
+    ///
+    /// It did. `/health` seeds the real `context_window` at boot, and a later
+    /// `context_pressure` event whose `max_tokens` the backend could not fill in
+    /// called straight through to `self.context_max = 0`. The renderer's
+    /// unknown-window branch then took over mid-session, so ONE session showed
+    /// `░░░░░░░░ 0% ctx` in one frame and `~80.8k ctx` in the next — the same
+    /// fact, stated two incompatible ways, because a known denominator had been
+    /// regressed to unknown. Forgetting a fact is not an update.
     pub fn set_context(&mut self, utilization: f64, estimated: u64, max: u64) {
-        self.context_utilization = utilization.clamp(0.0, 1.0);
         self.context_estimated = estimated;
-        self.context_max = max;
+        if max > 0 {
+            self.context_max = max;
+        }
+        // With a window known (from this call or an earlier one), a zero ratio
+        // reported alongside real tokens is a gap in the event, not a
+        // measurement. Derive it rather than render a confident "0%".
+        let utilization = if utilization <= 0.0 && self.context_max > 0 && estimated > 0 {
+            estimated as f64 / self.context_max as f64
+        } else {
+            utilization
+        };
+        self.context_utilization = utilization.clamp(0.0, 1.0);
     }
 
     /// Self-heal the context meter from the real last-request size.
@@ -2014,6 +2035,50 @@ mod status_bar_tests {
         assert_eq!(pending_hint(1499), "+~1k"); // rounds down
         assert_eq!(pending_hint(1500), "+~2k"); // rounds up
         assert_eq!(pending_hint(12_000), "+~12k");
+    }
+
+    /// **The same session may not state the context two incompatible ways.**
+    ///
+    /// The reported screen: `░░░░░░░░ 0% ctx` in one frame and `~80.8k ctx` in
+    /// the next, after nothing but a greeting. Both are this bar; the second is
+    /// its unknown-window branch, and it took over mid-session because
+    /// `set_context` wrote `max_tokens` through unconditionally. `/health` had
+    /// already resolved the real window; a later `context_pressure` event whose
+    /// `max_tokens` the backend could not fill in then erased it.
+    ///
+    /// `max == 0` from any source means "I could not resolve it", not "it is
+    /// zero", and it may not overwrite a window somebody else did resolve.
+    #[test]
+    fn an_unresolved_window_never_erases_one_already_known() {
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        // `/health` seeds the real window at boot.
+        sb.set_context(0.0, 0, 200_000);
+        // A later context_pressure arrives with tokens but no window.
+        sb.set_context(0.0, 80_800, 0);
+        let text = render_sb(&sb);
+        assert!(
+            text.contains("% ctx"),
+            "the window was known; the meter must keep stating a percentage: {text}"
+        );
+        assert!(
+            !text.contains("~80.8k ctx"),
+            "the unknown-window readout took over a session with a known window: {text}"
+        );
+        // 80.8k of 200k, derived rather than left at the reported zero.
+        assert!(text.contains("40% ctx"), "expected a real percent, got: {text}");
+    }
+
+    /// A window that was never known stays unknown — the fix above must not
+    /// invent one.
+    #[test]
+    fn a_window_that_was_never_resolved_still_renders_the_token_count() {
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        sb.set_context(0.0, 80_800, 0);
+        let text = render_sb(&sb);
+        assert!(text.contains("~80.8k ctx"), "got: {text}");
+        assert!(!text.contains("% ctx"), "no fabricated denominator: {text}");
     }
 
     #[test]

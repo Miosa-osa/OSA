@@ -63,7 +63,9 @@ defmodule OptimalSystemAgent.Security.MCPToolKeyCollisionTest do
     test "every sanitized name is a valid, unambiguous server segment" do
       for raw <- ["a_-b", "a__b", "My Server!!", "x---y", "a.b.c", "srv"] do
         sanitized = Config.sanitize_name(raw)
-        assert ToolBridge.valid_server_segment?(sanitized), "#{inspect(raw)} → #{inspect(sanitized)}"
+
+        assert ToolBridge.valid_server_segment?(sanitized),
+               "#{inspect(raw)} → #{inspect(sanitized)}"
       end
     end
   end

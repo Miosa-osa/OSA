@@ -6,6 +6,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   """
   require Logger
   alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
 
   defp config_dir,
     do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
@@ -94,25 +95,18 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   def update_crons(state, update_fn) do
     path = crons_path()
 
-    current_jobs =
-      case File.read(path) do
-        {:ok, raw} ->
-          case Jason.decode(raw) do
-            {:ok, %{"jobs" => jobs}} -> jobs
-            _ -> state.cron_jobs
-          end
-
-        _ ->
-          state.cron_jobs
-      end
-
-    updated_jobs = update_fn.(current_jobs)
-    json = Jason.encode!(%{"jobs" => updated_jobs}, pretty: true)
-
-    with :ok <- AtomicFile.write(path, json) do
+    # A corrupt CRONS.json must NOT degrade to "no jobs". The old fallback was
+    # `state.cron_jobs`, which is `[]` whenever boot-load hit a parse error
+    # (load_crons/1 leaves state unchanged), so adding one job rewrote the file
+    # with only that job and silently deleted every other cron the user had.
+    with {:ok, current_jobs} <- JsonStore.read_list_for_write(path, "jobs"),
+         updated_jobs = update_fn.(current_jobs),
+         json = Jason.encode!(%{"jobs" => updated_jobs}, pretty: true),
+         :ok <- AtomicFile.write(path, json) do
       state = load_crons(%{state | cron_jobs: []})
       {:ok, state}
     else
+      {:error, :corrupt} -> {:error, JsonStore.corrupt_message("cron jobs", path)}
       {:error, reason} -> {:error, "Failed to write CRONS.json: #{inspect(reason)}"}
     end
   rescue
@@ -126,25 +120,15 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   def update_triggers(state, update_fn) do
     path = triggers_path()
 
-    current_triggers =
-      case File.read(path) do
-        {:ok, raw} ->
-          case Jason.decode(raw) do
-            {:ok, %{"triggers" => triggers}} -> triggers
-            _ -> state.triggers_raw
-          end
-
-        _ ->
-          state.triggers_raw
-      end
-
-    updated_triggers = update_fn.(current_triggers)
-    json = Jason.encode!(%{"triggers" => updated_triggers}, pretty: true)
-
-    with :ok <- AtomicFile.write(path, json) do
+    # Same wipe as update_crons/2 — see the note there.
+    with {:ok, current_triggers} <- JsonStore.read_list_for_write(path, "triggers"),
+         updated_triggers = update_fn.(current_triggers),
+         json = Jason.encode!(%{"triggers" => updated_triggers}, pretty: true),
+         :ok <- AtomicFile.write(path, json) do
       state = load_triggers(%{state | trigger_handlers: %{}, triggers_raw: []})
       {:ok, state}
     else
+      {:error, :corrupt} -> {:error, JsonStore.corrupt_message("triggers", path)}
       {:error, reason} -> {:error, "Failed to write TRIGGERS.json: #{inspect(reason)}"}
     end
   rescue

@@ -47,6 +47,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
 
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Agent.SessionPersistence.RecordLock
   alias OptimalSystemAgent.System.AtomicFile
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
@@ -114,7 +115,14 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
       with :ok <- ensure_file(session_id) do
         line = format_bullet(trimmed)
 
-        case File.write(path(session_id), line, [:append]) do
+        # Under the SAME lock `set_goal/2` takes. `set_goal/2` is a
+        # read-modify-write of the whole file; an append landing between its read
+        # and its write was overwritten out of existence, and this is the file
+        # the moduledoc calls the coherence anchor recovered after compaction.
+        result =
+          with_ledger_lock(session_id, fn -> File.write(path(session_id), line, [:append]) end)
+
+        case result do
           :ok ->
             emit(session_id, :entry_appended, %{entry: trimmed})
             Logger.debug("[progress_ledger] appended entry for #{session_id}")
@@ -143,16 +151,14 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   @spec set_goal(String.t(), String.t()) :: result()
   def set_goal(session_id, goal)
       when is_binary(session_id) and is_binary(goal) do
+    body = normalize_goal(goal)
+
     with :ok <- ensure_file(session_id),
-         {:ok, contents} <- read(session_id) do
-      body = normalize_goal(goal)
-
-      updated =
-        Regex.replace(@goal_section, contents, fn _full, head, _old, tail ->
-          "#{head}#{body}#{tail}"
-        end)
-
-      case atomic_write(path(session_id), updated) do
+         # The whole read-modify-write runs under the ledger lock, so a
+         # concurrent `append_entry/2` cannot be read-before / written-after and
+         # silently erased.
+         written = with_ledger_lock(session_id, fn -> rewrite_goal(session_id, body) end) do
+      case written do
         :ok ->
           # Capture the durable, immutable Task Brief once, at the moment the run's
           # first real goal is set (audit gap M1). Every goal-set path funnels
@@ -305,6 +311,55 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   # a torn final line is tolerable for an append-only log and preserves replay.
   @spec atomic_write(String.t(), iodata()) :: :ok | {:error, term()}
   defp atomic_write(path, contents), do: AtomicFile.write(path, contents)
+
+  # Run `fun` under the ledger's exclusive file lock.
+  #
+  # `atomic_write/2` makes the WRITE atomic, not the read-modify-write around it.
+  # Without this, `set_goal/2` (read → regex-replace → write) raced every
+  # `append_entry/2` (raw append) and any entry landing in the window was
+  # overwritten out of existence. Real concurrency exists today:
+  # `Agent.Memory.Coordinator`, the `progress_note` tool handler, and
+  # `Loop.GoalTracker` all write this file.
+  #
+  # RecordLock is the cross-OS-PROCESS lock (O_EXCL sidecar) — the right level,
+  # because every `osa` invocation is its own BEAM. `{:contended, result}` means
+  # the lock could not be taken within its bounded retry budget; the body still
+  # ran, which is strictly no worse than the old always-unlocked behavior.
+  defp with_ledger_lock(session_id, fun) do
+    case RecordLock.with_lock(path(session_id), fun) do
+      {:ok, result} -> result
+      {:contended, result} -> result
+    end
+  end
+
+  # Replace the `## Goal` body in place. Returns `{:error, :goal_section_missing}`
+  # when the scaffold has drifted and the section anchor no longer matches —
+  # `Regex.replace/3` returns the content UNCHANGED on zero matches, so the old
+  # code wrote the file back verbatim and still reported success, still emitted
+  # `:goal_set`, and still captured a founding Task Brief for a goal the ledger
+  # did not contain. Every later `set_goal/2` was then a silent no-op against a
+  # frozen brief.
+  defp rewrite_goal(session_id, body) do
+    file = path(session_id)
+
+    with {:ok, contents} <- File.read(file) do
+      if Regex.match?(@goal_section, contents) do
+        updated =
+          Regex.replace(@goal_section, contents, fn _full, head, _old, tail ->
+            "#{head}#{body}#{tail}"
+          end)
+
+        atomic_write(file, updated)
+      else
+        Logger.warning(
+          "[progress_ledger] goal section missing/drifted in #{file} — refusing to " <>
+            "report a goal that was never written"
+        )
+
+        {:error, :goal_section_missing}
+      end
+    end
+  end
 
   # Immutable Task Brief capture (audit gap M1). Never raises into set_goal.
   defp maybe_capture_brief(session_id, goal) do

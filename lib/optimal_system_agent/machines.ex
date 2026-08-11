@@ -90,7 +90,12 @@ defmodule OptimalSystemAgent.Machines do
   end
 
   defp determine_active_machines(config) do
-    machines = Map.get(config, "machines", %{})
+    # `|| %{}` and not a `Map.get/3` default: the default only fires when the
+    # key is ABSENT. A config file that spells the key with an explicit null
+    # ("machines": null — what an editor leaves behind when a block is cleared)
+    # hands back nil, and nil reaching Enum.filter/2 raises Protocol.Undefined
+    # instead of behaving like "no machines configured".
+    machines = Map.get(config, "machines") || %{}
 
     enabled =
       machines

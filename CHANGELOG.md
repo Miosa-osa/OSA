@@ -9,6 +9,141 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.77] — displays as `v1.0.077`
+
+### Fixed — the TUI kept losing its layout
+
+Reported as "it just doesn't have a structure, it loses its structure", with the
+model's reply landing in the middle of the screen. One cause, four symptoms.
+
+`Viewport::Inline` has no position of its own — ratatui anchors it wherever the
+cursor is — and **two paths decided that, disagreeing**. The commit path leaves
+the region immediately below what it just committed (flow-anchored). The
+height-change rebuild shipped in 1.0.75 homed it to `rows - inline_h`
+(bottom-anchored). The region changes height several times per *turn* — spinner
+appears, preview quantizes, composer grows, turn ends — so it teleported between
+the two on every turn, with no resize involved.
+
+- Growing, `rows - h` sits **above** the region, so chrome was rebuilt on top of
+  rows holding committed conversation. `insert_before` renders `old.diff(&new)`
+  against an empty buffer, so blank cells are never emitted and the text
+  underneath bleeds through — the banner interleaved with the status bar, two
+  composers, two status rows, replies out of order.
+- Shrinking, `rows - h` sits **below**, and the vacated rows became a blank band
+  the next commit scrolled into scrollback.
+
+The 1.0.75 homing was right for a resize — the screen reflowed, so the old top
+genuinely is unknowable — and wrong everywhere else. It is now used only for a
+real resize; a plain height change keeps its top, and a grow that would overflow
+scrolls the screen by exactly the overflow so rows are **made, not taken**.
+
+Second, independent cause of the dead space: `stream_preview_rows` put its
+quantization lattice at `ROWS + k*STEP`, so the first token of a one-line reply
+reserved 10 rows and drew one. The preview bottom-anchors its tail, so the
+undrawn rows landed between the prompt and the spinner.
+
+Measured on a 100×30 PTY: 5 dead rows before, 0 after — and before the fix a
+second turn also truncated the first reply from 9 rows to 3.
+
+The layout suite passed throughout, because `test_resize.py` asserted the
+*consequence* (chrome at the bottom) rather than the *invariant* (chrome sits
+against the transcript) — the same mistake the product made. Seven new
+invariants now fail on the pre-fix code.
+
+### Fixed — two ways to destroy the user's data, and one to run their code
+
+- **`skill_manager` could recursively delete `~/.osa`.** `name` is a bare
+  LLM-supplied string, `Path.join` does not normalize `..`, and the kebab-case
+  regex guarded only `create` — so `delete` with `name: ".."` reached
+  `File.rm_rf!` on the parent: sessions, transcripts, memory, credentials.
+  It declared `safety: :write_safe`, i.e. auto-approvable. Now regex **plus** a
+  containment proof on the expanded path, and `:write_destructive`. The
+  regression test deletes the parent directory on the old code.
+- **Editing a file in any cloned repo ran that repo's code.** `verify/post_edit`
+  `Code.eval_file`'d the first `.formatter.exs` found walking up 40 parents, and
+  it runs on every `file_edit`/`file_write`. A `rescue _ -> []` hid it. Options
+  are now read off the AST via `Code.string_to_quoted` + `Macro.quoted_literal?`
+  — computed values are dropped rather than executed. The regression test writes
+  a canary file on the old code.
+- **A failed read fed a whole-file rewrite in seven stores** — cron jobs, MCP
+  servers, permission rules and four copies of `config.json`. One BOM or one
+  truncated write, then one addition, and the rest was gone. The provider route
+  destroyed every other provider's API key and still returned
+  `200 {"status":"connected"}`; it now returns 500. The contract OSA already had
+  in two places is extracted to `system/json_store.ex`.
+- **API keys were written world-readable.** `osa.chat` wrote `~/.osa/.env` at
+  0644 and rebuilt it from three env lookups, destroying any other key. Two more
+  write-then-chmod TOCTOU holes were found in `onboarding.ex`.
+
+### Fixed — secrets reaching disk, screen and subprocesses
+
+- **Every subprocess inherited every API key.** `shell_execute` opened its port
+  with no `:env`, so any model-authored command could read `ANTHROPIC_API_KEY`
+  and friends. A shared scrubber now uses Erlang's overlay semantics, so `PATH`,
+  `HOME`, `LANG` and the user's own vars survive and builds still work. Proven
+  by a canary the child could previously read.
+- **Typed text — passwords — was stored and displayed in clear.** Computer-use
+  `type`/`fill` text reached the terminal, the render map and the trajectory
+  file. Masked structurally by argument name, so shape is kept and the value
+  never leaves the executor.
+- **Redaction failed open.** On a regex failure it returned the *unredacted*
+  original. Worse than reported: `Regex.replace/3` does not raise on invalid
+  UTF-8 under OTP 28 — it silently matches nothing, so a secret in a binary with
+  one stray byte was written wholly unredacted with no exception. Now fails
+  closed, with the text coerced first so the scrubber can see it.
+- **Reasoning text bypassed redaction** on its way to the bus and PubSub. The
+  redactor also had to be narrowed: `token` is a substring of `max_tokens`, so
+  ordinary prose came back as `max_tokens = [REDACTED]`.
+- **The VNC path connected to a hardcoded `127.0.0.1:5900`** while its own
+  server bound an auto-assigned port — so it could attach to a real
+  desktop-sharing server for the user's session and forward remote input into
+  it. The real port is threaded through, and the server no longer runs
+  unauthenticated, `-shared` and `-forever`.
+- **The Windows capture helper was resolved from a user-writable path first**,
+  with no signature check. Bundled binary now wins; an override needs a pinned
+  SHA-256.
+
+### Fixed — surfaces that reported work that did not happen
+
+- **A failed fleet node was merged into the user's branch.** The await status
+  was discarded and `gate: :pass` hardcoded, so the finalizer's existing skip
+  never fired and a crashed node's partial worktree was committed.
+- **The verification loop could never pass.** The result was sent as
+  `{pid, ...}` and matched as `{ref, ...}`, so it never arrived; the task's
+  normal exit then hit the crash clause. `succeed/1` was unreachable and every
+  run escalated. There was no test file.
+- **A mid-stream failure re-emitted the whole answer.** The per-hop fallback had
+  no `output_observed?` check, so a stream dying at 80% rendered 180%, and the
+  duplicate was persisted as the assistant turn.
+- **A structured provider error crashed the code meant to explain it.** Four
+  providers interpolated `error.message` with no `is_binary` guard; the raise
+  was swallowed, destroying both the HTTP status and the provider's explanation.
+- Terminal run states no longer demote, counters no longer decrease, and tree
+  spend is read from an unpruned edge ledger instead of an evictable cache.
+- Task-queue leases carry epochs, so a slow worker can no longer overwrite the
+  result of the worker that replaced it, and reaped tasks count an attempt.
+
+### Changed
+
+Writes into `.git/` internals are now **refused** rather than prompted, in every
+permission mode. Prompting was the one answer that could not hold in overdrive,
+whose whole purpose is not stopping to ask — and `core.hooksPath` is code
+execution on the user's next git command. Two tests asserted the old contract
+and were updated to the stronger one.
+
+### Known gaps
+
+`anthropic.ex` still lacks the sync→stream recovery its sibling now has. The
+Windows `VncServer.cs` still offers security type None (confirmed, not fixed —
+no Windows build here). `desktop_ready` now carries a VNC password the control
+plane must read, or desktop sessions will fail the handshake; the auth is
+disableable via `config :desktop_vnc_auth, false` if that lands first. Roughly
+175 other `Port.open`/`System.cmd` sites still inherit the environment.
+`UsageTest` and `LiveKeyResolutionTest` share a boot snapshot and are
+order-dependent; both pass in isolation.
+
+---
+
 ## [1.0.76] — displays as `v1.0.076`
 
 ### Fixed — surfaces that reported things which were not true

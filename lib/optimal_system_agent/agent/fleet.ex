@@ -377,11 +377,11 @@ defmodule OptimalSystemAgent.Agent.Fleet do
         # Spawn only STARTS the node — block until it reaches a terminal state so
         # the result reflects completion. Non-isolated nodes edit the shared tree
         # directly, so there is no per-node diff to capture (files stay []).
-        _ = safe_await(ctx, node_id)
-        spawn_result(ok, node_id, nil, [])
+        status = safe_await(ctx, node_id)
+        spawn_result(ok, node_id, nil, [], status)
 
       other ->
-        spawn_result(other, hint, nil, [])
+        spawn_result(other, hint, nil, [], :unknown)
     end
   end
 
@@ -391,13 +391,13 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   # ref + the node's now-materialized changed files. A failed spawn keeps the
   # branch as worktree_ref with no diff.
   defp await_and_finalize_isolated({:ok, node_id} = ok, ctx, _hint, path, branch) do
-    _ = safe_await(ctx, node_id)
+    status = safe_await(ctx, node_id)
     _ = safe_attach_snapshot(node_id, branch)
-    spawn_result(ok, node_id, branch, safe_diff(ctx, path))
+    spawn_result(ok, node_id, branch, safe_diff(ctx, path), status)
   end
 
   defp await_and_finalize_isolated(other, _ctx, hint, _path, branch) do
-    spawn_result(other, hint, branch, [])
+    spawn_result(other, hint, branch, [], :unknown)
   end
 
   # Block on a node's terminal state via the (injectable) await seam; degrade to
@@ -419,14 +419,28 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     _, _ -> []
   end
 
-  # Turn the spawn_fun return into a structured result map.
-  defp spawn_result({:ok, node_id}, _hint, worktree_ref, files),
+  # Terminal await statuses that mean "this node did NOT finish its work".
+  # `:unknown` is deliberately absent: it is what the default await returns for a
+  # node that was never registered (fake test spawn / injected seam), and it
+  # carries no evidence of failure.
+  @incomplete_await [:failed, :cancelled, :timeout]
+
+  # Turn the spawn_fun return (plus the node's terminal await status) into a
+  # structured result map. A spawn that succeeded but whose node ended in a
+  # NON-completed state must NOT be reported as a pass — the finalizer merges
+  # every non-errored node's worktree diff into the user's branch, so a crashed
+  # node's partial tree would otherwise be committed as if it were good work.
+  defp spawn_result({:ok, node_id}, _hint, worktree_ref, _files, status)
+       when status in @incomplete_await,
+       do: fail_result(node_id, {:node_incomplete, status}, worktree_ref)
+
+  defp spawn_result({:ok, node_id}, _hint, worktree_ref, files, _status),
     do: success_result(node_id, worktree_ref, files)
 
-  defp spawn_result({:error, reason}, hint, worktree_ref, _files),
+  defp spawn_result({:error, reason}, hint, worktree_ref, _files, _status),
     do: fail_result(hint, reason, worktree_ref)
 
-  defp spawn_result(_other, hint, worktree_ref, _files),
+  defp spawn_result(_other, hint, worktree_ref, _files, _status),
     do: fail_result(hint, :spawn_failed, worktree_ref)
 
   # ── structured result builders (O2 — FROZEN CONTRACT) ──────────────────

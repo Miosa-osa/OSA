@@ -278,6 +278,16 @@ defmodule OptimalSystemAgent.Application do
     # Team coordination tables (shared task list, messaging, scratchpad)
     OptimalSystemAgent.Team.init_tables()
 
+    # Shared per-team metadata/roster tables. Same reason as every other
+    # init_* in this phase: a named ETS table is owned by the process that
+    # created it and dies with that process. Left to lazy creation in
+    # `ensure_tables/1`, the FIRST team to be created owned :osa_team_meta and
+    # :osa_team_agents for the whole node — so dissolving that team, which
+    # stops its Manager, took every OTHER live team's metadata and roster with
+    # it. Creating them here from the long-lived application process removes
+    # the ownership race entirely.
+    OptimalSystemAgent.Teams.TableRegistry.init_tables()
+
     # Context Mesh registry table
     OptimalSystemAgent.ContextMesh.Registry.init_table()
 
@@ -583,36 +593,20 @@ defmodule OptimalSystemAgent.Application do
 
   def resolve_effort(_), do: nil
 
+  # Shared with `Onboarding` and `CLI.Setup` via `Config.Dotenv`, which is
+  # what makes a BOM-prefixed `.env` (Windows-authored — OSA ships a Windows
+  # build) load the key as `ANTHROPIC_API_KEY` instead of as an invisibly
+  # different string that nothing ever reads. This loop used `String.trim/1`,
+  # and U+FEFF is category Cf, not whitespace.
   defp load_dotenv do
     env_file = Path.expand("~/.osa/.env")
 
-    if File.exists?(env_file) do
-      env_file
-      |> File.read!()
-      |> String.split("\n")
-      |> Enum.each(fn line ->
-        line = String.trim(line)
-
-        cond do
-          line == "" ->
-            :ok
-
-          String.starts_with?(line, "#") ->
-            :ok
-
-          String.contains?(line, "=") ->
-            [key | rest] = String.split(line, "=", parts: 2)
-            value = Enum.join(rest, "=") |> String.trim() |> String.trim("\"") |> String.trim("'")
-            # Only set if not already set (env vars take precedence)
-            if System.get_env(String.trim(key)) == nil do
-              System.put_env(String.trim(key), value)
-            end
-
-          true ->
-            :ok
-        end
-      end)
-    end
+    env_file
+    |> OptimalSystemAgent.Config.Dotenv.parse_file()
+    |> Enum.each(fn {key, value} ->
+      # Only set if not already set (env vars take precedence).
+      if System.get_env(key) == nil, do: System.put_env(key, value)
+    end)
   rescue
     _ -> :ok
   end

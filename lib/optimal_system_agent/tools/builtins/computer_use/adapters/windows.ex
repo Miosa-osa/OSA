@@ -14,6 +14,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Windows do
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.AppAllowlist
 
+  # A single desktop action must not hang the adapter forever.
+  @ps_timeout_ms 30_000
+
   @sendkeys_keys %{
     "enter" => "{ENTER}",
     "return" => "{ENTER}",
@@ -247,36 +250,93 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Windows do
   defp powershell, do: System.find_executable("pwsh") || System.find_executable("powershell")
 
   defp ps(script, label) do
-    case powershell() do
-      nil ->
+    case run_powershell(script, merge_stderr: true) do
+      {:ok, _out} ->
+        :ok
+
+      {:error, :no_powershell} ->
         {:error, "#{label} requires PowerShell"}
 
-      exe ->
-        case System.cmd(exe, ["-NoProfile", "-NonInteractive", "-Command", script],
-               stderr_to_stdout: true
-             ) do
-          {_, 0} -> :ok
-          {out, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(out)}"}
-        end
+      {:error, {:exit, code, out}} ->
+        {:error, "#{label} failed (exit #{code}): #{String.trim(out)}"}
+
+      {:error, reason} ->
+        {:error, "#{label} failed: #{inspect(reason)}"}
     end
-  rescue
-    e in ErlangError -> {:error, "#{label} failed: #{inspect(e)}"}
   end
 
   defp ps_out(script) do
-    case powershell() do
-      nil ->
+    case run_powershell(script, merge_stderr: false) do
+      {:ok, out} ->
+        {:ok, out}
+
+      {:error, :no_powershell} ->
         {:error, "PowerShell not found"}
 
-      exe ->
-        case System.cmd(exe, ["-NoProfile", "-NonInteractive", "-Command", script],
-               stderr_to_stdout: false
-             ) do
-          {out, 0} -> {:ok, out}
-          {out, code} -> {:error, "PowerShell read failed (exit #{code}): #{String.trim(out)}"}
-        end
+      {:error, {:exit, code, out}} ->
+        {:error, "PowerShell read failed (exit #{code}): #{String.trim(out)}"}
+
+      {:error, reason} ->
+        {:error, "PowerShell read failed: #{inspect(reason)}"}
     end
+  end
+
+  defp run_powershell(script, opts) do
+    case powershell() do
+      nil -> {:error, :no_powershell}
+      exe -> run_hidden(exe, ["-NoProfile", "-NonInteractive", "-Command", script], opts)
+    end
+  end
+
+  @doc false
+  # `System.cmd/3` gives Erlang no way to suppress the console window, so every
+  # keystroke, key combo and clipboard write flashed a PowerShell console and
+  # STOLE FOCUS — which breaks SendKeys, because the keystrokes then land in
+  # whatever window grabbed focus instead of the intended target. `Port.open/2`
+  # accepts `:hide`, which maps to CREATE_NO_WINDOW on Windows and is a no-op
+  # elsewhere. Exposed so the option set can be asserted on.
+  @spec port_opts(keyword()) :: list()
+  def port_opts(opts \\ []) do
+    base = [:binary, :exit_status, :hide]
+    if Keyword.get(opts, :merge_stderr, true), do: base ++ [:stderr_to_stdout], else: base
+  end
+
+  @doc false
+  # Run `exe` with `args` in a hidden console, collecting output until exit.
+  # Returns {:ok, output} | {:error, {:exit, code, output}} | {:error, reason}.
+  @spec run_hidden(String.t(), [String.t()], keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def run_hidden(exe, args, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, @ps_timeout_ms)
+    port = Port.open({:spawn_executable, exe}, port_opts(opts) ++ [args: args])
+    collect_output(port, "", System.monotonic_time(:millisecond) + timeout)
   rescue
-    e in ErlangError -> {:error, "PowerShell read failed: #{inspect(e)}"}
+    e -> {:error, {:spawn_failed, Exception.message(e)}}
+  end
+
+  defp collect_output(port, acc, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      close_port(port)
+      {:error, {:timeout, acc}}
+    else
+      receive do
+        {^port, {:data, data}} -> collect_output(port, acc <> data, deadline)
+        {^port, {:exit_status, 0}} -> {:ok, acc}
+        {^port, {:exit_status, code}} -> {:error, {:exit, code, acc}}
+      after
+        remaining ->
+          close_port(port)
+          {:error, {:timeout, acc}}
+      end
+    end
+  end
+
+  defp close_port(port) do
+    Port.close(port)
+    :ok
+  catch
+    _, _ -> :ok
   end
 end

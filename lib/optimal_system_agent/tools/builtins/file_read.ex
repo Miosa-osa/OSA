@@ -1,29 +1,16 @@
 defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
+  @moduledoc """
+  Legacy single-module `file_read`.
+
+  NOTE: this module is **not** the registered `file_read` tool — the registry
+  maps `"file_read"` to `FileRead.Tool` (the `file_read/` directory split).
+  It is kept only so nothing that still references it breaks. Its read guard
+  is routed through the shared `Agent.Safety.PathPolicy` rather than a seventh
+  private copy of the blocklist.
+  """
   @behaviour OptimalSystemAgent.Tools.Behaviour
 
-  @default_allowed_paths ["~", "/tmp"]
-
-  @sensitive_paths [
-    ".ssh/id_rsa",
-    ".ssh/id_ed25519",
-    ".ssh/id_ecdsa",
-    ".ssh/id_dsa",
-    ".gnupg/",
-    ".aws/credentials",
-    ".env",
-    # Subscription bearer tokens for the operator's paid accounts. An agent
-    # that can read its own credential store is an exfiltration primitive:
-    # one prompt-injected instruction in a file it was asked to summarise is
-    # enough to get the token into a tool call. Denied by name, alongside the
-    # other credential stores above.
-    ".osa/subscriptions.json",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/master.passwd",
-    ".netrc",
-    ".npmrc",
-    ".pypirc"
-  ]
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
 
   @impl true
   def safety, do: :read_only
@@ -160,38 +147,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
   defp image_media_type(".tiff"), do: "image/tiff"
   defp image_media_type(_), do: "application/octet-stream"
 
-  defp allowed_paths do
-    configured =
-      Application.get_env(:optimal_system_agent, :allowed_read_paths, @default_allowed_paths)
-
-    Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
-
   # Resolve symlinks before security checks to prevent symlink traversal attacks.
   # EVERY component is resolved, not just the last one — see `PathCanon`.
-  defp resolve_real_path(path),
-    do: OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
+  defp resolve_real_path(path), do: PathPolicy.canonical(path)
 
-  defp path_allowed?(expanded_path) do
-    sensitive =
-      Enum.any?(@sensitive_paths, fn pattern ->
-        String.contains?(expanded_path, pattern)
-      end)
-
-    if sensitive do
-      false
-    else
-      # Normalize path with trailing slash to prevent prefix collisions
-      # e.g. /tmp-evil/ must NOT match allowed path /tmp/
-      check_path =
-        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-      Enum.any?(allowed_paths(), fn allowed ->
-        String.starts_with?(check_path, allowed)
-      end)
-    end
+  defp path_allowed?(canonical_path) do
+    not PathPolicy.sensitive?(canonical_path) and
+      PathPolicy.within_roots?(canonical_path, PathPolicy.read_roots())
   end
 end

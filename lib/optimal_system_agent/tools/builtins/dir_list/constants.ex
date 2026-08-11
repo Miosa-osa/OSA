@@ -12,22 +12,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Constants do
   @default_allowed_paths ["~", "/tmp"]
   def default_allowed_paths, do: @default_allowed_paths
 
-  @sensitive_paths [
-    ".ssh/id_rsa",
-    ".ssh/id_ed25519",
-    ".ssh/id_ecdsa",
-    ".ssh/id_dsa",
-    ".gnupg/",
-    ".aws/credentials",
-    ".env",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/master.passwd",
-    ".netrc",
-    ".npmrc",
-    ".pypirc"
-  ]
-  def sensitive_paths, do: @sensitive_paths
+  # Single shared policy — see `Agent.Safety.PathPolicy`. This accessor is a
+  # description for prompts/tests; decisions go through `PathPolicy.sensitive?/1`.
+  defdelegate sensitive_paths, to: OptimalSystemAgent.Agent.Safety.PathPolicy,
+    as: :sensitive_patterns
 
   @max_suggestions 3
   def max_suggestions, do: @max_suggestions

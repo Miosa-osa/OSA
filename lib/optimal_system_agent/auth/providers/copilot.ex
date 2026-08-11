@@ -51,6 +51,7 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
   require Logger
 
   alias OptimalSystemAgent.Auth.DeviceFlow
+  alias OptimalSystemAgent.Auth.RefreshFailures
   alias OptimalSystemAgent.Auth.SubscriptionStore
   alias OptimalSystemAgent.Utils.Browser
 
@@ -138,18 +139,66 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
     on_tick = Keyword.get(opts, :on_tick, fn -> :continue end)
     cfg = config()
 
-    if is_nil(cfg.client_id) do
-      {:error, :not_configured}
-    else
-      with {:ok, session} <- DeviceFlow.start(cfg),
-           :ok <- present(session, io, opts),
-           {:ok, token_body} <- DeviceFlow.poll(cfg, session, on_tick),
-           {:ok, entry} <- persist(token_body) do
+    cond do
+      is_nil(cfg.client_id) ->
+        {:error, :not_configured}
+
+      # NOTHING IN OSA CAN SPEND THIS TOKEN. See `no_transport?/0`.
+      #
+      # This flow completed, wrote a real long-lived GitHub bearer token to
+      # `~/.osa/subscriptions.json`, and returned "✓ Connected" — and then no
+      # transport ever read it, because Copilot inference is not
+      # OpenAI-compatible and OSA deliberately does not use the undocumented
+      # `copilot_internal/v2/token` route (see the moduledoc). The user got a
+      # credential at rest and zero capability.
+      #
+      # The rule `Auth.Providers.MiniMax` states for itself applies here too:
+      # nothing is offered until it is completely wired, because a provider a
+      # user can select but never send a request through fails several
+      # screens after the mistake. MiniMax is honest about that by staying
+      # out of the catalog; this one claimed to work.
+      #
+      # `status/0` and `logout/0` stay reachable so anyone who already ran
+      # this can see and remove what it left behind.
+      no_transport?() ->
         io.("")
-        io.("  ✓ Connected to #{@display_name}#{account_suffix(entry)}")
-        {:ok, entry}
-      end
+        io.("  #{@display_name} account sign-in is not available.")
+        io.("")
+        io.("  OSA has no transport that can send inference through a GitHub")
+        io.("  bearer token, so connecting one would store a credential and")
+        io.("  give you nothing. Use the `copilot_cli` provider instead — it")
+        io.("  runs against your existing `copilot login` session.")
+
+        {:error, :no_transport}
+
+      true ->
+        with {:ok, session} <- DeviceFlow.start(cfg),
+             :ok <- present(session, io, opts),
+             {:ok, token_body} <- DeviceFlow.poll(cfg, session, on_tick),
+             {:ok, entry} <- persist(token_body) do
+          io.("")
+          io.("  ✓ Connected to #{@display_name}#{account_suffix(entry)}")
+          {:ok, entry}
+        end
     end
+  end
+
+  @doc """
+  True when no transport in this build can spend a stored Copilot token.
+
+  Derived from the actual wiring rather than hardcoded, so it cannot go stale
+  in either direction: the moment `:copilot` is added to
+  `Providers.OpenAICompatProvider`'s account-mode table, this answers `false`
+  and sign-in turns itself back on with no change here.
+
+  Today it is `true`, because Copilot inference is not OpenAI-compatible (so
+  this provider cannot join `xai` and `qwen` in that table as-is) and OSA
+  deliberately does not use the undocumented `copilot_internal/v2/token`
+  exchange with a borrowed editor client id — see the moduledoc.
+  """
+  @spec no_transport?() :: boolean()
+  def no_transport? do
+    :copilot not in OptimalSystemAgent.Providers.OpenAICompatProvider.account_mode_providers()
   end
 
   defp present(session, io, opts) do
@@ -382,13 +431,25 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
 
     case result do
       {:ok, entry} ->
+        # A working token clears the strikes. Two rejections must be
+        # CONSECUTIVE — a rejection now and another next Tuesday, with a
+        # hundred successful turns between them, is not evidence of anything.
+        RefreshFailures.reset(@provider_id)
         {:ok, entry["access_token"]}
 
       {:error, :refresh_token_invalid} = err ->
-        # Permanent. Mark disconnected so this is not retried on every single
-        # message for the rest of the session.
-        Logger.warning("[Auth] #{@display_name} sign-in is no longer valid; signing out locally.")
-        _ = SubscriptionStore.delete(@provider_id)
+        # Deleting a credential is irreversible from the user's side — they
+        # have to run the whole sign-in again — so it takes TWO consecutive
+        # rejections, not one. Providers return `invalid_grant` for transient
+        # reasons, and a single bad minute signing someone out
+        # mid-conversation is worse than one extra failed turn. This used to
+        # delete on the FIRST rejection here while `OpenAICodex` required two;
+        # the rule now lives in one place so it cannot drift again.
+        _ =
+          RefreshFailures.handle_rejection(@provider_id, @display_name, fn ->
+            SubscriptionStore.delete(@provider_id)
+          end)
+
         err
 
       {:error, _} = err ->
@@ -401,6 +462,10 @@ defmodule OptimalSystemAgent.Auth.Providers.Copilot do
   @impl true
   @spec logout() :: :ok | {:error, term()}
   def logout do
+    # Clear the strike count too. Without this, signing out and back in
+    # within one OS process starts the new credential at strike one, and the
+    # next transient rejection deletes a sign-in that is seconds old.
+    RefreshFailures.reset(@provider_id)
     SubscriptionStore.delete(@provider_id)
   end
 end

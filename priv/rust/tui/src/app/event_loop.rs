@@ -9,6 +9,7 @@ use crossterm::{
 use ratatui::layout::{Constraint, Direction, Layout as RLayout};
 use ratatui::prelude::*;
 use ratatui::{TerminalOptions, Viewport};
+use std::io::Write as _;
 use std::time::Duration;
 use tokio::time;
 use tracing::info;
@@ -425,9 +426,24 @@ pub(crate) fn stream_preview_ceiling(term_rows: u16) -> u16 {
 /// together make mid-turn viewport churn impossible.
 pub(crate) fn stream_preview_rows(content_h: u16, high_water: u16, ceiling: u16) -> u16 {
     let ceiling = ceiling.max(STREAM_PREVIEW_ROWS);
-    let overflow = content_h.saturating_sub(STREAM_PREVIEW_ROWS);
-    let steps = overflow.div_ceil(STREAM_PREVIEW_STEP);
-    let want = STREAM_PREVIEW_ROWS.saturating_add(steps.saturating_mul(STREAM_PREVIEW_STEP));
+    // The lattice starts at ZERO, not at `STREAM_PREVIEW_ROWS`.
+    //
+    // A floor of 10 meant the very first token reserved ten rows and drew one.
+    // Because the region is bottom-anchored and `Chat::draw_live` bottom-anchors
+    // the tail inside its slot, those nine undrawn rows land between the user's
+    // committed prompt and the spinner — "my prompt, then most of a screen of
+    // blank rows, then `⠋ Signaling…` stranded near the bottom", which is the
+    // dead space as reported. At the ceiling (22 rows on a tall terminal) a
+    // one-line reply reserved 21 rows it never painted.
+    //
+    // Everything the floor was there for is a property of the LATTICE, not of
+    // where the lattice starts: growth still moves in whole `STREAM_PREVIEW_STEP`
+    // jumps, is still monotonic within a turn via `high_water`, and is still
+    // bounded by `ceiling` — so the number of mid-turn viewport rebuilds is
+    // unchanged (`ceiling / STEP`, four at most) and none of them is per-token.
+    // What changes is only that a reply reserves rows in proportion to the reply.
+    let steps = content_h.div_ceil(STREAM_PREVIEW_STEP);
+    let want = steps.saturating_mul(STREAM_PREVIEW_STEP);
     want.min(ceiling).max(high_water.min(ceiling))
 }
 
@@ -864,6 +880,46 @@ impl App {
                     term_handle.abort();
                     let _ = term_handle.await;
 
+                    // **Where the rebuilt region starts.** Two different
+                    // questions, and conflating them is the defect this release
+                    // is about.
+                    //
+                    // A real RESIZE reflowed the emulator's screen: the old top
+                    // is genuinely unknowable, so the only defensible anchor is
+                    // the bottom (`rows - h`). That is the v1.0.75 fix and it
+                    // stays.
+                    //
+                    // A pure HEIGHT change moved nothing. The transcript above
+                    // the region is exactly where it was, so the region's first
+                    // row must not move either — it may only be pushed UP, and
+                    // only by as much as a taller region needs to stay on the
+                    // screen. Homing this case to `rows - h` as well is what
+                    // teleported the live region between two contradictory
+                    // anchors:
+                    //
+                    //   * a turn STARTING grows the region, `rows - h` is above
+                    //     where it was, and the chrome is rebuilt on top of rows
+                    //     that hold committed conversation — the reply that came
+                    //     out truncated, and the response timestamped 11:27
+                    //     rendering below the prompt timestamped 11:28, because
+                    //     the next commit was emitted from an origin that had
+                    //     moved backwards over content;
+                    //   * a turn ENDING shrinks it, `rows - h` is below where it
+                    //     was, and the rows it vacates become a blank band that
+                    //     the next commit scrolls up into scrollback — the
+                    //     screenful of dead rows in the middle of the transcript.
+                    //
+                    // Neither happens if the top simply stays. `min` is the only
+                    // clamp: it never lets the region hang off the bottom, and on
+                    // a screen with room it is the identity.
+                    let old_top = last_inline_top
+                        .unwrap_or_else(|| size.rows.saturating_sub(cur_inline_h));
+                    let new_top = if terminal_resized {
+                        resize_clear_top_from_bottom(size.rows, desired_inline_h)
+                    } else {
+                        old_top.min(size.rows.saturating_sub(desired_inline_h))
+                    };
+
                     if terminal_resized {
                         // ACTUAL terminal resize. The emulator reflowed the whole
                         // screen, so the old chrome floated to an unknown row — and on
@@ -938,77 +994,68 @@ impl App {
                         } else {
                             let _ = clear_screen_for_resize(&mut std::io::stdout());
                         }
-                    } else if let Some(top) = last_inline_top {
-                        // Pure HEIGHT change (composer grew/shrank, a transient notice
-                        // appeared) — NOT a resize. The terminal did NOT reflow, so the
-                        // region's tracked top is still valid and the transcript above
-                        // it must be preserved. Clear ONLY from that row down. Wiping
-                        // the whole screen here (the earlier bug) repainted on every
-                        // notice / keystroke / scroll and stacked chrome. Clamp into
-                        // the current screen in case a shrink left the row past bottom.
+                    } else {
+                        // Pure HEIGHT change (the composer grew, the spinner came
+                        // up, a turn ended) — NOT a resize. Nothing on screen moved
+                        // by itself, so nothing above the region may move now.
+                        //
+                        // The one case that needs the screen to move is a region
+                        // that has grown past the bottom: `new_top` is then `old_top
+                        // - scroll`, and those `scroll` rows have to be MADE, not
+                        // taken. Scrolling the screen up by exactly that much flows
+                        // the oldest visible rows into scrollback — the same motion
+                        // a commit performs, which is why it reads as the transcript
+                        // moving rather than the chrome jumping — and leaves the
+                        // rows the region is about to occupy already vacated by the
+                        // old chrome. Growing with room below, and every shrink,
+                        // scroll by zero.
+                        //
+                        // `MoveTo(bottom)` + newlines is the scroll ratatui's own
+                        // `insert_before` performs (`Terminal::scroll_up` →
+                        // `Backend::append_lines`), so history receives the rows
+                        // through the one path every emulator agrees on. `ESC[S`
+                        // scrolls the screen WITHOUT depositing anything into
+                        // history on the VTE family — those rows would be lost.
+                        let mut out = std::io::stdout();
+                        let scroll = old_top.saturating_sub(new_top);
+                        if scroll > 0 {
+                            let _ = execute!(
+                                out,
+                                crossterm::cursor::MoveTo(0, size.rows.saturating_sub(1))
+                            );
+                            for _ in 0..scroll {
+                                let _ = out.write_all(b"\n");
+                            }
+                            let _ = out.flush();
+                        }
+                        // The old chrome now begins at `new_top` (it scrolled up
+                        // with everything else). Erasing from there down takes
+                        // exactly the old chrome and the rows below it, and never
+                        // reaches a transcript row.
                         let max_row = size.rows.saturating_sub(1);
                         let _ = execute!(
-                            std::io::stdout(),
-                            crossterm::cursor::MoveTo(0, top.min(max_row)),
+                            out,
+                            crossterm::cursor::MoveTo(0, new_top.min(max_row)),
                             crossterm::terminal::Clear(
                                 crossterm::terminal::ClearType::FromCursorDown
                             ),
                         );
                     }
 
-                    // Anchor the rebuild DELIBERATELY, at the bottom.
-                    //
-                    // This is the root cause of the long-running "composer jumps
-                    // to the top / duplicates on resize" report, and it is not
-                    // about which clear runs — it is about what happens after.
-                    //
-                    // `Viewport::Inline` does not choose a position: ratatui's
-                    // `compute_inline_size` anchors the new region on WHEREVER IT
-                    // FINDS THE CURSOR. `clear_screen_for_resize` ends with the
-                    // cursor at row 0 (it homes, then erases forward), so the
-                    // rebuild landed the live region at the TOP of the screen.
-                    // Measured on a 30-row terminal: chrome at rows 25-28 before
-                    // a width resize, rows 1-4 after exactly one — permanently
-                    // inverting the bottom-anchored invariant this whole design
-                    // rests on, the one `resize_clear_top_from_bottom` states as
-                    // `old_top = old_rows - old_h`.
-                    //
-                    // That single inversion produces all three reported symptoms:
-                    //
-                    //   * the composer sitting at the top with dead space below —
-                    //     visible, and NOT a duplicate, which is exactly why
-                    //     band-counting harnesses never caught it;
-                    //   * stacked copies — with the region at rows 0..h, the next
-                    //     `insert_before` scrolls at the bottom and pushes those
-                    //     rows (the chrome) into scrollback, where no erase can
-                    //     reach them; on a reflowing terminal a later widen pulls
-                    //     them back onto the visible screen;
-                    //   * an occasional transcript wipe — `last_inline_top` is
-                    //     refreshed from the rebuilt viewport below and becomes 0,
-                    //     so the next pure height change clears from row 0 down.
-                    //
-                    // The multiplexer branch escaped only incidentally: it homes
-                    // to `last_inline_top` instead of row 0, so it happened to
-                    // preserve the anchor. That is why the defect looked
-                    // terminal-specific for so long when it never was.
-                    //
-                    // Homing to `rows - h` makes the anchor explicit and makes
-                    // both clear branches agree on geometry. Clamped so a
-                    // viewport taller than the screen cannot underflow.
-                    //
-                    // The row comes from `resize_clear_top_from_bottom`, which
-                    // is the same arithmetic spelled inline — but that function
-                    // used to be `#[cfg(test)]`, annotated "no longer used by
-                    // the resize path … retained as a tested pure helper
-                    // documenting the bottom-anchored geometry". That demotion
-                    // IS the defect, recorded in a comment: the invariant went
-                    // on being asserted in tests after the code stopped obeying
-                    // it, so the tests stayed green while the screen inverted.
-                    // Calling it here makes the helper load-bearing again.
-                    {
-                        let anchor = resize_clear_top_from_bottom(size.rows, desired_inline_h);
-                        let _ = execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, anchor));
-                    }
+                    // Put the cursor on `new_top`: `Viewport::Inline` anchors
+                    // the region wherever it finds it. `clear_screen_for_resize`
+                    // ends at row 0, and the surgical clears end on their own
+                    // start row, so without this the region was rebuilt at the
+                    // TOP of the screen after a resize (measured: chrome at rows
+                    // 25-28 before one width change, rows 1-4 after). The
+                    // arithmetic lives in `resize_clear_top_from_bottom` for the
+                    // resize case, and in the `min` above for the height case —
+                    // a pure helper stating an invariant nothing calls is a
+                    // comment with a test suite, which is how this one rotted.
+                    let _ = execute!(
+                        std::io::stdout(),
+                        crossterm::cursor::MoveTo(0, new_top.min(size.rows.saturating_sub(1)))
+                    );
 
                     // Rebuild fresh to bypass ratatui's in-place inline-resize
                     // (which can misplace the viewport on a shrink).
@@ -2180,7 +2227,7 @@ fn clamp_inline_top(top: Option<u16>, term_rows: u16) -> Option<u16> {
 ///
 /// It is production code again, and the resize path calls it. A pure helper
 /// that states an invariant nothing enforces is a comment with a test suite.
-fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
+pub(crate) fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
     term_rows.saturating_sub(inline_h)
 }
 

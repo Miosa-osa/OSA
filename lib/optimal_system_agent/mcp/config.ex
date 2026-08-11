@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.MCP.Config do
 
   require Logger
 
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
+
   # Scope precedence for merge (later wins): user < project < local.
   @scopes [:local, :project, :user]
 
@@ -243,14 +246,19 @@ defmodule OptimalSystemAgent.MCP.Config do
           {:ok, String.t()} | {:error, term()}
   def add_server(name, spec, scope) when is_binary(name) and is_map(spec) do
     path = scope_path(scope)
-    raw = read_raw(path)
-    servers = Map.get(raw, "mcpServers", %{})
-    updated = Map.put(raw, "mcpServers", Map.put(servers, name, spec))
 
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(path, Jason.encode!(updated, pretty: true)) do
+    # `read_raw/1` returns `%{}` for an unparseable file, which here means
+    # `osa mcp add` rewrites mcp.json containing ONLY the new server and
+    # silently deletes every other one the user configured. Read for write
+    # instead, and refuse rather than clobber.
+    with {:ok, raw} <- JsonStore.read_map_for_write(path),
+         servers = Map.get(raw, "mcpServers", %{}),
+         updated = Map.put(raw, "mcpServers", Map.put(servers, name, spec)),
+         :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- AtomicFile.write(path, Jason.encode!(updated, pretty: true)) do
       {:ok, path}
     else
+      {:error, :corrupt} -> {:error, JsonStore.corrupt_message("MCP config", path)}
       {:error, reason} -> {:error, reason}
     end
   rescue
@@ -266,7 +274,14 @@ defmodule OptimalSystemAgent.MCP.Config do
           {:ok, String.t()} | {:error, term()}
   def remove_server(name, scope) do
     path = scope_path(scope)
-    raw = read_raw(path)
+
+    case JsonStore.read_map_for_write(path) do
+      {:ok, raw} -> do_remove_server(name, path, raw)
+      {:error, :corrupt} -> {:error, JsonStore.corrupt_message("MCP config", path)}
+    end
+  end
+
+  defp do_remove_server(name, path, raw) do
     servers = Map.get(raw, "mcpServers", %{})
 
     # Fail closed on an ambiguous sanitized match: when two raw keys sanitize
@@ -302,7 +317,7 @@ defmodule OptimalSystemAgent.MCP.Config do
     if key do
       updated = Map.put(raw, "mcpServers", Map.delete(servers, key))
 
-      case File.write(path, Jason.encode!(updated, pretty: true)) do
+      case AtomicFile.write(path, Jason.encode!(updated, pretty: true)) do
         :ok -> {:ok, path}
         {:error, reason} -> {:error, reason}
       end
@@ -321,19 +336,6 @@ defmodule OptimalSystemAgent.MCP.Config do
     Enum.filter(@scopes, fn scope ->
       Enum.any?(load_scope(scope), fn s -> s.name == sanitized end)
     end)
-  end
-
-  defp read_raw(path) do
-    case File.read(path) do
-      {:ok, content} ->
-        case Jason.decode(content) do
-          {:ok, map} when is_map(map) -> map
-          _ -> %{}
-        end
-
-      _ ->
-        %{}
-    end
   end
 
   @doc """

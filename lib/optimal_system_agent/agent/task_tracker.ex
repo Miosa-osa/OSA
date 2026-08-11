@@ -225,9 +225,15 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   def handle_call({:start_task, session_id, task_id}, _from, state) do
     state = ensure_session(state, session_id)
 
-    case update_task(state, session_id, task_id, fn task ->
+    case update_task(state, session_id, task_id, :in_progress, fn task ->
            %{task | status: :in_progress, started_at: DateTime.utc_now()}
          end) do
+      {:noop, _task} ->
+        {:reply, :ok, state}
+
+      {:invalid, from, _task} ->
+        {:reply, {:error, {:invalid_transition, from, :in_progress}}, state}
+
       {:ok, updated_state, task} ->
         persist(session_id, updated_state.sessions[session_id])
 
@@ -257,9 +263,15 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   def handle_call({:complete_task, session_id, task_id}, _from, state) do
     state = ensure_session(state, session_id)
 
-    case update_task(state, session_id, task_id, fn task ->
+    case update_task(state, session_id, task_id, :completed, fn task ->
            %{task | status: :completed, completed_at: DateTime.utc_now()}
          end) do
+      {:noop, _task} ->
+        {:reply, :ok, state}
+
+      {:invalid, from, _task} ->
+        {:reply, {:error, {:invalid_transition, from, :completed}}, state}
+
       {:ok, updated_state, task} ->
         persist(session_id, updated_state.sessions[session_id])
 
@@ -289,9 +301,15 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
   def handle_call({:fail_task, session_id, task_id, reason}, _from, state) do
     state = ensure_session(state, session_id)
 
-    case update_task(state, session_id, task_id, fn task ->
+    case update_task(state, session_id, task_id, :failed, fn task ->
            %{task | status: :failed, reason: reason, completed_at: DateTime.utc_now()}
          end) do
+      {:noop, _task} ->
+        {:reply, :ok, state}
+
+      {:invalid, from, _task} ->
+        {:reply, {:error, {:invalid_transition, from, :failed}}, state}
+
       {:ok, updated_state, task} ->
         persist(session_id, updated_state.sessions[session_id])
 
@@ -484,6 +502,37 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
       metadata: Map.get(opts, :metadata, %{}),
       created_at: DateTime.utc_now()
     }
+  end
+
+  # Statuses from which no further transition is legal. A task that has already
+  # settled stays settled: `complete_task` after `fail_task` used to flip a
+  # failed task green, emit `task_completed` to the TUI, persist it, and unblock
+  # its dependents via `dependencies_met?/2` — and duplicate completes are
+  # trivially reachable through model todo updates and tool retries.
+  @terminal_task_statuses [:completed, :failed, :cancelled]
+
+  # `{:ok, :apply}` — do the transition; `:noop` — already in the target state,
+  # reply :ok but emit/persist nothing; `{:invalid, from}` — refuse.
+  defp transition(from, to) when from == to, do: :noop
+  defp transition(from, _to) when from in @terminal_task_statuses, do: {:invalid, from}
+  defp transition(_from, _to), do: {:ok, :apply}
+
+  # Guarded variant: only runs `update_fn` when moving to `to_status` is legal
+  # from the task's current status.
+  defp update_task(state, session_id, task_id, to_status, update_fn) do
+    tasks = state.sessions[session_id] || []
+
+    case Enum.find(tasks, &(&1.id == task_id)) do
+      nil ->
+        :not_found
+
+      task ->
+        case transition(task.status, to_status) do
+          {:ok, :apply} -> update_task(state, session_id, task_id, update_fn)
+          :noop -> {:noop, task}
+          {:invalid, from} -> {:invalid, from, task}
+        end
+    end
   end
 
   defp update_task(state, session_id, task_id, update_fn) do

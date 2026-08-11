@@ -3190,23 +3190,30 @@ mod turn_completion_invariants {
                      viewport twice"
                 );
                 assert!(
-                    (STREAM_PREVIEW_ROWS..=ceiling).contains(&rows),
+                    rows <= ceiling,
                     "term_rows={term_rows} content={content_h}: {rows} rows is \
-                     outside [{STREAM_PREVIEW_ROWS}, {ceiling}]"
+                     above the {ceiling}-row ceiling"
                 );
                 assert!(
-                    rows == ceiling
-                        || (rows - STREAM_PREVIEW_ROWS) % STREAM_PREVIEW_STEP == 0,
+                    rows >= content_h.min(ceiling),
+                    "term_rows={term_rows} content={content_h}: {rows} rows clips \
+                     the reply"
+                );
+                // The lattice is `k * STEP`, not `ROWS + k * STEP`. The old floor
+                // of STREAM_PREVIEW_ROWS is what reserved ten rows for the first
+                // token of a one-line reply and painted one — the dead space
+                // between the committed prompt and the spinner. Quantization is
+                // what keeps the viewport from churning; the floor never was.
+                assert!(
+                    rows == ceiling || rows % STREAM_PREVIEW_STEP == 0,
                     "term_rows={term_rows} content={content_h}: {rows} is off the \
-                     ROWS + k*STEP lattice — growth is not quantized"
+                     k*STEP lattice — growth is not quantized"
                 );
                 hw = rows;
                 heights.push(rows);
             }
             heights.dedup();
-            let max_steps = (STREAM_PREVIEW_MAX - STREAM_PREVIEW_ROWS)
-                .div_ceil(STREAM_PREVIEW_STEP) as usize
-                + 1;
+            let max_steps = STREAM_PREVIEW_MAX.div_ceil(STREAM_PREVIEW_STEP) as usize + 1;
             assert!(
                 heights.len() <= max_steps,
                 "term_rows={term_rows}: the preview changed height {} times in one \
@@ -5219,8 +5226,9 @@ Beta is the one I would pick.
     impl LoopModel {
         fn new(w: u16, h: u16, bands: usize) -> Self {
             let inline_h = chrome_height(bands).min(h.saturating_sub(1)).max(1);
+            let backend = VT100Backend::with_scrollback(w, h, 8000);
             let term = Terminal::with_options(
-                VT100Backend::with_scrollback(w, h, 8000),
+                backend,
                 TerminalOptions { viewport: Viewport::Inline(inline_h) },
             )
             .unwrap();
@@ -5266,6 +5274,14 @@ Beta is the one I would pick.
                 self.app_size = now;
                 self.resize_dirty = true;
             }
+        }
+
+        /// A band came up or went down, so the live region wants a different
+        /// height on the next iteration. This is what happens every turn (the
+        /// spinner, the checklist, the composer growing), and it is the edge on
+        /// which the rebuild path's anchor met the commit path's.
+        fn set_bands(&mut self, bands: usize) {
+            self.bands = bands;
         }
 
         /// Queue a finalized block for native scrollback, as a live turn does.
@@ -5317,19 +5333,50 @@ Beta is the one I would pick.
             let resized = std::mem::take(&mut self.resize_dirty);
             if resized || desired != self.cur_inline_h {
                 let mut out = self.backend().fork();
+                // WHERE the rebuilt region starts. A resize reflowed the screen,
+                // so the old top is unknowable and the bottom is the only
+                // defensible anchor; a pure height change moved nothing, so the
+                // top stays put and is only pushed up by what a taller region
+                // needs to stay on screen.
+                let old_top = self
+                    .last_inline_top
+                    .unwrap_or_else(|| term_rows.saturating_sub(self.cur_inline_h));
+                let new_top = if resized {
+                    term_rows.saturating_sub(desired)
+                } else {
+                    old_top.min(term_rows.saturating_sub(desired))
+                };
                 if resized {
                     clear_screen_for_resize(&mut out).unwrap();
-                } else if let Some(top) = self.last_inline_top {
+                } else {
+                    let scroll = old_top.saturating_sub(new_top);
+                    if scroll > 0 {
+                        crossterm::execute!(
+                            out,
+                            crossterm::cursor::MoveTo(0, term_rows.saturating_sub(1))
+                        )
+                        .unwrap();
+                        for _ in 0..scroll {
+                            std::io::Write::write_all(&mut out, b"\n").unwrap();
+                        }
+                        std::io::Write::flush(&mut out).unwrap();
+                    }
                     let max_row = term_rows.saturating_sub(1);
                     crossterm::execute!(
                         out,
-                        crossterm::cursor::MoveTo(0, top.min(max_row)),
+                        crossterm::cursor::MoveTo(0, new_top.min(max_row)),
                         crossterm::terminal::Clear(
                             crossterm::terminal::ClearType::FromCursorDown
                         ),
                     )
                     .unwrap();
                 }
+                crossterm::execute!(
+                    out,
+                    crossterm::cursor::MoveTo(0, new_top.min(term_rows.saturating_sub(1)))
+                )
+                .unwrap();
+                drop(out);
                 let backend = self.backend().fork();
                 self.term = None; // drop the old Terminal, exactly as `rebuild_inline` does
                 self.term = Some(
@@ -5372,6 +5419,7 @@ Beta is the one I would pick.
                         .unwrap();
                 }
             }
+
             self.last_inline_top = Some(self.term().get_frame().area().top());
 
             // Step 3 — draw.
@@ -5583,6 +5631,330 @@ Beta is the one I would pick.
             m.deliver_resize_event();
             m.iterate();
             m.backend().reset_probes();
+        }
+    }
+
+    // ────────── the structure: it stays, or it moves with the flow ──────────
+    //
+    // Everything above this line is about a RESIZE. The suite passed while the
+    // product was visibly broken because the defect is not in the resize path:
+    // it is in the ordinary commit path — a greeting and one more prompt, no
+    // resize anywhere — which nothing here constrained.
+    //
+    // `Viewport::Inline` has no position of its own; ratatui anchors it on
+    // wherever it finds the cursor. So "where the live region is" is decided by
+    // whatever the last thing to move the cursor decided, and until these
+    // assertions existed there were two such things, disagreeing:
+    // `insert_before`, which leaves the region immediately below the content it
+    // just committed, and the height-change rebuild, which homed to
+    // `rows - inline_h`. The region teleported between them on every turn.
+
+    impl LoopModel {
+        fn viewport_top(&mut self) -> u16 {
+            self.term().get_frame().area().top()
+        }
+
+        /// Every rendered row the user can still reach, oldest first.
+        fn reachable(&self) -> Vec<String> {
+            let mut all = self.backend().scrollback_lines();
+            all.extend(self.backend().contents().lines().map(str::to_string));
+            all.into_iter().map(|l| l.trim_end().to_string()).collect()
+        }
+
+        /// **The transcript is append-only.** Every line ever committed is still
+        /// reachable, exactly once, in the order it was committed.
+        ///
+        /// This is the invariant stated the way the user states it, and it is
+        /// the one that catches all four of the rendering symptoms at once — a
+        /// reply that came out truncated, a response rendering ABOVE the prompt
+        /// that preceded it, a status bar sharing a row with the welcome banner,
+        /// two separator rules on screen at the same time. Every one of them is
+        /// a committed row that stopped being where it was put, and every one of
+        /// them is a live region that moved backwards over content it had
+        /// already handed to the terminal.
+        fn assert_transcript_intact(&self, committed: &[String], ctx: &str) {
+            let reachable = self.reachable();
+            // Only the RECENT tail is checkable, because only the recent tail is
+            // reachable: `vt100` cannot compose a scrolled-back view deeper than
+            // one screenful (see `VT100Backend::scrollback_lines`), so a line
+            // committed long enough ago is genuinely out of the emulator's reach
+            // and its absence would prove nothing. That costs the assertion
+            // nothing it was buying — the live region only ever touches rows
+            // beside itself, so a commit that gets overwritten, duplicated or
+            // reordered does so while it is still the newest thing on screen.
+            let window = (self.app_size.1 as usize / 2).max(1);
+            let committed = &committed[committed.len().saturating_sub(window)..];
+            let mut from = 0usize;
+            for line in committed {
+                let hits: Vec<usize> = reachable
+                    .iter()
+                    .enumerate()
+                    // `contains`, not equality: a committed block is rendered
+                    // with the transcript's own decoration (label row, `┃` rail),
+                    // so the row carries more than the text handed in. The
+                    // markers below are chosen not to be prefixes of each other.
+                    .filter(|(_, l)| l.contains(line.as_str()))
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "{ctx}: the committed line {line:?} is reachable {} times, not \
+                     once. A commit was written over, or written twice.\n\
+                     --- screen ---\n{}\n--- history ---\n{}",
+                    hits.len(),
+                    self.backend().contents(),
+                    self.backend().scrollback_lines().join("\n"),
+                );
+                assert!(
+                    hits[0] >= from,
+                    "{ctx}: {line:?} is rendered at row {} but the line committed \
+                     before it is at row {from} — the transcript is out of order.\n\
+                     --- screen ---\n{}",
+                    hits[0],
+                    self.backend().contents(),
+                );
+                from = hits[0];
+            }
+        }
+
+        /// **A commit may never push a chrome row into scrollback.**
+        ///
+        /// `insert_before` writes into the terminal's NATIVE scroll history,
+        /// which no erase can reach. A region sitting where the next commit will
+        /// scroll therefore makes its own chrome permanent — the second status
+        /// bar, the composer duplicating down the screen, the welcome banner
+        /// reappearing below content that was committed after it.
+        fn assert_no_chrome_in_scrollback(&self, ctx: &str) {
+            let stuck: Vec<String> = self
+                .backend()
+                .scrollback_lines()
+                .into_iter()
+                .filter(|l| l.contains(COMPOSER) || l.contains(HINT) || l.contains(STATUS))
+                .collect();
+            assert!(
+                stuck.is_empty(),
+                "{ctx}: {} chrome row(s) were scrolled into native scrollback, \
+                 where nothing can erase them:\n{}",
+                stuck.len(),
+                stuck.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"),
+            );
+        }
+
+        /// The region is wholly on screen: it starts at a real row and its last
+        /// row is the terminal's last row or above it.
+        fn assert_region_fits(&mut self, ctx: &str) {
+            let top = self.viewport_top();
+            let h = self.cur_inline_h;
+            let rows = self.app_size.1;
+            assert!(
+                top.saturating_add(h) <= rows,
+                "{ctx}: a {h}-row region starting at row {top} runs {} rows past \
+                 the bottom of a {rows}-row terminal",
+                top + h - rows
+            );
+        }
+    }
+
+    /// **The region's first row does not move unless something moved it.**
+    ///
+    /// The height of the live region changes several times per turn — the
+    /// spinner comes up, the preview quantizes, the composer grows, the turn
+    /// ends. None of that is a reason for the chrome to relocate: the transcript
+    /// above it has not moved, so neither may its first row. The single
+    /// exception is a region that has grown past the bottom of the screen, which
+    /// must scroll to make room — and then it moves by exactly the overflow, not
+    /// to a fixed anchor.
+    ///
+    /// On the pre-fix code the rebuild homed to `rows - inline_h` on every
+    /// height change, so this fails on the first band that comes up.
+    #[test]
+    fn a_height_change_moves_the_region_only_as_far_as_it_must() {
+        for (w, rows) in [(80u16, 24u16), (100, 30), (120, 50)] {
+            let mut m = LoopModel::new(w, rows, 0);
+            m.iterate();
+            for bands in [1usize, 3, 0, 2, 3, 1, 0, 2] {
+                let before_top = m.viewport_top();
+                let before_h = m.cur_inline_h;
+                m.set_bands(bands);
+                m.iterate();
+                let after_top = m.viewport_top();
+                let after_h = m.cur_inline_h;
+                // Growing past the bottom is the ONLY licence to move, and only
+                // by the overflow.
+                let overflow = (before_top + after_h).saturating_sub(rows);
+                let allowed = before_top.saturating_sub(overflow);
+                assert_eq!(
+                    after_top, allowed,
+                    "{w}x{rows}: the region was at row {before_top} ({before_h} rows) \
+                     and a change to {after_h} rows moved it to {after_top}; it may \
+                     only move to {allowed} (the {overflow} rows it had to make).\n\
+                     --- screen ---\n{}",
+                    m.backend().contents()
+                );
+                m.assert_region_fits(&format!("{w}x{rows}, bands={bands}"));
+            }
+        }
+    }
+
+    /// **The reported session, start to finish.** The welcome banner, a prompt,
+    /// a reply settling into scrollback, the next prompt — with the region
+    /// changing height between commits exactly as a live turn makes it. Every
+    /// committed line stays reachable, exactly once, in order; no chrome reaches
+    /// scrollback; the region always fits.
+    ///
+    /// On the pre-fix code the growing region is rebuilt over rows that hold
+    /// committed conversation, so this fails on the first turn.
+    #[test]
+    fn an_ordinary_session_never_overwrites_or_reorders_the_transcript() {
+        for (w, rows) in [(80u16, 24u16), (100, 30), (120, 50), (60, 14)] {
+            let mut m = LoopModel::new(w, rows, 0);
+            m.iterate();
+            let mut committed: Vec<String> = Vec::new();
+
+            // The welcome banner: one tall commit, the first thing the loop
+            // writes, and the block the report saw interleaved with the status
+            // bar.
+            for i in 0..14 {
+                let line = format!("banner-line-{i:02}");
+                m.queue_output(&format!("{line}\n"));
+                committed.push(line);
+            }
+            m.iterate();
+            m.assert_transcript_intact(&committed, "after the welcome banner");
+            m.assert_no_chrome_in_scrollback("after the welcome banner");
+
+            for turn in 0..5 {
+                // The prompt commits while the region is idle-sized.
+                let prompt = format!("PROMPT-{turn} what about this");
+                m.queue_output(&format!("{prompt}\n"));
+                committed.push(prompt);
+                m.iterate();
+                m.assert_transcript_intact(&committed, &format!("prompt {turn} committed"));
+
+                // The turn starts: bands come up and the region GROWS — over the
+                // rows the prompt was just committed into, on the pre-fix code.
+                m.set_bands(3);
+                m.iterate();
+                m.assert_transcript_intact(&committed, &format!("turn {turn} started"));
+
+                // The reply settles, still mid-turn.
+                for i in 0..3 {
+                    let line = format!("REPLY-{turn}-{i} some prose from the model");
+                    m.queue_output(&format!("{line}\n"));
+                    committed.push(line);
+                }
+                m.iterate();
+                m.assert_transcript_intact(&committed, &format!("reply {turn} settled"));
+
+                // The turn ends: the region SHRINKS back.
+                m.set_bands(0);
+                m.iterate();
+                m.assert_transcript_intact(&committed, &format!("turn {turn} ended"));
+                m.assert_no_chrome_in_scrollback(&format!("turn {turn} ended"));
+                m.assert_single_live_region(&format!("turn {turn} ended"));
+                m.assert_region_fits(&format!("turn {turn} ended"));
+            }
+        }
+    }
+
+    /// The same session, with a resize thrown in between turns — the two anchors
+    /// have to coexist. A resize legitimately relocates the region (the screen
+    /// reflowed); what it may not do is cost a committed line.
+    #[test]
+    fn a_resize_between_turns_relocates_the_region_without_costing_a_line() {
+        let mut m = LoopModel::new(100, 30, 0);
+        m.iterate();
+        let mut committed: Vec<String> = Vec::new();
+        for turn in 0..3 {
+            let prompt = format!("PROMPT-{turn} ask");
+            m.queue_output(&format!("{prompt}\n"));
+            committed.push(prompt);
+            m.set_bands(2);
+            m.iterate();
+            let line = format!("REPLY-{turn} answered");
+            m.queue_output(&format!("{line}\n"));
+            committed.push(line);
+            m.set_bands(0);
+            m.iterate();
+            m.assert_transcript_intact(&committed, &format!("turn {turn}"));
+
+            // A pane drag lands between turns.
+            m.sigwinch(88, 30);
+            m.iterate();
+            m.deliver_resize_event();
+            m.iterate();
+            m.assert_single_live_region(&format!("after the resize on turn {turn}"));
+            m.assert_region_fits(&format!("after the resize on turn {turn}"));
+            m.sigwinch(100, 30);
+            m.iterate();
+            m.deliver_resize_event();
+            m.iterate();
+            // A real resize takes the destructive full-screen clear on purpose
+            // (the emulator reflowed, so the old chrome's row is unknowable) —
+            // the ON-SCREEN transcript is forfeit and lives on in the terminal's
+            // own history and the Ctrl+O reader. So the baseline restarts here:
+            // what this test pins is that a resize does not corrupt the lines
+            // committed AFTER it, which is where the interleaving showed up.
+            committed.clear();
+        }
+    }
+
+    /// **The streaming preview may not reserve rows it does not draw.**
+    ///
+    /// The dead space in the report — "my prompt, then most of a screen of blank
+    /// rows, then the spinner near the bottom" — is this: the slot's lattice
+    /// used to START at `STREAM_PREVIEW_ROWS`, so the first token of a one-line
+    /// reply reserved ten rows (twenty-two at the ceiling) and painted one.
+    /// Because the region is bottom-anchored and the preview bottom-anchors its
+    /// tail, every undrawn row lands between the committed prompt and the reply.
+    ///
+    /// The slack a quantized lattice needs is one STEP. More than that is dead
+    /// screen.
+    #[test]
+    fn the_streaming_preview_never_reserves_more_than_one_step_of_slack() {
+        use crate::app::event_loop::{
+            stream_preview_ceiling, stream_preview_rows, STREAM_PREVIEW_STEP,
+        };
+        for term_rows in [12u16, 24, 30, 50, 80] {
+            let ceiling = stream_preview_ceiling(term_rows);
+            let mut high_water = 0u16;
+            for content_h in 1u16..=60 {
+                let got = stream_preview_rows(content_h, high_water, ceiling);
+                assert!(
+                    got >= content_h.min(ceiling),
+                    "{term_rows} rows: {content_h} rows of reply were given a \
+                     {got}-row slot — the reply is clipped"
+                );
+                assert!(
+                    got <= content_h.saturating_add(STREAM_PREVIEW_STEP - 1).max(high_water),
+                    "{term_rows} rows: {content_h} rows of reply reserved a {got}-row \
+                     slot, leaving {} rows of dead screen between the committed \
+                     prompt and the reply",
+                    got - content_h
+                );
+                assert!(got <= ceiling, "{term_rows} rows: {got} exceeds the {ceiling} ceiling");
+                assert!(
+                    got >= high_water.min(ceiling),
+                    "{term_rows} rows: the slot shrank from {high_water} to {got} \
+                     mid-turn, which rebuilds the viewport downward"
+                );
+                high_water = got;
+            }
+        }
+    }
+
+    /// An idle turn reserves NO preview rows at all — a slot for a reply that
+    /// does not exist is the same defect at zero content.
+    #[test]
+    fn an_idle_stream_reserves_nothing() {
+        use crate::app::event_loop::{stream_preview_ceiling, stream_preview_rows};
+        for term_rows in [12u16, 24, 30, 50, 80] {
+            assert_eq!(
+                stream_preview_rows(0, 0, stream_preview_ceiling(term_rows)),
+                0,
+                "{term_rows} rows: an idle stream band reserved rows"
+            );
         }
     }
 }

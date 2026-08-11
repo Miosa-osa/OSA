@@ -18,6 +18,8 @@ defmodule OptimalSystemAgent.Onboarding do
 
   require Logger
 
+  alias OptimalSystemAgent.System.AtomicFile
+
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   @workspace_templates ~w(BOOTSTRAP.md IDENTITY.md USER.md SOUL.md HEARTBEAT.md)
@@ -264,7 +266,8 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "recommended",
         requires_key: true,
         env_var: "OPENROUTER_API_KEY",
-        default_model: "anthropic/" <> OptimalSystemAgent.Providers.AnthropicModels.default_model(),
+        default_model:
+          "anthropic/" <> OptimalSystemAgent.Providers.AnthropicModels.default_model(),
         base_url: "https://openrouter.ai/api/v1",
         signup_url: "https://openrouter.ai/keys",
         # Any vendor/model id may be entered free-text; model_list/2 also fetches
@@ -421,8 +424,22 @@ defmodule OptimalSystemAgent.Onboarding do
             recommended?: true,
             note: "Balanced — Claude Code's default"
           },
-          %{id: "opus", name: "Opus", ctx: 0, tools: true, recommended?: false, note: "Most capable"},
-          %{id: "haiku", name: "Haiku", ctx: 0, tools: true, recommended?: false, note: "Fastest, cheapest against your plan"}
+          %{
+            id: "opus",
+            name: "Opus",
+            ctx: 0,
+            tools: true,
+            recommended?: false,
+            note: "Most capable"
+          },
+          %{
+            id: "haiku",
+            name: "Haiku",
+            ctx: 0,
+            tools: true,
+            recommended?: false,
+            note: "Fastest, cheapest against your plan"
+          }
         ]
       },
       # GitHub Copilot plan, driven through GitHub's own CLI. Separate entry
@@ -1117,7 +1134,11 @@ defmodule OptimalSystemAgent.Onboarding do
     String.starts_with?(returned_id, catalog_id) and
       Regex.match?(
         @dated_snapshot_suffix,
-        binary_part(returned_id, byte_size(catalog_id), byte_size(returned_id) - byte_size(catalog_id))
+        binary_part(
+          returned_id,
+          byte_size(catalog_id),
+          byte_size(returned_id) - byte_size(catalog_id)
+        )
       )
   end
 
@@ -1303,7 +1324,8 @@ defmodule OptimalSystemAgent.Onboarding do
            verified: true,
            auth_mode: "subscription",
            plan: status.plan,
-           message: "Signed in to ChatGPT#{if status.plan, do: " (#{status.plan} plan)", else: ""}."
+           message:
+             "Signed in to ChatGPT#{if status.plan, do: " (#{status.plan} plan)", else: ""}."
          }}
 
       %{connected?: true} ->
@@ -1399,7 +1421,8 @@ defmodule OptimalSystemAgent.Onboarding do
            verified: true,
            auth_mode: "subscription",
            account: entry["account_id"],
-           message: "Using your GitHub Copilot plan through the Copilot CLI (via #{entry["auth_source"]})."
+           message:
+             "Using your GitHub Copilot plan through the Copilot CLI (via #{entry["auth_source"]})."
          }}
 
       {:ok, _entry} ->
@@ -1520,7 +1543,6 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
-
   def health_check(params) do
     provider = Map.get(params, "provider", "ollama")
     api_key = Map.get(params, "api_key")
@@ -1599,7 +1621,6 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
-
   # The TUI's onboarding dialog has one credential field and no auth-mode
   # menu, so "Ollama Cloud with the key left blank" is how a user asks for the
   # account route there. Without this it wrote `OLLAMA_URL=https://ollama.com`
@@ -1646,7 +1667,8 @@ defmodule OptimalSystemAgent.Onboarding do
   defp ollama_account_health(params) do
     alias OptimalSystemAgent.Auth.Providers.OllamaAccount
 
-    result = if during_setup?(params), do: OllamaAccount.connect(), else: OllamaAccount.live_status()
+    result =
+      if during_setup?(params), do: OllamaAccount.connect(), else: OllamaAccount.live_status()
 
     case result do
       {:ok, account} ->
@@ -1802,11 +1824,21 @@ defmodule OptimalSystemAgent.Onboarding do
         latency = System.monotonic_time(:millisecond) - start_time
 
         {:ok,
-         %{verified: :ok, status: "ok", latency_ms: latency, model: model, response_status: status}}
+         %{
+           verified: :ok,
+           status: "ok",
+           latency_ms: latency,
+           model: model,
+           response_status: status
+         }}
 
       {:ok, %{status: 401}} ->
         {:error,
-         %{verified: :key_rejected, error: "unauthorized", message: "API key is invalid or expired."}}
+         %{
+           verified: :key_rejected,
+           error: "unauthorized",
+           message: "API key is invalid or expired."
+         }}
 
       {:ok, %{status: 402}} ->
         {:error,
@@ -1828,7 +1860,11 @@ defmodule OptimalSystemAgent.Onboarding do
         # Not an auth failure — the model/endpoint just isn't there. The key
         # (if any) may be perfectly valid, so this is unverified, not rejected.
         {:error,
-         %{verified: :unverified, error: "model_not_found", message: "Model '#{model}' not found."}}
+         %{
+           verified: :unverified,
+           error: "model_not_found",
+           message: "Model '#{model}' not found."
+         }}
 
       {:ok, %{status: 429}} ->
         # Rate limited but key works
@@ -1857,7 +1893,11 @@ defmodule OptimalSystemAgent.Onboarding do
 
       {:error, %Req.TransportError{reason: :timeout}} ->
         {:error,
-         %{verified: :unverified, error: "timeout", message: "Connection timed out after 15 seconds."}}
+         %{
+           verified: :unverified,
+           error: "timeout",
+           message: "Connection timed out after 15 seconds."
+         }}
 
       {:error, reason} ->
         {:error,
@@ -1939,11 +1979,13 @@ defmodule OptimalSystemAgent.Onboarding do
 
     env_content = serialize_env(merged)
 
-    case File.write(env_path, env_content) do
+    # 0600 applied to the temp file BEFORE the keys are written to it, then
+    # renamed into place. `File.write` followed by `File.chmod` is a real
+    # TOCTOU hole, not a theoretical one: between the two calls the file exists
+    # at the process umask (0644 on a default Linux install) with every API key
+    # already in it, readable by any local process.
+    case AtomicFile.write(env_path, env_content, mode: 0o600) do
       :ok ->
-        # Lock down permissions — the file holds API keys.
-        _ = File.chmod(env_path, 0o600)
-
         # Apply env vars in-process so they take effect immediately
         apply_env_vars(provider, model, api_key, base_url)
         apply_channel_tokens(channel_tokens)
@@ -2013,10 +2055,9 @@ defmodule OptimalSystemAgent.Onboarding do
         merge_env(existing, {pairs, []})
       end
 
-    case File.write(env_path, serialize_env(merged)) do
+    # 0600 from birth — see the note on the other .env write in this module.
+    case AtomicFile.write(env_path, serialize_env(merged), mode: 0o600) do
       :ok ->
-        _ = File.chmod(env_path, 0o600)
-
         if set_active do
           apply_env_vars(provider, model, api_key, base_url)
         else
@@ -2258,43 +2299,12 @@ defmodule OptimalSystemAgent.Onboarding do
   # Parse an existing .env into an ordered [{key, value}] list. Skips blank
   # lines and comments. First occurrence of a key wins (mirrors the runtime.exs
   # loader, which only sets a var when it isn't already present).
-  defp parse_env_file(path) do
-    case File.read(path) do
-      {:ok, content} ->
-        content
-        |> String.split("\n")
-        |> Enum.reduce([], fn line, acc ->
-          trimmed = String.trim(line)
-
-          cond do
-            trimmed == "" ->
-              acc
-
-            String.starts_with?(trimmed, "#") ->
-              acc
-
-            true ->
-              case String.split(trimmed, "=", parts: 2) do
-                [k, v] ->
-                  k = String.trim(k)
-                  v = v |> String.trim() |> String.trim("\"") |> String.trim("'")
-
-                  if k != "" and not List.keymember?(acc, k, 0) do
-                    acc ++ [{k, v}]
-                  else
-                    acc
-                  end
-
-                _ ->
-                  acc
-              end
-          end
-        end)
-
-      _ ->
-        []
-    end
-  end
+  # One shared implementation with the boot loader (`Application.load_dotenv/0`)
+  # and `CLI.Setup`. Four hand-rolled copies of this loop existed, all with the
+  # same U+FEFF hole; a fix in one of them would have left the surfaces
+  # disagreeing about what a key is called, which on this path means one
+  # reporting "no key configured" while another writes the key back out.
+  defp parse_env_file(path), do: OptimalSystemAgent.Config.Dotenv.parse_file(path)
 
   # Canonical KV set for a provider selection, plus the list of keys to DELETE
   # (used to clear the opposite active-model override so it can't pin the wrong
@@ -2621,9 +2631,10 @@ defmodule OptimalSystemAgent.Onboarding do
           existing = File.read!(env_path)
 
           unless String.contains?(existing, "OSA_COMPUTER_USE") do
-            File.write!(
+            AtomicFile.write!(
               env_path,
-              existing <> "\n# Computer Use (auto-detected Linux X11)\nOSA_COMPUTER_USE=true\n"
+              existing <> "\n# Computer Use (auto-detected Linux X11)\nOSA_COMPUTER_USE=true\n",
+              mode: 0o600
             )
 
             System.put_env("OSA_COMPUTER_USE", "true")
@@ -2664,7 +2675,7 @@ defmodule OptimalSystemAgent.Onboarding do
             )
 
           if updated != content do
-            File.write!(path, updated)
+            AtomicFile.write!(path, updated)
             Logger.debug("[Onboarding] Pre-populated USER.md with name: #{name}")
           end
 
@@ -2689,7 +2700,7 @@ defmodule OptimalSystemAgent.Onboarding do
             )
 
           if updated != content do
-            File.write!(path, updated)
+            AtomicFile.write!(path, updated)
             Logger.debug("[Onboarding] Pre-populated IDENTITY.md with agent name: #{agent_name}")
           end
 
@@ -3301,19 +3312,14 @@ defmodule OptimalSystemAgent.Onboarding do
     end)
   end
 
+  # Asked through the same parser the rest of the credential path uses, so
+  # "is onboarding done?" and "what does that file contain?" can never
+  # disagree — a BOM used to make this answer yes while `parse_env_file/1`
+  # produced a key nothing could look up.
   defp env_has_provider?(env_path) do
-    case File.read(env_path) do
-      {:ok, content} ->
-        content
-        |> String.split("\n")
-        |> Enum.any?(fn line ->
-          line = String.trim(line)
-          not String.starts_with?(line, "#") and String.contains?(line, "OSA_DEFAULT_PROVIDER=")
-        end)
-
-      {:error, _} ->
-        false
-    end
+    env_path
+    |> OptimalSystemAgent.Config.Dotenv.parse_file()
+    |> List.keymember?("OSA_DEFAULT_PROVIDER", 0)
   end
 
   defp hostname do

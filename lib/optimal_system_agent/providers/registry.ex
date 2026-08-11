@@ -255,6 +255,28 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
+  # Same one-way door `stream_with_fallback/5` enforces, applied at the OTHER
+  # entrance. `fallback_sync_stream/4` pushes the WHOLE sync response through
+  # the live callback as a single `:text_delta` — there is no `emitted` cursor,
+  # so if the provider had already streamed part of the answer the user sees
+  # that prefix twice and the duplicate is what gets appended as the assistant
+  # turn and persisted. The top-level path checks `output_observed?/0` before
+  # calling this; the per-hop path in `do_try_stream_provider/4` did not, so a
+  # fallback-chain hop that died mid-stream re-emitted everything.
+  defp fallback_sync_stream_unless_observed(module, messages, callback, opts, reason) do
+    if Resilience.output_observed?() do
+      Logger.warning(
+        "Provider #{inspect(module)} stream failed after output was already streamed to the " <>
+          "user — not retrying via sync (it would duplicate what is on screen): " <>
+          Resilience.reason_to_string(reason)
+      )
+
+      {:error, reason}
+    else
+      fallback_sync_stream(module, messages, callback, opts)
+    end
+  end
+
   defp fallback_sync_stream(module, messages, callback, opts) do
     case apply_provider(module, messages, opts) do
       {:ok, result} ->
@@ -872,7 +894,21 @@ defmodule OptimalSystemAgent.Providers.Registry do
                 # actionable one: the fallback hops are collateral, and reporting
                 # the last hop's error is what made an Anthropic history bug read
                 # as an Ollama failure.
-                {:cont, acc}
+                #
+                # And stop here if THIS hop already put bytes on screen: the next
+                # hop re-streams the answer from scratch into the same live
+                # callback, so the user would watch a partial answer followed by a
+                # whole second one. Same one-way door as the primary attempt.
+                if Resilience.output_observed?() do
+                  Logger.warning(
+                    "Fallback provider #{fb_provider} failed after streaming output to the " <>
+                      "user — stopping the chain rather than duplicating what is on screen"
+                  )
+
+                  {:halt, acc}
+                else
+                  {:cont, acc}
+                end
             end
         end
       end)
@@ -1007,7 +1043,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
           "Compat provider #{provider} streaming failed: #{Exception.message(e)}, falling back to sync"
         )
 
-        fallback_sync_stream({:compat, provider}, messages, callback, opts)
+        fallback_sync_stream_unless_observed(
+          {:compat, provider},
+          messages,
+          callback,
+          opts,
+          "compat provider #{provider} streaming raised: #{Exception.message(e)}"
+        )
     end
   end
 
@@ -1025,14 +1067,23 @@ defmodule OptimalSystemAgent.Providers.Registry do
               "Provider #{module} chat_stream failed: #{inspect(reason)} — falling back to sync"
             )
 
-            fallback_sync_stream(module, messages, callback, opts)
+            fallback_sync_stream_unless_observed(module, messages, callback, opts, reason)
         end
       rescue
         e ->
           Logger.error("Provider #{module} chat_stream raised: #{Exception.message(e)}")
-          fallback_sync_stream(module, messages, callback, opts)
+
+          fallback_sync_stream_unless_observed(
+            module,
+            messages,
+            callback,
+            opts,
+            "provider #{inspect(module)} chat_stream raised: #{Exception.message(e)}"
+          )
       end
     else
+      # Provider cannot stream at all — nothing was emitted, so the whole-body
+      # push is the only delivery and is safe.
       fallback_sync_stream(module, messages, callback, opts)
     end
   end

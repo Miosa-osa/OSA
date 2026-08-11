@@ -96,7 +96,17 @@ defmodule OptimalSystemAgent.Memory.SkillGenerator do
 
     content = render_skill_md(slug, description, triggers, tags, category, id, response)
 
-    with :ok <- File.mkdir_p(dir),
+    # `slug` is derived from a free-form pattern description, so it can collide
+    # with a skill the user wrote by hand — and this path used to blind-write,
+    # silently replacing that skill's contents with generated text. (The
+    # interactive path in `Tools.Builtins.SkillManager` has always refused to
+    # clobber an existing SKILL.md; only this automatic one did not.)
+    #
+    # Regenerating a skill this module previously produced is still fine, and
+    # the frontmatter says which those are: `source: auto:<pattern_id>`. Absent
+    # that marker the file did not come from here, and is not ours to replace.
+    with :ok <- ensure_not_hand_written(path, slug),
+         :ok <- File.mkdir_p(dir),
          :ok <- File.write(path, content) do
       Logger.info("[SkillGenerator] wrote skill #{slug} -> #{path}")
       reload_registry()
@@ -283,6 +293,35 @@ defmodule OptimalSystemAgent.Memory.SkillGenerator do
 
     #{response}
     """
+  end
+
+  # `:ok` when `path` is absent or was itself generated here (frontmatter
+  # `source: auto:...`); `{:error, :hand_written_skill}` otherwise.
+  defp ensure_not_hand_written(path, slug) do
+    case File.read(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, existing} ->
+        if Regex.match?(~r/^source:\s*auto:/m, existing) do
+          :ok
+        else
+          Logger.warning(
+            "[SkillGenerator] refusing to overwrite hand-written skill #{slug} at #{path} " <>
+              "(no `source: auto:` marker). Rename the generated pattern or the existing skill."
+          )
+
+          {:error, :hand_written_skill}
+        end
+
+      {:error, reason} ->
+        # Unreadable but present — same rule: do not replace what we cannot read.
+        Logger.warning(
+          "[SkillGenerator] refusing to overwrite #{path}: unreadable (#{inspect(reason)})"
+        )
+
+        {:error, reason}
+    end
   end
 
   defp reload_registry do

@@ -62,7 +62,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_reasoning(model, opts)
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
-      |> maybe_add_provider_thinking(model, opts)
+      |> maybe_add_provider_thinking(model, opts, base_url)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
@@ -107,6 +107,26 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           Logger.warning("Rate limited by provider (HTTP 429): #{error_msg}")
           {:error, {:rate_limited, retry_after}}
 
+        # A 200 whose body did not match the JSON shape above. The common cause
+        # is a gateway that only speaks SSE and answers a non-streaming request
+        # with an event stream anyway: the body decodes to a BINARY, falls
+        # through to the clause below, and `extract_error_message/1` renders it
+        # as `inspect(body)` — a wall of escaped `data: {...}` frames presented
+        # to the user as the error message, for a request that in fact
+        # succeeded. OSA already has the inverse recovery (stream → sync, in
+        # `Registry.stream_with_fallback/5`); this is the missing direction.
+        {:ok, %{status: 200, body: body}} when is_binary(body) ->
+          if sse_body?(body) do
+            Logger.info(
+              "OpenAI-compat endpoint answered a non-streaming request with SSE — " <>
+                "re-issuing as a stream and collecting the result"
+            )
+
+            collect_via_stream(base_url, api_key, model, messages, opts)
+          else
+            {:error, "HTTP 200 with an unrecognized body: #{String.slice(body, 0, 500)}"}
+          end
+
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error_message(resp_body)
           {:error, "HTTP #{status}: #{error_msg}"}
@@ -119,6 +139,45 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
+  # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
+  # and terminate with `data: [DONE]`.
+  defp sse_body?(body) do
+    trimmed = String.trim_leading(body)
+    String.starts_with?(trimmed, "data:") or String.starts_with?(trimmed, "event:")
+  end
+
+  # Re-issue the request as a real stream and fold the deltas back into the
+  # single `{:ok, result}` the sync caller is waiting for. The caller asked for
+  # a whole answer, so nothing is emitted anywhere — this is a transport
+  # workaround, not a delivery change.
+  defp collect_via_stream(base_url, api_key, model, messages, opts) do
+    parent = self()
+    ref = make_ref()
+
+    callback = fn
+      {:done, result} -> send(parent, {ref, :done, result})
+      _ -> :ok
+    end
+
+    case do_chat_stream(base_url, api_key, model, messages, callback, opts) do
+      :ok ->
+        receive do
+          {^ref, :done, result} -> {:ok, result}
+        after
+          0 -> {:error, "SSE recovery: stream completed without a result"}
+        end
+
+      {:ok, result} when is_map(result) ->
+        {:ok, result}
+
+      {:error, reason} ->
+        {:error, "SSE recovery failed: #{inspect(reason)}"}
+
+      other ->
+        {:error, "SSE recovery failed: #{inspect(other)}"}
+    end
+  end
+
   # ── Streaming implementation ───────────────────────────────────────────
 
   @doc """
@@ -128,7 +187,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   `usage` from every streamed response and Accounting.record always sees 0
   tokens.
   """
-  def build_stream_body(model, messages, opts) do
+  def build_stream_body(model, messages, opts, base_url \\ nil) do
     %{
       model: model,
       messages: format_messages(messages) |> maybe_strip_images(opts),
@@ -146,11 +205,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> maybe_add_reasoning(model, opts)
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
-    |> maybe_add_provider_thinking(model, opts)
+    |> maybe_add_provider_thinking(model, opts, base_url)
   end
 
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
-    body = build_stream_body(model, messages, opts)
+    body = build_stream_body(model, messages, opts, base_url)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
@@ -300,8 +359,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       {:ok, %{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}} ->
         %{acc | usage: %{input_tokens: inp, output_tokens: out}}
 
+      # `inspect/1` rather than interpolation: a non-binary `message` here would
+      # raise inside the SSE accumulator and kill the whole stream over a log line.
       {:ok, %{"error" => %{"message" => msg}}} ->
-        Logger.error("OpenAI-compat stream error: #{msg}")
+        Logger.error("OpenAI-compat stream error: #{if is_binary(msg), do: msg, else: inspect(msg)}")
+
         acc
 
       {:error, _} ->
@@ -977,23 +1039,56 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # DeepSeek V4 takes a `thinking` object in the request body (what the OpenAI
   # SDK calls `extra_body`); OSA builds raw JSON, so it is simply merged in at
-  # top level. No-op for every non-DeepSeek model, so it is safe to call
-  # unconditionally on both the sync and streaming paths.
+  # top level.
   #
   # This must run even when the caller passes no effort: DeepSeek defaults
   # `thinking.type` to "enabled", so an OSA "off" effort has to send
   # `{"type": "disabled"}` explicitly — omitting the object leaves thinking ON.
-  defp maybe_add_provider_thinking(body, model, opts) do
-    effort =
-      Keyword.get(opts, :reasoning_effort) ||
-        Keyword.get(opts, :effort) ||
-        current_effort()
+  #
+  # The gate is `thinking_params/2`, a pure MODEL-NAME test. This module is the
+  # shared transport for OpenRouter, Groq, LM Studio and every user-defined
+  # base_url, and those gateways host DeepSeek weights under DeepSeek's own
+  # names — `deepseek/deepseek-v3.2` on OpenRouter, `deepseek-r1:70b` locally.
+  # Keyed on the name alone, DeepSeek's proprietary top-level `thinking` object
+  # was merged into requests bound for servers that reject an unknown top-level
+  # field with a 400. The transport is what decides whether a
+  # provider-proprietary body decoration is legal, so the endpoint gets a vote.
+  defp maybe_add_provider_thinking(body, model, opts, base_url) do
+    if deepseek_endpoint?(base_url) do
+      effort =
+        Keyword.get(opts, :reasoning_effort) ||
+          Keyword.get(opts, :effort) ||
+          current_effort()
 
-    case OptimalSystemAgent.Providers.DeepSeekModels.thinking_params(model, effort) do
-      params when map_size(params) == 0 -> body
-      params -> Map.merge(body, params)
+      case OptimalSystemAgent.Providers.DeepSeekModels.thinking_params(model, effort) do
+        params when map_size(params) == 0 -> body
+        params -> Map.merge(body, params)
+      end
+    else
+      body
     end
   end
+
+  # `nil` = the caller did not say (the 3-arity `build_stream_body/3` contract
+  # tests use). Unknown transport keeps the pre-existing behaviour rather than
+  # silently disabling thinking for a caller that never had a URL to give.
+  defp deepseek_endpoint?(nil), do: true
+
+  defp deepseek_endpoint?(url) when is_binary(url) do
+    host = URI.parse(url).host || ""
+
+    String.ends_with?(host, "deepseek.com") or
+      # A user proxying DeepSeek through their own host is still DeepSeek: the
+      # :deepseek provider's configured URL counts however it is spelled.
+      url ==
+        Application.get_env(
+          :optimal_system_agent,
+          :deepseek_url,
+          "https://api.deepseek.com/v1"
+        )
+  end
+
+  defp deepseek_endpoint?(_), do: false
 
   defp current_effort do
     OptimalSystemAgent.Agent.Effort.current()
@@ -1008,7 +1103,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp parse_usage(_), do: %{}
 
-  defp extract_error_message(%{"error" => %{"message" => msg}}), do: msg
+  # `message` is only usable as a message when it IS one. Some gateways answer
+  # with `{"error": {"message": {"detail": ...}}}` or a list of validation
+  # objects; without the guard that map reached a `"#{}"` interpolation at the
+  # call sites below and raised Protocol.UndefinedError, turning a classifiable
+  # provider error into an unclassifiable crash that ErrorCatalog and the
+  # fallback chain never got to see. Fall through to `inspect/1` instead.
+  defp extract_error_message(%{"error" => %{"message" => msg}}) when is_binary(msg), do: msg
   defp extract_error_message(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error_message(body), do: inspect(body)
 

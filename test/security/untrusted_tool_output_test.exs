@@ -196,7 +196,8 @@ defmodule OptimalSystemAgent.Security.UntrustedToolOutputTest do
 
     @tag :security
     test "ordinary output gets no warning" do
-      fenced = ToolExecutor.fence_untrusted("web_fetch", "The current price is $42.10 as of Tuesday.")
+      fenced =
+        ToolExecutor.fence_untrusted("web_fetch", "The current price is $42.10 as of Tuesday.")
 
       refute fenced =~ "WARNING"
       assert fenced =~ "not instructions"

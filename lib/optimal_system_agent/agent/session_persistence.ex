@@ -592,7 +592,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   """
   @spec save_from_state(String.t(), map()) :: :ok | {:error, term()}
   def save_from_state(session_id, state) when is_binary(session_id) and is_map(state) do
-    with :ok <- save(session_id, Map.get(state, :messages, []), Map.get(state, :working_dir)),
+    # `|| []` and not a Map.get/3 default. This gates what gets WRITTEN: a
+    # present-but-nil `:messages` skips the default and would persist an empty
+    # message set over a real session. The `|| []` at least keeps the nil case
+    # on the same code path as the absent case instead of writing nil through.
+    with :ok <- save(session_id, Map.get(state, :messages) || [], Map.get(state, :working_dir)),
          # Persist the running spend at the turn boundary too (audit gap C2).
          # The crash-recovery checkpoint is cleared on a clean turn end, so this
          # is what carries accumulated spend into a resume AFTER a completed turn.
@@ -825,7 +829,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         {incoming, false}
 
       true ->
-        prior = Enum.filter(Map.get(existing, "messages", []), &is_map/1)
+        # `|| []`: `existing` is decoded from a file on disk, where
+        # `"messages": null` is a real shape. The Map.get/3 default does not
+        # fire for a present null and Enum.filter/2 on nil raises — inside a
+        # merge whose whole job is to not lose the other writer's messages.
+        prior = Enum.filter(Map.get(existing, "messages") || [], &is_map/1)
         {union_messages(prior, incoming), true}
     end
   end

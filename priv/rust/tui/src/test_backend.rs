@@ -162,36 +162,49 @@ impl VT100Backend {
         self.parser.borrow_mut().set_size(height, width);
     }
 
-    /// Every retained scroll-history row, oldest first, trailing blanks stripped.
+    /// The most recent scroll-history rows, oldest first, trailing blanks
+    /// stripped — up to one screenful, which is as deep as `vt100` can be asked
+    /// to look.
     ///
-    /// Reads the history by scrolling the emulated viewport back to its oldest
-    /// row and walking forward, so it reflects what a user scrolling up would
-    /// actually see. The viewport is restored before returning.
+    /// **The depth limit is the emulator's, not a choice.** `Grid::visible_rows`
+    /// composes a scrolled-back view as `scrollback[len - offset ..]` followed
+    /// by `rows.iter().take(rows_len - offset)` (vt100-0.15.2 `grid.rs:118-126`),
+    /// and that second subtraction is unchecked — so any offset greater than the
+    /// screen height panics with "attempt to subtract with overflow" in a debug
+    /// build, and silently indexes nonsense in a release one. The reachable
+    /// window is therefore always the LAST `rows` rows of history, whatever
+    /// `set_scrollback` is handed.
+    ///
+    /// This function used to page from `depth` downward in screenfuls, which is
+    /// the natural way to write it and reads as if it returned the whole
+    /// history. It never could: the first `set_scrollback(depth)` panics the
+    /// moment history is deeper than the screen. Nothing noticed because no test
+    /// had committed more than a screenful — and "every retained row", asserted
+    /// on a value that can only ever be the last screenful, is the kind of claim
+    /// that makes a suite look stronger than it is.
+    ///
+    /// What it covers is what the assertions need: chrome scrolled into history
+    /// by a commit is the NEWEST history, so it is always inside the window.
     pub fn scrollback_lines(&self) -> Vec<String> {
         let mut parser = self.parser.borrow_mut();
         let (rows, _) = parser.screen().size();
-        let depth = {
-            // Walk back as far as the emulator will go: `set_scrollback` clamps
-            // to the retained length, so asking for more than exists is safe and
-            // reports the true depth.
-            parser.set_scrollback(usize::MAX);
-            parser.screen().scrollback()
-        };
+        // `set_scrollback` clamps to the retained length, so asking for more
+        // than exists reports the true depth. Reading the offset back does not
+        // compose a view, so it is safe at any depth; `contents()` is not.
+        parser.set_scrollback(usize::MAX);
+        let depth = parser.screen().scrollback();
+        let reachable = depth.min(rows as usize);
         let mut out: Vec<String> = Vec::new();
-        // Page forward one screen at a time from the oldest row, collecting only
-        // the rows that were genuinely history (never the live screen).
-        let mut remaining = depth;
-        while remaining > 0 {
-            parser.set_scrollback(remaining);
-            let page: Vec<String> = parser
-                .screen()
-                .contents()
-                .lines()
-                .map(str::to_string)
-                .collect();
-            let take = (remaining).min(rows as usize);
-            out.extend(page.into_iter().take(take));
-            remaining -= take;
+        if reachable > 0 {
+            parser.set_scrollback(reachable);
+            out.extend(
+                parser
+                    .screen()
+                    .contents()
+                    .lines()
+                    .map(str::to_string)
+                    .take(reachable),
+            );
         }
         parser.set_scrollback(0);
         out

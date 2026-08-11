@@ -224,7 +224,21 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
       # Only rewrite when formatting actually changed something, and never when
       # it would empty the file.
       if formatted != "" and formatted != src do
-        File.write(path, formatted)
+        # Formatting is not instantaneous (it parses the file and walks up to
+        # 40 parent directories looking for .formatter.exs), so the bytes on
+        # disk can have moved on since `src` was read — by the user's editor,
+        # or by another agent. Writing `formatted` unconditionally would
+        # silently revert whatever landed in that window. Re-read and only
+        # write when the file is still byte-identical to what was formatted.
+        if File.read(path) == {:ok, src} do
+          case File.write(path, formatted) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.debug("[PostEdit] format write failed for #{path}: #{inspect(reason)}")
+          end
+        end
       end
     end
 
@@ -244,22 +258,59 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
     _ -> nil
   end
 
+  # Read formatting options out of the nearest `.formatter.exs` WITHOUT
+  # executing it.
+  #
+  # This used to be `Code.eval_file(file)`. `.formatter.exs` is arbitrary
+  # Elixir source belonging to whatever repository happens to be on disk, and
+  # this function runs on EVERY file_edit / multi_file_edit / file_write (see
+  # the `:diagnostics_provider` wiring in config/config.exs and
+  # `Agent.Reminders`). Evaluating it meant that editing a single file inside
+  # any cloned repository executed that repository's code inside the agent's
+  # BEAM, with the agent's full filesystem and network access — remote code
+  # execution triggered by nothing more than `git clone` plus one edit. The
+  # `rescue` below made it silent.
+  #
+  # Parsing is enough. A `.formatter.exs` evaluates to a keyword list, so the
+  # options we care about are literals in the AST and can be read straight off
+  # it. Anything computed (`Path.wildcard/1`, `import_deps`, plugins) is simply
+  # not literal, so it is dropped rather than run — which is the correct
+  # outcome anyway, since @formatter_opt_keys already excludes those keys.
   defp elixir_formatter_opts(path) do
-    case find_up(dir(path), ".formatter.exs") do
-      nil ->
-        []
-
-      file ->
-        try do
-          {opts, _} = Code.eval_file(file)
-          if Keyword.keyword?(opts), do: Keyword.take(opts, @formatter_opt_keys), else: []
-        rescue
-          _ -> []
-        catch
-          _, _ -> []
-        end
+    with file when is_binary(file) <- find_up(dir(path), ".formatter.exs"),
+         {:ok, src} <- File.read(file),
+         {:ok, ast} <- Code.string_to_quoted(src),
+         opts when is_list(opts) <- literal_keyword(ast) do
+      Keyword.take(opts, @formatter_opt_keys)
+    else
+      _ -> []
     end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
+
+  # Convert a quoted top-level keyword list into a real keyword list, keeping
+  # only pairs whose value is a pure literal. Never evaluates.
+  defp literal_keyword(ast) when is_list(ast) do
+    Enum.reduce(ast, [], fn
+      {key, value}, acc when is_atom(key) ->
+        if Macro.quoted_literal?(value), do: [{key, unquote_literal(value)} | acc], else: acc
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp literal_keyword(_), do: nil
+
+  # A quoted literal is already its own value for scalars and lists; 2-tuples
+  # need their elements walked. `Macro.quoted_literal?/1` guarantees no calls
+  # are present, so this is a pure structural rewrite with nothing to execute.
+  defp unquote_literal(list) when is_list(list), do: Enum.map(list, &unquote_literal/1)
+  defp unquote_literal({a, b}), do: {unquote_literal(a), unquote_literal(b)}
+  defp unquote_literal(other), do: other
 
   defp elixir_syntax(path) do
     with {:ok, src} <- File.read(path),

@@ -18,7 +18,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     * Rich `{:ok, result, metadata}` return with diff text + stats when content changes
   """
 
-  alias OptimalSystemAgent.Agent.Safety.PathCanon
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
   alias OptimalSystemAgent.Tools.Builtins.FileWrite.Constants
   alias OptimalSystemAgent.Tools.FileState
@@ -54,25 +54,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
         do: Path.join("~/.osa/workspace", path),
         else: path
 
-    expanded = Path.expand(normalized)
-    {resolved, symlink_traversal?} = resolve_for_write(expanded)
-
-    cond do
-      # Guard on the *pre-resolution* path: a protected dotfile (e.g. ~/.zshrc)
-      # is protected by its name/location, even when it is a symlink pointing
-      # into an otherwise-allowed directory. Without this, symlinked dotfiles
-      # silently bypass the dotfile deny (the resolved target is not a dotfile).
-      dotfile_outside_osa?(expanded) ->
-        {:deny, "Access denied: #{path} is a protected dotfile outside ~/.osa/"}
-
-      symlink_traversal? and not write_allowed?(resolved) ->
-        {:deny, "Access denied: #{path} resolves through a symlink to a protected location"}
-
-      not write_allowed?(resolved) ->
-        {:deny, "Access denied: #{path} is outside allowed paths or targets a protected location"}
-
-      true ->
-        {:allow, input}
+    case PathPolicy.check_write(normalized, path) do
+      :ok -> {:allow, input}
+      {:deny, _} = denial -> denial
     end
   end
 
@@ -101,20 +85,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
   end
 
   defp execute_guard(orig_path, expanded) do
-    {resolved, symlink_traversal?} = resolve_for_write(expanded)
-
-    cond do
-      dotfile_outside_osa?(expanded) ->
-        {:deny, "Access denied: #{orig_path} is a protected dotfile outside ~/.osa/"}
-
-      symlink_traversal? and not write_allowed?(resolved) ->
-        {:deny, "Access denied: #{orig_path} resolves through a symlink to a protected location"}
-
-      not write_allowed?(resolved) ->
-        {:deny, "Access denied: #{orig_path} is outside allowed paths or targets a protected location"}
-
-      true ->
-        :allow
+    case PathPolicy.check_write(expanded, orig_path) do
+      :ok -> :allow
+      {:deny, _} = denial -> denial
     end
   end
 
@@ -274,60 +247,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
            String.match?(path, ~r/^[A-Za-z]:[\\\/]/))
   end
 
-  # Resolve symlinks for a write target path.
-  # Returns {resolved_path, symlink_traversal?} where symlink_traversal? is
-  # true when the resolved path differs from the original expanded path.
-  #
-  # `PathCanon` resolves EVERY component — including a not-yet-existing leaf,
-  # which is the normal case for a write. The previous version special-cased
-  # the immediate parent only, so `allowed/link/sub/new.txt` where
-  # `link -> ~/.ssh` escaped the allowlist entirely: neither the leaf nor its
-  # parent (`sub`) was a symlink, so nothing was resolved.
-  defp resolve_for_write(expanded_path), do: PathCanon.resolve(expanded_path)
-
-  defp allowed_write_paths do
-    configured =
-      Application.get_env(
-        :optimal_system_agent,
-        :allowed_write_paths,
-        Constants.default_allowed_write_paths()
-      )
-
-    # Canonicalise the roots too: the candidate path is canonical by the time it
-    # reaches `write_allowed?/1`, so a root that is itself a symlink (macOS
-    # `/tmp`, a symlinked `$HOME`) would otherwise never match and every write
-    # would be denied.
-    Enum.map(configured, fn p ->
-      expanded = PathCanon.canonicalize(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
-
-  defp osa_path do
-    Path.expand("~/.osa") <> "/"
-  end
-
-  defp dotfile_outside_osa?(expanded_path) do
-    home = Path.expand("~")
-
-    relative =
-      case String.split_at(expanded_path, byte_size(home)) do
-        {^home, rest} -> rest
-        _ -> nil
-      end
-
-    case relative do
-      "/" <> rest ->
-        first_component = rest |> String.split("/") |> List.first()
-        starts_with_dot = String.starts_with?(first_component, ".")
-        under_osa = String.starts_with?(expanded_path, osa_path())
-        starts_with_dot and not under_osa
-
-      _ ->
-        false
-    end
-  end
-
   defp maybe_reload_soul(expanded_path) do
     osa_dir = Path.expand("~/.osa")
     filename = Path.basename(expanded_path)
@@ -342,27 +261,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     end
   end
 
-  defp write_allowed?(expanded_path) do
-    if dotfile_outside_osa?(expanded_path) do
-      false
-    else
-      blocked =
-        Enum.any?(Constants.blocked_write_paths(), fn pattern ->
-          String.contains?(expanded_path, pattern)
-        end)
-
-      if blocked do
-        false
-      else
-        check_path =
-          if String.ends_with?(expanded_path, "/"),
-            do: expanded_path,
-            else: expanded_path <> "/"
-
-        Enum.any?(allowed_write_paths(), fn allowed ->
-          String.starts_with?(check_path, allowed)
-        end)
-      end
-    end
-  end
 end

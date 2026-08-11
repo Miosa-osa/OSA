@@ -9,14 +9,21 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Windows do
   see docs/windows-desktop.md for UAC / secure-desktop restrictions.
 
   Helper lookup order (first found wins):
-    1. `%USERPROFILE%\\.osa\\helpers\\osa-screen-capture-windows.exe`
+    1. A hash-pinned override (`OSA_DESKTOP_HELPER_OVERRIDE` +
+       `OSA_DESKTOP_HELPER_SHA256`)
     2. `<priv>/helpers/osa-screen-capture-windows.exe`  (bundled in release)
 
-  Returns `{:error, {:missing_helper, _}}` when neither path exists.
+  `%USERPROFILE%\\.osa\\helpers\\` is deliberately NOT searched: it is
+  user-writable, and this binary is executed on every desktop capture. See
+  `Desktop.HelperPath`.
+
+  Returns `{:error, {:missing_helper, _}}` when no trusted binary exists.
   See docs/windows-desktop.md for architecture details and ship status.
   """
 
   require Logger
+
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath
 
   @helper_name "osa-screen-capture-windows.exe"
   @port_pattern ~r/PORT=(\d+)/
@@ -59,30 +66,50 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Windows do
     :ok
   end
 
-  # ── Private ──────────────────────────────────────────────────────────
+  @doc """
+  Controller-compatible adapter API.
 
-  defp find_helper do
-    user_path = build_user_path()
-    priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/#{@helper_name}")
+  Returns `{:ok, %{port_ref: port, os_pid: pid, vnc_port: port_number}}`. The
+  RFB port travels with the handle — the caller must connect to the port this
+  helper reported, never a fixed one.
+  """
+  @spec start(map()) :: {:ok, map()} | {:error, term()}
+  def start(_opts \\ %{}) do
+    case spawn() do
+      {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}} ->
+        {:ok, %{port_ref: port, os_pid: os_pid, vnc_port: vnc_port}}
 
-    cond do
-      not is_nil(user_path) and File.exists?(user_path) ->
-        {:ok, user_path}
-
-      File.exists?(priv_path) ->
-        {:ok, priv_path}
-
-      true ->
-        {:error,
-         {:missing_helper,
-          "#{@helper_name} not found. " <>
-            "Install via: osa opencomputers install-helper " <>
-            "(see docs/windows-desktop.md)"}}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
+  @doc "Stop the helper by Port reference (as returned by `start/1`)."
+  @spec stop(port() | map()) :: :ok
+  def stop(%{port_ref: port_ref}), do: stop(port_ref)
+
+  def stop(port_ref) when is_port(port_ref) do
+    case Port.info(port_ref, :os_pid) do
+      {:os_pid, os_pid} -> kill(%__MODULE__{port: port_ref, os_pid: os_pid})
+      _ -> catch_exit(fn -> Port.close(port_ref) end)
+    end
+
+    :ok
+  end
+
+  def stop(_), do: :ok
+
+  # ── Private ──────────────────────────────────────────────────────────
+
+  defp find_helper do
+    priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/#{@helper_name}")
+
+    HelperPath.resolve(@helper_name, priv_path, build_user_path(), "docs/windows-desktop.md")
+  end
+
   # Resolves %USERPROFILE%\.osa\helpers\<name> — returns nil when the env var
-  # is absent (e.g. running on Linux/macOS in tests).
+  # is absent (e.g. running on Linux/macOS in tests). Used only to explain in
+  # the error message that this path is no longer trusted.
   defp build_user_path do
     case System.get_env("USERPROFILE") do
       nil -> nil

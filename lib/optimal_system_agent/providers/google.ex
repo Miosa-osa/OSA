@@ -448,7 +448,10 @@ defmodule OptimalSystemAgent.Providers.Google do
 
   defp extract_tool_calls(_), do: []
 
-  defp extract_error(%{"error" => %{"message" => msg}}), do: msg
+  # Guarded: a non-binary `message` (nested object, validation list) would
+  # otherwise reach a string interpolation at the call sites and raise
+  # Protocol.UndefinedError instead of producing a classifiable error.
+  defp extract_error(%{"error" => %{"message" => msg}}) when is_binary(msg), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error(body), do: inspect(body)
 

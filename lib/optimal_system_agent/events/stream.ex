@@ -28,6 +28,8 @@ defmodule OptimalSystemAgent.Events.Stream do
   use GenServer
   require Logger
 
+  alias OptimalSystemAgent.Events.Event
+
   @default_max_events 1000
 
   # ── Public API ──────────────────────────────────────────────────────
@@ -153,11 +155,16 @@ defmodule OptimalSystemAgent.Events.Stream do
       state.events
       |> :queue.to_list()
       |> filter_events(opts)
+      |> Event.sort()
 
     {:reply, {:ok, result}, state}
   end
 
   def handle_call({:replay, from, to}, _from, state) do
+    # Append order into the buffer is task-scheduling order (Bus.emit hands the
+    # already-built event to a Task so emit never blocks), and the wall clock
+    # alone cannot repair an inversion. Events carry a monotonic `seq` stamped
+    # on the CALLER's process at emit time, so replay orders on that.
     result =
       state.events
       |> :queue.to_list()
@@ -167,6 +174,7 @@ defmodule OptimalSystemAgent.Events.Stream do
         time != nil and DateTime.compare(time, from) in [:gt, :eq] and
           DateTime.compare(time, to) in [:lt, :eq]
       end)
+      |> Event.sort()
 
     {:reply, {:ok, result}, state}
   end

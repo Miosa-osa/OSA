@@ -7,14 +7,31 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
 
       config :optimal_system_agent, :fallback_chain, [:anthropic, :openai, :groq, :ollama]
 
-  Falls back silently — the agent continues working without interruption.
+  Falls back silently — the agent continues working without interruption —
+  with one deliberate exception. See `cost_gated_chain/2`: crossing from a
+  free/local primary onto a metered provider is a decision with a bill
+  attached and the user's prompt on the wire, so it is never taken silently and
+  never taken on a chain the user did not choose.
   """
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Providers.{ErrorCatalog, Resilience, RetryClassifier}
+  alias OptimalSystemAgent.Events.Bus
 
   @default_chain [:anthropic, :openai, :groq, :ollama]
+
+  # Providers that bill nothing and keep the prompt on the user's own machine.
+  # `:ollama_cloud` is deliberately NOT here: it proxies to ollama.com, so the
+  # prompt leaves the box even if the plan is free.
+  @free_providers [:ollama, :lmstudio]
+
+  # Opt-in for the case the gate exists for: an unconfigured chain plus a
+  # free/local primary. Set
+  #     config :optimal_system_agent, :fallback_allow_paid, true
+  # (or `fallback_allow_paid = true` in config.toml's equivalent) to let the
+  # built-in chain spend money on the user's behalf.
+  @allow_paid_key :fallback_allow_paid
 
   # Categories that always warrant a cross-provider fallback attempt: server
   # overload/5xx and rate-limit are provider-specific (another provider is not
@@ -41,6 +58,97 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
     Application.get_env(:optimal_system_agent, :fallback_chain, @default_chain)
   end
 
+  @doc "True for providers that cost nothing and keep the prompt on this machine."
+  @spec free?(atom()) :: boolean()
+  def free?(provider), do: provider in @free_providers
+
+  @doc """
+  The fallback chain a given primary is actually allowed to spend on.
+
+  `@default_chain` hardcodes three metered providers ahead of the one free
+  one, and `chain/0` returns it whenever the user has not configured a chain of
+  their own. Combined with "falls back silently", that meant a user whose
+  primary is `:ollama` — who chose a local model precisely so nothing is
+  billed and nothing leaves the machine — was moved onto Anthropic on the first
+  5xx, because an `ANTHROPIC_API_KEY` happened to be exported. Two things
+  crossed a line the user never drew: their money, and their prompt.
+
+  So: when the primary is free AND the chain is the built-in default (i.e. the
+  user never chose it), paid hops are dropped. An explicitly configured chain
+  is honoured as written — the user picked those providers — but the first paid
+  hop from a free primary still announces itself.
+
+  Returns the permitted chain. Emits at most one warning per VM per case.
+  """
+  @spec cost_gated_chain([atom()], atom()) :: [atom()]
+  def cost_gated_chain(candidates, primary) do
+    paid = Enum.reject(candidates, &free?/1)
+
+    cond do
+      not free?(primary) or paid == [] ->
+        candidates
+
+      Application.get_env(:optimal_system_agent, @allow_paid_key, false) ->
+        warn_once(
+          {:paid_allowed, primary},
+          "[fallback] #{primary} failed; falling back to metered provider(s) " <>
+            "#{inspect(paid)} because :#{@allow_paid_key} is enabled. Your prompt is " <>
+            "being sent to a provider you did not select, and the call is billed."
+        )
+
+        candidates
+
+      user_configured_chain?() ->
+        warn_once(
+          {:paid_configured, primary},
+          "[fallback] #{primary} failed; falling back to metered provider(s) " <>
+            "#{inspect(paid)} from your configured :fallback_chain. These calls are " <>
+            "billed and your prompt leaves this machine."
+        )
+
+        candidates
+
+      true ->
+        free = Enum.filter(candidates, &free?/1)
+
+        warn_once(
+          {:paid_blocked, primary},
+          "[fallback] #{primary} failed. NOT falling back to #{inspect(paid)} — those " <>
+            "are metered providers from OSA's built-in default chain, not a chain you " <>
+            "chose, and #{primary} is a free/local provider. Set " <>
+            "config :optimal_system_agent, :#{@allow_paid_key}, true to allow it, or " <>
+            "configure :fallback_chain explicitly."
+        )
+
+        free
+    end
+  end
+
+  defp user_configured_chain?,
+    do: Application.get_env(:optimal_system_agent, :fallback_chain) != nil
+
+  # Logger alone is not "a warning the user actually sees" — OSA's TUI renders
+  # the bus, not the log. Emit on both, once per distinct case per VM, so a
+  # retry loop cannot turn this into a wall of text.
+  defp warn_once(key, message) do
+    pt_key = {__MODULE__, :warned, key}
+
+    if :persistent_term.get(pt_key, false) == false do
+      :persistent_term.put(pt_key, true)
+      Logger.warning(message)
+
+      try do
+        Bus.emit(:system_event, %{event: :provider_cost_warning, message: message})
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
   @doc """
   Try a chat call across the fallback chain.
 
@@ -52,8 +160,13 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       Keyword.get(opts, :provider) ||
         Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
-    # Build ordered chain: primary first, then configured fallbacks (excluding primary)
-    fallback_providers = chain() |> Enum.reject(fn p -> p == primary end)
+    # Build ordered chain: primary first, then configured fallbacks (excluding
+    # primary), minus any metered hop the primary is not allowed to spend on.
+    fallback_providers =
+      chain()
+      |> Enum.reject(fn p -> p == primary end)
+      |> cost_gated_chain(primary)
+
     ordered = [primary | fallback_providers]
 
     try_providers(ordered, messages, opts, [])
@@ -69,7 +182,11 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       Keyword.get(opts, :provider) ||
         Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
-    fallback_providers = chain() |> Enum.reject(fn p -> p == primary end)
+    fallback_providers =
+      chain()
+      |> Enum.reject(fn p -> p == primary end)
+      |> cost_gated_chain(primary)
+
     ordered = [primary | fallback_providers]
 
     try_stream_providers(ordered, messages, callback, opts, [])

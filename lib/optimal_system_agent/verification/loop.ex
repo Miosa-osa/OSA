@@ -219,9 +219,14 @@ defmodule OptimalSystemAgent.Verification.Loop do
       task_id: state.task_id
     })
 
-    parent = self()
     cmd = state.test_command
 
+    # The task RETURNS the result rather than `send/2`-ing it: `Task.async/1`
+    # already delivers `{task.ref, <return value>}` to the caller, which is the
+    # exact shape `handle_info({ref, {:test_result, ...}}, ...)` matches. Sending
+    # `{self(), ...}` instead delivered a pid where a reference was required, so
+    # the result was silently dropped into the catch-all and the loop could only
+    # ever observe the task's `:normal` exit as a crash.
     task =
       Task.async(fn ->
         {output, exit_code} =
@@ -231,7 +236,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
             e -> {"Command error: #{Exception.message(e)}", 1}
           end
 
-        send(parent, {self(), {:test_result, exit_code, output}})
+        {:test_result, exit_code, output}
       end)
 
     %{state | iteration: iteration, task_ref: task.ref}

@@ -74,6 +74,36 @@ defmodule OptimalSystemAgent.Agent.TrajectoryTest do
       assert Trajectory.redact(text) == text
     end
 
+    # `redact/1` now also runs over model REASONING text (the `:thinking_delta`
+    # paths in `Agent.Loop.LLMClient` and `Agent.Scratchpad`), which talks about
+    # token budgets constantly. `token` is a substring of `max_tokens`,
+    # `token_count` and `output_tokens`, so the credential `KEY=value` pattern
+    # was rewriting every one of those numbers to `[REDACTED]` and making the
+    # reasoning trace unreadable.
+    test "a numeric value on a credential-shaped key is left alone" do
+      for text <- [
+            "I should set max_tokens = 4096 for this call.",
+            "The context window token_count: 12000 is nearly full.",
+            "num_ctx and max_tokens: 8192 both matter here.",
+            "output_tokens=2048"
+          ] do
+        assert Trajectory.redact(text) == text,
+               "a plain number is not a credential: #{inspect(Trajectory.redact(text))}"
+      end
+    end
+
+    test "the numeric exemption does not open a hole for real key shapes" do
+      for text <- [
+            "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz012345",
+            "api_key=1234567890abcdef",
+            ~s|{"api_key": "0123456789abcdef"}|,
+            "SESSION_TOKEN=deadbeefcafebabe"
+          ] do
+        out = Trajectory.redact(text)
+        assert out =~ "REDACTED", "still a secret shape, must be redacted: #{out}"
+      end
+    end
+
     test "tool-call arguments and results are redacted on the way to disk" do
       Application.put_env(:optimal_system_agent, :trajectory_recording, true)
 

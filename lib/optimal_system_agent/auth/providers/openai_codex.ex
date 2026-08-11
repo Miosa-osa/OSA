@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
   require Logger
 
   alias OptimalSystemAgent.Auth.DeviceFlow
+  alias OptimalSystemAgent.Auth.RefreshFailures
   alias OptimalSystemAgent.Auth.SubscriptionStore
   alias OptimalSystemAgent.Utils.Browser
 
@@ -591,7 +592,7 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
 
     case result do
       {:ok, entry} ->
-        clear_refresh_failures()
+        RefreshFailures.reset(@provider_id)
         {:ok, entry["access_token"]}
 
       {:error, :refresh_token_invalid} = err ->
@@ -603,39 +604,21 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
         # extra failed turn. `refresh_token_reused` is not in this branch and
         # never should be: reuse detection is definitive and is handled as a
         # terminal error immediately.
-        if record_refresh_failure() >= 2 do
-          Logger.warning(
-            "[Auth] #{@display_name} rejected the refresh token twice in a row; signing out locally."
-          )
+        #
+        # The rule itself now lives in `Auth.RefreshFailures`, because it was
+        # spelled three different ways across five providers and only this
+        # one had a reason attached.
+        _ =
+          RefreshFailures.handle_rejection(@provider_id, @display_name, fn ->
+            SubscriptionStore.delete(@provider_id)
+          end)
 
-          _ = SubscriptionStore.delete(@provider_id)
-          clear_refresh_failures()
-          err
-        else
-          Logger.warning(
-            "[Auth] #{@display_name} rejected a token refresh. Keeping the credential — " <>
-              "a second consecutive rejection will sign you out."
-          )
-
-          err
-        end
+        err
 
       err ->
         err
     end
   end
-
-  # Consecutive `invalid_grant` count, in `:persistent_term` because it must
-  # survive across turns within an OS process but is worthless across a
-  # restart — a fresh process re-testing the credential once is exactly the
-  # right behaviour.
-  defp record_refresh_failure do
-    n = :persistent_term.get({__MODULE__, :refresh_failures}, 0) + 1
-    :persistent_term.put({__MODULE__, :refresh_failures}, n)
-    n
-  end
-
-  defp clear_refresh_failures, do: reset_refresh_failures()
 
   @doc """
   Forget the consecutive-refresh-failure count.
@@ -646,13 +629,17 @@ defmodule OptimalSystemAgent.Auth.Providers.OpenAICodex do
   a one-strike rule intermittently.
   """
   @spec reset_refresh_failures() :: :ok
-  def reset_refresh_failures do
-    :persistent_term.put({__MODULE__, :refresh_failures}, 0)
-    :ok
-  end
+  def reset_refresh_failures, do: RefreshFailures.reset(@provider_id)
 
   @impl true
-  def logout, do: SubscriptionStore.delete(@provider_id)
+  def logout do
+    # Signing out and back in within one OS process must start from zero
+    # strikes. Without this reset the fresh credential inherits the old one's
+    # strike, and the next transient rejection deletes a sign-in that is
+    # seconds old.
+    RefreshFailures.reset(@provider_id)
+    SubscriptionStore.delete(@provider_id)
+  end
 
   # ── helpers ─────────────────────────────────────────────────────────────
 

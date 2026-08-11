@@ -24,13 +24,41 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @spec snapshot(String.t(), String.t(), [String.t()]) :: :ok
+  @doc """
+  Snapshot `paths` as they are RIGHT NOW, and do not return until the copy is
+  on disk.
+
+  ## Why this is a call and not a cast
+
+  This ran as `GenServer.cast/2`. The pre-tool-use hook therefore returned
+  immediately, the tool wrote the file, and the copy happened whenever the
+  server got round to it — queued behind the previous snapshot's git
+  subprocesses. Under back-to-back edits the copy ran *after* the write it was
+  supposed to precede, so the checkpoint captured POST-edit content: `/rollback`
+  then restored the file to the state it was already in, and reported success.
+  A checkpoint that silently records the wrong bytes is worse than no
+  checkpoint, because the operator stops keeping their own backup.
+
+  The snapshot is now synchronous. The caller pays for the copy (and the git
+  commit) before its write proceeds, which is exactly the ordering the feature
+  claims.
+
+  Returns `{:ok, report}` where `report` carries `:copied` and `:skipped`, or
+  `{:error, reason}`. Never raises and never blocks forever: a dead or wedged
+  server degrades to `{:error, _}` so a checkpoint failure can never stop the
+  edit itself.
+  """
+  @spec snapshot(String.t(), String.t(), [String.t()]) ::
+          {:ok, %{copied: [String.t()], skipped: [{String.t(), String.t()}]}}
+          | {:error, String.t()}
   def snapshot(session_id, tool_name, paths) when is_list(paths) do
     if Config.enabled?() do
-      GenServer.cast(__MODULE__, {:snapshot, session_id, tool_name, paths})
+      GenServer.call(__MODULE__, {:snapshot, session_id, tool_name, paths}, 30_000)
+    else
+      {:ok, %{copied: [], skipped: []}}
     end
-
-    :ok
+  catch
+    :exit, _ -> {:error, "FSCheckpoint server unavailable"}
   end
 
   @spec list_checkpoints(pos_integer()) :: {:ok, [map()]} | {:error, String.t()}
@@ -108,59 +136,68 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
       priority: 11
     )
 
-    repo = Config.repo_path()
-    ensure_shadow_repo(repo)
-    {:ok, %{repo_path: repo}}
+    ensure_shadow_repo(Config.repo_path())
+    {:ok, %{}}
   end
 
   @impl true
-  def handle_cast({:snapshot, session_id, tool_name, paths}, state) do
-    try do
-      do_snapshot(state.repo_path, session_id, tool_name, paths)
-    rescue
-      e -> Logger.warning("[fs_checkpoint] Snapshot failed: #{Exception.message(e)}")
-    end
+  def handle_call({:snapshot, session_id, tool_name, paths}, _from, state) do
+    result =
+      try do
+        do_snapshot(repo_path(), session_id, tool_name, paths)
+      rescue
+        e ->
+          Logger.warning("[fs_checkpoint] Snapshot failed: #{Exception.message(e)}")
+          {:error, Exception.message(e)}
+      end
 
-    {:noreply, state}
+    {:reply, result, state}
   end
 
   @impl true
   def handle_call({:list, limit}, _from, state) do
-    result = do_list(state.repo_path, limit)
+    result = do_list(repo_path(), limit)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:restore, checkpoint_id}, _from, state) do
-    result = do_restore(state.repo_path, checkpoint_id)
+    result = do_restore(repo_path(), checkpoint_id)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:diff, checkpoint_id}, _from, state) do
-    result = do_diff(state.repo_path, checkpoint_id)
+    result = do_diff(repo_path(), checkpoint_id)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call(:head, _from, state) do
-    result = do_head(state.repo_path)
+    result = do_head(repo_path())
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:restore_to, commit}, _from, state) do
-    result = do_restore_to(state.repo_path, commit)
+    result = do_restore_to(repo_path(), commit)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:diff_stat, from_commit, to_commit}, _from, state) do
-    result = do_diff_stat(state.repo_path, from_commit, to_commit)
+    result = do_diff_stat(repo_path(), from_commit, to_commit)
     {:reply, result, state}
   end
 
   # ── Private: repo management ──────────────────────────────────────────
+
+  # Read per call rather than frozen into the GenServer's state at init, so the
+  # location is a configuration value rather than a property of one process
+  # instance. Tests point it at a temp directory; without that, exercising the
+  # checkpoint subsystem at all meant committing into the operator's real
+  # ~/.osa/fs_checkpoints history.
+  defp repo_path, do: Config.repo_path()
 
   defp ensure_shadow_repo(repo_path) do
     File.mkdir_p!(repo_path)
@@ -193,16 +230,18 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   # ── Private: snapshot ─────────────────────────────────────────────────
 
   defp do_snapshot(repo_path, session_id, tool_name, paths) do
+    # The path is read per call (see `repo_path/0`), so the repo may not exist
+    # yet — and it may have been deleted underneath a long-running server.
+    ensure_shadow_repo(repo_path)
+
+    # Files this snapshot will NOT protect. They used to be dropped in silence
+    # by two `Enum.filter/2`s while the log line counted only the survivors, so
+    # a 2 MiB file looked checkpointed and was not — the operator found out at
+    # `/rollback` time, which is the one moment the information is useless.
+    {copyable, skipped} = Enum.split_with(paths, &snapshotable?/1)
+
     copied =
-      paths
-      |> Enum.filter(&File.regular?/1)
-      |> Enum.filter(fn path ->
-        case File.stat(path) do
-          {:ok, %{size: size}} -> size <= Config.max_file_size()
-          _ -> false
-        end
-      end)
-      |> Enum.map(fn original_path ->
+      Enum.map(copyable, fn original_path ->
         # Store under the absolute path structure inside the shadow repo so
         # restore can reconstruct the original location without metadata.
         dest = Path.join(repo_path, original_path)
@@ -211,29 +250,80 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
         original_path
       end)
 
-    if copied != [] do
-      {_, 0} = OptimalSystemAgent.Git.cmd(["add", "-A"], cd: repo_path, stderr_to_stdout: true)
+    skipped = Enum.map(skipped, fn path -> {path, skip_reason(path)} end)
 
-      commit_msg = "#{tool_name} | #{session_id} | #{Enum.join(copied, ", ")}"
+    if skipped != [] do
+      Logger.warning(
+        "[fs_checkpoint] NOT checkpointed before #{tool_name} — /rollback cannot restore " <>
+          "these: " <>
+          Enum.map_join(skipped, ", ", fn {path, reason} -> "#{path} (#{reason})" end)
+      )
+    end
 
-      {_, _} =
-        System.cmd(
-          "git",
-          [
-            "-c",
-            "user.name=OSA Checkpoint",
-            "-c",
-            "user.email=checkpoint@osa",
-            "commit",
-            "-m",
-            commit_msg
-          ],
-          cd: repo_path,
-          stderr_to_stdout: true
+    if copied == [] do
+      {:ok, %{copied: [], skipped: skipped}}
+    else
+      commit_snapshot(repo_path, session_id, tool_name, copied, skipped)
+    end
+  end
+
+  defp commit_snapshot(repo_path, session_id, tool_name, copied, skipped) do
+    {_, 0} = OptimalSystemAgent.Git.cmd(["add", "-A"], cd: repo_path, stderr_to_stdout: true)
+
+    commit_msg = "#{tool_name} | #{session_id} | #{Enum.join(copied, ", ")}"
+
+    # The exit status used to be bound as `{_, _}` and thrown away, and the
+    # success line below was logged unconditionally — so a failed commit (repo
+    # locked by a concurrent git, bad ownership, disk full) was indistinguishable
+    # from a good one. The files are copied into the worktree either way, but
+    # without a commit there is no checkpoint to restore FROM. `git add` two
+    # lines up already asserted `{_, 0}`; this one now does too.
+    case System.cmd(
+           "git",
+           [
+             "-c",
+             "user.name=OSA Checkpoint",
+             "-c",
+             "user.email=checkpoint@osa",
+             "commit",
+             "-m",
+             commit_msg
+           ],
+           cd: repo_path,
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        maybe_prune(repo_path)
+        Logger.debug("[fs_checkpoint] Snapshot: #{length(copied)} file(s) for #{tool_name}")
+        {:ok, %{copied: copied, skipped: skipped}}
+
+      {output, status} ->
+        Logger.warning(
+          "[fs_checkpoint] Snapshot commit FAILED (exit #{status}) for #{tool_name} — " <>
+            "#{length(copied)} file(s) are NOT recoverable via /rollback: #{String.trim(output)}"
         )
 
-      maybe_prune(repo_path)
-      Logger.debug("[fs_checkpoint] Snapshot: #{length(copied)} file(s) for #{tool_name}")
+        {:error, "checkpoint commit failed (exit #{status}): #{String.trim(output)}"}
+    end
+  end
+
+  defp snapshotable?(path) do
+    File.regular?(path) and file_size(path) <= Config.max_file_size()
+  end
+
+  defp file_size(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} -> size
+      _ -> :infinity
+    end
+  end
+
+  defp skip_reason(path) do
+    cond do
+      not File.exists?(path) -> "does not exist"
+      not File.regular?(path) -> "not a regular file"
+      file_size(path) == :infinity -> "cannot stat"
+      true -> "#{file_size(path)} bytes exceeds the #{Config.max_file_size()}-byte limit"
     end
   end
 
@@ -303,15 +393,14 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   defp restore_files_from_commit(repo_path, full_hash) do
     case System.cmd(
            "git",
-           ["diff-tree", "--no-commit-id", "-r", "--name-only", full_hash],
+           ["diff-tree", "--no-commit-id", "-r", "-z", "--name-only", full_hash],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
       {files_output, 0} ->
-        files = files_output |> String.trim() |> String.split("\n", trim: true)
-
         restored =
-          files
+          files_output
+          |> split_z()
           |> Enum.map(fn file_in_repo ->
             source = Path.join(repo_path, file_in_repo)
             # file_in_repo is the absolute path stored without leading slash
@@ -331,6 +420,19 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
         {:error, "Failed to read checkpoint files: #{err}"}
     end
   end
+
+  # Git's default pathname output is *quoted*: a path containing a non-ASCII
+  # byte, a quote, a backslash or a control character comes back as
+  # `"caf\303\251.ex"` — with the surrounding quotes and the octal escapes as
+  # literal characters. Splitting that on "\n" and prefixing "/" produced a
+  # restore destination that does not exist, so the file was silently not
+  # restored (or, with `File.mkdir_p!`, a junk directory was created). A
+  # filename containing a newline broke the framing outright and could aim a
+  # restore at an unrelated path.
+  #
+  # `-z` turns both problems off at the source: NUL-separated, never quoted,
+  # never escaped.
+  defp split_z(output), do: String.split(output, <<0>>, trim: true)
 
   # ── Private: head / restore_to (whole-tree, for /rewind) ─────────────
 
@@ -355,21 +457,25 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   end
 
   defp restore_tree_from_commit(repo_path, full_hash) do
-    case OptimalSystemAgent.Git.cmd(["ls-tree", "-r", "--name-only", full_hash],
+    case OptimalSystemAgent.Git.cmd(["ls-tree", "-r", "-z", "--name-only", full_hash],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
       {files_output, 0} ->
-        files = files_output |> String.trim() |> String.split("\n", trim: true)
-
         restored =
-          files
+          files_output
+          |> split_z()
           |> Enum.map(fn file_in_repo ->
             target = "/" <> file_in_repo
 
+            # NO `stderr_to_stdout` here. This output is not a status message —
+            # it is the bytes that get written into the user's file two lines
+            # down. Merging stderr in meant any warning git felt like emitting
+            # ("warning: LF will be replaced by CRLF", advice, locale noise) was
+            # prepended to the restored content, corrupting the very file the
+            # restore existed to repair.
             case OptimalSystemAgent.Git.cmd(["show", "#{full_hash}:#{file_in_repo}"],
-                   cd: repo_path,
-                   stderr_to_stdout: true
+                   cd: repo_path
                  ) do
               {content, 0} ->
                 File.mkdir_p!(Path.dirname(target))

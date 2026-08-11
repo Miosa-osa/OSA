@@ -17,6 +17,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.UI do
   a component once the renderer is implemented.
   """
 
+  alias OptimalSystemAgent.Security.TypedText
+
   @spec render(atom(), any(), keyword()) :: map() | nil
 
   # ── :tool_use — model is about to call the tool ───────────────────────
@@ -27,7 +29,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.UI do
       action: action,
       x: input["x"],
       y: input["y"],
-      text: input["text"],
+      # `text` on a typing action is the user's keystrokes — a password when the
+      # model is filling a login form. The render map is broadcast over PubSub
+      # and drawn in the TUI, so it carries the shape, not the value.
+      text: TypedText.mask_for_action(action, input["text"]),
       target: input["target"],
       direction: input["direction"],
       region: input["region"],

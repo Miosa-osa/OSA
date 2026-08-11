@@ -891,6 +891,14 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp upsert_env(existing, pairs) do
     lines =
       existing
+      # A BOM sits in front of the FIRST key name, and this loop matches keys
+      # by exact string equality with no trim at all — so on a
+      # Windows-authored `.env` the first key never matched, the upsert fell
+      # through to the append branch, and the file ended up with the key
+      # twice. The first-occurrence-wins loader then kept serving the OLD
+      # value, so the user's corrected key was written to disk and still not
+      # used. Same shared stripper as every other reader on this path.
+      |> OptimalSystemAgent.Config.Dotenv.strip_invisible()
       |> String.split("\n", trim: true)
 
     {updated_lines, remaining_pairs} =

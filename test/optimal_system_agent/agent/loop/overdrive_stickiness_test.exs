@@ -62,13 +62,16 @@ defmodule OptimalSystemAgent.Agent.Loop.OverdriveStickinessTest do
       assert Permissions.bypass_immune_ask("use_skill", %{"skill_name" => "lavish"}) == nil
     end
 
-    test "bypass-immune write to .git internals still asks even under overdrive" do
+    test "write to .git internals is refused outright under overdrive" do
       enable_interactive()
       s = state(permission_mode: :overdrive)
 
+      # Previously an un-bypassable prompt; now a refusal. Overdrive exists so
+      # the user is not asked, so "ask" was the one answer that could not hold
+      # here — the prompt is exactly what overdrive is meant to skip.
       path = Path.join([OptimalSystemAgent.Workspace.Cwd.get(), ".git", "config"])
-      assert {:ask, _rid, summary} = ToolExecutor.approve_tool_call(tool("file_write", %{"path" => path}), s)
-      assert summary.reason =~ "not bypassable"
+      assert {:blocked, msg} = ToolExecutor.approve_tool_call(tool("file_write", %{"path" => path}), s)
+      assert msg =~ "protected location"
     end
   end
 

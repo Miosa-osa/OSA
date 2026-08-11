@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Settings do
   require Logger
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.System.AtomicFile
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
   # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
@@ -396,7 +397,7 @@ defmodule OptimalSystemAgent.Settings do
   defp write_json(path, data) do
     dir = Path.dirname(path)
     File.mkdir_p!(dir)
-    File.write!(path, Jason.encode!(data, pretty: true))
+    AtomicFile.write!(path, Jason.encode!(data, pretty: true))
     :ok
   rescue
     e ->

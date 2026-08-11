@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.Resilience
+  alias OptimalSystemAgent.Agent.Trajectory
 
   # If no streaming token arrives for this long, the connection is dead.
   # This is NOT a total-duration cap — active streams can run indefinitely.
@@ -202,7 +203,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
         # Broadcast token usage via PubSub for TUI status bar
-        usage = Map.get(result, :usage, %{})
+        # `|| %{}`: a provider that reports `usage: nil` is a present key, so
+        # the Map.get/3 default does not fire and the `usage != %{}` guard
+        # below would then send nil into Map.get/3 on the next line.
+        usage = Map.get(result, :usage) || %{}
 
         if usage != %{} do
           Phoenix.PubSub.broadcast(
@@ -228,6 +232,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # Reasoning is rendered live in the TUI, so it is user-visible output
         # under exactly the same one-way-door rule as `:text_delta`.
         Resilience.mark_output_observed()
+
+        # Reasoning routinely quotes back the contents of a file the model just
+        # read — .env dumps, Authorization headers, key material. It lands in
+        # terminal scrollback and in persisted session state, so it gets the
+        # same redaction every other user-visible provider text gets.
+        text = Trajectory.redact(text)
 
         Bus.emit(:system_event, %{
           event: :thinking_delta,

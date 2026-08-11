@@ -85,7 +85,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.HttpHook do
       if not is_nil(event) and is_list(hook_list) do
         Enum.each(hook_list, fn
           %{"type" => "http", "url" => url} = hook_config ->
-            headers = Map.get(hook_config, "headers", %{})
+            # `|| %{}`: a `"headers": null` in the hook config is a present key,
+            # so the Map.get/3 default never fires and nil reached Req.
+            headers = Map.get(hook_config, "headers") || %{}
             name = "http_hook_#{event}_#{:erlang.phash2(url)}"
 
             handler = fn payload ->

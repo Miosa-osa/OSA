@@ -65,16 +65,22 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
     assert msg =~ "denied by a saved permission rule"
   end
 
-  test "bypass-immune safety ask prompts for .git writes even in :overdrive" do
+  test "bypass-immune safety refuses .git writes outright, even in :overdrive" do
     enable_interactive()
 
-    assert {:ask, _rid, summary} =
+    # This used to prompt. It now blocks, which is deliberately stronger: a write
+    # into .git internals is code execution on the user's next git command
+    # (core.hooksPath, core.fsmonitor, filter.*.clean), and `Git.cmd/2` only
+    # neutralizes those for OSA's own invocations — not for the user's shell.
+    # An approval prompt puts that one keystroke away in a mode whose whole
+    # point is not stopping to ask, so the path is refused rather than offered.
+    assert {:blocked, msg} =
              ToolExecutor.approve_tool_call(
                tool("file_write", %{"path" => ".git/config", "content" => "x"}),
                state(permission_mode: :overdrive)
              )
 
-    assert summary.reason =~ "Safety check"
+    assert msg =~ "protected location"
   end
 
   test "enriched summary: file_edit diff + kind + suggestions" do

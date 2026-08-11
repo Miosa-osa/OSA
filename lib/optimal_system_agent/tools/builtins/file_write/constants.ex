@@ -26,19 +26,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Constants do
       else: @default_allowed_write_paths ++ [tmp]
   end
 
-  @blocked_write_paths [
-    ".ssh/",
-    ".gnupg/",
-    "/etc/",
-    "/boot/",
-    "/usr/",
-    "/bin/",
-    "/sbin/",
-    "/var/",
-    ".aws/",
-    ".env"
-  ]
-  def blocked_write_paths, do: @blocked_write_paths
+  # Single shared policy — see `Agent.Safety.PathPolicy`.
+  defdelegate blocked_write_paths, to: OptimalSystemAgent.Agent.Safety.PathPolicy,
+    as: :blocked_write_patterns
 
   @soul_reload_files ~w(USER.md IDENTITY.md SOUL.md)
   def soul_reload_files, do: @soul_reload_files

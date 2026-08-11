@@ -28,8 +28,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
   pattern established by `FileEdit.Handler`.
   """
 
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
-  alias OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Constants
   alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
@@ -54,17 +55,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
   def check_permissions(%{"edits" => edits} = input, _ctx) when is_list(edits) do
+    # The SAME write decision the other three write tools use
+    # (`PathPolicy.check_write/2`). This call site used to have a private
+    # `write_allowed?/1` that resolved no symlinks and had no dotfile clause at
+    # all, so `multi_file_edit` could write where `file_edit` and `file_write`
+    # both refused — the weakest of three copies decided the sandbox.
     denied =
       Enum.find_value(edits, fn
         %{"path" => path} when is_binary(path) ->
-          expanded = resolve_path(path)
-
-          cond do
-            not write_allowed?(expanded) ->
-              "Access denied: #{path} targets a protected location"
-
-            true ->
-              nil
+          case PathPolicy.check_write(normalize_path(path), path) do
+            :ok -> nil
+            {:deny, reason} -> reason
           end
 
         _ ->
@@ -160,7 +161,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
     # Every remaining edit validated. Apply them ATOMICALLY (all-or-nothing) so
     # a write that fails partway can never leave the repo half-edited (BUG B).
     case apply_atomic(validation_results) do
-      {:ok, per_file} ->
+      {:ok, per_file, applied} ->
         # Refresh read-state for every edited file (P0-1) and run the
         # post-edit validation hook synchronously per file, aggregating any
         # diagnostics into the observation (P1-4).
@@ -168,6 +169,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
           for {:valid, _dp, ep, _o, _n, _c} <- validation_results, do: ep
 
         Enum.each(edited_paths, &FileState.record_write(session, &1))
+
+        # Move the drift-guard baseline to the content this batch just wrote,
+        # so a follow-up edit in the same session is not falsely flagged.
+        Enum.each(applied, fn {ep, new_content} ->
+          {mtime, size} = stat_or_zero(ep)
+          DriftGuard.record(session, ep, new_content, mtime, size)
+        end)
 
         hook_note =
           edited_paths
@@ -205,7 +213,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
          %{results: per_file, count: count, already_applied: already_applied}}
 
       {:error, reason} ->
-        {:error, "Apply failed — all changes rolled back, no files were modified:\n  #{reason}"}
+        # The rollback outcome is stated by `commit_all/1`, which knows whether
+        # the restore actually succeeded. This wrapper no longer asserts
+        # "no files were modified" on its behalf.
+        {:error, "Apply failed:\n  #{reason}"}
     end
   end
 
@@ -274,10 +285,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
               true ->
                 # Read-before-edit / stale-write guard (P0-1). Any un-read or
-                # stale target fails the whole atomic batch — no files modified.
-                case FileState.check_read(session, ep) do
+                # stale target fails the whole batch — no files modified.
+                #
+                # DriftGuard is the second, independent layer `file_edit`
+                # already runs (see `FileEdit.Handler.do_edit/6`) and this tool
+                # did not. Without it a file whose {mtime, size} happen to
+                # collide with the recorded ones — a same-second edit that
+                # keeps the length, which is exactly what a formatter or a
+                # sibling agent produces — passes `check_read/2`, and the batch
+                # then computes new content from THIS read and writes it over
+                # whatever is actually on disk, discarding the other change.
+                {mtime, size} = stat_or_zero(ep)
+
+                with :ok <- FileState.check_read(session, ep),
+                     :ok <- DriftGuard.verify(session, ep, content, mtime, size) do
+                  {:valid, dp, ep, old, new, content}
+                else
                   {:error, msg} -> {:error, dp, msg}
-                  :ok -> {:valid, dp, ep, old, new, content}
                 end
             end
 
@@ -287,21 +311,63 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
     end
   end
 
+  # POSIX {mtime, size} for DriftGuard. A stat failure degrades to {0, 0},
+  # which DriftGuard treats as a non-matching identity and defers on — never a
+  # false rejection. Mirrors `FileEdit.Handler.stat_or_zero/1`.
+  defp stat_or_zero(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}
+      _ -> {0, 0}
+    end
+  end
+
   defp occurrence_count(content, old) do
     (content |> String.split(old) |> length()) - 1
   end
 
-  # Apply every validated edit atomically: all files change or none do.
+  # POSIX {mtime, size} for DriftGuard, identical to `FileEdit.Handler`'s. A
+  # stat failure degrades to {0, 0}, which DriftGuard treats as a non-matching
+  # identity and simply defers on — never a false rejection.
+  defp stat_or_zero(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}
+      _ -> {0, 0}
+    end
+  end
+
+  # Apply every validated edit as a batch: all files change or none do.
   #
-  # Two-phase commit over the filesystem:
-  #   1. STAGE  — compute each file's new content and write it to a sibling
-  #               temp file (same directory, so the final rename is atomic and
-  #               never crosses filesystems). Any staging failure aborts here,
-  #               deleting every temp already written — zero target files touched.
-  #   2. COMMIT — rename each temp over its target. If a rename fails partway,
-  #               restore the targets already renamed from their in-memory
-  #               originals and delete the remaining temps, so the on-disk state
-  #               is exactly what it was before the call.
+  # Two phases:
+  #   1. PRECHECK — confirm every target is actually writable, WITHOUT creating
+  #                 or modifying anything. A permission problem therefore aborts
+  #                 with zero files touched.
+  #   2. COMMIT   — write each file in place. On failure partway, restore the
+  #                 targets already written from their in-memory originals.
+  #
+  # ## Why not stage-to-temp-then-rename
+  #
+  # The previous implementation wrote each new content to a sibling
+  # `<target>.osa-tmp-<n>` and `File.rename`d it over the target. `rename(2)`
+  # replaces the directory entry, so the target's INODE is swapped for a fresh
+  # one created by `File.write` at the default 0644. That silently destroyed,
+  # on every single edit:
+  #
+  #   * the execute bit — editing a `chmod +x` script left it non-executable;
+  #   * owner/group, ACLs and xattrs;
+  #   * every hard link to the file — the other names kept the OLD content;
+  #   * and worst, a SYMLINK target: renaming over a symlink deletes the link
+  #     and leaves a regular file in its place, so the file the link pointed at
+  #     was never updated at all and the link is gone.
+  #
+  # The temp files were also predictable, created inside the user's own repo,
+  # and only removed on the explicit failure branches — a crash or a kill mid
+  # batch left `foo.ex.osa-tmp-37` behind for compilers, watchers and
+  # `git status` to trip over, with no sweeper anywhere.
+  #
+  # Writing in place keeps the inode, so every one of those properties
+  # survives; it is also exactly what `file_edit` and `file_write` already do.
+  # The all-or-nothing guarantee never came from `rename` anyway — it is a
+  # batch property, provided by the rollback below.
   defp apply_atomic(validation_results) do
     edits =
       Enum.map(validation_results, fn
@@ -315,115 +381,103 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
           }
       end)
 
-    case stage_all(edits) do
-      {:ok, staged} -> commit_all(staged)
+    case precheck_all(edits) do
+      :ok -> commit_all(edits)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # Phase 1 — write every new content to a temp file. Returns {:ok, staged}
-  # where staged pairs each edit with its temp path, or {:error, reason} after
-  # cleaning up any temps already created.
-  defp stage_all(edits) do
-    Enum.reduce_while(edits, {:ok, []}, fn edit, {:ok, staged} ->
-      tmp = temp_path(edit.expanded_path)
-
-      case File.write(tmp, edit.new_content) do
-        :ok ->
-          {:cont, {:ok, [Map.put(edit, :tmp_path, tmp) | staged]}}
+  # Phase 1 — confirm each target can be opened for writing. `:append` is used
+  # deliberately: unlike `:write` it does NOT truncate, so a precheck can never
+  # damage a file it is only asking about, and nothing is written because the
+  # handle is closed immediately.
+  defp precheck_all(edits) do
+    Enum.reduce_while(edits, :ok, fn edit, :ok ->
+      case File.open(edit.expanded_path, [:append]) do
+        {:ok, io} ->
+          File.close(io)
+          {:cont, :ok}
 
         {:error, reason} ->
-          Enum.each(staged, fn s -> File.rm(s.tmp_path) end)
-          {:halt, {:error, "#{edit.display_path}: staging write failed: #{reason}"}}
+          {:halt,
+           {:error,
+            "#{edit.display_path}: not writable (#{:file.format_error(reason)}) — " <>
+              "no files were modified"}}
       end
     end)
-    |> case do
-      {:ok, staged} -> {:ok, Enum.reverse(staged)}
-      {:error, _} = err -> err
-    end
   end
 
-  # Phase 2 — rename each temp over its target. On any failure, roll back every
-  # target already committed (restoring the original in-memory content) and
-  # remove the remaining temps.
-  defp commit_all(staged) do
-    Enum.reduce_while(staged, {:ok, []}, fn edit, {:ok, committed} ->
-      case File.rename(edit.tmp_path, edit.expanded_path) do
+  # Phase 2 — write each file in place. On any failure, restore every target
+  # already written from its in-memory original.
+  defp commit_all(edits) do
+    Enum.reduce_while(edits, {:ok, []}, fn edit, {:ok, committed} ->
+      case File.write(edit.expanded_path, edit.new_content) do
         :ok ->
           result = %{path: edit.display_path, lines_changed: edit.lines_changed}
           {:cont, {:ok, [{edit, result} | committed]}}
 
         {:error, reason} ->
-          rollback(committed)
-          # Remaining (uncommitted) temps, including this one, are cleaned up.
-          remaining = Enum.drop_while(staged, fn s -> s != edit end)
-          Enum.each(remaining, fn s -> File.rm(s.tmp_path) end)
-          {:halt, {:error, "#{edit.display_path}: rename failed: #{reason}"}}
+          failed = rollback(committed)
+          {:halt, {:error, failure_message(edit, reason, failed)}}
       end
     end)
     |> case do
-      {:ok, committed} -> {:ok, committed |> Enum.map(&elem(&1, 1)) |> Enum.reverse()}
-      {:error, reason} -> {:error, reason}
+      {:ok, committed} ->
+        ordered = Enum.reverse(committed)
+        per_file = Enum.map(ordered, &elem(&1, 1))
+        # {expanded_path, new_content} pairs, so the caller can refresh the
+        # drift-guard baseline to what THIS batch actually wrote. The public
+        # `per_file` shape is left exactly as it was for SSE/TUI consumers.
+        applied = Enum.map(ordered, fn {edit, _} -> {edit.expanded_path, edit.new_content} end)
+        {:ok, per_file, applied}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
+  # The restore is itself I/O and can itself fail — the disk that just refused
+  # a write is exactly the disk being asked to accept one. `rollback/1` used to
+  # be `Enum.each(... File.write ...)` with every result discarded, and the
+  # caller then reported "all changes rolled back, no files were modified"
+  # unconditionally. When a restore failed, that sentence was simply false and
+  # the model had no way to learn which files were left rewritten.
+  #
+  # Returns the paths that could NOT be restored.
   defp rollback(committed) do
-    Enum.each(committed, fn {edit, _result} ->
-      File.write(edit.expanded_path, edit.content)
+    committed
+    |> Enum.filter(fn {edit, _result} ->
+      File.write(edit.expanded_path, edit.content) != :ok
     end)
+    |> Enum.map(fn {edit, _result} -> edit.display_path end)
   end
 
-  defp temp_path(expanded_path) do
-    suffix = Integer.to_string(System.unique_integer([:positive]))
-    expanded_path <> ".osa-tmp-" <> suffix
+  defp failure_message(edit, reason, []) do
+    "#{edit.display_path}: write failed (#{:file.format_error(reason)}) — " <>
+      "every file already written was restored, so no files were modified."
   end
 
-  defp resolve_path(path) do
-    normalized =
-      if relative_path?(path) do
-        Path.join("~/.osa/workspace", path)
-      else
-        path
-      end
-
-    Path.expand(normalized)
+  defp failure_message(edit, reason, unrestored) do
+    "#{edit.display_path}: write failed (#{:file.format_error(reason)}). " <>
+      "ROLLBACK INCOMPLETE — these files were rewritten and could NOT be restored: " <>
+      Enum.join(unrestored, ", ") <>
+      ". They hold the NEW content while the batch as a whole did not apply. " <>
+      "Re-read them before doing anything else."
   end
+
+  # A bare relative path means the agent's workspace, matching `file_write`.
+  defp normalize_path(path) do
+    if relative_path?(path), do: Path.join("~/.osa/workspace", path), else: path
+  end
+
+  # CANONICAL target. Resolving the whole chain here is not only the security
+  # check — it is also what makes an edit to a symlinked file land on the real
+  # file instead of replacing the link.
+  defp resolve_path(path), do: path |> normalize_path() |> PathPolicy.canonical()
 
   defp relative_path?(path) do
     not (String.starts_with?(path, "~") or
            String.starts_with?(path, "/") or
            String.match?(path, ~r/^[A-Za-z]:[\\\/]/))
-  end
-
-  defp write_allowed?(expanded_path) do
-    blocked =
-      Enum.any?(Constants.blocked_write_paths(), fn pattern ->
-        String.contains?(expanded_path, pattern)
-      end)
-
-    if blocked do
-      false
-    else
-      check_path =
-        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-      Enum.any?(allowed_write_paths(), fn allowed ->
-        String.starts_with?(check_path, allowed)
-      end)
-    end
-  end
-
-  defp allowed_write_paths do
-    configured =
-      Application.get_env(
-        :optimal_system_agent,
-        :allowed_write_paths,
-        Constants.default_allowed_paths()
-      )
-
-    Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
   end
 end

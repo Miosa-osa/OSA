@@ -69,14 +69,34 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     GenServer.call(__MODULE__, {:lease, agent_id, lease_duration_ms})
   end
 
-  @doc "Mark a task as completed with a result."
-  def complete(task_id, result) do
-    GenServer.cast(__MODULE__, {:complete, task_id, result})
+  @doc """
+  Mark a task as completed with a result.
+
+  `opts` carries the caller's lease proof and is how a task avoids being
+  executed twice:
+
+    - `:lease_epoch` — the `lease_epoch` from the task `lease/2` handed back.
+      A lease that has since expired and been re-granted to another agent has a
+      NEWER epoch, so the slow original holder's completion is discarded instead
+      of overwriting the second holder's in-flight work.
+    - `:agent_id` — the leasing agent; must match `leased_by`.
+
+  Omitting both keeps the old (unchecked-by-token) behavior for callers that
+  cannot thread the lease through, but the `:leased` status check always
+  applies, so a duplicate completion of an already-terminal task is dropped.
+  """
+  def complete(task_id, result, opts \\ []) do
+    GenServer.cast(__MODULE__, {:complete, task_id, result, opts})
   end
 
-  @doc "Mark a task as failed. Retries if under max_attempts, otherwise marks :failed."
-  def fail(task_id, error) do
-    GenServer.cast(__MODULE__, {:fail, task_id, error})
+  @doc """
+  Mark a task as failed. Retries if under max_attempts, otherwise marks :failed.
+
+  Takes the same lease-proof `opts` as `complete/3` — without them a stale
+  worker's failure could revert a task another agent is actively running.
+  """
+  def fail(task_id, error, opts \\ []) do
+    GenServer.cast(__MODULE__, {:fail, task_id, error, opts})
   end
 
   @doc "Reap expired leases back to :pending status."
@@ -161,7 +181,10 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       attempts: 0,
       max_attempts: max_attempts,
       created_at: now,
-      completed_at: nil
+      completed_at: nil,
+      # Bumped on every lease grant AND every reap; the holder echoes it back
+      # on complete/fail so a stale holder cannot clobber the current one.
+      lease_epoch: 0
     }
 
     state = persist_and_cache(state, task)
@@ -173,13 +196,12 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   end
 
   @impl true
-  def handle_cast({:complete, task_id, result}, state) do
-    case Map.get(state.tasks, task_id) do
-      nil ->
-        Logger.warning("[Agent.TaskQueue] Complete called for unknown task #{task_id}")
+  def handle_cast({:complete, task_id, result, opts}, state) do
+    case lease_holder(state, task_id, opts, :complete) do
+      :reject ->
         {:noreply, state}
 
-      task ->
+      {:ok, task} ->
         now = DateTime.utc_now()
 
         updated = %{
@@ -207,13 +229,12 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   end
 
   @impl true
-  def handle_cast({:fail, task_id, error}, state) do
-    case Map.get(state.tasks, task_id) do
-      nil ->
-        Logger.warning("[Agent.TaskQueue] Fail called for unknown task #{task_id}")
+  def handle_cast({:fail, task_id, error, opts}, state) do
+    case lease_holder(state, task_id, opts, :fail) do
+      :reject ->
         {:noreply, state}
 
-      task ->
+      {:ok, task} ->
         new_attempts = task.attempts + 1
 
         updated =
@@ -262,6 +283,55 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     end
   end
 
+  # Resolve the task a `complete`/`fail` refers to, but ONLY if the caller still
+  # holds its lease.
+  #
+  # Without this, both handlers looked a task up by id alone — no status check,
+  # no `leased_by` check, no epoch. `do_reap_expired/1` reverts an expired lease
+  # and the next `lease/2` hands the task to a second agent, so the original
+  # slow worker's later `complete/2` overwrote the SECOND worker's in-flight
+  # task, and its `fail/2` reverted a task another agent was actively running —
+  # a third execution.
+  defp lease_holder(state, task_id, opts, op) do
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        Logger.warning("[Agent.TaskQueue] #{op} called for unknown task #{task_id}")
+        :reject
+
+      %{status: status} when status != :leased ->
+        Logger.warning(
+          "[Agent.TaskQueue] ignoring #{op} for task #{task_id} — status is #{status}, not :leased"
+        )
+
+        :reject
+
+      task ->
+        epoch = Keyword.get(opts, :lease_epoch)
+        agent_id = Keyword.get(opts, :agent_id)
+
+        cond do
+          not is_nil(epoch) and epoch != Map.get(task, :lease_epoch, 0) ->
+            Logger.warning(
+              "[Agent.TaskQueue] ignoring #{op} for task #{task_id} — stale lease epoch " <>
+                "#{inspect(epoch)} (current #{inspect(Map.get(task, :lease_epoch, 0))})"
+            )
+
+            :reject
+
+          not is_nil(agent_id) and agent_id != task.leased_by ->
+            Logger.warning(
+              "[Agent.TaskQueue] ignoring #{op} for task #{task_id} — #{inspect(agent_id)} " <>
+                "does not hold the lease (#{inspect(task.leased_by)})"
+            )
+
+            :reject
+
+          true ->
+            {:ok, task}
+        end
+    end
+  end
+
   @impl true
   def handle_cast(:reap_expired, state) do
     state = do_reap_expired(state)
@@ -285,7 +355,10 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       attempts: 0,
       max_attempts: max_attempts,
       created_at: now,
-      completed_at: nil
+      completed_at: nil,
+      # Bumped on every lease grant AND every reap; the holder echoes it back
+      # on complete/fail so a stale holder cannot clobber the current one.
+      lease_epoch: 0
     }
 
     state = persist_and_cache(state, task)
@@ -315,7 +388,18 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       task ->
         leased_until = DateTime.add(now, lease_duration_ms, :millisecond)
 
-        updated = %{task | status: :leased, leased_until: leased_until, leased_by: agent_id}
+        # Every grant mints a NEW epoch. The holder echoes it back on
+        # complete/fail, which is what lets a stale holder be told apart from
+        # the current one after a reap re-granted the task.
+        epoch = Map.get(task, :lease_epoch, 0) + 1
+
+        updated = %{
+          task
+          | status: :leased,
+            leased_until: leased_until,
+            leased_by: agent_id,
+            lease_epoch: epoch
+        }
 
         state = persist_update(state, updated)
 
@@ -388,7 +472,9 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
 
       {tasks, leased} =
         Enum.reduce(records, {%{}, %{}}, fn record, {tasks_acc, leased_acc} ->
-          task = TaskSchema.to_map(record)
+          # Epochs are per-BEAM (there is no lease_epoch column); a recovered
+          # task starts at 0 and the next grant mints 1.
+          task = record |> TaskSchema.to_map() |> Map.put_new(:lease_epoch, 0)
           tasks_acc = Map.put(tasks_acc, task.task_id, task)
 
           leased_acc =
@@ -490,31 +576,53 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
 
     if expired_ids != [] do
       Logger.info("[Agent.TaskQueue] Reaping #{length(expired_ids)} expired lease(s)")
-
-      # Bulk reap in DB
-      if state.db_available do
-        try do
-          TaskSchema
-          |> where([t], t.task_id in ^expired_ids)
-          |> Repo.update_all(
-            set: [status: "pending", leased_until: nil, leased_by: nil, updated_at: now]
-          )
-        rescue
-          e ->
-            Logger.warning("[Agent.TaskQueue] DB reap failed: #{inspect(e)}")
-        end
-      end
     end
 
-    updated_tasks =
-      Enum.reduce(expired_ids, state.tasks, fn task_id, tasks ->
-        case Map.get(tasks, task_id) do
-          nil ->
-            tasks
+    # An expired lease is a FAILED attempt, not a free retry. The reap used to
+    # reset straight to :pending without touching `attempts`, so max_attempts
+    # was enforced only on the explicit-fail path and a task that hangs its
+    # worker every time re-executed forever. Each reaped task also gets a new
+    # epoch so the (still-running) previous holder's late complete/fail is
+    # rejected instead of clobbering whoever leases it next.
+    #
+    # Rows are written one at a time rather than via a bulk `update_all`: the
+    # bulk form had no `where status == "leased"` guard (so it could stomp a
+    # task that raced to :completed) and could not carry per-task attempts.
+    state =
+      Enum.reduce(expired_ids, state, fn task_id, acc ->
+        case Map.get(acc.tasks, task_id) do
+          %{status: :leased} = task ->
+            attempts = task.attempts + 1
 
-          task ->
-            reverted = %{task | status: :pending, leased_until: nil, leased_by: nil}
-            Map.put(tasks, task_id, reverted)
+            reverted =
+              if attempts >= task.max_attempts do
+                %{
+                  task
+                  | status: :failed,
+                    error: :lease_expired,
+                    attempts: attempts,
+                    completed_at: now,
+                    leased_until: nil,
+                    leased_by: nil,
+                    lease_epoch: task.lease_epoch + 1
+                }
+              else
+                %{
+                  task
+                  | status: :pending,
+                    attempts: attempts,
+                    leased_until: nil,
+                    leased_by: nil,
+                    lease_epoch: task.lease_epoch + 1
+                }
+              end
+
+            acc = persist_reaped(acc, reverted)
+            %{acc | tasks: Map.put(acc.tasks, task_id, reverted)}
+
+          _ ->
+            # Already terminal or gone — nothing to revert.
+            acc
         end
       end)
 
@@ -523,7 +631,38 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
         Map.delete(leased, id)
       end)
 
-    %{state | tasks: updated_tasks, leased: updated_leased}
+    %{state | leased: updated_leased}
+  end
+
+  # Guarded persist for a reaped task: the DB row must STILL be leased, so a
+  # task that legitimately completed between the expiry scan and this write is
+  # left alone.
+  defp persist_reaped(state, task) do
+    if state.db_available do
+      try do
+        attrs = TaskSchema.from_map(task)
+
+        TaskSchema
+        |> where([t], t.task_id == ^task.task_id and t.status == "leased")
+        |> Repo.update_all(
+          set: [
+            status: attrs.status,
+            leased_until: nil,
+            leased_by: nil,
+            error: attrs.error,
+            attempts: attrs.attempts,
+            completed_at: attrs.completed_at,
+            updated_at: DateTime.utc_now()
+          ]
+        )
+      rescue
+        e -> Logger.warning("[Agent.TaskQueue] DB reap failed: #{inspect(e)}")
+      catch
+        :exit, reason -> Logger.warning("[Agent.TaskQueue] DB reap exit: #{inspect(reason)}")
+      end
+    end
+
+    state
   end
 
   # ── Private: History Query ──────────────────────────────────────────

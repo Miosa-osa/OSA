@@ -98,6 +98,7 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMax do
   require Logger
 
   alias OptimalSystemAgent.Auth.PKCE
+  alias OptimalSystemAgent.Auth.RefreshFailures
   alias OptimalSystemAgent.Auth.SubscriptionStore
 
   @provider_id "minimax"
@@ -401,17 +402,49 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMax do
     end
   end
 
+  @doc """
+  Renew a token the SERVER rejected, even though it had not expired locally.
+
+  `needs_refresh?/1` and `expired?/1` are deadline arithmetic, and a deadline
+  is not the only way a token dies: a clock skewed past the #{@refresh_skew_s}s
+  window, or a provider-side revocation, leaves both predicates answering
+  `false` forever while every request 401s. Without this entry point the dead
+  token is handed out on every turn for the rest of the process's life.
+
+  The argument is the token that was rejected, which is what makes this safe
+  to call concurrently: a peer that already rotated the credential has its
+  fresh token adopted without a network call, so the single-use refresh token
+  is never double-spent.
+  """
+  @spec force_refresh(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def force_refresh(rejected_token) when is_binary(rejected_token) do
+    refresh_and_get(fn entry -> entry["access_token"] == rejected_token end)
+  end
+
   # Refresh inside the store's lock so two OSA processes cannot both spend the
   # same single-use refresh token.
-  defp refresh_and_get do
+  defp refresh_and_get(needs_refresh? \\ &needs_refresh?/1) do
     SubscriptionStore.refresh_within_lock(
       @provider_id,
       fn entry -> do_refresh(entry) end,
-      &needs_refresh?/1
+      needs_refresh?
     )
     |> case do
-      {:ok, entry} -> {:ok, entry["access_token"]}
-      {:error, reason} -> {:error, reason}
+      {:ok, entry} ->
+        RefreshFailures.reset(@provider_id)
+        {:ok, entry["access_token"]}
+
+      {:error, :refresh_token_invalid} = err ->
+        # Two consecutive rejections, never one — see `Auth.RefreshFailures`.
+        _ =
+          RefreshFailures.handle_rejection(@provider_id, display_name(), fn ->
+            SubscriptionStore.delete(@provider_id)
+          end)
+
+        err
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -449,7 +482,10 @@ defmodule OptimalSystemAgent.Auth.Providers.MiniMax do
 
   @doc "Forget the stored credential."
   @spec logout() :: :ok | {:error, term()}
-  def logout, do: SubscriptionStore.delete(@provider_id)
+  def logout do
+    RefreshFailures.reset(@provider_id)
+    SubscriptionStore.delete(@provider_id)
+  end
 
   # ── Expiry: milliseconds or seconds ─────────────────────────────────────
 

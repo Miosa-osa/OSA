@@ -239,7 +239,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         |> maybe_add_headers(config)
         |> maybe_extend_timeout(model)
 
-      case OpenAICompat.chat(url, api_key, model, messages, opts) do
+      result =
+        retry_once_on_rejected_account_token(provider, api_key, fn key ->
+          OpenAICompat.chat(url, key, model, messages, opts)
+        end)
+
+      case result do
         {:error, "API key not configured"} ->
           {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
 
@@ -264,7 +269,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         |> maybe_add_headers(config)
         |> maybe_extend_timeout(model)
 
-      case OpenAICompat.chat_stream(url, api_key, model, messages, callback, opts) do
+      result =
+        retry_once_on_rejected_account_token(provider, api_key, fn key ->
+          OpenAICompat.chat_stream(url, key, model, messages, callback, opts)
+        end)
+
+      case result do
         {:error, "API key not configured"} ->
           {:error, "#{provider |> to_string() |> String.upcase()}_API_KEY not configured"}
 
@@ -273,6 +283,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
       end
     end
   end
+
 
   # ── Dual-mode credential resolution ─────────────────────────────────────
   #
@@ -288,6 +299,71 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     qwen: OptimalSystemAgent.Auth.Providers.Qwen,
     xai: OptimalSystemAgent.Auth.Providers.XAI
   }
+
+  # (Defined below `@account_modes`, which it reads — a module attribute is
+  # only visible to code compiled after it.)
+  #
+  # Recover from a token the SERVER rejected but the CLIENT still believes in.
+  #
+  # `resolve_credential/2` refreshes on a DEADLINE — `needs_refresh?/1` and
+  # `expired?/1` are arithmetic over `expires_at`. A deadline is not the only
+  # way a token dies. A clock skewed past the refresh window, or a
+  # provider-side revocation, leaves both predicates answering `false`
+  # forever, so the same dead token was resolved, sent, 401'd and resolved
+  # again on every single turn for the life of the OS process, with no path
+  # back except the user noticing and re-running sign-in.
+  #
+  # One retry, and only for a token that came from an ACCOUNT: a pasted API
+  # key has nothing to refresh (its 401 is a real "this key is wrong" and
+  # must surface unchanged), and `force_refresh/1` is keyed on the rejected
+  # token, so a peer process that already rotated the credential has its
+  # fresh token adopted with no network call rather than double-spending the
+  # single-use refresh token.
+  # Public with `@doc false` for the same reason `resolved_credential/1` and
+  # `resolved_api_key/1` are: the behaviour worth pinning is the DECISION
+  # (retry or not, once or repeatedly, account or key), and `OpenAICompat`
+  # offers no plug seam to drive that decision through a real HTTP call.
+  @doc false
+  @spec retry_once_on_rejected_account_token(atom(), String.t() | nil, (String.t() | nil -> term())) ::
+          term()
+  def retry_once_on_rejected_account_token(provider, api_key, fun) do
+    case fun.(api_key) do
+      {:error, msg} = err when is_binary(msg) ->
+        with true <- rejected_credential?(msg),
+             module when not is_nil(module) <- Map.get(@account_modes, provider),
+             true <- is_binary(api_key) and api_key != "",
+             {:ok, renewed} <- module.force_refresh(api_key),
+             true <- renewed != api_key do
+          fun.(renewed)
+        else
+          _ -> err
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # `OpenAICompat` reports transport failures as `"HTTP <status>: <body>"`.
+  # 401 is a rejected credential; 403 is an authorised credential without
+  # entitlement, and refreshing that changes nothing, so it is not retried.
+  defp rejected_credential?(msg), do: String.starts_with?(msg, "HTTP 401")
+
+  @doc """
+  The providers that can actually SPEND an account (subscription) credential.
+
+  Published so an auth provider can ask "is there a transport for me?" instead
+  of hardcoding the answer. `Auth.Providers.Copilot` uses it to refuse a
+  sign-in that would store a bearer token nothing in this build can send —
+  and, because the question is asked at runtime against this table, adding a
+  provider here is all it takes to turn that sign-in back on.
+  """
+  @spec account_mode_providers() :: [atom()]
+  def account_mode_providers, do: Map.keys(@account_modes)
+
+  @doc "The auth module that owns a provider's account credential, or `nil`."
+  @spec account_mode_module(atom()) :: module() | nil
+  def account_mode_module(provider), do: Map.get(@account_modes, provider)
 
   @doc false
   # Test/introspection seam for `resolve_credential/2`.

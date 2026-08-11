@@ -509,14 +509,17 @@ defmodule OptimalSystemAgent.Shell.Pty.Session do
     _ -> :ok
   end
 
-  defp normalize_env(env) when is_list(env) do
-    Enum.map(env, fn
-      {k, v} -> {to_charlist(k), to_charlist(v)}
-      other -> other
-    end)
-  end
+  # The `:env` port option is an OVERLAY, not a replacement: whatever is not
+  # listed here is INHERITED from the BEAM. Passing only the caller's additions
+  # therefore handed every interactive PTY command the operator's provider
+  # credentials (ANTHROPIC_API_KEY, gateway tokens, ...).
+  #
+  # `OS.Env.port_env/1` prepends the unset entries for secret-shaped names and
+  # then applies the caller's overlay last, so a caller that deliberately wants
+  # to pass a credential into a PTY still can.
+  defp normalize_env(env) when is_list(env), do: OptimalSystemAgent.OS.Env.port_env(env)
 
-  defp normalize_env(_), do: []
+  defp normalize_env(_), do: OptimalSystemAgent.OS.Env.port_env([])
 
   defp default_cwd do
     case OptimalSystemAgent.Workspace.Cwd.get() do

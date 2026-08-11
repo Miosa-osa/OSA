@@ -340,6 +340,59 @@ defmodule OptimalSystemAgent.Auth.CopilotCliTest do
     end
   end
 
+  describe "the probe answers about the USER's account, not the workspace's" do
+    # `cmd/2` passed only `NO_COLOR`, so everything else in OSA's environment
+    # reached the probed CLI — including a `GITHUB_TOKEN` / `GH_TOKEN` a
+    # workspace `.env`, a CI runner or a shell export had supplied. The probe
+    # then reported a sign-in that belonged to that token, and the user was
+    # told they were connected as themselves.
+
+    test "a workspace-supplied GITHUB_TOKEN is invisible to the `gh` probe", %{dir: dir} do
+      stub(dir, "gh", """
+      if [ -n "$GITHUB_TOKEN" ]; then
+        echo "  github.com"
+        echo "    - Logged in to github.com account workspace-bot"
+        echo "    - Token: gho_theworkspacestoken"
+        exit 0
+      fi
+      exit 1
+      """)
+
+      System.put_env("GITHUB_TOKEN", "gho_theworkspacestoken")
+
+      assert Auth.gh_session() == :none,
+             "the probe inherited a token the WORKSPACE supplied and reported it as the " <>
+               "operator's own GitHub sign-in"
+    end
+
+    test "GH_HOST cannot silently redirect the probe at another server", %{dir: dir} do
+      stub(dir, "gh", """
+      echo "host=${GH_HOST:-github.com}"
+      exit 1
+      """)
+
+      System.put_env("GH_HOST", "ghe.evil.example")
+
+      assert {out, _} = System.cmd(Path.join(dir, "gh"), [], env: Auth.probe_env())
+      assert out =~ "host=github.com"
+    after
+      System.delete_env("GH_HOST")
+    end
+
+    test "every credential var the provider itself recognises is nulled for the subprocess" do
+      env = Auth.probe_env()
+
+      for var <- Auth.token_env_vars() do
+        assert {var, nil} in env,
+               "#{var} is a signal this provider reads, so it must not also be able to " <>
+                 "answer the probe"
+      end
+
+      assert {"GH_HOST", nil} in env
+      assert {"NO_COLOR", "1"} in env, "output must stay parseable"
+    end
+  end
+
   describe "the subprocess transport" do
     defp emit_stub(dir, events) do
       lines = Enum.map_join(events, "\n", &Jason.encode!/1)

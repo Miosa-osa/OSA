@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   alias OptimalSystemAgent.ConfigFile
 
   @table __MODULE__
+  @edges_table :"Elixir.OptimalSystemAgent.Agent.RunStore.TreeEdges"
 
   # Runtime-resolved default so a prebuilt release uses the END USER's home, not
   # the CI runner's baked-in path. The `:agent_runs_dir` app-env override still
@@ -133,6 +134,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       }
 
     :ets.insert(@table, {agent_id, run})
+    record_edge(agent_id, run.parent_session_id)
 
     # Claim the cross-process ownership lease for this run BEFORE anyone can
     # observe it as `:running`. A failure here means another live `osa` process
@@ -197,12 +199,12 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     update(agent_id, fn run ->
       %{
         run
-        | status: Map.get(result, :status, :completed),
-          completed_at: now,
-          duration_ms: Map.get(result, :duration_ms),
-          tool_count: Map.get(result, :tool_count, run.tool_count),
-          tokens_used: Map.get(result, :tokens_used, run.tokens_used),
-          result: result
+        | status: settled_status(run.status, Map.get(result, :status, :completed)),
+          completed_at: run.completed_at || now,
+          duration_ms: Map.get(result, :duration_ms) || run.duration_ms,
+          tool_count: monotonic(run.tool_count, Map.get(result, :tool_count)),
+          tokens_used: monotonic(run.tokens_used, Map.get(result, :tokens_used)),
+          result: run.result || result
       }
     end)
 
@@ -217,6 +219,28 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     prune_terminal()
     :ok
   end
+
+  @terminal_statuses [:completed, :failed, :cancelled]
+
+  # Terminal states are LATCHED: the first one to land is the truth.
+  #
+  # `handle_ownership_loss/1` and `reconcile_stale_running/1` both settle a run
+  # as `:cancelled` while its loop may still be draining, and that loop's own
+  # later `complete/2` (e.g. via `Fleet.finish/3`) used to promote the run right
+  # back to `:completed` — reporting aborted work as successful. A run that has
+  # already settled keeps the status it settled with.
+  defp settled_status(current, _incoming) when current in @terminal_statuses, do: current
+  defp settled_status(_current, incoming) when incoming in @terminal_statuses, do: incoming
+  defp settled_status(current, _incoming), do: current
+
+  # Counters only ever go up. `complete/2` used to overwrite `tool_count` /
+  # `tokens_used` outright while `progress/3` correctly used `max/2`, so a
+  # completion carrying a stale (or absent-then-defaulted) count erased real
+  # accumulated usage.
+  defp monotonic(current, incoming) when is_integer(current) and is_integer(incoming),
+    do: max(current, incoming)
+
+  defp monotonic(current, _incoming), do: current
 
   # Keep only the newest @max_terminal_runs terminal rows; :running rows are
   # always preserved. Bounds table growth over long-lived nodes. Best-effort.
@@ -1083,9 +1107,68 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       _ ->
         :ok
     end
+
+    ensure_edges_table()
   rescue
     ArgumentError -> :ok
   end
+
+  # ── run-tree edge ledger ────────────────────────────────────────────────
+  #
+  # `prune_terminal/0` evicts terminal run ROWS past @max_terminal_runs, and
+  # `list/1` is capped and machine-wide. Neither is a safe basis for a spend
+  # rollup: a wide fan-out evicts its own finished nodes, their cost vanishes
+  # from the tree total, and an exhausted budget silently un-exhausts itself.
+  #
+  # So parentage is recorded here instead, in a table that is NEVER pruned and
+  # NEVER capped. An edge is two binaries; the whole ledger is orders of
+  # magnitude smaller than the run rows it outlives.
+  defp ensure_edges_table do
+    case :ets.whereis(@edges_table) do
+      :undefined ->
+        :ets.new(@edges_table, [:named_table, :public, :bag, read_concurrency: true])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp record_edge(agent_id, parent) when is_binary(agent_id) and is_binary(parent) do
+    ensure_edges_table()
+
+    # `:bag` keeps duplicates distinct by full tuple, so re-registering the same
+    # run under the same parent is idempotent; a re-parent adds a second edge,
+    # which the walker tolerates via its `seen` guard.
+    :ets.insert(@edges_table, {parent, agent_id})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp record_edge(_, _), do: :ok
+
+  @doc """
+  Direct children of `parent` in the run tree, from the unpruned edge ledger.
+
+  Unlike `list/1` this is neither capped nor evictable, so a spend/rollup walk
+  built on it cannot lose nodes to `prune_terminal/0`.
+  """
+  @spec children_of(String.t()) :: [String.t()]
+  def children_of(parent) when is_binary(parent) do
+    ensure_edges_table()
+
+    @edges_table
+    |> :ets.lookup(parent)
+    |> Enum.map(fn {_p, child} -> child end)
+    |> Enum.uniq()
+  rescue
+    ArgumentError -> []
+  end
+
+  def children_of(_), do: []
 
   @doc """
   Create the ETS index and rehydrate known runs from disk. Call from the app

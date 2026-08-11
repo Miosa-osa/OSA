@@ -35,6 +35,8 @@ defmodule OptimalSystemAgent.Usage.RateLimits do
 
   require Logger
 
+  alias OptimalSystemAgent.System.AtomicFile
+
   @name __MODULE__
   @filename "provider_quota.json"
 
@@ -63,20 +65,30 @@ defmodule OptimalSystemAgent.Usage.RateLimits do
   Fire-and-forget: a `cast` that is a no-op when the process is not running,
   because this is called from the response path of every inference request and
   must never be able to fail or block one.
-  """
-  @spec record(String.t() | atom(), map() | nil) :: :ok
-  def record(_provider_id, nil), do: :ok
-  def record(_provider_id, info) when info == %{}, do: :ok
 
-  def record(provider_id, info) when is_map(info) do
-    GenServer.cast(@name, {:record, to_string(provider_id), info})
+  The reading is timestamped HERE, in the caller, at the moment the response
+  carrying it arrived — not when the cast is eventually handled. A cast is
+  queued behind whatever else this process is doing, and concurrent requests
+  finish out of order, so stamping on arrival at the server would date a reading
+  by when OSA got around to it. `observed_at` may also be passed explicitly (or
+  carried in `info`) by a caller that read the value earlier than it can report
+  it.
+  """
+  @spec record(String.t() | atom(), map() | nil, integer() | nil) :: :ok
+  def record(provider_id, info, observed_at \\ nil)
+  def record(_provider_id, nil, _observed_at), do: :ok
+  def record(_provider_id, info, _observed_at) when info == %{}, do: :ok
+
+  def record(provider_id, info, observed_at) when is_map(info) do
+    taken_at = observed_at || Map.get(info, :observed_at) || System.system_time(:second)
+    GenServer.cast(@name, {:record, to_string(provider_id), info, taken_at})
   catch
     # Not started (cold CLI, `--no-start`, or a test without the tree). The
     # observation is lost, which is strictly better than crashing a turn.
     :exit, _ -> :ok
   end
 
-  def record(_provider_id, _info), do: :ok
+  def record(_provider_id, _info, _observed_at), do: :ok
 
   @doc """
   The last observation for a provider, or `nil` when nothing has been seen.
@@ -128,22 +140,39 @@ defmodule OptimalSystemAgent.Usage.RateLimits do
   end
 
   @impl true
-  def handle_cast({:record, provider_id, info}, state) do
-    entry =
-      info
-      |> Map.take([:used_percent, :window_minutes, :resets_at, :limit_name])
-      |> Map.put(:observed_at, System.system_time(:second))
-
-    entries = Map.put(state.entries, provider_id, entry)
-    now = System.monotonic_time(:millisecond)
-
-    if now - state.last_write_ms >= @write_throttle_ms do
-      write_file(entries)
-      {:noreply, %{state | entries: entries, last_write_ms: now}}
+  def handle_cast({:record, provider_id, info, taken_at}, state) do
+    if stale?(state.entries, provider_id, taken_at) do
+      # An older reading arrived after a newer one (a slow response landing late,
+      # or two in-flight requests completing out of order). Overwriting would
+      # replace a correct number with a superseded one AND re-date it to now, so
+      # `/usage` would render a stale figure as freshly observed. Drop it.
+      {:noreply, state}
     else
-      {:noreply, %{state | entries: entries}}
+      entry =
+        info
+        |> Map.take([:used_percent, :window_minutes, :resets_at, :limit_name])
+        |> Map.put(:observed_at, taken_at)
+
+      entries = Map.put(state.entries, provider_id, entry)
+      now = System.monotonic_time(:millisecond)
+
+      if now - state.last_write_ms >= @write_throttle_ms do
+        write_file(entries)
+        {:noreply, %{state | entries: entries, last_write_ms: now}}
+      else
+        {:noreply, %{state | entries: entries}}
+      end
     end
   end
+
+  defp stale?(entries, provider_id, taken_at) when is_integer(taken_at) do
+    case Map.get(entries, provider_id) do
+      %{observed_at: previous} when is_integer(previous) -> previous > taken_at
+      _ -> false
+    end
+  end
+
+  defp stale?(_entries, _provider_id, _taken_at), do: false
 
   @impl true
   def terminate(_reason, state) do
@@ -177,7 +206,7 @@ defmodule OptimalSystemAgent.Usage.RateLimits do
   defp write_file(entries) do
     path = path()
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(%{"version" => 1, "providers" => entries}))
+    AtomicFile.write!(path, Jason.encode!(%{"version" => 1, "providers" => entries}))
     :ok
   rescue
     e ->

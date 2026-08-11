@@ -3,6 +3,7 @@ defmodule OptimalSystemAgent.Events.Event do
 
   defstruct [
     :id,
+    :seq,
     :type,
     :source,
     :time,
@@ -32,9 +33,42 @@ defmodule OptimalSystemAgent.Events.Event do
   def new(type, source), do: new(type, source, nil, [])
   def new(type, source, data), do: new(type, source, data, [])
 
+  @doc """
+  Next value of the process-independent, strictly-increasing emission counter.
+
+  Wall-clock `time` cannot order two events emitted microseconds apart from
+  different processes (and is not even guaranteed to be stamped in emit order
+  when event construction is deferred to a task). `seq` is stamped at the emit
+  call site and is strictly increasing for the lifetime of the VM, so consumers
+  can restore true emission order regardless of delivery order.
+  """
+  @spec next_seq() :: pos_integer()
+  def next_seq, do: :erlang.unique_integer([:monotonic, :positive])
+
+  @doc """
+  Sort events into true emission order.
+
+  Orders on `seq` when present. Events without a `seq` (external producers, or
+  events persisted before sequencing existed) sort ahead of sequenced ones,
+  ordered among themselves by wall-clock `time`.
+  """
+  @spec sort([t()]) :: [t()]
+  def sort(events) when is_list(events) do
+    Enum.sort_by(events, fn event ->
+      seq = Map.get(event, :seq)
+      time = Map.get(event, :time)
+      time_key = if match?(%DateTime{}, time), do: DateTime.to_unix(time, :microsecond), else: 0
+
+      # Unsequenced events sort by time only; sequenced events always compare
+      # on seq first so a lagging clock can never reorder them.
+      if is_integer(seq), do: {1, seq, time_key}, else: {0, 0, time_key}
+    end)
+  end
+
   def new(type, source, data, opts) do
     %__MODULE__{
       id: Keyword.get(opts, :id, generate_id()),
+      seq: Keyword.get(opts, :seq) || next_seq(),
       type: type,
       source: source,
       data: data,
@@ -85,6 +119,7 @@ defmodule OptimalSystemAgent.Events.Event do
     }
 
     base
+    |> maybe_put("seq", event.seq)
     |> maybe_put("data", event.data)
     |> maybe_put("subject", event.subject)
     |> maybe_put("dataschema", event.dataschema)

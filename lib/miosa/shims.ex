@@ -475,37 +475,191 @@ end
 
 defmodule MiosaMemory.Taxonomy do
   @moduledoc """
-  Shim for OptimalSystemAgent.Agent.Memory.Taxonomy.
+  Memory categories and scopes: the vocabulary, the validators, and the
+  filter.
 
-  The target module is planned but not yet implemented. All functions degrade
-  gracefully so callers can proceed without taxonomy support.
+  ## Why this is a real implementation and not a `Code.ensure_loaded?` shim
+
+  It used to be one, guarding a delegation to
+  `OptimalSystemAgent.Agent.Memory.Taxonomy`. Two things were wrong with that,
+  and they compound:
+
+  1. **The guard was evaluated at COMPILE time.** `if Code.ensure_loaded?(...)`
+     in a module body runs when this file is compiled and the chosen branch is
+     frozen into the BEAM file. Whichever branch won on the machine that built
+     the release won forever — implementing the target module later changed
+     nothing, and nothing forced a recompile to notice.
+
+  2. **The target module delegates straight back here.**
+     `Agent.Memory.Taxonomy` is an alias module whose every function is
+     `defdelegate ... to: MiosaMemory.Taxonomy`. So the guard was not choosing
+     between "real implementation" and "fallback" at all: had it ever taken
+     the delegation branch it would have produced the A->B->A mutual
+     delegation loop this file's `MiosaMemory.Injector` moduledoc already
+     warns about, and blown the stack. The frozen fallback was the only thing
+     keeping it working.
+
+  There is therefore no second implementation to defer to, and the fix is not
+  to make the check runtime — it is to delete the check and be the
+  implementation. Delegation flows strictly `Agent.Memory.Taxonomy ->
+  MiosaMemory.Taxonomy`, in one direction, exactly as it does for `Injector`.
+
+  ## Validation fails CLOSED
+
+  `valid_category?/1` and `valid_scope?/1` returned `true` for literally every
+  input, including `nil`, a struct, or an attacker-supplied string. A
+  validator that cannot fail is not a validator; it is a function that makes
+  call sites look guarded. Anything not in the vocabulary below is now
+  invalid.
+
+  `filter_by/2` returned the list it was given, unfiltered, whatever the
+  filters said. Nothing calls it today — the live read paths in
+  `Memory.Store` do their own category/scope filtering and do it correctly —
+  so this was a trap set for the first caller rather than a leak in
+  production. It filters now.
+
+  ## The vocabulary
+
+  Taken from what the system actually writes, not invented here:
+  `Memory.Store.do_auto_categorize/1` produces the six categories, and
+  `Memory.Store.save/2` plus the `memories` table default produce the scopes.
   """
 
   @type t :: map()
   @type category :: String.t()
   @type scope :: String.t()
 
-  if Code.ensure_loaded?(OptimalSystemAgent.Agent.Memory.Taxonomy) do
-    defdelegate new(content, opts \\ []), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate categorize(content), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate filter_by(entries, filters), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate categories(), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate scopes(), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate touch(entry), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate valid_category?(cat), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-    defdelegate valid_scope?(scope), to: OptimalSystemAgent.Agent.Memory.Taxonomy
-  else
-    def new(content, opts \\ []),
-      do: %{content: content, opts: opts, category: "general", scope: "session"}
+  # `Memory.Store.do_auto_categorize/1`, in its own order of precedence.
+  @categories ~w(decision pattern lesson preference project context)
 
-    def categorize(_content), do: "general"
-    def filter_by(entries, _filters), do: entries
-    def categories, do: ["general"]
-    def scopes, do: ["session"]
-    def touch(entry), do: entry
-    def valid_category?(_cat), do: true
-    def valid_scope?(_scope), do: true
+  # `Memory.Store.save/2` defaults to :global; the `memories` migration
+  # defaults the column to "global". "session" and "project" are the two
+  # narrower scopes the callers use.
+  @scopes ~w(global project session)
+
+  @default_category "context"
+  @default_scope "global"
+
+  @doc "Every valid category, most-specific first."
+  @spec categories() :: [category()]
+  def categories, do: @categories
+
+  @doc "Every valid scope, widest first."
+  @spec scopes() :: [scope()]
+  def scopes, do: @scopes
+
+  @doc """
+  True only for a category in `categories/0`.
+
+  Fails closed: an unknown string, `nil`, or a non-string is invalid. Accepts
+  an atom because callers pass `:decision` as readily as `"decision"`.
+  """
+  @spec valid_category?(term()) :: boolean()
+  def valid_category?(cat), do: normalize(cat) in @categories
+
+  @doc "True only for a scope in `scopes/0`. Fails closed, as above."
+  @spec valid_scope?(term()) :: boolean()
+  def valid_scope?(scope), do: normalize(scope) in @scopes
+
+  @doc """
+  Build a taxonomy entry, rejecting a category or scope that is not in the
+  vocabulary rather than storing it.
+
+  An invalid value falls back to the default and the entry records that it
+  did, so a caller passing a typo'd scope gets the SAFEST scope rather than a
+  scope no filter will ever match — an entry stored under an unknown scope is
+  invisible to a scoped read and visible to an unscoped one, which is the
+  wrong way round for anything a scope was meant to contain.
+  """
+  @spec new(String.t(), keyword()) :: t()
+  def new(content, opts \\ []) do
+    requested_category = Keyword.get(opts, :category)
+    requested_scope = Keyword.get(opts, :scope)
+
+    category =
+      cond do
+        is_nil(requested_category) -> categorize(content)
+        valid_category?(requested_category) -> normalize(requested_category)
+        true -> @default_category
+      end
+
+    scope =
+      if valid_scope?(requested_scope), do: normalize(requested_scope), else: @default_scope
+
+    %{
+      content: content,
+      opts: opts,
+      category: category,
+      scope: scope,
+      rejected:
+        Enum.reject(
+          [
+            if(not is_nil(requested_category) and not valid_category?(requested_category),
+              do: {:category, requested_category}
+            ),
+            if(not is_nil(requested_scope) and not valid_scope?(requested_scope),
+              do: {:scope, requested_scope}
+            )
+          ],
+          &is_nil/1
+        )
+    }
   end
+
+  @doc """
+  Classify content into a category. Always returns a valid one.
+
+  Deliberately conservative — `Memory.Store` owns the keyword heuristics and
+  this must not become a second, drifting copy of them.
+  """
+  @spec categorize(term()) :: category()
+  def categorize(_content), do: @default_category
+
+  @doc """
+  Filter entries by `:category` and/or `:scope`.
+
+  A `nil` filter means "do not constrain on this field". A filter naming a
+  value outside the vocabulary matches NOTHING rather than everything: the
+  caller asked to be restricted, and answering an unanswerable restriction
+  with the unrestricted set is how a scope filter turns into a scope leak.
+  """
+  @spec filter_by([map()], keyword() | map()) :: [map()]
+  def filter_by(entries, filters) when is_list(entries) do
+    filters = Enum.into(filters, %{})
+
+    entries
+    |> constrain(:category, Map.get(filters, :category))
+    |> constrain(:scope, Map.get(filters, :scope))
+  end
+
+  def filter_by(entries, _filters), do: entries
+
+  @doc "Bump an entry's access bookkeeping."
+  @spec touch(map()) :: map()
+  def touch(entry) when is_map(entry) do
+    entry
+    |> Map.put(:accessed_at, DateTime.utc_now())
+    |> Map.put(:access_count, (Map.get(entry, :access_count) || 0) + 1)
+  end
+
+  def touch(entry), do: entry
+
+  defp constrain(entries, _field, nil), do: entries
+
+  defp constrain(entries, field, value) do
+    wanted = normalize(value)
+    Enum.filter(entries, fn e -> normalize(field_of(e, field)) == wanted end)
+  end
+
+  defp field_of(entry, field) when is_map(entry) do
+    Map.get(entry, field) || Map.get(entry, Atom.to_string(field))
+  end
+
+  defp field_of(_entry, _field), do: nil
+
+  defp normalize(v) when is_binary(v), do: v
+  defp normalize(v) when is_atom(v) and not is_nil(v), do: Atom.to_string(v)
+  defp normalize(_), do: nil
 end
 
 defmodule MiosaMemory.Learning do
@@ -516,42 +670,55 @@ defmodule MiosaMemory.Learning do
   is available, all calls are forwarded to it. Until then, every function
   degrades gracefully with no-op or empty-collection returns so the supervision
   tree starts without errors.
+
+  ## The availability check is made at CALL time, not compile time
+
+  It used to be `if Code.ensure_loaded?(...)` in the module body. Elixir
+  evaluates that while compiling this file and bakes the winning branch into
+  the BEAM, so the answer was decided by whether the target happened to be
+  compiled first on the machine that built the artifact — and, since the
+  target does not exist, frozen as "degrade forever". Implementing
+  `Agent.Learning` later would have had no effect at all, and nothing in the
+  build would have forced the recompile that noticed. Asking per call costs a
+  module lookup and is correct whenever the answer changes.
   """
 
-  if Code.ensure_loaded?(OptimalSystemAgent.Agent.Learning) do
-    def start_link(opts \\ []),
-      do: OptimalSystemAgent.Agent.Learning.start_link(opts)
+  @target OptimalSystemAgent.Agent.Learning
 
-    def child_spec(opts),
-      do: OptimalSystemAgent.Agent.Learning.child_spec(opts)
-
-    def observe(interaction),
-      do: OptimalSystemAgent.Agent.Learning.observe(interaction)
-
-    def correction(what_was_wrong, what_is_right),
-      do: OptimalSystemAgent.Agent.Learning.correction(what_was_wrong, what_is_right)
-
-    def error(tool_name, error_message, context),
-      do: OptimalSystemAgent.Agent.Learning.error(tool_name, error_message, context)
-
-    def metrics, do: OptimalSystemAgent.Agent.Learning.metrics()
-    def patterns, do: OptimalSystemAgent.Agent.Learning.patterns()
-    def solutions, do: OptimalSystemAgent.Agent.Learning.solutions()
-    def consolidate, do: OptimalSystemAgent.Agent.Learning.consolidate()
-  else
-    def start_link(_opts \\ []), do: :ignore
-
-    def child_spec(_opts),
-      do: %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}, type: :worker}
-
-    def observe(_interaction), do: :ok
-    def correction(_what_was_wrong, _what_is_right), do: :ok
-    def error(_tool_name, _error_message, _context), do: :ok
-    def metrics, do: %{}
-    def patterns, do: []
-    def solutions, do: []
-    def consolidate, do: :ok
+  # `apply/3` rather than `@target.fun(...)` for the same reason the check is
+  # runtime: a direct call is a compile-time reference to a module that does
+  # not exist yet, which produces an "undefined" warning per function and
+  # trains everyone to ignore exactly the warnings that would matter.
+  defp forward(fun, args, fallback) do
+    if Code.ensure_loaded?(@target) and function_exported?(@target, fun, length(args)) do
+      apply(@target, fun, args)
+    else
+      fallback
+    end
   end
+
+  def start_link(opts \\ []), do: forward(:start_link, [opts], :ignore)
+
+  def child_spec(opts) do
+    forward(:child_spec, [opts], %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [[]]},
+      type: :worker
+    })
+  end
+
+  def observe(interaction), do: forward(:observe, [interaction], :ok)
+
+  def correction(what_was_wrong, what_is_right),
+    do: forward(:correction, [what_was_wrong, what_is_right], :ok)
+
+  def error(tool_name, error_message, context),
+    do: forward(:error, [tool_name, error_message, context], :ok)
+
+  def metrics, do: forward(:metrics, [], %{})
+  def patterns, do: forward(:patterns, [], [])
+  def solutions, do: forward(:solutions, [], [])
+  def consolidate, do: forward(:consolidate, [], :ok)
 end
 
 defmodule MiosaMemory.Parser do

@@ -508,10 +508,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     wrapped = "( " <> command <> "\n) 2>&1 < " <> null_device()
     args = OptimalSystemAgent.OS.Shell.port_flags() ++ [wrapped]
 
+    # PROCESS GROUP — spawn through `setsid -w` so the command and everything it
+    # forks share one process group we can reap as a unit. Without this, killing
+    # the timed-out wrapper shell leaves `npm run dev`, docker clients and
+    # background servers alive as orphans holding ports and file handles. See
+    # `kill_os_process/1`. When setsid is unavailable the plan falls back to the
+    # bare shell and single-pid kill.
+    plan = OptimalSystemAgent.OS.ProcessGroup.spawn_plan(sh, args)
+
+    # ENVIRONMENT SCRUB — a bare Port.open hands the child the ENTIRE BEAM
+    # environment, so `echo $ANTHROPIC_API_KEY` in a model-authored command reads
+    # the operator's provider credentials. `OS.Env.port_env/1` unsets
+    # secret-shaped names for the child only; PATH/HOME/LANG/TERM and the user's
+    # own build vars are left intact.
     port =
       Port.open(
-        {:spawn_executable, sh},
-        [:binary, :exit_status, :hide, {:args, args}, {:cd, cwd}]
+        {:spawn_executable, plan.exe},
+        [
+          :binary,
+          :exit_status,
+          :hide,
+          {:args, plan.args},
+          {:cd, cwd},
+          {:env, OptimalSystemAgent.OS.Env.port_env()}
+        ]
       )
 
     os_pid =
@@ -617,7 +637,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
            cwd: detach.cwd,
            session_id: session_id,
            port: port,
-           os_pid: os_pid,
+           os_pid: adopted_os_pid(os_pid),
            initial: output_so_far
          ) do
       {:ok, id, child_pid} ->
@@ -678,7 +698,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
            cwd: detach.cwd,
            session_id: session_id,
            port: port,
-           os_pid: os_pid,
+           os_pid: adopted_os_pid(os_pid),
            initial: output_so_far
          ) do
       {:ok, id, child_pid} ->
@@ -890,23 +910,65 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   defp collected_output(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
+  # The pid handed to BackgroundManager on adoption.
+  #
+  # `os_pid` is the `setsid -w` wrapper. BackgroundManager stops a task with a
+  # plain single-pid `kill`, so giving it the WRAPPER pid would kill setsid and
+  # leave the command running — strictly worse than before the group change.
+  # Give it the group LEADER instead: that is the command shell, exactly the pid
+  # this code used to register when there was no setsid wrapper.
+  #
+  # (Reaping the leader's descendants from the background path needs
+  # `BackgroundTask.do_kill/1` to learn about process groups — see the report;
+  # that file is outside this change.)
+  defp adopted_os_pid(nil), do: nil
+
+  defp adopted_os_pid(os_pid) do
+    OptimalSystemAgent.OS.ProcessGroup.leader_pid(os_pid) || os_pid
+  end
+
   defp kill_os_process(nil), do: :ok
 
+  # Kill the command AND EVERYTHING IT SPAWNED.
+  #
+  # `os_pid` is the `setsid -w` wrapper (see `run_command/5`). Its sole child is
+  # the group leader, so the pgid resolves deterministically from it while the
+  # wrapper is still alive — which it is, because `-w` makes setsid wait for the
+  # command. Signalling `-<pgid>` reaches the whole tree.
+  #
+  # This used to send `kill -TERM <pid>` immediately followed by `kill -KILL
+  # <pid>` on the wrapper shell alone: no group, and no grace window, so the
+  # TERM was functionally a KILL and every descendant survived as an orphan.
+  #
+  # The pgid resolution is guarded by `ProcessGroup.killpg_safe?/1`, which
+  # refuses pgid <= 1 and this node's own group; if the group cannot be resolved
+  # safely we fall back to the single pid rather than guessing at a group.
   defp kill_os_process(os_pid) do
+    alias OptimalSystemAgent.OS.ProcessGroup
+
     case :os.type() do
       {:win32, _} ->
         _ =
           System.cmd("taskkill", ["/PID", to_string(os_pid), "/T", "/F"], stderr_to_stdout: true)
 
       _ ->
-        # SIGTERM for a graceful stop, then SIGKILL as a fallback.
-        _ = System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
-        _ = System.cmd("kill", ["-KILL", to_string(os_pid)], stderr_to_stdout: true)
+        case ProcessGroup.resolve_pgid(os_pid) do
+          nil ->
+            ProcessGroup.terminate_pid(os_pid)
+
+          pgid ->
+            case ProcessGroup.terminate_group(pgid) do
+              :ok -> ProcessGroup.terminate_pid(os_pid, 0)
+              {:error, :unsafe_pgid} -> ProcessGroup.terminate_pid(os_pid)
+            end
+        end
     end
 
     :ok
   rescue
     _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp safe_close_port(port) do
@@ -916,14 +978,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     _ -> :ok
   end
 
+  # Fraction of the byte budget kept from the HEAD; the rest is the tail.
+  # Head-weighted because the command being run, its banner and the first errors
+  # live there, but the tail is never zero — see below.
+  @truncate_head_ratio 0.4
+
   defp maybe_truncate(output) do
     max = Constants.max_output_bytes()
 
     bounded =
       if byte_size(output) > max do
-        # max is a BYTE budget; String.slice/3 counts CHARACTERS, so multibyte
-        # output could pass ~4x the cap. binary_part keeps the cap honest.
-        binary_part(output, 0, max) <> "\n[output truncated at 100KB]"
+        # HEAD AND TAIL, not head only.
+        #
+        # This used to keep `binary_part(output, 0, max)` and throw the rest
+        # away. For the commands that actually overflow the cap — a build, a
+        # test run, a long install — the compiler errors, the failure summary
+        # and the exit diagnostics are all at the END. Head-only truncation
+        # discarded exactly the bytes the turn depended on and handed the model
+        # a screenful of progress spinners instead.
+        #
+        # `max` is a BYTE budget; String.slice/3 counts CHARACTERS, so multibyte
+        # output could pass ~4x the cap. binary_part keeps the cap honest, and
+        # `ensure_utf8/1` below repairs the codepoint that either cut may split.
+        head_bytes = trunc(max * @truncate_head_ratio)
+        tail_bytes = max - head_bytes
+
+        head = binary_part(output, 0, head_bytes)
+        tail = binary_part(output, byte_size(output) - tail_bytes, tail_bytes)
+
+        omitted_bytes = byte_size(output) - max
+
+        omitted_lines =
+          output
+          |> binary_part(head_bytes, omitted_bytes)
+          |> count_newlines()
+
+        head <> elision_marker(omitted_bytes, omitted_lines) <> tail
       else
         output
       end
@@ -932,6 +1022,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     # otherwise break the JSON serialization of the tool result downstream.
     ensure_utf8(bounded)
   end
+
+  defp elision_marker(omitted_bytes, omitted_lines) do
+    "\n\n[... output truncated: #{omitted_lines} lines / #{omitted_bytes} bytes omitted from the middle; " <>
+      "the head and the tail are shown in full ...]\n\n"
+  end
+
+  defp count_newlines(bin), do: count_newlines(bin, 0)
+  defp count_newlines(<<>>, acc), do: acc
+  defp count_newlines(<<?\n, rest::binary>>, acc), do: count_newlines(rest, acc + 1)
+  defp count_newlines(<<_, rest::binary>>, acc), do: count_newlines(rest, acc)
 
   defp ensure_utf8(bin) do
     if String.valid?(bin), do: bin, else: IO.iodata_to_binary(scrub_utf8(bin, []))

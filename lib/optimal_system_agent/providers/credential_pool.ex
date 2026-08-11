@@ -27,7 +27,10 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
   # `last_issued` records the key `get_key/1` most recently handed out per
   # provider. It exists so the 429 call site does not have to plumb the key back
   # through the provider's error tuple — see `mark_rate_limited/1`.
-  defstruct pools: %{}, counters: %{}, last_issued: %{}
+  # `sources` records the RAW environment strings each provider's pool was
+  # built from, so `get_key/1` can notice that the environment has moved out
+  # from under the snapshot. See `refresh_if_env_changed/2`.
+  defstruct pools: %{}, counters: %{}, last_issued: %{}, sources: %{}
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -114,11 +117,13 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
         do: Logger.info("CredentialPool: #{Enum.join(providers_with_pools, ", ")}")
     end
 
-    {:ok, %__MODULE__{pools: pools, counters: %{}}}
+    {:ok, %__MODULE__{pools: pools, counters: %{}, sources: read_sources()}}
   end
 
   @impl true
   def handle_call({:get_key, provider}, _from, state) do
+    state = refresh_if_env_changed(state, provider)
+
     case Map.get(state.pools, provider) do
       nil ->
         {:reply, fallback_key(provider), state}
@@ -145,7 +150,8 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
     # a stale offset against a re-read list would skip keys arbitrarily. The
     # last-issued map is dropped for the same reason — it may name a key the
     # re-read pools no longer contain.
-    {:reply, :ok, %{state | pools: load_all_pools(), counters: %{}, last_issued: %{}}}
+    {:reply, :ok,
+     %{state | pools: load_all_pools(), counters: %{}, last_issued: %{}, sources: read_sources()}}
   end
 
   @impl true
@@ -197,34 +203,107 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
 
   # ── Private ──────────────────────────────────────────────────────────
 
+  # Notice, at the moment of use, that this provider's environment no longer
+  # matches the snapshot the pool is serving from.
+  #
+  # `reload/0` closes this correctly but only for the write paths that
+  # remember to call it — onboarding's two and `cli/setup`'s one. Every other
+  # writer left the pool serving the boot snapshot, and because `get_key/1`
+  # OUTRANKS `Application.get_env/2` in the providers, that snapshot wins over
+  # the key the user just entered. Two real paths were open:
+  #
+  #   * `POST /providers/:slug/connect` sets the key env var and then
+  #     immediately makes a live test call — which spent the OLD key, so the
+  #     verification of a correct new key could fail.
+  #   * `DELETE /providers/:slug` deletes the env var, and the pool went on
+  #     handing out the key the user had just revoked. That is the dangerous
+  #     direction: a credential the operator believes is gone keeps being sent
+  #     over the wire.
+  #
+  # Auditing the writers one at a time only fixes the writers that exist
+  # today. Comparing the snapshot against the live environment at the point of
+  # use fixes every writer, including ones not written yet, and costs two
+  # `System.get_env/1` reads on a call that is already a GenServer round trip.
+  #
+  # Only the changed provider is rebuilt, so an unrelated provider keeps its
+  # round-robin position and its rate-limit cooldowns.
+  defp refresh_if_env_changed(state, provider) do
+    case Map.get(@env_vars, provider) do
+      nil ->
+        state
+
+      {pool_var, single_var} = vars ->
+        current = {System.get_env(pool_var), System.get_env(single_var)}
+
+        if Map.get(state.sources, provider) == current do
+          state
+        else
+          keys = load_pool(vars)
+
+          pools =
+            if keys == [],
+              do: Map.delete(state.pools, provider),
+              else: Map.put(state.pools, provider, Enum.map(keys, &{&1, nil}))
+
+          Logger.info(
+            "CredentialPool: #{provider} credentials changed on disk/env — re-read " <>
+              "(#{length(keys)} key(s)); the previous snapshot is discarded."
+          )
+
+          %{
+            state
+            | pools: pools,
+              # The counter indexes into the key list and the last-issued key
+              # may no longer be in it, so both are meaningless against a
+              # re-read pool.
+              counters: Map.delete(state.counters, provider),
+              last_issued: Map.delete(state.last_issued, provider),
+              sources: Map.put(state.sources, provider, current)
+          }
+        end
+    end
+  end
+
+  # The raw env strings every pool was built from — the thing compared above.
+  # Deliberately the raw values and not a hash: a hash of a secret is still
+  # derived from a secret, and this map never leaves the process.
+  defp read_sources do
+    Map.new(@env_vars, fn {provider, {pool_var, single_var}} ->
+      {provider, {System.get_env(pool_var), System.get_env(single_var)}}
+    end)
+  end
+
+  defp load_pool({pool_var, single_var}) do
+    keys =
+      case System.get_env(pool_var) do
+        nil ->
+          []
+
+        "" ->
+          []
+
+        val ->
+          val
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+      end
+
+    if keys == [] do
+      case System.get_env(single_var) do
+        nil -> []
+        "" -> []
+        key -> [key]
+      end
+    else
+      keys
+    end
+  end
+
   defp load_all_pools do
     @env_vars
-    |> Enum.reduce(%{}, fn {provider, {pool_var, single_var}}, acc ->
-      keys =
-        case System.get_env(pool_var) do
-          nil ->
-            []
-
-          "" ->
-            []
-
-          val ->
-            val
-            |> String.split(",")
-            |> Enum.map(&String.trim/1)
-            |> Enum.reject(&(&1 == ""))
-        end
-
-      keys =
-        if keys == [] do
-          case System.get_env(single_var) do
-            nil -> []
-            "" -> []
-            key -> [key]
-          end
-        else
-          keys
-        end
+    |> Enum.reduce(%{}, fn {provider, vars}, acc ->
+      keys = load_pool(vars)
 
       if keys != [] do
         # Store as {key, rate_limited_until} tuples

@@ -31,15 +31,25 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
 
   ## Secret redaction
 
-  Tool-call arguments, tool results and assistant responses are the places
-  where API keys, `.env` contents and `Authorization` headers actually show
-  up. Every such field is passed through `redact/1` before it is written, so
-  known secret shapes (provider `sk-` keys, GitHub/Slack tokens, AWS key ids,
-  Google keys, JWTs, `Bearer`/`Basic` headers and `KEY=value` pairs whose key
-  looks like a credential) are replaced with a `[REDACTED]` marker. Redaction
-  is pattern-based, not a guarantee: a trajectory file is still a transcript
-  of the session and is written with the process umask. Treat
-  `~/.osa/trajectories/` as sensitive.
+  Tool-call arguments, tool results, assistant responses and compaction
+  events are the places where API keys, `.env` contents and `Authorization`
+  headers actually show up. Every such field is passed through `redact/1`
+  before it is written, so known secret shapes (provider `sk-`/`sk_`/`xai-`
+  keys, GitHub/GitLab/Slack tokens, AWS key ids, Google keys, JWTs, PEM
+  private-key blocks, URL userinfo and OAuth query parameters, `Bearer`/
+  `Basic` headers and `KEY=value` pairs whose key looks like a credential) are
+  replaced with a `[REDACTED]` marker. The operator's home directory is
+  rewritten to `~`. `redact/1` fails CLOSED: if the scrubber raises, the field
+  is dropped, never passed through.
+
+  Text OSA types into a computer (`computer_use`/`browser` `type`, `fill`,
+  `clipboard_set`) has no secret shape at all — it is a password whenever the
+  model fills a login form — so it is masked structurally by argument name via
+  `Security.TypedText` and stored as `"<12 chars>"`.
+
+  Redaction of free text is still pattern-based, not a guarantee: a trajectory
+  file is a transcript of the session. It is created `0600` before the first
+  write, under a `0700` directory. Treat `~/.osa/trajectories/` as sensitive.
 
   ## Retention
 
@@ -59,15 +69,39 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   require Logger
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.Security.TypedText
 
   @trajectory_dir "trajectories"
   @default_max_field_chars 2_000
   @default_retention_days 30
 
+  # What `redact/1` returns when the scrubber itself raises. Fail closed: the
+  # caller gets a marker, never the unscrubbed input.
+  @redaction_failure_marker "[REDACTED — secret scrubber failed]"
+
+  # Trajectories hold credentials by design. Owner-only, set before the first
+  # byte is written.
+  @trajectory_file_mode 0o600
+
   # Ordered highest-signal-first. Each entry is `{pattern, replacement}` and is
   # applied to every free-text field before it is written to disk.
   @secret_patterns [
-    {~r/\bsk-[A-Za-z0-9_\-]{16,}/, "sk-[REDACTED]"},
+    # A PEM block is multiline, so no single-line pattern below can see it. It
+    # has to come first: `cat id_rsa` in a tool result is a full private key.
+    {~r/(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----/,
+     "[REDACTED_PRIVATE_KEY]"},
+    # `scheme://user:pass@host` — the password is in the URL itself, and URLs
+    # are quoted whole into tool arguments and results.
+    {~r{([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s:@]+):([^/\s@]+)@}, "\\1\\2:[REDACTED]@"},
+    # OAuth/OIDC query parameters. These are bearer-equivalent for the life of
+    # the token and land in trajectories via redirect URLs the agent follows.
+    {~r/\b(access_token|refresh_token|id_token|client_secret|code|state)(=)([^&\s"']{4,})/i,
+     "\\1\\2[REDACTED]"},
+    # `sk_` as well as `sk-` (Stripe-style), and `xai-` because OSA ships an
+    # xAI provider — that key shape is one OSA's own users will have.
+    {~r/\bsk[-_][A-Za-z0-9_\-]{16,}/, "sk-[REDACTED]"},
+    {~r/\bxai-[A-Za-z0-9_\-]{16,}/, "[REDACTED_XAI_KEY]"},
+    {~r/\bglpat-[A-Za-z0-9_\-]{16,}/, "[REDACTED_GITLAB_TOKEN]"},
     {~r/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/, "[REDACTED_GITHUB_TOKEN]"},
     {~r/\bgithub_pat_[A-Za-z0-9_]{20,}/, "[REDACTED_GITHUB_TOKEN]"},
     {~r/\bxox[abprs]-[A-Za-z0-9\-]{10,}/, "[REDACTED_SLACK_TOKEN]"},
@@ -77,7 +111,16 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     {~r/\b(Bearer|Basic)\s+[A-Za-z0-9_\-\.=\+\/]{12,}/i, "\\1 [REDACTED]"},
     # `KEY=value`, `"key": "value"`, `key = value` where the key name looks
     # like a credential. Covers .env dumps and JSON tool arguments alike.
-    {~r/("?[A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|password|passwd|credential|private[_\-]?key)[A-Za-z0-9_\-]*"?)(\s*[:=]\s*)("?)([^"\s,}\n]{4,})/i,
+    #
+    # The `(?!\d+(?:\.\d+)?\b)` on the VALUE keeps this usable on reasoning
+    # text, which is now redacted too. `token` is a substring of `max_tokens`,
+    # `token_count`, `output_tokens` — all of which the model discusses with a
+    # number attached, and all of which came back as `max_tokens = [REDACTED]`.
+    # A purely numeric value is not a credential in any shape this list
+    # targets, so excluding it costs no coverage: a numeric-looking key with a
+    # trailing non-digit (`sk-1234...abcd`, a hex secret) fails the lookahead's
+    # `\b` and is still redacted.
+    {~r/("?[A-Za-z0-9_\-]*(?:api[_\-]?key|secret|token|password|passwd|credential|private[_\-]?key)[A-Za-z0-9_\-]*"?)(\s*[:=]\s*)("?)(?!\d+(?:\.\d+)?\b)([^"\s,}\n]{4,})/i,
      "\\1\\2\\3[REDACTED]"}
   ]
 
@@ -172,9 +215,17 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     path = session_path(session_id)
 
     try do
-      File.mkdir_p(Path.dirname(path))
+      dir = Path.dirname(path)
+      File.mkdir_p(dir)
+      File.chmod(dir, 0o700)
 
       line = encode_entry(entry)
+
+      # chmod BEFORE the first write, not after: a file created under the
+      # process umask is world-readable for the window between creation and a
+      # trailing chmod, and this file is a transcript that holds credentials.
+      ensure_owner_only(path)
+
       :ok = File.write(path, line <> "\n", [:append, :utf8])
       :ok
     rescue
@@ -304,6 +355,17 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
 
   # --- Private ---
 
+  # Create the file 0600 if it does not exist yet, and repair the mode if an
+  # earlier build created it under the umask.
+  defp ensure_owner_only(path) do
+    unless File.exists?(path) do
+      File.write(path, "", [:write])
+    end
+
+    File.chmod(path, @trajectory_file_mode)
+    :ok
+  end
+
   defp encode_entry(entry) do
     %{
       "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
@@ -318,10 +380,30 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
       "tool_results" => truncate_list(Map.get(entry, :tool_results, [])),
       "assistant_response" => truncate(Map.get(entry, :assistant_response, "")),
       "context_utilization" => Map.get(entry, :context_utilization, 0.0),
-      "compaction_events" => Map.get(entry, :compaction_events, [])
+      # Compaction events used to be written raw — they are summaries of the
+      # conversation being compacted, so they carry the same content every
+      # other field is scrubbed for. Route them through the same pipeline.
+      "compaction_events" => sanitize_term(Map.get(entry, :compaction_events, []))
     }
     |> Jason.encode!()
   end
+
+  # Recursively redact every string inside an arbitrary JSON-able term.
+  defp sanitize_term(term) when is_binary(term), do: truncate(term)
+
+  defp sanitize_term(term) when is_list(term), do: Enum.map(term, &sanitize_term/1)
+
+  defp sanitize_term(%{__struct__: _} = term), do: sanitize_term(inspect(term))
+
+  defp sanitize_term(term) when is_map(term) do
+    Map.new(term, fn {k, v} -> {sanitize_key(k), sanitize_term(v)} end)
+  end
+
+  defp sanitize_term(term) when is_atom(term) or is_number(term), do: term
+  defp sanitize_term(term), do: truncate(inspect(term))
+
+  defp sanitize_key(k) when is_binary(k) or is_atom(k) or is_number(k), do: k
+  defp sanitize_key(k), do: inspect(k)
 
   defp truncate(nil), do: ""
 
@@ -332,7 +414,11 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     max = max_field_chars()
 
     if byte_size(s) > max do
-      binary_part(s, 0, max) <> "…[truncated]"
+      # `binary_part/3` cuts on a byte offset, so a budget expressed in chars
+      # can land mid-codepoint and produce invalid UTF-8. `Jason.encode!` then
+      # raises and `do_record/2`'s rescue discards the WHOLE entry. Trim back
+      # to a valid boundary, same as Loop.ToolExecutor.safe_head/2.
+      safe_head(s, max) <> "…[truncated]"
     else
       s
     end
@@ -351,15 +437,72 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   distinguishing shape.
   """
   @spec redact(String.t()) :: String.t()
-  def redact(text) when is_binary(text) do
-    Enum.reduce(@secret_patterns, text, fn {pattern, replacement}, acc ->
-      Regex.replace(pattern, acc, replacement)
-    end)
-  rescue
-    _ -> text
-  end
+  def redact(text) when is_binary(text), do: redact(text, @secret_patterns)
 
   def redact(other), do: other
+
+  @doc false
+  # `patterns` is injectable so the failure path can be exercised in tests.
+  @spec redact(String.t(), [{Regex.t(), term()}]) :: String.t()
+  def redact(text, patterns) when is_binary(text) and is_list(patterns) do
+    # `Regex.replace/3` does not raise on invalid UTF-8 — it silently matches
+    # nothing and hands the input back. That is a fail-open: a key sitting in a
+    # tool result that also contains one stray byte was written to disk
+    # completely unredacted. Coerce to valid UTF-8 first so the patterns can
+    # actually see the text.
+    text
+    |> coerce_utf8()
+    |> then(fn t ->
+      Enum.reduce(patterns, t, fn {pattern, replacement}, acc ->
+        Regex.replace(pattern, acc, replacement)
+      end)
+    end)
+    |> anonymize_home()
+  rescue
+    e ->
+      # A sanitizer that returns its input when it fails is not a sanitizer:
+      # the original callers wrote the UNREDACTED text to
+      # `~/.osa/trajectories/` and printed it to the terminal on any regex
+      # error. Fail closed — the content is dropped, never passed through.
+      Logger.error("Trajectory.redact failed, dropping content: #{Exception.message(e)}")
+      @redaction_failure_marker
+  end
+
+  @doc """
+  Replace the operator's home directory with `~`.
+
+  A trajectory is shared as a debug artifact; the real home path carries the
+  operator's username. Only the directory form is rewritten — replacing a bare
+  username everywhere would mangle unrelated text.
+  """
+  @spec anonymize_home(String.t()) :: String.t()
+  def anonymize_home(text) when is_binary(text) do
+    case home_dir() do
+      nil -> text
+      home -> String.replace(text, home, "~")
+    end
+  end
+
+  # Replace invalid byte sequences with U+FFFD so the scrubber can run. Cheap
+  # no-op for the overwhelmingly common valid case.
+  defp coerce_utf8(text) do
+    if String.valid?(text), do: text, else: do_coerce(text, [])
+  end
+
+  defp do_coerce(<<>>, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp do_coerce(<<c::utf8, rest::binary>>, acc), do: do_coerce(rest, [<<c::utf8>> | acc])
+
+  defp do_coerce(<<_bad, rest::binary>>, acc), do: do_coerce(rest, ["�" | acc])
+
+  defp home_dir do
+    case System.get_env("HOME") || System.get_env("USERPROFILE") do
+      nil -> nil
+      "" -> nil
+      "/" -> nil
+      home -> String.trim_trailing(home, "/")
+    end
+  end
 
   defp truncate_list(list) when is_list(list) do
     Enum.map(list, &truncate/1)
@@ -371,12 +514,57 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     Enum.map(calls, fn call ->
       %{
         "name" => Map.get(call, :name, Map.get(call, "name", "")),
-        "arguments" => truncate(Map.get(call, :arguments, Map.get(call, "arguments", "")))
+        "arguments" =>
+          call
+          |> Map.get(:arguments, Map.get(call, "arguments", ""))
+          |> mask_typed_text()
+          |> truncate()
       }
     end)
   end
 
   defp truncate_tool_calls(_), do: []
+
+  # A `computer_use`/`browser` typing action carries the literal keystrokes —
+  # a password when the model is filling a login form. `redact/1` cannot help:
+  # a password has no shape. Mask structurally, by argument name, before the
+  # value reaches disk.
+  defp mask_typed_text(args) when is_binary(args) do
+    case Jason.decode(args) do
+      {:ok, decoded} when is_map(decoded) or is_list(decoded) ->
+        case Jason.encode(TypedText.mask_args(decoded)) do
+          {:ok, json} -> json
+          _ -> args
+        end
+
+      _ ->
+        args
+    end
+  end
+
+  defp mask_typed_text(args) when is_map(args) or is_list(args) do
+    masked = TypedText.mask_args(args)
+
+    case Jason.encode(masked) do
+      {:ok, json} -> json
+      _ -> inspect(masked)
+    end
+  end
+
+  defp mask_typed_text(other), do: other
+
+  # See Loop.ToolExecutor.safe_head/2 — same primitive, same reason.
+  defp safe_head(bin, limit) do
+    head = binary_part(bin, 0, min(limit, byte_size(bin)))
+    if String.valid?(head), do: head, else: trim_to_valid(head)
+  end
+
+  defp trim_to_valid(<<>>), do: <<>>
+
+  defp trim_to_valid(bin) do
+    shorter = binary_part(bin, 0, byte_size(bin) - 1)
+    if String.valid?(shorter), do: shorter, else: trim_to_valid(shorter)
+  end
 
   defp sanitize_session_id(id) when is_binary(id) do
     id

@@ -187,12 +187,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   # ---------------------------------------------------------------------------
 
   describe "output truncation" do
-    test "output larger than 100KB is truncated" do
+    test "output larger than 100KB is capped, keeping the head AND the tail" do
       assert {:ok, output} = exec("seq 1 50000")
 
-      if byte_size(output) > 100_000 do
-        assert output =~ "[output truncated at 100KB]"
-      end
+      # ~288KB of input, capped to ~100KB.
+      assert byte_size(output) < 200_000
+      assert output =~ "output truncated"
+
+      # The cut is now head+tail with a middle elision, not head-only: both the
+      # first and the LAST line of the command's output must survive. See
+      # shell_execute_truncation_test.exs for the full behavior.
+      assert output =~ ~r/\A1\n/
+      assert String.contains?(output, "50000")
     end
 
     test "small output is not truncated" do

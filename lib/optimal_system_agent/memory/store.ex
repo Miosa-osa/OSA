@@ -48,6 +48,7 @@ defmodule OptimalSystemAgent.Memory.Store do
 
   alias OptimalSystemAgent.Store.{Repo, MemoryEntry}
   alias OptimalSystemAgent.Agent.Memory.SQLiteBridge
+  alias OptimalSystemAgent.System.AtomicFile
   import Ecto.Query
 
   # Both tables are 1:1 MIRRORS of the durable `memories` SQLite table, not
@@ -596,7 +597,12 @@ defmodule OptimalSystemAgent.Memory.Store do
 
     content = render_memory_md(entries)
 
-    case File.write(path, content) do
+    # This regenerates the ENTIRE ~/.osa/MEMORY.md. A plain `File.write` on a
+    # whole-file regeneration means a crash or a full disk mid-write leaves a
+    # truncated index where the user's memory used to be; AtomicFile writes a
+    # temp file, fsyncs, and renames, so readers see either the old file or the
+    # complete new one and never a fragment.
+    case AtomicFile.write(path, content) do
       :ok ->
         Logger.debug("[Memory.Store] wrote #{path}")
         :ok
@@ -611,10 +617,18 @@ defmodule OptimalSystemAgent.Memory.Store do
       {:error, Exception.message(e)}
   end
 
+  # Regeneration runs in an unlinked Task so callers are not blocked by a full
+  # table scan. That made it possible for two regenerations to be in flight at
+  # once on the SAME path, and their `Repo.all` snapshots to be applied out of
+  # order — the older snapshot winning and reverting entries that had just been
+  # saved. The lock makes the read-render-write sequence serial, so the last
+  # file on disk is always rendered from the newest database state seen.
   defp write_memory_md_async do
     Task.Supervisor.start_child(
       OptimalSystemAgent.TaskSupervisor,
-      fn -> write_memory_md() end
+      fn ->
+        :global.trans({{__MODULE__, :memory_md}, self()}, &write_memory_md/0, [node()])
+      end
     )
   rescue
     _ -> :ok

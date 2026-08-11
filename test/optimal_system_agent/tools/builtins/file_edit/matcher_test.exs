@@ -40,7 +40,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.MatcherTest do
       old = "line_one\nline_two"
       new = "REPLACED"
 
-      assert {:ok, "REPLACED\n", 1, :whitespace} = Matcher.replace(content, old, new, false)
+      # The file indents by 2 and `old_string` does not, so the replacement is
+      # shifted to the file's indentation. This assertion used to be
+      # "REPLACED\n" — the whitespace stage matched by ignoring indentation and
+      # then wrote the model's (absent) indentation over the file's, silently
+      # de-indenting the region. See `Matcher`'s moduledoc.
+      assert {:ok, "  REPLACED\n", 1, :whitespace} = Matcher.replace(content, old, new, false)
     end
 
     test "matches a multi-line block despite leading-whitespace drift, inserting new_string verbatim" do

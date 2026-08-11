@@ -21,7 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   """
 
   alias OptimalSystemAgent.Agent.Safety.PathCanon
-  alias OptimalSystemAgent.Tools.Builtins.FileEdit.Constants
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
   alias OptimalSystemAgent.Tools.FileState
@@ -46,23 +46,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
   def check_permissions(%{"path" => path} = input, _ctx) do
-    expanded = Path.expand(path)
-    resolved = resolve_real_path(expanded)
-    symlink_traversal? = resolved != expanded
-
-    cond do
-      symlink_traversal? and
-          (not read_allowed?(resolved) or not write_allowed?(resolved)) ->
-        {:deny, "Access denied: #{path} resolves through a symlink to a protected location"}
-
-      not read_allowed?(resolved) ->
-        {:deny, "Access denied: #{path} is outside allowed paths or is a sensitive file"}
-
-      not write_allowed?(resolved) ->
-        {:deny, "Access denied: #{path} targets a protected location"}
-
-      true ->
-        {:allow, input}
+    # One shared decision (`PathPolicy.check_write/2`) for all four write
+    # tools. It canonicalises first, so an intermediate directory symlink
+    # cannot smuggle the target out of the allowed roots, and it applies the
+    # dotfile and blocked-location rules that used to differ per tool.
+    with :ok <- PathPolicy.check_read(path, path),
+         :ok <- PathPolicy.check_write(path, path) do
+      {:allow, input}
+    else
+      {:deny, _} = denial -> denial
     end
   end
 
@@ -85,7 +77,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
         {:error, "old_string cannot be empty"}
 
       true ->
-        do_edit(resolved, path, old, new, replace_all, session_id(ctx))
+        # Defense-in-depth: re-run the write guard here so the sandbox holds
+        # even when `execute/2` is invoked directly, bypassing the
+        # validate → check_permissions → execute pipeline. `file_write` already
+        # did this; `file_edit`, which is equally write-capable, did not.
+        case PathPolicy.check_write(path, path) do
+          :ok -> do_edit(resolved, path, old, new, replace_all, session_id(ctx))
+          {:deny, msg} -> {:error, msg}
+        end
     end
   end
 
@@ -362,76 +361,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   # itself a link), which is what let a symlinked intermediate directory walk
   # straight past this guard. See `PathCanon`.
   defp resolve_real_path(path), do: PathCanon.canonicalize(path)
-
-  defp read_allowed?(expanded_path) do
-    sensitive =
-      Enum.any?(Constants.sensitive_paths(), fn p -> String.contains?(expanded_path, p) end)
-
-    if sensitive do
-      false
-    else
-      check =
-        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-      Enum.any?(allowed_read_paths(), fn a -> String.starts_with?(check, a) end)
-    end
-  end
-
-  defp write_allowed?(expanded_path) do
-    if dotfile_outside_osa?(expanded_path) do
-      false
-    else
-      blocked =
-        Enum.any?(Constants.blocked_write_paths(), fn p ->
-          String.contains?(expanded_path, p)
-        end)
-
-      if blocked do
-        false
-      else
-        check =
-          if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-        Enum.any?(allowed_write_paths(), fn a -> String.starts_with?(check, a) end)
-      end
-    end
-  end
-
-  defp allowed_read_paths do
-    Application.get_env(
-      :optimal_system_agent,
-      :allowed_read_paths,
-      Constants.default_allowed_paths()
-    )
-    |> Enum.map(fn p ->
-      e = PathCanon.canonicalize(p)
-      if String.ends_with?(e, "/"), do: e, else: e <> "/"
-    end)
-  end
-
-  defp allowed_write_paths do
-    Application.get_env(
-      :optimal_system_agent,
-      :allowed_write_paths,
-      Constants.default_allowed_paths()
-    )
-    |> Enum.map(fn p ->
-      e = PathCanon.canonicalize(p)
-      if String.ends_with?(e, "/"), do: e, else: e <> "/"
-    end)
-  end
-
-  defp dotfile_outside_osa?(expanded_path) do
-    home = Path.expand("~")
-    osa = Path.expand("~/.osa") <> "/"
-
-    case String.split_at(expanded_path, byte_size(home)) do
-      {^home, "/" <> rest} ->
-        first = rest |> String.split("/") |> List.first()
-        String.starts_with?(first, ".") and not String.starts_with?(expanded_path, osa)
-
-      _ ->
-        false
-    end
-  end
 end
