@@ -99,6 +99,10 @@ defmodule OptimalSystemAgent.Providers.Google do
       |> maybe_add_system_instruction(system_instruction)
       |> maybe_add_generation_config(model, opts)
       |> maybe_add_tools(opts)
+      # Gemini's 20 MB request ceiling — the budget knows the `contents`/`parts`
+      # envelope now, so this is a real gate rather than a no-op.
+      |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:google, model)
+      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :google)
 
     # The API key goes in the `x-goog-api-key` HEADER, not a `?key=` query
     # parameter. Every current Google example uses the header, and the query
@@ -161,6 +165,17 @@ defmodule OptimalSystemAgent.Providers.Google do
   end
 
   @doc """
+  True — Gemini turns carry `inlineData` image parts (see `parts_for/1`).
+
+  `Registry.normalize_message_content/3` asks the DISPATCH TARGET this before
+  deciding whether to flatten an image block into a text placeholder. Declaring
+  it here, next to the encoder, is what keeps the registry from carrying a
+  hand-maintained provider allowlist that drifts from the encoders.
+  """
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
+
+  @doc """
   Test seam: build the `{systemInstruction_text, contents}` pair for a raw
   message list, without a live HTTP call.
   """
@@ -193,7 +208,7 @@ defmodule OptimalSystemAgent.Providers.Google do
     system_text =
       case sys_msgs do
         [] -> nil
-        msgs -> Enum.map_join(msgs, "\n\n", &to_string(&1["content"] || ""))
+        msgs -> Enum.map_join(msgs, "\n\n", &flatten_text_content(&1["content"]))
       end
 
     chat_msgs =
@@ -283,7 +298,7 @@ defmodule OptimalSystemAgent.Providers.Google do
         Map.put(acc, to_string(c[:id] || c["id"] || ""), c[:name] || c["name"])
       end)
 
-    text = to_string(msg["content"] || "")
+    text = flatten_text_content(msg["content"])
     text_parts = if text == "", do: [], else: [%{"text" => text}]
 
     call_parts =
@@ -299,9 +314,88 @@ defmodule OptimalSystemAgent.Providers.Google do
     {%{"role" => "model", "parts" => text_parts ++ call_parts}, names}
   end
 
+  # User (and every other) turn. `content` may be a LIST of structured blocks —
+  # `MessageHandler.build_messages/3` emits `text` + `image` blocks for an
+  # attachment — and `to_string/1` on a list of maps raises
+  # `Protocol.UndefinedError`. Gemini carries images as `inlineData` parts, so
+  # they are translated rather than crashed on or dropped.
   defp content_part(msg, names) do
-    {%{"role" => "user", "parts" => [%{"text" => to_string(msg["content"] || "")}]}, names}
+    {%{"role" => "user", "parts" => parts_for(msg["content"])}, names}
   end
+
+  # Gemini accepts exactly these inline image types. An unknown one becomes an
+  # explicit note — a dropped image makes the model answer confidently about
+  # something it never received.
+  @gemini_image_types [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/heic",
+    "image/heif"
+  ]
+
+  @image_unsupported "[An image was attached but is not in a format this model accepts. Do not describe or reason about it; ask the user to re-share it as PNG, JPEG, GIF or WebP.]"
+
+  defp parts_for(content) when is_binary(content) or is_nil(content) do
+    [%{"text" => to_string(content || "")}]
+  end
+
+  defp parts_for(content) when is_list(content) do
+    case content |> Enum.map(&part_for/1) |> Enum.reject(&is_nil/1) do
+      [] -> [%{"text" => ""}]
+      parts -> parts
+    end
+  end
+
+  defp parts_for(other), do: [%{"text" => to_string(other)}]
+
+  defp part_for(text) when is_binary(text), do: %{"text" => text}
+
+  defp part_for(%{type: "image", source: source}), do: inline_data_part(source)
+  defp part_for(%{"type" => "image", "source" => source}), do: inline_data_part(source)
+
+  # Already a Gemini part (a re-entrant retry/fallback hop) — pass through.
+  defp part_for(%{"inlineData" => _} = part), do: part
+
+  defp part_for(%{type: "text", text: t}) when is_binary(t), do: %{"text" => t}
+  defp part_for(%{"type" => "text", "text" => t}) when is_binary(t), do: %{"text" => t}
+  defp part_for(%{text: t}) when is_binary(t), do: %{"text" => t}
+  defp part_for(%{"text" => t}) when is_binary(t), do: %{"text" => t}
+  defp part_for(_), do: nil
+
+  # Text-only flattening for the two places Gemini takes a bare string
+  # (`systemInstruction`, and a `model` turn's prose). A block list here would
+  # otherwise raise on `to_string/1`.
+  defp flatten_text_content(content) when is_binary(content), do: content
+  defp flatten_text_content(nil), do: ""
+
+  defp flatten_text_content(content) when is_list(content) do
+    content
+    |> Enum.map(&part_for/1)
+    |> Enum.map(fn
+      %{"text" => t} -> t
+      %{"inlineData" => _} -> @image_unsupported
+      _ -> nil
+    end)
+    |> Enum.reject(&(&1 == nil or &1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp flatten_text_content(other), do: to_string(other)
+
+  defp inline_data_part(source) when is_map(source) do
+    media_type = Map.get(source, :media_type, Map.get(source, "media_type"))
+    data = Map.get(source, :data, Map.get(source, "data"))
+
+    if media_type in @gemini_image_types and is_binary(data) and data != "" do
+      %{"inlineData" => %{"mimeType" => media_type, "data" => data}}
+    else
+      %{"text" => @image_unsupported}
+    end
+  end
+
+  defp inline_data_part(_), do: %{"text" => @image_unsupported}
 
   defp maybe_add_system_instruction(body, nil), do: body
   defp maybe_add_system_instruction(body, ""), do: body

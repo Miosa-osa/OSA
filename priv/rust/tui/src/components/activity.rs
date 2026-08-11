@@ -2120,18 +2120,23 @@ fn sanitize_live_line(s: &str, max_cols: usize) -> String {
     }
     let mut out = String::new();
     let mut acc = 0usize;
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        // Drop CSI/OSC escape sequences wholesale rather than rendering their
-        // payload as literal text.
-        if ch == '\u{1b}' {
-            for esc in chars.by_ref() {
-                if esc.is_ascii_alphabetic() || esc == '\u{7}' {
-                    break;
-                }
-            }
+    let mut i = 0usize;
+    while i < s.len() {
+        // Drop escape sequences wholesale rather than rendering their payload as
+        // literal text.
+        //
+        // This used to break on the first ASCII alphabetic, which is right for
+        // CSI but WRONG for OSC: an OSC string runs to BEL or ST, so
+        // `ESC ]8;;http://x ESC \` stopped at the `h` of `http`, leaked
+        // `ttp://x` onto the row as visible text, and then the trailing `ESC \`
+        // opened a fresh "escape" that ate the real output after it.
+        // `escape_len_at` knows each introducer's real terminator.
+        if let Some(len) = crate::util::escape_len_at(s, i) {
+            i += len;
             continue;
         }
+        let ch = s[i..].chars().next().expect("at a char boundary");
+        i += ch.len_utf8();
         let ch = if ch == '\t' { ' ' } else { ch };
         if ch.is_control() {
             continue;
@@ -3209,6 +3214,24 @@ mod slot_invariant_tests {
         // Clipped to the column budget, never wrapped.
         assert_eq!(sanitize_live_line("abcdefghij", 4), "abcd");
         assert_eq!(sanitize_live_line("anything", 0), "");
+
+        // OSC, not CSI: an OSC string runs to BEL or ST, so a skipper that
+        // breaks on the first ASCII alphabetic stops inside the URL, leaks its
+        // tail as visible text, and then the trailing `ESC \` eats real output.
+        assert_eq!(
+            sanitize_live_line("a\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\b", 40),
+            "alinkb"
+        );
+        // BEL-terminated OSC (window title) — the other legal terminator.
+        assert_eq!(
+            sanitize_live_line("x\u{1b}]0;my title\u{7}y", 40),
+            "xy"
+        );
+        // The tmux DCS passthrough wrapper is a string-family escape too.
+        assert_eq!(
+            sanitize_live_line("p\u{1b}P tmux;junk\u{1b}\\q", 40),
+            "pq"
+        );
         // Wide chars are measured in COLUMNS, not bytes.
         assert_eq!(sanitize_live_line("\u{4f60}\u{597d}", 3), "\u{4f60}");
     }

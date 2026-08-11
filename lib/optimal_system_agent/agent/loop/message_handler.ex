@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Reminders
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Events.Bus
 
   @doc """
@@ -35,68 +36,214 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   @doc """
   Same as `build_messages/2`, but when `images` is a non-empty list the user
   turn is emitted as structured content blocks (`text` + one `image` block per
-  entry) so vision-capable providers actually receive the image bytes. Each
-  entry is either a filesystem path (read + base64-encoded, media type detected
-  from the extension) or an already-base64 PNG blob (pasted clipboard bytes).
+  entry) so vision-capable providers actually receive the image bytes.
+
+  An entry is either inline image bytes (a `data:image/...;base64,...` URL or a
+  bare base64 blob — a clipboard paste) or a filesystem path. Ingestion is NOT
+  "read whatever string arrived":
+
+    * A path is canonicalised through `Agent.Safety.PathCanon` (real recursive
+      realpath, so an intermediate directory symlink cannot smuggle the target
+      elsewhere) and then run through `Agent.Safety.PathPolicy.check_read/2` —
+      the same allowlist + sensitive-file blocklist every file-reading builtin
+      uses. Without this, an `images` entry is an arbitrary-file-read primitive
+      that base64s the result straight into an outbound provider request:
+      `images: ["~/.ssh/id_rsa"]` or `["../.env"]` exfiltrates the file. The
+      entry can be model-authored or, over `POST /api/v1/orchestrate`, caller-
+      supplied, so it is untrusted input.
+    * The media type is sniffed from MAGIC BYTES, never guessed from the
+      extension. The old code defaulted an unknown extension to `image/png`,
+      which both mislabels real images and lets a non-image file through.
+    * A byte cap applies (`:max_image_bytes`, default 10 MB).
+    * A path that does not exist is an ERROR. It used to fall through to "treat
+      the string as base64 image bytes", so a typo'd path was shipped to the
+      provider as a garbage payload and the user got a confused model answer
+      instead of "that file does not exist".
+
+  Rejected entries are reported to the model in a `system` directive placed
+  immediately before the user turn, so a dropped attachment is visible rather
+  than silent.
   """
   @spec build_messages(String.t(), map(), list()) :: list(map())
   def build_messages(message, state, images) when is_list(images) do
     message_with_nudge = maybe_inject_memory_nudge(message, state)
     pre_directives = build_pre_directives(message_with_nudge, state)
 
+    {image_blocks, errors} = ingest_images(images)
+
     user_msg =
-      case build_image_blocks(message_with_nudge, images) do
-        nil -> %{role: "user", content: message_with_nudge}
-        blocks -> %{role: "user", content: blocks}
+      case image_blocks do
+        [] -> %{role: "user", content: message_with_nudge}
+        blocks -> %{role: "user", content: [%{type: "text", text: message_with_nudge} | blocks]}
       end
 
-    pre_directives ++ [user_msg]
+    pre_directives ++ rejection_directives(errors) ++ [user_msg]
   end
 
-  defp build_image_blocks(_text, []), do: nil
+  # ── Image ingestion ───────────────────────────────────────────────────────
 
-  defp build_image_blocks(text, images) do
-    image_blocks =
-      images
-      |> Enum.map(&image_entry_to_block/1)
-      |> Enum.reject(&is_nil/1)
+  # Anthropic (and every other vision API OSA talks to) accepts exactly these
+  # four. Anything else is refused rather than mislabelled as PNG.
+  @image_types ["image/png", "image/jpeg", "image/gif", "image/webp"]
 
-    if image_blocks == [], do: nil, else: [%{type: "text", text: text} | image_blocks]
+  @default_max_image_bytes 10 * 1024 * 1024
+
+  # Cheap shape guard before attempting a base64 decode, so a filesystem path
+  # is never mistaken for a payload: base64's alphabet excludes `.`, `-`, `~`
+  # and `/`-adjacent path punctuation is not enough on its own to decode.
+  @base64_re ~r/\A[A-Za-z0-9+\/\s]+={0,2}\z/
+
+  @doc false
+  @spec ingest_images(list()) :: {list(map()), list(String.t())}
+  def ingest_images(images) when is_list(images) do
+    {blocks, errors} =
+      Enum.reduce(images, {[], []}, fn entry, {blocks, errors} ->
+        case image_entry_to_block(entry) do
+          {:ok, block} -> {[block | blocks], errors}
+          {:error, reason} -> {blocks, [reason | errors]}
+        end
+      end)
+
+    {Enum.reverse(blocks), Enum.reverse(errors)}
+  end
+
+  defp rejection_directives([]), do: []
+
+  defp rejection_directives(errors) do
+    lines = Enum.map_join(errors, "\n", &("  - " <> &1))
+
+    [
+      %{
+        role: "system",
+        content:
+          "[System: #{length(errors)} image attachment(s) could NOT be attached and are not " <>
+            "part of this turn. Do not describe or reason about them; tell the user what " <>
+            "failed.\n" <> lines <> "]"
+      }
+    ]
   end
 
   defp image_entry_to_block(entry) when is_binary(entry) and entry != "" do
-    if File.exists?(entry) do
-      case File.read(entry) do
-        {:ok, bytes} ->
-          %{
-            type: "image",
-            source: %{
-              type: "base64",
-              media_type: media_type_for(entry),
-              data: Base.encode64(bytes)
-            }
-          }
-
-        _ ->
-          nil
-      end
-    else
-      # Not a path — treat as already-base64 image bytes (clipboard paste = PNG).
-      %{type: "image", source: %{type: "base64", media_type: "image/png", data: entry}}
+    case classify_entry(entry) do
+      {:inline, bytes} -> block_from_bytes(bytes, "pasted image data")
+      {:path, path} -> block_from_path(path)
     end
   end
 
-  defp image_entry_to_block(_), do: nil
+  defp image_entry_to_block(other),
+    do: {:error, "unsupported image attachment: #{inspect(other)}"}
 
-  defp media_type_for(path) do
-    case path |> Path.extname() |> String.downcase() do
-      ".png" -> "image/png"
-      ".jpg" -> "image/jpeg"
-      ".jpeg" -> "image/jpeg"
-      ".gif" -> "image/gif"
-      ".webp" -> "image/webp"
-      _ -> "image/png"
+  # A `data:` URL or a bare base64 blob is inline bytes; everything else is a
+  # path. Decoding is only attempted when the string cannot be a path shape,
+  # so a real path is never swallowed as a payload (and vice versa).
+  defp classify_entry("data:" <> _ = entry) do
+    case Regex.run(~r{\Adata:[^;,]*;base64,(.*)\z}s, entry) do
+      [_, payload] ->
+        case Base.decode64(payload, ignore: :whitespace) do
+          {:ok, bytes} -> {:inline, bytes}
+          :error -> {:inline, <<>>}
+        end
+
+      _ ->
+        {:inline, <<>>}
     end
+  end
+
+  defp classify_entry(entry) do
+    if byte_size(entry) >= 24 and Regex.match?(@base64_re, entry) do
+      case Base.decode64(entry, ignore: :whitespace) do
+        {:ok, bytes} -> {:inline, bytes}
+        :error -> {:path, entry}
+      end
+    else
+      {:path, entry}
+    end
+  end
+
+  defp block_from_path(entry) do
+    canonical = PathPolicy.canonical(entry)
+
+    with :ok <- policy_check(entry),
+         :ok <- exists_check(canonical, entry),
+         {:ok, size} <- regular_file_size(canonical, entry),
+         :ok <- size_check(size, entry),
+         {:ok, bytes} <- read_file(canonical, entry) do
+      block_from_bytes(bytes, entry)
+    end
+  end
+
+  defp policy_check(entry) do
+    case PathPolicy.check_read(entry, entry) do
+      :ok -> :ok
+      {:deny, reason} -> {:error, reason}
+    end
+  end
+
+  defp exists_check(canonical, entry) do
+    if File.exists?(canonical), do: :ok, else: {:error, "#{entry}: no such file"}
+  end
+
+  defp regular_file_size(canonical, entry) do
+    case File.stat(canonical) do
+      {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, size}
+      {:ok, %File.Stat{type: type}} -> {:error, "#{entry}: not a regular file (#{type})"}
+      {:error, posix} -> {:error, "#{entry}: cannot stat (#{:file.format_error(posix)})"}
+    end
+  end
+
+  defp size_check(size, entry) do
+    max = max_image_bytes()
+
+    if size > max do
+      {:error, "#{entry}: #{size} bytes exceeds the #{max}-byte image attachment limit"}
+    else
+      :ok
+    end
+  end
+
+  defp read_file(canonical, entry) do
+    case File.read(canonical) do
+      {:ok, bytes} -> {:ok, bytes}
+      {:error, posix} -> {:error, "#{entry}: cannot read (#{:file.format_error(posix)})"}
+    end
+  end
+
+  defp block_from_bytes(bytes, label) do
+    cond do
+      byte_size(bytes) == 0 ->
+        {:error, "#{label}: empty image data"}
+
+      byte_size(bytes) > max_image_bytes() ->
+        {:error,
+         "#{label}: #{byte_size(bytes)} bytes exceeds the #{max_image_bytes()}-byte " <>
+           "image attachment limit"}
+
+      true ->
+        case sniff_media_type(bytes) do
+          {:ok, media_type} when media_type in @image_types ->
+            {:ok,
+             %{
+               type: "image",
+               source: %{type: "base64", media_type: media_type, data: Base.encode64(bytes)}
+             }}
+
+          _ ->
+            {:error, "#{label}: not a supported image (expected PNG, JPEG, GIF or WebP)"}
+        end
+    end
+  end
+
+  # Content sniffing, not extension trust. The extension is attacker-chosen and
+  # the old `media_type_for/1` defaulted anything unknown to "image/png".
+  defp sniff_media_type(<<0x89, "PNG\r\n", 0x1A, 0x0A, _::binary>>), do: {:ok, "image/png"}
+  defp sniff_media_type(<<0xFF, 0xD8, 0xFF, _::binary>>), do: {:ok, "image/jpeg"}
+  defp sniff_media_type(<<"GIF87a", _::binary>>), do: {:ok, "image/gif"}
+  defp sniff_media_type(<<"GIF89a", _::binary>>), do: {:ok, "image/gif"}
+  defp sniff_media_type(<<"RIFF", _::binary-size(4), "WEBP", _::binary>>), do: {:ok, "image/webp"}
+  defp sniff_media_type(_), do: :error
+
+  defp max_image_bytes do
+    Application.get_env(:optimal_system_agent, :max_image_bytes, @default_max_image_bytes)
   end
 
   @doc """

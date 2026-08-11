@@ -10,6 +10,7 @@ mod handle_backend;
 mod handle_dialogs;
 pub mod key_normalize;
 mod keymap_dispatch;
+pub mod permission_queue;
 pub mod resume;
 pub mod self_update;
 pub mod settle_guard;
@@ -46,7 +47,6 @@ use crate::dialogs::config_editor::ConfigEditor;
 use crate::dialogs::file_picker::FilePicker;
 use crate::dialogs::model_picker::ModelPicker;
 use crate::dialogs::onboarding::OnboardingWizard;
-use crate::dialogs::permissions::Permissions;
 use crate::dialogs::plan_review::PlanReview;
 use crate::dialogs::quit_confirm::QuitConfirm;
 use crate::dialogs::reasoning::ReasoningSelector;
@@ -107,7 +107,10 @@ pub struct App {
     pub session_browser: Option<SessionBrowser>,
     pub onboarding: Option<OnboardingWizard>,
     pub plan_review: Option<PlanReview>,
-    pub permissions: Option<Permissions>,
+    /// Tool-permission asks. One displayed, the rest queued behind it — tool
+    /// calls run in parallel, and a bare slot let a later ask silently replace
+    /// the one the user was reading (approving B while looking at A).
+    pub permissions: self::permission_queue::PermissionQueue,
     pub reasoning_selector: Option<ReasoningSelector>,
     pub rewind_dialog: Option<RewindDialog>,
     pub config_editor: Option<ConfigEditor>,
@@ -416,19 +419,40 @@ pub struct App {
     // always reflects the FINAL size.
     pub resize_dirty: bool,
 
-    // High-water mark of the streaming preview slot for the CURRENT turn, in
-    // rows (0 when no reply is streaming). The preview grows with a long reply in
-    // whole `STREAM_PREVIEW_STEP` jumps; this makes that growth MONOTONIC, so a
-    // reply whose rendered height dips (a fenced block closing, a table
-    // collapsing) can never shrink the slot back and start a grow/shrink
-    // oscillation — every height change rebuilds the inline viewport, and
-    // mid-turn rebuilds are the stacked-chrome class of bug.
+    // Reserved height of the streaming preview slot for the CURRENT turn, in
+    // rows (0 when no reply is streaming), plus the pending-shrink timer that
+    // damps it. See `DampedSlot`.
     //
-    // A `Cell` because `desired_inline_height` is `&self`: keeping the mark
+    // This used to be a bare high-water mark, which made the slot MONOTONIC for
+    // the turn: a reply whose rendered height dipped could not shrink it back,
+    // so a grow/shrink oscillation could not churn the inline viewport. It also
+    // meant the slot never released a row until the turn ended — the turn that
+    // needed twelve rows early reserved twelve for its one-row closing reply and
+    // drew a blank band above it. The slot now sizes to what is drawn and damps
+    // only the shrink direction, on a time bound.
+    //
+    // A `Cell` because `desired_inline_height` is `&self`: keeping the state
     // inside the one function that computes the slot means the sizing and the
     // memory of it cannot drift, and every turn-ending path releases it for free
     // (the "nothing is streaming" branch resets it).
-    pub(crate) stream_preview_hw: std::cell::Cell<u16>,
+    pub(crate) stream_preview_slot: std::cell::Cell<crate::app::event_loop::DampedSlot>,
+
+    // The same damped reservation for the other two bands that reserved a
+    // ceiling and painted less than it. `Activity` reserved `max_height()` (its
+    // verbosity ceiling) while drawing `height()`; `Agents` reserved a flat
+    // `AGENTS_INLINE_CAP` while drawing its live roster. Both bands are
+    // bottom-anchored, so both surpluses painted as blank rows above their
+    // content — the same defect as the preview's, in a different band.
+    pub(crate) activity_slot: std::cell::Cell<crate::app::event_loop::DampedSlot>,
+    pub(crate) agents_slot: std::cell::Cell<crate::app::event_loop::DampedSlot>,
+
+    // One clock per frame, latched by `desired_inline_height` and read by
+    // `measure_bands`. Both run during a single frame, and a band's pending
+    // shrink must not be allowed to mature BETWEEN the reservation and the
+    // draw — that would reserve one height and paint another, which is the
+    // anchor-orphaning class of bug. `DampedSlot::resolve` is idempotent for a
+    // fixed instant, so sharing one makes the two calls agree by construction.
+    pub(crate) frame_now: std::cell::Cell<Instant>,
 
     // One-shot "/clear was run" request. The terminal (and thus the real
     // scrollback the finalized transcript lives in when inline) is owned by
@@ -592,7 +616,7 @@ impl App {
             session_browser: None,
             onboarding: None,
             plan_review: None,
-            permissions: None,
+            permissions: self::permission_queue::PermissionQueue::new(),
             reasoning_selector: None,
             rewind_dialog: None,
             config_editor: None,
@@ -707,7 +731,10 @@ impl App {
             esc_tracker: EscTracker::default(),
             force_redraw: false,
             resize_dirty: false,
-            stream_preview_hw: std::cell::Cell::new(0),
+            stream_preview_slot: std::cell::Cell::new(Default::default()),
+            activity_slot: std::cell::Cell::new(Default::default()),
+            agents_slot: std::cell::Cell::new(Default::default()),
+            frame_now: std::cell::Cell::new(Instant::now()),
             pending_clear: false,
             keymap,
             chord_pending: None,
@@ -822,6 +849,10 @@ impl App {
     /// status, agents panel). Extracted so the CancelTimeout path and the
     /// disconnect path finalize identically and can never drift apart.
     pub(crate) fn finalize_turn_state(&mut self) {
+        // The turn these asks belong to is over — answering them would resume
+        // nothing, so drop the visible prompt AND everything queued behind it
+        // rather than leaving orphan dialogs over the next turn.
+        self.clear_permission_prompts();
         self.chat.clear_streaming();
         // Commit any completed-but-unflushed tool calls; drop the partial
         // streaming text deliberately.
@@ -835,6 +866,22 @@ impl App {
         self.activity.stop();
         self.status.set_active(false);
         self.agents.task_completed();
+    }
+
+    /// Drop every outstanding permission ask (displayed + queued) and leave the
+    /// overlay behind if one was open, keeping the return stack balanced —
+    /// exactly one `exit_overlay` per `enter_overlay`, no matter how many asks
+    /// were stacked inside it.
+    pub(crate) fn clear_permission_prompts(&mut self) {
+        if !self.permissions.is_active() {
+            self.permissions.clear();
+            return;
+        }
+        self.permissions.clear();
+        self.activity.set_pending_user(false);
+        if self.state == AppState::Permissions {
+            self.exit_overlay();
+        }
     }
 
     /// Settle the working chrome at the TURN-end edge, so what the user is left
@@ -871,7 +918,9 @@ impl App {
         // short-circuited by an open permission prompt or plan-review panel — so
         // a turn that ended under one of those would otherwise carry its
         // high-water mark into the next turn and start it pre-grown.
-        self.stream_preview_hw.set(0);
+        self.stream_preview_slot.set(Default::default());
+        self.activity_slot.set(Default::default());
+        self.agents_slot.set(Default::default());
         self.chat.clear_streaming();
         self.chat.flush_pending_tools();
         self.flush_collapse();
@@ -1066,7 +1115,7 @@ impl App {
             None
         });
 
-        if self.permissions.is_some() {
+        if self.permissions.is_active() {
             let since = *self.permission_wait_since.get_or_insert_with(Instant::now);
             if !self.permission_pinged
                 && self.notify_on_complete
@@ -1152,12 +1201,15 @@ fn compose_goal_label(goal: &str, elapsed_secs: u64) -> String {
     let goal = goal.trim();
     // Head-preserving trim: the start of a goal statement carries the intent, so
     // keep the leading words and append an ellipsis when it overflows.
-    let shown = if goal.chars().count() > MAX_GOAL_CHARS {
-        let head: String = goal.chars().take(MAX_GOAL_CHARS - 1).collect();
-        format!("{}\u{2026}", head.trim_end())
-    } else {
-        goal.to_string()
-    };
+    // COLUMNS, not chars: a 40-char CJK goal is 80 columns wide and shoves the
+    // elapsed-time suffix off the status bar, and a `.chars().take()` cut also
+    // splits grapheme clusters (half a flag, a severed emoji ZWJ sequence).
+    // `fit_cols` measures true display width and breaks on cluster boundaries.
+    let shown = crate::util::fit_cols(goal, MAX_GOAL_CHARS);
+    let shown = shown
+        .strip_suffix('\u{2026}')
+        .map(|h| format!("{}\u{2026}", h.trim_end()))
+        .unwrap_or(shown);
     format!(
         "Working on: {} \u{00b7} {}",
         shown,

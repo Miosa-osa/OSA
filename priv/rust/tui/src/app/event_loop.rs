@@ -388,23 +388,44 @@ pub(crate) const STREAM_PREVIEW_ROWS: u16 = 10;
 ///
 /// A permanently 10-row window is what made a long reply feel like it was being
 /// read through a letterbox: the answer scrolled past inside a small box and only
-/// became legible once it landed in scrollback. The preview may therefore GROW
-/// with the reply — but growth is the dangerous direction. Every height change
-/// rebuilds the inline viewport, and every rebuild issues a DSR cursor query that
-/// tmux/SSH can drop (the stacked-composer / duplicated-chrome class of bug).
+/// became legible once it landed in scrollback. The preview therefore sizes to
+/// the reply — but it never exceeds [`stream_preview_ceiling`], which refuses to
+/// let the live region eat more than half the terminal, because the rows above
+/// it are the scrollback the user is reading.
 ///
-/// So growth is **quantized and bounded**, never per-delta:
-/// * it moves in whole [`STREAM_PREVIEW_STEP`] jumps, so a 40-row reply costs at
-///   most `(MAX - ROWS) / STEP` rebuilds for the entire turn (two, today) rather
-///   than one per token;
-/// * it is monotonic within a turn (see `App::stream_preview_hw`), so a reply
-///   whose rendered height dips — a fenced block closing, a table collapsing —
-///   cannot oscillate the viewport;
-/// * it never exceeds [`stream_preview_ceiling`], which also refuses to let the
-///   live region eat more than half the terminal, because the rows above it are
-///   the scrollback the user is reading.
+/// [`STREAM_PREVIEW_STEP`] is no longer a growth quantum. Quantizing the slot up
+/// to a multiple of six, and ratcheting it at the turn's high-water mark, was an
+/// anti-churn trade that bought stability with dead screen: a turn that once
+/// needed twelve rows kept reserving twelve while drawing one, and because the
+/// region is bottom-anchored the surplus painted as a blank gap ABOVE the reply.
+/// The slot is now sized to what is drawn, with the shrink direction damped by
+/// [`SLOT_SHRINK_HOLD`] rather than forbidden. The constant survives
+/// only as the *slack budget* the invariants allow a single frame.
 pub(crate) const STREAM_PREVIEW_MAX: u16 = 22;
+/// Now only the per-frame slack budget the layout invariants allow; the runtime
+/// no longer quantizes to it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const STREAM_PREVIEW_STEP: u16 = 6;
+
+/// How long a band must hold a smaller drawn height before its slot gives the
+/// surplus rows back.
+///
+/// This is the whole anti-churn mechanism, and it is a TIME bound rather than a
+/// ratchet, which is the difference that matters. Growth is applied on the frame
+/// it is observed (under-reserving would clip the reply); a shrink is applied
+/// only once the content has stayed below the reservation continuously for this
+/// long. A stream whose height oscillates — a fenced block opening and closing,
+/// a table being rewritten — re-arms the timer on every upward move and so never
+/// shrinks the viewport, exactly as the old high-water mark guaranteed. What is
+/// different is the STEADY state: once the reply stops moving, the reservation
+/// converges on the drawn height and the dead rows are released.
+///
+/// 200ms is chosen to sit above a token-stream's inter-delta interval and above
+/// the activity feed's tick (so an actively moving band is never shrunk between
+/// updates) and below human perception of a settled screen (so the rows come
+/// back before the user reads the gap as a defect).
+pub(crate) const SLOT_SHRINK_HOLD: std::time::Duration =
+    std::time::Duration::from_millis(200);
 
 /// Largest preview slot allowed on a terminal of `term_rows` rows.
 ///
@@ -417,34 +438,93 @@ pub(crate) fn stream_preview_ceiling(term_rows: u16) -> u16 {
     (term_rows / 2).clamp(STREAM_PREVIEW_ROWS, STREAM_PREVIEW_MAX)
 }
 
-/// Rows the streaming preview should reserve for a reply currently rendering to
-/// `content_h` rows, given this turn's high-water mark and the ceiling.
+/// A reserved band height whose SHRINK direction is damped — the general cure
+/// for a slot that reserves more rows than it paints.
 ///
-/// Pure and monotonic: the result is never below `STREAM_PREVIEW_ROWS`, never
-/// below `high_water` (clamped to the ceiling), never above `ceiling`, and only
-/// ever takes values on the `ROWS + k*STEP` lattice — the three properties that
-/// together make mid-turn viewport churn impossible.
-pub(crate) fn stream_preview_rows(content_h: u16, high_water: u16, ceiling: u16) -> u16 {
-    let ceiling = ceiling.max(STREAM_PREVIEW_ROWS);
-    // The lattice starts at ZERO, not at `STREAM_PREVIEW_ROWS`.
-    //
-    // A floor of 10 meant the very first token reserved ten rows and drew one.
-    // Because the region is bottom-anchored and `Chat::draw_live` bottom-anchors
-    // the tail inside its slot, those nine undrawn rows land between the user's
-    // committed prompt and the spinner — "my prompt, then most of a screen of
-    // blank rows, then `⠋ Signaling…` stranded near the bottom", which is the
-    // dead space as reported. At the ceiling (22 rows on a tall terminal) a
-    // one-line reply reserved 21 rows it never painted.
-    //
-    // Everything the floor was there for is a property of the LATTICE, not of
-    // where the lattice starts: growth still moves in whole `STREAM_PREVIEW_STEP`
-    // jumps, is still monotonic within a turn via `high_water`, and is still
-    // bounded by `ceiling` — so the number of mid-turn viewport rebuilds is
-    // unchanged (`ceiling / STEP`, four at most) and none of them is per-token.
-    // What changes is only that a reply reserves rows in proportion to the reply.
-    let steps = content_h.div_ceil(STREAM_PREVIEW_STEP);
-    let want = steps.saturating_mul(STREAM_PREVIEW_STEP);
-    want.min(ceiling).max(high_water.min(ceiling))
+/// Three inline bands independently made the same trade: reserve a stable
+/// ceiling so the viewport never rebuilds mid-turn, and accept that the ceiling
+/// is usually taller than the content. The preview quantized to a `k*STEP`
+/// lattice and ratcheted at a per-turn high-water mark; the activity band
+/// reserved `Activity::max_height()` (its verbosity ceiling) while drawing
+/// `Activity::height()`; the agents roster reserved a flat `AGENTS_INLINE_CAP`.
+/// Every one of those slots is bottom-anchored, so each surplus row paints as a
+/// blank band ABOVE its content — the dead space in the report.
+///
+/// A ratchet or a fixed ceiling cannot release a row, because neither carries
+/// *when* the content dropped. This does, so a drop can be honoured once it is
+/// real rather than never. Growth is immediate (under-reserving clips), the
+/// shrink waits out [`SLOT_SHRINK_HOLD`], and any upward move re-arms the wait —
+/// so a moving band is as stable as it ever was and a settled band reserves
+/// exactly what it draws.
+///
+/// `Copy`, so `App` can hold one per band in a `Cell` and keep
+/// `desired_inline_height` / `measure_bands` on `&self` as the render path
+/// requires. Both are called during a frame, and `resolve` is idempotent for a
+/// fixed `now` — which is why the frame latches one clock (`App::frame_now`)
+/// instead of each call site reading `Instant::now()` and risking a shrink that
+/// commits between the measurement and the draw.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DampedSlot {
+    /// Rows currently reserved. In the steady state this equals the rows drawn.
+    reserved: u16,
+    /// When the content first fell below `reserved` and has stayed below since.
+    /// `None` whenever the content is at or above the reservation.
+    shrink_since: Option<std::time::Instant>,
+}
+
+impl DampedSlot {
+    /// Rows to reserve for a band currently drawing `content_h` rows.
+    ///
+    /// Grows immediately — under-reserving clips the content, which is the one
+    /// failure worse than a gap. Shrinks only after the smaller height has held
+    /// for [`SLOT_SHRINK_HOLD`], measured from `now`; any upward move
+    /// in the meantime re-arms the timer, so an oscillating stream holds its
+    /// slot for as long as it is oscillating and releases it once it settles.
+    ///
+    /// `now` is a parameter rather than an `Instant::now()` call so the timing
+    /// behaviour is testable against a synthetic clock.
+    pub(crate) fn resolve(
+        &mut self,
+        content_h: u16,
+        ceiling: u16,
+        now: std::time::Instant,
+    ) -> u16 {
+        let want = content_h.min(ceiling);
+        if want >= self.reserved {
+            // Growth, or already exact. Either way there is no pending shrink.
+            self.reserved = want;
+            self.shrink_since = None;
+            return self.reserved;
+        }
+        // The reply is drawing fewer rows than are reserved: the dead-row state.
+        // Arm the timer on the first such frame, and honour it once it matures —
+        // shrinking to the CURRENT want, not to whatever height armed it, so a
+        // slowly-deflating reply converges instead of stepping down repeatedly.
+        match self.shrink_since {
+            None => self.shrink_since = Some(now),
+            Some(since) if now.duration_since(since) >= SLOT_SHRINK_HOLD => {
+                self.reserved = want;
+                self.shrink_since = None;
+            }
+            Some(_) => {}
+        }
+        self.reserved
+    }
+}
+
+/// Rows the streaming preview should reserve, as a pure function of the slot
+/// state — the shape the layout invariants exercise.
+///
+/// Kept as a free function (rather than only the method) because every existing
+/// invariant drives the reservation as `f(content, state, ceiling)`; threading a
+/// clock through them explicitly is what makes the hysteresis testable at all.
+pub(crate) fn stream_preview_rows(
+    content_h: u16,
+    slot: &mut DampedSlot,
+    ceiling: u16,
+    now: std::time::Instant,
+) -> u16 {
+    slot.resolve(content_h, ceiling, now)
 }
 
 /// Retire the working chrome at the TURN-end edge.
@@ -1812,6 +1892,10 @@ impl App {
     }
 
     pub fn desired_inline_height(&self, size: FrameSize) -> u16 {
+        // ONE clock for this frame. `measure_bands` runs again from
+        // `draw_inline`; both must see the same instant or a pending band
+        // shrink could mature between the reservation and the paint.
+        self.frame_now.set(std::time::Instant::now());
         let term_rows = size.rows;
         // ONE measurement, shared with `draw_inline`. Sizing and layout used to
         // be two hand-written sums of the same ten numbers, each maintained by
@@ -1831,7 +1915,7 @@ impl App {
 
         // A pending permission prompt renders inline above the composer; grow the
         // live region to fit its compact height so the ask isn't clipped.
-        if let Some(ref perm) = self.permissions {
+        if let Some(perm) = self.permissions.displayed() {
             let perm_rows = perm.desired_height(size.cols);
             let overhead: u16 = b.think + b.hint + b.status;
             let want = overhead
@@ -1863,33 +1947,33 @@ impl App {
             return want.clamp(base, hi);
         }
 
-        // Streaming preview — FIXED-height, internally-scrolled slot (the real
-        // cure). The reserved slot is a constant STREAM_PREVIEW_ROWS, quantized
-        // upward in whole steps for a long reply, so the inline-viewport height
-        // is stable for the whole turn: growing it per token rebuilt the viewport
-        // mid-turn → a DSR cursor re-anchor tmux/SSH can drop → stacked chrome.
+        // Streaming preview — internally-scrolled slot sized to the reply it is
+        // actually drawing. `Chat::draw_live` bottom-anchors its tail inside this
+        // slot, so every row reserved here and not drawn there paints as a blank
+        // band between the committed transcript and the reply. Reserve what is
+        // drawn; damp only the shrink direction (see `DampedSlot`).
         let content_h = self.chat.desired_height(size.cols);
         let streaming = content_h > 1;
         if !streaming {
             // Not streaming ⇒ no turn's worth of growth to remember. Releasing the
-            // high-water mark HERE (rather than from a handler) means every path
-            // that ends a turn — completion, interrupt, cancel, disconnect — is
-            // covered by construction: none of them can leave the next turn's
-            // preview pre-grown.
-            self.stream_preview_hw.set(0);
+            // slot HERE (rather than from a handler) means every path that ends a
+            // turn — completion, interrupt, cancel, disconnect — is covered by
+            // construction: none of them can leave the next turn's preview
+            // pre-grown.
+            self.stream_preview_slot.set(Default::default());
             return base;
         }
-        // Quantized, monotonic growth of the preview slot (see
-        // `stream_preview_rows`). The high-water mark is what makes it monotonic
-        // for the turn: without it a reply whose rendered height dips would shrink
-        // the slot back, and the shrink/grow pair is exactly the mid-turn viewport
-        // churn that stacks chrome.
+        // Exact reservation, with the shrink damped by SLOT_SHRINK_HOLD
+        // so an oscillating stream cannot churn the viewport while still
+        // converging on reserved == drawn once the reply settles.
+        let mut slot = self.stream_preview_slot.get();
         let preview_rows = stream_preview_rows(
             content_h,
-            self.stream_preview_hw.get(),
+            &mut slot,
             stream_preview_ceiling(term_rows),
+            self.frame_now.get(),
         );
-        self.stream_preview_hw.set(preview_rows);
+        self.stream_preview_slot.set(slot);
         // Every band that consumes stream rows is counted in BOTH `base` and
         // `want`. Omitting one from `want` is a real bug that shipped: whenever
         // `want > base` the clamp returns `want`, so a band counted only in
@@ -1938,7 +2022,7 @@ impl App {
         // An inline permission prompt or plan-review panel takes over the stream
         // band while pending. The informational bands stand down: two blocking
         // asks are never stacked, and the panel needs the rows.
-        let blocking_ask = self.permissions.is_some() || self.plan_review.is_some();
+        let blocking_ask = self.permissions.is_active() || self.plan_review.is_some();
 
         // The checklist owns a real band. It used to be drawn as an OVERLAY into
         // the stream band's own rect — the same rect the reply had already
@@ -1963,11 +2047,40 @@ impl App {
         // screen readers in favour of the activity's 1-row plain-text line.
         // Measuring with a DIFFERENT predicate than the draw reserved the box's
         // 12 rows and painted 1, leaving 11 dead rows above the composer.
+        //
+        // The activity branch reserved `Activity::desired_height` — which is
+        // `max_height()`, the VERBOSITY ceiling — while `draw_inline` paints
+        // `Activity::height()`, the live feed, bottom-anchored inside the slot.
+        // In the quiet modes that ceiling is several rows taller than the feed,
+        // and every one of those rows painted as blank screen between the
+        // transcript and the spinner. Reserve what is drawn, with the shrink
+        // damped so a feed that gains and loses a row per tool cannot churn the
+        // viewport (`DampedSlot`). `max_height()` remains the ceiling, so the
+        // band can still never exceed what the verbosity allows.
+        let now = self.frame_now.get();
         let think = if !self.thinking_box.is_empty() && !self.activity.a11y() {
+            self.activity_slot.set(Default::default());
             self.thinking_box.desired_height(w)
         } else if self.activity.height() > 0 {
-            self.activity.desired_height(w)
+            let mut slot = self.activity_slot.get();
+            let h = slot.resolve(self.activity.height(), self.activity.max_height(), now);
+            self.activity_slot.set(slot);
+            h
         } else {
+            self.activity_slot.set(Default::default());
+            0
+        };
+
+        // Identical treatment for the fleet roster, which reserved a flat
+        // `AGENTS_INLINE_CAP` whenever it was visible regardless of how many
+        // nodes it actually had to draw.
+        let agents = if self.agents.height() > 0 {
+            let mut slot = self.agents_slot.get();
+            let h = slot.resolve(self.agents.height(), AGENTS_INLINE_CAP, now);
+            self.agents_slot.set(slot);
+            h
+        } else {
+            self.agents_slot.set(Default::default());
             0
         };
 
@@ -1975,7 +2088,7 @@ impl App {
             toast: self.toasts.desired_height(w),
             checklist,
             think,
-            agents: self.agents.desired_height(w),
+            agents,
             survey,
             popup: self.input.popup_desired_height(),
             input: self.input.desired_height(w),
@@ -2021,7 +2134,7 @@ impl App {
         let a_input = clamp_to_frame(frame, rows[ROW_INPUT]);
         let a_status = clamp_to_frame(frame, rows[ROW_STATUS]);
 
-        if let Some(ref perm) = self.permissions {
+        if let Some(perm) = self.permissions.displayed() {
             // Inline approval prompt takes over the stream band while pending.
             perm.draw_inline(frame, a_stream);
         } else if let Some(ref review) = self.plan_review {

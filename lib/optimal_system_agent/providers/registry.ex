@@ -45,6 +45,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Providers.FallbackChain
   alias OptimalSystemAgent.Providers.HealthChecker
+  alias OptimalSystemAgent.Providers.ImageBudget
   alias OptimalSystemAgent.Providers.Resilience
 
   # Consolidated compat provider — one module handles 13 OpenAI-compatible APIs
@@ -437,14 +438,16 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # `arguments` (further below). Both are idempotent, so re-entry through a retry
   # or a fallback hop is free.
   @doc false
-  @spec normalize_outbound_messages(list(), module() | {:compat, atom()}) :: list()
-  def normalize_outbound_messages(messages, target) when is_list(messages) do
+  @spec normalize_outbound_messages(list(), module() | {:compat, atom()}, keyword()) :: list()
+  def normalize_outbound_messages(messages, target, opts \\ [])
+
+  def normalize_outbound_messages(messages, target, opts) when is_list(messages) do
     messages
     |> normalize_tool_call_arguments()
-    |> normalize_message_content(target)
+    |> normalize_message_content(target, opts)
   end
 
-  def normalize_outbound_messages(messages, _target), do: messages
+  def normalize_outbound_messages(messages, _target, _opts), do: messages
 
   # ── Tool-call argument normalization ──────────────────────────────────────
   #
@@ -593,34 +596,131 @@ defmodule OptimalSystemAgent.Providers.Registry do
   #
   # Normalization is keyed on the DISPATCH TARGET, not on the requested
   # provider, so it is decided by who is actually about to receive the bytes.
+  #
+  # ## The image carve-out
+  #
+  # Flattening EVERY structured block was right while Anthropic was the only
+  # provider that could read one. It is not right any more: `OpenAICompat`,
+  # `Google` and `Bedrock` now encode native image parts, and flattening ahead
+  # of them made those encoders unreachable — and told the user a provider
+  # "does not accept inline image content" when in fact gpt-4o, Gemini and
+  # Claude-on-Bedrock all do.
+  #
+  # An image block is now passed through UNTOUCHED when both are true:
+  #
+  #   1. **The transport can carry it.** Asked of the dispatch target itself
+  #      (`supports_image_content?/0`), so the answer lives next to the encoder
+  #      rather than in a provider allowlist here that drifts out of date.
+  #      `Ollama`, `Cohere` and `Replicate` do not export it, so they keep the
+  #      old flattening — without it they raise on a list.
+  #   2. **The model is not known to be text-only.** Asked of
+  #      `ImageBudget.vision_capable?/2`, the same `Catalog`-backed predicate
+  #      the providers' own `gate_unsupported/3` uses. One source of truth.
+  #
+  # An UNKNOWN model (not in the catalog, or a fallback hop where
+  # `cross_provider_opts/1` has dropped `:model`) is passed THROUGH, not
+  # flattened. Both choices are conservative in a different direction; this one
+  # is chosen because flattening an unknown model is silent and permanent — a
+  # newly released vision model would quietly never receive images, and the
+  # placeholder would assert a falsehood about why — whereas passing through
+  # fails loudly at the provider with a message naming the real limitation. It
+  # is also the same call `ImageBudget.gate_unsupported/3` already makes, so
+  # "unknown" means the same thing at both layers.
+  #
+  # Text-only structured content is UNAFFECTED: only a block list that actually
+  # contains an image block can take the carve-out, so a system prompt split
+  # into `cache_control` blocks still flattens byte-identically to the string
+  # every non-Anthropic provider received before.
   @doc false
   @spec normalize_message_content(list(), module() | {:compat, atom()}) :: list()
-  def normalize_message_content(messages, Providers.Anthropic), do: messages
+  def normalize_message_content(messages, target),
+    do: normalize_message_content(messages, target, [])
 
-  def normalize_message_content(messages, _target) when is_list(messages) do
+  @doc false
+  @spec normalize_message_content(list(), module() | {:compat, atom()}, keyword()) :: list()
+  def normalize_message_content(messages, Providers.Anthropic, _opts), do: messages
+
+  def normalize_message_content(messages, target, opts) when is_list(messages) do
     # Cheap guard: the overwhelmingly common case is all-string content, and a
     # retry loop re-enters here on every attempt. Only rebuild when there is
     # something to rebuild.
     if Enum.any?(messages, &structured_content?/1) do
-      Enum.map(messages, &flatten_message_content/1)
+      carry_images? = carry_images?(target, opts)
+      reason = if carry_images?, do: nil, else: omission_reason(target)
+
+      Enum.map(messages, &flatten_message_content(&1, carry_images?, reason))
     else
       messages
     end
   end
 
-  def normalize_message_content(messages, _target), do: messages
+  def normalize_message_content(messages, _target, _opts), do: messages
+
+  # Can this dispatch target put an image on the wire at all, for this model?
+  defp carry_images?(target, opts) do
+    transport_carries_images?(target) and
+      ImageBudget.vision_capable?(provider_key(target), Keyword.get(opts, :model))
+  end
+
+  # `{:compat, _}` is served by `OpenAICompat`, whose `encode_content/1` emits
+  # OpenAI `image_url` parts. Every other target is asked directly; a module
+  # that does not export the predicate cannot carry images.
+  defp transport_carries_images?({:compat, _provider}), do: true
+
+  defp transport_carries_images?(module) when is_atom(module) do
+    Code.ensure_loaded?(module) and function_exported?(module, :supports_image_content?, 0) and
+      module.supports_image_content?()
+  end
+
+  defp transport_carries_images?(_), do: false
+
+  defp provider_key({:compat, provider}), do: provider
+
+  defp provider_key(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :name, 0) do
+      module.name()
+    else
+      :unknown
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  defp provider_key(_), do: :unknown
+
+  # Which of the two refusals actually applies, so the placeholder can say the
+  # true thing rather than one sentence covering both.
+  defp omission_reason(target) do
+    if transport_carries_images?(target), do: :model, else: :transport
+  end
 
   defp structured_content?(%{content: c}) when is_list(c), do: true
   defp structured_content?(%{"content" => c}) when is_list(c), do: true
   defp structured_content?(_msg), do: false
 
-  defp flatten_message_content(%{content: c} = msg) when is_list(c),
-    do: %{msg | content: flatten_blocks(c)}
+  defp flatten_message_content(%{content: c} = msg, carry_images?, reason) when is_list(c) do
+    if carry_images? and Enum.any?(c, &image_block?/1) do
+      msg
+    else
+      %{msg | content: flatten_blocks(c, reason)}
+    end
+  end
 
-  defp flatten_message_content(%{"content" => c} = msg) when is_list(c),
-    do: Map.put(msg, "content", flatten_blocks(c))
+  defp flatten_message_content(%{"content" => c} = msg, carry_images?, reason) when is_list(c) do
+    if carry_images? and Enum.any?(c, &image_block?/1) do
+      msg
+    else
+      Map.put(msg, "content", flatten_blocks(c, reason))
+    end
+  end
 
-  defp flatten_message_content(msg), do: msg
+  defp flatten_message_content(msg, _carry_images?, _reason), do: msg
+
+  defp image_block?(%{type: t}) when t in ["image", "image_url", :image, :image_url], do: true
+  defp image_block?(%{"type" => t}) when t in ["image", "image_url"], do: true
+  defp image_block?(%{"image" => _}), do: true
+  defp image_block?(%{"inlineData" => _}), do: true
+  defp image_block?(_), do: false
 
   # The separator is `"\n\n"` and the empty-block rejection is deliberate: it
   # reproduces `Context.build_system_message/4`'s own non-Anthropic branch
@@ -632,36 +732,47 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # `cache_control` is dropped rather than translated: it is an Anthropic-only
   # wire field. It survives untouched on the Anthropic path, which never reaches
   # this function.
-  defp flatten_blocks(blocks) do
+  defp flatten_blocks(blocks, reason) do
     blocks
-    |> Enum.map(&block_to_text/1)
+    |> Enum.map(&block_to_text(&1, reason))
     |> Enum.reject(&(&1 == nil or &1 == ""))
     |> Enum.join("\n\n")
   end
 
-  # An image block cannot be flattened into text, and these providers would
-  # otherwise raise on it. It becomes an honest placeholder — the same choice
-  # `OpenAICompat`'s 413 image-stripping recovery already makes — so the model
-  # is told the image is missing instead of hallucinating its contents. (OSA has
-  # no Anthropic-block → OpenAI `image_url` translation anywhere; until it does,
-  # this is the difference between a degraded answer and a crash.)
-  @image_omitted "[An image was omitted here because the provider serving this request does not accept inline image content. Do not describe or reason about it; ask the user to re-share it if it matters.]"
+  # An image block that cannot be carried becomes a placeholder, so the model is
+  # told the image is missing instead of hallucinating its contents. The text
+  # names the ACTUAL reason: one sentence covering both cases was wrong for at
+  # least one of them, and "this provider does not accept inline image content"
+  # is now false for every target that reaches the carve-out.
+  #
+  # The other two ways an image can go missing say their own true thing
+  # elsewhere: evicted for the size budget (`ImageBudget.placeholder/0`) and
+  # refused at ingestion (`MessageHandler.build_messages/3`'s rejection
+  # directive).
+  @image_omitted_transport "[An image was attached, but OSA's integration for the provider serving this request cannot send images, so it was not sent. Do not describe or reason about its contents; tell the user to switch to a provider that accepts images.]"
 
-  defp block_to_text(block) when is_binary(block), do: block
-  defp block_to_text(%{text: t}) when is_binary(t), do: t
-  defp block_to_text(%{"text" => t}) when is_binary(t), do: t
+  @image_omitted_model "[An image was attached, but the model serving this request does not accept image input, so it was not sent. Do not describe or reason about its contents; tell the user to switch to a vision-capable model.]"
 
-  defp block_to_text(%{type: t}) when t in ["image", "image_url", :image, :image_url],
-    do: @image_omitted
+  defp image_omitted(:transport), do: @image_omitted_transport
+  defp image_omitted(:model), do: @image_omitted_model
+  defp image_omitted(_), do: @image_omitted_transport
 
-  defp block_to_text(%{"type" => t}) when t in ["image", "image_url"], do: @image_omitted
+  defp block_to_text(block, _reason) when is_binary(block), do: block
+  defp block_to_text(%{text: t}, _reason) when is_binary(t), do: t
+  defp block_to_text(%{"text" => t}, _reason) when is_binary(t), do: t
+
+  defp block_to_text(%{type: t}, reason) when t in ["image", "image_url", :image, :image_url],
+    do: image_omitted(reason)
+
+  defp block_to_text(%{"type" => t}, reason) when t in ["image", "image_url"],
+    do: image_omitted(reason)
 
   # Anything else structured (a stray tool_use/tool_result block, say) carries no
   # text these providers can render; dropping it is what `Anthropic`'s own
   # `system_content_to_blocks/1` does with unreadable blocks.
-  defp block_to_text(block) when is_map(block), do: nil
+  defp block_to_text(block, _reason) when is_map(block), do: nil
 
-  defp block_to_text(other) do
+  defp block_to_text(other, _reason) do
     if String.Chars.impl_for(other), do: to_string(other), else: inspect(other)
   end
 
@@ -926,7 +1037,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
   # error and decide whether to retry the same provider.
   defp native_stream(target, messages, callback, opts) do
-    do_native_stream(target, normalize_outbound_messages(messages, target), callback, opts)
+    do_native_stream(target, normalize_outbound_messages(messages, target, opts), callback, opts)
   end
 
   defp do_native_stream({:compat, provider}, messages, callback, opts) do
@@ -1030,7 +1141,12 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp notify_stream_retry(_callback, _info), do: :ok
 
   defp try_stream_provider(target, messages, callback, opts) do
-    do_try_stream_provider(target, normalize_outbound_messages(messages, target), callback, opts)
+    do_try_stream_provider(
+      target,
+      normalize_outbound_messages(messages, target, opts),
+      callback,
+      opts
+    )
   end
 
   defp do_try_stream_provider({:compat, provider}, messages, callback, opts) do
@@ -1106,7 +1222,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp merge_retry_ctx(opts, _ctx), do: opts
 
   defp apply_provider(target, messages, opts) do
-    do_apply_provider(target, normalize_outbound_messages(messages, target), opts)
+    do_apply_provider(target, normalize_outbound_messages(messages, target, opts), opts)
   end
 
   defp do_apply_provider({:compat, provider}, messages, opts) do

@@ -56,6 +56,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
   alias OptimalSystemAgent.Auth.AwsSigV4
   alias OptimalSystemAgent.Auth.Providers.Bedrock, as: Auth
+  alias OptimalSystemAgent.Providers.ImageBudget
 
   # A concrete, currently-served cross-region inference profile rather than a
   # bare model id: Bedrock increasingly requires the `<geo>.` prefixed profile
@@ -130,15 +131,36 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     end
   end
 
-  defp do_chat(auth, model, messages, opts) do
+  @doc """
+  True — Converse turns carry `image` blocks (see `content_blocks/1`).
+
+  Asked by `Registry.normalize_message_content/3` before it decides whether to
+  flatten an image block into a text placeholder.
+  """
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
+
+  @doc """
+  Test seam: the exact Converse request body for `messages`, without a live
+  HTTP call or credentials.
+  """
+  @spec build_request_body(list(), String.t(), keyword()) :: map()
+  def build_request_body(messages, model, opts \\ []) do
     {system, conversation} = split_system(messages)
 
-    body =
-      %{"messages" => format_messages(conversation)}
-      |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
-      |> put_inference_config(opts)
-      |> put_tool_config(opts)
+    %{"messages" => format_messages(conversation)}
+    |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
+    |> put_inference_config(opts)
+    |> put_tool_config(opts)
+    # Every provider gets the image byte-budget, not just Anthropic. Without it
+    # an oversized image body is a hard provider error instead of a
+    # degraded-but-honest request.
+    |> ImageBudget.gate_unsupported(:bedrock, model)
+    |> ImageBudget.apply(provider: :bedrock)
+  end
 
+  defp do_chat(auth, model, messages, opts) do
+    body = build_request_body(messages, model, opts)
     payload = Jason.encode!(body)
 
     # The model id goes in the PATH, so it must be percent-encoded for the
@@ -305,7 +327,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
   defp format_message(msg) do
     blocks =
-      text_blocks(content(msg)) ++
+      content_blocks(content(msg)) ++
         Enum.map(tool_calls_of(msg), fn tc ->
           %{
             "toolUse" => %{
@@ -365,6 +387,75 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
   defp converse_role("assistant"), do: "assistant"
   defp converse_role(_), do: "user"
+
+  # Converse content blocks. `flatten_text/1` alone matched only text shapes and
+  # ended `_ -> ""`, so an `image` block from `MessageHandler.build_messages/3`
+  # was SILENTLY DROPPED and the model answered as though nothing were attached
+  # — a confident answer about an image it never received. Converse has a real
+  # image block, so images are carried rather than discarded.
+  defp content_blocks(content) when is_list(content) do
+    content
+    |> Enum.map(&content_block/1)
+    |> Enum.reject(&is_nil/1)
+    |> merge_text_runs()
+  end
+
+  defp content_blocks(content), do: text_blocks(content)
+
+  defp content_block(block) when is_binary(block), do: text_block(block)
+
+  defp content_block(%{type: "image", source: source}), do: image_block(source)
+  defp content_block(%{"type" => "image", "source" => source}), do: image_block(source)
+
+  defp content_block(%{"image" => _} = block), do: block
+
+  defp content_block(block) do
+    case flatten_text([block]) do
+      "" -> nil
+      text -> text_block(text)
+    end
+  end
+
+  defp text_block(""), do: nil
+  defp text_block(text), do: %{"text" => text}
+
+  # Converse names the format, not a MIME type, and accepts exactly these four.
+  # An unknown media type is refused with an explicit note rather than dropped.
+  @bedrock_formats %{
+    "image/png" => "png",
+    "image/jpeg" => "jpeg",
+    "image/gif" => "gif",
+    "image/webp" => "webp"
+  }
+
+  @image_unsupported "[An image was attached but could not be sent to this model in a format it accepts. Do not describe or reason about it; ask the user to re-share it as PNG, JPEG, GIF or WebP.]"
+
+  defp image_block(source) when is_map(source) do
+    media_type = Map.get(source, :media_type, Map.get(source, "media_type"))
+    data = Map.get(source, :data, Map.get(source, "data"))
+
+    case {Map.get(@bedrock_formats, media_type), data} do
+      {fmt, d} when is_binary(fmt) and is_binary(d) and d != "" ->
+        %{"image" => %{"format" => fmt, "source" => %{"bytes" => d}}}
+
+      _ ->
+        text_block(@image_unsupported)
+    end
+  end
+
+  defp image_block(_), do: text_block(@image_unsupported)
+
+  # Adjacent text blocks are concatenated into one, with NO separator — exactly
+  # what the old `flatten_text/1` (`Enum.map_join(content, "", ..)`) produced, so
+  # a text-only turn is byte-identical to the request Bedrock received before.
+  defp merge_text_runs(blocks) do
+    blocks
+    |> Enum.reduce([], fn
+      %{"text" => t}, [%{"text" => prev} | rest] -> [%{"text" => prev <> t} | rest]
+      block, acc -> [block | acc]
+    end)
+    |> Enum.reverse()
+  end
 
   defp text_blocks(content) do
     case flatten_text(content) do

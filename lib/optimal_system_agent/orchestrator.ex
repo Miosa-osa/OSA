@@ -327,6 +327,14 @@ defmodule OptimalSystemAgent.Orchestrator do
         # under `mix osa.serve` would be the OSA source tree.
         repo_dir = Map.get(config, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
 
+        # The repo this worktree is cut from may itself be an alternate root
+        # whose `.osa/settings.json` is never resolved (settings come from the
+        # process-global cwd). Report it rather than let it be silent.
+        OptimalSystemAgent.Agent.Fleet.SettingsCoverage.check(
+          repo_dir,
+          "subagent #{subagent_id} worktree source"
+        )
+
         case OptimalSystemAgent.Workspace.FastWorktree.create(subagent_id, repo_dir: repo_dir) do
           {:ok, info} ->
             Logger.info(
@@ -362,6 +370,14 @@ defmodule OptimalSystemAgent.Orchestrator do
         else:
           Map.get(config, :working_dir) ||
             OptimalSystemAgent.Workspace.Cwd.get()
+
+    # The root the subagent will actually run under. A worktree is a fresh copy
+    # of the repo, so a checked-in `.osa/settings.json` is present in it and
+    # looks authoritative while being resolved from nowhere.
+    OptimalSystemAgent.Agent.Fleet.SettingsCoverage.check(
+      working_dir,
+      "subagent #{subagent_id}"
+    )
 
     # Spawn the subagent Loop
     subagent_opts = [

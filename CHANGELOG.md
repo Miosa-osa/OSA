@@ -9,6 +9,114 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.79] — displays as `v1.0.079`
+
+### Fixed — the dead rows, and the escape codes painting as text
+
+Two defects the owner was looking at on screen while three releases of layout
+fixes shipped against a green test suite.
+
+**Roughly a third of the screen was blank.** Three independent bands — the
+streaming preview, the activity feed, and the agents panel — had each made the
+same anti-churn trade: reserve a ceiling, paint the live height, bottom-anchor
+the result. So a one-row reply in a turn that had once needed twelve reserved
+twelve and drew one, and the surplus appeared as a gap *above* the content. One
+of those bands already carried a comment describing the symptom exactly:
+*"reserved the box's 12 rows and painted 1, leaving 11 dead rows above the
+composer."*
+
+All three now share one damped slot: growth is immediate (under-reserving clips
+content, which is worse than a gap), and shrink is held for 200ms, re-armed by
+any upward move — so an oscillating stream never thrashes the viewport and a
+settled one converges on `reserved == drawn`. No quantization, no ratchet.
+`measure_bands` runs twice per frame, so a shrink maturing between reservation
+and paint would have orphaned rows exactly as the 1.0.75 anchor bug did; one
+instant is now latched per frame to make that impossible.
+
+**Escape codes were painting as literal text** — `[1mvite v5.4.10[0m` on screen.
+`scrub_rendered_span` dropped only characters failing `is_control()`, so `\x1b[1m`
+lost its ESC byte and kept `[1m`. It was a security scrub with no display
+counterpart, running on every tool render. It now consumes whole sequences via
+the canonical scanner, checking OSA's own OSC-8 hyperlinks first so they survive.
+It fails closed: every byte attributed to an escape is dropped, and an
+unterminated OSC/DCS or a CSI with no final byte is dropped to the end of the
+span — strictly less untrusted text reaching the screen than before.
+
+**The layout suite kept passing because it measured the wrong thing.** The
+existing reserved-vs-drawn check only banned over-paint, on one message type. The
+new invariant drives the real reservation *and* the real paint across six body
+shapes, five widths and four terminal heights, asserting no blank row in the slot
+and that the top row carries ink. And `test/pty/blank_rows_probe.py` is now a
+gate that exits non-zero with named failures — it previously only printed, which
+is how a broken screen shipped under a green suite.
+
+### Fixed — since 1.0.78
+
+- **An auto-paused goal resumed itself.** `GoalTracker` lived entirely in ETS,
+  and every `osa` invocation is its own BEAM — so the table died at each CLI
+  boundary and a goal paused for `:no_progress` came back with a fresh run
+  budget. It is now a durable sidecar that fails closed: an unrecognised status
+  decodes to `:paused`, never `:active`. Goals also gained a stable id, so a
+  re-issued goal no longer inherits the previous one's log.
+- **Cron jobs silently never fired.** Execution ran inside the scheduler process
+  and matching used a timestamp read before the work, so any minute spent
+  executing was never evaluated — with no missed-tick log. Execution is now off
+  the process, with a watermark, per-minute backfill, an in-flight set, and a
+  server-side deadline. A gap beyond the backfill window is logged at `:error`.
+- **A fan-out lost every finished node if the coordinator died.** There is now an
+  append-only journal replayed before anything is spawned, so a resumed run never
+  re-executes a completed sibling. Results are also reassembled in submission
+  order, and a reaped node keeps its real id instead of an empty string.
+- **Images could exfiltrate any readable file.** The `images` parameter read an
+  arbitrary caller-supplied path with no confinement, no symlink resolution, no
+  size cap, and a media type guessed from the extension — and a path that did not
+  exist was shipped to the provider as base64 anyway. Reads are now confined and
+  canonicalised, typed from magic bytes, capped, and a bad path is an error the
+  user sees.
+- **No non-Anthropic provider could receive an image.** Every image block was
+  flattened to a placeholder before dispatch, and vision-capable models were told
+  a falsehood about why. OpenAI-compatible, Bedrock and Google now encode images
+  natively, gated on the model's real capability; an unknown model passes through
+  so the provider's own error speaks rather than OSA guessing. The placeholder is
+  split by actual cause — transport, model, size budget, or refused at ingestion.
+- **Secrets were written world-readable.** The auth token, refresh token, prompt
+  history and the compose-in-`$EDITOR` draft were all created at default umask.
+  They are now created 0600 before the secret is written, with the descriptor
+  fchmod'd rather than the path re-resolved. A test confirms the compose path
+  previously followed a planted symlink and clobbered the victim file.
+- **A second permission request overwrote the first.** The dialog was a single
+  unqueued slot, so with parallel tool calls the user read request A's diff and
+  their answer was dispatched for request B. It is now a queue, and the answer's
+  id is read from the displayed dialog so no field can drift.
+- **Every copy claimed success.** OSC 52 is last in the chain and returns `Ok`
+  whenever a write to stdout succeeds, so the failure arms were unreachable and
+  the user was always told "Copied". Confidence is now reported honestly, an
+  unconfirmed copy is parked at a named path, oversized payloads are refused
+  rather than silently dropped by the terminal, and the tmux wrapper no longer
+  fires inside an editor's embedded terminal.
+- **Hyperlinked rows were truncated.** `unicode-width` returns 1 for ESC, so a
+  single `file://` link cost ~80 phantom columns — which also made the row-padding
+  guard skip exactly the lines carrying links. Width measurement is now
+  escape-aware.
+- **Test runs poisoned each other.** Every run shared one `/tmp` durable-log
+  directory, and that log is an idempotency cache that returns a recorded result
+  *without invoking the tool*. Session ids restart low each VM boot, so run N+1
+  inherited run N's cache — sixteen test files affected. This was previously
+  recorded here as env pollution; that was wrong, and the correction is the
+  reason the suite is now stable.
+
+### Known gaps
+
+The owner's reported `Build's1greene— 976rmodules,xclean` corruption is **not**
+explained by the escape fix — that form is single characters substituted for
+spaces, and it does not reproduce on the probe. It is a separate overpaint or
+column-shear defect and remains open. `scrub_untrusted_document` keeps its
+character-level filter deliberately: whole-escape consumption there could swallow
+multi-line content on a stray ESC, since it is not row-bounded. Two suites still
+fail only inside a full run and pass both alone and paired.
+
+---
+
 ## [1.0.78] — displays as `v1.0.078`
 
 ### Fixed — text wider than one column sheared every layout it appeared in

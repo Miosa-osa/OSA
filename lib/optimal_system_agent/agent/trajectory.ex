@@ -70,6 +70,7 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
 
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Security.TypedText
+  alias OptimalSystemAgent.Utils.Text
 
   @trajectory_dir "trajectories"
   @default_max_field_chars 2_000
@@ -414,11 +415,17 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     max = max_field_chars()
 
     if byte_size(s) > max do
-      # `binary_part/3` cuts on a byte offset, so a budget expressed in chars
-      # can land mid-codepoint and produce invalid UTF-8. `Jason.encode!` then
-      # raises and `do_record/2`'s rescue discards the WHOLE entry. Trim back
-      # to a valid boundary, same as Loop.ToolExecutor.safe_head/2.
-      safe_head(s, max) <> "…[truncated]"
+      # A raw byte cut can land mid-codepoint and produce invalid UTF-8;
+      # `Jason.encode!/1` then raises and `do_record/2`'s rescue discards the
+      # WHOLE trajectory entry. `utf8_head/2` cuts back to a character
+      # boundary.
+      #
+      # NOTE: `max_field_chars` is compared against `byte_size/1`, so despite
+      # the name this budget is enforced in BYTES. That is the safe direction
+      # (a byte cap can never under-count the on-disk cost of a field) and is
+      # left as-is deliberately — the name is a config key that operators
+      # already set.
+      Text.utf8_head(s, max) <> "…[truncated]"
     else
       s
     end
@@ -552,19 +559,6 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
   end
 
   defp mask_typed_text(other), do: other
-
-  # See Loop.ToolExecutor.safe_head/2 — same primitive, same reason.
-  defp safe_head(bin, limit) do
-    head = binary_part(bin, 0, min(limit, byte_size(bin)))
-    if String.valid?(head), do: head, else: trim_to_valid(head)
-  end
-
-  defp trim_to_valid(<<>>), do: <<>>
-
-  defp trim_to_valid(bin) do
-    shorter = binary_part(bin, 0, byte_size(bin) - 1)
-    if String.valid?(shorter), do: shorter, else: trim_to_valid(shorter)
-  end
 
   defp sanitize_session_id(id) when is_binary(id) do
     id

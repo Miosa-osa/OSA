@@ -173,6 +173,95 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
     serialized_bytes(blanked_body) + image_data_bytes
   end
 
+  # ── Capability gate ───────────────────────────────────────────────────────
+
+  @unsupported_prefix "[An image was attached, but the selected model"
+
+  @doc """
+  Replace every inline image with an explicit "this model cannot see images"
+  note when the catalog says the model takes no image input.
+
+  Dropping an image silently is the worst outcome — the model answers
+  confidently about something it never received. Refusing to send it and SAYING
+  SO is the next best. When the catalog has no entry for the model (a local or
+  unreleased tag) the body is returned unchanged, so the provider's own error is
+  what the user sees rather than a guess made here.
+  """
+  @spec gate_unsupported(map(), atom() | String.t(), String.t() | nil) :: map()
+  def gate_unsupported(body, provider, model) when is_map(body) do
+    if vision_capable?(provider, model) do
+      body
+    else
+      notice =
+        "#{@unsupported_prefix} (#{model}) does not accept image input, so the image was " <>
+          "not sent. Do not describe or reason about its contents; tell the user to switch " <>
+          "to a vision-capable model or describe the image in text.]"
+
+      messages = fetch_messages(body)
+
+      case replace_all_images(messages, notice) do
+        {^messages, 0} ->
+          body
+
+        {new_messages, n} ->
+          Logger.info("[image_budget] #{n} image(s) not sent: #{provider}/#{model} is text-only")
+          put_messages(body, new_messages)
+      end
+    end
+  end
+
+  @doc """
+  True when the catalog says `model` accepts image input, or when the catalog
+  does not know the model at all (unknown is NOT treated as "cannot").
+  """
+  @spec vision_capable?(atom() | String.t(), String.t() | nil) :: boolean()
+  def vision_capable?(_provider, nil), do: true
+
+  def vision_capable?(provider, model) do
+    mods =
+      OptimalSystemAgent.Providers.Catalog.modalities(to_string(provider), model) ||
+        OptimalSystemAgent.Providers.Catalog.modalities(model)
+
+    case mods do
+      %{input: inputs} when is_list(inputs) and inputs != [] ->
+        Enum.any?(inputs, &String.contains?(to_string(&1), "image"))
+
+      _ ->
+        true
+    end
+  rescue
+    _ -> true
+  end
+
+  defp replace_all_images(messages, notice) do
+    Enum.map_reduce(messages, 0, fn msg, acc ->
+      {content, n} = replace_images_in_content(msg_content(msg), notice)
+      {put_msg_content(msg, content), acc + n}
+    end)
+  end
+
+  defp replace_images_in_content(content, notice) when is_list(content) do
+    Enum.map_reduce(content, 0, fn block, acc ->
+      cond do
+        is_binary(image_payload(block)) ->
+          {notice_block(block, notice), acc + 1}
+
+        match?(%{"type" => "tool_result", "content" => inner} when is_list(inner), block) ->
+          {inner2, n} = replace_images_in_content(Map.get(block, "content"), notice)
+          {Map.put(block, "content", inner2), acc + n}
+
+        true ->
+          {block, acc}
+      end
+    end)
+  end
+
+  defp replace_images_in_content(other, _notice), do: {other, 0}
+
+  defp notice_block(%{"image" => _}, notice), do: %{"text" => notice}
+  defp notice_block(%{"inlineData" => _}, notice), do: %{"text" => notice}
+  defp notice_block(_, notice), do: %{"type" => "text", "text" => notice}
+
   # ── Threshold resolution ──────────────────────────────────────────────────
 
   defp resolve_thresholds(opts) do
@@ -200,10 +289,15 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
 
   # ── Body <-> messages access (envelope is atom- or string-keyed) ───────────
 
+  # Gemini's envelope is `contents` with `parts`, not `messages` with `content`.
+  # Budgeting only ever looked at `messages`, so a Gemini body was a silent
+  # no-op no matter how large its inline images were.
   defp fetch_messages(body) do
     cond do
       is_list(Map.get(body, :messages)) -> Map.get(body, :messages)
       is_list(Map.get(body, "messages")) -> Map.get(body, "messages")
+      is_list(Map.get(body, :contents)) -> Map.get(body, :contents)
+      is_list(Map.get(body, "contents")) -> Map.get(body, "contents")
       true -> []
     end
   end
@@ -212,19 +306,74 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
     cond do
       Map.has_key?(body, :messages) -> Map.put(body, :messages, messages)
       Map.has_key?(body, "messages") -> Map.put(body, "messages", messages)
+      Map.has_key?(body, :contents) -> Map.put(body, :contents, messages)
+      Map.has_key?(body, "contents") -> Map.put(body, "contents", messages)
       true -> Map.put(body, :messages, messages)
     end
   end
 
-  defp msg_content(msg), do: Map.get(msg, "content", Map.get(msg, :content))
+  defp msg_content(msg) do
+    cond do
+      Map.has_key?(msg, "content") -> Map.get(msg, "content")
+      Map.has_key?(msg, :content) -> Map.get(msg, :content)
+      Map.has_key?(msg, "parts") -> Map.get(msg, "parts")
+      Map.has_key?(msg, :parts) -> Map.get(msg, :parts)
+      true -> nil
+    end
+  end
 
   defp put_msg_content(msg, content) do
     cond do
       Map.has_key?(msg, "content") -> Map.put(msg, "content", content)
       Map.has_key?(msg, :content) -> Map.put(msg, :content, content)
+      Map.has_key?(msg, "parts") -> Map.put(msg, "parts", content)
+      Map.has_key?(msg, :parts) -> Map.put(msg, :parts, content)
       true -> Map.put(msg, "content", content)
     end
   end
+
+  # ── Cross-provider image-block recognition ────────────────────────────────
+  #
+  # One eviction pass, four wire shapes. Budgeting used to know only Anthropic's
+  # `%{"type" => "image", "source" => %{"data" => ..}}`, and it was wired in only
+  # at `Anthropic.apply_image_budget/2` — so on every other provider an
+  # oversized image request simply failed at the provider instead of degrading.
+  @doc false
+  @spec image_payload(term()) :: String.t() | nil
+  def image_payload(%{"type" => "image", "source" => %{"data" => d}}) when is_binary(d), do: d
+  def image_payload(%{type: "image", source: %{data: d}}) when is_binary(d), do: d
+
+  def image_payload(%{"type" => "image_url", "image_url" => %{"url" => "data:" <> _ = u}}), do: u
+
+  def image_payload(%{"image" => %{"source" => %{"bytes" => d}}}) when is_binary(d), do: d
+  def image_payload(%{"inlineData" => %{"data" => d}}) when is_binary(d), do: d
+  def image_payload(_), do: nil
+
+  # The same block with its payload blanked — used for exact measurement (the
+  # raw payload length is added back separately).
+  defp blank_image(%{"type" => "image", "source" => src} = b),
+    do: Map.put(b, "source", Map.put(src, "data", ""))
+
+  defp blank_image(%{type: "image", source: src} = b),
+    do: Map.put(b, :source, Map.put(src, :data, ""))
+
+  defp blank_image(%{"type" => "image_url", "image_url" => iu} = b),
+    do: Map.put(b, "image_url", Map.put(iu, "url", ""))
+
+  defp blank_image(%{"image" => %{"source" => src} = img} = b),
+    do: Map.put(b, "image", Map.put(img, "source", Map.put(src, "bytes", "")))
+
+  defp blank_image(%{"inlineData" => idata} = b),
+    do: Map.put(b, "inlineData", Map.put(idata, "data", ""))
+
+  defp blank_image(b), do: b
+
+  # The placeholder has to be a legal block in the SAME envelope: Anthropic and
+  # OpenAI want `%{"type" => "text", "text" => ..}`, Bedrock Converse and Gemini
+  # want a bare `%{"text" => ..}`.
+  defp placeholder_for(%{"image" => _}), do: %{"text" => @placeholder}
+  defp placeholder_for(%{"inlineData" => _}), do: %{"text" => @placeholder}
+  defp placeholder_for(_), do: placeholder_block()
 
   # ── Measurement: blank image data, sum raw lengths ─────────────────────────
 
@@ -237,12 +386,11 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
 
   defp blank_content(content) when is_list(content) do
     Enum.map_reduce(content, 0, fn block, acc ->
-      case block do
-        %{"type" => "image", "source" => %{"data" => data} = source} when is_binary(data) ->
-          blanked = Map.put(block, "source", Map.put(source, "data", ""))
-          {blanked, acc + byte_size(data)}
+      case {image_payload(block), block} do
+        {data, _} when is_binary(data) ->
+          {blank_image(block), acc + byte_size(data)}
 
-        %{"type" => "tool_result", "content" => inner} when is_list(inner) ->
+        {_, %{"type" => "tool_result", "content" => inner}} when is_list(inner) ->
           {inner2, sub} = blank_content(inner)
           {Map.put(block, "content", inner2), acc + sub}
 
@@ -261,15 +409,17 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
   end
 
   defp count_in_content(content) when is_list(content) do
-    Enum.reduce(content, 0, fn
-      %{"type" => "image", "source" => %{"data" => data}}, acc when is_binary(data) ->
-        acc + 1
+    Enum.reduce(content, 0, fn block, acc ->
+      cond do
+        is_binary(image_payload(block)) ->
+          acc + 1
 
-      %{"type" => "tool_result", "content" => inner}, acc when is_list(inner) ->
-        acc + count_in_content(inner)
+        match?(%{"type" => "tool_result", "content" => inner} when is_list(inner), block) ->
+          acc + count_in_content(Map.get(block, "content"))
 
-      _, acc ->
-        acc
+        true ->
+          acc
+      end
     end)
   end
 
@@ -283,17 +433,19 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
   end
 
   defp savings_in_content(content, placeholder_bytes) when is_list(content) do
-    Enum.flat_map(content, fn
-      %{"type" => "image", "source" => %{"data" => data} = source} = block when is_binary(data) ->
-        blanked = Map.put(block, "source", Map.put(source, "data", ""))
-        image_bytes = serialized_bytes(blanked) + byte_size(data)
-        [max(image_bytes - placeholder_bytes, 0)]
+    Enum.flat_map(content, fn block ->
+      cond do
+        is_binary(image_payload(block)) ->
+          data = image_payload(block)
+          image_bytes = serialized_bytes(blank_image(block)) + byte_size(data)
+          [max(image_bytes - placeholder_bytes, 0)]
 
-      %{"type" => "tool_result", "content" => inner} when is_list(inner) ->
-        savings_in_content(inner, placeholder_bytes)
+        match?(%{"type" => "tool_result", "content" => inner} when is_list(inner), block) ->
+          savings_in_content(Map.get(block, "content"), placeholder_bytes)
 
-      _ ->
-        []
+        true ->
+          []
+      end
     end)
   end
 
@@ -329,8 +481,8 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
         l <= 0 ->
           {block, l}
 
-        match?(%{"type" => "image", "source" => %{"data" => d}} when is_binary(d), block) ->
-          {placeholder_block(), l - 1}
+        is_binary(image_payload(block)) ->
+          {placeholder_for(block), l - 1}
 
         match?(%{"type" => "tool_result", "content" => inner} when is_list(inner), block) ->
           {inner2, l2} = evict_content(Map.get(block, "content"), l)

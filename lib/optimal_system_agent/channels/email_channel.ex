@@ -234,14 +234,28 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
             {:ok, raw} ->
               {from, subject, body} = parse_email(raw)
 
-              if allowed_sender?(from, state.allowed_senders) and not automated_email?(from) do
-                # Mark as seen
-                send_imap(socket, "A005 STORE #{id} +FLAGS (\\Seen)")
-                recv_imap(socket)
+              cond do
+                not allowed_sender?(from, state.allowed_senders) ->
+                  # Previously silent. A misconfigured allowlist rejects EVERY
+                  # message, and with no log the channel looks merely idle
+                  # rather than locked out — say so, and say what it compared.
+                  Logger.info(
+                    "[Email] Skipping message from #{from} — not in email_allowed_senders " <>
+                      "(#{MapSet.size(state.allowed_senders)} entr#{if MapSet.size(state.allowed_senders) == 1, do: "y", else: "ies"} configured). " <>
+                      "Matching is case-insensitive on ASCII; check for typos or stray whitespace."
+                  )
 
-                Delivery.start_task(:email, fn ->
-                  process_email(from, subject, body, state)
-                end)
+                automated_email?(from) ->
+                  Logger.debug("[Email] Skipping automated sender #{from}")
+
+                true ->
+                  # Mark as seen
+                  send_imap(socket, "A005 STORE #{id} +FLAGS (\\Seen)")
+                  recv_imap(socket)
+
+                  Delivery.start_task(:email, fn ->
+                    process_email(from, subject, body, state)
+                  end)
               end
 
             _ ->
@@ -381,12 +395,50 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
     )
   end
 
-  defp parse_allowed(nil), do: MapSet.new()
-  defp parse_allowed(""), do: MapSet.new()
+  @doc """
+  Parse the `email_allowed_senders` config value into a normalized set.
 
-  defp parse_allowed(str),
-    do: str |> String.split(",") |> Enum.map(&String.trim/1) |> MapSet.new()
+  Public for the same reason `tls_opts/1` is: this is a security decision and
+  it needs direct test coverage.
+  """
+  @spec parse_allowed(String.t() | nil | any()) :: MapSet.t(String.t())
+  def parse_allowed(str) when is_binary(str) do
+    str
+    |> String.split(",")
+    |> Enum.map(&normalize_address/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
 
-  defp allowed_sender?(_from, allowed) when allowed == %MapSet{}, do: true
-  defp allowed_sender?(from, allowed), do: MapSet.member?(allowed, String.downcase(from))
+  def parse_allowed(_), do: MapSet.new()
+
+  @doc """
+  Whether `from` may start an agent task.
+
+  An EMPTY allowlist means "no restriction configured" — every sender is
+  allowed. `MapSet.size/1` rather than a `when allowed == %MapSet{}` guard: the
+  guard compared against a literal empty-struct value and is coupled to
+  MapSet's internal representation.
+  """
+  @spec allowed_sender?(String.t(), MapSet.t(String.t())) :: boolean()
+  def allowed_sender?(from, allowed) do
+    MapSet.size(allowed) == 0 or MapSet.member?(allowed, normalize_address(from))
+  end
+
+  # BOTH sides of the allowlist comparison go through this. They previously did
+  # not: `parse_allowed/1` stored the configured values verbatim while
+  # `allowed_sender?/2` downcased only the sender, so a single uppercase letter
+  # anywhere in `email_allowed_senders` made that entry permanently unmatchable.
+  # Because an unmatched sender is skipped with no log and no error, the visible
+  # symptom was a silent, total lockout of every inbound message.
+  #
+  # The fold is ASCII-ONLY on purpose. `String.downcase/1` performs full Unicode
+  # case folding, under which U+212A KELVIN SIGN folds to "k" and U+017F LATIN
+  # SMALL LETTER LONG S folds to "s" — so a DIFFERENT address could fold onto an
+  # allowlisted one and be accepted. This channel starts agent tasks, so that
+  # direction is a privilege bypass rather than a cosmetic defect; restricting
+  # the fold to ASCII keeps those codepoints distinct.
+  defp normalize_address(addr) do
+    addr |> to_string() |> String.trim() |> String.downcase(:ascii)
+  end
 end

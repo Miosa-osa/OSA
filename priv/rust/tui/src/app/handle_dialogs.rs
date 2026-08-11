@@ -6,6 +6,16 @@ use crate::event::Event;
 
 use super::App;
 
+/// How to leave the permission overlay once the last queued ask is answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PermissionClose {
+    /// Land back on whatever opened the overlay (allow / deny).
+    ReturnToCaller,
+    /// Drop the recorded caller without restoring it — the clarify steer feeds
+    /// the SAME turn, which drives the next state itself.
+    DiscardReturn,
+}
+
 impl App {
     pub(super) fn handle_quit_dialog_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if let Some(action) = self.quit_dialog.handle_key(key) {
@@ -356,101 +366,99 @@ impl App {
         });
     }
 
+    /// Answer the permission ask the user is LOOKING AT, then show the next one.
+    ///
+    /// The id comes out of the displayed dialog (`answer_current`), never from a
+    /// separate field: tool calls run in parallel, so the only id that is safe to
+    /// resume is the one attached to the content on screen.
+    ///
+    /// The overlay was entered once, for the first ask of the batch, so it is
+    /// left once — only when the queue has drained. `close` covers the two exit
+    /// shapes the callers need (return to the caller state, or drop the recorded
+    /// caller because the steer keeps the turn running).
+    fn answer_permission(
+        &mut self,
+        decision: &'static str,
+        note: Option<String>,
+        close: PermissionClose,
+    ) {
+        let Some(answered) = self.permissions.answer_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        let request_id = answered.request_id;
+        tokio::spawn(async move {
+            let _ = client
+                .permission_respond(&request_id, decision, note.as_deref())
+                .await;
+        });
+        if answered.has_more {
+            // The next ask took the screen: stay parked on the user.
+            self.recompute_layout();
+            return;
+        }
+        self.activity.set_pending_user(false);
+        match close {
+            PermissionClose::ReturnToCaller => self.exit_overlay(),
+            PermissionClose::DiscardReturn => self.discard_overlay_return(),
+        }
+        self.recompute_layout();
+    }
+
     pub(super) fn handle_permissions_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if let Some(ref mut dialog) = self.permissions {
-            if let Some(action) = dialog.handle_key(key) {
-                match action {
-                    DialogAction::PermissionAllow => {
-                        self.exit_overlay();
-                        self.toasts.push(
-                            "Permission granted".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ =
-                                    client.permission_respond(&request_id, "allow_once", None).await;
-                            });
-                        }
-                        self.permissions = None;
-                    }
-                    DialogAction::PermissionAllowSession => {
-                        self.exit_overlay();
-                        self.toasts.push(
-                            "Permission granted for session".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ = client
-                                    .permission_respond(&request_id, "allow_session", None)
-                                    .await;
-                            });
-                        }
-                        self.permissions = None;
-                    }
-                    DialogAction::PermissionAllowAlways => {
-                        self.exit_overlay();
-                        self.toasts.push(
-                            "Permission granted (always)".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            // Reuse the permission-response mechanism; the
-                            // always-allow flag asks the backend to persist a rule.
-                            tokio::spawn(async move {
-                                let _ = client
-                                    .permission_respond(&request_id, "allow_always", None)
-                                    .await;
-                            });
-                        }
-                        self.permissions = None;
-                    }
-                    DialogAction::PermissionClarify(text) => {
-                        // Reject-with-steer: decision "clarify" makes the backend
-                        // block THIS tool call and feed `note` back into the SAME
-                        // turn (tool_executor.ex apply_permission_decision :clarify
-                        // → {:steer, note}), so do NOT also submit it as a new
-                        // prompt — that would double-send the clarification.
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            let note = text.clone();
-                            tokio::spawn(async move {
-                                let _ = client
-                                    .permission_respond(&request_id, "clarify", Some(&note))
-                                    .await;
-                            });
-                        }
-                        self.discard_overlay_return();
-                        self.permissions = None;
-                        // Echo locally so the steer text shows in the transcript.
-                        self.chat.add_user_message(&text);
-                    }
-                    DialogAction::PermissionDeny => {
-                        self.exit_overlay();
-                        self.toasts.push(
-                            "Permission denied".into(),
-                            crate::components::toast::ToastLevel::Warning,
-                        );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ = client.permission_respond(&request_id, "deny", None).await;
-                            });
-                        }
-                        self.permissions = None;
-                    }
-                    _ => {}
-                }
+        let Some(action) = self
+            .permissions
+            .displayed_mut()
+            .and_then(|dialog| dialog.handle_key(key))
+        else {
+            return false;
+        };
+        match action {
+            DialogAction::PermissionAllow => {
+                self.toasts.push(
+                    "Permission granted".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.answer_permission("allow_once", None, PermissionClose::ReturnToCaller);
             }
+            DialogAction::PermissionAllowSession => {
+                self.toasts.push(
+                    "Permission granted for session".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.answer_permission("allow_session", None, PermissionClose::ReturnToCaller);
+            }
+            DialogAction::PermissionAllowAlways => {
+                self.toasts.push(
+                    "Permission granted (always)".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                // Reuse the permission-response mechanism; the always-allow
+                // decision asks the backend to persist a rule.
+                self.answer_permission("allow_always", None, PermissionClose::ReturnToCaller);
+            }
+            DialogAction::PermissionClarify(text) => {
+                // Reject-with-steer: decision "clarify" makes the backend
+                // block THIS tool call and feed `note` back into the SAME
+                // turn (tool_executor.ex apply_permission_decision :clarify
+                // → {:steer, note}), so do NOT also submit it as a new
+                // prompt — that would double-send the clarification.
+                self.answer_permission(
+                    "clarify",
+                    Some(text.clone()),
+                    PermissionClose::DiscardReturn,
+                );
+                // Echo locally so the steer text shows in the transcript.
+                self.chat.add_user_message(&text);
+            }
+            DialogAction::PermissionDeny => {
+                self.toasts.push(
+                    "Permission denied".into(),
+                    crate::components::toast::ToastLevel::Warning,
+                );
+                self.answer_permission("deny", None, PermissionClose::ReturnToCaller);
+            }
+            _ => {}
         }
         false
     }

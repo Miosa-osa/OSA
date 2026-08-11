@@ -132,9 +132,9 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
   # ── Non-system messages share the defect ───────────────────────────────────
 
   describe "image blocks on user/tool turns" do
-    test "a user turn with an image no longer raises, and says the image is gone" do
-      # Exactly what MessageHandler.build_messages/3 emits for an attachment.
-      messages = [
+    # Exactly what MessageHandler.build_messages/3 emits for an attachment.
+    defp image_messages do
+      [
         %{
           role: "user",
           content: [
@@ -146,13 +146,53 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
           ]
         }
       ]
+    end
 
-      [user] = Registry.normalize_message_content(messages, {:compat, :openai})
+    test "an image-capable target keeps the blocks — its own encoder handles them" do
+      # gpt-4o is catalogued with image input, and OpenAICompat encodes
+      # `image_url` parts. Flattening here would make that encoder dead code.
+      [user] =
+        Registry.normalize_message_content(image_messages(), {:compat, :openai}, model: "gpt-4o")
+
+      assert is_list(user.content), "the image must reach the provider's own encoder"
+      assert Enum.any?(user.content, &match?(%{type: "image"}, &1))
+    end
+
+    test "an unknown model is passed through, not silently flattened" do
+      [user] =
+        Registry.normalize_message_content(image_messages(), {:compat, :openai},
+          model: "some-model-nobody-catalogued"
+        )
+
+      assert is_list(user.content)
+    end
+
+    test "a fallback hop that dropped :model is passed through too" do
+      [user] = Registry.normalize_message_content(image_messages(), {:compat, :openai})
+
+      assert is_list(user.content)
+    end
+
+    test "a model the catalog knows to be text-only is flattened, and says why" do
+      [user] =
+        Registry.normalize_message_content(image_messages(), {:compat, :groq},
+          model: "llama-3.1-8b-instant"
+        )
 
       assert is_binary(user.content)
       assert user.content =~ "what is in this screenshot?"
-      assert user.content =~ "image was omitted"
+      assert user.content =~ "does not accept image input"
       refute user.content =~ "aGVsbG8=", "the base64 payload must not be pasted into the prompt"
+    end
+
+    test "a transport with no image encoder is flattened, and says THAT instead" do
+      # Ollama does not export `supports_image_content?/0`; it would raise on a
+      # list. The placeholder must name the transport, not blame the model.
+      [user] = Registry.normalize_message_content(image_messages(), Providers.Ollama)
+
+      assert is_binary(user.content)
+      assert user.content =~ "cannot send images"
+      refute user.content =~ "does not accept image input"
     end
 
     test "a tool result carrying an image flattens instead of raising" do
@@ -172,7 +212,7 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
       [tool] = Registry.normalize_message_content(messages, Providers.Ollama)
 
       assert tool.content =~ "Image: /tmp/shot.png"
-      assert tool.content =~ "image was omitted"
+      assert tool.content =~ "cannot send images"
     end
 
     test "the old formatters really did raise on this shape (regression witness)" do

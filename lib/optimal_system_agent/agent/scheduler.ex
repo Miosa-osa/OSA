@@ -64,12 +64,44 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   @circuit_breaker_limit 3
 
+  # Cron ticks are armed on a FIXED cadence; a tick's own work never delays the
+  # next one (see `handle_info(:cron_check, ...)`).
+  @cron_tick_ms 60_000
+
+  # Ceiling on how many missed minutes one tick will backfill. A machine
+  # suspended for a week must not replay ten thousand minutes of cron at once;
+  # past this the skip is reported rather than replayed.
+  @max_backfill_minutes 60
+
+  # Default ceiling on a single job execution before the scheduler terminates it
+  # (30 min). Distinct from the caller-facing reply deadline below.
+  @default_job_timeout_ms 1_800_000
+
+  # How long a `run_job/1` caller is made to wait before being told the job is
+  # still going. The job itself keeps running under its own deadline; the
+  # in-flight set is what stops the caller's retry from starting a second copy.
+  @default_run_job_reply_ms 30_000
+
   defstruct failures: %{},
             last_run: nil,
             cron_jobs: [],
             trigger_handlers: %{},
             triggers_raw: [],
-            heartbeat_started_at: nil
+            heartbeat_started_at: nil,
+            # Executions currently running OFF this process, `job_id => entry`.
+            # Its only job is to make a second concurrent execution of the same
+            # job impossible.
+            in_flight: %{},
+            # `task_ref => job_id`, the reverse index for task replies/DOWNs.
+            by_ref: %{},
+            # Last wall-clock minute the cron matcher actually evaluated. Any
+            # gap between this and `now` is a missed tick, and is backfilled or
+            # explicitly reported — never silently skipped.
+            last_cron_minute: nil,
+            # Real armed-timer instants, so `status/0` reports when the next
+            # tick will ACTUALLY happen rather than deriving it from `last_run`.
+            next_heartbeat_at: nil,
+            next_cron_at: nil
 
   # ── Public API ───────────────────────────────────────────────────────
 
@@ -160,10 +192,10 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   @impl true
   def init(state) do
     Heartbeat.ensure_heartbeat_file()
-    schedule_heartbeat()
-    schedule_cron_check()
 
     state = %{state | heartbeat_started_at: DateTime.utc_now()}
+    state = schedule_heartbeat(state)
+    state = schedule_cron_check(state)
     state = load_crons(state)
     state = load_trigger_state(state)
 
@@ -294,21 +326,28 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     end
   end
 
+  # Never runs the job body on this process. The caller is parked and answered
+  # when the execution task reports back (or when the reply deadline expires),
+  # so a long job cannot serialize `list_jobs`, `add_job`, or the cron tick
+  # behind it.
   @impl true
-  def handle_call({:run_job, job_id}, _from, state) do
+  def handle_call({:run_job, job_id}, from, state) do
     case Enum.find(state.cron_jobs, &(&1["id"] == job_id)) do
       nil ->
         {:reply, {:error, "Job not found: #{job_id}"}, state}
 
       job ->
-        case execute_cron_job(job) do
-          {:ok, result} ->
-            state = %{state | failures: Map.delete(state.failures, job_id)}
-            {:reply, {:ok, result}, state}
+        case start_job(state, job, from) do
+          {:started, state} ->
+            {:noreply, state}
 
-          {:error, reason} ->
-            failures = Map.get(state.failures, job_id, 0) + 1
-            state = %{state | failures: Map.put(state.failures, job_id, failures)}
+          {:already_running, state} ->
+            # The previous execution is still going. Answering with an error is
+            # the honest result; starting a second copy (what an unbounded
+            # handler plus a caller-side retry produced) is not.
+            {:reply, {:error, :already_running}, state}
+
+          {:error, reason, state} ->
             {:reply, {:error, reason}, state}
         end
     end
@@ -404,20 +443,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   @impl true
   def handle_call(:next_heartbeat_at, _from, state) do
-    next =
-      case state.last_run do
-        nil ->
-          DateTime.add(
-            state.heartbeat_started_at || DateTime.utc_now(),
-            heartbeat_interval(),
-            :millisecond
-          )
-
-        last ->
-          DateTime.add(last, heartbeat_interval(), :millisecond)
-      end
-
-    {:reply, next, state}
+    {:reply, next_heartbeat(state), state}
   end
 
   @impl true
@@ -431,29 +457,33 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
         _ -> 0
       end
 
-    next =
-      case state.last_run do
-        nil ->
-          DateTime.add(
-            state.heartbeat_started_at || DateTime.utc_now(),
-            heartbeat_interval(),
-            :millisecond
-          )
-
-        last ->
-          DateTime.add(last, heartbeat_interval(), :millisecond)
-      end
-
     status = %{
       cron_active: enabled_jobs,
       cron_total: length(state.cron_jobs),
       trigger_active: enabled_triggers,
       trigger_total: length(state.triggers_raw),
       heartbeat_pending: pending_tasks,
-      next_heartbeat: next
+      next_heartbeat: next_heartbeat(state),
+      next_cron_check: state.next_cron_at,
+      # Truth about what is executing right now, so "0 running" is never
+      # reported for a job the scheduler is in fact still waiting on.
+      cron_running: Map.keys(state.in_flight),
+      last_cron_minute: state.last_cron_minute
     }
 
     {:reply, status, state}
+  end
+
+  # The instant the armed timer will actually fire. Falls back to a derived
+  # value only before the first arm.
+  defp next_heartbeat(%{next_heartbeat_at: %DateTime{} = at}), do: at
+
+  defp next_heartbeat(state) do
+    DateTime.add(
+      state.heartbeat_started_at || DateTime.utc_now(),
+      heartbeat_interval(),
+      :millisecond
+    )
   end
 
   # ── Info Handlers ─────────────────────────────────────────────────────
@@ -465,17 +495,86 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   @impl true
   def handle_info(:heartbeat, state) do
-    state = run_heartbeat(state)
-    schedule_heartbeat()
-    {:noreply, state}
+    # Re-arm before running, so the heartbeat cadence is a property of the
+    # clock rather than of how long the last batch took.
+    state = schedule_heartbeat(state)
+    {:noreply, run_heartbeat(state)}
   end
 
   @impl true
   def handle_info(:cron_check, state) do
-    state = run_cron_check(state)
-    schedule_cron_check()
-    {:noreply, state}
+    # Re-armed FIRST and on a fixed cadence. Previously the next tick was armed
+    # only AFTER the firing jobs had run inline, so every minute spent
+    # executing was a minute the matcher never evaluated — those jobs simply
+    # never fired, with no log and no backfill.
+    state = schedule_cron_check(state)
+    {:noreply, run_cron_check(state)}
   end
+
+  # An execution task finished. `async_nolink` delivers the value first and the
+  # :DOWN afterwards; flushing the monitor here means the DOWN never arrives.
+  @impl true
+  def handle_info({ref, result}, state) when is_reference(ref) do
+    case Map.fetch(state.by_ref, ref) do
+      {:ok, job_id} ->
+        Process.demonitor(ref, [:flush])
+        {:noreply, finish_job(state, job_id, normalize_result(result))}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  # The task died without reporting — a crash in the job body. Counted as a
+  # failure exactly once, by ref, so a crashed job cannot be double-counted.
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Map.fetch(state.by_ref, ref) do
+      {:ok, job_id} ->
+        {:noreply, finish_job(state, job_id, {:error, "job crashed: #{inspect(reason)}"})}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  # Server-side execution deadline. The handler used to be unbounded: a job
+  # that never returned held the scheduler forever and the caller's own 35s
+  # client timeout just made a retry (i.e. a second concurrent execution)
+  # likely. Now the execution is terminated and recorded once.
+  @impl true
+  def handle_info({:job_deadline, ref}, state) do
+    case Map.fetch(state.by_ref, ref) do
+      {:ok, job_id} ->
+        entry = Map.get(state.in_flight, job_id, %{})
+        Logger.warning("Cron '#{job_id}': exceeded #{job_timeout_ms()}ms — terminating execution")
+        terminate_task(entry)
+        Process.demonitor(ref, [:flush])
+        {:noreply, finish_job(state, job_id, {:error, :timeout})}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  # The caller of `run_job/1` has waited long enough. The JOB is not touched —
+  # it keeps running under its own deadline — the caller is simply told so.
+  @impl true
+  def handle_info({:reply_deadline, ref}, state) do
+    with {:ok, job_id} <- Map.fetch(state.by_ref, ref),
+         %{from: from} = entry when not is_nil(from) <- Map.get(state.in_flight, job_id) do
+      GenServer.reply(from, {:error, :still_running})
+      in_flight = Map.put(state.in_flight, job_id, %{entry | from: nil})
+      {:noreply, %{state | in_flight: in_flight}}
+    else
+      _ -> {:noreply, state}
+    end
+  end
+
+  # Stray messages must not crash the scheduler — it owns every cron job on the
+  # machine.
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
 
   # ── CRONS/TRIGGERS I/O (delegated to Scheduler.Persistence) ────────
   defp load_crons(state), do: Persistence.load_crons(state)
@@ -537,9 +636,54 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   # ── Cron Check ────────────────────────────────────────────────────────
 
-  defp run_cron_check(state) do
+  # Evaluate every minute that has elapsed since the last evaluation, not just
+  # `now`. A tick that arrives late (GC pause, machine suspend, a scheduler
+  # busy with something else) used to skip every intervening minute silently.
+  @doc false
+  @spec run_cron_check(%__MODULE__{}) :: %__MODULE__{}
+  def run_cron_check(state) do
     now = DateTime.utc_now()
+    {minutes, skipped} = pending_minutes(state.last_cron_minute, now)
 
+    if skipped > 0 do
+      Logger.error(
+        "[Scheduler] cron tick gap: #{skipped} minute(s) elapsed beyond the " <>
+          "#{@max_backfill_minutes}-minute backfill window and were NOT evaluated — any job " <>
+          "scheduled in that window did not run"
+      )
+    end
+
+    state = %{state | last_cron_minute: truncate_minute(now)}
+    Enum.reduce(minutes, state, &fire_due_jobs(&2, &1))
+  end
+
+  # Minutes still owed evaluation, oldest first, plus how many were dropped for
+  # exceeding the backfill window.
+  defp pending_minutes(nil, now), do: {[truncate_minute(now)], 0}
+
+  defp pending_minutes(last, now) do
+    current = truncate_minute(now)
+
+    case DateTime.diff(current, last, :second) |> div(60) do
+      n when n <= 0 ->
+        # Clock went backwards, or two ticks landed in the same minute. Do not
+        # re-fire a minute already evaluated.
+        {[], 0}
+
+      n when n <= @max_backfill_minutes ->
+        {for(i <- 1..n, do: DateTime.add(last, i * 60, :second)), 0}
+
+      n ->
+        {for(i <- (n - @max_backfill_minutes + 1)..n, do: DateTime.add(last, i * 60, :second)),
+         n - @max_backfill_minutes}
+    end
+  end
+
+  defp truncate_minute(%DateTime{} = dt) do
+    dt |> DateTime.truncate(:second) |> Map.put(:second, 0) |> Map.put(:microsecond, {0, 0})
+  end
+
+  defp fire_due_jobs(state, minute) do
     enabled_jobs =
       state.cron_jobs
       |> Enum.filter(&(&1["enabled"] == true))
@@ -560,7 +704,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       Enum.filter(enabled_jobs, fn job ->
         case parse_cron_expression(job["schedule"]) do
           {:ok, fields} ->
-            cron_matches?(fields, now)
+            cron_matches?(fields, minute)
 
           {:error, reason} ->
             Logger.warning("Cron '#{job["id"]}': bad schedule '#{job["schedule"]}' — #{reason}")
@@ -569,34 +713,162 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       end)
 
     if firing != [] do
-      Logger.info("Cron tick: #{length(firing)} job(s) firing at #{DateTime.to_iso8601(now)}")
+      Logger.info("Cron tick: #{length(firing)} job(s) firing at #{DateTime.to_iso8601(minute)}")
     end
 
     Enum.reduce(firing, state, fn job, acc ->
-      case execute_cron_job(job) do
-        {:ok, _} ->
-          Logger.info("Cron '#{job["id"]}' (#{job["name"]}): completed")
-          %{acc | failures: Map.delete(acc.failures, job["id"])}
+      case start_job(acc, job, nil) do
+        {:started, acc} ->
+          acc
 
-        {:error, reason} ->
-          failures = Map.get(acc.failures, job["id"], 0) + 1
+        {:already_running, acc} ->
+          acc
 
-          Logger.warning(
-            "Cron '#{job["id"]}' (#{job["name"]}): failed (#{failures}/#{@circuit_breaker_limit}) — #{reason}"
-          )
-
-          if failures >= @circuit_breaker_limit do
-            Logger.warning(
-              "Cron '#{job["id"]}': circuit breaker opened after #{failures} failures"
-            )
-          end
-
-          %{acc | failures: Map.put(acc.failures, job["id"], failures)}
+        {:error, reason, acc} ->
+          Logger.warning("Cron '#{job["id"]}': could not dispatch — #{inspect(reason)}")
+          acc
       end
     end)
   end
 
-  defp execute_cron_job(job), do: JobExecutor.execute_cron_job(job)
+  # ── Off-process execution ─────────────────────────────────────────────
+  #
+  # The scheduler NEVER runs a job body. It routes: each execution is a
+  # supervised task, and the scheduler only records the outcome. An `"agent"`
+  # job is a full agent turn, and running one inline blocked every other call,
+  # cast, and cron tick for its entire duration.
+
+  defp start_job(state, job, from) do
+    job_id = job["id"]
+
+    if Map.has_key?(state.in_flight, job_id) do
+      Logger.warning(
+        "Cron '#{job_id}': previous execution still running — not starting a second one"
+      )
+
+      {:already_running, state}
+    else
+      do_start_job(state, job, job_id, from)
+    end
+  end
+
+  defp do_start_job(state, job, job_id, from) do
+    task =
+      Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
+        execute_cron_job(job)
+      end)
+
+    job_timer = Process.send_after(self(), {:job_deadline, task.ref}, job_timeout_ms())
+
+    reply_timer =
+      if from, do: Process.send_after(self(), {:reply_deadline, task.ref}, run_job_reply_ms())
+
+    entry = %{
+      ref: task.ref,
+      pid: task.pid,
+      from: from,
+      job_timer: job_timer,
+      reply_timer: reply_timer,
+      started_at: DateTime.utc_now()
+    }
+
+    {:started,
+     %{
+       state
+       | in_flight: Map.put(state.in_flight, job_id, entry),
+         by_ref: Map.put(state.by_ref, task.ref, job_id)
+     }}
+  rescue
+    e -> {:error, Exception.message(e), state}
+  catch
+    :exit, reason -> {:error, {:exit, reason}, state}
+  end
+
+  # Record an execution's outcome exactly once: cancel its timers, drop it from
+  # the in-flight set, answer a parked caller, and move the failure counter.
+  defp finish_job(state, job_id, result) do
+    entry = Map.get(state.in_flight, job_id, %{})
+    cancel_timer(Map.get(entry, :job_timer))
+    cancel_timer(Map.get(entry, :reply_timer))
+
+    state = %{
+      state
+      | in_flight: Map.delete(state.in_flight, job_id),
+        by_ref: Map.delete(state.by_ref, Map.get(entry, :ref))
+    }
+
+    state =
+      case result do
+        {:ok, value} ->
+          Logger.info("Cron '#{job_id}': completed")
+          maybe_reply(entry, {:ok, value})
+          %{state | failures: Map.delete(state.failures, job_id)}
+
+        {:error, reason} ->
+          failures = Map.get(state.failures, job_id, 0) + 1
+
+          Logger.warning(
+            "Cron '#{job_id}': failed (#{failures}/#{@circuit_breaker_limit}) — #{inspect(reason)}"
+          )
+
+          if failures >= @circuit_breaker_limit do
+            Logger.warning("Cron '#{job_id}': circuit breaker opened after #{failures} failures")
+          end
+
+          maybe_reply(entry, {:error, reason})
+          %{state | failures: Map.put(state.failures, job_id, failures)}
+      end
+
+    state
+  end
+
+  defp maybe_reply(%{from: from}, reply) when not is_nil(from), do: GenServer.reply(from, reply)
+  defp maybe_reply(_entry, _reply), do: :ok
+
+  defp cancel_timer(ref) when is_reference(ref), do: Process.cancel_timer(ref)
+  defp cancel_timer(_), do: :ok
+
+  defp terminate_task(%{pid: pid}) when is_pid(pid) do
+    Task.Supervisor.terminate_child(OptimalSystemAgent.TaskSupervisor, pid)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp terminate_task(_), do: :ok
+
+  # A job body may return anything; only the two documented shapes are outcomes.
+  defp normalize_result({:ok, _} = ok), do: ok
+  defp normalize_result({:error, _} = err), do: err
+  defp normalize_result(other), do: {:error, "unexpected job result: #{inspect(other)}"}
+
+  @doc "Ceiling on one job execution before the scheduler terminates it."
+  @spec job_timeout_ms() :: pos_integer()
+  def job_timeout_ms do
+    Application.get_env(:optimal_system_agent, :cron_job_timeout_ms, @default_job_timeout_ms)
+  end
+
+  @doc "How long a `run_job/1` caller waits before being told the job is still running."
+  @spec run_job_reply_ms() :: pos_integer()
+  def run_job_reply_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :cron_run_job_reply_ms,
+      @default_run_job_reply_ms
+    )
+  end
+
+  # Execution seam, mirroring `Heartbeat.run/2`'s injectable executor: tests
+  # drive the tick and the in-flight bookkeeping without entering the real tool
+  # registry (an `"agent"` job is a full agent turn, a `"command"` job goes
+  # through `shell_execute`). Production leaves it unset.
+  defp execute_cron_job(job) do
+    case Application.get_env(:optimal_system_agent, :cron_executor) do
+      fun when is_function(fun, 1) -> fun.(job)
+      _ -> JobExecutor.execute_cron_job(job)
+    end
+  end
 
   # ── Trigger Execution ─────────────────────────────────────────────────
 
@@ -675,11 +947,18 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   # ── Helpers ─────────────────────────────────────────────────────────
 
-  defp schedule_heartbeat do
-    Process.send_after(self(), :heartbeat, heartbeat_interval())
+  # Both schedulers record the instant they actually armed for, so `status/0`
+  # and `next_heartbeat_at/0` report the real next tick instead of deriving one
+  # from `last_run + interval` — a derivation that drifted from reality the
+  # moment a tick took any time at all.
+  defp schedule_heartbeat(state) do
+    interval = heartbeat_interval()
+    Process.send_after(self(), :heartbeat, interval)
+    %{state | next_heartbeat_at: DateTime.add(DateTime.utc_now(), interval, :millisecond)}
   end
 
-  defp schedule_cron_check do
-    Process.send_after(self(), :cron_check, 60_000)
+  defp schedule_cron_check(state) do
+    Process.send_after(self(), :cron_check, @cron_tick_ms)
+    %{state | next_cron_at: DateTime.add(DateTime.utc_now(), @cron_tick_ms, :millisecond)}
   end
 end

@@ -60,7 +60,16 @@ defmodule OptimalSystemAgent.CriticalFlowsRegressionTest do
   describe "#12 image threading" do
     test "build_messages/3 emits image content blocks for image entries" do
       state = %{turn_count: 0, permission_tier: :full}
-      b64 = Base.encode64("fake-png-bytes")
+
+      # A REAL 1x1 PNG: the media type is now sniffed from magic bytes, so a
+      # placeholder payload is (correctly) no longer accepted as an image.
+      # See `test/agent/loop/image_ingestion_test.exs`.
+      png =
+        <<137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+          6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5,
+          0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130>>
+
+      b64 = Base.encode64(png)
 
       messages = MessageHandler.build_messages("what is in this image", state, [b64])
 

@@ -9,11 +9,31 @@
 //! ```
 //!
 //! The `ESC \` (String Terminator) closes each half; the empty URL in the
-//! trailing half ends the link. Because the ESC bytes are zero display width,
-//! ratatui 0.29 carries them along on the adjacent grapheme cell (verified:
-//! `Paragraph` preserves the full sequence through to the crossterm backend),
-//! so we can emit hyperlinks simply by embedding the escape in a `Span`'s
-//! content — no custom widget or backend patch required.
+//! trailing half ends the link.
+//!
+//! # The escape bytes are NOT zero display width to ratatui
+//!
+//! This module used to claim they were, and that ratatui 0.29 therefore carried
+//! them along on the adjacent grapheme cell for free. That is wrong.
+//! `unicode-width` reports width **1** for ESC — it reports 1 for every
+//! `c <= '\u{A0}'` — and ratatui measures spans with `symbol.width()`
+//! (`widgets/reflow.rs`). A single `file://` link header therefore costs roughly
+//! 80 phantom columns, which makes `LineTruncator` cut the row's visible tail and
+//! makes any width computed over the span content over-count.
+//!
+//! Embedding the escape in a `Span`'s content is still how hyperlinks are
+//! emitted (ratatui 0.29's `Cell` has no hyperlink field, and a zero-width
+//! sentinel cannot be smuggled through either — `Paragraph::render_text` drops
+//! zero-width graphemes outright). What changed is who does the measuring:
+//!
+//!   * width must be computed with [`crate::util::cols`], which skips escapes;
+//!   * lines that may carry links are rendered with
+//!     [`crate::render::cells::render_lines`], which lays them out at true
+//!     visible width and hands each escape to the terminal on the following
+//!     cell's symbol — never through ratatui's width math.
+//!
+//! Passing these spans to a plain `Paragraph` will truncate them; use the
+//! renderer above.
 //!
 //! Mirrors the pattern in `osc52.rs` (raw escape emission, env-gated). Unlike
 //! OSC 52 we do *not* need the tmux/screen DCS passthrough: OSC 8 is a display
@@ -322,6 +342,39 @@ mod tests {
             "TERM",
             "xterm-256color"
         )])));
+    }
+
+    /// Pins the fact the module header used to get wrong: `unicode-width` gives
+    /// ESC a width of 1, so the naive measurement over-counts a hyperlink span by
+    /// the whole escape, and `crate::util::cols` must not.
+    #[test]
+    fn escape_bytes_are_not_zero_width_to_unicode_width() {
+        use unicode_width::UnicodeWidthStr;
+        let seq = osc8("a.rs", "file:///home/x/a.rs");
+        let naive = UnicodeWidthStr::width(seq.as_str());
+        assert_eq!(
+            naive,
+            seq.chars().count(),
+            "every byte of the escape counts as a column"
+        );
+        assert!(
+            naive >= 30,
+            "a short file:// link already costs {naive} phantom columns, not 0"
+        );
+        // The escape-aware measurement sees only the visible text.
+        assert_eq!(crate::util::cols(&seq), 4);
+
+        // A realistic repo path pushes it past a full 80-column terminal, which
+        // is why the tail of a linkified row disappears entirely.
+        let real = osc8(
+            "handle_backend.rs",
+            "file:///home/user/projects/osa/OSA/priv/rust/tui/src/app/handle_backend.rs",
+        );
+        assert!(
+            UnicodeWidthStr::width(real.as_str()) > 80,
+            "expected a full terminal width of phantom columns"
+        );
+        assert_eq!(crate::util::cols(&real), 17);
     }
 
     #[test]

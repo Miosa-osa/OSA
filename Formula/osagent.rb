@@ -12,30 +12,30 @@
 # three near-identical formulas is redundant; long term, prefer a single tapped
 # formula (`osa`) that installs all three command symlinks.
 #
-# The download tag is `v1.0.002` while the Homebrew `version` is `1.0.2`
+# The download tag is `v1.0.078` while the Homebrew `version` is `1.0.78`
 # (Homebrew rejects the zero-padded form), so the release URL pins the tag
 # explicitly instead of interpolating `#{version}`.
 #
 # Only the two published release platforms are wired up: macOS arm64 (Apple
 # Silicon) and Linux x86_64. There is no macOS Intel or Linux arm64 tarball in
-# the v1.0.002 release, so `brew install` on those platforms is unsupported.
+# the v1.0.078 release, so `brew install` on those platforms is unsupported.
 class Osagent < Formula
   desc "Signal Theory-optimized AI agent - your OS, supercharged"
   homepage "https://github.com/Miosa-osa/OSA"
-  version "1.0.2"
+  version "1.0.78"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/Miosa-osa/OSA/releases/download/v1.0.002/osa-macos-arm64.tar.gz"
-      sha256 "9c7dc79a03a350c3bb93ce9fdffad8f44a80bbe0f1e42112968e42f54b0f12c3"
+      url "https://github.com/Miosa-osa/OSA/releases/download/v1.0.078/osa-macos-arm64.tar.gz"
+      sha256 "3e883f15ae7b768431ba3dc500025cde91430531e52d9c19bdca80750b930d8b"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/Miosa-osa/OSA/releases/download/v1.0.002/osa-linux-x64.tar.gz"
-      sha256 "ec631d24326f2f0d0e118abaf3aa86a89c95226e05cd95a8914a503e4969e825"
+      url "https://github.com/Miosa-osa/OSA/releases/download/v1.0.078/osa-linux-x64.tar.gz"
+      sha256 "8749df6ee016303b28022730b37e60c32ef2a01c1e3a53b7dadd8c7e43da35ea"
     end
   end
 

@@ -300,21 +300,15 @@ impl Message {
         // Borders::LEFT block, which insets the text by 1 column (NOT 2). Wrapping
         // at width-2 here over-counts lines and leaves blank rows in scrollback
         // ("scroll adds spaces"). Use width-1 to match the actual render.
+        // Count with the SAME wrapper that paints. Ceiling division on the raw
+        // line width silently under-counts whenever a word cannot be split at
+        // the boundary — `Wrap { trim: false }` is ratatui's `WordWrapper`,
+        // which keeps words whole and so needs strictly more rows. The shortfall
+        // is not a cosmetic gap: this number sizes the `insert_before` rect, and
+        // rows past it are clipped out of scrollback permanently.
         let plain_width = width.saturating_sub(1).max(1);
-        let lines: Vec<&str> = self.content.lines().collect();
-        let mut height: u16 = 0;
-        for line in &lines {
-            let line_len = unicode_width::UnicodeWidthStr::width(*line) as u16;
-            let wrapped_lines = if line_len == 0 {
-                1
-            } else {
-                (line_len + plain_width - 1) / plain_width
-            };
-            height += wrapped_lines;
-        }
-        if lines.is_empty() {
-            height = 1;
-        }
+        let mut height: u16 =
+            super::wrap_count::wrapped_row_count(&self.content, plain_width);
 
         // Label line for user/agent messages (continuation has no label)
         match self.msg_type {
@@ -557,10 +551,17 @@ impl Message {
             return;
         }
 
-        // Rich tool call: render pre-built styled Lines directly
+        // Rich tool call: render pre-built styled Lines directly.
+        //
+        // NOT via `Paragraph`: these lines carry OSC 8 hyperlink escapes (tool
+        // headers linkify their file path, and `tools/collapse.rs` linkifies
+        // URLs in output rows). `Paragraph` has no `.wrap()` here, so ratatui
+        // uses `LineTruncator`, which counts each ESC byte as one display column
+        // — about 80 phantom columns for a `file://` header — and cuts the row's
+        // visible tail. This content is finalized into the terminal's own
+        // scrollback via `insert_before`, so that truncation is permanent.
         if let Some(ref td) = self.tool_data {
-            let paragraph = Paragraph::new(td.lines.clone());
-            paragraph.render(area, buf);
+            crate::render::cells::render_lines(&td.lines, area, buf, 0);
             return;
         }
 

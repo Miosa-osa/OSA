@@ -858,9 +858,15 @@ fn copy_to_clipboard(text: &str, ok_msg: &str) -> TranscriptAction {
     // U-T7/U-T19 — layered clipboard cascade (native CLI → tmux buffer → OSC 52)
     // so copy works over SSH / headless / tmux, not just on a local windowing
     // system as the old arboard-only path did.
-    match crate::clipboard::copy(text) {
-        Some(_) => TranscriptAction::Toast(ok_msg.to_string()),
-        None => TranscriptAction::Toast("Copy failed".to_string()),
+    // Only the caller's optimistic `ok_msg` is used when the copy is actually
+    // CONFIRMED. OSC 52 (the last transport, and the only one available over SSH)
+    // cannot be acknowledged, so anything less than confirmed reports itself and
+    // names the file the payload was parked in — `Y` copies the whole transcript,
+    // which is exactly the payload you cannot reconstruct after a silent drop.
+    let outcome = crate::clipboard::copy(text);
+    match outcome.confidence {
+        crate::clipboard::Confidence::Confirmed => TranscriptAction::Toast(ok_msg.to_string()),
+        _ => TranscriptAction::Toast(outcome.message()),
     }
 }
 

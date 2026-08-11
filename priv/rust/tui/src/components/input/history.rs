@@ -152,7 +152,10 @@ impl History {
             buf.push_str(&encode(entry));
             buf.push('\n');
         }
-        let _ = std::fs::write(path, buf);
+        // 0600 from birth: this file is everything the user has ever typed,
+        // pasted secrets included. See client::auth::write_private for why this
+        // is not a write-then-chmod.
+        let _ = crate::client::auth::write_private(path, buf.as_bytes());
     }
 
     pub fn prev(&mut self) -> Option<&str> {
@@ -254,5 +257,48 @@ mod tests {
         // Continue older.
         let older = h.search_backward("git", idx).unwrap();
         assert_eq!(h.entries()[older], "git status");
+    }
+
+    #[cfg(unix)]
+    mod perms {
+        use super::*;
+        use crate::client::auth::TempDir;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn persisted_history_is_owner_only() {
+            let tmp = TempDir::new("history");
+            let path = tmp.path().join("nested").join("tui_history");
+
+            let mut h = History::load_from(Some(path.clone()));
+            h.push("secret prompt with a pasted api key".to_string());
+
+            assert_eq!(
+                mode_of(&path),
+                0o600,
+                "prompt history must not be world-readable"
+            );
+            // Persistence still works.
+            let reloaded = History::load_from(Some(path));
+            assert_eq!(reloaded.entries(), &["secret prompt with a pasted api key"]);
+        }
+
+        #[test]
+        fn persist_repairs_preexisting_world_readable_history() {
+            let tmp = TempDir::new("history-legacy");
+            let path = tmp.path().join("tui_history");
+            std::fs::write(&path, "old\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            let mut h = History::load_from(Some(path.clone()));
+            h.push("new entry".to_string());
+
+            assert_eq!(mode_of(&path), 0o600, "pre-existing 0644 history not repaired");
+            assert_eq!(History::load_from(Some(path)).entries(), &["old", "new entry"]);
+        }
     }
 }

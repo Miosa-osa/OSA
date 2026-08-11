@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   require Logger
 
   alias OptimalSystemAgent.ConfigFile
+  alias OptimalSystemAgent.Utils.Text
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
   # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
@@ -193,13 +194,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
 
       {:error, reason} ->
         Logger.warning("[tool_result_storage] Failed to persist: #{reason}")
-        # Fall back to inline truncation (no file to reference).
-        String.slice(result_str, 0, threshold) <>
+        # Fall back to inline truncation (no file to reference). `threshold` is
+        # a BYTE cap, so this must be a byte-bounded cut — String.slice/3
+        # counts graphemes and would emit ~3x the advertised size on CJK and
+        # ~4x on emoji while claiming "showing first #{threshold} bytes".
+        Text.utf8_head(result_str, threshold) <>
           "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{threshold} bytes]"
     end
   rescue
     _ ->
-      String.slice(result_str, 0, threshold) <>
+      Text.utf8_head(result_str, threshold) <>
         "\n\n[Output truncated — #{byte_size(result_str)} bytes total]"
   end
 
@@ -266,9 +270,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     if total <= head_bytes + tail_bytes do
       result_str
     else
-      head = binary_part(result_str, 0, head_bytes)
-      tail = binary_part(result_str, total - tail_bytes, tail_bytes)
-      omitted = total - head_bytes - tail_bytes
+      # Both cuts MUST be UTF-8 boundary-safe. This preview is handed straight
+      # to the provider, whose request body goes through
+      # `Jason.encode_to_iodata!/1` — that RAISES on invalid UTF-8, so an
+      # unguarded `binary_part/3` here kills the turn rather than degrading it.
+      # The tail is the dangerous one: a cut at `total - tail_bytes` starts
+      # mid-sequence on almost any multibyte content (minified JSON with
+      # escaped text, a base64 blob, a CJK or emoji log), while the head only
+      # misbehaves when the boundary lands inside the final character.
+      head = Text.utf8_head(result_str, head_bytes)
+      tail = Text.utf8_tail(result_str, tail_bytes)
+      omitted = total - byte_size(head) - byte_size(tail)
 
       "#{head}\n\n… #{omitted} bytes omitted …\n\n#{tail}"
     end

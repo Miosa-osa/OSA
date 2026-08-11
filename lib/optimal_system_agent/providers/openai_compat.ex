@@ -56,6 +56,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         model: model,
         messages: format_messages(messages) |> maybe_strip_images(opts)
       }
+      |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:openai, model)
+      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :openai)
       |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(model, opts)
@@ -199,6 +201,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # builds) fall back to the char/token estimate in finalize_sse_stream/4.
       stream_options: %{include_usage: true}
     }
+    |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:openai, model)
+    |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :openai)
     |> maybe_add_temperature(model, opts)
     |> maybe_add_tools(opts)
     |> maybe_add_max_tokens(model, opts)
@@ -593,7 +597,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       %{role: "tool", content: content, tool_call_id: id} = msg ->
         base = %{
           "role" => "tool",
-          "content" => to_string(content),
+          # `encode_text/1`, not `to_string/1`: a `tool` turn's content can be a
+          # block list (ToolExecutor's screenshot branch emits text + image),
+          # and the OpenAI `tool` role accepts only a string — so blocks are
+          # flattened to text with an honest note where the image was.
+          "content" => encode_text(content),
           "tool_call_id" => to_string(id)
         }
 
@@ -605,7 +613,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # Assistant messages with tool_calls — preserve structured tool calls
       %{role: "assistant", content: content, tool_calls: calls}
       when is_list(calls) and calls != [] ->
-        msg = %{"role" => "assistant", "content" => to_string(content)}
+        msg = %{"role" => "assistant", "content" => encode_text(content)}
 
         formatted_calls =
           Enum.map(calls, fn tc ->
@@ -626,9 +634,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
         Map.put(msg, "tool_calls", formatted_calls)
 
-      # Generic atom-keyed messages
+      # Generic atom-keyed messages. `content` may be a LIST of structured
+      # blocks (`MessageHandler.build_messages/3` emits `text` + `image` blocks
+      # for an attachment); `to_string/1` on a list of maps raises
+      # `Protocol.UndefinedError` and kills the turn. Encode it into the
+      # OpenAI multimodal content-part array instead — which is also the only
+      # way an image ever reaches a vision-capable OpenAI-compatible model.
       %{role: role, content: content} ->
-        %{"role" => to_string(role), "content" => to_string(content)}
+        %{"role" => to_string(role), "content" => encode_content(content)}
 
       %{"role" => _role} = msg ->
         msg
@@ -636,6 +649,116 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       msg when is_map(msg) ->
         msg
     end)
+  end
+
+  # ── Multimodal content encoding ───────────────────────────────────────────
+  #
+  # OSA's internal block shape is Anthropic's
+  # (`%{type: "image", source: %{type: "base64", media_type: .., data: ..}}`).
+  # The OpenAI chat-completions equivalent is a content ARRAY of parts, where an
+  # image is `%{"type" => "image_url", "image_url" => %{"url" => <data URL>}}`.
+  # Without this translation the only thing that ever reached an OpenAI-shaped
+  # provider was a crash (`to_string/1` on a list) or, upstream of it,
+  # `Registry.normalize_message_content/2`'s "provider does not accept inline
+  # image content" placeholder — which is simply false for gpt-4o and friends.
+  @doc false
+  @spec encode_content(term()) :: String.t() | list(map())
+  def encode_content(content) when is_binary(content), do: content
+
+  def encode_content(content) when is_list(content) do
+    parts =
+      content
+      |> Enum.map(&content_part/1)
+      |> Enum.reject(&is_nil/1)
+
+    case parts do
+      [] -> ""
+      # A single text part is emitted as a plain string: byte-identical to what
+      # every provider received before, so nothing about a text-only turn moves.
+      [%{"type" => "text", "text" => text}] -> text
+      parts -> parts
+    end
+  end
+
+  def encode_content(nil), do: ""
+
+  def encode_content(other) do
+    if String.Chars.impl_for(other), do: to_string(other), else: inspect(other)
+  end
+
+  defp content_part(text) when is_binary(text), do: %{"type" => "text", "text" => text}
+
+  defp content_part(%{type: "image", source: source}), do: image_part(source)
+  defp content_part(%{"type" => "image", "source" => source}), do: image_part(source)
+
+  # Already in OpenAI shape (a re-entrant retry/fallback hop) — pass through.
+  defp content_part(%{"type" => "image_url"} = part), do: part
+
+  defp content_part(%{type: "image_url", image_url: url}),
+    do: %{"type" => "image_url", "image_url" => url}
+
+  defp content_part(%{type: "text", text: t}) when is_binary(t),
+    do: %{"type" => "text", "text" => t}
+
+  defp content_part(%{"type" => "text", "text" => t}) when is_binary(t),
+    do: %{"type" => "text", "text" => t}
+
+  defp content_part(%{text: t}) when is_binary(t), do: %{"type" => "text", "text" => t}
+  defp content_part(%{"text" => t}) when is_binary(t), do: %{"type" => "text", "text" => t}
+
+  # Anything else structured (a stray tool_use block) carries nothing this API
+  # can render.
+  defp content_part(_), do: nil
+
+  defp image_part(source) do
+    media_type = get_in_either(source, :media_type, "media_type") || "image/png"
+    data = get_in_either(source, :data, "data")
+    url = get_in_either(source, :url, "url")
+
+    cond do
+      is_binary(url) and url != "" ->
+        %{"type" => "image_url", "image_url" => %{"url" => url}}
+
+      is_binary(data) and data != "" ->
+        %{"type" => "image_url", "image_url" => %{"url" => "data:#{media_type};base64,#{data}"}}
+
+      true ->
+        nil
+    end
+  end
+
+  defp get_in_either(map, atom_key, string_key) when is_map(map),
+    do: Map.get(map, atom_key, Map.get(map, string_key))
+
+  defp get_in_either(_, _, _), do: nil
+
+  @image_unrenderable "[An image was attached here but this message role cannot carry image content, so the image was not sent. Do not describe or reason about it; ask the user to re-share it as a new message if it matters.]"
+
+  # Text-only flattening, for the two roles the OpenAI API restricts to a plain
+  # string (`tool`, and `assistant` alongside tool_calls). An image block there
+  # cannot be carried, so it becomes an explicit note rather than "" — a
+  # silently dropped image is what makes a model answer confidently about
+  # something it never received.
+  @doc false
+  @spec encode_text(term()) :: String.t()
+  def encode_text(content) when is_binary(content), do: content
+  def encode_text(nil), do: ""
+
+  def encode_text(content) when is_list(content) do
+    content
+    |> Enum.map(fn block ->
+      case content_part(block) do
+        %{"type" => "text", "text" => t} -> t
+        %{"type" => "image_url"} -> @image_unrenderable
+        _ -> nil
+      end
+    end)
+    |> Enum.reject(&(&1 == nil or &1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  def encode_text(other) do
+    if String.Chars.impl_for(other), do: to_string(other), else: inspect(other)
   end
 
   @doc "Format tools into the OpenAI function-calling format."

@@ -67,7 +67,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     session_id = conn.body_params["session_id"] || "session-#{System.unique_integer([:positive])}"
     user_id = conn.assigns[:user_id] || "anonymous"
     working_dir = conn.body_params["working_dir"]
-    images = conn.body_params["images"] || []
+    images = normalize_images(conn.body_params["images"])
     context_refs = conn.body_params["context_refs"]
 
     # Deferred composer @-mentions piece: non-image `@file`/`@agent` refs
@@ -496,6 +496,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     valid_list = Enum.join(@valid_patterns, ", ")
     {:error, "Pattern must be a string. Valid patterns are: #{valid_list}"}
   end
+
+  # `images` is caller-supplied and each entry is either inline base64 bytes or
+  # a filesystem PATH that `MessageHandler.build_messages/3` will read. The
+  # security decision lives there (canonicalisation + `PathPolicy.check_read/2`
+  # + magic-byte sniffing + a per-image byte cap); what belongs at the request
+  # boundary is shape: a list of non-empty strings, bounded in count, so a
+  # 10_000-entry body cannot turn one request into 10_000 file reads.
+  @max_images 16
+
+  defp normalize_images(images) when is_list(images) do
+    images
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.take(@max_images)
+  end
+
+  defp normalize_images(_), do: []
 end
 
 # Alias so existing tests referencing OrchestrationRoutes compile without changes.

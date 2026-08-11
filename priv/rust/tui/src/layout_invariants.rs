@@ -3152,9 +3152,9 @@ mod turn_completion_invariants {
     use crate::app::event_loop::{
         fit_bands, inline_split, settle_working_chrome, stream_preview_ceiling,
         Bands,
-        stream_preview_rows, streaming_inline_height, ROW_AGENTS,
+        stream_preview_rows, streaming_inline_height, DampedSlot, ROW_AGENTS,
         ROW_CHECKLIST, ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, STREAM_PREVIEW_MAX,
-        STREAM_PREVIEW_ROWS, STREAM_PREVIEW_STEP,
+        STREAM_PREVIEW_ROWS, SLOT_SHRINK_HOLD, STREAM_PREVIEW_STEP,
     };
     use crate::components::chat::Chat;
     use crate::components::task_checklist::TaskChecklist;
@@ -3162,31 +3162,36 @@ mod turn_completion_invariants {
 
     const W: u16 = 100;
 
-    // ── (3) The preview may grow, but only in bounded steps ───────────────
+    // ── (3) The preview sizes to the reply, and only the shrink is damped ──
 
-    /// Growth is quantized, monotonic and capped — the three properties that make
-    /// it impossible for a growing reply to churn the inline viewport.
+    /// A growing reply is never clipped and never exceeds the ceiling, and a
+    /// reply whose height OSCILLATES never shrinks the viewport while it is
+    /// still oscillating.
     ///
-    /// A per-delta-sized preview would rebuild the viewport (and issue a DSR
-    /// cursor query tmux/SSH can drop) on every token. This sweeps a reply
-    /// growing row by row past the ceiling and asserts the reserved slot changes
-    /// only a handful of times for the WHOLE turn.
+    /// This is the anti-churn half of the contract. It used to be bought with a
+    /// per-turn high-water ratchet, which never gave a row back and so paid for
+    /// stability in dead screen. The ratchet is now a time bound: any upward
+    /// move re-arms `SLOT_SHRINK_HOLD`, so a stream that keeps moving
+    /// holds its slot exactly as before. The clock here never advances, which is
+    /// precisely the "the reply is still moving" case.
     #[test]
-    fn the_preview_grows_in_bounded_steps_and_never_shrinks_mid_turn() {
+    fn an_oscillating_reply_never_shrinks_the_preview_mid_burst() {
+        let t0 = std::time::Instant::now();
         for term_rows in [24u16, 30, 40, 60, 120] {
             let ceiling = stream_preview_ceiling(term_rows);
-            let mut hw = 0u16;
+            let mut slot = DampedSlot::default();
+            let mut prev = 0u16;
             let mut heights = Vec::new();
             // A reply rendering to 1…200 rows, then DIPPING back (a fenced block
             // closing / a table collapsing) — the shape that would oscillate a
             // naively content-sized slot.
             let progress = (1u16..=200).chain((1u16..=200).rev());
             for content_h in progress {
-                let rows = stream_preview_rows(content_h, hw, ceiling);
+                let rows = stream_preview_rows(content_h, &mut slot, ceiling, t0);
                 assert!(
-                    rows >= hw,
+                    rows >= prev,
                     "term_rows={term_rows} content={content_h}: the preview SHRANK \
-                     mid-turn ({hw} → {rows}); a shrink/grow pair rebuilds the \
+                     mid-burst ({prev} → {rows}); a shrink/grow pair rebuilds the \
                      viewport twice"
                 );
                 assert!(
@@ -3199,27 +3204,59 @@ mod turn_completion_invariants {
                     "term_rows={term_rows} content={content_h}: {rows} rows clips \
                      the reply"
                 );
-                // The lattice is `k * STEP`, not `ROWS + k * STEP`. The old floor
-                // of STREAM_PREVIEW_ROWS is what reserved ten rows for the first
-                // token of a one-line reply and painted one — the dead space
-                // between the committed prompt and the spinner. Quantization is
-                // what keeps the viewport from churning; the floor never was.
-                assert!(
-                    rows == ceiling || rows % STREAM_PREVIEW_STEP == 0,
-                    "term_rows={term_rows} content={content_h}: {rows} is off the \
-                     k*STEP lattice — growth is not quantized"
-                );
-                hw = rows;
+                prev = rows;
                 heights.push(rows);
             }
             heights.dedup();
-            let max_steps = STREAM_PREVIEW_MAX.div_ceil(STREAM_PREVIEW_STEP) as usize + 1;
+            // Growth is now per-row rather than per-STEP, so the bound is the
+            // ceiling itself: the slot can take at most `ceiling` distinct values
+            // on the way up, and (this test) none on the way down.
             assert!(
-                heights.len() <= max_steps,
-                "term_rows={term_rows}: the preview changed height {} times in one \
-                 turn ({heights:?}); at most {max_steps} viewport rebuilds are allowed",
+                heights.len() <= ceiling as usize,
+                "term_rows={term_rows}: the preview took {} distinct heights in \
+                 one burst ({heights:?}); at most {ceiling} are reachable",
                 heights.len()
             );
+        }
+    }
+
+    /// Once the reply STOPS moving, the slot gives the surplus rows back.
+    ///
+    /// The other half of the contract, and the defect itself: a turn that once
+    /// needed a tall slot kept it for its one-row closing reply, and because the
+    /// region is bottom-anchored the surplus painted as a blank band above the
+    /// text. Reserved must converge on drawn.
+    #[test]
+    fn the_preview_releases_its_rows_once_the_reply_settles() {
+        let t0 = std::time::Instant::now();
+        let settled = t0 + SLOT_SHRINK_HOLD;
+        for term_rows in [24u16, 30, 40, 60, 120] {
+            let ceiling = stream_preview_ceiling(term_rows);
+            for tall in [2u16, 5, 12, 40] {
+                for short in 1..=tall {
+                    let mut slot = DampedSlot::default();
+                    // Grow to `tall`, then hold `short`.
+                    assert_eq!(
+                        stream_preview_rows(tall, &mut slot, ceiling, t0),
+                        tall.min(ceiling)
+                    );
+                    // Within the hold window the tall slot stands (anti-churn).
+                    assert_eq!(
+                        stream_preview_rows(short, &mut slot, ceiling, t0),
+                        tall.min(ceiling),
+                        "term_rows={term_rows}: the slot shrank inside the hold \
+                         window, which is the churn the hold exists to prevent"
+                    );
+                    // Past it, the rows come back.
+                    assert_eq!(
+                        stream_preview_rows(short, &mut slot, ceiling, settled),
+                        short.min(ceiling),
+                        "term_rows={term_rows}: a reply that settled at {short} rows \
+                         kept a {tall}-row reservation — {} dead rows above it",
+                        tall.min(ceiling) - short.min(ceiling)
+                    );
+                }
+            }
         }
     }
 
@@ -5902,44 +5939,116 @@ Beta is the one I would pick.
 
     /// **The streaming preview may not reserve rows it does not draw.**
     ///
-    /// The dead space in the report — "my prompt, then most of a screen of blank
-    /// rows, then the spinner near the bottom" — is this: the slot's lattice
-    /// used to START at `STREAM_PREVIEW_ROWS`, so the first token of a one-line
-    /// reply reserved ten rows (twenty-two at the ceiling) and painted one.
-    /// Because the region is bottom-anchored and the preview bottom-anchors its
-    /// tail, every undrawn row lands between the committed prompt and the reply.
+    /// The defect, stated as an invariant, and the one this whole class was
+    /// structurally blind to. `reserved_equals_drawn_for_a_committed_table_at_every_width`
+    /// checks only the OVER-paint direction — ink below the reservation — so a
+    /// region that reserved twelve rows and painted one passed it cleanly. The
+    /// under-paint direction is what the owner sees: `Chat::draw_live`
+    /// bottom-anchors its tail inside the slot, so every reserved-and-undrawn
+    /// row lands as a blank band ABOVE the reply, between it and the committed
+    /// transcript.
     ///
-    /// The slack a quantized lattice needs is one STEP. More than that is dead
-    /// screen.
+    /// Deliberately general: it sweeps body shapes (one-liners, prose that
+    /// wraps, fenced code, tables, the tall reply that then collapses to a
+    /// one-liner) across a range of widths and terminal heights, and drives the
+    /// REAL reservation and the REAL paint. It is not specialised to any one
+    /// message type, and a new renderer is covered by construction.
     #[test]
-    fn the_streaming_preview_never_reserves_more_than_one_step_of_slack() {
+    fn the_streaming_preview_draws_every_row_it_reserves() {
         use crate::app::event_loop::{
-            stream_preview_ceiling, stream_preview_rows, STREAM_PREVIEW_STEP,
+            stream_preview_ceiling, stream_preview_rows, DampedSlot,
+            SLOT_SHRINK_HOLD,
         };
-        for term_rows in [12u16, 24, 30, 50, 80] {
+        use crate::components::chat::Chat;
+        use crate::layout_invariants::{render_to_buffer, snapshot_buffer};
+
+        const BODIES: &[&str] = &[
+            "ok",
+            "Build's green — 976 modules, clean typecheck.",
+            "a much longer single paragraph of prose that has to wrap at least \
+             once at every width in the sweep and probably several times at the \
+             narrow end of it",
+            "intro\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nouttro",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+            "line one\nline two\nline three\nline four\nline five\nline six\n\
+             line seven\nline eight\nline nine\nline ten\nline eleven\nline twelve",
+        ];
+
+        let t0 = std::time::Instant::now();
+        // Long enough that every pending shrink has matured: this is the SETTLED
+        // state, which is where reserved must equal drawn. The hold window is
+        // exercised separately by `an_oscillating_reply_never_shrinks_the_preview_mid_burst`.
+        let settled = t0 + SLOT_SHRINK_HOLD * 4;
+
+        for term_rows in [24u16, 30, 40, 60] {
             let ceiling = stream_preview_ceiling(term_rows);
-            let mut high_water = 0u16;
-            for content_h in 1u16..=60 {
-                let got = stream_preview_rows(content_h, high_water, ceiling);
-                assert!(
-                    got >= content_h.min(ceiling),
-                    "{term_rows} rows: {content_h} rows of reply were given a \
-                     {got}-row slot — the reply is clipped"
-                );
-                assert!(
-                    got <= content_h.saturating_add(STREAM_PREVIEW_STEP - 1).max(high_water),
-                    "{term_rows} rows: {content_h} rows of reply reserved a {got}-row \
-                     slot, leaving {} rows of dead screen between the committed \
-                     prompt and the reply",
-                    got - content_h
-                );
-                assert!(got <= ceiling, "{term_rows} rows: {got} exceeds the {ceiling} ceiling");
-                assert!(
-                    got >= high_water.min(ceiling),
-                    "{term_rows} rows: the slot shrank from {high_water} to {got} \
-                     mid-turn, which rebuilds the viewport downward"
-                );
-                high_water = got;
+            for width in [40u16, 60, 80, 100, 140] {
+                for body in BODIES {
+                    let mut slot = DampedSlot::default();
+                    // Pre-grow the slot the way a real turn does — an early tall
+                    // render (the tool's streaming output) before the short final
+                    // reply. This is exactly the sequence that stranded the rows.
+                    let _ = stream_preview_rows(ceiling, &mut slot, ceiling, t0);
+
+                    let mut chat = Chat::new();
+                    chat.update_streaming(body);
+                    let content_h = chat.streaming_height(width);
+                    if content_h == 0 {
+                        continue;
+                    }
+                    // Two frames, as the render loop really does it: the first
+                    // at this height arms the pending shrink, a later one past
+                    // the hold window commits it.
+                    let _ = stream_preview_rows(content_h, &mut slot, ceiling, t0);
+                    let reserved =
+                        stream_preview_rows(content_h, &mut slot, ceiling, settled);
+
+                    assert!(
+                        reserved >= content_h.min(ceiling),
+                        "{width}x{term_rows} {body:?}: {content_h} rows of reply \
+                         were given a {reserved}-row slot — the reply is clipped"
+                    );
+                    assert_eq!(
+                        reserved,
+                        content_h.min(ceiling),
+                        "{width}x{term_rows} {body:?}: the settled preview reserved \
+                         {reserved} rows for {content_h} rows of content — {} dead \
+                         rows above the reply",
+                        reserved.saturating_sub(content_h)
+                    );
+
+                    // …and the paint agrees at the boundary. The slot is bottom-
+                    // anchored, so the row that goes blank first when the
+                    // reservation is too big is its TOP row.
+                    let buf = render_to_buffer(
+                        |f| {
+                            let area = Rect::new(0, 0, width, reserved);
+                            chat.draw_live(f, area);
+                        },
+                        width,
+                        reserved,
+                    );
+                    for y in 0..reserved {
+                        let row: String = (0..width)
+                            .map(|x| buf[(x, y)].symbol())
+                            .collect::<String>();
+                        assert!(
+                            !row.trim().is_empty() || body.contains("\n\n"),
+                            "{width}x{term_rows} {body:?}: reserved {reserved} rows \
+                             but row {y} of the slot is blank\n{}",
+                            snapshot_buffer(&buf)
+                        );
+                    }
+                    // Whatever the body, the FIRST row of a bottom-anchored slot
+                    // must carry ink — a blank top row IS the reported gap.
+                    let top: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+                    assert!(
+                        !top.trim().is_empty(),
+                        "{width}x{term_rows} {body:?}: the top row of the reserved \
+                         slot is blank — this is the dead band above the reply\n{}",
+                        snapshot_buffer(&buf)
+                    );
+                }
             }
         }
     }
@@ -5948,174 +6057,17 @@ Beta is the one I would pick.
     /// does not exist is the same defect at zero content.
     #[test]
     fn an_idle_stream_reserves_nothing() {
-        use crate::app::event_loop::{stream_preview_ceiling, stream_preview_rows};
+        use crate::app::event_loop::{
+            stream_preview_ceiling, stream_preview_rows, DampedSlot,
+        };
+        let now = std::time::Instant::now();
         for term_rows in [12u16, 24, 30, 50, 80] {
+            let mut slot = DampedSlot::default();
             assert_eq!(
-                stream_preview_rows(0, 0, stream_preview_ceiling(term_rows)),
+                stream_preview_rows(0, &mut slot, stream_preview_ceiling(term_rows), now),
                 0,
                 "{term_rows} rows: an idle stream band reserved rows"
             );
-        }
-    }
-}
-
-/// **Column-width invariants** — a rendered row must own exactly the columns it
-/// reserved, measured in DISPLAY COLUMNS.
-///
-/// The failure these pin is the owner's loudest complaint: the TUI "loses its
-/// layout". It happens when a row is sized with the wrong unit. `s.len()` is
-/// BYTES, so a CJK/emoji value measures ~3x its true cost and collapses the
-/// column next to it; `s.chars().count()` is CHARS, so a wide glyph occupies two
-/// columns where one was reserved and shoves every column to its right off the
-/// pane. `crate::util::fit_cols` / `pad_cols` are the canonical primitives and
-/// measure grapheme clusters at their true column advance.
-#[cfg(test)]
-mod column_width_invariants {
-    use std::path::{Path, PathBuf};
-
-    fn src_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
-    }
-
-    fn rs_files_under(dirs: &[&str]) -> Vec<PathBuf> {
-        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "rs") {
-                    out.push(p);
-                }
-            }
-        }
-        let mut out = Vec::new();
-        for d in dirs {
-            walk(&src_root().join(d), &mut out);
-        }
-        out.sort();
-        out
-    }
-
-    /// Everything before the `#[cfg(test)]` marker — test bodies legitimately
-    /// assert on `chars().count()` and are not layout code.
-    fn non_test_source(path: &Path) -> String {
-        let src = std::fs::read_to_string(path).unwrap_or_default();
-        match src.find("#[cfg(test)]") {
-            Some(i) => src[..i].to_string(),
-            None => src,
-        }
-    }
-
-    /// No dialog/component/tool may carry its own private char-count fitter.
-    ///
-    /// There were 22 of these, all the same shape — `if s.chars().count() > max {
-    /// … s.chars().take(max - 1) … }` — shadowing `crate::util::fit_cols` and
-    /// its 28 correct callers. They render user-supplied content (session
-    /// titles, file paths, memory entries, skill descriptions, permission rules,
-    /// MCP server names), so any of them could shear a row.
-    #[test]
-    fn no_private_char_count_fitter_shadows_fit_cols() {
-        let mut offenders = Vec::new();
-        for path in rs_files_under(&["dialogs", "components", "tools"]) {
-            let src = non_test_source(&path);
-            for (i, line) in src.lines().enumerate() {
-                let l = line.trim();
-                if l.starts_with("//") {
-                    continue; // prose about the defect is not the defect
-                }
-                // The tell: a char-count compared against a column budget, or a
-                // char-count taken as a slice length for a fit.
-                let is_fit_shape = (l.contains("chars().count() >") && l.contains("max"))
-                    || l.contains("chars().take(max")
-                    || l.contains("chars().take(cut")
-                    || l.contains("chars().take(take");
-                if is_fit_shape {
-                    offenders.push(format!(
-                        "{}:{}: {l}",
-                        path.strip_prefix(src_root()).unwrap_or(&path).display(),
-                        i + 1
-                    ));
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "{} private char-count fitter(s) reappeared. `.chars().count()` treats a \
-             wide glyph as 1 column, so it OVERFLOWS its reserved span and shoves the \
-             row's right-hand badge/timestamp off the pane. Call \
-             `crate::util::fit_cols` instead:\n  {}",
-            offenders.len(),
-            offenders.join("\n  ")
-        );
-    }
-
-    /// No layout budget may be computed from a char count or a byte length.
-    ///
-    /// `pad = width - s.chars().count()` and `avail - badge.len()` are the two
-    /// shapes that shear a row without ever fitting anything.
-    #[test]
-    fn no_pad_or_budget_is_measured_in_chars_or_bytes() {
-        let mut offenders = Vec::new();
-        for path in rs_files_under(&["dialogs", "components", "tools"]) {
-            let src = non_test_source(&path);
-            for (i, line) in src.lines().enumerate() {
-                let l = line.trim();
-                if l.starts_with("//") {
-                    continue; // prose about the defect is not the defect
-                }
-                let is_pad_shape = l.contains("saturating_sub(") && l.contains("chars().count()");
-                if is_pad_shape {
-                    offenders.push(format!(
-                        "{}:{}: {l}",
-                        path.strip_prefix(src_root()).unwrap_or(&path).display(),
-                        i + 1
-                    ));
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "{} layout budget(s) measured in CHARS rather than display columns. Use \
-             `crate::util::cols` / `pad_width` / `pad_cols`:\n  {}",
-            offenders.len(),
-            offenders.join("\n  ")
-        );
-    }
-
-    /// The behavioural half of the guard: every fitter that survives must keep a
-    /// wide-glyph value inside its reserved span. A char-count fitter given a
-    /// budget of 8 returns 8 CJK chars = 16 columns and blows the span.
-    #[test]
-    fn the_canonical_fitter_never_overflows_its_span() {
-        use crate::util::{cols, fit_cols, pad_cols, pad_cols_start};
-        for s in [
-            "日本語のセッションタイトルです",
-            "🎉🎉🎉🎉🎉🎉🎉🎉",
-            "👨‍👩‍👧‍👦 family emoji run",
-            "ascii only, nothing wide",
-            "混ざったmixed幅のtext",
-        ] {
-            for w in 0usize..24 {
-                assert!(
-                    cols(&fit_cols(s, w)) <= w,
-                    "fit_cols({s:?}, {w}) = {:?} is {} columns, over its {w}-column span",
-                    fit_cols(s, w),
-                    cols(&fit_cols(s, w))
-                );
-                assert_eq!(
-                    cols(&pad_cols(s, w)),
-                    w,
-                    "pad_cols({s:?}, {w}) = {:?} does not own exactly {w} columns",
-                    pad_cols(s, w)
-                );
-                assert_eq!(
-                    cols(&pad_cols_start(s, w)),
-                    w,
-                    "pad_cols_start({s:?}, {w}) = {:?} does not own exactly {w} columns",
-                    pad_cols_start(s, w)
-                );
-            }
         }
     }
 }

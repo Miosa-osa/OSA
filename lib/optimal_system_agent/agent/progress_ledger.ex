@@ -60,6 +60,11 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
 
   @goal_placeholder "_Not set._"
 
+  # Boundary marker written into the `## Log` when a NEW goal is anchored.
+  # `summarize/1` never shows entries recorded before the last one, so a
+  # re-issued goal cannot inherit its predecessor's history.
+  @anchor_token "[goal-anchor:"
+
   # Matches the body of the "## Goal" section: everything between the "## Goal"
   # heading and the following "## Log" heading. Dotall so the body may span
   # multiple lines.
@@ -146,18 +151,39 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   The ledger is created if it does not exist yet. Passing an empty string resets
   the goal to the placeholder.
 
+  ## Options
+
+    * `:goal_id` — the stable identity of the goal being anchored (see
+      `Agent.Loop.GoalTracker`). When given, an `#{@anchor_token}<id>]` marker
+      bullet is appended to the `## Log` at the moment the goal changes, and
+      `summarize/1` renders only the log entries recorded AFTER that marker.
+
+      Without it the `## Goal` head is replaced in place while the previous
+      goal's `## Log` lines stay exactly where they are — so a re-issued goal
+      silently inherited its predecessor's history and `summarize/1` presented
+      the new goal over up to #{@summary_entries} lines that all belonged to
+      the old one.
+
   Returns `{:ok, goal}` on success.
   """
-  @spec set_goal(String.t(), String.t()) :: result()
-  def set_goal(session_id, goal)
-      when is_binary(session_id) and is_binary(goal) do
+  @spec set_goal(String.t(), String.t(), keyword()) :: result()
+  def set_goal(session_id, goal, opts \\ [])
+
+  def set_goal(session_id, goal, opts)
+      when is_binary(session_id) and is_binary(goal) and is_list(opts) do
     body = normalize_goal(goal)
 
     with :ok <- ensure_file(session_id),
          # The whole read-modify-write runs under the ledger lock, so a
          # concurrent `append_entry/2` cannot be read-before / written-after and
          # silently erased.
-         written = with_ledger_lock(session_id, fn -> rewrite_goal(session_id, body) end) do
+         # The anchor marker is written INSIDE the same lock as the section
+         # rewrite: a head that changed without its matching log boundary is
+         # exactly the mis-attribution this is meant to prevent.
+         written =
+           with_ledger_lock(session_id, fn ->
+             anchor_goal(session_id, body, Keyword.get(opts, :goal_id))
+           end) do
       case written do
         :ok ->
           # Capture the durable, immutable Task Brief once, at the moment the run's
@@ -290,13 +316,36 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
     end
   end
 
-  # Return the last `n` "- [...]" log bullets, preserving order.
+  # Return the last `n` "- [...]" log bullets **belonging to the current goal**,
+  # preserving order.
+  #
+  # The goal-scoping is the point: the `## Goal` head is replaced in place, so
+  # without cutting at the last `[goal-anchor:<id>]` boundary the summary
+  # rendered the CURRENT goal above entries logged entirely under a previous
+  # one. A ledger with no anchor (written before goal ids existed, or by a
+  # caller that passed no `:goal_id`) keeps the old whole-log behavior.
   @spec extract_recent_entries(String.t(), pos_integer()) :: [String.t()]
   defp extract_recent_entries(contents, n) do
     contents
     |> String.split("\n")
     |> Enum.filter(&String.starts_with?(&1, "- ["))
+    |> since_last_anchor()
     |> Enum.take(-n)
+  end
+
+  defp since_last_anchor(bullets) do
+    case last_anchor_index(bullets) do
+      nil -> bullets
+      idx -> Enum.drop(bullets, idx)
+    end
+  end
+
+  defp last_anchor_index(bullets) do
+    bullets
+    |> Enum.with_index()
+    |> Enum.reduce(nil, fn {line, idx}, acc ->
+      if String.contains?(line, @anchor_token), do: idx, else: acc
+    end)
   end
 
   @spec safe_id(String.t()) :: String.t()
@@ -329,6 +378,40 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
     case RecordLock.with_lock(path(session_id), fun) do
       {:ok, result} -> result
       {:contended, result} -> result
+    end
+  end
+
+  # Rewrite the `## Goal` head and, when the caller supplied a goal identity AND
+  # the goal actually changed, append the `[goal-anchor:<id>]` boundary bullet
+  # that `summarize/1` cuts on. Both halves run under the caller's lock.
+  #
+  # The marker is appended AFTER the head is successfully rewritten, so a failed
+  # rewrite never leaves a boundary claiming a goal the ledger does not contain.
+  defp anchor_goal(session_id, body, goal_id) do
+    previous = current_goal(session_id)
+
+    case rewrite_goal(session_id, body) do
+      :ok ->
+        if is_binary(goal_id) and goal_id != "" and previous != body do
+          File.write(
+            path(session_id),
+            format_bullet("#{@anchor_token}#{goal_id}] goal set: #{body}"),
+            [:append]
+          )
+        end
+
+        :ok
+
+      other ->
+        other
+    end
+  end
+
+  # Current `## Goal` body, or nil when the ledger is unreadable.
+  defp current_goal(session_id) do
+    case File.read(path(session_id)) do
+      {:ok, contents} -> extract_goal(contents)
+      _ -> nil
     end
   end
 

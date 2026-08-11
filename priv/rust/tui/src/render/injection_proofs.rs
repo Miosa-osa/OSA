@@ -76,9 +76,24 @@ fn observe(text: Text<'static>) -> Observed {
 /// observable on the emulator and neither is observable on a `Buffer`.
 const PAYLOAD: &str = "\u{1b}]0;PWNED\u{7}\u{1b}[9;30H";
 
-/// What the payload collapses to once the escape introducers are gone. It stays
-/// fully legible — that is the point.
+/// What the payload collapses to under the **character-level** scrubs
+/// (`scrub_untrusted_line` / `_document`, used by markdown prose and the session
+/// title). Those filter the `\x1b` byte and leave its parameters behind as
+/// literal text. It stays fully legible — that is the point on those surfaces.
 const NEUTRALIZED: &str = "]0;PWNED[9;30H";
+
+/// What the payload collapses to under the **rendered-span backstop**
+/// (`scrub_rendered_span`, the tool-output path): **nothing**.
+///
+/// That scrub consumes whole sequences via `util::escape_len_at` rather than
+/// filtering the introducer alone, so no residue reaches the screen. Filtering
+/// the introducer alone is what turned a build banner's `ESC[1m` into a visible
+/// `[1m` and rendered ordinary coloured tool output as `[1mvite v5.4.10[0m`;
+/// the tool path carries real SGR colour from real programs, so it is the one
+/// surface where leftover parameters are routine rather than exotic.
+///
+/// The two levels are deliberately distinct — see `render::sanitize`.
+const NEUTRALIZED_SPAN: &str = "";
 
 /// The control arm, shared by every surface: prove the emulator reports a
 /// compromise when the untrusted bytes reach it in a plain span — i.e. exactly
@@ -395,9 +410,9 @@ fn a_json_escaped_payload_in_tool_args_cannot_drive_the_terminal() {
         obs.screen
     );
     assert!(
-        obs.screen.contains("]0;PWNED"),
-        "the neutralized command must stay legible so the operator can see what \
-         ran:\n{}",
+        !obs.screen.contains("]0;PWNED"),
+        "the escape's parameters leaked onto the screen as literal text — the \
+         sequence must be consumed whole:\n{}",
         obs.screen
     );
 }
@@ -425,7 +440,7 @@ fn the_tool_backstop_preserves_legitimate_hyperlinks() {
         "a well-formed hyperlink was destroyed by the backstop: {flat:?}"
     );
     assert!(
-        flat.contains(&format!(" and {NEUTRALIZED} not this")),
+        flat.contains(&format!(" and {NEUTRALIZED_SPAN} not this")),
         "the injected payload was not neutralized: {flat:?}"
     );
     // Only the hyperlink's own four ESCs remain.
@@ -449,7 +464,9 @@ fn an_unterminated_osc8_wrapper_is_not_treated_as_a_hyperlink() {
         !flat.contains('\u{1b}'),
         "an unterminated OSC 8 wrapper was passed through: {flat:?}"
     );
-    assert_eq!(flat, "]8;;http://xrest-of-payload");
+    // The BEL terminates the OSC string, so the sequence — introducer and
+    // parameters alike — is consumed whole and only the text after it survives.
+    assert_eq!(flat, "rest-of-payload");
 }
 
 /// Ordinary tool output renders identically — the backstop must be invisible.

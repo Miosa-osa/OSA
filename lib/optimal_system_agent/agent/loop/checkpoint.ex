@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   """
   require Logger
 
+  alias OptimalSystemAgent.Utils.Text
+
   @doc "Returns the directory where checkpoint files are stored."
   def checkpoint_dir do
     Application.get_env(:optimal_system_agent, :checkpoint_dir, "~/.osa/checkpoints")
@@ -213,15 +215,21 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
 
   defp safe_key(k), do: k
 
-  defp sanitize_utf8(binary) when is_binary(binary) do
-    case :unicode.characters_to_binary(binary, :utf8) do
-      {:error, valid, _} -> valid
-      {:incomplete, valid, _} -> valid
-      valid when is_binary(valid) -> valid
-    end
-  end
+  # Coerce a checkpointed message's content to valid UTF-8.
+  #
+  # This used to return `valid` from the `{:error, valid, _}` and
+  # `{:incomplete, valid, _}` clauses of `:unicode.characters_to_binary/2`,
+  # dropping everything after the first undecodable byte with no marker and no
+  # log — and `:incomplete` (a chunk boundary landing mid-sequence) is the
+  # likely case, so what was lost was typically a message TAIL, not a stray
+  # byte. A checkpoint exists to restore a conversation after a crash; a
+  # silently shortened message is restored as if it were complete.
+  #
+  # Replacing bad bytes with U+FFFD preserves length and everything past the
+  # damage, matching `ShellExecute.Handler`'s treatment of raw command output.
+  defp sanitize_utf8(binary) when is_binary(binary), do: Text.scrub_utf8(binary)
 
-  defp sanitize_utf8(other), do: to_string(other)
+  defp sanitize_utf8(other), do: other |> to_string() |> Text.scrub_utf8()
 
   # Complete a partial state map from the record already on disk.
   #

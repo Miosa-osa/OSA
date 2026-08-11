@@ -46,6 +46,8 @@ defmodule OptimalSystemAgent.Agent.Loop.DurableLog do
   """
   require Logger
 
+  alias OptimalSystemAgent.Utils.Text
+
   @type key :: String.t()
   @type entry :: %{
           key: key(),
@@ -272,15 +274,23 @@ defmodule OptimalSystemAgent.Agent.Loop.DurableLog do
     _ -> inspect(v)
   end
 
-  defp sanitize(binary) when is_binary(binary) do
-    case :unicode.characters_to_binary(binary, :utf8) do
-      {:error, valid, _} -> valid
-      {:incomplete, valid, _} -> valid
-      valid when is_binary(valid) -> valid
-    end
-  end
+  # Coerce a recorded step's content to valid UTF-8.
+  #
+  # This used to return `valid` from the `{:error, valid, _}` and
+  # `{:incomplete, valid, _}` clauses of `:unicode.characters_to_binary/2`,
+  # which DISCARDS everything after the first undecodable byte — no marker, no
+  # log, no length signal. `:incomplete` is the likely one in practice (a chunk
+  # boundary landing mid-sequence), so the common case was losing a record's
+  # tail rather than a stray byte.
+  #
+  # These are crash-recovery records: on resume, a recorded step's result is
+  # replayed to the model INSTEAD of re-running the tool. Silently truncating
+  # one means the model is fed a short answer it cannot tell is short. Replace
+  # bad bytes with U+FFFD instead, so length and everything after the damage
+  # survive. `ShellExecute.Handler` already treats its output this way.
+  defp sanitize(binary) when is_binary(binary), do: Text.scrub_utf8(binary)
 
-  defp sanitize(other), do: to_string(other)
+  defp sanitize(other), do: other |> to_string() |> Text.scrub_utf8()
 
   defp emit_replay(state, tool_call, key) do
     OptimalSystemAgent.Events.Bus.emit(:system_event, %{

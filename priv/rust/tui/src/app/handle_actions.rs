@@ -819,12 +819,10 @@ impl App {
             .map(|m| {
                 let one_line = m.replace('\n', " ");
                 let trimmed = one_line.trim();
-                if trimmed.chars().count() > 60 {
-                    let short: String = trimmed.chars().take(57).collect();
-                    format!("{}...", short)
-                } else {
-                    trimmed.to_string()
-                }
+                // COLUMNS, not chars — see `crate::util::fit_cols`. A char-count
+                // cut renders a CJK/emoji prompt at up to double the reserved
+                // width and can sever a grapheme cluster mid-glyph.
+                crate::util::fit_cols(trimmed, 60)
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "background turn".to_string());
@@ -1555,19 +1553,15 @@ impl App {
             // U-T7/U-T19 — layered clipboard cascade (native CLI → tmux buffer →
             // OSC 52). Works locally, over SSH, on headless boxes and through
             // tmux, unlike the old arboard-only path (local windowing only).
-            match crate::clipboard::copy(&msg) {
-                Some(_) => self.toasts.push(
-                    "Copied to clipboard".into(),
-                    crate::components::toast::ToastLevel::Info,
-                ),
-                None => {
-                    warn!("Clipboard copy failed on every transport");
-                    self.toasts.push(
-                        "Copy failed".into(),
-                        crate::components::toast::ToastLevel::Warning,
-                    );
-                }
+            // The outcome carries how much is actually KNOWN: OSC 52 cannot be
+            // acknowledged, so an unverified send must not be reported as a
+            // copy. `message()`/`level()` say exactly that, and an unconfirmed
+            // payload is parked on disk so it is never unrecoverable.
+            let outcome = crate::clipboard::copy(&msg);
+            if outcome.confidence != crate::clipboard::Confidence::Confirmed {
+                warn!(?outcome, "clipboard copy not confirmed");
             }
+            self.toasts.push(outcome.message(), outcome.level());
         }
     }
 

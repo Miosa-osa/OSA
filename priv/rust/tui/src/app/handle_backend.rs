@@ -2642,19 +2642,31 @@ impl App {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
                 // Carry the backend-assigned request_id so the user's decision can
                 // resume the exact parked tool call via POST /permissions/respond.
-                let mut dialog = crate::dialogs::permissions::Permissions::new();
-                dialog.set_tool(tool, args, request_id);
-                dialog.set_target(target);
-                if let (Some(old), Some(new)) = (old_content, new_content) {
-                    dialog.set_diff(old, new);
-                }
-                dialog.set_meta(warning, reason);
-                self.permissions = Some(dialog);
-                // Item 5 — the turn is now blocked on YOU: pulse the ◆ cue so
-                // the spinner telegraphs "you're the blocker". Cleared on resume.
-                self.activity.set_pending_user(true);
-                if self.state.can_transition_to(AppState::Permissions) {
-                    self.enter_overlay(AppState::Permissions);
+                //
+                // Tools run in PARALLEL (see `pending_key` below), so a second ask
+                // can land while the user is still reading the first. It QUEUES:
+                // replacing the visible dialog would leave the user approving an
+                // action they never saw, and strand the first request until it
+                // timed out. A replayed id is dropped.
+                let req = crate::app::permission_queue::PermissionRequest {
+                    request_id,
+                    tool,
+                    args,
+                    target,
+                    old_content,
+                    new_content,
+                    warning,
+                    reason,
+                };
+                if self.permissions.submit(req)
+                    == crate::app::permission_queue::Submission::Displayed
+                {
+                    // Item 5 — the turn is now blocked on YOU: pulse the ◆ cue so
+                    // the spinner telegraphs "you're the blocker". Cleared on resume.
+                    self.activity.set_pending_user(true);
+                    if self.state.can_transition_to(AppState::Permissions) {
+                        self.enter_overlay(AppState::Permissions);
+                    }
                 }
             }
             BackendEvent::PlanProposed { plan, request_id: _ } => {

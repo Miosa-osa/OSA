@@ -52,9 +52,87 @@ pub fn fit_cols(s: &str, max_cols: usize) -> String {
     out
 }
 
-/// Display width of `s` in terminal columns (wide glyphs count as 2).
+/// Byte length of the ANSI escape sequence starting at byte offset `at`, or
+/// `None` when there is no escape there.
+///
+/// **`unicode-width` reports width 1 for ESC** (it reports 1 for every
+/// `c <= '\u{A0}'`), so any width computed with `UnicodeWidthStr::width` over
+/// text carrying escapes over-counts by roughly the length of the escape. A
+/// single OSC 8 `file://` hyperlink header is ~80 bytes, i.e. ~80 phantom
+/// columns. Callers that measure strings which may carry escapes must skip them
+/// with this, not scan for "ESC then the first ASCII letter".
+///
+/// Handles the four shapes OSA actually emits or forwards:
+///
+/// * **CSI** — `ESC [` … final byte in `0x40..=0x7E` (SGR colours, cursor moves).
+/// * **OSC** — `ESC ]` … terminated by `BEL` **or** `ST` (`ESC \`). This is the
+///   one a "break on the first ASCII alphabetic" skipper gets wrong: in
+///   `ESC ]8;;http://x ESC \` it stops at the `h` of `http`, leaks `ttp://x` as
+///   visible text, and then the trailing `ESC \` eats the real output after it.
+/// * **DCS/SOS/PM/APC** — `ESC P|X|^|_` … terminated by `ST` (tmux passthrough).
+/// * **Two-byte** — `ESC <single byte>`, the catch-all (includes a bare `ESC \`).
+pub fn escape_len_at(s: &str, at: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.get(at) != Some(&0x1b) {
+        return None;
+    }
+    let Some(&kind) = b.get(at + 1) else {
+        // A trailing lone ESC: consume it rather than counting it as a column.
+        return Some(1);
+    };
+    match kind {
+        // CSI: parameter/intermediate bytes then a final byte 0x40..=0x7E.
+        b'[' => {
+            let mut i = at + 2;
+            while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
+                i += 1;
+            }
+            Some((i + 1).min(b.len()) - at)
+        }
+        // OSC and the string-family introducers: run to BEL or ST.
+        b']' | b'P' | b'X' | b'^' | b'_' => {
+            let mut i = at + 2;
+            while i < b.len() {
+                if b[i] == 0x07 {
+                    return Some(i + 1 - at);
+                }
+                if b[i] == 0x1b && b.get(i + 1) == Some(&b'\\') {
+                    return Some(i + 2 - at);
+                }
+                i += 1;
+            }
+            Some(b.len() - at)
+        }
+        // Anything else is a two-byte escape (`ESC \`, `ESC =`, charset selects…).
+        _ => Some(2),
+    }
+}
+
+/// Display width of `s` in terminal columns (wide glyphs count as 2), **ignoring
+/// ANSI escape sequences**.
+///
+/// Escapes occupy zero columns on screen, so counting them is never right, and
+/// counting them is what makes padding and truncation shear on any line carrying
+/// an OSC 8 hyperlink. See [`escape_len_at`].
 pub fn cols(s: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(s)
+    if !s.as_bytes().contains(&0x1b) {
+        // Fast path: the overwhelming majority of strings have no escapes.
+        return unicode_width::UnicodeWidthStr::width(s);
+    }
+    let mut total = 0usize;
+    let mut i = 0usize;
+    while i < s.len() {
+        if let Some(len) = escape_len_at(s, i) {
+            i += len;
+            continue;
+        }
+        // Advance one char and count its width.
+        let rest = &s[i..];
+        let c = rest.chars().next().expect("non-empty at a char boundary");
+        total += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        i += c.len_utf8();
+    }
+    total
 }
 
 /// Spaces needed to pad `s` out to `width` DISPLAY COLUMNS.

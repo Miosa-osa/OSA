@@ -44,11 +44,42 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       `:complete`, `:active -> :off_track` (with a re-plan nudge queued via
       `Agent.Loop.Steer`) when `GoalVerifier` returns `:off_track`, and
       `:active -> :paused` on stall/run-cap;
-    * reuses `Agent.ProgressLedger` as the durable goal store — `start/2`
-      writes the goal into the ledger's `## Goal` section, and every status
-      transition is appended to the ledger's `## Log` so the transition
-      history survives a context reset / daemon restart exactly like every
-      other durable goal signal in OSA.
+    * reuses `Agent.ProgressLedger` as the durable PROSE goal store —
+      `start/2` writes the goal into the ledger's `## Goal` section, and
+      every status transition is appended to the ledger's `## Log`.
+
+  ## Durability (why the ETS table is not the whole store)
+
+  The ETS table is a per-BEAM cache, not the store. `Agent.ProgressLedger`
+  states the operative fact: **every `osa` invocation is its own BEAM**. A
+  table-only state machine therefore dies at each CLI invocation boundary,
+  and both `paused?/1` and `continue?/1` fall through their `nil ->` branch —
+  so a goal auto-paused for `:no_progress` or `:run_cap` would resume
+  autonomously with a fresh run budget on the very next invocation. The
+  circuit breaker would reset every time it was needed.
+
+  So every mutation is mirrored to a durable JSON sidecar next to the
+  session's ledger and its full-state JSON:
+
+      ~/.osa/sessions/<safe_id>.json          # full message state (resume)
+      ~/.osa/sessions/<safe_id>.progress.md   # progress ledger (prose)
+      ~/.osa/sessions/<safe_id>.goal.json     # THIS module's state machine
+
+  written through `System.AtomicFile` (temp + fsync + rename), the same
+  crash-safe primitive `Agent.Loop.Checkpoint` and `ProgressLedger` use. An
+  ETS miss rehydrates from that sidecar before answering `nil`, so everything
+  that gates continuation — goal text, `goal_id`, `verify_run_count`, the
+  stall streak, `pause_reason`, and the transition history — round-trips
+  across invocations. `reset/1` clears both halves.
+
+  ## Goal identity
+
+  A goal carries a `goal_id` minted by `start/2` and stable across
+  pause -> resume -> complete. `ProgressLedger.set_goal/3` records it as a
+  `[goal-anchor:<id>]` marker in the `## Log`, and every transition line this
+  module writes is prefixed `[goal:<id>]`, so a re-issued `/goal` can no
+  longer render its new `## Goal` head over log lines that belong entirely to
+  the previous goal (`ProgressLedger.summarize/1` cuts at the last anchor).
 
   ## Config gate (default OFF)
 
@@ -85,7 +116,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.Steer
   alias OptimalSystemAgent.Agent.ProgressLedger
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.System.AtomicFile
 
   @table :osa_goal_tracker
 
@@ -99,6 +132,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             session_id: String.t(),
             status: OptimalSystemAgent.Agent.Loop.GoalTracker.status(),
             phase: OptimalSystemAgent.Agent.Loop.GoalTracker.phase(),
+            goal_id: String.t() | nil,
             goal: String.t() | nil,
             turn_count: non_neg_integer(),
             rounds_since_verify: non_neg_integer(),
@@ -112,6 +146,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     defstruct session_id: nil,
               status: :active,
               phase: :executing,
+              goal_id: nil,
               goal: nil,
               turn_count: 0,
               rounds_since_verify: 0,
@@ -206,20 +241,41 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   """
   @spec start(String.t(), String.t()) :: Snapshot.t()
   def start(session_id, goal) when is_binary(session_id) and is_binary(goal) do
+    # A fresh identity per anchoring. It is what makes the ledger's `## Log`
+    # attributable: without it, a re-issued `/goal` overwrote the `## Goal`
+    # head in place while the previous goal's log lines stayed put, and
+    # `summarize/1` then rendered the NEW goal over the OLD goal's history.
+    goal_id = new_goal_id()
+
     snap = %Snapshot{
       session_id: session_id,
       status: :active,
       phase: :executing,
+      goal_id: goal_id,
       goal: goal,
       updated_at: DateTime.utc_now()
     }
 
     put(snap)
-    ProgressLedger.set_goal(session_id, goal)
-    log(session_id, "[goal-tracker] goal started: #{goal}")
+    ProgressLedger.set_goal(session_id, goal, goal_id: goal_id)
+    log(session_id, tag(snap, "[goal-tracker] goal started: #{goal}"))
     emit(snap, :started)
     snap
   end
+
+  defp new_goal_id do
+    OptimalSystemAgent.Utils.ID.generate()
+  rescue
+    _ -> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  # Prefix a durable log line with the goal it belongs to. A snapshot with no
+  # anchored goal (a bare `ensure/1` row) is left untagged rather than given a
+  # fake identity.
+  defp tag(%Snapshot{goal_id: id}, message) when is_binary(id) and id != "",
+    do: "[goal:#{id}] " <> message
+
+  defp tag(_snap, message), do: message
 
   @doc """
   Get-or-lazily-create the snapshot for `session_id`. Unlike `start/2` this
@@ -455,7 +511,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     history = Enum.take([message | snap.history], @history_max)
     snap = %{snap | history: history}
 
-    log(snap.session_id, "[goal-tracker] #{message}")
+    log(snap.session_id, tag(snap, "[goal-tracker] #{message}"))
     emit(snap, :transition, %{message: message})
 
     Logger.info(
@@ -508,6 +564,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   def reset(session_id) when is_binary(session_id) do
     ensure_table()
     :ets.delete(@table, session_id)
+    # The sidecar is the store; forgetting only the cache would resurrect the
+    # row on the next read.
+    _ = File.rm(store_path(session_id))
     :ok
   rescue
     ArgumentError -> :ok
@@ -527,6 +586,22 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       snap -> snap.status
     end
   end
+
+  @doc """
+  Stable identity of the goal currently anchored for `session_id`, or `nil`
+  when no goal was ever anchored via `start/2`. Survives pause -> resume ->
+  complete and every BEAM boundary; changes only when `start/2` anchors a NEW
+  goal.
+  """
+  @spec goal_id(String.t()) :: String.t() | nil
+  def goal_id(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      nil -> nil
+      snap -> snap.goal_id
+    end
+  end
+
+  def goal_id(_), do: nil
 
   @spec phase(String.t()) :: phase() | nil
   def phase(session_id) when is_binary(session_id) do
@@ -665,27 +740,170 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   end
 
   # ---------------------------------------------------------------------------
-  # ETS storage (lazily-created public table, mirrors `Agent.PermissionMode`)
+  # Storage — durable JSON sidecar (the store) fronted by ETS (a cache).
+  #
+  # The ETS table alone cannot hold this state: every `osa` invocation is its
+  # own BEAM (see `Agent.ProgressLedger`), so a table-only breaker resets at
+  # every invocation boundary and an auto-paused goal resumes itself with a
+  # fresh run budget. Reads fall back to the sidecar before answering `nil`;
+  # writes go to both.
   # ---------------------------------------------------------------------------
+
+  @doc """
+  Absolute path to the session's durable goal-tracker sidecar.
+
+  Sits beside `ProgressLedger.path/1` and the session's full-state JSON, using
+  the same safe-id scheme.
+  """
+  @spec store_path(String.t()) :: String.t()
+  def store_path(session_id) when is_binary(session_id) do
+    Path.join([ConfigFile.config_dir(), "sessions", "#{safe_id(session_id)}.goal.json"])
+  end
+
+  defp safe_id(session_id), do: Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
 
   defp get(session_id) do
     ensure_table()
 
     case :ets.lookup(@table, session_id) do
       [{^session_id, snap}] -> snap
-      _ -> nil
+      _ -> rehydrate(session_id)
     end
   rescue
     ArgumentError -> nil
   end
 
-  defp put(%Snapshot{session_id: session_id} = snap) do
+  # ETS miss: the table may simply be younger than the goal (new BEAM, table
+  # re-created, session teardown of a DIFFERENT session). Read the sidecar and
+  # re-seed the cache so the rest of the turn is cheap.
+  defp rehydrate(session_id) do
+    case load_from_disk(session_id) do
+      %Snapshot{} = snap ->
+        cache(snap)
+        snap
+
+      _ ->
+        nil
+    end
+  end
+
+  defp put(%Snapshot{} = snap) do
+    cache(snap)
+    persist(snap)
+    :ok
+  end
+
+  defp cache(%Snapshot{session_id: session_id} = snap) do
     ensure_table()
     :ets.insert(@table, {session_id, snap})
     :ok
   rescue
     ArgumentError -> :ok
   end
+
+  # Durable half. Best-effort in the same sense every other write in this
+  # module is: a failed sidecar write is logged and never breaks a transition,
+  # but it is NOT silent — losing this file is what un-trips the breaker.
+  defp persist(%Snapshot{session_id: session_id} = snap) do
+    case AtomicFile.write(store_path(session_id), Jason.encode!(encode(snap))) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[goal-tracker] could not persist goal state for #{session_id} " <>
+            "(#{inspect(reason)}) — the pause/run-cap breaker will not survive this " <>
+            "invocation"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[goal-tracker] persist raised: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp load_from_disk(session_id) do
+    with {:ok, json} <- File.read(store_path(session_id)),
+         {:ok, %{} = map} <- Jason.decode(json) do
+      decode(session_id, map)
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @statuses [:active, :paused, :completed, :off_track]
+  @phases [:idle, :planning, :executing]
+  @pause_reasons [:no_progress, :run_cap, :off_track, :user]
+
+  defp encode(%Snapshot{} = snap) do
+    %{
+      "session_id" => snap.session_id,
+      "status" => to_string(snap.status),
+      "phase" => to_string(snap.phase),
+      "goal_id" => snap.goal_id,
+      "goal" => snap.goal,
+      "turn_count" => snap.turn_count,
+      "rounds_since_verify" => snap.rounds_since_verify,
+      "verify_run_count" => snap.verify_run_count,
+      "last_gap_fingerprint" => snap.last_gap_fingerprint,
+      "stall_count" => snap.stall_count,
+      "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
+      "history" => snap.history,
+      "updated_at" => snap.updated_at && DateTime.to_iso8601(snap.updated_at)
+    }
+  end
+
+  # Fail-CLOSED decode: an unrecognized status decodes to `:paused`, never to
+  # `:active`. A corrupted sidecar must not be the thing that hands an
+  # autonomous run a fresh budget — the whole point of persisting it.
+  defp decode(session_id, map) do
+    %Snapshot{
+      session_id: Map.get(map, "session_id") || session_id,
+      status: known_atom(Map.get(map, "status"), @statuses, :paused),
+      phase: known_atom(Map.get(map, "phase"), @phases, :executing),
+      goal_id: string_or_nil(Map.get(map, "goal_id")),
+      goal: string_or_nil(Map.get(map, "goal")),
+      turn_count: non_neg_int(Map.get(map, "turn_count")),
+      rounds_since_verify: non_neg_int(Map.get(map, "rounds_since_verify")),
+      verify_run_count: non_neg_int(Map.get(map, "verify_run_count")),
+      last_gap_fingerprint: int_or_nil(Map.get(map, "last_gap_fingerprint")),
+      stall_count: non_neg_int(Map.get(map, "stall_count")),
+      pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),
+      history: string_list(Map.get(map, "history")),
+      updated_at: decode_datetime(Map.get(map, "updated_at"))
+    }
+  end
+
+  defp known_atom(value, allowed, fallback) when is_binary(value) do
+    Enum.find(allowed, fallback, fn a -> Atom.to_string(a) == value end)
+  end
+
+  defp known_atom(_value, _allowed, fallback), do: fallback
+
+  defp string_or_nil(v) when is_binary(v) and v != "", do: v
+  defp string_or_nil(_), do: nil
+
+  defp non_neg_int(v) when is_integer(v) and v >= 0, do: v
+  defp non_neg_int(_), do: 0
+
+  defp int_or_nil(v) when is_integer(v), do: v
+  defp int_or_nil(_), do: nil
+
+  defp string_list(v) when is_list(v), do: Enum.filter(v, &is_binary/1)
+  defp string_list(_), do: []
+
+  defp decode_datetime(v) when is_binary(v) do
+    case DateTime.from_iso8601(v) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+
+  defp decode_datetime(_), do: nil
 
   @doc """
   Create the cross-turn goal table up front, owned by the long-lived caller.
@@ -694,11 +912,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   `Infra.BoundedTable.init_tables/0` and `Agent.RunStore.init_store/0`: a
   lazily created named table is owned by whatever process happened to insert
   first, and here that is usually a TRANSIENT one (a ReAct loop task, a
-  subagent). When that process exits the table vanishes with it and every
-  anchored goal silently disappears mid-run — `goal_loop?/1` starts answering
-  `false`, the cross-turn run cap and stall breaker reset to zero, and an
-  autonomous run loses its circuit breaker without ever failing loudly.
-  Giving the table a durable owner at boot removes that whole class of bug.
+  subagent). When that process exits the table vanishes with it.
+
+  Since the state machine is now stored in a durable sidecar (see the module
+  doc) a lost table no longer loses the goal — reads rehydrate from disk. This
+  still matters for cost, not correctness: without a stable owner every read
+  after a table death is a file read, and the cache is rebuilt one session at
+  a time.
   """
   @spec init_table() :: :ok
   def init_table, do: ensure_table()

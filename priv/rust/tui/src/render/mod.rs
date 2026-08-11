@@ -1,3 +1,5 @@
+/// Escape-aware direct-to-buffer line rendering (OSC 8 hyperlinks).
+pub mod cells;
 pub mod colors;
 pub mod glyphs;
 pub mod latex;

@@ -80,6 +80,12 @@
 //!   to a block boundary when the final genuinely diverged. Nothing is rendered
 //!   twice, and nothing is silently dropped.
 
+use std::collections::VecDeque;
+
+/// The most finalized message ids one turn will be remembered by. A turn with
+/// more generations than this has bigger problems than a replay.
+const MAX_REMEMBERED_FINALIZATIONS: usize = 64;
+
 /// What a finalizing `agent_response` should render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Finalize {
@@ -106,6 +112,18 @@ pub(crate) struct AssistantStream {
     msg_id: Option<String>,
     /// Identity of the last message finalized this turn (`None` for an id-less backend).
     finalized_id: Option<String>,
+    /// **Every** message id finalized this turn, most recent last.
+    ///
+    /// `finalized_id` alone is a single slot, so it only ever recognised a
+    /// replay of the most recent message: after N finalized, a re-delivery of
+    /// N-1 read as brand new and rendered a second time. It is also what `push`
+    /// consults to drop a delta belonging to a message that is already closed —
+    /// finalizing clears `msg_id`, so without this list a straggler had no way
+    /// to be told apart from a delta for the live generation.
+    ///
+    /// Bounded: ids are unique within a turn and a turn is reset wholesale, but
+    /// a pathological producer must not be able to grow this without limit.
+    finalized_ids: VecDeque<String>,
     /// Text of the last finalization — the id-less backend's duplicate check.
     finalized_text: Option<String>,
 }
@@ -118,6 +136,7 @@ impl Default for AssistantStream {
             settle_ok: true,
             msg_id: None,
             finalized_id: None,
+            finalized_ids: VecDeque::new(),
             finalized_text: None,
         }
     }
@@ -188,6 +207,18 @@ impl AssistantStream {
     /// generation that already settled into scrollback are NOT handed back —
     /// they are on screen, and handing them back would render them twice.
     pub(crate) fn push(&mut self, message_id: Option<&str>, text: &str) -> Option<String> {
+        // A delta for a message that has already been finalized is dead on
+        // arrival: that message is in the terminal's native scrollback via
+        // `insert_before`, so there is nothing left to append to. Dropping it
+        // here is what stops it from (a) being buffered as live text under the
+        // next message's identity and (b) reading as a generation change that
+        // tears the CURRENT generation's partial out to be committed early.
+        if let Some(id) = message_id {
+            if self.finalized_ids.iter().any(|seen| seen == id) {
+                return None;
+            }
+        }
+
         let new_generation = matches!(
             (self.msg_id.as_deref(), message_id),
             (Some(current), Some(incoming)) if current != incoming
@@ -257,6 +288,12 @@ impl AssistantStream {
         };
 
         self.finalized_id = message_id.map(str::to_string);
+        if let Some(id) = message_id {
+            self.finalized_ids.push_back(id.to_string());
+            while self.finalized_ids.len() > MAX_REMEMBERED_FINALIZATIONS {
+                self.finalized_ids.pop_front();
+            }
+        }
         self.finalized_text = Some(out.clone());
         self.msg_id = None;
         Finalize::Emit(subtract_committed(&out, &streamed[..settled]))
@@ -266,8 +303,10 @@ impl AssistantStream {
         match (self.finalized_id.as_deref(), message_id) {
             // Both sides carry an id — identity decides, and only identity.
             // Different ids are two genuinely different messages, however
-            // similar their text.
-            (Some(previous), Some(incoming)) => previous == incoming,
+            // similar their text. Checked against EVERY id finalized this turn,
+            // not just the latest, so a replay of an earlier message is still
+            // recognised instead of rendering twice.
+            (Some(_), Some(incoming)) => self.finalized_ids.iter().any(|seen| seen == incoming),
             // Legacy backend (or a producer with no generation behind it):
             // only a byte-identical repeat of the same non-empty final counts
             // as the same delivery.
@@ -292,6 +331,7 @@ impl AssistantStream {
         self.settle_ok = true;
         self.msg_id = None;
         self.finalized_id = None;
+        self.finalized_ids.clear();
         self.finalized_text = None;
     }
 }
@@ -757,5 +797,113 @@ mod tests {
         // Mid-turn finalization followed by a genuinely new generation.
         s.push(Some("m2"), "second");
         assert_eq!(s.finalize(Some("m2"), "second".into()), Finalize::Emit("second".into()));
+    }
+
+    // ── late deltas must not resurrect, tear, or re-emit a finalized message ──
+
+    /// A delta for a message that has already been finalized is *dead*. It
+    /// arrives from an SSE replay or a slow duplicate leg, and the message it
+    /// belongs to is already in the terminal's native scrollback via
+    /// `insert_before`, where nothing can be edited or removed.
+    ///
+    /// `finalize` clears `msg_id`, so before the fix `push` saw
+    /// `(None, Some("m1"))`, took the "same generation" branch, and appended the
+    /// straggler to a buffer that no longer belonged to any live message — the
+    /// text then surfaced under whatever identity finalized next.
+    #[test]
+    fn a_delta_after_finalization_does_not_resurrect_the_message() {
+        let mut s = AssistantStream::new();
+        s.push(Some("m1"), "hello");
+        assert_eq!(s.finalize(Some("m1"), "hello".into()), Finalize::Emit("hello".into()));
+
+        assert_eq!(s.push(Some("m1"), " straggler"), None);
+        assert!(
+            s.is_empty(),
+            "a delta for the finalized m1 was buffered as live text: {:?}",
+            s.tail()
+        );
+        assert_eq!(s.text(), "", "finalized message m1 was resurrected");
+    }
+
+    /// The damaging variant: the straggler arrives *after a newer message has
+    /// started*. `push` compared only against `msg_id`, so the straggler's id
+    /// read as a generation change and tore the CURRENT message's partial out to
+    /// be committed as its own block — under the wrong identity, at the wrong
+    /// time, permanently.
+    #[test]
+    fn a_straggler_does_not_tear_off_the_current_generation() {
+        let mut s = AssistantStream::new();
+        s.push(Some("m1"), "first");
+        assert_eq!(s.finalize(Some("m1"), "first".into()), Finalize::Emit("first".into()));
+
+        s.push(Some("m2"), "second partial");
+        assert_eq!(
+            s.push(Some("m1"), " late"),
+            None,
+            "a dead delta from m1 forced m2's partial out as a superseded block"
+        );
+        assert_eq!(
+            s.text(),
+            "second partial",
+            "m2's accumulation was replaced by a straggler from the finalized m1"
+        );
+
+        // m2 must still finalize normally, carrying its own text.
+        assert_eq!(
+            s.finalize(Some("m2"), "second partial".into()),
+            Finalize::Emit("second partial".into())
+        );
+    }
+
+    /// Duplicate detection held ONE finalized slot, so it only ever recognised a
+    /// replay of the most recent message. A replay of N-1 after N finalized was
+    /// treated as fresh and rendered a second time — into scrollback, where the
+    /// duplicate is permanent.
+    #[test]
+    fn a_replay_of_an_earlier_message_is_still_recognised_as_duplicate() {
+        let mut s = AssistantStream::new();
+        s.push(Some("m1"), "one");
+        assert_eq!(s.finalize(Some("m1"), "one".into()), Finalize::Emit("one".into()));
+        s.push(Some("m2"), "two");
+        assert_eq!(s.finalize(Some("m2"), "two".into()), Finalize::Emit("two".into()));
+
+        assert_eq!(
+            s.finalize(Some("m1"), "one".into()),
+            Finalize::Duplicate,
+            "a replayed finalization of m1 rendered the message twice"
+        );
+        // And the newer one is still recognised too.
+        assert_eq!(s.finalize(Some("m2"), "two".into()), Finalize::Duplicate);
+    }
+
+    /// A genuinely new generation must still supersede a live partial — the fix
+    /// above must not disarm the split the module exists for.
+    #[test]
+    fn a_new_generation_still_supersedes_an_uncommitted_partial() {
+        let mut s = AssistantStream::new();
+        s.push(Some("m1"), "unfinished");
+        assert_eq!(
+            s.push(Some("m2"), "replacement"),
+            Some("unfinished".to_string()),
+            "a live generation change must hand back the superseded partial"
+        );
+        assert_eq!(s.text(), "replacement");
+    }
+
+    /// `reset` opens a new turn, and ids are only unique within one. After a
+    /// reset the same id must be accepted again rather than dropped as dead.
+    #[test]
+    fn reset_forgets_dead_ids_so_the_next_turn_streams() {
+        let mut s = AssistantStream::new();
+        s.push(Some("m1"), "one");
+        let _ = s.finalize(Some("m1"), "one".into());
+        s.reset();
+
+        s.push(Some("m1"), "a brand new turn");
+        assert_eq!(
+            s.text(),
+            "a brand new turn",
+            "a fresh turn reusing id m1 was silently dropped"
+        );
     }
 }

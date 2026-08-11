@@ -9,6 +9,7 @@
 pub mod message;
 pub mod thinking_box;
 pub mod welcome;
+pub mod wrap_count;
 
 use std::cell::RefCell;
 

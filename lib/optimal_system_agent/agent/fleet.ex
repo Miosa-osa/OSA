@@ -31,6 +31,8 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   require Logger
 
   alias OptimalSystemAgent.Agent.{Effort, Loop, RunStore}
+  alias OptimalSystemAgent.Agent.Fleet.Journal
+  alias OptimalSystemAgent.Agent.Fleet.SettingsCoverage
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Events.Bus
@@ -198,11 +200,25 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   parent loop that does not exist at all — there is no capped run tree to bill,
   so spawning proceeds. It never crashes the fan_out.
 
-  Returns `{:ok, %{total: T, dropped: D, results: [...]}}` or
-  `{:error, :ultra_required}`.
+  DURABILITY: the run has an id (`:run_id`, minted when not supplied) and every
+  item is journalled — `queued` before it is spawned, `result` as soon as it is
+  terminal — by `Fleet.Journal`. Before anything is spawned the journal is
+  replayed, so re-invoking `fan_out/3` with the SAME `:run_id` and item list
+  finishes only the items that never completed and serves the rest from disk. A
+  coordinator crash therefore costs the in-flight items, not the finished ones.
+  See `resume/3`.
+
+  Returns `{:ok, %{total: T, dropped: D, results: [...], run_id: R}}` or
+  `{:error, :ultra_required}`. `results` are in SUBMISSION order.
   """
   @spec fan_out(String.t(), [term()], keyword()) ::
-          {:ok, %{total: non_neg_integer(), dropped: non_neg_integer(), results: [map()]}}
+          {:ok,
+           %{
+             total: non_neg_integer(),
+             dropped: non_neg_integer(),
+             results: [map()],
+             run_id: String.t()
+           }}
           | {:error, :ultra_required | :invalid_parent_session_id}
   def fan_out(parent_session_id, items, opts \\ [])
 
@@ -224,6 +240,27 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
   def fan_out(_parent, _items, _opts), do: {:error, :invalid_parent_session_id}
 
+  @doc """
+  Resume a fan-out that a coordinator crash interrupted.
+
+  The entry point finding #7 asked for. Pass the original `run_id` and the SAME
+  item list: `fan_out/3` replays the journal, returns every item that already
+  reached a terminal outcome without touching it again, and executes only the
+  remainder.
+
+  This is the coordinator-side complement to `Agent.FleetResumer`, which
+  re-dispatches individual orphaned NODES at boot but has no notion of a
+  fan-out run, its item list, or its results.
+
+  `Fleet.Journal.outstanding/1` reports what a given run still owed.
+  """
+  @spec resume(String.t(), [term()], String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def resume(parent_session_id, items, run_id, opts \\ [])
+      when is_binary(run_id) and run_id != "" do
+    fan_out(parent_session_id, items, Keyword.put(opts, :run_id, run_id))
+  end
+
   defp do_fan_out(parent, items, opts) do
     cap = max_fleet_agents()
     total_cap = max_fleet_total()
@@ -244,6 +281,9 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       # a real `git status` read; injectable so tests assert a non-empty diff.
       diff_fun: Keyword.get(opts, :diff_fun, &changed_files/1),
       isolation: Keyword.get(opts, :isolation),
+      # Durable run identity. Supplied by a caller resuming a crashed run;
+      # minted otherwise. Everything the run learns is journalled under it.
+      run_id: Keyword.get(opts, :run_id) || generate_run_id(),
       base_opts:
         Keyword.drop(opts, [
           :spawn_fun,
@@ -251,7 +291,8 @@ defmodule OptimalSystemAgent.Agent.Fleet do
           :budget_fun,
           :await_fun,
           :diff_fun,
-          :isolation
+          :isolation,
+          :run_id
         ]),
       budget_stopped: :atomics.new(1, [])
     }
@@ -273,10 +314,51 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     # Start summary: everything queued, nothing spawned yet.
     emit_fleet_summary(parent, %{queued: total, cap: cap, total_spawned: 0})
 
+    # REPLAY BEFORE TOUCHING THE HOST. Any item this run already carried to a
+    # terminal outcome is served from the journal and never spawned again — a
+    # fan-out node is a full agent turn that writes to the repo, so re-running
+    # a completed sibling is both expensive and destructive.
+    already_done = Journal.completed(ctx.run_id, work)
+
+    if already_done != %{} do
+      Logger.info(
+        "[Fleet] resuming run #{ctx.run_id}: #{map_size(already_done)}/#{total} item(s) " <>
+          "replayed from the journal, not re-executed"
+      )
+    end
+
+    Journal.write_manifest(ctx.run_id, %{
+      "run_id" => ctx.run_id,
+      "parent" => parent,
+      "total" => total,
+      "dropped" => dropped,
+      "started_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+
     results =
       work
+      |> Enum.with_index()
+      |> Enum.reject(fn {_item, idx} -> Map.has_key?(already_done, idx) end)
       |> Task.async_stream(
-        fn item -> run_fan_out_item(parent, item, ctx) end,
+        # The index rides along INSIDE the task so it survives every exit path.
+        # `ordered: false` yields results in completion order, which made the
+        # finalizer's claim table (and its conflict briefs) nondeterministic —
+        # the same wave reported its nodes in a different order every run. The
+        # stream still drains out of order (that is the point of the cap); the
+        # RESULTS are put back in submission order below, exactly as
+        # `Orchestrator.run_parallel/3` does with its `original_idx`.
+        # The submission index rides along INSIDE the task, so a result can be
+        # put back in the caller's order no matter which order it completed in.
+        # `ordered: false` is kept deliberately: it is what lets the summary
+        # gauge below tick per freed slot rather than head-of-line blocking.
+        fn {item, idx} ->
+          # Queued BEFORE the spawn, result as soon as it is terminal: a
+          # coordinator that dies at item 9 of 10 keeps items 1..8.
+          Journal.record_queued(ctx.run_id, idx, item)
+          result = run_fan_out_item(parent, item, ctx)
+          Journal.record_result(ctx.run_id, idx, item, result)
+          {idx, result}
+        end,
         max_concurrency: cap,
         ordered: false,
         # Backstop only — NOT the per-node ceiling.
@@ -308,33 +390,89 @@ defmodule OptimalSystemAgent.Agent.Fleet do
           total_spawned: completed
         })
 
-        case res do
-          # run_fan_out_item already returns the structured result map.
-          {:ok, %{} = result} ->
-            result
+        res
+      end)
+      |> reassemble(work, already_done)
 
-          # Reaped by the OUTER backstop. The in-task ceiling should have fired
-          # first and returned a real, identified result; reaching here means it
-          # did not, the task is dead, and the item identity died with it. Do
-          # not dress this up as a node we stopped — nothing was cancelled and
-          # the node may well still be running.
-          {:exit, :timeout} ->
-            Logger.error(
-              "[Fleet] a node exceeded the outer backstop (#{fan_out_task_timeout_ms()}ms) and " <>
-                "was reaped WITHOUT being cancelled — it may still be running and writing to " <>
-                "its worktree. Its identity was lost with the task."
-            )
+    # The run is fully accounted for in the returned results; the journal has
+    # nothing left to protect.
+    Journal.discard(ctx.run_id)
 
-            fail_result("", {:node_timeout, :unidentified_task_reaped})
+    {:ok, %{total: total, dropped: dropped, results: results, run_id: ctx.run_id}}
+  end
 
-          # Any other task exit (crash we couldn't trap): isolate it as a fail
-          # result so remaining items still drain.
-          {:exit, reason} ->
-            fail_result("", {:exit, reason})
-        end
+  defp generate_run_id do
+    "fleet-run-" <> OptimalSystemAgent.Utils.ID.generate()
+  rescue
+    _ -> "fleet-run-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  # Put the drained yields back into SUBMISSION order and give every one of them
+  # a real identity.
+  #
+  # Two defects are closed here. `ordered: false` returned results in completion
+  # order, so `Fleet.Finalizer`'s claim table and conflict briefs listed the same
+  # wave's nodes differently on every run — a diagnostic a human is meant to read
+  # and compare. And a task reaped by the outer backstop yields a bare
+  # `{:exit, reason}` carrying no index, which produced a result with an EMPTY
+  # `node_id`: the finalizer then had a failed node it could not name.
+  #
+  # Indexed yields are placed directly. Exits carry no index, but their set is
+  # exactly the complement of the indices that did come back, so each is matched
+  # to the item it must have been — recovering the node hint the reap destroyed.
+  defp reassemble(yields, work, replayed) do
+    # Journal-replayed items are already placed and were never submitted to the
+    # stream, so they must not be mistaken for reaped tasks below.
+    {placed, exits} =
+      Enum.reduce(yields, {replayed, []}, fn
+        {:ok, {idx, result}}, {acc, exits} -> {Map.put(acc, idx, result), exits}
+        {:exit, reason}, {acc, exits} -> {acc, [reason | exits]}
       end)
 
-    {:ok, %{total: total, dropped: dropped, results: results}}
+    missing = Enum.reject(0..(length(work) - 1)//1, &Map.has_key?(placed, &1))
+    indexed_work = Enum.with_index(work) |> Map.new(fn {item, idx} -> {idx, item} end)
+
+    placed =
+      missing
+      |> Enum.zip(Enum.reverse(exits))
+      |> Enum.reduce(placed, fn {idx, reason}, acc ->
+        Map.put(acc, idx, exit_result(reason, Map.get(indexed_work, idx)))
+      end)
+
+    Enum.map(0..(length(work) - 1)//1, fn idx ->
+      Map.get(placed, idx) || fail_result("", {:exit, :no_result})
+    end)
+  end
+
+  defp exit_result(:timeout, item) do
+    hint = item_hint(item)
+
+    # Reaped by the OUTER backstop. The in-task ceiling should have fired first
+    # and returned a real, identified result; reaching here means it did not and
+    # the task is dead. Do not dress this up as a node we stopped — nothing was
+    # cancelled and the node may well still be running.
+    Logger.error(
+      "[Fleet] node #{inspect(hint)} exceeded the outer backstop " <>
+        "(#{fan_out_task_timeout_ms()}ms) and was reaped WITHOUT being cancelled — it may " <>
+        "still be running and writing to its worktree."
+    )
+
+    fail_result(hint, {:node_timeout, :unidentified_task_reaped})
+  end
+
+  # Any other task exit (a crash we could not trap): isolate it as a fail result
+  # so the remaining items still drain, but keep the item's identity.
+  defp exit_result(reason, item), do: fail_result(item_hint(item), {:exit, reason})
+
+  # The hint an item WOULD have produced, recovered from the raw item after its
+  # task died. Mirrors `run_fan_out_item/3`'s normalization.
+  defp item_hint(item) do
+    case item do
+      i when is_binary(i) -> node_hint(task: i)
+      i when is_list(i) -> node_hint(i)
+      i when is_map(i) -> node_hint(Map.to_list(i))
+      _ -> ""
+    end
   end
 
   # Normalize an item to per-item spawn opts, merge over the shared base opts,
@@ -808,6 +946,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
     working_dir =
       Keyword.get(opts, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
+
+    # A node given a `:working_dir` other than the cwd cascade root runs against
+    # settings resolved from the CWD, not from that root. Say so if the root
+    # carries a settings file — see `SettingsCoverage` for why this is a
+    # diagnostic rather than a `Watcher.register_root/1` call.
+    SettingsCoverage.check(working_dir, "fleet node #{node_id}")
 
     {system_prompt, allowed_tools} =
       resolve_agent_type(agent_type, Keyword.get(opts, :system_prompt))

@@ -125,8 +125,17 @@ defmodule OptimalSystemAgent.Shell.Pty.Screen do
         parse_osc(s, binary_part(rest, 1, byte_size(rest) - 1))
 
       # Single-char escapes (charset select, etc.) — drop the next byte.
+      #
+      # This drops one BYTE, matched byte-wise on purpose. It used to be
+      # `<<_ignored::utf8, tail::binary>> = ...`, a hard pattern match that
+      # raised MatchError — killing the PTY session process and its buffered
+      # scrollback — whenever the byte after ESC was not a valid UTF-8 lead
+      # byte. Every ESC-introduced single-char escape (charset select `ESC(B`,
+      # `ESC=`, `ESC>`, `ESC7/8`, …) is ASCII, so there is no codepoint here
+      # worth decoding, and a garbage byte must not be able to crash the
+      # decoder.
       true ->
-        <<_ignored::utf8, tail::binary>> = ensure_utf8(rest)
+        <<_ignored, tail::binary>> = rest
         process(s, tail)
     end
   end
@@ -142,8 +151,43 @@ defmodule OptimalSystemAgent.Shell.Pty.Screen do
     process(put_char(s, <<cp::utf8>>), rest)
   end
 
+  # A multi-byte character split across a `feed/2` boundary. The clause above
+  # could not decode it because the continuation bytes are in the NEXT chunk,
+  # and the catch-all below would consume its bytes one at a time and drop the
+  # character silently. `pending` previously only ever held a partial ESCAPE
+  # sequence, so every character straddling a chunk boundary was lost.
+  # Stash it instead and finish decoding on the next feed.
+  defp process(s, <<lead, _::binary>> = buf) when lead >= 0xC0 and lead < 0xF8 do
+    if partial_utf8?(buf) do
+      %{s | pending: buf}
+    else
+      <<_c, rest::binary>> = buf
+      process(s, rest)
+    end
+  end
+
   # Any remaining C0 control we don't model — skip it.
   defp process(s, <<_c, rest::binary>>), do: process(s, rest)
+
+  # True when `buf` is the START of one multi-byte character and nothing else:
+  # a lead byte, fewer bytes than that lead announces, and continuation bytes
+  # the whole way. Anything else is malformed and must not be stashed (a
+  # stashed non-prefix would be re-prepended forever and wedge the decoder).
+  defp partial_utf8?(<<lead, rest::binary>>) do
+    byte_size(rest) + 1 < utf8_seq_len(lead) and
+      rest_all_continuation?(rest)
+  end
+
+  defp rest_all_continuation?(<<>>), do: true
+
+  defp rest_all_continuation?(<<b, rest::binary>>) when b >= 0x80 and b < 0xC0,
+    do: rest_all_continuation?(rest)
+
+  defp rest_all_continuation?(_), do: false
+
+  defp utf8_seq_len(lead) when lead < 0xE0, do: 2
+  defp utf8_seq_len(lead) when lead < 0xF0, do: 3
+  defp utf8_seq_len(_lead), do: 4
 
   # ── CSI (\e[ ... final) ────────────────────────────────────────────────
 
@@ -352,12 +396,14 @@ defmodule OptimalSystemAgent.Shell.Pty.Screen do
     |> Enum.reverse()
   end
 
-  # If a chunk boundary split a UTF-8 codepoint, fall back to byte-wise so we
-  # never crash; the stray bytes are visually negligible.
-  defp ensure_utf8(bin) do
-    case String.valid?(bin) do
-      true -> bin
-      false -> bin
-    end
-  end
+  @doc """
+  Render the visible screen, guaranteed to be valid UTF-8.
+
+  `text/1` reproduces whatever bytes the PTY emitted. A process that writes raw
+  binary to its terminal therefore makes `text/1` return an invalid-UTF-8
+  binary, which raises the moment anything JSON-encodes it on the way to a
+  provider or an SSE client. Use this at those boundaries.
+  """
+  @spec text_utf8(t()) :: String.t()
+  def text_utf8(%__MODULE__{} = s), do: s |> text() |> OptimalSystemAgent.Utils.Text.scrub_utf8()
 end

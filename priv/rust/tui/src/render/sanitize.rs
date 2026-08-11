@@ -171,9 +171,26 @@ const OSC8_ST: &str = "\u{1b}\\";
 /// codepoints, but carry well-formed OSC 8 hyperlink wrappers through verbatim.
 ///
 /// `\t` is preserved (spans that carry tab-indented file bodies would otherwise
-/// lose their indentation); `\r`, `\n` and every escape introducer that is not
-/// the start of a complete hyperlink wrapper are dropped, since a span is one
-/// row and any of those corrupts the row and everything after it.
+/// lose their indentation); `\r`, `\n` and every escape sequence that is not a
+/// complete hyperlink wrapper are dropped, since a span is one row and any of
+/// those corrupts the row and everything after it.
+///
+/// **An escape is dropped WHOLE.** Filtering `\x1b` out character-by-character
+/// removed the introducer and left its parameters behind as ordinary text, so
+/// `ESC [ 1 m` painted as a literal `[1m` and a build banner rendered as
+/// `[1mvite v5.4.10[0m`. The sequence is therefore measured with the canonical
+/// [`crate::util::escape_len_at`] scanner — which knows CSI's final byte, OSC's
+/// BEL-or-ST terminator, and the DCS/SOS/PM/APC string family — and the whole
+/// run is discarded.
+///
+/// This strictly tightens the security contract rather than loosening it. There
+/// is no "recognised" branch that lets bytes through: `escape_len_at` returns
+/// `Some(_)` for *every* `\x1b`, and every byte it attributes to the sequence is
+/// dropped. A truncated or unterminated escape (an OSC with no ST, a CSI with no
+/// final byte, a lone trailing ESC) is attributed to the end of the span and so
+/// is dropped in its entirety — the fail-closed direction. The single exception
+/// is checked first and is ours: a *complete* `ESC ]8;; … ESC \` hyperlink
+/// wrapper, whose URI `components::osc8::osc8` has already percent-encoded.
 ///
 /// Borrows unchanged text, so the overwhelmingly common escape-free span costs
 /// a scan and no allocation.
@@ -191,12 +208,19 @@ pub fn scrub_rendered_span(text: &str) -> std::borrow::Cow<'_, str> {
     let mut rest = text;
     while !rest.is_empty() {
         // A complete `ESC ]8;; … ESC \` run is a hyperlink we emitted; keep it.
+        // Checked before the generic escape drop below, which would otherwise
+        // consume it as an ordinary OSC string.
         if let Some(tail) = rest.strip_prefix(OSC8_OPEN) {
             if let Some(end) = tail.find(OSC8_ST) {
                 out.push_str(&rest[..OSC8_OPEN.len() + end + OSC8_ST.len()]);
                 rest = &tail[end + OSC8_ST.len()..];
                 continue;
             }
+        }
+        // Any other escape: drop the WHOLE sequence, parameters included.
+        if let Some(len) = crate::util::escape_len_at(rest, 0) {
+            rest = &rest[len..];
+            continue;
         }
         let ch = rest.chars().next().expect("non-empty");
         if benign(ch) {
@@ -402,15 +426,65 @@ mod tests {
         let link = "\u{1b}]8;;file:///tmp/a.rs\u{1b}\\a.rs\u{1b}]8;;\u{1b}\\";
         assert_eq!(scrub_rendered_span(link), link);
 
+        // An unterminated wrapper gets no passthrough: the BEL closes the OSC
+        // string, so the whole sequence — introducer AND parameters — is
+        // consumed and only the text after it survives. Leaving `]8;;http://x`
+        // behind as literal text was the display half of this defect.
         let open = "\u{1b}]8;;http://x\u{7}payload";
-        assert_eq!(scrub_rendered_span(open), "]8;;http://xpayload");
+        assert_eq!(scrub_rendered_span(open), "payload");
 
         // Mixed: the link survives, the injection next to it does not.
         let mixed = format!("see {link} and \u{1b}]0;PWNED\u{7}done");
+        assert_eq!(scrub_rendered_span(&mixed), format!("see {link} and done"));
+    }
+
+    /// **Coloured tool output renders as text, not as escape wreckage.**
+    ///
+    /// The owner's screenshot, verbatim: a build banner painting as
+    /// `[1mvite v5.4.10[0m`. `ESC [ 1 m` is four characters and only the first
+    /// is a control character, so a scrub built on `!ch.is_control()` removed
+    /// the introducer and left `[1m` behind to paint as literal text. Every
+    /// SGR-coloured line of every tool's output hit this.
+    ///
+    /// Whole-sequence consumption is the fix, and it is general across the
+    /// shapes `util::escape_len_at` knows: CSI, OSC (BEL- and ST-terminated),
+    /// the DCS/SOS/PM/APC string family, and bare two-byte escapes.
+    #[test]
+    fn the_span_backstop_consumes_whole_escape_sequences() {
+        // The reported string, exactly.
         assert_eq!(
-            scrub_rendered_span(&mixed),
-            format!("see {link} and ]0;PWNEDdone")
+            scrub_rendered_span("\u{1b}[1mvite v5.4.10\u{1b}[0m building for production..."),
+            "vite v5.4.10 building for production..."
         );
+        assert_eq!(
+            scrub_rendered_span("\u{1b}[32m\u{2713}\u{1b}[0m 976 modules transformed."),
+            "\u{2713} 976 modules transformed."
+        );
+        // Multi-parameter CSI, and one with intermediates.
+        assert_eq!(scrub_rendered_span("a\u{1b}[38;5;213mb"), "ab");
+        assert_eq!(scrub_rendered_span("a\u{1b}[?25lb"), "ab");
+        // OSC terminated by ST rather than BEL.
+        assert_eq!(scrub_rendered_span("a\u{1b}]0;title\u{1b}\\b"), "ab");
+        // DCS / APC string family (tmux passthrough shapes).
+        assert_eq!(scrub_rendered_span("a\u{1b}Pq#0;2\u{1b}\\b"), "ab");
+        assert_eq!(scrub_rendered_span("a\u{1b}_G f=100\u{1b}\\b"), "ab");
+        // Bare two-byte escape.
+        assert_eq!(scrub_rendered_span("a\u{1b}=b"), "ab");
+
+        // Fail-closed: nothing unrecognised or incomplete is allowed through.
+        // An unterminated CSI/OSC is attributed to the end of the span and
+        // dropped entirely, and no ESC ever survives.
+        for hostile in [
+            "a\u{1b}[",
+            "a\u{1b}[38;5;",
+            "a\u{1b}]0;no-terminator-here",
+            "a\u{1b}Pno-terminator",
+            "a\u{1b}",
+        ] {
+            let got = scrub_rendered_span(hostile);
+            assert_eq!(got, "a", "an incomplete escape leaked residue: {got:?}");
+            assert!(!got.contains('\u{1b}'), "ESC survived: {got:?}");
+        }
     }
 
     /// A span is one row, so `\t` is kept (tab-indented file bodies) but `\n`

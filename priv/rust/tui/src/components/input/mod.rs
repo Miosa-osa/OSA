@@ -1813,8 +1813,18 @@ impl InputComponent {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("osa-compose-{}.md", nanos));
-        std::fs::write(&path, self.content.as_bytes())
+        let path = std::env::temp_dir().join(format!(
+            "osa-compose-{}-{}.md",
+            std::process::id(),
+            nanos
+        ));
+        // $TMPDIR is world-writable and this name is predictable, so create the
+        // draft 0600 with O_EXCL: an attacker-planted symlink (or file) at the
+        // path makes this fail loudly instead of becoming a write primitive.
+        // The draft is the user's prompt -- it must not be world-readable while
+        // the editor is open, and it survives on disk if OSA is killed before
+        // the remove_file below.
+        crate::client::auth::write_private_new(&path, self.content.as_bytes())
             .map_err(|e| format!("compose: write temp failed: {e}"))?;
 
         // Suspend the TUI's terminal modes around the child.

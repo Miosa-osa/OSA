@@ -87,6 +87,114 @@ defmodule OptimalSystemAgent.Utils.Text do
   def truncate(_, _), do: ""
 
   @doc """
+  Byte-bounded HEAD of `bin`: at most `max_bytes` bytes, cut back to a UTF-8
+  character boundary.
+
+  `binary_part/3` and friends cut at an arbitrary byte offset, which lands
+  mid-sequence on most multibyte content and yields invalid UTF-8. Anything
+  built from the result and handed to `Jason.encode_to_iodata!/1` — every
+  provider request body — then RAISES, so an unguarded byte cut on the way to
+  the model is a crash, not a cosmetic defect.
+
+  `String.slice/3` is not a substitute: it counts GRAPHEMES, so asking it for
+  "51200" against CJK yields ~150KB and against 4-byte emoji ~200KB.
+
+  The result is always valid UTF-8: the boundary cut handles the common case
+  (a clean binary sliced mid-character), and any remaining invalid bytes —
+  from a source that was already malformed — are replaced with U+FFFD rather
+  than dropped, so length is preserved and nothing is silently lost.
+  """
+  @spec utf8_head(binary(), non_neg_integer()) :: binary()
+  def utf8_head(bin, max_bytes)
+      when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do
+    if byte_size(bin) <= max_bytes do
+      scrub_utf8(bin)
+    else
+      bin
+      |> binary_part(0, max_bytes)
+      |> drop_partial_trailing()
+      |> scrub_utf8()
+    end
+  end
+
+  @doc """
+  Byte-bounded TAIL of `bin`: at most `max_bytes` bytes, advanced FORWARD to a
+  UTF-8 character boundary.
+
+  The tail is the dangerous half of a head+tail split — a cut at
+  `byte_size - max_bytes` starts mid-sequence on almost any multibyte content,
+  whereas a head cut only misbehaves when the boundary happens to land inside
+  the final character. Same validity guarantee as `utf8_head/2`.
+  """
+  @spec utf8_tail(binary(), non_neg_integer()) :: binary()
+  def utf8_tail(bin, max_bytes)
+      when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do
+    if byte_size(bin) <= max_bytes do
+      scrub_utf8(bin)
+    else
+      bin
+      |> binary_part(byte_size(bin) - max_bytes, max_bytes)
+      |> drop_partial_leading()
+      |> scrub_utf8()
+    end
+  end
+
+  @doc """
+  Coerce `bin` to valid UTF-8, replacing each undecodable byte with U+FFFD.
+
+  Replacement rather than truncation is deliberate: these binaries are logs,
+  tool output and crash-recovery records, where silently dropping the tail
+  after the first bad byte loses far more than it protects.
+  """
+  @spec scrub_utf8(binary()) :: binary()
+  def scrub_utf8(bin) when is_binary(bin) do
+    if String.valid?(bin), do: bin, else: IO.iodata_to_binary(do_scrub(bin, []))
+  end
+
+  defp do_scrub(<<>>, acc), do: Enum.reverse(acc)
+  defp do_scrub(<<c::utf8, rest::binary>>, acc), do: do_scrub(rest, [<<c::utf8>> | acc])
+  defp do_scrub(<<_bad, rest::binary>>, acc), do: do_scrub(rest, [<<0xFFFD::utf8>> | acc])
+
+  # Drop a trailing UTF-8 sequence that the byte cut left incomplete. A UTF-8
+  # character is at most 4 bytes, so at most 3 bytes are ever removed.
+  defp drop_partial_trailing(bin) do
+    case incomplete_tail_len(bin, 0) do
+      0 -> bin
+      n -> binary_part(bin, 0, byte_size(bin) - n)
+    end
+  end
+
+  defp incomplete_tail_len(bin, seen) when seen < 4 do
+    size = byte_size(bin)
+
+    if size - seen <= 0 do
+      seen
+    else
+      case :binary.at(bin, size - seen - 1) do
+        # ASCII: whatever we walked past was stray, not an incomplete sequence.
+        b when b < 0x80 -> seen
+        # Continuation byte — keep walking back toward the lead byte.
+        b when b < 0xC0 -> incomplete_tail_len(bin, seen + 1)
+        # Lead byte: incomplete only if the sequence it opens does not fit.
+        b -> if seen + 1 < utf8_seq_len(b), do: seen + 1, else: 0
+      end
+    end
+  end
+
+  defp incomplete_tail_len(_bin, seen), do: seen
+
+  defp utf8_seq_len(b) when b < 0xE0, do: 2
+  defp utf8_seq_len(b) when b < 0xF0, do: 3
+  defp utf8_seq_len(_b), do: 4
+
+  # Drop leading continuation bytes orphaned by a tail cut (at most 3 for a
+  # well-formed source; a pathological all-continuation input degrades to "").
+  defp drop_partial_leading(<<b, rest::binary>>) when b >= 0x80 and b < 0xC0,
+    do: drop_partial_leading(rest)
+
+  defp drop_partial_leading(bin), do: bin
+
+  @doc """
   Strips leading and trailing Markdown code fences from `content`.
 
   Handles optional language tags (e.g. ` ```json `).
