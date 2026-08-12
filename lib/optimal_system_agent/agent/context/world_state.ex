@@ -44,17 +44,57 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
 
   Emitted payloads are kept per session in ETS, in emission order. Replaying
   them verbatim is what makes the prefix byte-stable. The ledger compacts back
-  to a single fresh snapshot once it exceeds `@max_payloads` deltas, so a
-  section that churns cannot grow the prompt without bound.
+  to a single fresh snapshot once REPLAYING it costs more than the snapshot
+  would (`should_compact?/3`), so a section that churns cannot grow the prompt
+  without bound — while a session whose deltas stay small never pays the cache
+  break at all. The trigger used to be a flat count of 6 payloads, which fired
+  on a schedule unrelated to whether compacting helped.
   """
 
   require Logger
 
   @ledger_table :osa_world_state_ledger
 
-  # Compact the ledger to one fresh full snapshot after this many delta
-  # payloads. Bounds growth when a section churns turn over turn.
-  @max_payloads 6
+  # Hard backstop on ledger length, so a pathological session cannot grow the
+  # ETS entry without bound even when every delta is tiny. Deliberately far
+  # above the point where the size rule below takes over — it should never be
+  # what fires.
+  @max_payloads 64
+
+  # Compaction is triggered by SIZE, not by count.
+  #
+  # It used to collapse the ledger after 6 delta payloads, regardless of how
+  # large they were. Replaying the ledger verbatim is the whole reason the
+  # world-state block is byte-stable, and that block carries its own
+  # `cache_control` breakpoint (`Agent.Context.build_system_message/4`), so
+  # rewriting it invalidates that breakpoint AND everything after it — the
+  # volatile block and the entire conversation. On a long session that is the
+  # expensive part of the request, and it was being paid every 6 deltas on a
+  # schedule that had nothing to do with whether compacting would help.
+  #
+  # Worse, it could make things bigger: six deltas of a few hundred bytes each
+  # are cheaper to replay than a fresh full snapshot of every live section, so
+  # compacting them broke the cache in exchange for a LARGER block.
+  #
+  # The honest rule is to compact exactly when replaying costs more than a
+  # snapshot would, which is the only condition under which compaction is a win
+  # on both axes at once.
+  @compact_when_ledger_exceeds_snapshot_by 1.2
+
+  # Absolute floor: never compact until the ledger wastes at least this much.
+  #
+  # Sized from what the break COSTS rather than from what it reclaims. Rewriting
+  # the world-state block invalidates its cache breakpoint, so the volatile
+  # block and the entire conversation are re-prefilled at full price instead of
+  # being read from cache at ~10%. In a session with 30k tokens of history that
+  # is ~27k tokens of extra prefill — so reclaiming a few hundred tokens by
+  # compacting is a large net loss, which is exactly the trade the old 6-payload
+  # rule kept making.
+  #
+  # 16 KB is ~4k tokens of genuinely wasted prefix, the point at which the
+  # reclaim is the same order as the re-prefill it costs. Below it, replaying a
+  # slightly redundant ledger is simply cheaper.
+  @compact_floor_bytes 16_384
 
   @typedoc "Outcome of diffing one section against the previous turn."
   @type change :: :added | :changed | :removed | :unchanged
@@ -228,7 +268,7 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
     delta = render_delta(changes, current)
 
     {payloads, changes, delta} =
-      if delta != [] and length(payloads) >= @max_payloads do
+      if delta != [] and should_compact?(payloads, delta, current) do
         # Compaction: collapse to ONE fresh full snapshot. Every live section is
         # re-emitted as `:added` so the model still sees the whole world, and the
         # ledger stops growing when a section churns turn over turn.
@@ -323,6 +363,44 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
   # ---------------------------------------------------------------------------
   # Diff + render
   # ---------------------------------------------------------------------------
+
+  # Whether replaying this ledger has become more expensive than re-sending a
+  # full snapshot. See `@compact_when_ledger_exceeds_snapshot_by`.
+  #
+  # Both sides are measured as the bytes that would actually reach the model, so
+  # the comparison is the one the prompt pays for — not a proxy like payload
+  # count, which is what this replaced.
+  defp should_compact?(payloads, delta, current) do
+    ledger_bytes = payload_bytes(payloads) + payload_bytes([delta])
+
+    cond do
+      # Backstop: bound the ETS entry regardless of size.
+      length(payloads) >= @max_payloads ->
+        true
+
+      # Nothing worth reclaiming yet.
+      ledger_bytes < @compact_floor_bytes ->
+        false
+
+      true ->
+        all_added = Map.new(current, fn {id, _} -> {id, :added} end)
+        snapshot_bytes = payload_bytes([render_delta(all_added, current)])
+
+        snapshot_bytes > 0 and
+          ledger_bytes > snapshot_bytes * @compact_when_ledger_exceeds_snapshot_by
+    end
+  end
+
+  # Bytes a list of payloads contributes to the prompt.
+  defp payload_bytes(payloads) do
+    payloads
+    |> List.flatten()
+    |> Enum.reduce(0, fn
+      {_id, text}, acc when is_binary(text) -> acc + byte_size(text)
+      text, acc when is_binary(text) -> acc + byte_size(text)
+      _, acc -> acc
+    end)
+  end
 
   defp diff(prev_digests, current) do
     current_digests = digests(current)

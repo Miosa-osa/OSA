@@ -9,6 +9,45 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.88] — displays as `v1.0.088`
+
+### Fixed — the world-state ledger broke the prompt cache on a timer
+
+The world-state block is diffed per turn and replayed verbatim so the prompt
+prefix stays byte-stable, and it carries its **own** `cache_control` breakpoint
+(`Agent.Context.build_system_message/4`). Rewriting it invalidates that
+breakpoint and everything after it — the volatile block and the **entire
+conversation** — so the whole history is re-prefilled at full price instead of
+being read from cache at ~10%.
+
+The ledger compacted itself to a fresh snapshot every **6 delta payloads**,
+regardless of their size. That schedule had nothing to do with whether
+compacting helped:
+
+* In a normal session the deltas are small. Six of a few hundred bytes are
+  *cheaper to replay* than a fresh snapshot of every live section — so the break
+  was paid to make the block **larger**.
+* The reclaim was a few hundred tokens; the break costs a full re-prefill of the
+  conversation, ~27k tokens in a session with 30k of history. The trade lost by
+  roughly two orders of magnitude, every six turns, forever.
+
+Compaction is now triggered by size, and the floor is sized from what the break
+*costs* rather than what it reclaims: the ledger must waste at least 16 KB
+(~4k tokens, the same order as the re-prefill) **and** exceed a fresh snapshot
+by 20% before it collapses. A payload-count cap of 64 remains purely as a
+backstop against unbounded ETS growth.
+
+Measured over 30 turns:
+
+    typical session (~135 B deltas)   5 cache breaks  ->  0
+    heavy churn     (~20 KB deltas)   still compacts every turn,
+                                      block bounded at 20 KB instead of ~600 KB
+
+The churn case is not a regression: when a section rewrites itself every turn
+the block changes anyway, so the cache breaks with or without compaction and
+bounding the prompt is free. The win is the normal case, which is every session
+that is not pathological.
+
 ## [1.0.87] — displays as `v1.0.087`
 
 ### Fixed — streaming arrives in chunks (measured this time)
