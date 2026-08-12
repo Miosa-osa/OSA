@@ -1,6 +1,7 @@
 // Phase 2+: survey_id field — wired when survey Q&A is persisted
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::time::SystemTime;
 use ratatui::prelude::*;
 use ratatui::buffer::Buffer;
@@ -79,8 +80,14 @@ pub struct Message {
     pub tool_data: Option<ToolCallData>,
     /// Survey Q&A data (only for SurveyQA messages)
     pub survey_data: Option<SurveyQAData>,
-    /// Cached height for given width
-    pub cached_height: Option<(u16, u16)>,
+    /// Memoized `(width, height)` from the last [`Message::height`] call.
+    ///
+    /// A `Cell` because `height` takes `&self` — it is called from the render
+    /// path, which has no `&mut`. **That is why this field spent its whole life
+    /// declared, read, cleared and never once written**: four constructors
+    /// initialised it, `height` read it at the top, `invalidate_cache` cleared
+    /// it, and nothing could assign it. The cache did not exist.
+    pub cached_height: Cell<Option<(u16, u16)>>,
     /// Pre-parsed markdown body for the live streaming preview. When set (only
     /// via `new_agent_prerendered`), `height` and `draw_agent` reuse this parsed
     /// `Text` instead of re-running `render_markdown` over the whole reply — this
@@ -105,7 +112,7 @@ impl Message {
             signal,
             tool_data: None,
             survey_data: None,
-            cached_height: None,
+            cached_height: Cell::new(None),
             timestamp: Some(SystemTime::now()),
             prerendered_body: None,
             raw_mode: false,
@@ -120,7 +127,7 @@ impl Message {
             tool_data: Some(data),
             survey_data: None,
             signal: None,
-            cached_height: None,
+            cached_height: Cell::new(None),
             timestamp: None,
             prerendered_body: None,
             raw_mode: false,
@@ -138,7 +145,7 @@ impl Message {
             signal: None,
             tool_data: None,
             survey_data: None,
-            cached_height: None,
+            cached_height: Cell::new(None),
             timestamp: None,
             prerendered_body: Some(body),
             raw_mode: false,
@@ -156,7 +163,7 @@ impl Message {
             signal: None,
             tool_data: None,
             survey_data: None,
-            cached_height: None,
+            cached_height: Cell::new(None),
             timestamp: None,
             prerendered_body: Some(body),
             raw_mode: false,
@@ -188,7 +195,7 @@ impl Message {
     }
 
     pub fn invalidate_cache(&mut self) {
-        self.cached_height = None;
+        self.cached_height.set(None);
     }
 
     /// U-T7: toggle raw-markdown display for this message. Returns the new state.
@@ -224,7 +231,72 @@ impl Message {
             )
     }
 
+    /// Rendered height in rows at `width`, memoized in [`Message::cached_height`].
+    ///
+    /// The memo is the point. On the commit path `height` and
+    /// `render_to_buffer` are called back to back on the same message at the
+    /// same width, and for an agent message each one ran a full
+    /// `render_markdown` — so every finalized answer was parsed twice on its way
+    /// into scrollback. [`Message::prepare_for_commit`] removes the second parse
+    /// by sharing one `Text`; this removes the second *measurement*.
+    ///
+    /// Every mutation that can change the answer routes through
+    /// [`Message::invalidate_cache`] (content edits, raw-mode toggles, width
+    /// changes), so a stale entry is not reachable.
     pub fn height(&self, width: u16) -> u16 {
+        if let Some((cached_w, cached_h)) = self.cached_height.get() {
+            if cached_w == width {
+                return cached_h;
+            }
+        }
+        let h = self.height_uncached(width);
+        self.cached_height.set(Some((width, h)));
+        h
+    }
+
+    /// Parse the markdown body ONCE, before this message is measured and drawn.
+    ///
+    /// The commit path (`event_loop`'s `drain_scrollback` loop) calls
+    /// `height(w)` and then `render_to_buffer(.., w, ..)`, and for an
+    /// Agent/AgentContinuation message both ran their own
+    /// `render_markdown(&self.content, w - 2)`. Populating `prerendered_body`
+    /// first makes both take the already-parsed branch
+    /// (`height` at the `prerendered_body` arm, `draw_agent` /
+    /// `draw_agent_continuation` at theirs), so the answer is parsed once.
+    ///
+    /// **Only safe on a message that is on its way out of `Chat`.** For the live
+    /// preview `prerendered_body` is not a cache, it is the body
+    /// (`new_agent_prerendered`), and for a Plan message it is the whole
+    /// content; neither is touched here, because this only ever *fills* an empty
+    /// one. The commit path drains its messages out of `Chat` first and drops
+    /// them straight after rendering, so nothing can mutate the content
+    /// underneath the parse.
+    ///
+    /// Width must be the same `width` later handed to `height` and
+    /// `render_to_buffer`: all three derive the markdown width as `width - 2`.
+    pub fn prepare_for_commit(&mut self, width: u16) {
+        if self.prerendered_body.is_some() || self.renders_raw() {
+            return;
+        }
+        if !matches!(
+            self.msg_type,
+            MessageType::Agent | MessageType::AgentContinuation
+        ) {
+            return;
+        }
+        let content_width = width.saturating_sub(2);
+        if content_width == 0 {
+            return;
+        }
+        self.prerendered_body = Some(crate::render::markdown::render_markdown(
+            &self.content,
+            content_width,
+        ));
+        // The body just changed shape as far as the height cache is concerned.
+        self.cached_height.set(None);
+    }
+
+    fn height_uncached(&self, width: u16) -> u16 {
         // Help messages have fixed styled content — bypass text-based calc.
         if matches!(self.msg_type, MessageType::Help) {
             return HELP_LINE_COUNT;
@@ -248,12 +320,6 @@ impl Message {
         // Survey Q&A: 2 lines per pair + 2 for border (top + bottom)
         if let Some(ref sd) = self.survey_data {
             return (sd.pairs.len() as u16 * 2).saturating_add(2);
-        }
-
-        if let Some((cached_w, cached_h)) = self.cached_height {
-            if cached_w == width {
-                return cached_h;
-            }
         }
 
         let content_width = width.saturating_sub(2); // match draw_agent's markdown width
@@ -1133,5 +1199,147 @@ mod timestamp_tz_tests {
         let off = local_utc_offset_secs();
         assert!((-14 * 3600..=14 * 3600).contains(&off), "implausible offset {off}");
         assert_eq!(off % 60, 0, "offset must be a whole number of minutes");
+    }
+}
+
+#[cfg(test)]
+mod commit_parse_tests {
+    use super::*;
+
+    /// A markdown body with enough structure that a re-parse is not free, and
+    /// enough lines that a height mismatch would be obvious.
+    fn body() -> String {
+        let mut s = String::from(
+            "Here is the answer, written as one long paragraph so that the \
+             rendered height genuinely depends on the width it is measured at \
+             and a width-keyed cache has something to be wrong about.\n\n",
+        );
+        for i in 0..30 {
+            s.push_str(&format!("- item {i} with some **bold** text\n"));
+        }
+        s.push_str("\n```rust\nfn main() { println!(\"hi\"); }\n```\n");
+        s
+    }
+
+    fn agent() -> Message {
+        Message::new(MessageType::Agent, body(), None)
+    }
+
+    /// **The defect.** `cached_height` was declared, read at the top of
+    /// `height`, cleared by `invalidate_cache`, and initialised by four
+    /// constructors — and assigned by nothing in the crate. Every `height` call
+    /// therefore re-ran the markdown parse. Reverting `height` to a plain
+    /// `height_uncached` call leaves this `None` and fails here.
+    #[test]
+    fn measuring_a_message_populates_its_height_cache() {
+        let msg = agent();
+        assert_eq!(msg.cached_height.get(), None, "nothing measured it yet");
+        let h = msg.height(80);
+        assert_eq!(
+            msg.cached_height.get(),
+            Some((80, h)),
+            "height() must record what it computed, keyed by the width it used"
+        );
+    }
+
+    /// A second call at the same width is served from the memo, and a different
+    /// width is not (the cache is keyed by width because the answer rewraps).
+    #[test]
+    fn the_height_cache_is_keyed_by_width() {
+        let msg = agent();
+        let narrow = msg.height(40);
+        let wide = msg.height(120);
+        assert_eq!(msg.cached_height.get(), Some((120, wide)));
+        assert_ne!(
+            narrow, wide,
+            "a 30-item list must wrap differently at 40 columns than at 120; \
+             if this ever ties, pick a body where it does not"
+        );
+        assert_eq!(msg.height(120), wide, "second call must agree with the memo");
+    }
+
+    /// Invalidation still reaches it — otherwise the memo would outlive an edit.
+    #[test]
+    fn invalidating_clears_the_height_cache() {
+        let mut msg = agent();
+        msg.height(80);
+        assert!(msg.cached_height.get().is_some());
+        msg.invalidate_cache();
+        assert_eq!(msg.cached_height.get(), None);
+    }
+
+    /// **The double parse.** On the commit path `height(w)` and
+    /// `render_to_buffer(.., w, ..)` each ran their own `render_markdown` over
+    /// the whole answer. `prepare_for_commit` parses once and leaves the result
+    /// where both of them already look for it.
+    #[test]
+    fn preparing_for_commit_leaves_a_body_both_consumers_use() {
+        let mut msg = agent();
+        assert!(msg.prerendered_body.is_none());
+        msg.prepare_for_commit(80);
+        let prepared = msg
+            .prerendered_body
+            .as_ref()
+            .expect("an agent message must come out of prepare_for_commit parsed");
+        assert!(
+            prepared.lines.len() > 30,
+            "the parsed body must be the real answer, not a stub"
+        );
+    }
+
+    /// The shared parse must not change the number. If `prepare_for_commit`
+    /// measured at a different width than `height` does, every committed block
+    /// would be sized wrong and rows would be clipped out of scrollback.
+    #[test]
+    fn the_shared_parse_measures_the_same_height_as_the_double_parse() {
+        for width in [40u16, 80, 120, 200] {
+            let plain = agent().height(width);
+            let mut prepared = agent();
+            prepared.prepare_for_commit(width);
+            assert_eq!(
+                prepared.height(width),
+                plain,
+                "sharing the parse changed the committed height at width {width}"
+            );
+        }
+    }
+
+    /// It only ever FILLS an empty body. The live preview and the plan snapshot
+    /// carry their content in `prerendered_body`; overwriting it there would
+    /// replace the body with a re-parse of an empty `content`.
+    #[test]
+    fn preparing_never_overwrites_a_body_that_is_the_content() {
+        let text: Text<'static> = Text::from("already rendered");
+        let mut msg = Message::new_agent_prerendered(text);
+        msg.prepare_for_commit(80);
+        let body = msg.prerendered_body.as_ref().unwrap();
+        assert_eq!(body.lines.len(), 1);
+        assert_eq!(
+            body.lines[0].spans[0].content.as_ref(),
+            "already rendered",
+            "prepare_for_commit must leave an existing body untouched"
+        );
+    }
+
+    /// Raw view shows the literal source, which is not markdown at all — a
+    /// parsed body would be ignored by the draw and wrong for the height.
+    #[test]
+    fn preparing_leaves_a_raw_view_message_alone() {
+        let mut msg = agent();
+        msg.set_raw_mode(true);
+        msg.prepare_for_commit(80);
+        assert!(
+            msg.prerendered_body.is_none(),
+            "raw view renders `content` verbatim; it must not gain a parsed body"
+        );
+    }
+
+    /// Non-agent messages are not markdown-rendered, so there is nothing to
+    /// share and nothing to parse.
+    #[test]
+    fn preparing_ignores_messages_that_are_not_markdown() {
+        let mut user = Message::new(MessageType::User, body(), None);
+        user.prepare_for_commit(80);
+        assert!(user.prerendered_body.is_none());
     }
 }

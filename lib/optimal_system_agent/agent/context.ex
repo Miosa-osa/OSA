@@ -99,9 +99,19 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     # Local providers (or any small effective window) get the LITE static base:
     # only the core-tool allowlist is inlined; every other tool is advertised by
-    # name in a <system-reminder> and pulled on demand via tool_search. This keeps
-    # the static base ~4-6k instead of ~24k so the assembled prompt fits a real
-    # <=32k window (and so num_ctx isn't forced up to 32k+).
+    # name in a <system-reminder> and pulled on demand via tool_search.
+    #
+    # This comment used to claim lite kept the static base "~4-6k instead of
+    # ~24k". MEASURED at v1.0.82: :full is 30,901 tokens and :lite is 24,375 —
+    # trimming the tool section saves ~6.5k, and the rest is the SYSTEM.md body,
+    # which :lite does not touch. So the saving is real but the destination is
+    # not: on a 32k window, 24,375 static + a ~4k response reserve leaves under
+    # 4k for the conversation AND all dynamic context — the same starvation
+    # described for `response_reserve/1` above, not the comfortable fit the old
+    # number implied. Nothing computes against the claim (the budget below uses
+    # `Soul.static_token_count(variant)`, a real measurement), but the CHOICE to
+    # route small windows here was made believing it, and it does not buy what
+    # it was thought to buy.
     lite? = provider in [:ollama, :lmstudio, :llamacpp] or max_tok < 40_000
 
     # Which flavour of the cached static base this provider gets.

@@ -63,11 +63,25 @@ defmodule OptimalSystemAgent.OS.Shell do
 
   @doc """
   Drop-in replacement for `System.cmd("sh", ["-c", command], opts)` that is
-  cross-platform. Options are passed through unchanged.
+  cross-platform.
+
+  Every caller of this function hands it a whole command STRING that came from
+  a model, a hook definition, a verification config or a workspace file — i.e.
+  the exact shape that can contain `echo $ANTHROPIC_API_KEY`. So the `:env`
+  option is always routed through `OptimalSystemAgent.OS.Env`, which unsets the
+  secret-shaped variables and leaves `PATH`/`HOME`/toolchain vars alone.
+
+  A caller-supplied `:env` is MERGED on top of the scrub rather than replacing
+  it, so a call site that deliberately injects a value (hook payload vars) keeps
+  working and can still force a credential through if it must.
+
+  All other options are passed through unchanged.
   """
   @spec cmd(String.t(), keyword()) :: {Collectable.t(), non_neg_integer()}
   def cmd(command, opts \\ []) when is_binary(command) do
     {exe, args} = invocation(command)
+    caller_env = Keyword.get(opts, :env, [])
+    opts = Keyword.put(opts, :env, OptimalSystemAgent.OS.Env.cmd_env(caller_env))
     System.cmd(exe, args, opts)
   end
 end

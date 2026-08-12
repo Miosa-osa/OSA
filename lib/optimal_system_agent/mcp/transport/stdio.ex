@@ -87,8 +87,13 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
 
     case resolve_executable(command) do
       {:ok, exe} ->
-        port_env =
-          Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+        # `:env` is an OVERLAY, not a replacement: building it from the server's
+        # configured `env` alone still handed the child EVERYTHING else in the
+        # BEAM's environment — and an MCP server is third-party code the
+        # operator installed, not code OSA controls. Scrub first; the server's
+        # own configured vars are applied on top, so a server that is meant to
+        # receive a credential still receives exactly the one it was given.
+        port_env = OptimalSystemAgent.OS.Env.port_env(Enum.to_list(env))
 
         # Redirect the child's stderr off the daemon console AND wrap it under
         # `setsid -w` so it leads its own process group for teardown reaping.

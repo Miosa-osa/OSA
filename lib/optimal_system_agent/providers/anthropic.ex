@@ -96,6 +96,36 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
     try do
       case Req.post("#{base_url}/messages", req_opts(body, headers, timeout, opts)) do
+        # A 200 whose body is a BINARY rather than the decoded JSON object.
+        #
+        # The cause in practice is a gateway that only speaks SSE and answers a
+        # NON-streaming request with an event stream anyway.
+        #
+        # The 200 arm below carries NO guard, so before this clause the SSE
+        # binary matched it and was treated as a successful decode:
+        # `extract_content/1` and `extract_tool_calls/1` both fall through to
+        # their catch-all clauses on a binary, so the caller received
+        # `{:ok, %{content: "", tool_calls: []}}` — a silent, empty, SUCCESSFUL
+        # answer for a request whose real reply was sitting unparsed in `body`.
+        # Ordering matters here: this clause must stay ABOVE the general 200.
+        #
+        # `Providers.OpenAICompat` gained this recovery first; this is the same
+        # idea with a different collector, because Anthropic's stream path has
+        # its own result shape (thinking_blocks) and its own sync FALLBACK,
+        # which has to be disarmed here — see `collect_via_stream/6`.
+        {:ok, %{status: 200, body: body}} when is_binary(body) ->
+          if sse_body?(body) do
+            Logger.info(
+              "Anthropic endpoint answered a non-streaming request with SSE — " <>
+                "re-issuing as a stream and collecting the result"
+            )
+
+            collect_via_stream(base_url, auth, model, messages, opts, body)
+          else
+            {:error,
+             "Anthropic returned 200 with an unrecognized body: #{String.slice(body, 0, 500)}"}
+          end
+
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
@@ -135,6 +165,65 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       e ->
         Logger.error("Anthropic unexpected error: #{Exception.message(e)}")
         {:error, "Anthropic unexpected error: #{Exception.message(e)}"}
+    end
+  end
+
+  # An SSE payload rather than JSON. Anthropic streams are `event: <name>` /
+  # `data: {...}` line pairs, so either prefix identifies one.
+  @doc false
+  @spec sse_body?(term()) :: boolean()
+  def sse_body?(body) when is_binary(body) do
+    trimmed = String.trim_leading(body)
+    String.starts_with?(trimmed, "data:") or String.starts_with?(trimmed, "event:")
+  end
+
+  def sse_body?(_), do: false
+
+  # Re-issue the request as a real stream and fold the events back into the one
+  # `{:ok, result}` the synchronous caller is waiting for. Nothing is emitted
+  # anywhere: the caller asked for a whole answer, so this is a transport
+  # workaround, not a delivery change.
+  #
+  # Two things make this different from the OpenAI-compat collector:
+  #
+  #   1. `do_chat_stream/6` here falls back to `do_chat/5` on a connection error
+  #      or an unexpected raise. Called from inside `do_chat/5` that is a
+  #      MUTUAL RECURSION — sync sees SSE, re-issues as a stream, the stream
+  #      fails, and the fallback re-enters sync, which sees SSE again. The
+  #      `:__sse_recovery__` flag disarms that fallback for the duration of the
+  #      recovery, so a failure surfaces as an error instead of looping.
+  #   2. The done-result carries `thinking_blocks` when extended thinking is on,
+  #      so the collector takes the result map WHOLE rather than rebuilding it.
+  defp collect_via_stream(base_url, auth, model, messages, opts, original_body) do
+    parent = self()
+    ref = make_ref()
+
+    callback = fn
+      {:done, result} -> send(parent, {ref, :done, result})
+      _ -> :ok
+    end
+
+    opts = Keyword.put(opts, :__sse_recovery__, true)
+
+    case do_chat_stream(base_url, auth, model, messages, callback, opts) do
+      :ok ->
+        receive do
+          {^ref, :done, result} -> {:ok, result}
+        after
+          0 ->
+            {:error,
+             "Anthropic SSE recovery: stream completed without a result. " <>
+               "Original body: #{String.slice(original_body, 0, 300)}"}
+        end
+
+      {:ok, result} when is_map(result) ->
+        {:ok, result}
+
+      {:error, reason} ->
+        {:error, "Anthropic SSE recovery failed: #{inspect(reason)}"}
+
+      other ->
+        {:error, "Anthropic SSE recovery failed: #{inspect(other)}"}
     end
   end
 
@@ -202,12 +291,23 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
         {:error, reason} ->
           Logger.error("Anthropic stream connection failed: #{inspect(reason)}")
-          fallback_to_sync(base_url, auth, model, messages, callback, opts)
+          sync_fallback(base_url, auth, model, messages, callback, opts, reason)
       end
     rescue
       e ->
         Logger.error("Anthropic stream unexpected error: #{Exception.message(e)}")
-        fallback_to_sync(base_url, auth, model, messages, callback, opts)
+        sync_fallback(base_url, auth, model, messages, callback, opts, Exception.message(e))
+    end
+  end
+
+  # `fallback_to_sync/6`, except it REFUSES when we are already inside the
+  # sync→stream SSE recovery. Falling back there would re-enter `do_chat/5`,
+  # which would see the same SSE body and re-issue the same stream, forever.
+  defp sync_fallback(base_url, auth, model, messages, callback, opts, reason) do
+    if Keyword.get(opts, :__sse_recovery__, false) do
+      {:error, "Anthropic stream failed during SSE recovery: #{inspect(reason)}"}
+    else
+      fallback_to_sync(base_url, auth, model, messages, callback, opts)
     end
   end
 

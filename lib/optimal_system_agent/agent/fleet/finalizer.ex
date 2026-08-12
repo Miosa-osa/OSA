@@ -402,8 +402,15 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
 
   defp default_cmd_fun(command, cwd) do
     case String.split(command, ~r/\s+/, trim: true) do
-      [program | args] -> System.cmd(program, args, cd: cwd, stderr_to_stdout: true)
-      [] -> {"empty command", 0}
+      [program | args] ->
+        System.cmd(program, args,
+          cd: cwd,
+          stderr_to_stdout: true,
+          env: OptimalSystemAgent.OS.Env.cmd_env()
+        )
+
+      [] ->
+        {"empty command", 0}
     end
   end
 end

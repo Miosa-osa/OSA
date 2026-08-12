@@ -159,7 +159,10 @@ defmodule OptimalSystemAgent.Sandbox.Vercel do
     try do
       task =
         Task.async(fn ->
-          System.cmd("node", ["-e", script], env: env, stderr_to_stdout: true)
+          System.cmd("node", ["-e", script],
+            env: OptimalSystemAgent.OS.Env.cmd_env(env),
+            stderr_to_stdout: true
+          )
         end)
 
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

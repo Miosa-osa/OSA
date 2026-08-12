@@ -8,7 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
 };
-use ratatui::{prelude::*, Terminal, TerminalOptions, Viewport};
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::{self, Write};
 use tracing::error;
 
@@ -225,7 +225,7 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            CrosstermBackend::new(io::stdout()),
+            crate::app::inline_backend::InlineBackend::new(io::stdout()),
             TerminalOptions {
                 viewport: Viewport::Inline(viewport_h),
             },
@@ -253,7 +253,7 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
                 "inline viewport unavailable ({:?}); falling back to full-screen",
                 last_err
             );
-            Terminal::new(CrosstermBackend::new(io::stdout()))?
+            Terminal::new(crate::app::inline_backend::InlineBackend::new(io::stdout()))?
         }
     };
 

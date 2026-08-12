@@ -82,6 +82,40 @@ defmodule OptimalSystemAgent.OS.ProcessGroup do
   end
 
   @doc """
+  The process-group id THIS pid belongs to.
+
+  `resolve_pgid/1` is for a `setsid -w` WRAPPER pid and deliberately looks one
+  level down at the wrapper's child. Use `pgid_of/1` when you already hold the
+  group leader itself — e.g. a pid adopted from another spawner, where there is
+  no wrapper to look through.
+
+  Returns `nil` when it cannot be read. Callers must still route the result
+  through `killpg_safe?/1`: a pid that was never `setsid`-ed reports the
+  BEAM's own group, and signalling that would kill the agent.
+  """
+  @spec pgid_of(pos_integer() | nil) :: pos_integer() | nil
+  def pgid_of(nil), do: nil
+
+  def pgid_of(os_pid) when is_integer(os_pid) and os_pid > 1 do
+    with {out, 0} <-
+           System.cmd("ps", ["-o", "pgid=", "-p", Integer.to_string(os_pid)],
+             stderr_to_stdout: true
+           ),
+         {pgid, _} <- Integer.parse(String.trim(out)),
+         true <- pgid > 1 do
+      pgid
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  def pgid_of(_), do: nil
+
+  @doc """
   The pid of the group LEADER running under a `setsid -w` wrapper — i.e. the
   actual command, not the wrapper.
 

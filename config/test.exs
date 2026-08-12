@@ -74,8 +74,24 @@ config :optimal_system_agent, live_env_file_fallback: false
 # config. Without this, HTTP route tests that exercise POST /switch call
 # persist_model_selection, which writes ~/.osa/config.json — silently clobbering
 # the user's real model selection every time the suite runs.
+#
+# Per-RUN and wiped, like the database and the config dir. A single fixed
+# `osa-test-bootstrap` was isolated from the OPERATOR but not from the previous
+# RUN: `persist_model_selection` left a `config.json` there that the next suite
+# read back as if it were configuration someone had chosen. `Soul.soul_dir/0`
+# resolves USER.md / IDENTITY.md / SOUL.md out of this directory, so anything
+# left behind here is interpolated into the system prompt every later run
+# measures.
+bootstrap_dir = Path.join(System.tmp_dir!(), "osa-test-bootstrap-#{test_db_tag}")
+_ = File.rm_rf(bootstrap_dir)
+
+for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-bootstrap-*")),
+    match?({:ok, %{mtime: mtime}} when mtime < stale_before, File.stat(stale, time: :posix)) do
+  _ = File.rm_rf(stale)
+end
+
 config :optimal_system_agent,
-  bootstrap_dir: Path.join(System.tmp_dir!(), "osa-test-bootstrap")
+  bootstrap_dir: bootstrap_dir
 
 # Model catalog: no network fetch in tests — deterministic, bundled-only.
 # Point the on-disk cache at a path that never exists so the catalog's tier-1
@@ -144,3 +160,56 @@ config :optimal_system_agent,
 # non-:ask defaults.
 config :optimal_system_agent,
   permission_mode_file: Path.join(System.tmp_dir!(), "osa-test-permission-mode.json")
+
+# ── The rest of the operator's ~/.osa ──────────────────────────────────────
+#
+# `config_dir`, `skills_dir`, `sessions_dir` and friends are re-resolved per run
+# in config/runtime.exs, and `bootstrap_dir` / the database are isolated above.
+# SIX more state paths were not, and stayed at their PRODUCTION default of
+# `~/.osa/...`. The suite therefore ran against — and wrote into — the live
+# install this checkout is the source of.
+#
+# That is measured, not suspected. On this machine, before this block existed:
+#
+#   * `~/.osa/fs_checkpoints` (the shadow git repo backing `/rewind`) held 2,761
+#     commits, of which 2,759 were test sessions — subjects like
+#     `file_write | rewind_coord_157314 | /tmp/osa_rewind_coord_test_157250/scratch.txt`;
+#   * `~/.osa/verification_checkpoints` held 182 `vloop-fail-<n>.json` files
+#     left by `Verification.LoopTest`, the lowest numbered `vloop-fail-68.json`;
+#   * `~/.osa/workflows` held 241 `wf_*.json`, 24 of them written during a single
+#     `mix test`.
+#
+# Two ways that turns a green suite red, both of which the four fixes already
+# landed tonight were the same shape of:
+#
+#   1. It is SHARED WITH THE RUNNING AGENT. `~/.osa` belongs to the operator's
+#      live OSA process, which reads and writes the same files concurrently. A
+#      suite result then depends on whether someone was using OSA while it ran,
+#      which no `--seed` can reproduce and no ordering can control.
+#   2. It PERSISTS ACROSS RUNS while the ids written into it come from
+#      `System.unique_integer/1`, which restarts low on every VM boot.
+#      `vloop-fail-68.json` sitting on disk is a leftover from a run whose 68th
+#      unique integer the NEXT run hands out again — the exact collision the
+#      `durable_log_dir` and `permission_mode_file` isolation above exists to
+#      prevent. `Verification.Checkpoint` also prunes to 200 files, so the suite
+#      deletes the operator's real forensic records once it fills the directory.
+#
+# Keyed off the same per-run tag as the database so concurrent suites cannot
+# clobber each other, wiped at config-load time, with the same age-based sweep
+# so per-run naming does not leak directories forever.
+test_state_dir = Path.join(System.tmp_dir!(), "osa-test-state-#{test_db_tag}")
+_ = File.rm_rf(test_state_dir)
+_ = File.mkdir_p(test_state_dir)
+
+for stale <- Path.wildcard(Path.join(System.tmp_dir!(), "osa-test-state-*")),
+    match?({:ok, %{mtime: mtime}} when mtime < stale_before, File.stat(stale, time: :posix)) do
+  _ = File.rm_rf(stale)
+end
+
+config :optimal_system_agent,
+  fs_checkpoint_repo_path: Path.join(test_state_dir, "fs_checkpoints"),
+  workflows_dir: Path.join(test_state_dir, "workflows"),
+  checkpoint_dir: Path.join(test_state_dir, "checkpoints"),
+  rewind_checkpoint_dir: Path.join(test_state_dir, "rewind"),
+  verification_checkpoint_dir: Path.join(test_state_dir, "verification_checkpoints"),
+  commands_dir: Path.join(test_state_dir, "commands")

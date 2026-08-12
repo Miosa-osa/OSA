@@ -265,7 +265,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           :binary,
           :exit_status,
           {:line, 1_048_576},
-          {:args, curl_args(config_file, body_file, url)}
+          {:args, curl_args(config_file, body_file, url)},
+          # curl gets its credential from the 0600 config file, never from the
+          # environment, so there is nothing here it needs and everything to
+          # lose: a redirected/hostile URL should not be able to reach a
+          # provider key through a `-w`/config trick.
+          {:env, OptimalSystemAgent.OS.Env.port_env()}
         ])
 
       result =

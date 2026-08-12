@@ -333,7 +333,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner do
 
     env = [{"ACTIONS_RUNNER_INPUT_TOKEN", payload.registration_token}]
 
-    case System.cmd(config_sh, args, cd: dir, env: env, stderr_to_stdout: true) do
+    case System.cmd(config_sh, args,
+           cd: dir,
+           env: OptimalSystemAgent.OS.Env.cmd_env(env),
+           stderr_to_stdout: true
+         ) do
       {_, 0} ->
         :ok
 
@@ -369,7 +373,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner do
         [
           :exit_status,
           {:cd, dir},
-          {:env, []},
+          # run.sh executes whatever workflow GitHub hands it — arbitrary
+          # third-party code on this machine. `{:env, []}` inherited the whole
+          # environment, provider keys included.
+          {:env, OptimalSystemAgent.OS.Env.port_env()},
           :hide
         ]
       )

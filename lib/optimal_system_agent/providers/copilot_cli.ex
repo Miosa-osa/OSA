@@ -231,7 +231,12 @@ defmodule OptimalSystemAgent.Providers.CopilotCli do
         :exit_status,
         :hide,
         {:args, ["-c", @shell_script | args]},
-        {:env, child_env(stdin_path, stderr_path)}
+        # Scrub first so the CLI cannot see other providers' credentials, and
+        # so an inherited GITHUB_TOKEN cannot silently answer for a different
+        # account than the one the user connected — the same reasoning as
+        # `Auth.Providers.CopilotCli.probe_env/0`. `child_env/2` is applied on
+        # top, so the stdin/stderr paths and NO_COLOR survive.
+        {:env, OptimalSystemAgent.OS.Env.port_env(child_env(stdin_path, stderr_path))}
       ])
 
     deadline = System.monotonic_time(:millisecond) + timeout_ms

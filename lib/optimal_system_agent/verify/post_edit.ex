@@ -350,7 +350,11 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
       task =
         Task.async(fn ->
           try do
-            System.cmd(program, args, cd: cwd, stderr_to_stdout: true)
+            System.cmd(program, args,
+              cd: cwd,
+              stderr_to_stdout: true,
+              env: OptimalSystemAgent.OS.Env.cmd_env()
+            )
           rescue
             _ -> {"", 1}
           catch

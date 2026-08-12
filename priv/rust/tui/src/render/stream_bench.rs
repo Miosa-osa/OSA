@@ -206,3 +206,63 @@ fn the_streamed_preview_is_cell_identical_to_a_cold_render() {
         );
     }
 }
+
+// ── draw_live cost vs streamed-buffer size ──────────────────────────────
+//
+// The live preview shows ~10 rows. If its cost tracks the size of the WHOLE
+// streamed answer rather than the rows on screen, the TUI gets slower the
+// longer the model talks — which is felt as input lag and uneven streaming.
+// This measures that curve directly. Debug build: absolute numbers are
+// inflated, the SHAPE is the finding.
+#[test]
+fn draw_live_cost_curve() {
+    fn body(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("Paragraph {i} about the deep ocean and its trenches.\n\n"))
+            .collect()
+    }
+
+    // Warm lazies.
+    {
+        let mut warm = Chat::new();
+        warm.update_streaming("hello\n");
+        let _ = warm.streaming_height(W);
+    }
+
+    let area = Rect::new(0, 0, W, 12);
+    println!("\n  lines |  per-FRAME draw_live |  per-DELTA (push+draw)");
+    println!("  ------+----------------------+----------------------");
+    for &n in &[50usize, 200, 800] {
+        let text = body(n);
+
+        // Per-frame cost with the cache already warm (pure redraw).
+        let mut term = Terminal::new(TestBackend::new(W, 12)).unwrap();
+        let mut chat = Chat::new();
+        chat.update_streaming(&text);
+        let _ = chat.streaming_height(W);
+        term.draw(|f| chat.draw_live(f, area)).unwrap();
+        let iters = 100;
+        let t = Instant::now();
+        for _ in 0..iters {
+            term.draw(|f| chat.draw_live(f, area)).unwrap();
+        }
+        let per_frame = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+        // Per-delta cost: append one token to a buffer of this size, then draw.
+        let mut term2 = Terminal::new(TestBackend::new(W, 12)).unwrap();
+        let mut chat2 = Chat::new();
+        let mut buf = text.clone();
+        chat2.update_streaming(&buf);
+        let _ = chat2.streaming_height(W);
+        let t2 = Instant::now();
+        for _ in 0..iters {
+            buf.push_str("word ");
+            chat2.update_streaming(&buf);
+            let _ = chat2.streaming_height(W);
+            term2.draw(|f| chat2.draw_live(f, area)).unwrap();
+        }
+        let per_delta = t2.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+        println!("  {n:5} | {per_frame:15.1} us | {per_delta:15.1} us");
+    }
+}

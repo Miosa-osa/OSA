@@ -267,7 +267,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Clipboard do
         arg_str = Enum.map_join(args, " ", &"'#{String.replace(&1, "'", "'\\''")}'")
         cmd = "#{exe} #{arg_str} < #{tmp}"
 
-        case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
+        case System.cmd("sh", ["-c", cmd],
+               stderr_to_stdout: true,
+               env: OptimalSystemAgent.OS.Env.cmd_env()
+             ) do
           {_out, 0} ->
             :ok
 

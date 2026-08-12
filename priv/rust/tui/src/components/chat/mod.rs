@@ -368,7 +368,7 @@ impl Chat {
             signal: None,
             tool_data: None,
             survey_data: Some(SurveyQAData { survey_id, pairs }),
-            cached_height: None,
+            cached_height: std::cell::Cell::new(None),
             timestamp: None,
             prerendered_body: None,
             raw_mode: false,
@@ -656,21 +656,45 @@ impl Chat {
             return;
         }
         if self.ensure_stream_cache(area.width).is_some() {
-            // One clone of the cached body per frame (O(lines), not a re-parse);
-            // height comes straight from the cache so it can't drift from draw.
-            let (body, full_h) = {
+            // **Only the rows that will be on screen are built.**
+            //
+            // This used to clone the WHOLE cached body every frame and then hand
+            // it to `draw_scrolled`, which laid out every line and scrolled to the
+            // tail — two O(total answer) costs to paint ~10 rows, plus a third
+            // clone inside `draw_agent`. Measured in `draw_live_cost_curve`: 1.1ms
+            // per frame at 50 lines, 3.2ms at 200, 11.8ms at 800 — a curve, so the
+            // TUI got slower the longer the model talked, and every keystroke
+            // queued behind a frame inherited it.
+            //
+            // The preview is bottom-anchored, so the visible rows are always the
+            // LAST `h`. Slicing to them first makes the per-frame cost O(visible
+            // rows) and independent of the answer's length.
+            let (body, full_h, scroll) = {
                 let cache = self.stream_cache.borrow();
                 let c = cache.as_ref().expect("cache populated by ensure_stream_cache");
-                (c.body.clone(), c.height)
+                let full_h = c.height;
+                let h = full_h.min(area.height);
+                if full_h > area.height {
+                    // Taller than the slot: the "◈ OSA" label (message line 0) is
+                    // scrolled off, so the visible rows are exactly the last `h`
+                    // body lines. `scroll_top = 1` is what tells `draw_agent` the
+                    // label is above the viewport; the body itself then starts at
+                    // its own line 0, which is where the slice begins.
+                    let start = c.body.lines.len().saturating_sub(h as usize);
+                    (
+                        Text::from(c.body.lines[start..].to_vec()),
+                        full_h,
+                        1u16,
+                    )
+                } else {
+                    // Fits: the label is drawn and the whole (short) body shows.
+                    (c.body.clone(), full_h, 0u16)
+                }
             };
             let msg = Message::new_agent_prerendered(body);
             let h = full_h.min(area.height);
             let y = area.y + area.height.saturating_sub(h);
-            msg.draw_scrolled(
-                frame,
-                Rect::new(area.x, y, area.width, h),
-                full_h.saturating_sub(h),
-            );
+            msg.draw_scrolled(frame, Rect::new(area.x, y, area.width, h), scroll);
         }
     }
 }

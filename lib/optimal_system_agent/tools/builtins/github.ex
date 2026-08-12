@@ -337,7 +337,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   defp gh_api(args) do
     task =
       Task.async(fn ->
-        System.cmd("gh", args, stderr_to_stdout: true, cd: OptimalSystemAgent.Workspace.Cwd.get())
+        System.cmd("gh", args,
+          stderr_to_stdout: true,
+          cd: OptimalSystemAgent.Workspace.Cwd.get(),
+          env: gh_env()
+        )
       end)
 
     case Task.yield(task, @gh_timeout) || Task.shutdown(task) do
@@ -360,6 +364,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   defp maybe_branch_args(""), do: []
   defp maybe_branch_args(branch), do: ["-f", "branch=#{branch}"]
 
+  # Environment for every `gh` invocation.
+  #
+  # `gh` is the one child here that legitimately needs a credential, so the
+  # scrub cannot be blanket: `GH_TOKEN`/`GITHUB_TOKEN` (and the Enterprise
+  # variants plus `GH_HOST`, which selects the server) are re-exported on top
+  # of it. Everything else — provider API keys, gateway tokens — is unset, so
+  # `gh` and any helper it shells out to see only GitHub's own credential.
+  @gh_passthrough ~w(GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+                     GH_HOST GH_CONFIG_DIR)
+  defp gh_env,
+    do: OptimalSystemAgent.OS.Env.cmd_env(OptimalSystemAgent.OS.Env.keep(@gh_passthrough))
+
   # Pad a list to n elements with nil.
   defp pad_to(list, n) when length(list) >= n, do: list
   defp pad_to(list, n), do: list ++ List.duplicate(nil, n - length(list))
@@ -367,7 +383,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   defp gh(args) do
     task =
       Task.async(fn ->
-        System.cmd("gh", args, stderr_to_stdout: true, cd: OptimalSystemAgent.Workspace.Cwd.get())
+        System.cmd("gh", args,
+          stderr_to_stdout: true,
+          cd: OptimalSystemAgent.Workspace.Cwd.get(),
+          env: gh_env()
+        )
       end)
 
     case Task.yield(task, @gh_timeout) || Task.shutdown(task) do
@@ -405,7 +425,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   end
 
   defp check_gh_auth do
-    case System.cmd("gh", ["auth", "status"], stderr_to_stdout: true) do
+    case System.cmd("gh", ["auth", "status"], stderr_to_stdout: true, env: gh_env()) do
       {_, 0} ->
         :ok
 

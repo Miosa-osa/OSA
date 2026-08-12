@@ -7,7 +7,15 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
 
   alias OptimalSystemAgent.Agent.Loop
 
-  @checkpoint_dir Path.expand("~/.osa/checkpoints")
+  # Resolve the SAME way `Agent.Loop.Checkpoint` does, at call time. The literal
+  # `~/.osa/checkpoints` is the OPERATOR's live crash-recovery directory: this
+  # module wrote (and deleted) files in it on every run, and once the suite
+  # isolated `:checkpoint_dir` under tmp, a hardcoded path here read a directory
+  # the code under test no longer writes to.
+  defp checkpoint_dir do
+    Application.get_env(:optimal_system_agent, :checkpoint_dir, "~/.osa/checkpoints")
+    |> Path.expand()
+  end
 
   # ---------------------------------------------------------------------------
   # Setup — ensure SessionRegistry and SessionSupervisor are running
@@ -53,7 +61,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
   end
 
   defp checkpoint_path(session_id) do
-    Path.join(@checkpoint_dir, "#{session_id}.json")
+    Path.join(checkpoint_dir(), "#{session_id}.json")
   end
 
   # ---------------------------------------------------------------------------
@@ -147,7 +155,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
       ]
 
       # Write a checkpoint manually
-      File.mkdir_p!(@checkpoint_dir)
+      File.mkdir_p!(checkpoint_dir())
 
       checkpoint_data = %{
         session_id: session_id,
@@ -186,7 +194,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
 
     test "restore_checkpoint returns state from existing checkpoint" do
       session_id = unique_session_id()
-      File.mkdir_p!(@checkpoint_dir)
+      File.mkdir_p!(checkpoint_dir())
 
       checkpoint_data = %{
         session_id: session_id,
@@ -243,7 +251,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
       session_id = unique_session_id()
 
       # Write a checkpoint
-      File.mkdir_p!(@checkpoint_dir)
+      File.mkdir_p!(checkpoint_dir())
 
       checkpoint_data = %{
         session_id: session_id,
@@ -281,7 +289,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
   describe "clear_checkpoint" do
     test "removes checkpoint file" do
       session_id = unique_session_id()
-      File.mkdir_p!(@checkpoint_dir)
+      File.mkdir_p!(checkpoint_dir())
       File.write!(checkpoint_path(session_id), "{}")
 
       assert File.exists?(checkpoint_path(session_id))

@@ -83,7 +83,15 @@ defmodule OptimalSystemAgent.Security.NoSecretsInArgvTest do
       source = File.read!(@gha_runner)
       assert source =~ "ACTIONS_RUNNER_INPUT_TOKEN"
       assert source =~ "payload.registration_token"
-      assert source =~ ~r/env:\s*env/
+
+      # The `env` binding must reach the child through the `env:` option. It is
+      # now routed through `OS.Env.cmd_env/1`, which returns `scrubbed ++ caller`
+      # — later entries win in an Erlang env overlay, so the token still arrives
+      # while every unrelated provider key is unset. This asserts the property
+      # (the binding goes to `env:`, never to argv) rather than the exact
+      # spelling, which is what made the earlier version fail on a scrub that
+      # preserved the behaviour it was guarding.
+      assert source =~ ~r/env:\s*(?:\w+(?:\.\w+)*\()?\s*env\b/
     end
   end
 

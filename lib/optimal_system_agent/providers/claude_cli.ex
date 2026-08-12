@@ -270,7 +270,11 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
         # binary path and its flags are positional parameters the shell never
         # re-parses. Nothing user-supplied is interpolated into the script.
         {:args, ["-c", @shell_script | args]},
-        {:env, child_env(stdin_path, stderr_path)}
+        # The CLI is a trusted binary, but it is still a child that would
+        # otherwise inherit OPENAI_API_KEY, gateway tokens and every other
+        # provider credential. Scrub first; `child_env/2` is applied on top, so
+        # its own deliberate overrides (and the stdin/stderr paths) win.
+        {:env, OptimalSystemAgent.OS.Env.port_env(child_env(stdin_path, stderr_path))}
       ])
 
     deadline = System.monotonic_time(:millisecond) + timeout_ms

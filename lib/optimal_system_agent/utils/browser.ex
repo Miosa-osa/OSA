@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Utils.Browser do
   def open(url) when is_binary(url) do
     if enabled?() do
       {opener, args} = command_for(:os.type(), url)
-      System.cmd(opener, args)
+      System.cmd(opener, args, env: OptimalSystemAgent.OS.Env.cmd_env())
     end
 
     :ok

@@ -159,7 +159,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSandbox do
 
         task =
           Task.async(fn ->
-            System.cmd("docker", docker_args, stderr_to_stdout: true, into: "")
+            System.cmd("docker", docker_args,
+              stderr_to_stdout: true,
+              into: "",
+              env: OptimalSystemAgent.OS.Env.cmd_env()
+            )
           end)
 
         case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
@@ -306,7 +310,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSandbox do
             )
           end
 
-          opts = [stderr_to_stdout: true, cd: tmp_dir]
+          # This path runs MODEL-AUTHORED code with no container around it, so
+          # the environment scrub is the only thing standing between the script
+          # and the operator's provider credentials.
+          opts = [
+            stderr_to_stdout: true,
+            cd: tmp_dir,
+            env: OptimalSystemAgent.OS.Env.cmd_env()
+          ]
 
           task =
             Task.async(fn ->

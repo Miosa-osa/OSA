@@ -260,7 +260,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
   defp worktree_path?(path, ctx) do
     repo_dir = resolve_repo_dir(ctx)
 
-    osa_dir = Path.expand("~/.osa/worktrees")
+    # Resolve through the SAME seam `enter_worktree` creates them with
+    # (`EnterWorktree.Constants.worktrees_dir/0` → `ConfigFile.config_dir/0`).
+    # Hardcoding `~/.osa/worktrees` here made the two tools disagree the moment
+    # `config_dir` was not the literal home — a release resolving the end user's
+    # home, or the suite pointed at a tmp dir — so a worktree enter_worktree had
+    # just created was not recognised as one by exit_worktree.
+    osa_dir = OptimalSystemAgent.Tools.Builtins.EnterWorktree.Constants.worktrees_dir()
     under_osa = String.starts_with?(path, osa_dir)
 
     listed =

@@ -103,7 +103,10 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
       try do
         task =
           Task.async(fn ->
-            System.cmd("docker", docker_args, stderr_to_stdout: true)
+            System.cmd("docker", docker_args,
+              stderr_to_stdout: true,
+              env: OptimalSystemAgent.OS.Env.cmd_env()
+            )
           end)
 
         case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

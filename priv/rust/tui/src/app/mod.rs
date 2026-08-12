@@ -5,6 +5,7 @@ pub mod commands;
 pub mod event_loop;
 pub mod focus;
 pub mod frame_size;
+pub mod inline_backend;
 mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;

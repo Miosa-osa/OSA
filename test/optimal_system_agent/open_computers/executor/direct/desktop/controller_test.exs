@@ -36,8 +36,15 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
       )
 
     on_exit(fn ->
-      if Process.alive?(controller), do: GenServer.stop(controller)
-      if Process.alive?(fake_router), do: GenServer.stop(fake_router)
+      # `Process.alive?` then `GenServer.stop` is a check-then-act on a process
+      # that is LINKED to the test process: by the time the on_exit runner calls
+      # stop/1, the test has already exited and the link may have taken the
+      # server down in between. The gap is microseconds and invisible on an idle
+      # machine; under load it widens and the callback exits with
+      # `(EXIT) no process`, failing whichever test happened to be last in the
+      # module. Ask for the stop and accept that it may already have happened.
+      stop_quietly(controller)
+      stop_quietly(fake_router)
       :gen_tcp.close(fake_vnc_listen)
     end)
 
@@ -46,6 +53,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
      fake_vnc_listen: fake_vnc_listen,
      fake_router: fake_router,
      vnc_port: port}
+  end
+
+  # Stop a server if it is still there. `:noproc` / `:normal` exits are the
+  # expected outcome of a teardown race, not a test failure.
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal, 5_000)
+  catch
+    :exit, _ -> :ok
   end
 
   describe "desktop_start_request" do

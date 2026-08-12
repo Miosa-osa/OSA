@@ -41,6 +41,11 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     :session_id,
     :port,
     :os_pid,
+    # `true` when `os_pid` is a `setsid -w` WRAPPER (this module spawned it), so
+    # the group leader is one level down. `false` when the pid was adopted from
+    # another spawner and IS the leader. Decides which ProcessGroup lookup to
+    # use when reaping.
+    :wrapper?,
     :started_at,
     :finished_at,
     :exit_code,
@@ -107,6 +112,9 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       session_id: session_id,
       port: port,
       os_pid: os_pid,
+      # An adopted pid is the group LEADER (shell_execute's `adopted_os_pid/1`
+      # already looks through its own setsid wrapper), never a wrapper.
+      wrapper?: false,
       started_at: DateTime.utc_now(),
       max_bytes: max_bytes,
       retain_ms: retain_ms,
@@ -144,16 +152,27 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     session_id = Keyword.get(opts, :session_id)
 
     sh = OptimalSystemAgent.OS.Shell.executable()
+    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1"]
+
+    # PROCESS GROUP — spawn through `setsid -w` so the command and everything it
+    # forks share one group we can reap as a unit. A background task is the
+    # WORST case for the old single-pid kill: `npm run dev &`, a docker client,
+    # a dev server. Killing the shell left every descendant holding its ports.
+    # Same helper (and the same `killpg_safe?/1` guard) shell_execute uses.
+    plan = OptimalSystemAgent.OS.ProcessGroup.spawn_plan(sh, args)
 
     port =
       Port.open(
-        {:spawn_executable, sh},
+        {:spawn_executable, plan.exe},
         [
           :binary,
           :exit_status,
           :hide,
-          {:args, OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1"]},
-          {:cd, cwd}
+          {:args, plan.args},
+          {:cd, cwd},
+          # A bare Port.open hands the child the entire BEAM environment,
+          # provider credentials included.
+          {:env, OptimalSystemAgent.OS.Env.port_env()}
         ]
       )
 
@@ -182,6 +201,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       session_id: session_id,
       port: port,
       os_pid: os_pid,
+      wrapper?: plan.group?,
       started_at: DateTime.utc_now(),
       max_bytes: max_bytes,
       retain_ms: retain_ms
@@ -238,7 +258,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
   end
 
   def handle_call(:kill, _from, %{status: :running} = state) do
-    do_kill(state.os_pid)
+    do_kill(state.os_pid, state.wrapper?)
 
     state = %{
       state
@@ -280,15 +300,82 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     end
   end
 
-  defp do_kill(nil), do: :ok
+  @doc false
+  def do_kill(os_pid, wrapper? \\ false)
 
-  defp do_kill(os_pid) do
-    # SIGTERM first for a graceful stop, then SIGKILL as a fallback.
-    _ = System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
-    _ = System.cmd("kill", ["-KILL", to_string(os_pid)], stderr_to_stdout: true)
+  def do_kill(nil, _wrapper?), do: :ok
+
+  # Kill the command AND EVERYTHING IT SPAWNED.
+  #
+  # This used to be `kill -TERM <pid>` immediately followed by `kill -KILL
+  # <pid>`: one pid, no process group, and no grace window between the two
+  # signals — so the TERM was functionally a KILL, and every descendant of a
+  # background `npm run dev` / `docker run` survived as an orphan still holding
+  # its ports. Exactly the defect already fixed in shell_execute.
+  #
+  # Which lookup applies depends on how we got the pid:
+  #
+  #   * `wrapper?: true`  — we spawned it, so `os_pid` is the `setsid -w`
+  #     wrapper and the leader is its child: `resolve_pgid/1`.
+  #   * `wrapper?: false` — the pid was adopted from a foreground
+  #     shell_execute, which already hands over the group LEADER: `pgid_of/1`.
+  #
+  # Both results go through `ProcessGroup.killpg_safe?/1` (inside
+  # `terminate_group/2`), which refuses pgid <= 1 and this node's own group. A
+  # pid that was never `setsid`-ed reports the BEAM's group, so that guard is
+  # what stops an adopted-without-setsid task from signalling the agent itself;
+  # it degrades to the single-pid path instead.
+  # Kill the command AND EVERYTHING IT SPAWNED.
+  #
+  # This used to be `kill -TERM <pid>` immediately followed by `kill -KILL
+  # <pid>`: one pid, no process group, and no grace window between the two
+  # signals — so the TERM was functionally a KILL, and every descendant of a
+  # background `npm run dev` / `docker run` survived as an orphan still holding
+  # its ports. Exactly the defect already fixed in shell_execute.
+  #
+  # Which lookup applies depends on how we got the pid:
+  #
+  #   * `wrapper?: true`  — we spawned it, so `os_pid` is the `setsid -w`
+  #     wrapper and the leader is its child: `resolve_pgid/1`.
+  #   * `wrapper?: false` — the pid was adopted from a foreground
+  #     shell_execute, which already hands over the group LEADER: `pgid_of/1`.
+  #
+  # Both results go through `ProcessGroup.killpg_safe?/1` (inside
+  # `terminate_group/2`), which refuses pgid <= 1 and this node's own group. A
+  # pid that was never `setsid`-ed reports the BEAM's group, so that guard is
+  # what stops an adopted-without-setsid task from signalling the agent itself;
+  # it degrades to the single-pid path instead.
+  def do_kill(os_pid, wrapper?) do
+    alias OptimalSystemAgent.OS.ProcessGroup
+
+    case :os.type() do
+      {:win32, _} ->
+        _ =
+          System.cmd("taskkill", ["/PID", to_string(os_pid), "/T", "/F"], stderr_to_stdout: true)
+
+      _ ->
+        pgid =
+          if wrapper?, do: ProcessGroup.resolve_pgid(os_pid), else: ProcessGroup.pgid_of(os_pid)
+
+        case pgid do
+          nil ->
+            ProcessGroup.terminate_pid(os_pid)
+
+          pgid ->
+            case ProcessGroup.terminate_group(pgid) do
+              # The group is gone; the wrapper (which is NOT in that group when
+              # setsid was used) still needs reaping, with no second grace wait.
+              :ok -> ProcessGroup.terminate_pid(os_pid, 0)
+              {:error, :unsafe_pgid} -> ProcessGroup.terminate_pid(os_pid)
+            end
+        end
+    end
+
     :ok
   rescue
     _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # Broadcast a terminal event on the parent session topic so BOTH the

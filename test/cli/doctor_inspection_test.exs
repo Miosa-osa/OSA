@@ -99,7 +99,13 @@ defmodule OptimalSystemAgent.CLI.Doctor.InspectionTest do
     test "an unassembled static base is reported as a state, not manufactured" do
       %{sections: sections} = Inspection.report()
       %{rows: rows} = Enum.find(sections, &(&1.title =~ "static base"))
-      row = Enum.find(rows, &(&1.label == "static base (assembled)"))
+
+      # The label depends on what is already assembled: nothing assembled yields
+      # the single "static base (assembled)" state row, while an assembled
+      # variant is reported under its own label. Anything earlier in a full run
+      # can assemble one, so match the family rather than the unassembled
+      # spelling — pinning the latter made this pass alone and fail in a suite.
+      row = Enum.find(rows, &String.starts_with?(&1.label, "static base"))
 
       assert row
       # Whichever state it is in, it must be honest about it rather than
@@ -108,6 +114,59 @@ defmodule OptimalSystemAgent.CLI.Doctor.InspectionTest do
 
       if row.status == :absent do
         assert row.detail =~ "does not trigger it"
+      end
+    end
+
+    # There is no single "the static base": `Agent.Context.static_base_variant/2`
+    # picks one of three per turn. The report read only the `:full` slot, so it
+    # printed ~31k while an Anthropic session — which uses `:native_tools`, with
+    # the spans duplicating the request's own tool schemas removed — sends ~16k.
+    # A 15k error in the number someone budgets a context window against.
+    test "every ASSEMBLED variant is reported, not just :full" do
+      # Assemble all three deliberately, in the test, so the report has
+      # something to find. The report itself must never do this.
+      for variant <- [:full, :lite, :native_tools] do
+        _ = OptimalSystemAgent.Soul.static_base(variant)
+      end
+
+      %{sections: sections} = Inspection.report()
+      %{rows: rows} = Enum.find(sections, &(&1.title =~ "static base"))
+      labels = Enum.map(rows, & &1.label)
+
+      assert "static base (assembled)" in labels
+
+      assert "static base (lite)" in labels,
+             "the :lite variant is assembled but the report does not mention it"
+
+      assert "static base (native-tools dedup)" in labels,
+             "the :native_tools variant is what Anthropic sessions send, and the report omits it"
+    end
+
+    test "the variants report DIFFERENT sizes, and native-tools is the smallest" do
+      for variant <- [:full, :lite, :native_tools] do
+        _ = OptimalSystemAgent.Soul.static_base(variant)
+      end
+
+      %{sections: sections} = Inspection.report()
+      %{rows: rows} = Enum.find(sections, &(&1.title =~ "static base"))
+
+      sizes =
+        Map.new(rows, fn r ->
+          {r.label,
+           case Regex.run(~r/^(\d+) tokens/, to_string(r.detail)) do
+             [_, n] -> String.to_integer(n)
+             _ -> nil
+           end}
+        end)
+
+      full = sizes["static base (assembled)"]
+      native = sizes["static base (native-tools dedup)"]
+
+      # Only meaningful when the registry is up so tool definitions interpolate;
+      # from a cold VM every variant is the same inert stub.
+      if is_integer(full) and is_integer(native) do
+        assert native < full,
+               "native-tools must report a SMALLER prefix than full — that gap is the whole point"
       end
     end
   end

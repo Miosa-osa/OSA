@@ -72,8 +72,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktreeTest do
       assert msg =~ "worktree"
     end
 
-    test "allows path under ~/.osa/worktrees that exists", %{ctx: ctx} do
-      worktrees_base = Path.expand("~/.osa/worktrees")
+    test "allows path under the worktrees dir that exists", %{ctx: ctx} do
+      # Resolve the same way the tools do rather than hardcoding `~/.osa`: the
+      # literal path is the OPERATOR's live worktrees directory, and creating a
+      # fixture inside it made the suite write into the running agent's state.
+      worktrees_base = OptimalSystemAgent.Tools.Builtins.EnterWorktree.Constants.worktrees_dir()
+      File.mkdir_p!(worktrees_base)
       fake_wt = Path.join(worktrees_base, "test-allow-#{System.unique_integer([:positive])}")
       File.mkdir_p!(fake_wt)
       on_exit(fn -> File.rm_rf(fake_wt) end)

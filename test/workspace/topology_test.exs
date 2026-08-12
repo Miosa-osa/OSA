@@ -18,12 +18,20 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
   alias OptimalSystemAgent.Workspace.Topology.Role
 
   setup do
+    # `System.pid/0` (the OS pid of this BEAM) makes the name unique ACROSS
+    # runs, not just within one: `unique_integer` alone collided with fixtures
+    # left by earlier suites. Registered for cleanup BEFORE it is built, so a
+    # fixture that raises mid-build cannot survive to collide again.
     root =
-      build_fixture(
-        Path.join(System.tmp_dir!(), "osa_topo_#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "osa_topo_#{System.pid()}_#{System.unique_integer([:positive])}"
       )
 
     on_exit(fn -> File.rm_rf(root) end)
+    on_exit(fn -> File.rm_rf(root <> "_subsrc") end)
+
+    root = build_fixture(root)
     on_exit(fn -> Topology.invalidate(:all) end)
     %{root: root}
   end
@@ -540,6 +548,22 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
   #     node_modules, _build, target — skipped
   defp build_fixture(root) do
     submodule_src = root <> "_subsrc"
+
+    # Start from nothing. `System.unique_integer/1` is unique only WITHIN a VM
+    # and restarts low on every boot, so `osa_topo_25` is handed out again by
+    # the next `mix test` — and when a previous run left that directory behind,
+    # `git submodule add … vendor/subm` fails with
+    # `fatal: 'vendor/subm' already exists in the index` (exit 128), which
+    # raises inside `setup` and fails the whole module.
+    #
+    # The failure is SELF-PERPETUATING, which is why 34 `osa_topo_*` trees were
+    # on disk before this line existed: the `on_exit` that removes `root` is
+    # registered by the caller only AFTER `build_fixture/1` returns, so a
+    # fixture that raises halfway leaves its half-built tree behind to collide
+    # again on the next run.
+    _ = File.rm_rf(root)
+    _ = File.rm_rf(submodule_src)
+
     init_repo(root)
 
     write(root, ".gitignore", "generated/\n")

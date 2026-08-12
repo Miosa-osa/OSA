@@ -201,7 +201,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
     split_cmd =
       build_pipeline_cmd(path, exclude_args, level, tmp_prefix)
 
-    case System.cmd("sh", ["-c", split_cmd], stderr_to_stdout: false) do
+    case System.cmd("sh", ["-c", split_cmd],
+           stderr_to_stdout: false,
+           env: OptimalSystemAgent.OS.Env.cmd_env()
+         ) do
       {_out, 0} ->
         :ok
 
@@ -361,7 +364,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
     chunk_list = Enum.join(chunk_files, " ")
     restore_cmd = "cat #{chunk_list} | zstd -d - | tar xf - -C #{shell_escape(target_path)}"
 
-    case System.cmd("sh", ["-c", restore_cmd], stderr_to_stdout: false) do
+    case System.cmd("sh", ["-c", restore_cmd],
+           stderr_to_stdout: false,
+           env: OptimalSystemAgent.OS.Env.cmd_env()
+         ) do
       {_out, 0} -> :ok
       {err, code} -> {:error, "restore pipeline failed (exit #{code}): #{err}"}
     end

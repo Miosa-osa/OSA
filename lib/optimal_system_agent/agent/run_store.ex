@@ -186,9 +186,29 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   """
   @spec attach_worktree_snapshot(String.t(), String.t()) :: :ok
   def attach_worktree_snapshot(agent_id, ref) when is_binary(agent_id) and is_binary(ref) do
-    update(agent_id, fn run -> Map.put(run, :worktree_snapshot_ref, ref) end)
-    append(agent_id, "WORKTREE_SNAPSHOT ref=#{ref}")
-    :ok
+    # Only record against a run that actually exists. `update/2` is already a
+    # no-op for an unknown id, but `append/2` was not: it created
+    # `<agent_runs_dir>/<agent_id>.md` for a run that had never started.
+    #
+    # That transcript is not inert. `rehydrate/0` reconstructs the index from
+    # exactly these files, so a phantom `a.md` came back as a real row —
+    # `%{agent_id: "a", role: "agent", task: "", parent_session_id: "unknown"}`
+    # — which `reconcile/0` then settled to `:failed` because it has no live
+    # owner. `Fleet`'s default await polls `RunStore.get(node_id).status`, so a
+    # perfectly healthy node whose id collided with one of those phantoms was
+    # reported as `{:node_incomplete, :failed}` and its work discarded.
+    #
+    # A snapshot marker is evidence ABOUT a run. It must not be able to invent
+    # one.
+    case get(agent_id) do
+      nil ->
+        :ok
+
+      _run ->
+        update(agent_id, fn run -> Map.put(run, :worktree_snapshot_ref, ref) end)
+        append(agent_id, "WORKTREE_SNAPSHOT ref=#{ref}")
+        :ok
+    end
   end
 
   @doc "Mark a run complete and attach the structured result."

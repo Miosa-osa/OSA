@@ -162,6 +162,82 @@ defmodule OptimalSystemAgent.OS.EnvTest do
     end
   end
 
+  describe "keep/1 — the deliberate passthrough" do
+    test "re-exports a name that is set, so a provider CLI keeps its credential" do
+      with_env("GH_TOKEN", "gho_canary", fn ->
+        assert {"GH_TOKEN", "gho_canary"} in Env.keep(~w(GH_TOKEN))
+      end)
+    end
+
+    test "an unset name comes back as nil, which unsets rather than leaks" do
+      System.delete_env("OSA_KEEP_ABSENT")
+      assert Env.keep(~w(OSA_KEEP_ABSENT)) == [{"OSA_KEEP_ABSENT", nil}]
+    end
+
+    test "composed with cmd_env, the kept name survives and the rest is scrubbed" do
+      with_env("GH_TOKEN", "gho_canary", fn ->
+        with_env("ANTHROPIC_API_KEY", @canary, fn ->
+          env = Env.cmd_env(Env.keep(~w(GH_TOKEN)))
+
+          # Extras are applied last, so the later GH_TOKEN entry wins over the
+          # scrub's nil for the same name.
+          assert List.last(for {"GH_TOKEN", v} <- env, do: v) == "gho_canary"
+          assert {"ANTHROPIC_API_KEY", nil} in env
+        end)
+      end)
+    end
+  end
+
+  # `OS.Shell.cmd/2` is the shared entry point for the host sandbox, the
+  # verification loop, watch tasks, shell hooks and direct exec — every one of
+  # them hands it a command STRING it did not write. Before the fix it called
+  # `System.cmd/3` with the caller's opts verbatim, so with no `:env` the child
+  # inherited the whole environment. These fail on the original code.
+  describe "OS.Shell.cmd/2" do
+    alias OptimalSystemAgent.OS.Shell
+
+    @describetag :tmp_dir
+
+    test "does not hand the operator's API key to the command", %{tmp_dir: tmp_dir} do
+      with_env("ANTHROPIC_API_KEY", @canary, fn ->
+        {out, 0} = Shell.cmd("printf '[%s]' \"$ANTHROPIC_API_KEY\"", cd: tmp_dir)
+        refute out =~ @canary
+        assert out == "[]"
+      end)
+    end
+
+    test "keeps PATH so the command can still find its tools", %{tmp_dir: tmp_dir} do
+      with_env("ANTHROPIC_API_KEY", @canary, fn ->
+        {out, 0} = Shell.cmd("printf '%s' \"$PATH\"", cd: tmp_dir)
+        assert out == System.get_env("PATH")
+      end)
+    end
+
+    test "merges a caller-supplied :env on top of the scrub", %{tmp_dir: tmp_dir} do
+      with_env("ANTHROPIC_API_KEY", @canary, fn ->
+        {out, 0} =
+          Shell.cmd("printf '%s|%s' \"$OSA_HOOK_VAR\" \"$ANTHROPIC_API_KEY\"",
+            cd: tmp_dir,
+            env: [{"OSA_HOOK_VAR", "from-caller"}]
+          )
+
+        assert out == "from-caller|"
+      end)
+    end
+
+    test "a caller can still force a credential through deliberately", %{tmp_dir: tmp_dir} do
+      with_env("ANTHROPIC_API_KEY", @canary, fn ->
+        {out, 0} =
+          Shell.cmd("printf '%s' \"$ANTHROPIC_API_KEY\"",
+            cd: tmp_dir,
+            env: [{"ANTHROPIC_API_KEY", "explicit"}]
+          )
+
+        assert out == "explicit"
+      end)
+    end
+  end
+
   # Spawns exactly one `sh -c` child under the scrubbed environment and returns
   # its stdout. Deliberately does NOT go through shell_execute so this stays a
   # test of the scrubber alone.

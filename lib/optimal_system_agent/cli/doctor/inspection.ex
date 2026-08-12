@@ -143,7 +143,7 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   # ── Section 1: static prompt tier ─────────────────────────────────────
 
   defp prompt_rows do
-    prompt_override_rows() ++ soul_rows() ++ [rules_row(), static_base_row()]
+    prompt_override_rows() ++ soul_rows() ++ [rules_row()] ++ static_base_rows()
   end
 
   # PromptLoader: `~/.osa/prompts/<KEY>.md` beats `priv/prompts/<KEY>.md`.
@@ -318,14 +318,48 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   # A diagnostic must not perturb what it measures. So this reads the cached
   # slot directly and reports "not assembled yet" as a genuine state rather than
   # manufacturing a value to print.
-  defp static_base_row do
-    tokens = cached_static_tokens()
+  # One row per VARIANT, because there is no single "the static base".
+  #
+  # This read only the `:full` slot, so it reported ~31k while an Anthropic
+  # session — which uses the `:native_tools` variant, with the spans that
+  # duplicate the request's own tool schemas removed — actually sends ~16k. A
+  # diagnostic that is 15k tokens wrong about the prefix is worse than silent:
+  # it is what someone budgets a context window against.
+  #
+  # Still strictly NON-FORCING (see below): a variant that has never been
+  # assembled is simply not reported, rather than being built to be printed.
+  defp static_base_rows do
+    case cached_static_variants() do
+      [] ->
+        [static_base_row(:full, nil)]
 
+      variants ->
+        Enum.map(variants, fn {variant, tokens} -> static_base_row(variant, tokens) end)
+    end
+  end
+
+  # Which slot a live request actually uses is decided per turn by
+  # `Agent.Context.static_base_variant/2`, so each row says who it is for.
+  defp variant_label(:full), do: "static base (assembled)"
+  defp variant_label(:lite), do: "static base (lite)"
+  defp variant_label(:native_tools), do: "static base (native-tools dedup)"
+
+  defp variant_note(:full), do: "used by providers that inline every tool schema in the prompt"
+
+  defp variant_note(:lite),
+    do:
+      "used by local providers and windows under 40k — core tools inlined, the rest via tool_search"
+
+  defp variant_note(:native_tools),
+    do:
+      "used when the transport carries the tool schemas itself (e.g. Anthropic) — this is the size those sessions send"
+
+  defp static_base_row(variant, tokens) do
     cond do
       is_nil(tokens) ->
         row(
           :absent,
-          "static base (assembled)",
+          variant_label(variant),
           "(persistent_term cache)",
           "runtime",
           "not assembled yet — the cache is populated lazily on the first turn, and this " <>
@@ -341,7 +375,7 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         # confidently-wrong number a diagnostic must never print.
         row(
           :inert,
-          "static base (assembled)",
+          variant_label(variant),
           "(persistent_term cache)",
           "runtime",
           "#{tokens} tokens measured WITHOUT tool definitions — Tools.Registry is not " <>
@@ -352,17 +386,16 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       tokens > 0 ->
         row(
           :loaded,
-          "static base (assembled)",
+          variant_label(variant),
           "(persistent_term cache)",
           "runtime",
-          "#{tokens} tokens — SYSTEM.md with TOOL_DEFINITIONS, RULES, USER_PROFILE, " <>
-            "SOUL_CONTENT and IDENTITY_PROFILE interpolated"
+          "#{tokens} tokens — #{variant_note(variant)}"
         )
 
       true ->
         row(
           :malformed,
-          "static base (assembled)",
+          variant_label(variant),
           "(persistent_term cache)",
           "runtime",
           "assembled to 0 tokens — the template resolved but produced nothing. Every " <>
@@ -973,13 +1006,26 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
 
   # `nil` = never assembled. Mirrors the key `Soul` writes; read-only by design,
   # see the comment on `static_base_row/0`.
-  defp cached_static_tokens do
-    case :persistent_term.get({OptimalSystemAgent.Soul, :static_base}, nil) do
-      nil -> nil
-      _ -> :persistent_term.get({OptimalSystemAgent.Soul, :static_token_count}, 0)
-    end
+  # The three variant slots `Soul` writes, in the order a reader wants them.
+  # Kept as data so a new variant is one line here rather than a new branch.
+  @static_slots [
+    {:full, :static_base, :static_token_count},
+    {:lite, :static_base_lite, :static_token_count_lite},
+    {:native_tools, :static_base_native, :static_token_count_native}
+  ]
+
+  # Every variant that has ALREADY been assembled, with its token count.
+  # Read-only by design, see the comment on `static_base_rows/0`: a slot that is
+  # empty stays empty, and is simply absent from the report.
+  defp cached_static_variants do
+    Enum.flat_map(@static_slots, fn {variant, base_key, count_key} ->
+      case :persistent_term.get({OptimalSystemAgent.Soul, base_key}, nil) do
+        nil -> []
+        _ -> [{variant, :persistent_term.get({OptimalSystemAgent.Soul, count_key}, 0)}]
+      end
+    end)
   rescue
-    _ -> nil
+    _ -> []
   end
 
   defp registry_running? do

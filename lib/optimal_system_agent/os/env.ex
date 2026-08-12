@@ -210,6 +210,24 @@ defmodule OptimalSystemAgent.OS.Env do
   end
 
   @doc """
+  Extras that re-export `names` from the CURRENT environment, for a child that
+  legitimately needs one specific credential.
+
+  A provider CLI is the motivating case: `gh` cannot authenticate without
+  `GH_TOKEN`/`GITHUB_TOKEN`, so scrubbing everything would break sign-in — but
+  it has no business seeing `ANTHROPIC_API_KEY`. Pass the result as `extra` to
+  `cmd_env/1` or `port_env/1`; extras are applied after the scrub, so the named
+  vars survive and everything else is still unset.
+
+  Names that are not currently set are returned as `{name, nil}`, which unsets
+  them — the same thing the scrub would have done, so absence is not a leak.
+  """
+  @spec keep([String.t()]) :: [{String.t(), String.t() | nil}]
+  def keep(names) when is_list(names) do
+    Enum.map(names, fn name -> {name, System.get_env(name)} end)
+  end
+
+  @doc """
   Merge a caller-provided `:env` overlay (as accepted by `Port.open/2`) on top of
   the scrub. Existing call sites that already build an env list route through
   here so the scrub is additive rather than a rewrite.

@@ -21,6 +21,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.DelegationPolicy
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
+  alias OptimalSystemAgent.Agent.TaskNotifications
+  alias OptimalSystemAgent.Agent.Loop
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -406,6 +408,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
           ms -> [await_timeout: ms]
         end
 
+    if fanout_background?(args, configs) do
+      dispatch_fanout_background(
+        batch_id,
+        umbrella_task,
+        tasks,
+        args,
+        parent_id,
+        parent_depth,
+        configs,
+        parallel_opts
+      )
+    else
+      run_fanout(umbrella_task, tasks, args, parent_id, parent_depth, configs, parallel_opts)
+    end
+  end
+
+  # The wave itself. Blocks until every workstream joins — only ever called from
+  # the foreground path, or from inside the detached Task the background path
+  # starts.
+  defp run_fanout(umbrella_task, tasks, args, parent_id, parent_depth, configs, parallel_opts) do
     results = Orchestrator.run_parallel(parent_id, configs, parallel_opts)
 
     if reconcile?(args) and Enum.any?(results, &match?({:ok, _}, &1)) do
@@ -413,6 +435,117 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     else
       {:ok, format_fanout(umbrella_task, tasks, results)}
     end
+  end
+
+  @doc """
+  Whether a `tasks:[]` fan-out runs detached from the parent's turn.
+
+  Resolved with the same rule as the single-delegate `background?/2`, applied to
+  every workstream: an explicit `background` arg on the call wins outright, and
+  otherwise a wave runs in the background unless SOME workstream's agent
+  definition explicitly asked to be joined. Resolution is by KEY PRESENCE, so a
+  definition carrying `background: false` keeps its opt-out; a definition that
+  never mentions it does not drag the wave into the foreground.
+
+  ## Why this matters more here than anywhere else
+
+  `delegate` already defaults a single teammate to background, for the reason in
+  `background?/2`: a foreground delegation blocks the parent inside its tool
+  phase, so the steer drain, the task-notification drain and cancellation are
+  all unreachable until the child returns — the user's channel to the agent goes
+  offline for the child's entire life.
+
+  The fan-out went through `run_parallel/3` synchronously, so it kept exactly
+  that defect on the path where it hurts most: a wave is N teammates, it joins
+  the SLOWEST of them, and it is what a model reaches for on the biggest jobs.
+  A wave of long workstreams could hold the conversation for hours.
+  """
+  @spec fanout_background?(map(), [map()]) :: boolean()
+  def fanout_background?(args, configs) do
+    case Map.fetch(args, "background") do
+      {:ok, value} -> value == true
+      :error -> configs != [] and Enum.all?(configs, &background?(args, &1))
+    end
+  end
+
+  # Run the wave detached and return the launch notice immediately.
+  #
+  # The fan-out TUI is unaffected: every wave/agent/synthesis event
+  # `run_parallel/3` emits goes out on the parent's PubSub topic from whichever
+  # process is running it, and none of it is carried on the return value. The
+  # only thing that moves is WHERE the report is delivered — instead of being
+  # the tool result, it arrives as a `<task-notification>` through the same
+  # queue+poke path a background subagent and a background shell command use, so
+  # it re-enters the current turn if the parent is still working and wakes an
+  # idle parent if it is not.
+  defp dispatch_fanout_background(
+         batch_id,
+         umbrella_task,
+         tasks,
+         args,
+         parent_id,
+         parent_depth,
+         configs,
+         parallel_opts
+       ) do
+    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      summary =
+        try do
+          {:ok, report} =
+            run_fanout(
+              umbrella_task,
+              tasks,
+              args,
+              parent_id,
+              parent_depth,
+              configs,
+              parallel_opts
+            )
+
+          report
+        rescue
+          e -> "Fan-out crashed: #{Exception.message(e)}"
+        catch
+          :exit, reason -> "Fan-out exited: #{inspect(reason)}"
+        end
+
+      # `mark_notified/1` is the same exactly-once token the subagent and shell
+      # paths arbitrate on, keyed here by the stable batch id.
+      if TaskNotifications.mark_notified(batch_id) do
+        TaskNotifications.queue(parent_id, %{
+          task_id: batch_id,
+          status: :completed,
+          summary: summary
+        })
+
+        Loop.poke(parent_id)
+      end
+    end)
+
+    {:ok, fanout_launch_notice(batch_id, length(tasks))}
+  end
+
+  @doc """
+  The tool result the lead reads the instant a background wave starts.
+
+  Same discipline as `async_launch_notice/3`: no "end your response" branch (a
+  model takes it almost every time, leaving the user holding a launch notice
+  instead of an answer), and no polling before the notification lands.
+  """
+  @spec fanout_launch_notice(String.t(), pos_integer()) :: String.t()
+  def fanout_launch_notice(batch_id, count) do
+    """
+    Parallel wave launched.
+    batchId: #{batch_id}
+    workstreams: #{count}
+
+    #{count} teammate#{if count == 1, do: " is", else: "s are"} running in the \
+    background. A <task-notification> carrying every workstream's report will be \
+    injected into this conversation when the wave finishes — do NOT poll for it, \
+    and do not redo any of this work yourself. Mention the launch to the user in \
+    one clause, then KEEP WORKING: pick up the next thing that does not depend on \
+    these results. Launching a wave is never a reason to stop or to wait.
+    """
   end
 
   # Opt-in coordinator closeout (all-hands pattern). After the parallel wave
@@ -537,11 +670,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   defp dispatch_foreground(config) do
     note = role_missing_note(config) <> resumed_from_note(config)
 
-    case Orchestrator.run_subagent(config) do
-      {:ok, result} -> {:ok, note <> result}
-      {:error, reason} -> {:ok, "Delegation failed: #{inspect(reason)}"}
-    end
+    config |> Orchestrator.run_subagent() |> foreground_result(note)
   end
+
+  @doc """
+  Classify a foreground delegation's outcome as a tool result.
+
+  A failed delegation is an ERROR result, not a successful one whose text
+  happens to say "failed". This used to return
+  `{:ok, "Delegation failed: \#{inspect(reason)}"}`, which laundered the
+  failure: the model received a SUCCESSFUL tool result and went on to build its
+  next step on work that never happened — the worst failure mode available,
+  because nothing downstream can tell it apart from real output.
+
+  `Orchestrator.dispatch` already classifies a subagent timeout as a genuine
+  `{:error, :timeout}` for exactly this reason, and `Swarm.Patterns` had the
+  identical laundering removed from its parallel path.
+  """
+  @spec foreground_result({:ok, String.t()} | {:error, term()}, String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def foreground_result({:ok, result}, note), do: {:ok, note <> result}
+
+  def foreground_result({:error, reason}, _note),
+    do: {:error, "Delegation failed: #{inspect(reason)}"}
 
   # P6 peer-resume — non-fatal signal so the model can see (and later refer to)
   # which peer's context seeded this subagent, and confirm the handoff worked

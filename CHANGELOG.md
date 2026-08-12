@@ -9,6 +9,105 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.83] — displays as `v1.0.083`
+
+### Fixed — the composer froze while a turn streamed
+
+Typing during a streaming turn did nothing. Measured against a real provider:
+**7 of 7 keystrokes never echoed within 5 seconds each**, and a paste never
+appeared at all. Idle typing was fine at 3.4ms median, so it looked like a
+mysterious general slowness rather than one mechanism.
+
+The inline viewport rebuild was **doing a cursor round-trip to learn a number it
+had just written itself**. Every rebuild path computes `new_top` and issues
+`MoveTo(0, new_top)` immediately before rebuilding — and then `Viewport::Inline`
+asked the terminal to read that row back with a DSR query. The reply arrives on
+stdin, which the terminal event reader owns, so each rebuild had to abort the
+reader, run a priming loop of up to **40 × 25ms of blocking sleep on the event
+loop's own thread**, then respawn it. A growing streaming preview commits one
+rebuild per row: 12–34 DSR queries per turn, measured on the wire.
+
+The rebuild is now free rather than rare: a backend newtype carries the
+already-known cursor position, so there is no DSR, no stdin read, no reader
+teardown and no priming loop. Paths where the cursor is genuinely unknown — boot,
+and returning from the alternate screen with no remembered top — keep the old
+query-and-retry ladder unchanged.
+
+| | before | after |
+|---|---|---|
+| DSR queries per turn | 12–34 | **0** |
+| keystrokes lost mid-stream (DSR dropped) | **7 of 7** | **0** |
+| echo latency in that state | never echoed | 1.1ms median, 3.3ms p95 |
+
+**Why this never reproduced here.** On bare Linux the terminal answers DSR in
+under a millisecond, so the reader is deaf for about that long and nothing is
+lost. It reproduces completely the moment the reply is dropped or delayed — which
+is macOS inside tmux, where DSR passthrough is unreliable and where the 40 × 25ms
+blocking loop actually fires. A new probe models that with `--drop-dsr`, and it is
+the revert-verified gate: the pre-fix binary fails it, the post-fix binary passes.
+
+A stable per-turn ceiling for the streaming band was considered and rejected: the
+slot is monotone within a turn, so reserving the ceiling up front is the
+pre-1.0.79 high-water ratchet, and `reserved > drawn` is bottom-anchored — it
+paints as dead rows above the reply, which is exactly the defect 1.0.79 fixed and
+which `blank_rows_probe.py` now gates on.
+
+### Fixed — every finalized block was markdown-parsed twice
+
+`Message::cached_height` was declared, read, and invalidated — and never assigned
+anywhere, because `height/1` takes `&self`. So the commit path parsed each block
+once to measure it and again to draw it. The field is now a `Cell`, and a single
+parse is shared between measuring and drawing. It only ever fills an empty
+`prerendered_body`, so the live preview and plan snapshots — where that field is
+the content rather than a cache — are untouched.
+
+### Fixed — the test suite was writing into the operator's live `~/.osa`
+
+Six state paths were still at their production defaults, so `mix test` shared
+directories with the running agent. Measured before the fix: `fs_checkpoints` held
+2,761 commits of which **2,759 were test sessions**; `verification_checkpoints`
+held 182 leftover files; `workflows` gained 24 files per run. Because
+`Verification.Checkpoint` prunes at 200 files, the suite was **deleting the
+operator's real records**. All six are now isolated per run, verified across five
+runs by the operator's counters not moving.
+
+Four ordering and cross-run mechanisms were also fixed, each measured rather than
+inferred: a test leaking a permission into the process-wide settings cascade; a
+`/tmp` fixture colliding with leftovers because `System.unique_integer/1` restarts
+low each VM boot, self-perpetuating because its cleanup was registered after the
+build that could raise; and a check-then-act `on_exit` on a linked process.
+Five consecutive full runs are green, including the two seeds that reliably failed.
+
+### Fixed — a healthy fleet node could have its work discarded
+
+`RunStore.attach_worktree_snapshot/2` created a run file for an id that never
+started. `rehydrate/0` rebuilds its index from exactly those files, so the phantom
+came back as a real row and `reconcile` settled it to `:failed` — and `Fleet`'s
+await polls that status, so a node that completed fine was reported
+`{:node_incomplete, :failed}` and its output thrown away. A snapshot marker is
+evidence *about* a run and can no longer invent one. Found while chasing a test
+flake; it is a production defect.
+
+### Known gaps
+
+Per-delta streaming cost still grows with the size of the **open** markdown block
+(655 → 1084µs from 50 to 800 lines) because OSA's only streaming boundary is a
+blank line at depth zero outside a fence, so the preview always re-parses one
+unterminated block — unbounded inside a code fence or table. Per-frame cost is
+flat. The fix is a real streaming boundary primitive and is planned in
+`docs/tui-primitives-plan.md`, not attempted here.
+
+Chunked streaming is the cloud provider, not OSA: measured 68% of inter-delta gaps
+under 1ms with a 28-character median chunk on the cloud model, versus 0% and 4.5
+characters on a local one, on the same code path. Only character-paced rendering
+would smooth it, at the cost of roughly one clump interval of added latency.
+
+`fs_checkpoint` commits fail on a machine that sets `commit.gpgsign`, because the
+shadow repository inherits it — so `/rollback` silently records nothing there.
+Pre-existing and unrelated to this work.
+
+---
+
 ## [1.0.82] — displays as `v1.0.082`
 
 ### Fixed — the system prompt was frozen at boot

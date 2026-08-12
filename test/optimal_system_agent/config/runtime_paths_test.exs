@@ -73,8 +73,18 @@ defmodule OptimalSystemAgent.Config.RuntimePathsTest do
     bootstrap_dir = Application.fetch_env!(@app, :bootstrap_dir)
     database = Application.fetch_env!(@app, OptimalSystemAgent.Store.Repo)[:database]
 
-    assert bootstrap_dir == Path.join(System.tmp_dir!(), "osa-test-bootstrap"),
+    # Pinned by SHAPE, not by exact spelling: the name now carries the same
+    # per-run tag as the database. A single fixed `osa-test-bootstrap` was
+    # isolated from the operator but shared by every RUN, so a `config.json`
+    # written by one suite was read back by the next — and `Soul.soul_dir/0`
+    # resolves USER.md / IDENTITY.md / SOUL.md out of this directory, which the
+    # system prompt interpolates. What must hold is what the comment above says:
+    # it stays under tmp, and runtime.exs has not rewritten it to config_dir.
+    assert String.starts_with?(bootstrap_dir, Path.join(System.tmp_dir!(), "osa-test-bootstrap")),
            "expected config/test.exs's bootstrap_dir to survive runtime.exs, got #{bootstrap_dir}"
+
+    refute bootstrap_dir == Path.join(Application.fetch_env!(@app, :config_dir), ""),
+           "bootstrap_dir was rewritten to config_dir, overwriting the suite's own isolation"
 
     assert String.starts_with?(database, Path.join(System.tmp_dir!(), "osa-test-")),
            "expected config/test.exs's per-run database to survive runtime.exs, got #{database}"

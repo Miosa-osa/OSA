@@ -406,7 +406,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Compose do
         ) ++
         ["ps", "--format", "json"]
 
-    case System.cmd(runtime, args, stderr_to_stdout: true) do
+    case System.cmd(runtime, args,
+           stderr_to_stdout: true,
+           env: OptimalSystemAgent.OS.Env.cmd_env()
+         ) do
       {output, 0} ->
         services = parse_ps_json(output)
         {:ok, services}
@@ -440,6 +443,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Compose do
         :binary,
         :exit_status,
         {:args, args},
+        {:env, OptimalSystemAgent.OS.Env.port_env()},
         :stderr_to_stdout
       ]
     )
@@ -475,7 +479,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Compose do
 
     Logger.info("[Compose] #{runtime} #{Enum.join(args, " ")}")
 
-    case System.cmd(runtime, args, cd: tmp_dir, stderr_to_stdout: true) do
+    # compose interpolates `${VAR}` from the CLIENT environment into the
+    # compose file, so a workspace-supplied compose file can read any variable
+    # this process holds. Scrub before handing it the file.
+    case System.cmd(runtime, args,
+           cd: tmp_dir,
+           stderr_to_stdout: true,
+           env: OptimalSystemAgent.OS.Env.cmd_env()
+         ) do
       {_out, 0} -> :ok
       {err, _} -> {:error, String.trim(err)}
     end

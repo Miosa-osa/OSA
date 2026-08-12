@@ -39,7 +39,9 @@ fn is_stream_delta(event: &Event) -> bool {
     )
 }
 
-type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
+type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>;
+
+use crate::app::inline_backend::InlineBackend;
 
 /// Intersect `rect` with the frame's drawable area, returning a rect guaranteed
 /// to lie within `frame.area()` (possibly zero-sized). Pass the result as the
@@ -921,11 +923,11 @@ impl App {
             let do_clear = !want_full && self.pending_clear;
             if do_clear {
                 self.pending_clear = false;
-                term_handle.abort();
-                let _ = term_handle.await;
+                // `purge_scrollback` ends with the cursor homed at (0, 0), so
+                // the rebuilt region's top is known and no DSR — and therefore
+                // no reader teardown — is needed. See `rebuild_inline`.
                 purge_scrollback()?;
-                rebuild_inline(&mut terminal, desired_inline_h)?;
-                term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                rebuild_inline(&mut terminal, desired_inline_h, Some(0))?;
                 cur_inline_h = desired_inline_h;
                 shrink_streak = 0;
                 last_inline_top = Some(terminal.get_frame().area().top());
@@ -998,11 +1000,25 @@ impl App {
                 };
                 if commit {
                     shrink_streak = 0;
-                    // Erase the OLD inline chrome before rebuilding fresh. Pause the
-                    // reader FIRST (shared stdin) so the DSR cursor query below isn't
-                    // eaten by it, exactly as the full→inline switch does.
-                    term_handle.abort();
-                    let _ = term_handle.await;
+                    // **The reader is NOT torn down here, and that is the fix
+                    // for the frozen composer.** It used to be: the rebuild
+                    // below took a DSR cursor query, the reply arrives on the
+                    // same stdin this reader owns, so the reader had to be
+                    // aborted and respawned around every rebuild. A growing
+                    // streaming preview commits its grow immediately, which is
+                    // one rebuild per row — measured at 26 in a single
+                    // 5-second turn — and every keystroke that landed in one of
+                    // those 26 windows was read by nobody. Mid-stream, 7 of 7
+                    // keystrokes never echoed within 5 s each; a paste never
+                    // appeared at all.
+                    //
+                    // `rebuild_inline` is now handed `new_top` (computed below,
+                    // and written to the terminal with an explicit `MoveTo`)
+                    // instead of asking the terminal to read it back, so there
+                    // is no cursor query, nothing on stdin to steal, and no
+                    // reason to stop reading input. Keystrokes queue in the
+                    // channel across a rebuild exactly as they do across any
+                    // other frame.
 
                     // **Where the rebuilt region starts.** Two different
                     // questions, and conflating them is the defect this release
@@ -1183,9 +1199,14 @@ impl App {
                     );
 
                     // Rebuild fresh to bypass ratatui's in-place inline-resize
-                    // (which can misplace the viewport on a shrink).
-                    rebuild_inline(&mut terminal, desired_inline_h)?;
-                    term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                    // (which can misplace the viewport on a shrink). `new_top`
+                    // is where the `MoveTo` above just put the cursor, so the
+                    // rebuild anchors there without a DSR round trip.
+                    rebuild_inline(
+                        &mut terminal,
+                        desired_inline_h,
+                        Some(new_top.min(size.rows.saturating_sub(1))),
+                    )?;
                     cur_inline_h = desired_inline_h;
                     last_inline_top = Some(terminal.get_frame().area().top());
                 }
@@ -1290,7 +1311,7 @@ impl App {
                     Ok(())
                 }
 
-                for msg in self.chat.drain_scrollback() {
+                for mut msg in self.chat.drain_scrollback() {
                     // Capture a text copy for the on-demand transcript viewer as
                     // each finalized message flows into native scrollback. This is
                     // the single choke point every message passes through, so it
@@ -1301,6 +1322,14 @@ impl App {
                     {
                         self.transcript_log.push(entry);
                     }
+                    // Parse the markdown ONCE for this message. `height(w)` on
+                    // the next line and `render_to_buffer(.., w, ..)` in
+                    // `flush` below each used to run their own
+                    // `render_markdown` over the whole answer, so every
+                    // finalized assistant block was parsed twice on its way
+                    // into scrollback. `w` here is the same width both of them
+                    // use, which is what makes sharing the parse sound.
+                    msg.prepare_for_commit(w);
                     let h = msg.height(w);
                     if h == 0 {
                         continue;
@@ -2328,7 +2357,7 @@ impl App {
 fn switch_to_full(terminal: &mut Term) -> Result<()> {
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     crate::app::alt_screen::mark_entered();
-    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     terminal.clear()?; // fresh diff state after rebuild
     Ok(())
 }
@@ -2447,17 +2476,6 @@ fn switch_to_inline(
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
     crate::app::alt_screen::mark_left();
 
-    // Viewport::Inline queries the cursor (DSR); the first query after leaving the
-    // alt screen can be dropped and time out ("cursor position could not be read"),
-    // which would crash the session on every dialog close. Prime it, then retry the
-    // rebuild instead of aborting.
-    for _ in 0..40 {
-        if crossterm::cursor::position().is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-
     // Erase the old inline chrome before rebuilding. `size` is THIS frame's
     // size — sampled once at the top of the run loop, and already re-adopted if
     // a resize landed while the dialog owned the screen — so the remembered top
@@ -2465,7 +2483,8 @@ fn switch_to_inline(
     // trusted blindly. It used to be a second, independent
     // `crossterm::terminal::size()` here; see `app::frame_size`.
     let term_rows = size.rows;
-    if let Some(top) = clamp_inline_top(prev_inline_top, term_rows) {
+    let placed = clamp_inline_top(prev_inline_top, term_rows);
+    if let Some(top) = placed {
         let _ = execute!(
             std::io::stdout(),
             crossterm::cursor::MoveTo(0, top),
@@ -2473,10 +2492,36 @@ fn switch_to_inline(
         );
     }
 
+    // When the old top was remembered, the `MoveTo` above just PUT the cursor
+    // where the region must be rebuilt, so the DSR round trip that
+    // `Viewport::Inline` would take reads back a number we wrote. Hand ratatui
+    // that number instead (see [`rebuild_inline`] for the full argument). Only
+    // the no-remembered-top case — the cursor is genuinely wherever the dialog
+    // left it — still has to ask, and it keeps the priming/retry ladder that
+    // stopped a dropped reply from crashing the session on a dialog close.
+    if let Some(top) = placed {
+        if let Ok(t) = Terminal::with_options(
+            InlineBackend::primed_at(std::io::stdout(), top),
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_h),
+            },
+        ) {
+            *terminal = t;
+            return Ok(());
+        }
+    } else {
+        for _ in 0..40 {
+            if crossterm::cursor::position().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            CrosstermBackend::new(std::io::stdout()),
+            InlineBackend::new(std::io::stdout()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },
@@ -2497,28 +2542,72 @@ fn switch_to_inline(
     // queries the cursor, so it can't fail. The viewport reconciliation will
     // recover the inline region on a later iteration if the terminal recovers.
     info!("inline rebuild failed ({:?}); degrading to full-screen", last_err);
-    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
     Ok(())
 }
 
 /// Rebuild the inline viewport at a new height *without* leaving/entering the
 /// alt screen (we're already inline). Used when the live region grows/shrinks or
-/// the terminal is resized. Like [`switch_to_inline`] it primes the cursor query
-/// (DSR) and retries, since the query can be dropped intermittently. The caller
-/// must have paused the terminal event reader first (shared stdin) and should
-/// `terminal.clear()` beforehand so no stale rows of the old-sized region remain.
-fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
-    for _ in 0..40 {
-        if crossterm::cursor::position().is_ok() {
-            break;
+/// the terminal is resized.
+///
+/// `known_top` is the row the caller has just placed the cursor on with an
+/// explicit `MoveTo` — the row the rebuilt region must start at. **Pass it
+/// whenever it is known, which on the inline paths is always.**
+///
+/// # Why that argument is the fix
+///
+/// `Viewport::Inline` anchors itself wherever `Backend::get_cursor_position`
+/// says the cursor is, and for `CrosstermBackend` that is a DSR round trip:
+/// `ESC[6n` out, blocking stdin read back. Two of them per rebuild here — one
+/// from the priming probe this function used to run, one from ratatui's own
+/// construction — and the reply lands on the same stdin the terminal event
+/// reader owns, so the caller had to abort and respawn the reader around every
+/// call. Measured on a real PTY against a real provider, a growing streaming
+/// preview drove **26 rebuilds in one 5-second turn**, and mid-stream 7 of 7
+/// keystrokes were never echoed within 5 s each. The composer was not slow; it
+/// was unread.
+///
+/// The round trip was always redundant: the caller writes the cursor to
+/// `known_top` immediately before calling, so DSR only reads back a number we
+/// just wrote. [`InlineBackend::primed_at`] hands ratatui that number directly.
+/// No `ESC[6n`, no stdin read, no reader teardown, and no priming loop — the
+/// old one slept up to 40 × 25 ms **on the event loop's thread**, which is
+/// exactly the stall a terminal that drops DSR (tmux, SSH) used to take, 26
+/// times a turn.
+///
+/// With `known_top = None` the behaviour is the old one verbatim: prime, query,
+/// retry, degrade. Nothing on the inline path passes `None` today; it exists so
+/// a future caller without a placed cursor is still correct rather than lying.
+///
+/// The caller should still `terminal.clear()` / erase beforehand so no stale
+/// rows of the old-sized region remain.
+fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) -> Result<()> {
+    if let Some(top) = known_top {
+        // No cursor query happens at all, so there is nothing to drop and
+        // nothing to retry: the only way this fails is a genuine write error on
+        // stdout, which the degrade path below handles identically.
+        if let Ok(t) = Terminal::with_options(
+            InlineBackend::primed_at(std::io::stdout(), top),
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_h),
+            },
+        ) {
+            *terminal = t;
+            return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+    } else {
+        for _ in 0..40 {
+            if crossterm::cursor::position().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            CrosstermBackend::new(std::io::stdout()),
+            InlineBackend::new(std::io::stdout()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },
@@ -2537,7 +2626,7 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
     // cursor query keeps failing, fall back to a full-screen terminal (which does
     // not query the cursor) so the live-region resize can't crash the session.
     info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
-    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
     Ok(())
 }

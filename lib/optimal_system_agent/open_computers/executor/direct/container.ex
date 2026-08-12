@@ -359,7 +359,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
 
         Logger.info("[Container] running: #{runtime} #{Enum.join(args, " ")}")
 
-        case System.cmd(runtime, args, stderr_to_stdout: false) do
+        # `docker run -e FOO` with no value FORWARDS the daemon client's own
+        # FOO into the container, so an unscrubbed env here is a direct path
+        # from the operator's credentials into an arbitrary image.
+        case System.cmd(runtime, args,
+               stderr_to_stdout: false,
+               env: OptimalSystemAgent.OS.Env.cmd_env()
+             ) do
           {runtime_id, 0} ->
             runtime_id = String.trim(runtime_id)
             ports_resolved = resolve_ports(runtime, runtime_id)
@@ -591,7 +597,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
           :binary,
           :exit_status,
           {:args, ["logs", "-f", "--timestamps", runtime_id]},
-          {:env, []},
+          # `{:env, []}` is an EMPTY OVERLAY — it inherits everything. Scrub.
+          {:env, OptimalSystemAgent.OS.Env.port_env()},
           :stderr_to_stdout
         ]
       )

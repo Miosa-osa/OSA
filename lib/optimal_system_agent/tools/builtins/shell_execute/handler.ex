@@ -918,9 +918,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # Give it the group LEADER instead: that is the command shell, exactly the pid
   # this code used to register when there was no setsid wrapper.
   #
-  # (Reaping the leader's descendants from the background path needs
-  # `BackgroundTask.do_kill/1` to learn about process groups — see the report;
-  # that file is outside this change.)
+  # `BackgroundTask.do_kill/2` reaps the leader's whole group via
+  # `ProcessGroup.pgid_of/1`, so a backgrounded command's descendants are
+  # collected the same way a foreground timeout collects them.
   defp adopted_os_pid(nil), do: nil
 
   defp adopted_os_pid(os_pid) do
