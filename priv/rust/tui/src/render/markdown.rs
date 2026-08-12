@@ -1597,11 +1597,34 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 if found_bracket && chars.peek() == Some(&'(') {
                     chars.next(); // consume `(`
                     let mut url = String::new();
+                    let mut closed = false;
                     for c in chars.by_ref() {
                         if c == ')' {
+                            closed = true;
                             break;
                         }
                         url.push(c);
+                    }
+                    if !closed {
+                        // ── Unterminated `[text](url` — emit the source literally.
+                        //
+                        // Every other unterminated inline construct in this
+                        // function already falls back to its literal source
+                        // (`**`, `*`, `$`, `[`), and the references agree that a
+                        // half-drawn *visual* span is acceptable mid-stream. A
+                        // link is the one case where the intermediate state is
+                        // **interactive**: without this branch the destination is
+                        // whatever bytes have arrived, so `[docs](https://exa`
+                        // rendered a live, clickable OSC 8 hyperlink whose target
+                        // mutated on every delta — a click during the stream opens
+                        // a truncated URL.
+                        //
+                        // `Span::raw`, not `plain`: pushing to `plain` would send
+                        // the partial through `push_plain_autolinked`, which would
+                        // re-create the very mutating hyperlink this removes.
+                        flush_plain!();
+                        spans.push(Span::raw(format!("[{link_text}]({url}")));
+                        continue;
                     }
                     // Emit the link text in cyan+underline, then the target in
                     // dim parens so the user can see (and copy) it.
@@ -1844,6 +1867,85 @@ mod tests {
         let theme = crate::style::theme();
         let spans = parse_inline("[docs](https://osa.dev)", &theme);
         assert_eq!(flat(&spans), "docs (https://osa.dev)");
+    }
+
+    /// An unterminated `[label](url` must NOT become a live hyperlink.
+    ///
+    /// Before this was fixed, the `(url)` scanner had no "closed" flag: it ran
+    /// to end-of-line and emitted an OSC 8 hyperlink pointing at whatever bytes
+    /// had arrived. Mid-stream that is a *clickable* element whose destination
+    /// changes on every delta, and the `](`/URL source text was swallowed
+    /// outright — `[docs](https://exa` rendered as the four characters `docs`.
+    #[test]
+    fn unterminated_link_renders_literally_not_as_a_hyperlink() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("see [docs](https://exa", &theme);
+        // Visible text is the literal source — nothing swallowed.
+        assert_eq!(flat(&spans), "see [docs](https://exa");
+        // Nothing is styled as a link (cyan + underline) …
+        assert!(
+            spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "unterminated link rendered as an underlined link span: {spans:?}"
+        );
+        // … and no OSC 8 escape was emitted for it.
+        assert!(
+            spans.iter().all(|s| !s.content.contains('\x1b')),
+            "unterminated link emitted an OSC 8 escape: {spans:?}"
+        );
+    }
+
+    /// The partial URL must not be recovered as a *bare* autolink either: the
+    /// literal fallback goes out as a raw span rather than through
+    /// `push_plain_autolinked`, which would re-create the mutating hyperlink.
+    #[test]
+    fn unterminated_link_partial_url_is_not_bare_autolinked() {
+        let theme = crate::style::theme();
+        // Long enough that `next_bare_url` would certainly match `https://…`.
+        let spans = parse_inline("[OSA docs](https://osa.dev/guide/strea", &theme);
+        assert_eq!(flat(&spans), "[OSA docs](https://osa.dev/guide/strea");
+        assert!(
+            spans.iter().all(|s| !s.content.contains('\x1b')),
+            "partial URL was autolinked: {spans:?}"
+        );
+    }
+
+    /// Token-by-token: no clickable link exists at any point until the `)`
+    /// lands, and the instant it does the real link appears.
+    #[test]
+    fn link_becomes_clickable_only_on_the_closing_paren() {
+        let theme = crate::style::theme();
+        let full = "[docs](https://osa.dev)";
+        let mut linked_prefixes = Vec::new();
+        for end in 1..=full.len() {
+            let spans = parse_inline(&full[..end], &theme);
+            if spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+            {
+                linked_prefixes.push(&full[..end]);
+            }
+        }
+        assert_eq!(
+            linked_prefixes,
+            vec![full],
+            "a link span appeared before the URL was complete"
+        );
+    }
+
+    /// The streaming tail is rendered with a block cursor appended, so the
+    /// unterminated form seen in practice is `…(https://exa█`. The cursor must
+    /// never end up inside a link target.
+    #[test]
+    fn unterminated_link_with_streaming_cursor_is_literal() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("[docs](https://exa\u{2588}", &theme);
+        assert_eq!(flat(&spans), "[docs](https://exa\u{2588}");
+        assert!(
+            spans.iter().all(|s| !s.content.contains('\x1b')),
+            "cursor leaked into a hyperlink target: {spans:?}"
+        );
     }
 
     #[test]

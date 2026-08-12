@@ -563,3 +563,140 @@ Done.
         );
     }
 }
+
+/// The freeze boundary must be safe for GFM pipe tables — the property codex's
+/// `TableHoldbackScanner` exists to provide, established here by construction
+/// rather than by a scanner.
+///
+/// # Why there is no holdback module next to this one
+///
+/// codex (`codex-rs/tui/src/streaming/table_holdback.rs`) commits *completed
+/// top-level blocks*, and a newline-terminated table row looks like one. So it
+/// needs a state machine — `None | PendingHeader | Confirmed` — to pin a table
+/// region into the mutable tail: "adding a row can reflow earlier table rows
+/// instead of committing a stale render to scrollback."
+///
+/// OSA's boundary is stricter to begin with. [`find_frozen_boundary`] only ever
+/// splits at a **blank line at depth 0 outside a fence**, and
+/// [`render_markdown`](super::markdown::render_markdown) flushes its table
+/// accumulator at *any* non-table line — a blank one included
+/// (`markdown.rs`, `if in_table { … render_table(…) }`). A blank line is
+/// therefore always a table *end*, never a table *interior*, so the column
+/// widths of everything before a split point are already final and no later row
+/// can reflow them.
+///
+/// That is an argument, and arguments about renderers are exactly what this
+/// project has been burned by, so it is also a test. Each case below is driven
+/// one byte at a time, and at every prefix the committed region is compared
+/// against the head of a one-shot render of the whole document. If a boundary
+/// ever landed inside a table, the committed rows would carry column widths
+/// computed from a subset of the rows and the comparison would diverge.
+///
+/// If this ever goes red, a `TableHoldbackScanner` port is the fix: clamp
+/// [`find_frozen_boundary`] to `min(boundary, table_start)`.
+#[cfg(test)]
+mod table_split_safety {
+    use super::*;
+    use crate::render::markdown::render_markdown;
+
+    const W: u16 = 60;
+
+    fn flat(t: &ratatui::text::Text<'_>) -> Vec<String> {
+        t.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// Documents chosen to attack the boundary rule specifically: a blank line
+    /// *inside* a table region (the case codex's `Confirmed` state pins), a
+    /// header with no delimiter yet (its `PendingHeader` state), quoted and
+    /// list-nested tables, pipe rows inside a fence, whitespace-only "blank"
+    /// lines, CRLF, and ragged rows whose widest cell arrives last.
+    const DOCS: &[&str] = &[
+        "Here is the data:\n\n| Name | Value |\n| --- | --- |\n| a | 1 |\n| bbbbbbbbbbbbbbbb | 22222 |\n\nDone.\n",
+        "| Name | Value |\n| --- | --- |\n| a | 1 |\n\n| Other | T |\n| --- | --- |\n| xxxxxxxxxx | 9 |\n\n",
+        "- one\n\n- two\n\nafter\n",
+        "| a | b |\n| --- | --- |\n\n| 1 | 2222222222222 |\n\ntail\n",
+        "Intro\n\n> quote\n\n> more\n\nend\n",
+        // blank line inside a confirmed table, widest cell in the second half
+        "| h1 | h2 |\n| --- | --- |\n| a | b |\n   \n| loooooooooooooooooong | c |\n\nx\n",
+        // whitespace-only "blank" (a tab) inside a table
+        "| h1 | h2 |\n| --- | --- |\n\t\n| q | wwwwwwwwwwwwwwwwww |\n\ndone\n",
+        // blockquoted table split by a blank
+        "> | h1 | h2 |\n> | --- | --- |\n\n> | aaaaaaaaaaaa | b |\n\nend\n",
+        // table indented inside a list item
+        "- item\n\n  | h | v |\n  | --- | --- |\n\n  | wwwwwwwwwwwwwwww | 2 |\n\nafter\n",
+        // table immediately after a closed fence
+        "```rust\nfn a() {}\n```\n\n| h | v |\n| --- | --- |\n\n| llllllllllllllll | 2 |\n\ntail\n",
+        // pipe rows INSIDE a fence — must not be treated as a table at all
+        "```\n| h | v |\n| --- | --- |\n\n| a | b |\n```\n\nafter\n",
+        // CRLF, with a CRLF blank inside the table
+        "| h1 | h2 |\r\n| --- | --- |\r\n\r\n| zzzzzzzzzzzzzzzzzz | b |\r\n\r\nend\r\n",
+        // header row committed before its delimiter arrives (PendingHeader)
+        "| h1 | h2 |\n\n| --- | --- |\n| a | b |\n\nend\n",
+        // ragged rows, widest cell last
+        "| a | b | c |\n| --- | --- | --- |\n| 1 |\n\n| 1 | 2 | 33333333333333 |\n\nz\n",
+        // quote + list + table nested together
+        "> - x\n>\n>   | h | v |\n>   | --- | --- |\n\n>   | wwwwwwwwwww | 2 |\n\nq\n",
+    ];
+
+    #[test]
+    fn no_prefix_ever_commits_a_table_that_a_later_row_would_reflow() {
+        let mut checked = 0usize;
+        for (di, doc) in DOCS.iter().enumerate() {
+            let full = flat(&render_markdown(doc, W));
+            for end in 1..=doc.len() {
+                if !doc.is_char_boundary(end) {
+                    continue;
+                }
+                let b = find_frozen_boundary(&doc[..end]);
+                if b == 0 {
+                    continue;
+                }
+                checked += 1;
+                let committed = flat(&render_markdown(&doc[..b], W));
+                assert!(
+                    full.len() >= committed.len() && full[..committed.len()] == committed[..],
+                    "doc {di}: committing {b} bytes at prefix length {end} produced \
+                     rows that are not a prefix of the finished render — a table \
+                     was split and its columns reflowed.\n  committed: {committed:#?}\n  \
+                     finished head: {:#?}\n  source committed: {:?}",
+                    &full[..committed.len().min(full.len())],
+                    &doc[..b],
+                );
+            }
+        }
+        // A guard that never ran would pass silently.
+        assert!(checked > 500, "only {checked} prefixes reached a commit");
+    }
+
+    /// The complement: a table whose rows are still arriving is never committed
+    /// at all. Nothing may settle until the blank line that closes it lands.
+    #[test]
+    fn a_growing_table_stays_in_the_mutable_tail() {
+        let doc = "Results:\n\n| Name | Status |\n| --- | --- |\n| short | ok |\n| a_much_longer_name | failed |\n\nDone.\n";
+        let after_intro = "Results:\n\n".len();
+        let table_end = doc.find("\n\nDone.").unwrap() + 2;
+
+        let mut r = StreamingRenderer::new(W);
+        for end in 1..=doc.len() {
+            if !doc.is_char_boundary(end) {
+                continue;
+            }
+            r.update(&doc[..end]);
+            let frozen = r.frozen_bytes();
+            assert!(
+                frozen <= after_intro || frozen >= table_end,
+                "froze {frozen} bytes at prefix {end} — that is inside the table \
+                 (rows {after_intro}..{table_end}), so the committed columns were \
+                 sized from a subset of the rows"
+            );
+        }
+        assert_eq!(
+            r.frozen_bytes(),
+            table_end,
+            "the completed table should freeze as one unit once its blank line lands"
+        );
+    }
+}

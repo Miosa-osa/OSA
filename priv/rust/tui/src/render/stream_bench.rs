@@ -60,7 +60,7 @@ fn measure(name: &'static str, text: &str, chunk: usize) -> Sample {
         // paint. Both go through the one-parse-per-frame cache, exactly as in
         // `draw_inline`.
         let _ = chat.streaming_height(W);
-        terminal.draw(|f| chat.draw_live(f, area)).unwrap();
+        terminal.draw(|f| chat.draw_live(f, area, true)).unwrap();
         deltas += 1;
     }
     let total = start.elapsed();
@@ -186,7 +186,7 @@ fn the_streamed_preview_is_cell_identical_to_a_cold_render() {
             let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
             let mut chat = Chat::new();
             chat.update_streaming(prefix);
-            term.draw(|f| chat.draw_live(f, area)).unwrap();
+            term.draw(|f| chat.draw_live(f, area, true)).unwrap();
             term.backend().buffer().clone()
         })
         .collect();
@@ -197,7 +197,7 @@ fn the_streamed_preview_is_cell_identical_to_a_cold_render() {
     let mut chat = Chat::new();
     for (prefix, want) in prefixes.iter().zip(&cold) {
         chat.update_streaming(prefix);
-        term.draw(|f| chat.draw_live(f, area)).unwrap();
+        term.draw(|f| chat.draw_live(f, area, true)).unwrap();
         assert_eq!(
             term.backend().buffer(),
             want,
@@ -240,11 +240,11 @@ fn draw_live_cost_curve() {
         let mut chat = Chat::new();
         chat.update_streaming(&text);
         let _ = chat.streaming_height(W);
-        term.draw(|f| chat.draw_live(f, area)).unwrap();
+        term.draw(|f| chat.draw_live(f, area, true)).unwrap();
         let iters = 100;
         let t = Instant::now();
         for _ in 0..iters {
-            term.draw(|f| chat.draw_live(f, area)).unwrap();
+            term.draw(|f| chat.draw_live(f, area, true)).unwrap();
         }
         let per_frame = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
 
@@ -259,7 +259,7 @@ fn draw_live_cost_curve() {
             buf.push_str("word ");
             chat2.update_streaming(&buf);
             let _ = chat2.streaming_height(W);
-            term2.draw(|f| chat2.draw_live(f, area)).unwrap();
+            term2.draw(|f| chat2.draw_live(f, area, true)).unwrap();
         }
         let per_delta = t2.elapsed().as_secs_f64() * 1e6 / iters as f64;
 

@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   # Shared helpers not needed — using Jason.encode! directly
   require Logger
 
+  alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Protocol.ContextRefs
   alias OptimalSystemAgent.Runtime.SessionManager
@@ -68,6 +69,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     user_id = conn.assigns[:user_id] || "anonymous"
     working_dir = conn.body_params["working_dir"]
     images = normalize_images(conn.body_params["images"])
+    image_source = MessageHandler.normalize_source(conn.body_params["image_source"])
     context_refs = conn.body_params["context_refs"]
 
     # Deferred composer @-mentions piece: non-image `@file`/`@agent` refs
@@ -129,6 +131,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
               result =
                 SessionManager.process_message(session_id, input,
                   images: images,
+                  image_source: image_source,
                   working_dir: working_dir
                 )
 
@@ -498,11 +501,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   end
 
   # `images` is caller-supplied and each entry is either inline base64 bytes or
-  # a filesystem PATH that `MessageHandler.build_messages/3` will read. The
-  # security decision lives there (canonicalisation + `PathPolicy.check_read/2`
-  # + magic-byte sniffing + a per-image byte cap); what belongs at the request
-  # boundary is shape: a list of non-empty strings, bounded in count, so a
-  # 10_000-entry body cannot turn one request into 10_000 file reads.
+  # a filesystem PATH that `MessageHandler.build_messages/4` will read. The
+  # security decision lives there (canonicalisation + a trust-aware
+  # `PathPolicy` check + magic-byte sniffing + a per-image byte cap); what
+  # belongs at the request boundary is shape: a list of non-empty strings,
+  # bounded in count, so a 10_000-entry body cannot turn one request into
+  # 10_000 file reads.
+  #
+  # The companion `image_source` field is the trust marker. It is absent on
+  # every body that does not set it, which `MessageHandler.normalize_source/1`
+  # maps to `:model` — so an unmarked request keeps the v1.0.79 confinement and
+  # only a caller that explicitly says `"user"` (the TUI, on a real
+  # drag-and-drop / paste / `@file`) gets the unconfined-location path.
   @max_images 16
 
   defp normalize_images(images) when is_list(images) do

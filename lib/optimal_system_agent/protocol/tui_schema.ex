@@ -161,6 +161,11 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
             skip_none: true,
             doc: "Attachments for vision-capable models: file paths or base64-encoded images."
           ),
+          f("image_source", {:option, :string},
+            skip_none: true,
+            doc:
+              "Trust marker for the PATH entries in `images`. `\"user\"` asserts every\npath came from an explicit user action (drag-and-drop, clipboard paste,\n`@file` mention), so it is read from anywhere on the filesystem — a\nscreenshot lives in $TMPDIR or on the Desktop, never in the workspace.\nAbsent (or anything else) means model/unknown origin and keeps the full\nallowed-roots confinement. Sensitive files, the size cap and the\nmagic-byte sniff apply either way."
+          ),
           f("context_refs", {:option, {:vec, {:struct, "ContextRef"}}},
             skip_none: true,
             doc:

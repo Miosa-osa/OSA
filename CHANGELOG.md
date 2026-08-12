@@ -9,6 +9,107 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.84] — displays as `v1.0.084`
+
+### Fixed — a 1M-context model was being treated as a toy
+
+`Context.small_window?/2` did not exist; the decision was made on the provider's
+*name*. Any model served through ollama, lmstudio or llamacpp was assumed small,
+so `glm-5.2:cloud` — a **1M-token window** — was routed to the `:lite` static
+base (22,971 tokens instead of the 14,527-token `:native_tools` variant) and,
+worse, `ToolFilter` trimmed its toolset to ten. That trim was visible in the log
+on every turn: `Trimming tools from 37 to 10 for ollama`. The model was told it
+had ten tools while thirty-seven were registered.
+
+Both sites now key on `Registry.effective_context_window/2`. A local provider
+with a large window keeps the full prefix and **all 37 tools**; a genuinely
+small window still gets the lite treatment. The predicate is one function, so
+the prompt variant and the tool budget cannot disagree about the same model.
+
+### Fixed — the `◈ OSA` header on tool-first turns
+
+`ToolCallStart` set `agent_header_sent = true` unconditionally, so any turn that
+opened with a tool call rendered its entire answer with no header. The live
+preview then drew a *second* header of its own, because `new_agent_prerendered`
+hardcoded `MessageType::Agent` — which is where the duplicate `◈ OSA` mid-answer
+came from. The preview now takes the header as a parameter and renders
+`AgentContinuation` when one has already been sent.
+
+### Fixed — every provider call minted a new assistant message
+
+`mint_message_id/1` fired per provider call, and the moduledoc asserted the
+behaviour it caused: *"Every generation is a distinct assistant message."* A
+single answer interrupted by tool calls therefore arrived as several messages.
+IDs are now minted once per turn and re-minted only after a tool call actually
+runs, which is the boundary that makes a new message meaningful.
+
+### Fixed — drag-and-dropped screenshots were refused
+
+`PathPolicy.check_read/2` confines reads to `read_roots()`, which is right for
+paths the *model* chose and wrong for a file the *user* just dropped onto the
+composer. The two cases are now distinguished: `check_read_as/3` dispatches on
+`:user` vs `:model`, and `check_user_attachment/2` canonicalises and applies the
+sensitive-path blocklist without the roots confinement. The guard was not
+loosened — a second trust level was added, because "the user handed me this
+file" and "the model asked for this path" are not the same claim.
+
+Found while fixing it: `Protocol.ContextRefs.resolve_file/3` had **no policy
+check at all**, so a request carrying
+`context_refs: [{"type":"file","path":"~/.ssh/id_rsa"}]` read the key and
+inlined it into the prompt. It now goes through the same `:model`-trust path as
+every other model-chosen read.
+
+### Added — a lean system prompt, on by default
+
+`priv/prompts/SYSTEM_LEAN.md` replaces prose that restated tool schemas the
+model receives natively on the same request. The system prompt drops from
+16,059 to **9,332 tokens (−42%)**; the total static prefix from 31,612 to
+24,828. Deferred-tool discovery is unaffected — it was never carried by that
+prose, but by the `<system-reminder>` block `ToolsSection` emits in every
+variant, which names each deferred tool and says to reach it via `tool_search`.
+
+Set `config :optimal_system_agent, :lean_prompt, false` to revert. A user's own
+`SYSTEM.md` override always wins over both.
+
+Measured honestly: cutting 5,818 tokens changed time-to-first-token by **nothing**
+(~1,430ms before, ~1,418ms after). The prefix was not the latency lever; the
+floor is network and provider scheduling. It is still worth shipping for the
+per-request cost and the context it hands back to the conversation.
+
+### Added — cache-break attribution
+
+`Providers.CacheAttribution` fingerprints each system block, each tool (name
+separately from schema) and each message, so a cache miss reports *what* moved:
+`tools changed (tool prompt/schema changed, same tool set)`,
+`message history mutated at index 2/4`. 92–118µs on a 192KB body.
+
+### Fixed — test-suite flakes that were hiding behind each other
+
+Two tests failed roughly one full run in three with the victim rotating by seed,
+which reads as nondeterminism and was not:
+
+* `UsageTest` "the only probe it will ever make is free and on loopback" drove
+  its assertion through `Usage.report/1`, so whether the probe fired depended on
+  that function enumerating ollama among its providers — ambient state other
+  suites perturb. It now drives `Usage.ollama_account/1`, the single shared probe
+  the contract is actually about, and waits on a polled deadline rather than a
+  fixed `sleep`. (The sleep was not the bug: it still failed at 2s.)
+* `ConversationTest` and `RulesAlwaysApplyTest` pinned literal prompt *wording*
+  that the lean template legitimately changed. They now assert the contracts —
+  a system message comes first and carries the static base; a rule without an
+  `alwaysApply` key is kept — so prompt edits stop reading as regressions.
+
+Full suite: **8,227 tests, 0 failures** at seeds 7 and 991. TUI: 1,307 passed.
+
+### Known, not fixed
+
+The settle-to-scrollback commit still lands in bursts — about 5% of paints carry
+roughly half the reply, with single frames up to 330 characters. That is the
+remaining "chunky streaming" complaint and it lives in `app/event_loop.rs` and
+`components/chat/**`, not in the pacing layer. `app/stream_pace.rs` ships
+**disabled by default**: measurement showed pacing made chunking worse
+(chars-per-paint p90 rose from 21 to 59), so it is present to iterate on, not on.
+
 ## [1.0.83] — displays as `v1.0.083`
 
 ### Fixed — the composer froze while a turn streamed

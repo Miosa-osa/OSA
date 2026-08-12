@@ -80,12 +80,74 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   Return the current HEAD commit hash of the shadow repo, or nil when the
   server is not running / has no commits. Used by the /rewind subsystem to
   pin the code state that existed when a rewind checkpoint was created.
+
+  ## Why this is a table read and not a call
+
+  This sits on the pre-request critical path: `Agent.Loop` takes a rewind
+  checkpoint before every prompt, and the checkpoint pins the shadow-repo HEAD.
+  It used to be `GenServer.call(__MODULE__, :head)` — a 5-second call into a
+  handler that shells out to `git rev-parse`. Two costs, and the second is the
+  one that bites:
+
+    1. a process spawn + `git` exec, on every prompt; and
+    2. **queueing**. The same mailbox serves `:snapshot`, which runs `git add`
+       + `git commit` across a working tree. A prompt submitted while a
+       snapshot is in flight waits for the whole commit, and on a large tree
+       that is where a 5-second timeout stops being theoretical.
+
+  HEAD only changes when THIS server changes it — nothing else writes to the
+  shadow repo — so the server publishes it into an ETS table on every mutation
+  and readers take it from there, lock-free and never queued. The call is kept
+  as a cold-start fallback for the one read that can precede any publish.
   """
   @spec head() :: String.t() | nil
   def head do
-    GenServer.call(__MODULE__, :head)
+    case cached_head(Config.repo_path()) do
+      {:ok, hash} ->
+        hash
+
+      :miss ->
+        GenServer.call(__MODULE__, :head)
+    end
   catch
     :exit, _ -> nil
+  end
+
+  # ── HEAD cache ────────────────────────────────────────────────────────
+
+  @head_table :osa_fs_checkpoint_head
+
+  @doc false
+  @spec cached_head(String.t()) :: {:ok, String.t() | nil} | :miss
+  def cached_head(repo_path) do
+    case :ets.whereis(@head_table) do
+      :undefined ->
+        :miss
+
+      _ ->
+        case :ets.lookup(@head_table, repo_path) do
+          [{^repo_path, hash}] -> {:ok, hash}
+          _ -> :miss
+        end
+    end
+  end
+
+  defp ensure_head_table do
+    case :ets.whereis(@head_table) do
+      :undefined ->
+        :ets.new(@head_table, [:named_table, :public, :set, read_concurrency: true])
+
+      tid ->
+        tid
+    end
+  end
+
+  # Publish the repo's current HEAD so `head/0` never has to ask. Called after
+  # every operation that can move it, and once at init.
+  defp publish_head(repo_path) do
+    ensure_head_table()
+    :ets.insert(@head_table, {repo_path, do_head(repo_path)})
+    :ok
   end
 
   @doc """
@@ -137,20 +199,28 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
       priority: 11
     )
 
-    ensure_shadow_repo(Config.repo_path())
+    repo = Config.repo_path()
+    ensure_shadow_repo(repo)
+    publish_head(repo)
     {:ok, %{}}
   end
 
   @impl true
   def handle_call({:snapshot, session_id, tool_name, paths}, _from, state) do
+    path = repo_path()
+
     result =
       try do
-        do_snapshot(repo_path(), session_id, tool_name, paths)
+        do_snapshot(path, session_id, tool_name, paths)
       rescue
         e ->
           Logger.warning("[fs_checkpoint] Snapshot failed: #{Exception.message(e)}")
           {:error, Exception.message(e)}
       end
+
+    # A snapshot commits, so HEAD moved. Republish before replying, while the
+    # mailbox is still ours — readers must never see a stale hash.
+    publish_head(path)
 
     {:reply, result, state}
   end
@@ -163,7 +233,9 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
 
   @impl true
   def handle_call({:restore, checkpoint_id}, _from, state) do
-    result = do_restore(repo_path(), checkpoint_id)
+    path = repo_path()
+    result = do_restore(path, checkpoint_id)
+    publish_head(path)
     {:reply, result, state}
   end
 
@@ -175,13 +247,18 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
 
   @impl true
   def handle_call(:head, _from, state) do
-    result = do_head(repo_path())
-    {:reply, result, state}
+    # Cold-start fallback only — `head/0` reads the published table first. Take
+    # the opportunity to publish, so this path is taken at most once per repo.
+    path = repo_path()
+    publish_head(path)
+    {:reply, do_head(path), state}
   end
 
   @impl true
   def handle_call({:restore_to, commit}, _from, state) do
-    result = do_restore_to(repo_path(), commit)
+    path = repo_path()
+    result = do_restore_to(path, commit)
+    publish_head(path)
     {:reply, result, state}
   end
 

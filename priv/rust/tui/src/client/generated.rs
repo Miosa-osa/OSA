@@ -115,6 +115,15 @@ pub struct OrchestrateRequest {
     /// Attachments for vision-capable models: file paths or base64-encoded images.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
+    /// Trust marker for the PATH entries in `images`. `"user"` asserts every
+    /// path came from an explicit user action (drag-and-drop, clipboard paste,
+    /// `@file` mention), so it is read from anywhere on the filesystem — a
+    /// screenshot lives in $TMPDIR or on the Desktop, never in the workspace.
+    /// Absent (or anything else) means model/unknown origin and keeps the full
+    /// allowed-roots confinement. Sensitive files, the size cap and the
+    /// magic-byte sniff apply either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_source: Option<String>,
     /// Non-image `@file` / `@agent` composer mentions, carried as structured
     /// refs instead of only inline prompt text. Absent/empty is today's behavior
     /// (unchanged) — the backend resolves each ref into a context block appended

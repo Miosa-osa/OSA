@@ -682,10 +682,18 @@ impl App {
                 "consumed composer submit metadata"
             );
         }
-        let images = if wire_images.is_empty() {
-            None
+        // Every path in `wire_images` reached us through an explicit user
+        // action: a drag-and-drop or a pasted path (`ingest_paste_as_attachments`),
+        // a clipboard image (bytes, not a path), or an `@file` mention the user
+        // typed. None of them is model-authored, so the turn is marked
+        // `image_source = "user"` and the backend reads them from wherever they
+        // live — a screenshot lands in $TMPDIR or on the Desktop, never inside
+        // the workspace, and confining it there refused the owner's own
+        // screenshots (v1.0.79). Sensitive files are still refused server-side.
+        let (images, image_source) = if wire_images.is_empty() {
+            (None, None)
         } else {
-            Some(wire_images)
+            (Some(wire_images), Some("user".to_string()))
         };
         let context_refs = if context_refs.is_empty() {
             None
@@ -702,6 +710,7 @@ impl App {
                 skip_plan: None,
                 working_dir,
                 images,
+                image_source,
                 context_refs,
             };
             let result = client.orchestrate(&req).await;

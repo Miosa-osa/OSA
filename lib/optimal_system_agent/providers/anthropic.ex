@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def native_tool_schemas?, do: true
 
   alias OptimalSystemAgent.Providers.AnthropicModels
+  alias OptimalSystemAgent.Providers.CacheAttribution
 
   @impl true
   def default_model, do: AnthropicModels.default_model()
@@ -90,6 +91,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
       |> apply_image_budget(opts)
 
+    # Fingerprint AFTER every body transform, so what is hashed is what goes on
+    # the wire. Hashes only — no payload retained.
+    cache_fp = CacheAttribution.fingerprint(body)
+
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing output
     timeout = if thinking, do: 600_000, else: 120_000
@@ -131,6 +136,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           tool_calls = extract_tool_calls(resp)
           usage = extract_usage(resp)
           thinking_blocks = extract_thinking(resp)
+
+          # Name the culprit when the provider's reported cache read drops.
+          # Diagnostics only — cannot fail the request (see CacheAttribution).
+          CacheAttribution.observe(CacheAttribution.scope(opts), cache_fp, usage)
 
           result = %{
             content: content,
@@ -249,6 +258,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
       |> apply_image_budget(opts)
 
+    # Fingerprint AFTER every body transform, so what is hashed is what goes on
+    # the wire. Carried on the stream accumulator because `collect_stream/3` is
+    # the only place the final usage exists.
+    cache_fp = CacheAttribution.fingerprint(body)
+    cache_scope = CacheAttribution.scope(opts)
+
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing the first token
     timeout = if thinking, do: 600_000, else: 120_000
@@ -268,6 +283,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             current_thinking: nil,
             stream_error: nil,
             stop_reason: nil,
+            cache_scope: cache_scope,
+            cache_fp: cache_fp,
             usage: %{
               input_tokens: 0,
               output_tokens: 0,
@@ -409,6 +426,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                     do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
                     else: result
 
+                observe_stream_cache(acc)
+
                 callback.({:done, result})
                 :ok
 
@@ -428,6 +447,20 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       620_000 ->
         Logger.error("Anthropic stream timeout after 620s")
         {:error, "Stream timeout"}
+    end
+  end
+
+  # Attribute a cache break on the streaming path. The accumulator carries the
+  # scope and fingerprint because the final `usage` only exists here.
+  # `collect_via_stream/6`'s recovery accumulator carries neither, so this is a
+  # no-op there rather than a crash.
+  defp observe_stream_cache(acc) do
+    case {Map.get(acc, :cache_scope), Map.get(acc, :cache_fp)} do
+      {scope, fp} when is_binary(scope) and is_map(fp) ->
+        CacheAttribution.observe(scope, fp, Map.get(acc, :usage, %{}))
+
+      _ ->
+        :ok
     end
   end
 

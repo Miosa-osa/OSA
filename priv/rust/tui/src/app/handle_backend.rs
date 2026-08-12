@@ -29,6 +29,101 @@ impl App {
         }
     }
 
+    /// Render a run of assistant text — the body the `streaming_token` handler
+    /// used to run inline, now called once per *release* from the de-jitter
+    /// buffer rather than once per arriving delta.
+    ///
+    /// Everything downstream of here is unchanged and unaware of the pacer:
+    /// `AssistantStream` sees the same byte sequence in the same order, settles
+    /// on the same boundaries, and finalizes with the same subtraction. Only the
+    /// number of frames the sequence is spread across is different.
+    fn apply_assistant_text(&mut self, message_id: Option<&str>, text: &str) {
+        // A delta carrying a NEW message_id means the backend started a fresh
+        // assistant message — it re-entered its ReAct loop after a text-only
+        // response (auto-continue / coding nudge / verification gate / goal
+        // verifier), with no tool call in between to flush the buffer. Commit
+        // the superseded generation as its own block; the new one starts clean
+        // instead of being appended onto the text it replaces.
+        if let Some(superseded) = self.assistant_stream.push(message_id, text) {
+            self.chat.clear_streaming();
+            self.flush_collapse();
+            crate::app::assistant_stream::commit_assistant_block(
+                &mut self.chat,
+                &mut self.agent_header_sent,
+                &superseded,
+                None,
+            );
+        }
+        // Flow completed blocks into the terminal's REAL scrollback as they
+        // complete, instead of holding the whole reply in the capped live
+        // region until the turn ends.
+        //
+        // Two things depended on that hold and both were wrong: the finished
+        // answer *appeared* only at turn end (the user had been watching text
+        // they were never allowed to read in place), and every tool-progress row
+        // appended below the prose pushed a row of prose off the top of the
+        // capped region — where, not being scrollback, it could not be
+        // recovered. A settled block is in the terminal's own scrollback:
+        // activity below it can no longer cost the user access to something the
+        // model already said.
+        //
+        // `settle` hands back only what markdown says is final AND what the
+        // backend's output guardrails provably cannot rewrite (see
+        // `settle_guard`); `finalize` later subtracts exactly these bytes from
+        // the authoritative final, so nothing renders twice.
+        let mut settled_any = false;
+        while let Some(block) = self.assistant_stream.settle() {
+            if !settled_any {
+                // Order stays [prior tools][text]: emit any pending collapsed
+                // tool run before the prose it precedes.
+                self.flush_collapse();
+                settled_any = true;
+            }
+            crate::app::assistant_stream::commit_assistant_chunk(
+                &mut self.chat,
+                &mut self.agent_header_sent,
+                &block,
+                None,
+            );
+        }
+        // The preview now holds ONLY the still-unterminated block.
+        self.chat.update_streaming(self.assistant_stream.tail());
+    }
+
+    /// Hand over everything the de-jitter buffer is holding, right now.
+    ///
+    /// Called at every boundary the user must never wait on: the turn ending, a
+    /// tool call starting, a generation change, an interrupt or a disconnect
+    /// (both through `finalize_turn_state`). Cheap and idempotent when nothing
+    /// is held, which is the overwhelmingly common case.
+    pub(crate) fn flush_stream_pacer(&mut self) {
+        let held = self.stream_pacer.flush();
+        if held.is_empty() {
+            return;
+        }
+        let id = self.pace_msg_id.clone();
+        self.apply_assistant_text(id.as_deref(), &held);
+    }
+
+    /// Release whatever the current instant is owed, if anything.
+    ///
+    /// Driven from the existing cadence events (`Event::AnimationFrame`, armed
+    /// whenever the activity indicator is on screen — i.e. exactly while a turn
+    /// streams — and the 200 ms `Event::Tick` as a backstop). Deliberately NOT a
+    /// third timer: the app already has a repaint cadence and a second one would
+    /// only alias against it.
+    pub(crate) fn drain_stream_pacer(&mut self) {
+        if !self.stream_pacer.is_pending() {
+            return;
+        }
+        let ready = self.stream_pacer.tick(std::time::Instant::now());
+        if ready.is_empty() {
+            return;
+        }
+        let id = self.pace_msg_id.clone();
+        self.apply_assistant_text(id.as_deref(), &ready);
+    }
+
     pub(super) fn handle_backend_event(&mut self, event: BackendEvent) -> bool {
         match event {
             BackendEvent::HealthResult(result) => {
@@ -198,65 +293,32 @@ impl App {
                     if !self.thinking_box.is_empty() {
                         self.thinking_box.finish();
                     }
-                    // A delta carrying a NEW message_id means the backend started
-                    // a fresh assistant message — it re-entered its ReAct loop
-                    // after a text-only response (auto-continue / coding nudge /
-                    // verification gate / goal verifier), with no tool call in
-                    // between to flush the buffer. Commit the superseded
-                    // generation as its own block; the new one starts clean
-                    // instead of being appended onto the text it replaces.
-                    if let Some(superseded) =
-                        self.assistant_stream.push(message_id.as_deref(), &text)
-                    {
-                        self.chat.clear_streaming();
-                        self.flush_collapse();
-                        crate::app::assistant_stream::commit_assistant_block(
-                            &mut self.chat,
-                            &mut self.agent_header_sent,
-                            &superseded,
-                            None,
-                        );
-                    }
-                    // Flow completed blocks into the terminal's REAL scrollback
-                    // as they complete, instead of holding the whole reply in
-                    // the capped live region until the turn ends.
+                    // Deltas do not paint directly — they go through the
+                    // de-jitter buffer, which hands back only what this instant
+                    // is owed. On a stream that already arrives smoothly (and
+                    // during every turn's warm-up) that is the whole delta,
+                    // unchanged and undelayed; on a clumped one it is a slice,
+                    // and the rest follows on the animation cadence. See
+                    // `app::stream_pace`.
                     //
-                    // Two things depended on that hold and both were wrong: the
-                    // finished answer *appeared* only at turn end (the user had
-                    // been watching text they were never allowed to read in
-                    // place), and every tool-progress row appended below the
-                    // prose pushed a row of prose off the top of the capped
-                    // region — where, not being scrollback, it could not be
-                    // recovered. A settled block is in the terminal's own
-                    // scrollback: activity below it can no longer cost the user
-                    // access to something the model already said.
-                    //
-                    // `settle` hands back only what markdown says is final AND
-                    // what the backend's output guardrails provably cannot
-                    // rewrite (see `settle_guard`); `finalize` later subtracts
-                    // exactly these bytes from the authoritative final, so
-                    // nothing renders twice.
-                    let mut settled_any = false;
-                    while let Some(block) = self.assistant_stream.settle() {
-                        if !settled_any {
-                            // Order stays [prior tools][text]: emit any pending
-                            // collapsed tool run before the prose it precedes.
-                            self.flush_collapse();
-                            settled_any = true;
-                        }
-                        crate::app::assistant_stream::commit_assistant_chunk(
-                            &mut self.chat,
-                            &mut self.agent_header_sent,
-                            &block,
-                            None,
-                        );
+                    // A delta carrying a NEW message_id ends the previous
+                    // generation, so whatever is still held belongs to the OLD
+                    // message and must be handed over under the old identity
+                    // before a byte of the new one is accepted.
+                    if self.pace_msg_id.as_deref() != message_id.as_deref() {
+                        self.flush_stream_pacer();
+                        self.pace_msg_id = message_id.clone();
                     }
-                    // The preview now holds ONLY the still-unterminated block.
-                    self.chat.update_streaming(self.assistant_stream.tail());
+                    let ready = self.stream_pacer.push(&text, std::time::Instant::now());
                     // Count CHARACTERS, not UTF-8 bytes — the ~4-chars/token
-                    // estimate inflates badly on non-ASCII output if we use len().
+                    // estimate inflates badly on non-ASCII output if we use
+                    // len(). Counted on ARRIVAL, not on release: throughput is
+                    // a property of the provider, not of the paint cadence.
                     self.activity.add_stream_chars(text.chars().count());
                     self.activity.set_phase(ProcessingPhase::Streaming);
+                    if !ready.is_empty() {
+                        self.apply_assistant_text(message_id.as_deref(), &ready);
+                    }
                 }
             }
             BackendEvent::ThinkingDelta { text } => {
@@ -279,6 +341,11 @@ impl App {
                 signal,
                 message_id,
             } => {
+                // The turn is ending: nothing may still be waiting on a cadence
+                // tick. (The authoritative final replaces the accumulation
+                // anyway, but the held text may complete a block that settles
+                // into scrollback, and the ordering must stay exact.)
+                self.flush_stream_pacer();
                 let was_processing = self.state.is_processing();
                 self.handle_agent_response(response, signal, message_id);
                 // True turn-end edge: `handle_agent_response` flips Processing →
@@ -326,6 +393,12 @@ impl App {
                 // where it meant the answer rendered under no label at all.
                 // Proven by `test/pty/header_probe.py` (shape T1).
                 //
+                // A tool call is a boundary the user watches for, so nothing may
+                // still be sitting in the de-jitter buffer when it lands: held
+                // text belongs BEFORE this tool in the transcript, and waiting
+                // for a cadence tick would both delay the tool row and put the
+                // two in the wrong order.
+                self.flush_stream_pacer();
                 // Finalize any still-pending tool call into native scrollback
                 // first, so ordering stays: [prior text][prior tool][this text].
                 self.chat.flush_pending_tools();

@@ -363,8 +363,26 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
 
   # Codex's exact semantics: a changed section must announce that it supersedes
   # the copy already sitting in history.
+  #
+  # This is what makes the strict prefix hold STRUCTURALLY. The ledger is
+  # append-only — an earlier payload is never edited — so the only way the model
+  # can know which of two copies of a section wins is for the newer one to say
+  # so. There is nothing to assert and no invariant to regress: the notice IS
+  # the mechanism.
   defp replace_notice(%{semantics: :replace, name: name}),
     do: "These #{name} instructions replace all previously provided #{name} instructions.\n\n"
+
+  # `:plain` sections were previously re-emitted with NO notice, which is the
+  # one place the append-only shape leaked: history ended up holding two
+  # contradictory copies of the same `<ws id="...">` section with nothing
+  # saying which is current, and the model had to guess (or, worse, honor the
+  # stale one — the failure Codex's supersession contract exists to prevent).
+  # `:plain` only means the body stands alone, not that a superseded copy may
+  # be left standing, so a changed plain section supersedes too — in its own
+  # weaker wording, since there is nothing to "replace instructions" about.
+  defp replace_notice(%{name: name}),
+    do:
+      "The previously provided #{name} no longer applies. It is superseded by the following.\n\n"
 
   defp replace_notice(_), do: ""
 

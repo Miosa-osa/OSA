@@ -138,9 +138,20 @@ impl Message {
     /// by the live streaming region (`Chat::draw_live`) so the same `Text`
     /// powers both `height` and `draw` without re-parsing the whole reply every
     /// frame or every token.
-    pub fn new_agent_prerendered(body: Text<'static>) -> Self {
+    /// The live streaming preview. `header` must be false once this turn has
+    /// already committed a block — the committed part carries the one `◈ OSA`
+    /// label the answer is owed, and a second one under it reads as two
+    /// separate replies split mid-sentence (it lands on a markdown boundary,
+    /// because that is where `settle()` commits). This constructor used to
+    /// hardcode `Agent`, so every answer long enough to settle one block drew
+    /// the header twice.
+    pub fn new_agent_prerendered(body: Text<'static>, header: bool) -> Self {
         Self {
-            msg_type: MessageType::Agent,
+            msg_type: if header {
+                MessageType::Agent
+            } else {
+                MessageType::AgentContinuation
+            },
             content: String::new(),
             signal: None,
             tool_data: None,
@@ -1109,7 +1120,7 @@ mod raw_mode_tests {
     fn prerendered_preview_never_renders_raw() {
         // The live preview carries no source in `content`, so it must not switch
         // to the raw path even if the flag is set.
-        let mut m = Message::new_agent_prerendered(Text::from("rendered"));
+        let mut m = Message::new_agent_prerendered(Text::from("rendered"), true);
         m.set_raw_mode(true);
         assert!(!m.renders_raw());
     }
@@ -1310,7 +1321,7 @@ mod commit_parse_tests {
     #[test]
     fn preparing_never_overwrites_a_body_that_is_the_content() {
         let text: Text<'static> = Text::from("already rendered");
-        let mut msg = Message::new_agent_prerendered(text);
+        let mut msg = Message::new_agent_prerendered(text, true);
         msg.prepare_for_commit(80);
         let body = msg.prerendered_body.as_ref().unwrap();
         assert_eq!(body.lines.len(), 1);

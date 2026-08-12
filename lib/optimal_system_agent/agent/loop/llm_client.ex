@@ -163,8 +163,22 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+
+    # Session identity for the provider layer: it keys the prompt-cache
+    # attributor's per-scope comparison, and on OpenAI it becomes the
+    # `prompt_cache_key` sent to the server. Stable for the whole thread —
+    # never regenerated per request.
+    opts = maybe_put_session(opts, Map.get(state, :session_id))
+
     Providers.chat(messages, opts)
   end
+
+  # `Keyword.put_new/3` so an explicit caller-supplied scope (a sub-agent, a
+  # side computation with its own prefix) still wins.
+  defp maybe_put_session(opts, session_id) when is_binary(session_id) and session_id != "",
+    do: Keyword.put_new(opts, :session_id, session_id)
+
+  defp maybe_put_session(opts, _), do: opts
 
   @doc """
   Streaming LLM chat with idle-timeout detection.
@@ -351,6 +365,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    opts = maybe_put_session(opts, session_id)
 
     Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
 

@@ -85,6 +85,77 @@ defmodule OptimalSystemAgent.Channels.HTTP.OrchestrateRoutesTest do
     end
   end
 
+  # A stub that actually answers `{:process, message, opts}` and forwards the
+  # opts to the test process, so we can assert what the route threaded down.
+  defmodule OptsSpy do
+    use GenServer
+
+    def start(session_id, reply_to) do
+      GenServer.start(__MODULE__, {session_id, reply_to})
+    end
+
+    @impl true
+    def init({session_id, reply_to}) do
+      {:ok, _} = Registry.register(OptimalSystemAgent.SessionRegistry, session_id, :test)
+      {:ok, reply_to}
+    end
+
+    @impl true
+    def handle_call({:process, _message, opts}, _from, reply_to) do
+      send(reply_to, {:process_opts, opts})
+      {:reply, {:ok, "ok"}, reply_to}
+    end
+
+    def handle_call(_other, _from, state), do: {:reply, :ok, state}
+  end
+
+  defp post_and_capture_opts(body) do
+    session_id = "opts-#{System.unique_integer([:positive])}"
+    {:ok, pid} = OptsSpy.start(session_id, self())
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    conn = json_post("/", Map.put(body, "session_id", session_id))
+    assert conn.status == 202
+
+    assert_receive {:process_opts, opts}, 5_000
+    opts
+  end
+
+  describe "image_source trust marker" do
+    # The marker is what separates "the model named a path" from "the user
+    # dragged a file in". It must reach the agent loop, and it must fail closed:
+    # an unmarked or garbled body keeps the v1.0.79 confinement.
+
+    test "an explicit \"user\" marker is threaded down as :user" do
+      opts = post_and_capture_opts(%{"input" => "look", "image_source" => "user"})
+      assert Keyword.get(opts, :image_source) == :user
+    end
+
+    test "an absent marker defaults to :model" do
+      opts = post_and_capture_opts(%{"input" => "look"})
+      assert Keyword.get(opts, :image_source) == :model
+    end
+
+    test "a bogus marker is downgraded to :model, never accepted verbatim" do
+      for bogus <- ["User", "trusted", "model", 1, true] do
+        opts = post_and_capture_opts(%{"input" => "look", "image_source" => bogus})
+        assert Keyword.get(opts, :image_source) == :model
+      end
+    end
+
+    test "images ride alongside the marker" do
+      opts =
+        post_and_capture_opts(%{
+          "input" => "look",
+          "images" => ["/tmp/shot.png"],
+          "image_source" => "user"
+        })
+
+      assert Keyword.get(opts, :images) == ["/tmp/shot.png"]
+      assert Keyword.get(opts, :image_source) == :user
+    end
+  end
+
   describe "R1: no redundant per-request Bus -> PubSub bridge" do
     test "POST /orchestrate does not add rows to :osa_event_handlers per call" do
       count_before = :ets.info(:osa_event_handlers, :size)

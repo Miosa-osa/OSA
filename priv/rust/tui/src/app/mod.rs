@@ -18,6 +18,7 @@ pub mod settle_guard;
 pub mod keys;
 pub mod layout;
 pub mod state;
+pub mod stream_pace;
 pub mod terminal_probe;
 pub mod update;
 
@@ -235,6 +236,16 @@ pub struct App {
     /// generation from the next, so a nudged/re-generated answer rendered
     /// concatenated onto the answer it replaced.
     pub assistant_stream: assistant_stream::AssistantStream,
+    /// De-jitter buffer in front of `assistant_stream`. Provider deltas arrive
+    /// clumped (the cloud endpoint flushes 4-6 tokens at a time); this spreads a
+    /// clump over the frames it has room for instead of painting it in one.
+    /// Adaptive — a stream that already arrives smoothly passes straight
+    /// through. See `app::stream_pace`.
+    pub stream_pacer: stream_pace::StreamPacer,
+    /// Which assistant message the pacer's held text belongs to. A delta for a
+    /// different message must flush first, or held text would be committed
+    /// under the wrong generation's identity.
+    pub pace_msg_id: Option<String>,
     pub thinking_buf: String,
     pub processing_start: Option<Instant>,
     /// Spinner-clock elapsed captured at the agent_response turn-end edge (just
@@ -677,6 +688,8 @@ impl App {
             event_rx,
 
             assistant_stream: assistant_stream::AssistantStream::new(),
+            stream_pacer: stream_pace::StreamPacer::new(stream_pace::PaceMode::from_env()),
+            pace_msg_id: None,
             thinking_buf: String::new(),
             processing_start: None,
             last_turn_client_elapsed_secs: None,
@@ -859,9 +872,16 @@ impl App {
         // streaming text deliberately.
         self.chat.flush_pending_tools();
         self.flush_collapse();
+        // Hand over anything the de-jitter buffer was still holding BEFORE the
+        // buffers are dropped. Nothing may be left waiting on a cadence tick at
+        // a boundary the user can see, and a last completed block settling into
+        // scrollback here is strictly better than losing it.
+        self.flush_stream_pacer();
         // The turn is over — drop the partial text AND this turn's finalization
         // history, so the next turn is not mistaken for a repeat of this one.
         self.assistant_stream.reset();
+        self.stream_pacer.reset();
+        self.pace_msg_id = None;
         self.thinking_buf.clear();
         self.agent_header_sent = false;
         self.activity.stop();

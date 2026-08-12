@@ -42,7 +42,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   @spec chat(String.t(), String.t(), String.t(), list(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def chat(base_url, token, model, messages, opts \\ []) do
-    body = build_body(model, messages, opts, false)
+    body = model |> build_body(messages, opts, false) |> put_prompt_cache_key(opts, base_url)
     timeout = Keyword.get(opts, :receive_timeout, 180_000)
 
     options =
@@ -91,7 +91,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   @spec chat_stream(String.t(), String.t(), String.t(), list(), function(), keyword()) ::
           :ok | {:error, term()}
   def chat_stream(base_url, token, model, messages, callback, opts \\ []) do
-    body = build_body(model, messages, opts, true)
+    body = model |> build_body(messages, opts, true) |> put_prompt_cache_key(opts, base_url)
     timeout = Keyword.get(opts, :receive_timeout, 300_000)
 
     acc = %{content: "", tool_calls: [], usage: %{}, stop_reason: nil, buffer: ""}
@@ -143,6 +143,30 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   end
 
   defp url(base_url), do: String.trim_trailing(base_url, "/") <> "/responses"
+
+  @doc """
+  Assert cache identity to the server with a session-stable `prompt_cache_key`.
+
+  This is codex's model: the key IS the session id — stable for the whole
+  thread, regenerated never — so cache identity is asserted rather than
+  inferred from a prefix that some later edit might perturb.
+
+  Applied outside `build_body/4` so that function keeps its arity (it has no
+  `base_url`), and gated by the same host allowlist as the Chat Completions
+  path: the ChatGPT backend the Codex provider talks to is not the public
+  Responses API and is not known to accept the field.
+  """
+  @spec put_prompt_cache_key(map(), keyword(), String.t()) :: map()
+  def put_prompt_cache_key(body, opts, base_url) do
+    key = Keyword.get(opts, :prompt_cache_key) || Keyword.get(opts, :session_id)
+
+    if OptimalSystemAgent.Providers.OpenAICompat.prompt_cache_key_host?(base_url) and
+         is_binary(key) and key != "" do
+      Map.put(body, :prompt_cache_key, key)
+    else
+      body
+    end
+  end
 
   # ── Request shaping ─────────────────────────────────────────────────────
 

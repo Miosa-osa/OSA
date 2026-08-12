@@ -351,10 +351,66 @@ defmodule OptimalSystemAgent.Soul do
 
   defp load_system_template do
     # Priority: PromptLoader (handles ~/.osa/prompts/ override + priv/prompts/ bundled)
-    case PromptLoader.get(:SYSTEM) do
+    case lean_template() || PromptLoader.get(:SYSTEM) do
       nil -> compose_legacy_template()
       content -> content
     end
+  end
+
+  # SYSTEM_LEAN.md, or nil to fall through to SYSTEM.md.
+  #
+  # A user override at ~/.osa/prompts/SYSTEM.md always wins: writing that file
+  # is an explicit statement about what the prompt should be, and quietly
+  # serving a different bundled template instead would discard it.
+  defp lean_template do
+    if lean_prompt?() and not PromptLoader.user_override?(:SYSTEM) do
+      PromptLoader.get(:SYSTEM_LEAN)
+    end
+  end
+
+  @doc """
+  Serve the lean system-prompt template (`priv/prompts/SYSTEM_LEAN.md`) instead
+  of `priv/prompts/SYSTEM.md`?
+
+  Defaults to `true`. Set
+
+      config :optimal_system_agent, :lean_prompt, false
+
+  to restore the long template and the unfilled bundled rule files, without a
+  code change or a deploy.
+
+  ## What the lean template drops, and why it is safe
+
+  `SYSTEM.md` is 41,242 B; `SYSTEM_LEAN.md` is roughly half that. Nothing was
+  paraphrased away — the cuts are, in descending order of confidence:
+
+    1. **Text the model already receives as a tool schema.** The provider ships
+       every `Registry.list_active/0` description on the same request, so
+       §5 "Tool Routing" is a second copy of `shell_execute`'s own routing list,
+       §3's `delegate(...)` call examples and parameter docs are a second copy of
+       the `delegate` schema, §6 "Complex Tasks" is a second copy of
+       `task_write`'s "When to Use"/state-machine text, §6 "Memory" is a second
+       copy of `memory_save`'s "Iron Rule", §5 "Tool Discovery" is a second copy
+       of `tool_search`, and §8's committing rules are a second copy of the
+       `git` tool's "Git Safety Protocol". Deleting the prose leaves the
+       instruction intact on the wire.
+    2. **Text duplicated elsewhere in the prompt itself** — the preamble rules
+       appeared three times, "stop when done" twice.
+    3. **UI affordances the model cannot act on** — `/effort`, `/coordinator`,
+       `max_budget_usd`, and the "Allow once / Allow always / Deny" prompt are
+       all harness-side; the model cannot set any of them.
+
+  Guidance that exists in exactly one place is kept verbatim: the completion
+  audit, the permission-mode validation matrix, ambition-vs-precision, the
+  never-guess coding standards, the dirty-worktree git rules, and the whole
+  terminal formatting contract.
+
+  The same flag gates `rules_content/0` skipping bundled rule files that are
+  still unfilled templates — see `substantive_rule?/1`.
+  """
+  @spec lean_prompt?() :: boolean()
+  def lean_prompt? do
+    Application.get_env(:optimal_system_agent, :lean_prompt, true) == true
   end
 
   @doc false
@@ -413,7 +469,8 @@ defmodule OptimalSystemAgent.Soul do
 
         cond do
           respect_always_apply?() and meta.always_apply? == false -> nil
-          true -> "## Rule: #{name}\n#{body}"
+          lean_prompt?() and not substantive_rule?(body) -> nil
+          true -> "## Rule: #{name}\n#{strip_html_comments(body)}"
         end
       end)
       |> Enum.reject(&is_nil/1)
@@ -452,6 +509,57 @@ defmodule OptimalSystemAgent.Soul do
       _ ->
         {%{always_apply?: nil}, content}
     end
+  end
+
+  # The five bundled `behaviors/*.md` rules are UNFILLED TEMPLATES. Every one is
+  # a generic checklist followed by a "YOUR INSIGHTS (Edit Below)" half whose
+  # entire content is HTML-comment placeholders:
+  #
+  #     ### Common Bug Patterns in Our Codebase
+  #     <!-- Add patterns you've noticed -->
+  #
+  # They shipped 11,009 bytes on every request. The HTML comments are invisible
+  # in a rendered doc, so nobody noticed they were being sent to the model as
+  # instruction text — including the worked EXAMPLES inside them, which name
+  # tools that do not exist here (`make debug`, Sentry, `kubectl logs`) and read
+  # as fact once the comment markers are gone. The checklist halves duplicate
+  # SYSTEM.md's own coding-standards and completion-audit sections.
+  #
+  # A rule is substantive when, after removing frontmatter, HTML comments,
+  # headings and list scaffolding, it still says something. Filling any of these
+  # files in makes it ship again automatically — this suppresses empty
+  # templates, not the rules mechanism.
+  # The marker every bundled behaviour template uses to separate the generic
+  # checklist it ships with from the section a human is meant to fill in.
+  @rule_template_marker ~r/##\s*YOUR INSIGHTS/i
+
+  defp substantive_rule?(body) do
+    case Regex.split(@rule_template_marker, body, parts: 2) do
+      # No marker: not one of the fill-in templates. Never drop it — absence of
+      # the marker is not evidence the file is empty. `projects/bos.md` lands
+      # here and keeps shipping.
+      [_] ->
+        true
+
+      [_generic_half, human_half] ->
+        human_half
+        |> strip_html_comments()
+        |> String.replace(~r/^#+ .*$/m, "")
+        |> String.replace(~r/^\s*-{3,}\s*$/m, "")
+        |> String.trim()
+        |> String.length()
+        |> Kernel.>=(rule_substance_threshold())
+    end
+  end
+
+  defp strip_html_comments(text), do: String.replace(text, ~r/<!--.*?-->/s, "")
+
+  # Characters of real prose a rule must carry to be worth a request. The five
+  # unfilled bundled behaviours land far below this; a genuinely written rule
+  # clears it easily. Tunable so the threshold is not a magic number buried in
+  # a guard.
+  defp rule_substance_threshold do
+    Application.get_env(:optimal_system_agent, :rule_substance_threshold, 400)
   end
 
   defp parse_rule_meta(meta) do

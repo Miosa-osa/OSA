@@ -39,6 +39,79 @@ fn is_stream_delta(event: &Event) -> bool {
     )
 }
 
+/// Whether `event` is a *cadence* event — one that wants the screen at a steady
+/// rate rather than immediately.
+///
+/// This is what the rate cap in `run` actually keys on. It is `is_stream_delta`
+/// plus `AnimationFrame`, and the addition matters: a spinner frame arriving in
+/// the middle of a stream must not be allowed to break the coalescer and force
+/// an out-of-band draw. Both kinds of event are content the floor is allowed to
+/// hold; everything else (a key, a tool edge, a resize, a `Tick`) still means
+/// "draw now".
+fn is_cadence_event(event: &Event) -> bool {
+    is_stream_delta(event) || matches!(event, Event::AnimationFrame)
+}
+
+/// The bookkeeping pulse period. Named because two things now share the loop
+/// and it must be obvious which one a number belongs to.
+const TICK_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How often a running animation asks for a repaint. ~31fps, matching codex's
+/// `status_indicator_widget` (32ms) and comfortably above the 133ms the spinner
+/// glyph index advances on, so frames no longer alias against the paint rate.
+const ANIMATION_FRAME: Duration = Duration::from_millis(32);
+
+/// How long the animation timer naps before re-checking a stopped animation.
+/// Nothing is sent while `animating` is false, so this is a bare atomic load;
+/// 100ms keeps the spin-up latency below one old tick without polling hot.
+const ANIMATION_IDLE_POLL: Duration = Duration::from_millis(100);
+
+/// The 200ms bookkeeping pulse. Advances toasts, the agents panel, the task
+/// checklist and the activity phrase counter, drives `sync_chrome` /
+/// `sync_turn_effects`, and is the cadence the inline-viewport shrink debounce
+/// counts iterations in. Its rate is load-bearing for all of that — repaint
+/// smoothness is NOT its job (see `spawn_animation_timer`).
+fn spawn_tick_timer(tx: tokio::sync::mpsc::UnboundedSender<Event>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(TICK_INTERVAL);
+        loop {
+            interval.tick().await;
+            if tx.send(Event::Tick).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// The repaint timer for running animations.
+///
+/// Emits `Event::AnimationFrame` every [`ANIMATION_FRAME`] while `animating` is
+/// set, and nothing at all while it is clear — so an idle app costs one relaxed
+/// atomic load every [`ANIMATION_IDLE_POLL`] and draws zero extra frames. The
+/// flag is written by the event loop from `Activity::is_active()` after each
+/// draw, which is the same "is the status indicator on screen" condition codex
+/// self-schedules on.
+fn spawn_animation_timer(
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    animating: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if animating.load(std::sync::atomic::Ordering::Relaxed) {
+                time::sleep(ANIMATION_FRAME).await;
+                if tx.send(Event::AnimationFrame).is_err() {
+                    break;
+                }
+            } else {
+                time::sleep(ANIMATION_IDLE_POLL).await;
+                if tx.is_closed() {
+                    break;
+                }
+            }
+        }
+    })
+}
+
 type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>;
 
 use crate::app::inline_backend::InlineBackend;
@@ -648,17 +721,15 @@ impl App {
         // inline-viewport rebuild — see the switch below).
         let mut term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
 
-        // Spawn tick timer
-        let tick_tx = self.event_tx.clone();
-        let tick_handle = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_millis(200));
-            loop {
-                interval.tick().await;
-                if tick_tx.send(Event::Tick).is_err() {
-                    break;
-                }
-            }
-        });
+        // Spawn tick timer (200ms bookkeeping pulse).
+        let tick_handle = spawn_tick_timer(self.event_tx.clone());
+
+        // Spawn the animation repaint timer (~31fps, only while something is
+        // animating). Separate from the tick because the tick's rate is
+        // load-bearing for the shrink debounce and the phrase/verb cadence,
+        // while this one carries no state at all — see `Event::AnimationFrame`.
+        let animating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let anim_handle = spawn_animation_timer(self.event_tx.clone(), animating.clone());
 
         // Seed screen-reader (plain-text) mode from persisted config, or auto-detect
         // from the environment (NO_COLOR / accessibility hints) on first run.
@@ -788,10 +859,16 @@ impl App {
         //     always draws immediately, and
         //   * any non-streaming event arriving during the wait breaks it, so a
         //     keystroke is never held back.
+        //
+        // `Event::AnimationFrame` is classified as cadence too (see
+        // `is_cadence_event`), for both directions of the same reason: a spinner
+        // frame must not break the coalescer mid-stream, and while the app is
+        // merely WAITING the frames are the only traffic — they arrive every
+        // 32ms, comfortably above this floor, so the floor never delays one.
         const MIN_DRAW_INTERVAL: Duration = Duration::from_millis(16);
         // Written by every draw, read only by the rate cap below it.
         let mut last_draw: std::time::Instant;
-        let mut prev_batch_stream_only = false;
+        let mut prev_batch_cadence_only = false;
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
@@ -1389,12 +1466,21 @@ impl App {
             draw_res?;
             last_draw = std::time::Instant::now();
 
+            // Arm/disarm the repaint timer from what was just drawn. While the
+            // activity indicator is on screen the app is waiting on the provider
+            // and nothing else will bring the loop round; while it is not, this
+            // costs nothing at all.
+            animating.store(
+                self.activity.is_active(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
             // 4. Block until at least one event is available.
             let event = match self.event_rx.recv().await {
                 Some(event) => event,
                 None => break, // all senders dropped
             };
-            let mut batch_stream_only = is_stream_delta(&event);
+            let mut batch_cadence_only = is_cadence_event(&event);
             let mut should_quit = self.dispatch_event(event);
 
             // Coalesce: apply every queued event before redrawing. During streaming
@@ -1404,7 +1490,7 @@ impl App {
             while !should_quit {
                 match self.event_rx.try_recv() {
                     Ok(event) => {
-                        batch_stream_only &= is_stream_delta(&event);
+                        batch_cadence_only &= is_cadence_event(&event);
                         should_quit = self.dispatch_event(event);
                     }
                     Err(_) => break,
@@ -1417,18 +1503,18 @@ impl App {
             // and keep absorbing deltas while we wait — same bytes, fewer and
             // more evenly spaced repaints. See MIN_DRAW_INTERVAL above for why
             // this cannot delay a first token.
-            if !should_quit && batch_stream_only && prev_batch_stream_only {
+            if !should_quit && batch_cadence_only && prev_batch_cadence_only {
                 let since = last_draw.elapsed();
                 if since < MIN_DRAW_INTERVAL {
                     let deadline = tokio::time::Instant::now() + (MIN_DRAW_INTERVAL - since);
                     loop {
                         match time::timeout_at(deadline, self.event_rx.recv()).await {
                             Ok(Some(event)) => {
-                                let more_stream = is_stream_delta(&event);
+                                let more_cadence = is_cadence_event(&event);
                                 should_quit = self.dispatch_event(event);
                                 // Anything that is not a streaming delta wants
                                 // the screen NOW — stop waiting and draw.
-                                if should_quit || !more_stream {
+                                if should_quit || !more_cadence {
                                     break;
                                 }
                             }
@@ -1438,7 +1524,7 @@ impl App {
                     }
                 }
             }
-            prev_batch_stream_only = batch_stream_only;
+            prev_batch_cadence_only = batch_cadence_only;
 
             // A failed launch-time resume is a quit condition in its own right:
             // there is no session to sit in, and staying would present an empty
@@ -1457,6 +1543,7 @@ impl App {
         }
         self.chrome_title.reset(); // hand the tab title back to the shell
         tick_handle.abort();
+        anim_handle.abort();
         term_handle.abort();
 
         // If a dialog still owned the full/alternate screen when the loop broke
@@ -2217,7 +2304,7 @@ impl App {
             // reserved by desired_inline_height's plan_review branch.
             review.draw(frame, a_stream);
         } else {
-            self.chat.draw_live(frame, a_stream);
+            self.chat.draw_live(frame, a_stream, !self.agent_header_sent);
         }
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
@@ -4156,5 +4243,95 @@ mod cadence_tests {
             signal: None,
             message_id: Some("m1".into()),
         })));
+    }
+
+    // ── The waiting repaint rate ────────────────────────────────────────
+
+    /// The defect this pins: while the app sits waiting on the provider, the
+    /// ONLY thing that brought the event loop round to draw was the 200ms
+    /// bookkeeping tick — 5fps. The spinner glyph index is a 133ms wall clock
+    /// (`components/activity.rs`), so frames aliased against the paint rate and
+    /// the spinner visibly skipped roughly every other frame.
+    ///
+    /// Every reference harness repaints its status indicator on a timer of its
+    /// own at ~30fps; codex's `status_indicator_widget` self-schedules every
+    /// 32ms. `spawn_animation_timer` is that timer.
+    ///
+    /// Asserted as a rate over a real window rather than by reading the
+    /// constant, because the thing that was wrong was the rate, not the number.
+    #[tokio::test]
+    async fn a_running_animation_repaints_at_about_thirty_fps() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let animating = Arc::new(AtomicBool::new(true));
+        let handle = super::spawn_animation_timer(tx, animating.clone());
+
+        let window = std::time::Duration::from_millis(300);
+        let deadline = tokio::time::Instant::now() + window;
+        let mut frames = 0usize;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            assert!(
+                matches!(event, Event::AnimationFrame),
+                "the animation timer must emit nothing but repaint requests"
+            );
+            frames += 1;
+        }
+
+        // 300ms at 32ms/frame is ~9. The old 200ms tick would have produced 1.
+        // Floor at 6 (20fps) so a loaded CI box cannot flake it, while still
+        // being four times what the tick alone could deliver.
+        assert!(
+            frames >= 6,
+            "waiting repaints ran at {}fps — the spinner is back to being driven \
+             by the 200ms bookkeeping tick",
+            frames as f64 / window.as_secs_f64()
+        );
+
+        handle.abort();
+    }
+
+    /// The other half of the contract: an app that is not animating must cost
+    /// nothing. The flag is written from `Activity::is_active()` after every
+    /// draw, so an idle session draws exactly as many frames as it did before.
+    #[tokio::test]
+    async fn a_stopped_animation_emits_no_frames_at_all() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let animating = Arc::new(AtomicBool::new(false));
+        let handle = super::spawn_animation_timer(tx, animating.clone());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
+        let got = tokio::time::timeout_at(deadline, rx.recv()).await;
+
+        assert!(
+            got.is_err(),
+            "an idle app must not be repainted by the animation timer"
+        );
+
+        handle.abort();
+    }
+
+    /// A spinner frame is *cadence*, not urgency. It must be held by the same
+    /// 16ms floor that holds streaming deltas, so that a frame landing in the
+    /// middle of a stream cannot break the coalescer and force an out-of-band
+    /// draw — while everything that genuinely wants the screen still bypasses
+    /// the floor entirely.
+    #[test]
+    fn an_animation_frame_is_cadence_but_is_not_a_stream_delta() {
+        use super::is_cadence_event;
+
+        assert!(is_cadence_event(&Event::AnimationFrame));
+        assert!(!is_stream_delta(&Event::AnimationFrame));
+
+        assert!(is_cadence_event(&token()));
+        assert!(!is_cadence_event(&Event::Tick));
+        assert!(!is_cadence_event(&Event::HealthRetry));
+        assert!(!is_cadence_event(&Event::Terminal(
+            crossterm::event::Event::Resize(80, 24)
+        )));
     }
 }

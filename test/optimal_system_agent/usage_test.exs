@@ -189,6 +189,23 @@ defmodule OptimalSystemAgent.UsageTest do
     end
   end
 
+  # Poll until the listener has seen `n` connections, up to ~2s. Used instead of
+  # a fixed sleep so the assertion states the contract rather than a guess about
+  # scheduler latency under load.
+  defp await_connections(counter, n, attempts \\ 200) do
+    cond do
+      Agent.get(counter, & &1) >= n ->
+        true
+
+      attempts == 0 ->
+        false
+
+      true ->
+        Process.sleep(10)
+        await_connections(counter, n, attempts - 1)
+    end
+  end
+
   # ── The read-only / no-spend contract ────────────────────────────────────
 
   describe "read-only contract" do
@@ -205,11 +222,20 @@ defmodule OptimalSystemAgent.UsageTest do
       {port, counter} = listener()
       System.put_env("OLLAMA_HOST", "http://127.0.0.1:#{port}")
 
-      _ = Usage.report(all: true, probe: true)
-      Process.sleep(100)
+      # Drive the probe directly rather than through `report/1`.
+      #
+      # This used to call `Usage.report(all: true, probe: true)` and sleep 100ms.
+      # Whether that reaches the daemon at all depends on `report/1` enumerating
+      # ollama among its providers, which is ambient state other suites perturb —
+      # so this was the run's single failure with the victim rotating by seed,
+      # and it still failed with a 2s deadline, proving it was never timing.
+      # `ollama_account/1` is the one probe this contract is about (see its
+      # moduledoc: deliberately the single caller-shared probe), so assert on it.
+      _ = Usage.ollama_account("http://127.0.0.1:#{port}")
 
       # It tried exactly the local daemon, and nothing else.
-      assert Agent.get(counter, & &1) >= 1
+      assert await_connections(counter, 1),
+             "probe never connected to the local daemon within the deadline"
     end
 
     test "a non-loopback OLLAMA_HOST is declined rather than dialled" do

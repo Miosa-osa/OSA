@@ -214,6 +214,58 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
   end
 
   @doc """
+  `:ok` or `{:deny, reason}` for reading a file the USER explicitly chose —
+  a drag-and-drop, a clipboard paste of a path, an `@file` mention, a file
+  picker. `path` may be raw; it is canonicalised here.
+
+  This is deliberately weaker than `check_read/2` and the difference is exactly
+  one rule: the allowed-roots confinement does not apply.
+
+  `check_read/2` exists because the *model* picks the path. A model-chosen path
+  is attacker-influenced (a prompt injection inside a file it was asked to
+  summarise is enough), so it must stay inside `read_roots/0`. A user-chosen
+  path carries the user's own consent: a screenshot lands in `$TMPDIR`, on the
+  Desktop, on a mounted volume — never inside the workspace — so confining it
+  to `read_roots/0` refuses the exact file the user just asked us to look at.
+  v1.0.79 routed image attachments through `check_read/2` and did precisely
+  that.
+
+  Everything that is NOT about location is kept:
+
+    * canonicalisation, so a symlink cannot make the user consent to one file
+      and hand us another,
+    * the sensitive-file blocklist — a mis-dragged `~/.ssh/id_rsa` is still
+      refused, and refusing it costs the user nothing since no one means to
+      attach their private key.
+
+  Size caps and content sniffing are the caller's job (see
+  `Agent.Loop.MessageHandler`); they apply to both trust levels.
+  """
+  @spec check_user_attachment(String.t(), String.t() | nil) :: :ok | {:deny, String.t()}
+  def check_user_attachment(path, display \\ nil) do
+    display = display || path
+    canonical = canonical(path)
+
+    if sensitive?(canonical) do
+      {:deny, "Access denied: #{display} is a sensitive file"}
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Trust-aware read decision. `:model` (the default everywhere a source is not
+  known) is the confined `check_read/2`; `:user` is `check_user_attachment/2`.
+
+  Call this from any ingestion path that can be reached by BOTH an explicit
+  user action and a model-authored value, so the two are never conflated by
+  accident.
+  """
+  @spec check_read_as(:user | :model, String.t(), String.t() | nil) :: :ok | {:deny, String.t()}
+  def check_read_as(:user, path, display), do: check_user_attachment(path, display)
+  def check_read_as(_model, path, display), do: check_read(path, display || path)
+
+  @doc """
   `:ok` or `{:deny, reason}` for writing `path`. `path` may be raw; it is
   canonicalised here, so an intermediate directory symlink cannot smuggle the
   target out of the allowed roots.

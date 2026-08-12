@@ -6023,7 +6023,7 @@ Beta is the one I would pick.
                     let buf = render_to_buffer(
                         |f| {
                             let area = Rect::new(0, 0, width, reserved);
-                            chat.draw_live(f, area);
+                            chat.draw_live(f, area, true);
                         },
                         width,
                         reserved,

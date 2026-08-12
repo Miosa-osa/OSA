@@ -44,13 +44,29 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
     * A path is canonicalised through `Agent.Safety.PathCanon` (real recursive
       realpath, so an intermediate directory symlink cannot smuggle the target
-      elsewhere) and then run through `Agent.Safety.PathPolicy.check_read/2` —
-      the same allowlist + sensitive-file blocklist every file-reading builtin
-      uses. Without this, an `images` entry is an arbitrary-file-read primitive
-      that base64s the result straight into an outbound provider request:
-      `images: ["~/.ssh/id_rsa"]` or `["../.env"]` exfiltrates the file. The
-      entry can be model-authored or, over `POST /api/v1/orchestrate`, caller-
-      supplied, so it is untrusted input.
+      elsewhere) and then run through `Agent.Safety.PathPolicy.check_read_as/3`
+      with this turn's `source`. Without a policy check at all, an `images`
+      entry is an arbitrary-file-read primitive that base64s the result
+      straight into an outbound provider request: `images: ["~/.ssh/id_rsa"]`
+      or `["../.env"]` exfiltrates the file.
+
+      `source` is the trust marker, and it decides ONE rule — allowed-roots
+      confinement:
+
+        - `:model` (the default, and what an unmarked `POST
+          /api/v1/orchestrate` body gets) — the path was chosen by the model or
+          by an unidentified caller. Full `check_read/2` confinement: outside
+          `read_roots/0` is refused.
+        - `:user` — the path came from an explicit user action the TUI
+          performed: a drag-and-drop, a clipboard paste, an `@file` mention.
+          `check_user_attachment/2`: readable from anywhere on the filesystem,
+          because a screenshot lives in `$TMPDIR` or on the Desktop and never
+          inside the workspace. v1.0.79 lacked this distinction and refused the
+          owner's own screenshots.
+
+      Everything that is not about location applies to BOTH: canonicalisation,
+      the sensitive-file blocklist (a mis-dragged private key is still
+      refused), the byte cap, the magic-byte sniff, and "no such file".
     * The media type is sniffed from MAGIC BYTES, never guessed from the
       extension. The old code defaulted an unknown extension to `image/png`,
       which both mislabels real images and lets a non-image file through.
@@ -64,12 +80,12 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   immediately before the user turn, so a dropped attachment is visible rather
   than silent.
   """
-  @spec build_messages(String.t(), map(), list()) :: list(map())
-  def build_messages(message, state, images) when is_list(images) do
+  @spec build_messages(String.t(), map(), list(), :user | :model) :: list(map())
+  def build_messages(message, state, images, source \\ :model) when is_list(images) do
     message_with_nudge = maybe_inject_memory_nudge(message, state)
     pre_directives = build_pre_directives(message_with_nudge, state)
 
-    {image_blocks, errors} = ingest_images(images)
+    {image_blocks, errors} = ingest_images(images, source)
 
     user_msg =
       case image_blocks do
@@ -94,11 +110,13 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   @base64_re ~r/\A[A-Za-z0-9+\/\s]+={0,2}\z/
 
   @doc false
-  @spec ingest_images(list()) :: {list(map()), list(String.t())}
-  def ingest_images(images) when is_list(images) do
+  @spec ingest_images(list(), :user | :model) :: {list(map()), list(String.t())}
+  def ingest_images(images, source \\ :model) when is_list(images) do
+    source = normalize_source(source)
+
     {blocks, errors} =
       Enum.reduce(images, {[], []}, fn entry, {blocks, errors} ->
-        case image_entry_to_block(entry) do
+        case image_entry_to_block(entry, source) do
           {:ok, block} -> {[block | blocks], errors}
           {:error, reason} -> {blocks, [reason | errors]}
         end
@@ -123,14 +141,23 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     ]
   end
 
-  defp image_entry_to_block(entry) when is_binary(entry) and entry != "" do
+  # Anything that is not exactly `:user` is untrusted. Fail-closed on typos and
+  # on values that crossed a wire (`"user"` is accepted, everything else is
+  # `:model`) so a missing/garbled marker can never widen the policy.
+  @doc false
+  @spec normalize_source(term()) :: :user | :model
+  def normalize_source(:user), do: :user
+  def normalize_source("user"), do: :user
+  def normalize_source(_), do: :model
+
+  defp image_entry_to_block(entry, source) when is_binary(entry) and entry != "" do
     case classify_entry(entry) do
       {:inline, bytes} -> block_from_bytes(bytes, "pasted image data")
-      {:path, path} -> block_from_path(path)
+      {:path, path} -> block_from_path(path, source)
     end
   end
 
-  defp image_entry_to_block(other),
+  defp image_entry_to_block(other, _source),
     do: {:error, "unsupported image attachment: #{inspect(other)}"}
 
   # A `data:` URL or a bare base64 blob is inline bytes; everything else is a
@@ -160,10 +187,10 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     end
   end
 
-  defp block_from_path(entry) do
+  defp block_from_path(entry, source) do
     canonical = PathPolicy.canonical(entry)
 
-    with :ok <- policy_check(entry),
+    with :ok <- policy_check(entry, source),
          :ok <- exists_check(canonical, entry),
          {:ok, size} <- regular_file_size(canonical, entry),
          :ok <- size_check(size, entry),
@@ -172,8 +199,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     end
   end
 
-  defp policy_check(entry) do
-    case PathPolicy.check_read(entry, entry) do
+  defp policy_check(entry, source) do
+    case PathPolicy.check_read_as(source, entry, entry) do
       :ok -> :ok
       {:deny, reason} -> {:error, reason}
     end

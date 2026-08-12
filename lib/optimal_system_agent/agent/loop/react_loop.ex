@@ -1819,19 +1819,36 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Frozen system prompt cache — avoids rebuilding the system message on every
   # iteration within a single process_message call. Cache key includes plan_mode,
   # session_id, memory version, and channel so it auto-invalidates on any change.
+  #
+  # ## The hit path used to rebuild everything anyway
+  #
+  # This read:
+  #
+  #     {^cache_key, cached} ->
+  #       full = Context.build(state)
+  #       %{full | messages: [cached | rest]}
+  #
+  # `Context.build/1` is the expensive call — it resolves the window, picks and
+  # fetches the static base, then assembles TWENTY-ONE dynamic blocks against a
+  # token budget (world state, git info, workspace overview, tasks, scratchpad,
+  # skills, episodic and semantic recall, …). The cached branch paid all of it
+  # and then threw the only product away, keeping just the conversation tail it
+  # already had in hand. Every ReAct iteration past the first therefore did the
+  # full assembly for nothing, and the "cache" reported a hit while doing so —
+  # which is the worst failure mode available to a cache, because the cost is
+  # hidden rather than removed.
+  #
+  # `build/1` returns exactly `[system_msg | conversation]` where `conversation`
+  # is `state.messages` verbatim (it applies no trimming of its own — compaction
+  # runs earlier, in `TurnPipeline`). So a hit is the concatenation below, and
+  # nothing else. `Context.build_count/0` pins this.
   defp cached_context(state) do
     cache_key =
       {state.plan_mode, state.session_id, Process.get(:osa_memory_version, 0), state.channel}
 
     case Process.get(:osa_system_msg_cache) do
-      {^cache_key, cached_system_msg} ->
-        full = Context.build(state)
-
-        case full do
-          %{messages: [_system | rest]} -> %{full | messages: [cached_system_msg | rest]}
-          %{messages: _} -> full
-          _ -> Context.build(state)
-        end
+      {^cache_key, cached_system_msg} when cached_system_msg != nil ->
+        %{messages: [cached_system_msg | state.messages || []]}
 
       _ ->
         full = Context.build(state)
@@ -1846,6 +1863,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         end
     end
   end
+
+  @doc false
+  # Test seam for the cache above. Named rather than exposing the private
+  # function so the contract under test is "the loop's context for this state",
+  # not an implementation detail.
+  def context_for_iteration(state), do: cached_context(state)
 
   defp maybe_inject_memory(context, %{iteration: 0, session_id: sid}) do
     try do

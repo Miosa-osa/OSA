@@ -19,6 +19,8 @@ defmodule OptimalSystemAgent.Protocol.ContextRefs do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Safety.PathPolicy
+
   @type ref_map :: %{optional(String.t()) => term()}
 
   @max_file_bytes 200_000
@@ -92,7 +94,8 @@ defmodule OptimalSystemAgent.Protocol.ContextRefs do
   defp resolve_file(path, range, working_dir) do
     resolved = resolve_path(path, working_dir)
 
-    with true <- File.regular?(resolved),
+    with :ok <- attachment_policy(resolved, path),
+         true <- File.regular?(resolved),
          {:ok, contents} <- File.read(resolved) do
       contents = maybe_truncate(contents)
       {sliced, label_suffix} = slice_range(contents, range)
@@ -100,11 +103,29 @@ defmodule OptimalSystemAgent.Protocol.ContextRefs do
       "<context-ref type=\"file\" path=#{inspect(path)}#{label_suffix}>\n" <>
         sliced <> "\n</context-ref>"
     else
+      {:deny, reason} ->
+        "<context-ref type=\"file\" path=#{inspect(path)} error=\"denied\">\n" <>
+          reason <> "\n</context-ref>"
+
       _ ->
         "<context-ref type=\"file\" path=#{inspect(path)} error=\"unreadable\">\n" <>
           "(could not read this file — it may not exist or is not a regular file)\n" <>
           "</context-ref>"
     end
+  end
+
+  # A `context_ref` is the non-image twin of an `images` path: the same class of
+  # user-chosen file, arriving on the same request. It gets the same USER
+  # attachment policy — readable from anywhere (an `@`-mention of a file outside
+  # the workspace is a legitimate thing to do), but never a credential store.
+  #
+  # Before this, `resolve_file/3` read whatever path arrived with no policy at
+  # all, so a `context_refs` entry naming `~/.ssh/id_rsa` or `../.env` was
+  # read and injected verbatim into the outbound prompt — the same
+  # arbitrary-file-read primitive v1.0.79 closed on `images`, still open one
+  # field over.
+  defp attachment_policy(resolved, display) do
+    PathPolicy.check_user_attachment(resolved, display)
   end
 
   # Relative paths resolve against working_dir (the session's cwd); absolute

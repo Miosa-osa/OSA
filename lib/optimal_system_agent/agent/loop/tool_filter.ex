@@ -9,8 +9,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
      local provider, trims the tool list to CU-related tools only.
   3. Fast path — clear intents get a smaller first-pass tool set with escape hatches;
      unclear intents keep the full tool surface.
-  4. Tool budget — local/slow providers (Ollama, LM Studio, llama.cpp) choke on large
-     tool lists. Caps at 10, prioritising file and shell tools.
+  4. Tool budget — models whose REAL resolved context window is small choke on large
+     tool lists. Caps at 10, prioritising file and shell tools. Keyed on the window,
+     NOT on the provider atom: a 1M-window model served through the Ollama transport
+     is not a small model.
   """
   require Logger
   alias OptimalSystemAgent.Agent.FastPath
@@ -35,8 +37,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   # Priority tools kept when trimming for local providers.
   @priority_tools ~w(file_read file_write file_edit shell_execute ask_user computer_use memory_recall)
 
-  # Local/slow provider atoms that need the tool budget cap.
+  # Local/slow provider atoms. Used ONLY by the computer-use focus heuristic's
+  # transport check; the tool budget keys on the model's real window instead —
+  # see `apply_small_window_budget/2`.
   @local_providers [:ollama, :lmstudio, :llamacpp]
+
+  # How many tools a genuinely small-window model gets.
+  @small_window_tool_budget 10
 
   # Coordinator mode restricts tools to delegation, messaging, and management.
   @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
@@ -55,7 +62,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
     |> FastPath.select_tools(state)
-    |> apply_local_provider_budget(state)
+    |> apply_small_window_budget(state)
   end
 
   @doc "Configured maximum delegation nesting depth."
@@ -161,7 +168,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
           (is_map(msg[:content]) and msg[:name] == "computer_use")
       end)
 
-    if last_used_cu and state.provider in @local_providers do
+    # The transport check alone was wrong for the same reason the tool budget's
+    # was: an Ollama Cloud tag is not a slow local model. Both must hold.
+    if last_used_cu and state.provider in @local_providers and small_window?(state) do
       Logger.debug("[loop] Computer-use focus mode — trimming to CU-related tools only")
       Enum.filter(tools, fn t -> t.name in ~w(computer_use file_read ask_user) end)
     else
@@ -169,13 +178,37 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     end
   end
 
-  defp apply_local_provider_budget(tools, state) do
-    if state.provider in @local_providers and length(tools) > 10 do
-      Logger.debug("[loop] Trimming tools from #{length(tools)} to 10 for #{state.provider}")
-      take_priority_tools(tools, 10)
+  # Cap the tool list for models whose REAL context window is too small to hold
+  # the full tool surface.
+  #
+  # This used to key on `state.provider in @local_providers`, which cut EVERY
+  # model reached through Ollama / LM Studio / llama.cpp to ten tools regardless
+  # of its window. Observed live on a 1M-window frontier model served as an
+  # Ollama Cloud tag: "Trimming tools from 37 to 10 for ollama". That is a
+  # capability regression, and it is also a LATENCY regression: a model that
+  # cannot see the tool it needs takes more round-trips to finish, and
+  # round-trips are what the wall clock is actually made of.
+  #
+  # `Context.small_window?/2` is the single source of truth, so the trimmed tool
+  # array and the trimmed prompt variant always describe the same regime.
+  defp apply_small_window_budget(tools, state) do
+    if length(tools) > @small_window_tool_budget and small_window?(state) do
+      Logger.debug(
+        "[loop] Trimming tools from #{length(tools)} to #{@small_window_tool_budget} " <>
+          "for small context window (#{state.provider}/#{Map.get(state, :model) || "default"})"
+      )
+
+      take_priority_tools(tools, @small_window_tool_budget)
     else
       tools
     end
+  end
+
+  defp small_window?(state) do
+    OptimalSystemAgent.Agent.Context.small_window?(
+      Map.get(state, :model),
+      Map.get(state, :provider)
+    )
   end
 
   defp take_priority_tools(tools, budget) do

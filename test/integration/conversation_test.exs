@@ -36,10 +36,14 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       assert String.contains?(system_msg.content, "Optimal System Agent") or
                String.contains?(system_msg.content, "OSA")
 
-      # SYSTEM.md static content references Signal Theory modes
-      assert String.contains?(system_msg.content, "BUILD") or
-               String.contains?(system_msg.content, "EXECUTE") or
-               String.contains?(system_msg.content, "ANALYZE")
+      # The static base is present and substantial. This used to assert the
+      # literal words BUILD / EXECUTE / ANALYZE — Signal Theory mode names that
+      # the lean template no longer spells out, because that section was prose
+      # restating tool schemas the model receives on the same request. Pinning
+      # prompt *wording* from an integration test makes every prompt edit look
+      # like a regression; the contract being guarded here is "a system message
+      # comes first and carries the static base", which is what is asserted now.
+      assert byte_size(system_msg.content) > 2_000
     end
 
     test "context includes the channel name in runtime block" do

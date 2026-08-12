@@ -65,6 +65,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
       |> maybe_add_provider_thinking(model, opts, base_url)
+      |> maybe_add_prompt_cache_key(opts, base_url)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
@@ -210,7 +211,48 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
     |> maybe_add_provider_thinking(model, opts, base_url)
+    |> maybe_add_prompt_cache_key(opts, base_url)
   end
+
+  @doc """
+  Assert cache identity to the server instead of leaving it to be inferred.
+
+  Codex keys the provider cache on the **session id** (`prompt_cache_key`
+  defaults to the session's id and is regenerated never), which is simpler and
+  more robust than trying to keep a derived value byte-stable. OSA sends the
+  same thing: the session id, stable for the whole thread.
+
+  Gated by host allowlist, default `["api.openai.com"]`. `prompt_cache_key` is
+  an OpenAI field, and many OpenAI-*compatible* servers (local Ollama builds,
+  gateways, proxies) reject unknown top-level body fields with a 400 — sending
+  it everywhere would trade a cache hint for broken requests on those
+  endpoints. Widen `:prompt_cache_key_hosts` only for a host observed to accept
+  it.
+  """
+  @spec maybe_add_prompt_cache_key(map(), keyword(), String.t()) :: map()
+  def maybe_add_prompt_cache_key(body, opts, base_url) do
+    key = Keyword.get(opts, :prompt_cache_key) || Keyword.get(opts, :session_id)
+
+    if prompt_cache_key_host?(base_url) and is_binary(key) and key != "" do
+      Map.put(body, :prompt_cache_key, key)
+    else
+      body
+    end
+  end
+
+  @doc "True when this endpoint's host is allowlisted for `prompt_cache_key`."
+  @spec prompt_cache_key_host?(String.t() | nil) :: boolean()
+  def prompt_cache_key_host?(base_url) when is_binary(base_url) do
+    allowed =
+      Application.get_env(:optimal_system_agent, :prompt_cache_key_hosts, ["api.openai.com"])
+
+    case URI.parse(base_url) do
+      %URI{host: host} when is_binary(host) -> host in allowed
+      _ -> false
+    end
+  end
+
+  def prompt_cache_key_host?(_), do: false
 
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
     body = build_stream_body(model, messages, opts, base_url)

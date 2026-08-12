@@ -27,9 +27,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   - "select:Read,Edit,Grep" — fetch these exact tools by name
   - "server:<name>" — list EVERY tool on one connected MCP server, unranked and uncapped
   - "notebook jupyter" — keyword search, up to max_results best matches
-  - "+slack send" — require "slack" in the name, rank by remaining terms\"""
+  - "+slack send" — require "slack" in the name, rank by remaining terms
+  """
 
-  @doc \"""
+  @doc """
   Render the tool_search prompt.
 
   `opts` accepts:

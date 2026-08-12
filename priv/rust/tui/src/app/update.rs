@@ -172,7 +172,27 @@ impl App {
                 false
             }
             Event::Tick => {
+                // Backstop for the de-jitter buffer: the animation frame is the
+                // real cadence, but it is armed only while the activity
+                // indicator is on screen. The 200 ms tick guarantees held text
+                // can never be stranded if that ever stops being true.
+                self.drain_stream_pacer();
                 self.handle_tick();
+                false
+            }
+            // Almost a no-op. Every animated value the frame makes visible (the
+            // braille spinner index, the accent rail, the elapsed timers, the
+            // stall→red bleed) is already derived from a wall clock inside
+            // `draw`, so nothing here needs advancing — advancing `phrase_tick`
+            // here instead would spin the verb rotation and the shimmer six
+            // times too fast.
+            //
+            // The one thing it DOES drive is the de-jitter buffer. That is the
+            // whole reason the pacer needs no timer of its own: this event
+            // already fires at a steady 32 ms for exactly as long as a turn is
+            // streaming, which is precisely when there is text to release.
+            Event::AnimationFrame => {
+                self.drain_stream_pacer();
                 false
             }
             Event::HealthRetry => {

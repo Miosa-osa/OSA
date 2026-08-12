@@ -103,6 +103,56 @@ defmodule OptimalSystemAgent.Protocol.ContextRefsTest do
     end
   end
 
+  describe "inject/3 — attachment policy" do
+    # A `context_ref` is the non-image twin of an `images` path: the same class
+    # of user-chosen file arriving on the same request body. It got no policy
+    # check at all — `resolve_file/3` read whatever path was named and injected
+    # it verbatim into the outbound prompt — which is the exact
+    # arbitrary-file-read primitive v1.0.79 closed on `images`, one field over.
+    #
+    # The policy is the USER one: readable from anywhere (an `@`-mention of a
+    # file outside the workspace is legitimate), never a credential store.
+
+    test "a sensitive file named by a ref is refused, not read" do
+      key = Path.join([System.user_home!(), ".ssh", "id_rsa"])
+      refs = [%{"type" => "file", "path" => key}]
+
+      result = ContextRefs.inject("summarise this", refs, nil)
+
+      assert result =~ "error=\"denied\""
+      assert result =~ "sensitive"
+      refute result =~ "PRIVATE KEY"
+    end
+
+    test "a .env named by a ref is refused", %{dir: dir} do
+      dotenv = Path.join(dir, ".env")
+      File.write!(dotenv, "STRIPE_SECRET=sk_live_dont_leak_me")
+
+      result = ContextRefs.inject("go", [%{"type" => "file", "path" => dotenv}], nil)
+
+      assert result =~ "error=\"denied\""
+      refute result =~ "sk_live_dont_leak_me"
+    end
+
+    test "a symlink whose target is sensitive is refused (canonicalisation)", %{dir: dir} do
+      link = Path.join(dir, "innocent.txt")
+      :ok = File.ln_s(Path.join([System.user_home!(), ".ssh", "id_rsa"]), link)
+
+      result = ContextRefs.inject("go", [%{"type" => "file", "path" => link}], nil)
+
+      assert result =~ "error=\"denied\""
+    end
+
+    test "an ordinary file outside the workspace still resolves", %{file_path: file_path} do
+      # The user picked it; location is not the objection. `file_path` lives in
+      # the OS temp directory, outside any project root.
+      result = ContextRefs.inject("go", [%{"type" => "file", "path" => file_path}], nil)
+
+      assert result =~ "line one"
+      refute result =~ "error="
+    end
+  end
+
   describe "inject/3 — mixed refs" do
     test "file and agent refs both resolve in one turn", %{file_path: file_path} do
       refs = [

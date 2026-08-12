@@ -238,8 +238,14 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # Build decorated message list (nudges + pre-directives + user message).
     # Thread any pasted/attached images so vision requests reach the model as
     # image content blocks rather than a dead "[Image #N]" text reference.
+    #
+    # `:image_source` is the trust marker for those paths. It is `:user` only
+    # when the caller asserted an explicit user action (drag-and-drop, paste,
+    # `@file`); absent/unknown means `:model` and keeps full allowed-roots
+    # confinement. See `MessageHandler.build_messages/4`.
     images = Keyword.get(opts, :images, [])
-    messages_to_append = MessageHandler.build_messages(message, state, images)
+    image_source = Keyword.get(opts, :image_source, :model)
+    messages_to_append = MessageHandler.build_messages(message, state, images, image_source)
 
     %{state | messages: state.messages ++ messages_to_append, current_input: message}
     |> reset_per_turn_fields()

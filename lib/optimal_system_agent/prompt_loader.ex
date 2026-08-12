@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.PromptLoader do
 
   @known_keys ~w(
     SYSTEM
+    SYSTEM_LEAN
     IDENTITY
     SOUL
     compactor_summary
@@ -69,6 +70,24 @@ defmodule OptimalSystemAgent.PromptLoader do
   @spec get(atom(), term()) :: String.t() | term()
   def get(key, default) when is_atom(key) do
     :persistent_term.get({__MODULE__, key}, nil) || default
+  end
+
+  @doc """
+  Does the user ship their own override for this prompt key?
+
+  `~/.osa/prompts/<key>.md` beats the bundled asset in `load/0`. Callers that
+  want to swap which BUNDLED template they read (see `Soul.load_system_template/0`
+  choosing between `SYSTEM.md` and `SYSTEM_LEAN.md`) must not do so when the user
+  has written their own — an override is an explicit statement about what the
+  prompt should be, and silently substituting a different bundled file for it
+  would discard that.
+  """
+  @spec user_override?(atom()) :: boolean()
+  def user_override?(key) when is_atom(key) do
+    @prompts_dir
+    |> Path.expand()
+    |> Path.join("#{key}.md")
+    |> File.exists?()
   end
 
   @doc "Get a command prompt template by category and name."

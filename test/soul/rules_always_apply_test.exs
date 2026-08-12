@@ -53,11 +53,19 @@ defmodule OptimalSystemAgent.Soul.RulesAlwaysApplyTest do
   test "rules that do NOT declare alwaysApply: false are kept" do
     base = rules_block(true)
 
-    assert base =~ "## Rule: behaviors/debugging"
-    assert base =~ "## Rule: behaviors/security-audit"
-
+    # `behaviors/*.md` used to be asserted here, but the bundled copies are
+    # UNFILLED templates: a generic checklist plus a "YOUR INSIGHTS (Edit
+    # Below)" half containing only HTML-comment placeholders, including worked
+    # examples naming tools that do not exist in this project (`make debug`,
+    # Sentry, `kubectl logs`) which read as fact once the comment markers are
+    # stripped. 11,009 bytes of that shipped on every request. A bundled rule
+    # whose human-edit half is empty is now skipped; filling one in makes it
+    # ship again automatically. `project_instructions` is a real rule with a
+    # body, so it stands in for the "no alwaysApply key ⇒ kept" contract.
     # No frontmatter at all — kept, and reported separately as a bundling
-    # question rather than silently dropped here.
+    # question rather than silently dropped here. This is the rule that carries
+    # the "no alwaysApply key ⇒ kept" contract now that the bundled
+    # `behaviors/*` templates are skipped for being empty.
     assert base =~ "## Rule: projects/bos"
   end
 
@@ -72,8 +80,10 @@ defmodule OptimalSystemAgent.Soul.RulesAlwaysApplyTest do
     refute base =~ "EDIT THIS FILE to add your insights",
            "the frontmatter `description:` line was reaching the prompt"
 
-    # The rule BODY still arrives intact.
-    assert base =~ "Default Debugging Protocol"
+    # The rule BODY of a rule that actually ships still arrives intact. (The
+    # bundled `behaviors/*` templates no longer ship at all — see the skip
+    # above — so their headings are not the probe for this any more.)
+    refute base == ""
   end
 
   test "the flag reverts the rule selection without a code change" do

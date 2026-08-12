@@ -358,7 +358,7 @@ defmodule OptimalSystemAgent.Memory do
         |> Enum.uniq_by(&entry_id/1)
 
       {query_vector, vector_scores, embeddings} =
-        maybe_vector_score(query, union_candidates)
+        maybe_vector_score(query, union_candidates, opts)
 
       vector_weight = if query_vector, do: vector_weight_opt, else: 0.0
       lexical_weight = 1.0 - vector_weight
@@ -382,13 +382,48 @@ defmodule OptimalSystemAgent.Memory do
     end
   end
 
+  # Embed the query under a DEADLINE.
+  #
+  # `Search.embed/1` is an HTTP round-trip to the embedding provider with a
+  # 5-second receive timeout. That is a fine budget for the `memory_recall` /
+  # `semantic_search` tools, where the user asked for a search and the answer is
+  # the point. It is the wrong budget for `Agent.Context`, which calls this
+  # while ASSEMBLING THE PROMPT, before the request is sent: a slow or wedged
+  # embedder there does not degrade recall quality, it stalls the turn — and the
+  # caller cannot tell the difference between "thinking" and "blocked on a
+  # sidecar".
+  #
+  # The vector score is strictly optional: `{:error, _}` falls through to the
+  # pure-lexical path a few lines below, which is what already happens when no
+  # embedder is configured at all. So the prompt path passes a tight
+  # `:embed_deadline_ms` and takes the lexical answer if the embedder does not
+  # make it. Without the option the behaviour is exactly as before.
+  defp embed_within_deadline(query, opts) do
+    case Keyword.get(opts, :embed_deadline_ms) do
+      ms when is_integer(ms) and ms > 0 ->
+        task = Task.async(fn -> Search.embed(query) end)
+
+        case Task.yield(task, ms) || Task.shutdown(task, :brutal_kill) do
+          {:ok, result} ->
+            result
+
+          _ ->
+            Logger.debug("[Memory] embed exceeded #{ms}ms deadline — lexical recall only")
+            {:error, :embed_deadline}
+        end
+
+      _ ->
+        Search.embed(query)
+    end
+  end
+
   # Attempts to embed the query and KNN-score the candidate pool. Returns
   # `{query_vector_or_nil, %{id => similarity}, %{id => vector}}`. Any
   # failure (no provider, unreachable, bad response) yields
   # `{nil, %{}, %{}}` — pure lexical fallback, never raises.
-  defp maybe_vector_score(query, candidates) do
+  defp maybe_vector_score(query, candidates, opts) do
     if Search.available?() do
-      case Search.embed(query) do
+      case embed_within_deadline(query, opts) do
         {:ok, query_vector} ->
           {scored, embeddings} = Search.knn(query_vector, candidates)
           sim_map = Map.new(scored, fn {sim, entry} -> {entry_id(entry), sim} end)

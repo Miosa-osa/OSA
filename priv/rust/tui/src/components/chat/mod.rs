@@ -651,7 +651,13 @@ impl Chat {
     /// Render the live streaming preview, bottom-anchored so the newest lines
     /// stay visible. When idle, the region is left blank (finalized content lives
     /// in the terminal's native scrollback).
-    pub fn draw_live(&self, frame: &mut Frame, area: Rect) {
+    ///
+    /// `header` draws the "◈ OSA" label. Pass false once this turn has already
+    /// committed a block to scrollback: that block carries the one label the
+    /// answer is owed, and a second one under it reads as two separate replies
+    /// split mid-sentence. The label also occupies a row, so its absence shortens
+    /// the preview by one — `ensure_stream_cache` counts it unconditionally.
+    pub fn draw_live(&self, frame: &mut Frame, area: Rect, header: bool) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -672,7 +678,13 @@ impl Chat {
             let (body, full_h, scroll) = {
                 let cache = self.stream_cache.borrow();
                 let c = cache.as_ref().expect("cache populated by ensure_stream_cache");
-                let full_h = c.height;
+                // `c.height` counts the label row; a continuation preview draws
+                // no label, so it is exactly one row shorter.
+                let full_h = if header {
+                    c.height
+                } else {
+                    c.height.saturating_sub(1).max(1)
+                };
                 let h = full_h.min(area.height);
                 if full_h > area.height {
                     // Taller than the slot: the "◈ OSA" label (message line 0) is
@@ -684,14 +696,14 @@ impl Chat {
                     (
                         Text::from(c.body.lines[start..].to_vec()),
                         full_h,
-                        1u16,
+                        if header { 1u16 } else { 0u16 },
                     )
                 } else {
                     // Fits: the label is drawn and the whole (short) body shows.
                     (c.body.clone(), full_h, 0u16)
                 }
             };
-            let msg = Message::new_agent_prerendered(body);
+            let msg = Message::new_agent_prerendered(body, header);
             let h = full_h.min(area.height);
             let y = area.y + area.height.saturating_sub(h);
             msg.draw_scrolled(frame, Rect::new(area.x, y, area.width, h), scroll);
@@ -707,7 +719,7 @@ impl Component for Chat {
     fn draw(&self, frame: &mut Frame, area: Rect) {
         // The chat no longer owns a scroll viewport; the live region is drawn via
         // `draw_live`. This trait impl remains for the Component contract.
-        self.draw_live(frame, area);
+        self.draw_live(frame, area, true);
     }
 }
 

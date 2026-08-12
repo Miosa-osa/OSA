@@ -49,6 +49,25 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @response_reserve 8_192
 
+  # A window at or below this is "small": it gets the trimmed prompt variant and
+  # the trimmed tool list. This is a property of the MODEL's resolved window, not
+  # of the provider transport — see `small_window?/2`.
+  @small_window_tokens 40_000
+
+  # Ceiling on the embedding round-trip taken while ASSEMBLING a prompt. A local
+  # `nomic-embed-text` call answers in tens of milliseconds; anything past this
+  # is a sick sidecar, and prompt assembly must not wait on one. Overridable via
+  #   config :optimal_system_agent, :prompt_embed_deadline_ms, N
+  @prompt_embed_deadline_ms 300
+
+  defp prompt_embed_deadline_ms,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :prompt_embed_deadline_ms,
+        @prompt_embed_deadline_ms
+      )
+
   # Fraction of the REAL window the response reserve may claim. A flat 8k reserve
   # is right for a 128k+ cloud window and catastrophic for a 32k local one: with a
   # ~24k static base, 8k of reserve leaves 964 tokens for ALL dynamic context and
@@ -112,7 +131,18 @@ defmodule OptimalSystemAgent.Agent.Context do
     # `Soul.static_token_count(variant)`, a real measurement), but the CHOICE to
     # route small windows here was made believing it, and it does not buy what
     # it was thought to buy.
-    lite? = provider in [:ollama, :lmstudio, :llamacpp] or max_tok < 40_000
+    #
+    # The predicate keys on the REAL resolved window, never on the provider
+    # atom. It used to read `provider in [:ollama, :lmstudio, :llamacpp] or
+    # max_tok < 40_000`, which handed every model served through a local
+    # provider the small-window prompt — including Ollama CLOUD tags. A
+    # frontier model like `glm-5.2:cloud` has a 1M window and is proxied to
+    # hosted hardware (`Registry.effective_context_window/2` already declines to
+    # apply the local num_ctx ceiling to it), yet it was routed to :lite —
+    # which, MEASURED, is 24,375 tokens against :native_tools' 16,059. The
+    # small-window path was making the prompt 8,316 tokens BIGGER on the one
+    # model that could least afford it, and that cost is paid on every request.
+    lite? = max_tok < @small_window_tokens
 
     # Which flavour of the cached static base this provider gets.
     variant = static_base_variant(provider, lite?)
@@ -151,8 +181,24 @@ defmodule OptimalSystemAgent.Agent.Context do
     )
 
     system_msg = build_system_message(static_base, world_state, volatile, provider)
+
+    # Per-process build counter. Assembling this message is the expensive part
+    # of preparing a request — 21 dynamic blocks, each with its own budget —
+    # and the ReAct loop caches the result across iterations. A cache whose
+    # hits still pay for a build is worse than no cache, because it hides the
+    # cost; this makes "did that actually skip the work?" an assertion rather
+    # than a belief. See `ReactLoop.cached_context/1`.
+    Process.put(:osa_context_builds, Process.get(:osa_context_builds, 0) + 1)
+
     %{messages: [system_msg | conversation]}
   end
+
+  @doc """
+  How many times `build/1` has run in THIS process. Test/diagnostic seam for
+  the ReAct loop's per-turn system-prompt cache.
+  """
+  @spec build_count() :: non_neg_integer()
+  def build_count, do: Process.get(:osa_context_builds, 0)
 
   @doc """
   Returns a token usage breakdown for debugging purposes.
@@ -200,9 +246,36 @@ defmodule OptimalSystemAgent.Agent.Context do
     }
   end
 
+  @doc """
+  `true` when the model's REAL resolved context window is small enough to need
+  the trimmed prompt variant and the trimmed tool list.
+
+  Keyed on `Registry.effective_context_window/2` — the window OSA actually
+  operates within, already capped by `:ollama_num_ctx` for genuinely local
+  weights and deliberately NOT capped for Ollama Cloud tags. The provider atom
+  is not consulted: a 1M-window frontier model reached through the `:ollama`
+  transport is not a small model, and treating it as one both inflated the
+  prompt (`:lite` is larger than `:native_tools`) and cut its tool list to ten.
+
+  Single source of truth for `Agent.Context` and `Agent.Loop.ToolFilter`, so
+  the inlined prose and the native tool array can never disagree about which
+  regime a request is in.
+  """
+  @spec small_window?(String.t() | nil, atom() | nil) :: boolean()
+  def small_window?(model, provider) do
+    provider = provider || Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider) <
+      @small_window_tokens
+  end
+
+  @doc false
+  @spec small_window_tokens() :: pos_integer()
+  def small_window_tokens, do: @small_window_tokens
+
   # Which cached static base this request gets.
   #
-  #   :lite          — small/local window. Unchanged: only the core allowlist is
+  #   :lite          — genuinely small window. Unchanged: only the core allowlist is
   #                    inlined, and the tool list is separately capped by
   #                    ToolFilter, so the prose and the native array do NOT
   #                    describe the same set and dropping prose there would lose
@@ -1037,11 +1110,24 @@ defmodule OptimalSystemAgent.Agent.Context do
   # recall_hybrid already filters below min_score and caps the count; the
   # already-ranked block is then hard-truncated to the token cap. No re-sort
   # here — that would undo the MMR diversity rerank.
+  #
+  # `:embed_deadline_ms` is what makes this safe to call from prompt assembly.
+  # The embedding round-trip inside `recall_hybrid` otherwise carries a
+  # 5-SECOND receive timeout, and this runs BEFORE the request is sent: a
+  # wedged embedding sidecar would hold the whole turn there with nothing on
+  # screen. The vector score is an optional improvement over the lexical one —
+  # `Memory.recall_hybrid/2` already falls back to pure lexical whenever the
+  # embedder is missing or fails — so past the deadline we simply take that
+  # answer. The tools that exist to search memory keep the full 5s.
   defp recall_scored(query, _query_keywords) do
     max_results = Budget.memory_recall_max_results()
     min_score = Budget.memory_recall_min_score()
 
-    case OptimalSystemAgent.Memory.recall_hybrid(query, limit: max_results, min_score: min_score) do
+    case OptimalSystemAgent.Memory.recall_hybrid(query,
+           limit: max_results,
+           min_score: min_score,
+           embed_deadline_ms: prompt_embed_deadline_ms()
+         ) do
       {:ok, entries} when is_list(entries) and entries != [] ->
         entries
         |> Enum.map(fn entry ->

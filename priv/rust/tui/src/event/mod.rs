@@ -37,6 +37,21 @@ pub enum Event {
     Voice(VoiceEvent),
     /// App-internal timer events
     Tick,
+    /// A repaint request for a running animation, and NOTHING else.
+    ///
+    /// `Tick` is a 200ms bookkeeping pulse: it advances toasts, the agents
+    /// panel, the checklist and the activity phrase counter, and it is the
+    /// cadence the inline-viewport shrink debounce is counted in. It cannot be
+    /// sped up without retuning all of that.
+    ///
+    /// But 200ms is also the ONLY thing that repaints the screen while the app
+    /// sits waiting on the provider, so the spinner ran at 5fps — and the glyph
+    /// index is a 133ms wall clock, so frames aliased and the spinner visibly
+    /// skipped. Every reference harness repaints its status indicator on its own
+    /// timer at ~30fps (codex's `status_indicator_widget` self-schedules every
+    /// 32ms). This is that timer: it carries no state and mutates nothing. Its
+    /// entire job is to make the loop come round and draw.
+    AnimationFrame,
     /// Health retry
     HealthRetry,
 }
