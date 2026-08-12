@@ -274,7 +274,13 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
       assert budget.system_prompt_budget == expected
     end
 
-    test "total_tokens equals static + dynamic + conversation + reserve" do
+    test "total_tokens equals static + dynamic + conversation + reserve + TOOLS" do
+      # The tool array used to be missing from this sum, and this test pinned
+      # its absence. The schemas are sent on every request — and under the
+      # `:native_tools` variant they are the ONLY place that content exists,
+      # since the prose duplicating them is stripped from the prompt — so
+      # omitting them made the meter read 41.7% low (15,496 tokens against a
+      # reported 37,172) and compaction fire later than it believed.
       state = base_state()
       budget = Context.token_budget(state)
 
@@ -282,7 +288,8 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
         budget.static_base_tokens +
           budget.dynamic_context_tokens +
           budget.conversation_tokens +
-          budget.response_reserve
+          budget.response_reserve +
+          budget.tool_schema_tokens
 
       assert budget.total_tokens == expected
     end

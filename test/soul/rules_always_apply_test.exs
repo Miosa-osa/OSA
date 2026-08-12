@@ -60,13 +60,20 @@ defmodule OptimalSystemAgent.Soul.RulesAlwaysApplyTest do
     # Sentry, `kubectl logs`) which read as fact once the comment markers are
     # stripped. 11,009 bytes of that shipped on every request. A bundled rule
     # whose human-edit half is empty is now skipped; filling one in makes it
-    # ship again automatically. `project_instructions` is a real rule with a
-    # body, so it stands in for the "no alwaysApply key ⇒ kept" contract.
-    # No frontmatter at all — kept, and reported separately as a bundling
-    # question rather than silently dropped here. This is the rule that carries
-    # the "no alwaysApply key ⇒ kept" contract now that the bundled
-    # `behaviors/*` templates are skipped for being empty.
-    assert base =~ "## Rule: projects/bos"
+    # ship again automatically.
+    #
+    # `projects/bos.md` then carried this contract, until it turned out to be
+    # one developer's private BusinessOS rules — naming their own checkout and
+    # Go module — bundled into the release and inlined into every user's cached
+    # prefix. It now lives in `~/.osa/rules/`, which the loader reads as a
+    # separate directory.
+    #
+    # So the contract is asserted structurally rather than by naming whichever
+    # file happens to ship: the narrow `alwaysApply: false` rules are gone (the
+    # test above), and a non-empty block still renders. That is exactly "absence
+    # of the flag is not a claim", with no dependency on the bundle's contents.
+    assert base =~ "# Active Rules"
+    refute base == ""
   end
 
   test "YAML frontmatter is not sent to the model as instruction text" do

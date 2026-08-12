@@ -134,14 +134,56 @@ defmodule OptimalSystemAgent.Soul.LeanPromptTest do
     refute String.contains?(base, "Add patterns you've noticed")
   end
 
-  test "a rule with real content still ships" do
+  test "a rule with real content still ships — from the USER's rules dir" do
+    # This used to assert on `projects/bos.md`, a rule that was bundled into the
+    # release but described one developer's private BusinessOS checkout. It now
+    # lives in `~/.osa/rules/`, and with it gone EVERY remaining bundled rule is
+    # either `alwaysApply: false` or an unfilled template — so a fresh install
+    # renders no rules block at all, which is the honest result and is asserted
+    # separately below.
+    #
+    # The mechanism still has to work, so exercise it where rules now live.
+    dir = Path.join(System.tmp_dir!(), "osa-rules-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(dir, "rules"))
+    File.write!(Path.join([dir, "rules", "mine.md"]), "# Mine\n\nAlways log with slog.\n")
+
+    prev = System.get_env("OSA_HOME")
+    System.put_env("OSA_HOME", dir)
+
+    on_exit(fn ->
+      if prev, do: System.put_env("OSA_HOME", prev), else: System.delete_env("OSA_HOME")
+      File.rm_rf(dir)
+      OptimalSystemAgent.Soul.reload()
+    end)
+
     base = with_flag(true, & &1)
 
-    # projects/bos.md carries no template marker and real instructions.
     assert String.contains?(base, "# Active Rules")
+    assert String.contains?(base, "## Rule: mine")
 
     assert String.contains?(base, "slog"),
            "the rules mechanism itself broke — a filled rule stopped being injected"
+  end
+
+  test "a fresh install ships NO rules block — nothing bundled is generic" do
+    dir = Path.join(System.tmp_dir!(), "osa-norules-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+
+    prev = System.get_env("OSA_HOME")
+    System.put_env("OSA_HOME", dir)
+
+    on_exit(fn ->
+      if prev, do: System.put_env("OSA_HOME", prev), else: System.delete_env("OSA_HOME")
+      File.rm_rf(dir)
+      OptimalSystemAgent.Soul.reload()
+    end)
+
+    base = with_flag(true, & &1)
+
+    # Not a regression: the bundled set is four `alwaysApply: false` rules and
+    # five unfilled behaviour templates. Rendering a heading over an empty list
+    # would be the bug.
+    refute String.contains?(base, "# Active Rules")
   end
 
   test "HTML comments never reach the model, flag or no flag" do

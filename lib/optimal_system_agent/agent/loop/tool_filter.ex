@@ -18,9 +18,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Agent.DelegationPolicy
 
-  # Minimum signal weight required to include tools in the LLM call.
-  @tool_weight_threshold 0.20
-
   # Maximum delegation nesting depth. A subagent at this depth has its
   # spawning tools (delegate/create_agent) stripped so it cannot fork more
   # children — a hard ceiling against fork-bomb / runaway-cost behaviour under
@@ -59,7 +56,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     tools
     |> apply_delegation_depth_guard(state)
     |> apply_delegation_policy(state)
-    |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
     |> FastPath.select_tools(state)
     |> apply_small_window_budget(state)
@@ -145,19 +141,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   defp tool_name(t) when is_map(t), do: to_string(t[:name] || "")
   defp tool_name(_), do: ""
 
-  defp apply_weight_gate(tools, %{signal_weight: weight}) when is_number(weight) do
-    if weight < @tool_weight_threshold do
-      Logger.debug(
-        "[loop] signal_weight=#{weight} < #{@tool_weight_threshold} — skipping tools for low-weight input"
-      )
-
-      []
-    else
-      tools
-    end
-  end
-
-  defp apply_weight_gate(tools, _state), do: tools
+  # REMOVED: the signal-weight gate.
+  #
+  # It sent the model an EMPTY tool list whenever `state.signal_weight` fell
+  # below 0.20, as a conversational fast path. The only thing keeping it from
+  # firing was that `signal_weight` is initialised to `nil` in `Agent.Loop` and
+  # never written, so the gate quietly did nothing.
+  #
+  # Wiring it up would have been a disaster, because the weight it gates on is
+  # `Signal.MessageClassifier.calculate_weight/1` — literally
+  # `min(String.length(message) / 500, 1.0)`. At a 0.20 threshold that is "any
+  # message shorter than 100 characters gets no tools at all":
+  #
+  #     "fix the bug in auth.ex"        22 chars -> 0.04 -> NO TOOLS
+  #     "run the tests"                 13 chars -> 0.03 -> NO TOOLS
+  #     "deploy to staging"             17 chars -> 0.03 -> NO TOOLS
+  #
+  # Message length is not a proxy for whether a request needs tools; if
+  # anything the correlation runs the other way, since a terse instruction is
+  # usually a command and a long one is usually context. Leaving the gate in
+  # place meant the next person to populate `signal_weight` — an obvious,
+  # innocuous-looking change — would have silently broken every short request.
+  #
+  # A real conversational fast path has to key on what the message ASKS for,
+  # not how long it is, so it is not being re-implemented here on a bad signal.
 
   defp apply_computer_use_focus([], _state), do: []
 

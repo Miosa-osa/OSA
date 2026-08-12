@@ -61,6 +61,25 @@ pub struct StreamingRenderer {
     frozen_bytes: usize,
     /// Rendered, cached output for `source[..frozen_bytes]`. Never re-rendered.
     frozen_lines: Vec<Line<'static>>,
+    /// Resumable state for the freeze-boundary scan.
+    ///
+    /// The scan used to restart at byte 0 on every delta, which made a single
+    /// reply O(N²) in its own length: the 200-line-fence bench spent 1.1s and
+    /// 352µs per delta, against 109µs for a short one. The source is append-only
+    /// within a turn, so bytes already examined can never change their verdict —
+    /// the scan resumes from `scan.pos`, carrying the fence state with it.
+    scan: ScanState,
+}
+
+/// Where the incremental freeze scan got to, and what it knew there.
+#[derive(Clone, Copy, Default)]
+struct ScanState {
+    /// Byte offset of the first line not yet examined (always a line start).
+    pos: usize,
+    /// Whether `pos` sits inside a ``` fenced code block.
+    in_code: bool,
+    /// Best freeze boundary found so far.
+    boundary: usize,
 }
 
 impl StreamingRenderer {
@@ -71,6 +90,7 @@ impl StreamingRenderer {
             width,
             frozen_bytes: 0,
             frozen_lines: Vec::new(),
+            scan: ScanState::default(),
         }
     }
 
@@ -82,6 +102,7 @@ impl StreamingRenderer {
             self.width = width;
             self.frozen_bytes = 0;
             self.frozen_lines.clear();
+            self.reset_scan();
             self.advance();
         }
     }
@@ -107,6 +128,7 @@ impl StreamingRenderer {
             self.source.push_str(full);
             self.frozen_bytes = 0;
             self.frozen_lines.clear();
+            self.reset_scan();
         }
         self.advance();
     }
@@ -116,6 +138,7 @@ impl StreamingRenderer {
         self.source.clear();
         self.frozen_bytes = 0;
         self.frozen_lines.clear();
+        self.reset_scan();
     }
 
     /// Advance the frozen boundary to the last safe checkpoint and render any
@@ -123,12 +146,56 @@ impl StreamingRenderer {
     /// isolation is output-identical to that slice of a full render because both
     /// ends are safe split points (see the module docs).
     fn advance(&mut self) {
-        let new_boundary = find_frozen_boundary(&self.source);
+        let new_boundary = self.scan_forward();
         if new_boundary > self.frozen_bytes {
             let newly = render_markdown(&self.source[self.frozen_bytes..new_boundary], self.width);
             self.frozen_lines.extend(newly.lines);
             self.frozen_bytes = new_boundary;
         }
+    }
+
+    /// Resume the freeze-boundary scan from `self.scan.pos`.
+    ///
+    /// Equivalent to `find_frozen_boundary(&self.source)` but linear in the
+    /// bytes appended since the last call rather than in the whole reply. Only
+    /// COMPLETE lines are consumed: a trailing partial line is left for the next
+    /// delta, since its verdict can still change as more bytes arrive.
+    fn scan_forward(&mut self) -> usize {
+        let bytes = self.source.as_bytes();
+        let mut line_start = self.scan.pos;
+        let mut i = self.scan.pos;
+
+        while i < bytes.len() {
+            if bytes[i] != b'\n' {
+                i += 1;
+                continue;
+            }
+
+            let line = &self.source[line_start..i];
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                // A fence line toggles the code-block state. Its own line is
+                // never a freeze point.
+                self.scan.in_code = !self.scan.in_code;
+            } else if !self.scan.in_code && line.trim().is_empty() {
+                // Blank line at depth 0, outside code: everything up to and
+                // including this line's terminating newline is safe to freeze.
+                self.scan.boundary = i + 1;
+            }
+
+            i += 1;
+            line_start = i;
+        }
+
+        // Stop at the last complete line. The remainder is re-examined next time.
+        self.scan.pos = line_start;
+        self.scan.boundary
+    }
+
+    /// Reset the incremental scan. Called whenever `frozen_bytes` is rolled back
+    /// (width change, buffer divergence) so the two never disagree.
+    fn reset_scan(&mut self) {
+        self.scan = ScanState::default();
     }
 
     /// Render the unstable tail (`source[frozen_bytes..]`), optionally with the

@@ -9,6 +9,90 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.85] — displays as `v1.0.085`
+
+### Fixed — streaming arrived in slabs
+
+The real cause of "it streams in chunks, it looks ugly", and it was not the
+renderer. The inline live region grew **one row at a time**, and every one of
+those rows committed a viewport rebuild — a scroll-region rewrite plus a full
+repaint of the region, **26 of them in a single 5-second turn**. No streaming
+text can be painted while a rebuild runs, so everything that arrived meanwhile
+landed together on the far side. That is the bimodal profile that was measured
+and mis-attributed: ~5% of paints carrying ~50% of the reply, single frames up
+to 330 characters.
+
+Rebuild cost is per-rebuild, not per-row, so the region now grows in steps of 8
+rows. For the duration of a turn it is a **high-water mark**: it only grows.
+Rounding the grow up is not sufficient on its own — `SHRINK_SETTLE_TICKS` is 1,
+so the next tick would report the true smaller height and hand the headroom
+straight back, costing two rebuilds and saving none. `settle_turn_chrome`
+already reclaims the rows when the turn ends, which is the moment the answer
+visibly settles into place anyway.
+
+Same 3→29 row growth, counted by test: **26 rebuilds → 4.** The reservation is
+clamped to `term_rows - 1` and proved never to sit below what the content needs,
+so nothing can clip off the bottom.
+
+Two things were investigated first and cleared, recorded so they are not
+re-investigated: syntect highlighting of a growing fence is already memoized and
+O(N), and per-delta render cost tops out at 357µs — far under the 16ms frame,
+and incapable of producing a 330-character paint. The freeze-boundary scan is
+now resumable rather than restarting at byte 0 each delta (strictly less work,
+no output change), but it was not the bottleneck either.
+
+### Fixed — the tool array was invisible to the context budget
+
+`token_budget/1` summed the system prompt, the conversation and the response
+reserve. The tool schemas sent in the request's native `tools` array were never
+counted — and under the `:native_tools` variant they are the *only* place that
+content exists, because the prose duplicating them is deliberately stripped from
+the prompt. The one variant that moves the weight out of the prompt also moved
+it out of the accounting.
+
+Measured on a live registry: **15,496 tokens uncounted against a reported total
+of 37,172 — the meter read 41.7% low.** The `/context` display, the reported
+headroom and, most importantly, the compaction trigger were all working from
+that number, so compaction fired later than it believed it was firing. The array
+is now its own budget line, cached against the active tool set.
+
+### Removed — a signal-weight gate that would have broken every short request
+
+`ToolFilter.apply_weight_gate/2` sent the model an **empty tool list** whenever
+`state.signal_weight` fell below 0.20. The only thing preventing that was that
+`signal_weight` is initialised to `nil` and never written, so the gate silently
+did nothing.
+
+Wiring it up would have been a disaster, because the weight it gates on is
+`Signal.MessageClassifier.calculate_weight/1` — literally
+`min(String.length(message) / 500, 1.0)`. At a 0.20 threshold that means any
+message shorter than 100 characters gets no tools at all:
+
+    "fix the bug in auth.ex"   22 chars -> 0.04 -> NO TOOLS
+    "run the tests"            13 chars -> 0.03 -> NO TOOLS
+    "deploy to staging"        17 chars -> 0.03 -> NO TOOLS
+
+Message length is not a proxy for whether a request needs tools; if anything the
+correlation runs the other way. The gate is removed rather than wired, because
+the next person to populate `signal_weight` — an obvious, innocuous-looking
+change — would have silently broken every terse instruction in the product.
+
+### Fixed — one developer's private rules shipped to every user
+
+`priv/rules/projects/bos.md` was a personal BusinessOS rule file, naming its
+author's own `~/Desktop/BOS` checkout and Go module, bundled into the release
+and inlined into the cached prefix of **every request every user ever made** —
+4,429 bytes of instructions about a repository they cannot see.
+
+Rules could only ever be loaded from `priv/rules/`, so a personal rule had
+nowhere else to live. `~/.osa/rules/**/*.md` (honouring `OSA_HOME`) is now read
+as a second rules directory, and the file moved there.
+
+With it gone, every remaining bundled rule is either `alwaysApply: false` or an
+unfilled template — so a fresh install now renders **no rules block at all**.
+That is the honest outcome and is asserted directly: OSA was shipping 21KB of
+rules of which none were generically applicable. Static base: 21,739 tokens.
+
 ## [1.0.84] — displays as `v1.0.084`
 
 ### Fixed — a 1M-context model was being treated as a toy

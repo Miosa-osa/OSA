@@ -229,7 +229,8 @@ defmodule OptimalSystemAgent.Agent.Context do
     # ledger, or the next real turn would think everything was already sent.
     {ws, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok, emit: false)
     dynamic_tokens = estimate_tokens(ws) + estimate_tokens(volatile)
-    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve
+    tool_tokens = tool_schema_tokens()
+    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve + tool_tokens
 
     %{
       max_tokens: max_tok,
@@ -237,13 +238,51 @@ defmodule OptimalSystemAgent.Agent.Context do
       conversation_tokens: conversation_tokens,
       static_base_tokens: static_tokens,
       dynamic_context_tokens: dynamic_tokens,
+      tool_schema_tokens: tool_tokens,
       system_prompt_budget: max_tok - reserve - conversation_tokens,
-      system_prompt_actual: static_tokens + dynamic_tokens,
+      system_prompt_actual: static_tokens + dynamic_tokens + tool_tokens,
       total_tokens: total_tokens,
       utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
       headroom: max_tok - total_tokens,
       blocks: block_details
     }
+  end
+
+  # Tokens spent on the native `tools` array of the request.
+  #
+  # These were invisible to the budget. Every consumer — the `/context` meter,
+  # the compaction trigger, the headroom figure — summed the system prompt, the
+  # conversation and the response reserve, and stopped there. But the tool
+  # schemas are sent on every single request, and under the `:native_tools`
+  # variant they live ENTIRELY in that array: the prose duplicating them is
+  # deliberately stripped from the prompt precisely because the model receives
+  # the schemas natively. So the one variant that moves the weight out of the
+  # prompt also moved it out of the accounting, and the meter under-reported by
+  # the full size of the tool payload — which for 37 registered tools is not a
+  # rounding error. Compaction consequently fired later than it believed.
+  #
+  # Cached against the active tool set, so the JSON encode happens when the
+  # toolbox changes rather than on every turn.
+  defp tool_schema_tokens do
+    tools = OptimalSystemAgent.Tools.Registry.list_active()
+    key = :erlang.phash2(Enum.map(tools, & &1[:name]))
+
+    case :persistent_term.get({__MODULE__, :tool_schema_tokens}, nil) do
+      {^key, tokens} ->
+        tokens
+
+      _ ->
+        tokens =
+          case Jason.encode(tools) do
+            {:ok, json} -> estimate_tokens(json)
+            _ -> 0
+          end
+
+        :persistent_term.put({__MODULE__, :tool_schema_tokens}, {key, tokens})
+        tokens
+    end
+  rescue
+    _ -> 0
   end
 
   @doc """

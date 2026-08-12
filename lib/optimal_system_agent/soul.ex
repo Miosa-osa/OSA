@@ -452,37 +452,58 @@ defmodule OptimalSystemAgent.Soul do
   end
 
   defp rules_content do
-    rules_dir =
+    rule_dirs()
+    |> Enum.flat_map(fn dir ->
+      dir
+      |> Path.join("**/*.md")
+      |> Path.wildcard()
+      |> Enum.sort()
+      |> Enum.map(&{dir, &1})
+    end)
+    |> Enum.map(fn {dir, path} ->
+      name = Path.relative_to(path, dir) |> String.replace_suffix(".md", "")
+      {meta, body} = split_rule_frontmatter(File.read!(path))
+
+      cond do
+        respect_always_apply?() and meta.always_apply? == false -> nil
+        lean_prompt?() and not substantive_rule?(body) -> nil
+        true -> "## Rule: #{name}\n#{strip_html_comments(body)}"
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      parts -> "# Active Rules\n\n" <> Enum.join(parts, "\n\n")
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Where rules are read from, in prompt order: the bundled ones, then the
+  # user's own.
+  #
+  # There used to be only the bundled directory, which meant a personal rule had
+  # nowhere to live except inside the product. `priv/rules/projects/bos.md` was
+  # exactly that — one developer's BusinessOS conventions, naming their own
+  # `~/Desktop/BOS` checkout and Go module — shipped to every OSA user and
+  # inlined into the cached prefix of every request they ever made. It was 4,429
+  # bytes of instructions about a repository they cannot see.
+  #
+  # `~/.osa/rules/**/*.md` (honouring `OSA_HOME`) is now read the same way, so
+  # personal and project rules live with the user instead of in the release.
+  defp rule_dirs do
+    bundled =
       case :code.priv_dir(:optimal_system_agent) do
         {:error, _} -> nil
         dir -> Path.join(to_string(dir), "rules")
       end
 
-    if rules_dir && File.dir?(rules_dir) do
-      rules_dir
-      |> Path.join("**/*.md")
-      |> Path.wildcard()
-      |> Enum.sort()
-      |> Enum.map(fn path ->
-        name = Path.relative_to(path, rules_dir) |> String.replace_suffix(".md", "")
-        {meta, body} = split_rule_frontmatter(File.read!(path))
+    user =
+      Path.join(System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa"), "rules")
 
-        cond do
-          respect_always_apply?() and meta.always_apply? == false -> nil
-          lean_prompt?() and not substantive_rule?(body) -> nil
-          true -> "## Rule: #{name}\n#{strip_html_comments(body)}"
-        end
-      end)
-      |> Enum.reject(&is_nil/1)
-      |> case do
-        [] -> nil
-        parts -> "# Active Rules\n\n" <> Enum.join(parts, "\n\n")
-      end
-    else
-      nil
-    end
-  rescue
-    _ -> nil
+    [bundled, user]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&File.dir?/1)
   end
 
   # Every bundled rule carries a YAML frontmatter block declaring `globs:` and,
