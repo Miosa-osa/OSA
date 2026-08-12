@@ -9,6 +9,57 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.87] — displays as `v1.0.087`
+
+### Fixed — streaming arrives in chunks (measured this time)
+
+Four attempts at this complaint were argued from synthetic benches, and all four
+were wrong, because a bench feeds deltas at a cadence its author chose. This one
+starts from a **real trace**: 2,442 deltas / 13,187 characters captured off the
+wire from `glm-5.2:cloud` via ollama, with a new `app::stream_probe` module and
+`test/pty/stream_shape_probe.py`.
+
+The arrival pattern is the opposite of what every previous fix assumed. Deltas
+are **small** — mean 5.4 chars, p90 12, max 29, so there is no slab on the wire.
+But they are **clumped in time**: median gap between deltas **0.2 ms**, p90
+**25 ms**. A clump lands inside a single TCP read, then ~25 ms of silence.
+
+The event loop coalesces everything available into one frame (by design, for
+throughput) and rate-caps at 16 ms. So each clump becomes exactly one paint.
+Replaying the real trace through the loop's real frame cadence:
+
+    pacer off    p50 19   p90 35   p99 101   max 358    582 paints
+    pacer auto   p50 11   p90 30   p99  64   max 100    900 paints
+
+**That 358-character single frame is the complaint.** The fix is the reveal
+pacer that already existed and was disabled: `stream_pace` now defaults to
+`auto` instead of `off`, and its engage threshold moved from a 40 ms mean
+inter-burst gap to 18 ms (release 25 → 11) — because at 40 ms it never engaged
+on a stream whose real gap is ~25 ms. It was tuned against numbers no provider
+produces.
+
+Worst frame drops **3.6x**, p99 by 37%, and the median improves too, at the cost
+of 900 paints where there were 582 — still inside the 60fps frame budget. Set
+`OSA_STREAM_PACE=off` to restore the old behaviour for a provider that already
+trickles.
+
+The measurement is now a test, not a memory: `stream_pace::real_trace` replays
+the captured trace and fails if the worst paint is not at least halved, if p99
+or the median regress, or if the paint count nearly doubles.
+
+### Added — `OSA_STREAM_PROBE`
+
+Set it to a file path and OSA records two things per streaming turn: every delta
+as it arrives off the wire, and every paint with the characters it revealed. Off
+and free otherwise. This is what turned a four-round guessing game into one
+measurement, and it stays in so the next question about streaming shape is
+answered the same way.
+
+Incidental finding worth recording: a backend left running from an older release
+served the whole reply as a single `agent_response` with **no `streaming_token`
+events at all**. If streaming ever looks like one big dump rather than chunks,
+check the backend's version before anything else.
+
 ## [1.0.86] — displays as `v1.0.086`
 
 ### Reverted — the v1.0.85 grow-headroom change (it caused a visible gap)

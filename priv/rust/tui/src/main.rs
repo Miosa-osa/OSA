@@ -52,6 +52,9 @@ fn main() -> Result<()> {
     // Init logging BEFORE terminal (crash recovery)
     logging::init(&cli)?;
 
+    // Streaming shape probe. No-op unless OSA_STREAM_PROBE names a file.
+    app::stream_probe::init();
+
     // Install panic hook that restores terminal
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

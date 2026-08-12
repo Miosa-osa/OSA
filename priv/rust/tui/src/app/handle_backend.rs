@@ -284,6 +284,9 @@ impl App {
                 // buffer accumulating so the text is intact when the overlay
                 // closes.
                 if self.turn_is_active() {
+                    // Record the wire shape BEFORE any buffering the TUI does,
+                    // so the probe sees what the provider actually sent.
+                    crate::app::stream_probe::delta(text.chars().count());
                     // Reasoning is over once real tokens stream. Freeze the
                     // thinking box to its done state ("∴ Thought for Ns") instead
                     // of clearing it, so the reasoning summary persists rather

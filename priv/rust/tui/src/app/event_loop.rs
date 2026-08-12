@@ -1461,6 +1461,11 @@ impl App {
             // private-mode sequence. Errors are non-fatal — the frame still draws.
             let mut sync_out = std::io::stdout();
             let _ = execute!(sync_out, crossterm::terminal::BeginSynchronizedUpdate);
+            // Probe: how much assistant text this frame reveals. Recorded at
+            // the single draw call so no frame can be missed, and reading the
+            // accumulator (not the rendered cells) keeps it independent of
+            // wrapping and of which band happens to be on screen.
+            crate::app::stream_probe::paint(self.assistant_stream.text().chars().count());
             let draw_res = terminal.draw(|frame| self.draw(frame));
             let _ = execute!(sync_out, crossterm::terminal::EndSynchronizedUpdate);
             draw_res?;

@@ -19,6 +19,7 @@ pub mod keys;
 pub mod layout;
 pub mod state;
 pub mod stream_pace;
+pub mod stream_probe;
 pub mod terminal_probe;
 pub mod update;
 

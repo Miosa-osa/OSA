@@ -156,12 +156,12 @@ const ENGAGE_CHUNK_CHARS: f64 = 12.0;
 /// Mean inter-*burst* gap (ms) at or above which there is room to smooth. Below
 /// this, arrival is already faster than the paint cadence and pacing would only
 /// add latency.
-const ENGAGE_GAP_MS: f64 = 40.0;
+const ENGAGE_GAP_MS: f64 = 18.0;
 
 /// Disengage thresholds, held below the engage thresholds so a stream hovering
 /// near the boundary does not flap between paced and unpaced mid-reply.
 const RELEASE_CHUNK_CHARS: f64 = 8.0;
-const RELEASE_GAP_MS: f64 = 25.0;
+const RELEASE_GAP_MS: f64 = 11.0;
 
 /// EWMA smoothing factor for both arrival statistics. 0.25 reacts within a
 /// handful of deltas without chasing a single outlier.
@@ -181,13 +181,24 @@ pub(crate) enum PaceMode {
 impl PaceMode {
     /// `OSA_STREAM_PACE` = `off` | `auto` | `on`.
     ///
-    /// **Unset is [`PaceMode::Off`]**, and the reason is measured rather than
-    /// cautious: on the streams tested, OSA's renderer already paints more
-    /// often and in smaller pieces than the provider delivers, so there is
-    /// nothing left for a pacer to smooth and engaging one would only coarsen
-    /// the cadence to the 32 ms animation frame. See the module docs. `auto`
-    /// opts in to the adaptive behaviour for a provider that is genuinely
-    /// clumpier than the paint rate.
+    /// **Unset is [`PaceMode::Auto`].**
+    ///
+    /// It was `Off`, on the strength of a synthetic bench that reported pacing
+    /// making chunking worse. That bench fed a cadence its author chose. A real
+    /// trace — 2,442 deltas off `glm-5.2:cloud`, replayed in `real_trace` — says
+    /// the opposite, because the arrival pattern is not what the bench assumed:
+    /// deltas are SMALL (mean 5.4 chars, max 29) but land in tight clumps, a
+    /// median 0.2 ms apart inside a clump and ~25 ms between clumps. The loop
+    /// coalesces each clump into one frame, so the screen gets a lump.
+    ///
+    /// Measured over that trace, at the loop's real 16 ms frame floor:
+    ///
+    ///     off    p50 19   p90 35   p99 101   max 358
+    ///     auto   p50 11   p90 30   p99  64   max 100
+    ///
+    /// The 358-character frame is the "it streams in chunks" complaint, and
+    /// `auto` cuts the worst frame by 3.6x while lowering the median too.
+    /// `Off` remains available for a provider that already trickles.
     pub(crate) fn from_env() -> Self {
         match std::env::var("OSA_STREAM_PACE")
             .unwrap_or_default()
@@ -196,8 +207,8 @@ impl PaceMode {
             .as_str()
         {
             "on" | "1" | "true" | "always" => PaceMode::On,
-            "auto" | "adaptive" => PaceMode::Auto,
-            _ => PaceMode::Off,
+            "off" | "0" | "false" | "never" => PaceMode::Off,
+            _ => PaceMode::Auto,
         }
     }
 }
@@ -465,7 +476,7 @@ mod tests {
     /// Drive a script of (text, gap-before) through the pacer, ticking every
     /// `tick` in between, and collect everything that was released with the
     /// instant it went out.
-    fn drive(
+    pub(super) fn drive(
         p: &mut StreamPacer,
         script: &[(String, Duration)],
         tick: Duration,
@@ -501,7 +512,7 @@ mod tests {
         (out, events)
     }
 
-    fn joined(script: &[(String, Duration)]) -> String {
+    pub(super) fn joined(script: &[(String, Duration)]) -> String {
         script.iter().map(|(t, _)| t.as_str()).collect()
     }
 
@@ -742,13 +753,178 @@ mod tests {
             ("always", PaceMode::On),
             ("auto", PaceMode::Auto),
             ("AUTO", PaceMode::Auto),
-            ("", PaceMode::Off),
-            ("nonsense", PaceMode::Off),
+            // Unset / unrecognised is AUTO: the real-trace measurement in
+            // `real_trace` showed the default-off decision was made on a
+            // synthetic cadence and does not hold for a real provider.
+            ("", PaceMode::Auto),
+            ("nonsense", PaceMode::Auto),
+            ("false", PaceMode::Off),
+            ("never", PaceMode::Off),
         ] {
             // SAFETY: single-threaded test, and the value is read immediately.
             unsafe { std::env::set_var("OSA_STREAM_PACE", v) };
             assert_eq!(PaceMode::from_env(), want, "for {v:?}");
         }
         unsafe { std::env::remove_var("OSA_STREAM_PACE") };
+    }
+}
+
+#[cfg(test)]
+mod real_trace {
+    use super::tests::{drive, joined};
+    use super::*;
+    use std::time::Duration;
+
+    /// A real arrival trace: 2,442 deltas / 13,187 chars captured off the wire
+    /// from the owner's provider (`glm-5.2:cloud` via ollama) by
+    /// `test/pty/../wire probe`, one `micros size` pair per line.
+    ///
+    /// Every previous attempt at the chunky-streaming complaint was argued from
+    /// a synthetic script whose cadence the test author chose, and every one was
+    /// wrong. This is the measured cadence instead.
+    const TRACE: &str = include_str!("../render/stream_trace.txt");
+
+    fn script() -> Vec<(String, Duration)> {
+        let mut out = Vec::new();
+        let mut prev_us: u64 = 0;
+        for line in TRACE.lines() {
+            let mut it = line.split_whitespace();
+            let (Some(t), Some(n)) = (it.next(), it.next()) else {
+                continue;
+            };
+            let (t, n) = (t.parse::<u64>().unwrap_or(0), n.parse::<usize>().unwrap_or(0));
+            if n == 0 {
+                continue;
+            }
+            out.push(("x".repeat(n), Duration::from_micros(t.saturating_sub(prev_us))));
+            prev_us = t;
+        }
+        out
+    }
+
+    fn pct(xs: &[usize], p: f64) -> usize {
+        if xs.is_empty() {
+            return 0;
+        }
+        let mut s = xs.to_vec();
+        s.sort_unstable();
+        s[((p / 100.0 * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)]
+    }
+
+    /// Replay the trace through the REAL loop model: deltas accumulate as they
+    /// arrive, and a frame paints at most every 16ms (`MIN_DRAW_INTERVAL`),
+    /// revealing everything released since the previous frame.
+    ///
+    /// The first version of this reused the unit-test `drive` helper, which
+    /// pushes one delta per step — so it reported the delta-size distribution
+    /// (p90 = 12 chars) and said nothing at all about what a paint shows. What
+    /// makes the screen look lumpy is a frame revealing a whole CLUMP at once.
+    fn stats(mode: PaceMode) -> (bool, Vec<usize>) {
+        let sc = script();
+        let mut p = StreamPacer::new(mode);
+        let frame = Duration::from_millis(16);
+
+        let start = Instant::now();
+        let mut arrive = start;
+        let mut queue: Vec<(Instant, String)> = Vec::new();
+        for (text, gap) in &sc {
+            arrive += *gap;
+            queue.push((arrive, text.clone()));
+        }
+        let end = arrive;
+
+        let mut out = String::new();
+        let mut paints = Vec::new();
+        let mut pending = String::new();
+        let mut i = 0usize;
+        let mut f = start;
+        while f <= end + Duration::from_millis(400) {
+            while i < queue.len() && queue[i].0 <= f {
+                pending.push_str(&p.push(&queue[i].1, queue[i].0));
+                i += 1;
+            }
+            pending.push_str(&p.tick(f));
+            if !pending.is_empty() {
+                paints.push(pending.chars().count());
+                out.push_str(&pending);
+                pending.clear();
+            }
+            f += frame;
+        }
+        out.push_str(&p.flush());
+
+        assert_eq!(
+            out.chars().count(),
+            joined(&sc).chars().count(),
+            "the pacer must never drop or duplicate a character"
+        );
+        (p.is_engaged(), paints)
+    }
+
+    #[test]
+    fn report_the_real_paint_distribution() {
+        let (eng_off, off) = stats(PaceMode::Off);
+        let (eng_on, on) = stats(PaceMode::Auto);
+
+        println!("\n  chars revealed per paint, real trace (16ms frames)\n");
+        let rows: [(&str, bool, &Vec<usize>); 2] =
+            [("off", eng_off, &off), ("auto", eng_on, &on)];
+        for (name, eng, v) in rows {
+            println!(
+                "  {name:5} engaged={eng:5}  paints={:5}  p50={:4}  p90={:4}  p99={:4}  max={:4}",
+                v.len(),
+                pct(v, 50.0),
+                pct(v, 90.0),
+                pct(v, 99.0),
+                v.iter().copied().max().unwrap_or(0)
+            );
+        }
+    }
+
+    /// The property that matters on screen: no single paint dumps a slab.
+    ///
+    /// Asserted on the DISTRIBUTION rather than on `is_engaged()`, which
+    /// reports the pacer's state after the stream has ended (by which point it
+    /// has disengaged) and so says nothing about what happened during it.
+    #[test]
+    fn pacing_flattens_the_tail_on_a_real_stream() {
+        let (_, off) = stats(PaceMode::Off);
+        let (_, on) = stats(PaceMode::Auto);
+
+        // The slab is the complaint. Unpaced, this trace puts 358 characters
+        // into a single frame; that is what reads as "it streams in chunks".
+        let (max_off, max_on) = (
+            off.iter().copied().max().unwrap_or(0),
+            on.iter().copied().max().unwrap_or(0),
+        );
+        assert!(
+            max_on * 2 <= max_off,
+            "worst paint must be at least halved: {max_on} vs {max_off}"
+        );
+
+        // And the tail as a whole, not just its single worst point.
+        assert!(
+            pct(&on, 99.0) < pct(&off, 99.0),
+            "p99 paint must improve: {} vs {}",
+            pct(&on, 99.0),
+            pct(&off, 99.0)
+        );
+
+        // Smoothing must not become a stutter: the median paint may not grow.
+        assert!(
+            pct(&on, 50.0) <= pct(&off, 50.0),
+            "median paint got worse: {} vs {}",
+            pct(&on, 50.0),
+            pct(&off, 50.0)
+        );
+
+        // Paint count must stay under the 60fps frame budget for this trace's
+        // duration — smoothing by painting far more often is not a win.
+        assert!(
+            on.len() < off.len() * 2,
+            "paint count nearly doubled: {} vs {}",
+            on.len(),
+            off.len()
+        );
     }
 }
