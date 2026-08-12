@@ -149,7 +149,12 @@ defmodule OptimalSystemAgent.MixProject do
         # scripts are byte-for-byte unchanged.
         include_executables_for: [:unix, :windows],
         applications: [runtime_tools: :permanent],
-        steps: [:assemble, &copy_go_tokenizer/1, &copy_osagent_wrapper/1],
+        steps: [
+          :assemble,
+          &prune_build_artifacts/1,
+          &copy_go_tokenizer/1,
+          &copy_osagent_wrapper/1
+        ],
         rel_templates_path: "rel"
       ],
 
@@ -173,6 +178,46 @@ defmodule OptimalSystemAgent.MixProject do
 
   # Copy the pre-built Go tokenizer binary into the release's priv directory.
   # The binary must be compiled before `mix release` (CI does this in a prior step).
+  # Drop build artifacts that `mix release` copies wholesale out of `priv/`.
+  #
+  # `priv/rust/tui/target/` is the Rust build directory. On a machine that has
+  # ever built the TUI it is tens of gigabytes, and `:assemble` copies all of it
+  # into the release: a local `MIX_ENV=prod mix release osagent` produced a
+  # **38 GB** release directory against CI's 32 MB artifact.
+  #
+  # CI only escapes this by accident of ordering — it assembles the OTP release
+  # BEFORE building the Rust TUI, so `target/` does not exist yet. Restore that
+  # directory from a cache, reorder the jobs, or build a release on any
+  # developer machine, and the artifact silently balloons. The release has no
+  # use for the build directory in any case: the TUI ships as its own binary.
+  #
+  # Stale versioned lib dirs from previous builds are removed for the same
+  # reason — `--overwrite` leaves them behind, so an old
+  # `optimal_system_agent-<older>/priv` was contributing another 12 GB.
+  defp prune_build_artifacts(release) do
+    lib = Path.join(release.path, "lib")
+
+    # This build's own Rust target dir.
+    File.rm_rf!(
+      Path.join([lib, "optimal_system_agent-#{@version}", "priv", "rust", "tui", "target"])
+    )
+
+    # Any lib dir left over from an earlier version.
+    case File.ls(lib) do
+      {:ok, entries} ->
+        for entry <- entries,
+            String.starts_with?(entry, "optimal_system_agent-"),
+            entry != "optimal_system_agent-#{@version}" do
+          File.rm_rf!(Path.join(lib, entry))
+        end
+
+      _ ->
+        :ok
+    end
+
+    release
+  end
+
   defp copy_go_tokenizer(release) do
     src = Path.join(["priv", "go", "tokenizer", "osa-tokenizer"])
 

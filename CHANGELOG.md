@@ -9,6 +9,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.89] — displays as `v1.0.089`
+
+### Fixed — the OTP release bundled 38 GB of Rust build artifacts
+
+`mix release` copies `priv/` wholesale, and `priv/rust/tui/target/` is the Rust
+build directory. On any machine that has ever built the TUI that is tens of
+gigabytes, so `MIX_ENV=prod mix release osagent` produced a **38 GB release
+directory** — against CI's 32 MB artifact. Stale versioned lib dirs from earlier
+builds added to it, because `--overwrite` leaves them in place: an old
+`optimal_system_agent-1.0.58/priv` was contributing another 12 GB on its own.
+
+CI escapes this only by accident of ordering: it assembles the OTP release
+*before* building the Rust TUI, so `target/` does not exist yet. Restore that
+directory from a cache, reorder the jobs, or build a release on any developer
+machine, and the artifact silently balloons a thousandfold. The release has no
+use for the build directory either way — the TUI ships as its own binary.
+
+A `prune_build_artifacts/1` release step now removes the Rust target directory
+and any stale versioned lib dir during `:assemble`.
+
+    release dir   38 GB  ->  99 MB
+    tarball       (never completed)  ->  36 MB
+
+Verified by booting the packaged release: it reports `v1.0.88 (b98f1011)` and
+starts normally.
+
 ## [1.0.88] — displays as `v1.0.088`
 
 ### Fixed — the world-state ledger broke the prompt cache on a timer
