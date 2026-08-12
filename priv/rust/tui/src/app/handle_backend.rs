@@ -1305,6 +1305,42 @@ impl App {
                     // must be applied to THIS id (no-op when the flags are unset).
                     self.apply_startup_model_override();
 
+                    // Same argument for the PERMISSION MODE, and for the same
+                    // reason it is applied here rather than only on `SseConnected`.
+                    //
+                    // `--overdrive` seeds the status bar into overdrive at
+                    // construction (`App::new`), but the backend learns the mode
+                    // only from an explicit command, and `set_permission_mode`
+                    // is session-scoped: sent before the session exists it comes
+                    // back `{:error, :no_session}`, which nothing retries. The
+                    // SSE re-assert races that — connect can precede session
+                    // creation — so launching with `--overdrive` left the status
+                    // bar reading "full auto, no prompts" while the backend gate
+                    // was still `ask`.
+                    //
+                    // That is a lie about the effective permission gate, and it
+                    // also desynced `/overdrive`: the toggle reads the TUI's
+                    // mode, saw "on", and so its FIRST press turned overdrive
+                    // OFF — reporting "Overdrive OFF" over a screen that had
+                    // been claiming it was on. The second press then set both
+                    // sides and everything agreed from there.
+                    //
+                    // Re-pushing here, where the session provably exists, is the
+                    // point at which the command can actually be honoured.
+                    let mode = self.status.permission_mode();
+                    self.spawn_backend_command("permission_mode", mode.backend_token());
+                    self.spawn_backend_command(
+                        "dangerous_mode",
+                        if matches!(
+                            mode,
+                            crate::components::status_bar::PermissionMode::BypassPermissions
+                        ) {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                    );
+
                     if resumed {
                         // Folder already had a conversation — pull its history back in
                         // so the user sees where they left off (Claude Code style).

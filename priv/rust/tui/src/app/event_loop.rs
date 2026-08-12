@@ -941,8 +941,7 @@ impl App {
 
             // Height the inline live region wants right now (grows with the
             // composer, always clamped to the terminal so it can't overflow).
-            let desired_inline_h =
-                self.grow_with_headroom(self.desired_inline_height(size), size, cur_inline_h);
+            let desired_inline_h = self.desired_inline_height(size);
             // Did a terminal resize (pane split / drag) land since the last
             // frame? Consumed once here. The whole event backlog is drained by
             // `dispatch_event` before this runs, so a burst of Resize events from
@@ -2051,47 +2050,6 @@ impl App {
         // would be held by the transient-dip debounce for ~0.8s.
         self.resize_dirty = true;
         true
-    }
-
-    /// Rows of slack to reserve ahead of a growing streaming preview.
-    ///
-    /// The live region used to grow exactly one row at a time, and every one of
-    /// those rows committed a viewport rebuild: scroll-region rewrite plus a
-    /// full repaint of the region, **26 of them in a single 5-second turn**.
-    /// Painting is blocked for the duration of each, so the text that arrives
-    /// meanwhile lands in one slab on the far side — which is the "streams in
-    /// chunks" complaint. About 5% of paints were carrying half the reply, with
-    /// single frames up to 330 characters.
-    ///
-    /// Rebuild cost is per-rebuild, not per-row, so growing in steps of this
-    /// many rows cuts the count by roughly this factor (26 → ~4) for the same
-    /// final height. Eight is the largest step that still fits comfortably on a
-    /// short terminal; the reservation is clamped below so it can never take the
-    /// transcript's last rows.
-    const GROW_HEADROOM: u16 = 8;
-
-    /// Round a GROWING live region up to the next [`GROW_HEADROOM`] boundary.
-    ///
-    /// Applies only while a turn is streaming, where the region acts as a
-    /// high-water mark: it grows in steps and never shrinks mid-turn, because
-    /// the 1-tick shrink debounce would otherwise reclaim the headroom on the
-    /// very next tick and cost two rebuilds instead of saving any.
-    /// `settle_turn_chrome` returns the region to its true height when the turn
-    /// ends. The rounded height is clamped to `term_rows - 1`, the same ceiling
-    /// `desired_inline_height` applies, so headroom can never overflow the
-    /// terminal.
-    fn grow_with_headroom(&self, desired: u16, size: FrameSize, cur: u16) -> u16 {
-        // Only while streaming. An idle composer growing as the user types
-        // should track their text exactly, not jump in eights.
-        if !self.turn_is_active() {
-            return desired;
-        }
-        round_grow(
-            desired,
-            cur,
-            size.rows.saturating_sub(1).max(1),
-            Self::GROW_HEADROOM,
-        )
     }
 
     pub fn desired_inline_height(&self, size: FrameSize) -> u16 {
@@ -4375,98 +4333,5 @@ mod cadence_tests {
         assert!(!is_cadence_event(&Event::Terminal(
             crossterm::event::Event::Resize(80, 24)
         )));
-    }
-}
-
-/// Round a growing live-region height up to the next `step` boundary, clamped
-/// to `ceiling`. Shrinks and steady states pass through untouched.
-///
-/// Split out of [`App::grow_with_headroom`] so the row arithmetic — the part
-/// that decides how many viewport rebuilds a turn pays for — is testable
-/// without an `App`.
-fn round_grow(desired: u16, cur: u16, ceiling: u16, step: u16) -> u16 {
-    if step == 0 {
-        return desired;
-    }
-    // HIGH-WATER MARK for the duration of the turn.
-    //
-    // Rounding the grow up is not enough on its own: `SHRINK_SETTLE_TICKS` is 1,
-    // so the very next tick would report the true (smaller) height and hand the
-    // headroom straight back — one rebuild to take it, one to give it up, and
-    // nothing saved. While the turn streams, the region therefore never reports
-    // a shrink. `settle_turn_chrome` reclaims the rows when the turn ends, which
-    // is the moment the user actually sees the answer settle into place.
-    if desired <= cur {
-        return cur;
-    }
-    let rounded = desired.div_ceil(step).saturating_mul(step);
-    // Never below what the content needs, never above the terminal.
-    rounded.max(desired).min(ceiling.max(desired))
-}
-
-#[cfg(test)]
-mod grow_headroom_tests {
-    use super::round_grow;
-
-    const STEP: u16 = 8;
-    const CEIL: u16 = 40;
-
-    /// Replay a live region growing one row at a time, as a streaming preview
-    /// does, and count how many times the committed height actually CHANGES.
-    /// Each change is one viewport rebuild: a scroll-region rewrite plus a full
-    /// repaint, during which no streaming text can be painted.
-    fn rebuilds(step: u16, from: u16, to: u16) -> usize {
-        let mut cur = from;
-        let mut n = 0;
-        for want in from..=to {
-            let h = round_grow(want, cur, CEIL, step);
-            if h != cur {
-                cur = h;
-                n += 1;
-            }
-        }
-        n
-    }
-
-    #[test]
-    fn growing_one_row_at_a_time_no_longer_rebuilds_per_row() {
-        // The old behaviour: every row committed (step of 1 == no rounding).
-        assert_eq!(rebuilds(1, 3, 29), 26, "precondition: 26 rebuilds, as measured");
-
-        // With headroom the same growth costs a handful.
-        // 26 -> 4: the same growth, a sixth of the viewport rebuilds, and so a
-        // sixth of the windows in which streaming text cannot be painted.
-        let with_headroom = rebuilds(STEP, 3, 29);
-        assert_eq!(with_headroom, 4, "rebuild count for a 3->29 row growth");
-    }
-
-    #[test]
-    fn the_region_is_never_smaller_than_the_content_needs() {
-        // Clipping streaming text off the bottom is the one failure this
-        // optimisation must not introduce, at any width.
-        for cur in 0..40u16 {
-            for desired in 0..40u16 {
-                let h = round_grow(desired, cur, CEIL, STEP);
-                assert!(h >= desired, "cur={cur} desired={desired} gave {h}");
-            }
-        }
-    }
-
-    #[test]
-    fn headroom_never_exceeds_the_terminal() {
-        // Rounding up near the ceiling must clamp, not overflow the viewport.
-        for desired in 30..=CEIL {
-            let h = round_grow(desired, 0, CEIL, STEP);
-            assert!(h <= CEIL, "desired={desired} rounded to {h}, over ceiling {CEIL}");
-        }
-    }
-
-    #[test]
-    fn the_region_never_shrinks_mid_turn() {
-        // Giving rows back while the turn streams costs two rebuilds (one to
-        // take the headroom, one to release it) and saves none. The turn-end
-        // settle is what reclaims them, and it runs outside this function.
-        assert_eq!(round_grow(5, 20, CEIL, STEP), 20);
-        assert_eq!(round_grow(20, 20, CEIL, STEP), 20);
     }
 }

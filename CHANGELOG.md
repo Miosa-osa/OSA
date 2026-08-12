@@ -9,6 +9,52 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.86] — displays as `v1.0.086`
+
+### Reverted — the v1.0.85 grow-headroom change (it caused a visible gap)
+
+v1.0.85 made the inline live region a high-water mark that grew in steps of 8
+rows, on the theory that per-row viewport rebuilds were what made streaming
+arrive in slabs. Reported immediately, and correctly: a **gap** during tool use.
+The region only grew, so once a tool cell had pushed it taller it stayed taller,
+and the unused rows rendered as blank space between the transcript and the live
+preview.
+
+It also did not fix what it was aimed at — streaming still reads as chunked. So
+it was a regression in exchange for nothing, and the whole change is out: call
+site, method, constant and its four tests. The resumable freeze-boundary scan
+from the same release stays, since it is strictly less work per delta and
+changes no output.
+
+**The chunked streaming is therefore still unfixed, and the cause is still not
+known.** Three candidates have now been eliminated by measurement rather than
+argument: syntect highlighting (already memoized, O(N)), per-delta render cost
+(357µs worst case, far under the 16ms frame), and viewport rebuild frequency
+(this change). What remains unexamined is the shape of the deltas arriving on
+the wire — how the provider chunks its SSE, and how the 16ms frame cap
+coalesces what lands inside each window. That needs instrumenting a real
+session, not another bench.
+
+### Fixed — `--overdrive` displayed a permission mode the backend was not in
+
+Launching with `--overdrive` seeds the status bar into overdrive in `App::new`,
+but the backend learns its permission mode only from an explicit command, and
+`set_permission_mode` is session-scoped: sent before the session exists it
+returns `{:error, :no_session}`, which nothing retries. The existing re-assert
+on `SseConnected` races session creation and can land first.
+
+The result was a status bar reading "overdrive (full auto), no prompts" over a
+backend gate that was still `ask` — a lie about the effective permission state,
+in a display whose entire job is to tell you whether tools run unprompted.
+
+It also desynced the `/overdrive` command, which is how it surfaced: the toggle
+reads the TUI's mode, saw "on", and so its FIRST press turned overdrive *off*,
+announcing "Overdrive OFF" over a screen that had been claiming it was on. The
+second press set both sides, and everything agreed from then on.
+
+Mode + `dangerous_mode` are now also pushed from the `SessionCreated` handler,
+where the session provably exists and the command can actually be honoured.
+
 ## [1.0.85] — displays as `v1.0.085`
 
 ### Fixed — streaming arrived in slabs
