@@ -9,6 +9,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.90] — displays as `v1.0.090`
+
+### Fixed — the CLI banner stated two numbers that were both false
+
+It printed `128K context · 81 tools`. The real values for that session were
+**1M context · 37 tools**.
+
+* The window came from `Application.get_env(:max_context_tokens, 128_000)` — a
+  static config default with no relationship to the model in use. A 1M-window
+  model printed "128K" on every single launch. Same defect as the small-window
+  gate fixed in v1.0.84: a surface stating a fabricated number instead of asking
+  `Registry.effective_context_window/2`, which had the right answer all along.
+* The tool count came from `list_tools_direct/0`, the whole registry, while the
+  model is sent `list_active/0`. The banner claimed more than double the tools
+  the agent can actually call.
+
+Both now read from the same functions the agent itself uses.
+
 ## [1.0.89] — displays as `v1.0.089`
 
 ### Fixed — the OTP release bundled 38 GB of Rust build artifacts

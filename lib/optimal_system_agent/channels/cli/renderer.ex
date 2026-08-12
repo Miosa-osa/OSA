@@ -27,15 +27,32 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     cwd = prompt_dir()
     width = min(terminal_width(), 80)
 
+    # Tools the MODEL actually receives, not everything registered.
+    #
+    # This counted `list_tools_direct/0`, the full registry — 81 on this
+    # install — while the model is sent `list_active/0`, which is 37. The banner
+    # was reporting more than double the tools the agent can actually call.
     tool_count =
       try do
-        length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
+        length(OptimalSystemAgent.Tools.Registry.list_active())
       rescue
         _ -> 0
       end
 
-    # Context window size from config
-    ctx_window = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    # The model's REAL context window, asked of the registry.
+    #
+    # This read `:max_context_tokens` from config, whose default is 128_000 —
+    # a static number with no relationship to the model in use. A 1M-window
+    # model (`glm-5.2:cloud`) printed "128K context" on every launch. Same
+    # defect as the small-window gate fixed in v1.0.84: a surface stating a
+    # fabricated number instead of asking the one function that knows.
+    ctx_window =
+      try do
+        OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider) ||
+          Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+      rescue
+        _ -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+      end
 
     ctx_display =
       if ctx_window >= 1_000_000,
