@@ -102,3 +102,9 @@ desktop/vite.config.ts.timestamp-*
 # branch that can never be pushed.
 .axon/
 .serena/
+
+# Release artifacts built by hand for a GitHub Release upload.
+# These were committed by accident in v1.0.089/090, adding ~46 MB of binary to
+# the repo per release. They are build OUTPUT — they belong on the release, not
+# in history.
+dist/
