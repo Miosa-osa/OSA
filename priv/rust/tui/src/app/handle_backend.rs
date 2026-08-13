@@ -573,10 +573,12 @@ impl App {
                         name, duration_ms
                     );
                 } else if kind.is_collapsible() {
-                    // A different collapsible kind breaks the run.
-                    if !self.collapse.is_empty() && !self.collapse.family_matches(&kind) {
-                        self.flush_collapse();
-                    }
+                    // A different foldable kind joins the SAME run in its own
+                    // bucket — it no longer breaks it. That is what turns three
+                    // consecutive lines into one `Read 1 skill, Searched 8
+                    // patterns, Listed 4 dirs` row. The run is still broken by
+                    // assistant prose, a non-foldable tool, a permission prompt
+                    // and turn end, all handled at their own sites.
                     self.collapse.add(&kind, &args, success);
                     debug!(
                         "Tool call end (collapsed): {} ({}ms, success={})",

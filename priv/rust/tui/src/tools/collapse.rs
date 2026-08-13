@@ -11,32 +11,205 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// Classification of a finished tool call for collapse grouping.
+/// Semantic kind of a finished tool call.
+///
+/// Verb, noun and fold policy live HERE, on the kind, and never in the
+/// formatter. That placement is the whole point: a newly-added tool that
+/// forgets to declare its vocabulary fails to compile rather than silently
+/// rendering as `Ran 1 tools`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolKind {
+    /// A file read.
+    File,
+    /// A read whose target is a skill definition — counted separately from
+    /// files on purpose, because "a skill was loaded" is not "a file was read".
+    Skill,
+    /// Pattern search — grep / glob / rg.
     Search,
-    Read,
-    List,
-    Shell,
-    Mcp(String),
+    /// Directory listing.
+    Dir,
+    /// URL content retrieval.
+    WebFetch,
+    /// Web search.
+    WebSearch,
+    /// Memory search.
+    MemorySearch,
+    /// MCP tool *discovery*.
+    IntegrationSearch,
+    /// Subagent lifecycle.
+    Subagent,
+    /// Shell execute.
+    Command,
+    /// File edit **and** file write. There is deliberately no separate "write"
+    /// kind: the reader cares that files changed, not which syscall did it.
+    EditFile,
+    /// MCP tool *dispatch*, grouped by server.
+    McpCall(String),
+    /// Anything classified but unrecognised.
+    OtherTool,
+    /// Lifecycle chrome — never labelled, never counted.
     NonCollapsible,
 }
 
 impl ToolKind {
-    pub fn is_collapsible(&self) -> bool {
-        !matches!(self, ToolKind::NonCollapsible)
+    /// Past tense, or the present participle while the run is still going.
+    pub fn verb(&self, running: bool) -> &'static str {
+        use ToolKind::*;
+        match self {
+            File | Skill => {
+                if running {
+                    "Reading"
+                } else {
+                    "Read"
+                }
+            }
+            Search | WebSearch | MemorySearch | IntegrationSearch => {
+                if running {
+                    "Searching"
+                } else {
+                    "Searched"
+                }
+            }
+            Dir => {
+                if running {
+                    "Listing"
+                } else {
+                    "Listed"
+                }
+            }
+            WebFetch => {
+                if running {
+                    "Fetching"
+                } else {
+                    "Fetched"
+                }
+            }
+            Subagent | Command | OtherTool => {
+                if running {
+                    "Running"
+                } else {
+                    "Ran"
+                }
+            }
+            EditFile => {
+                if running {
+                    "Editing"
+                } else {
+                    "Edited"
+                }
+            }
+            McpCall(_) => {
+                if running {
+                    "Calling"
+                } else {
+                    "Called"
+                }
+            }
+            NonCollapsible => "",
+        }
     }
 
-    /// Bucket key — two kinds with the same key merge into one summary.
-    fn family_key(&self) -> Option<String> {
+    /// Pluralization is strictly `count == 1 ? singular : plural`. No special
+    /// cases and no zero form — a bucket with zero calls does not exist.
+    ///
+    /// `dir` and `MCP tool` are abbreviated deliberately: the summary is ONE
+    /// row competing for width with three or four other clauses, and
+    /// `directories` costs eight columns for no information.
+    pub fn noun(&self, count: usize) -> &'static str {
+        let one = count == 1;
+        use ToolKind::*;
         match self {
-            ToolKind::Search => Some("search".to_string()),
-            ToolKind::Read => Some("read".to_string()),
-            ToolKind::List => Some("list".to_string()),
-            ToolKind::Shell => Some("shell".to_string()),
-            ToolKind::Mcp(server) => Some(format!("mcp:{}", server)),
-            ToolKind::NonCollapsible => None,
+            File | EditFile => {
+                if one {
+                    "file"
+                } else {
+                    "files"
+                }
+            }
+            Skill => {
+                if one {
+                    "skill"
+                } else {
+                    "skills"
+                }
+            }
+            Search => {
+                if one {
+                    "pattern"
+                } else {
+                    "patterns"
+                }
+            }
+            Dir => {
+                if one {
+                    "dir"
+                } else {
+                    "dirs"
+                }
+            }
+            WebFetch | WebSearch => {
+                if one {
+                    "website"
+                } else {
+                    "websites"
+                }
+            }
+            MemorySearch => {
+                if one {
+                    "memory"
+                } else {
+                    "memories"
+                }
+            }
+            IntegrationSearch | McpCall(_) => {
+                if one {
+                    "MCP tool"
+                } else {
+                    "MCP tools"
+                }
+            }
+            Subagent => {
+                if one {
+                    "subagent"
+                } else {
+                    "subagents"
+                }
+            }
+            Command => {
+                if one {
+                    "command"
+                } else {
+                    "commands"
+                }
+            }
+            OtherTool => {
+                if one {
+                    "tool"
+                } else {
+                    "tools"
+                }
+            }
+            NonCollapsible => "",
         }
+    }
+
+    /// Whether a call of this kind folds into the aggregated summary row.
+    ///
+    /// The "label-only" kinds return false: a shell command, a diff, an MCP
+    /// dispatch, a web result or a subagent block is usually the most
+    /// interesting thing on screen and keeps its own full rendering. Their
+    /// vocabulary still exists so a *truncation* header can say `Ran 6
+    /// commands` about rows it is hiding.
+    pub fn folds_eagerly(&self) -> bool {
+        use ToolKind::*;
+        matches!(
+            self,
+            File | Skill | Search | Dir | MemorySearch | IntegrationSearch
+        )
+    }
+
+    pub fn is_collapsible(&self) -> bool {
+        self.folds_eagerly()
     }
 }
 
@@ -44,10 +217,10 @@ impl ToolKind {
 pub fn classify(name: &str, args: &str) -> ToolKind {
     let lower = name.to_lowercase();
 
-    // MCP tools: mcp__server__tool → group by server.
+    // MCP tools: mcp__server__tool → dispatch, grouped by server.
     if lower.starts_with("mcp__") {
         let server = lower.split("__").nth(1).unwrap_or("mcp").to_string();
-        return ToolKind::Mcp(server);
+        return ToolKind::McpCall(server);
     }
 
     match lower.as_str() {
@@ -55,15 +228,46 @@ pub fn classify(name: &str, args: &str) -> ToolKind {
         // search/read/list command pipelines collapse; any other command
         // renders in full with its `● Bash(cmd)` header + `⎿` output block.
         "bash" | "run_bash_command" | "shell" | "shell_execute" => classify_shell_command(args),
-        // Read-family.
-        "read" | "read_file" | "file_read" | "cat" | "head" | "tail" => ToolKind::Read,
+        // Read-family. A read of a skill definition is a Skill, not a File.
+        "read" | "read_file" | "file_read" | "cat" | "head" | "tail" => classify_read(args),
         // Directory listing.
-        "ls" | "list_directory" | "dir_list" | "list_dir" | "tree" | "du" => ToolKind::List,
+        "ls" | "list_directory" | "dir_list" | "list_dir" | "tree" | "du" => ToolKind::Dir,
         // Search / pattern matching.
         "grep" | "file_grep" | "glob" | "file_glob" | "rg" | "search" => ToolKind::Search,
-        // Everything else (edit/write/web/task/…) renders in full.
-        _ => ToolKind::NonCollapsible,
+        // Web. Label-only: OSA's web renderers carry the URL and the citation
+        // list, which a `Fetched 1 website` clause would throw away.
+        "web_fetch" | "webfetch" | "fetch" | "fetch_url" => ToolKind::WebFetch,
+        "web_search" | "websearch" | "search_web" => ToolKind::WebSearch,
+        // Memory / tool discovery — low-information lookups, so they fold.
+        "memory_search" | "mem_search" | "recall" => ToolKind::MemorySearch,
+        "search_tool" | "search_tools" | "find_tool" => ToolKind::IntegrationSearch,
+        // Subagents. Label-only for the same reason as web.
+        "task" | "agent" | "sub_agent" | "subagent" | "delegate" | "orchestrate" => {
+            ToolKind::Subagent
+        }
+        // Edits and writes are one kind.
+        "edit" | "file_edit" | "write" | "file_write" | "file_create" | "multiedit"
+        | "apply_patch" => ToolKind::EditFile,
+        "use_tool" | "call_tool" => ToolKind::McpCall("mcp".to_string()),
+        "skill" | "invoke_skill" | "slash_command" => ToolKind::Skill,
+        // Unclassified: labelled `Ran N tools` in a truncation header, but it
+        // keeps its own full rendering in the transcript.
+        _ => ToolKind::OtherTool,
     }
+}
+
+/// A read is a Skill when its target is a skill definition. Mirrors how
+/// `extract_read_path` already recovers the path.
+fn classify_read(args: &str) -> ToolKind {
+    match extract_read_path(args) {
+        Some(p) if is_skill_path(&p) => ToolKind::Skill,
+        _ => ToolKind::File,
+    }
+}
+
+fn is_skill_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.ends_with("/skill.md") || lower == "skill.md" || lower.contains("/skills/")
 }
 
 /// CC's BASH_* command sets (BashTool.tsx): a compound command collapses only
@@ -125,9 +329,9 @@ fn classify_shell_command(args: &str) -> ToolKind {
     if has_search {
         ToolKind::Search
     } else if has_read {
-        ToolKind::Read
+        ToolKind::File
     } else if has_list {
-        ToolKind::List
+        ToolKind::Dir
     } else {
         ToolKind::NonCollapsible
     }
@@ -147,7 +351,7 @@ pub(crate) fn basename(path: &str) -> &str {
 }
 
 /// `Read foo.rs` / `Read foo.rs, bar.ex` / `Read foo.rs, bar.ex +3 more`.
-fn named_read_summary(paths: &[String]) -> String {
+fn named_read_summary(verb: &str, paths: &[String]) -> String {
     const SHOWN: usize = 3;
     let names: Vec<&str> = paths.iter().map(|p| basename(p)).collect();
     let head = names
@@ -157,123 +361,130 @@ fn named_read_summary(paths: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     if names.len() > SHOWN {
-        format!("Read {} +{} more", head, names.len() - SHOWN)
+        format!("{} {} +{} more", verb, head, names.len() - SHOWN)
     } else {
-        format!("Read {}", head)
+        format!("{} {}", verb, head)
     }
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+/// One clause of the summary row. Buckets are held in call order.
+struct Bucket {
+    kind: ToolKind,
+    calls: usize,
+    /// Read/Skill buckets only, for NAMING rather than counting. Ordered and
+    /// de-duplicated: the summary prints these, so they must appear in the
+    /// order the agent read them — a HashSet would shuffle them every render.
+    read_paths: Vec<String>,
 }
 
-/// Accumulates a run of consecutive same-kind collapsible tools.
+/// Accumulates a maximal consecutive run of eagerly-foldable tool calls.
+///
+/// A run is not restricted to one kind. Each kind gets its own bucket and its
+/// own clause, and the clauses appear in the order their FIRST call happened,
+/// so the row is a literal trace of what the agent did:
+///
+/// ```text
+/// ◆ Read 1 skill, Searched 8 patterns, Listed 4 dirs, Read 2 files
+/// ```
+///
+/// That line legitimately shows the verb `Read` twice — two buckets, two
+/// nouns. Merging them would hide that a skill was loaded.
 #[derive(Default)]
 pub struct Accumulator {
-    family: Option<String>,
-    search_count: usize,
-    read_paths: Vec<String>,
-    read_ops: usize,
-    list_count: usize,
-    shell_count: usize,
-    mcp_server: Option<String>,
-    mcp_count: usize,
+    buckets: Vec<Bucket>,
     any_error: bool,
+    failed: usize,
 }
 
 impl Accumulator {
     pub fn is_empty(&self) -> bool {
-        self.family.is_none()
-    }
-
-    /// True if `kind` belongs to the currently-accumulating bucket.
-    pub fn family_matches(&self, kind: &ToolKind) -> bool {
-        self.family.as_deref() == kind.family_key().as_deref()
+        self.buckets.is_empty()
     }
 
     /// Fold one finished collapsible tool into the run.
     pub fn add(&mut self, kind: &ToolKind, args: &str, success: bool) {
-        self.family = kind.family_key();
+        if matches!(kind, ToolKind::NonCollapsible) {
+            return;
+        }
         if !success {
             self.any_error = true;
+            self.failed += 1;
         }
-        match kind {
-            ToolKind::Read => {
-                if let Some(p) = extract_read_path(args) {
-                    // Ordered + de-duplicated: the summary NAMES these files, so
-                    // they must appear in the order the agent read them. A
-                    // HashSet would shuffle them on every render.
-                    if !self.read_paths.contains(&p) {
-                        self.read_paths.push(p);
-                    }
-                } else {
-                    self.read_ops += 1;
+        // Linear lookup, APPEND on miss. Append-on-miss *is* the ordering rule:
+        // clauses come out in first-call order, not category order.
+        let idx = match self.buckets.iter().position(|b| b.kind == *kind) {
+            Some(i) => i,
+            None => {
+                self.buckets.push(Bucket {
+                    kind: kind.clone(),
+                    calls: 0,
+                    read_paths: Vec::new(),
+                });
+                self.buckets.len() - 1
+            }
+        };
+        let bucket = &mut self.buckets[idx];
+        bucket.calls += 1;
+        if matches!(kind, ToolKind::File | ToolKind::Skill) {
+            if let Some(p) = extract_read_path(args) {
+                if !bucket.read_paths.contains(&p) {
+                    bucket.read_paths.push(p);
                 }
             }
-            ToolKind::List => self.list_count += 1,
-            ToolKind::Shell => self.shell_count += 1,
-            ToolKind::Search => self.search_count += 1,
-            ToolKind::Mcp(server) => {
-                self.mcp_server = Some(server.clone());
-                self.mcp_count += 1;
-            }
-            ToolKind::NonCollapsible => {}
         }
+    }
+
+    /// The clause join of §2.2: `verb SP count SP noun`, separated by `", "`,
+    /// no trailing separator and no Oxford-comma special case.
+    fn label(&self, running: bool) -> String {
+        // A run whose only bucket is a named read stays named. Naming files is
+        // strictly more informative than counting them — "Read 1 file" told the
+        // operator nothing about WHICH file. With a second bucket present the
+        // row falls back to counts so it stays one line.
+        if self.buckets.len() == 1 {
+            let only = &self.buckets[0];
+            if matches!(only.kind, ToolKind::File | ToolKind::Skill)
+                && !only.read_paths.is_empty()
+            {
+                return named_read_summary(only.kind.verb(running), &only.read_paths);
+            }
+        }
+        let mut out = String::new();
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let n = bucket.calls;
+            out.push_str(bucket.kind.verb(running));
+            out.push(' ');
+            out.push_str(&n.to_string());
+            out.push(' ');
+            out.push_str(bucket.kind.noun(n));
+        }
+        out
     }
 
     fn summary_text(&self) -> String {
-        if self.shell_count > 0 {
-            let n = self.shell_count;
-            format!("Ran {} shell command{}", n, plural(n))
-        } else if !self.read_paths.is_empty() {
-            // NAME the files. "Read 1 file" told the operator nothing about
-            // WHICH file, which made a transcript of several reads unusable.
-            named_read_summary(&self.read_paths)
-        } else if self.read_ops > 0 {
-            // Anonymous fallback: the call carried no recoverable path.
-            let n = self.read_ops;
-            format!("Read {} file{}", n, plural(n))
-        } else if self.list_count > 0 {
-            let n = self.list_count;
-            let noun = if n == 1 { "directory" } else { "directories" };
-            format!("Listed {} {}", n, noun)
-        } else if self.search_count > 0 {
-            let n = self.search_count;
-            format!("Searched for {} pattern{}", n, plural(n))
-        } else if self.mcp_count > 0 {
-            let server = self.mcp_server.clone().unwrap_or_default();
-            if self.mcp_count == 1 {
-                format!("Queried {}", server)
-            } else {
-                format!("Queried {} {} times", server, self.mcp_count)
-            }
-        } else {
-            String::new()
-        }
+        self.label(false)
     }
 
-    /// Emit the run as a single styled scrollback line and reset. Returns None
-    /// when the accumulator is empty.
-    pub fn take_summary_line(&mut self) -> Option<Line<'static>> {
+    /// The one row shape, finished or running. Both forms MUST come from this
+    /// single function — two code paths drift, and the composer jumps when
+    /// they do.
+    fn render_line(&self, running: bool) -> Option<Line<'static>> {
         if self.is_empty() {
             return None;
         }
-        let text = self.summary_text();
-        let err = self.any_error;
-        *self = Accumulator::default();
+        let text = self.label(running);
         if text.is_empty() {
             return None;
         }
         let theme = crate::style::theme();
         // A failed run in a collapsed batch was signalled ONLY by recolouring
-        // this bullet — so `● Searched for 1 pattern` looked identical whether
+        // this bullet — so `● Searched 1 pattern` looked identical whether
         // the grep succeeded or blew up, under NO_COLOR or to a colour-blind
         // reader. Carry the failure in the glyph and in words.
-        let (icon, icon_color) = if err {
+        let (icon, icon_color) = if self.any_error {
             ("✗".to_string(), theme.colors.error)
         } else {
             (crate::tools::tool_bullet().to_string(), theme.colors.success)
@@ -285,13 +496,34 @@ impl Accumulator {
             ),
             Span::styled(text, Style::default().fg(theme.colors.muted)),
         ];
-        if err {
+        if self.failed > 1 {
+            spans.push(Span::styled(
+                format!(" · {} failed", self.failed),
+                Style::default().fg(theme.colors.error),
+            ));
+        } else if self.any_error {
             spans.push(Span::styled(
                 " (failed)".to_string(),
                 Style::default().fg(theme.colors.error),
             ));
         }
         Some(Line::from(spans))
+    }
+
+    /// Emit the run as a single styled scrollback line and reset. Returns None
+    /// when the accumulator is empty.
+    pub fn take_summary_line(&mut self) -> Option<Line<'static>> {
+        let line = self.render_line(false);
+        *self = Accumulator::default();
+        line
+    }
+
+    /// The same row, in the present tense, without resetting — this is what the
+    /// live activity slot paints while the run is still executing. It is fixed
+    /// at one row and still shows the counts so far; it never degrades to a
+    /// spinner or a generic "working".
+    pub fn live_line(&self) -> Option<Line<'static>> {
+        self.render_line(true)
     }
 }
 
@@ -641,11 +873,11 @@ mod shell_classify_tests {
         );
         assert_eq!(
             classify("bash", r#"{"command":"cat a.txt | head -5"}"#),
-            ToolKind::Read
+            ToolKind::File
         );
         assert_eq!(
             classify("bash", r#"{"command":"ls -la && echo done"}"#),
-            ToolKind::List
+            ToolKind::Dir
         );
     }
 
@@ -665,7 +897,7 @@ mod shell_classify_tests {
     fn read_run(paths: &[&str]) -> String {
         let mut acc = Accumulator::default();
         for p in paths {
-            acc.add(&ToolKind::Read, p, true);
+            acc.add(&ToolKind::File, p, true);
         }
         acc.summary_text()
     }
@@ -697,8 +929,8 @@ mod shell_classify_tests {
     #[test]
     fn a_read_with_no_recoverable_path_falls_back_to_a_count() {
         let mut acc = Accumulator::default();
-        acc.add(&ToolKind::Read, "", true);
-        acc.add(&ToolKind::Read, "", true);
+        acc.add(&ToolKind::File, "", true);
+        acc.add(&ToolKind::File, "", true);
         assert_eq!(acc.summary_text(), "Read 2 files");
     }
 
@@ -708,8 +940,126 @@ mod shell_classify_tests {
         // read-only shell calls never collapsed.
         assert_eq!(
             classify("shell_execute", r#"{"command":"cat a.txt"}"#),
-            ToolKind::Read
+            ToolKind::File
         );
+    }
+}
+
+// ── one row per run, not one row per KIND ───────────────────────────────────
+//
+// A mixed run used to emit a separate line per kind, because a kind change
+// flushed the accumulator. Each kind now gets its own clause in one row, and
+// the clauses come out in the order their first call happened.
+#[cfg(test)]
+mod multi_bucket_summary_tests {
+    use super::*;
+
+    fn run(calls: &[(ToolKind, &str)]) -> String {
+        let mut acc = Accumulator::default();
+        for (kind, args) in calls {
+            acc.add(kind, args, true);
+        }
+        acc.summary_text()
+    }
+
+    #[test]
+    fn a_mixed_run_is_one_row_with_a_clause_per_kind() {
+        let mut calls = vec![(ToolKind::Skill, r#"{"path":"/s/skills/x/SKILL.md"}"#)];
+        calls.extend(std::iter::repeat_n((ToolKind::Search, ""), 8));
+        calls.extend(std::iter::repeat_n((ToolKind::Dir, ""), 4));
+        calls.push((ToolKind::File, r#"{"path":"/a.rs"}"#));
+        calls.push((ToolKind::File, r#"{"path":"/b.rs"}"#));
+        assert_eq!(
+            run(&calls),
+            "Read 1 skill, Searched 8 patterns, Listed 4 dirs, Read 2 files"
+        );
+    }
+
+    #[test]
+    fn clause_order_follows_first_appearance_not_category() {
+        // Same multiset, different call order — the row must read differently.
+        assert_eq!(
+            run(&[(ToolKind::Dir, ""), (ToolKind::Search, "")]),
+            "Listed 1 dir, Searched 1 pattern"
+        );
+        assert_eq!(
+            run(&[(ToolKind::Search, ""), (ToolKind::Dir, "")]),
+            "Searched 1 pattern, Listed 1 dir"
+        );
+    }
+
+    #[test]
+    fn nouns_are_terse_and_pluralize_on_count_alone() {
+        assert_eq!(run(&[(ToolKind::Dir, "")]), "Listed 1 dir");
+        assert_eq!(
+            run(&[(ToolKind::Dir, ""), (ToolKind::Dir, "")]),
+            "Listed 2 dirs"
+        );
+    }
+
+    #[test]
+    fn a_run_of_one_still_folds() {
+        assert_eq!(run(&[(ToolKind::Search, "")]), "Searched 1 pattern");
+    }
+
+    #[test]
+    fn a_read_of_a_skill_definition_is_a_skill_not_a_file() {
+        assert_eq!(
+            classify("read", r#"{"path":"/home/u/.osa/skills/foo/SKILL.md"}"#),
+            ToolKind::Skill
+        );
+        assert_eq!(classify("read", r#"{"path":"/src/main.rs"}"#), ToolKind::File);
+    }
+
+    #[test]
+    fn the_running_form_shows_counts_in_the_present_tense() {
+        let mut acc = Accumulator::default();
+        acc.add(&ToolKind::File, r#"{"path":"/a.rs"}"#, true);
+        acc.add(&ToolKind::Search, "", true);
+        let live: String = acc
+            .live_line()
+            .expect("running run renders")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(live.contains("Reading 1 file"), "{live:?}");
+        assert!(live.contains("Searching 1 pattern"), "{live:?}");
+        // live_line does NOT consume the run.
+        assert!(!acc.is_empty());
+    }
+
+    #[test]
+    fn several_failures_are_counted_not_just_flagged() {
+        let mut acc = Accumulator::default();
+        acc.add(&ToolKind::Search, "", false);
+        acc.add(&ToolKind::Search, "", false);
+        let out: String = acc
+            .take_summary_line()
+            .expect("failed run renders")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(out.contains("2 failed"), "{out:?}");
+    }
+
+    #[test]
+    fn label_only_kinds_keep_their_own_block() {
+        for kind in [
+            ToolKind::Command,
+            ToolKind::EditFile,
+            ToolKind::McpCall("x".to_string()),
+            ToolKind::WebFetch,
+            ToolKind::WebSearch,
+            ToolKind::Subagent,
+            ToolKind::OtherTool,
+        ] {
+            assert!(!kind.folds_eagerly(), "{kind:?} must not fold eagerly");
+            // …but it still has vocabulary, for truncation headers.
+            assert!(!kind.verb(false).is_empty(), "{kind:?} has no verb");
+            assert!(!kind.noun(2).is_empty(), "{kind:?} has no plural noun");
+        }
     }
 
     #[test]
