@@ -42,6 +42,10 @@ pub fn dark() -> Theme {
             button_active_text: hex("#08131A"),
             grad_a: hex("#E6F6FD"),   // OSA logo gradient: near-white light blue →
             grad_b: hex("#06B6D4"),   // OSA blue — visible light→blue fade
+            // Fenced-code block: a full-row background one step off the
+            // terminal ground, plus a body-weight foreground for untagged code.
+            code_bg: hex("#151B26"),
+            code_fg: hex("#D6DEEB"),
             // Word-level diff colors (line bg + brighter changed-word bg).
             diff_del_bg: Color::Rgb(122, 41, 54),
             diff_add_bg: Color::Rgb(34, 92, 43),
@@ -80,6 +84,10 @@ pub fn light() -> Theme {
             button_active_text: hex("#FFFFFF"),
             grad_a: hex("#6D28D9"),
             grad_b: hex("#0891B2"),
+            // Fenced-code block: a full-row background one step off the
+            // terminal ground, plus a body-weight foreground for untagged code.
+            code_bg: hex("#F1F3F5"),
+            code_fg: hex("#1F2328"),
             diff_del_bg: Color::Rgb(255, 230, 230),
             diff_add_bg: Color::Rgb(220, 255, 220),
             diff_del_highlight_fg: Color::Rgb(180, 0, 0),
@@ -117,6 +125,10 @@ pub fn catppuccin() -> Theme {
             button_active_text: hex("#1E1E2E"),
             grad_a: hex("#CBA6F7"),
             grad_b: hex("#89DCEB"),
+            // Fenced-code block: a full-row background one step off the
+            // terminal ground, plus a body-weight foreground for untagged code.
+            code_bg: hex("#181825"),
+            code_fg: hex("#CDD6F4"),
             diff_del_bg: Color::Rgb(60, 15, 20),
             diff_add_bg: Color::Rgb(15, 45, 25),
             diff_del_highlight_fg: Color::Rgb(243, 139, 168),
@@ -154,6 +166,10 @@ pub fn tokyo_night() -> Theme {
             button_active_text: hex("#1A1B26"),
             grad_a: hex("#7AA2F7"),
             grad_b: hex("#7DCFFF"),
+            // Fenced-code block: a full-row background one step off the
+            // terminal ground, plus a body-weight foreground for untagged code.
+            code_bg: hex("#16161E"),
+            code_fg: hex("#C0CAF5"),
             diff_del_bg: Color::Rgb(50, 15, 25),
             diff_add_bg: Color::Rgb(15, 40, 20),
             diff_del_highlight_fg: Color::Rgb(247, 118, 142),

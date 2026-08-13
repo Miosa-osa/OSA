@@ -8,19 +8,29 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Supported constructs:
 ///   - Headers  `# H1` … `###### H6`  — styled per level
 ///   - Fenced code blocks  ` ``` [lang] ` … ` ``` ` — syntax-highlighted via [`crate::render::syntax`]
-///   - Inline code `` `expr` `` — dim style
+///   - Inline code `` `expr` `` — code colour + BOLD, no background
 ///   - **Bold**  `**text**`
 ///   - *Italic*  `*text*`
-///   - `~~text~~` — passes through literally (strikethrough deliberately
-///     disabled, CC parity: models write `~~100ms~~` meaning "approximately")
-///   - Task checkboxes  `- [ ] todo` / `- [x] done` — green checkmark or muted circle
-///   - Unordered lists  `- item` / `* item` / `+ item` — nested with indent-aware bullets
-///   - Ordered lists    `1. item` — depth-styled markers (1. / a. / i.)
+///   - `~~text~~` — strikethrough; a SINGLE `~` is always literal (`~50ms`)
+///   - Task checkboxes  `- [ ] todo` / `- [x] done` — green checkmark or muted
+///     circle, never struck through
+///   - Unordered lists  `- item` / `* item` — one `•` at every depth, nested by
+///     the model's OWN leading whitespace
+///   - Ordered lists    `1. item` / `10) item` — the marker is styled, never rewritten
 ///   - Links  `[text](url)` — text in cyan+underline followed by the URL in dim parens
 ///   - Blockquotes  `> text` — muted italic with `│ ` prefix
-///   - Horizontal rules  `---` / `***` — full-width `─`
-///   - GFM pipe tables  `| H1 | H2 |` — styled with box-drawing borders
+///   - Horizontal rules  `---` / `***` — a three-column `───`
+///   - GFM pipe tables  `| H1 | H2 |` — box-drawing grid, content-sized columns,
+///     cells wrap WITH their inline styling
 ///   - Plain text — unstyled
+///
+/// # Spacing
+///
+/// `k` consecutive newlines produce `k − 1` blank rows, uniformly, for every
+/// pair of block types. There is no `blank_lines_between(a, b)` table and there
+/// must not be one — see `docs/design/tui-output-rendering.md` §A.5. The single
+/// exception is one synthetic blank row before an *opening* code fence whose
+/// previous row has content, because the fence line itself is erased.
 pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
     // `input` is the model's reply, verbatim. Everything below styles it with
     // ratatui `Style` values rather than escape bytes, so the *only* way a
@@ -66,6 +76,14 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         if raw_line.trim_start().starts_with("```") {
             if !in_code_block {
                 flush_para!(); // a fence right after prose closes the paragraph
+                // …and so does a fence right after a table. Without this the
+                // table stayed in its accumulator until the NEXT prose line and
+                // was emitted *below* the code block it preceded.
+                if in_table {
+                    in_table = false;
+                    lines.extend(render_table(&table_buf, width, &theme));
+                    table_buf.clear();
+                }
             }
             if in_code_block {
                 // Closing fence: flush accumulated code.
@@ -77,9 +95,30 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 code_lines.clear();
             } else {
                 // Opening fence: extract optional language tag.
+                //
+                // Take the FIRST whitespace-delimited word of the info string,
+                // not the whole remainder: models write ```` ```rust ignore ````
+                // and ```` ```python title=foo.py ````, and matching the whole
+                // string by token finds no syntax at all, silently dropping the
+                // highlighting for the entire block.
                 in_code_block = true;
                 let rest = raw_line.trim_start().trim_start_matches('`').trim();
-                code_lang = rest.to_owned();
+                code_lang = rest.split_whitespace().next().unwrap_or("").to_owned();
+
+                // §A.5 Modifier 3 — the ONLY blank row this renderer
+                // manufactures. The fence lines themselves are erased, so
+                // `1. Hello` would otherwise collapse straight onto the first
+                // row of code with no air at all. Conditional on the previous
+                // row being non-empty, so the model's own `\n\n` is never
+                // doubled, and on there BEING a previous row, so a fence at the
+                // start of a streamed tail renders identically to the same
+                // fence inside a one-shot render.
+                if lines
+                    .last()
+                    .is_some_and(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
+                {
+                    lines.push(Line::from(Span::raw("")));
+                }
             }
             continue;
         }
@@ -198,8 +237,11 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         let trimmed = raw_line.trim();
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             flush_para!();
-            let rule = "─".repeat(width.saturating_sub(2) as usize);
-            lines.push(Line::from(Span::styled(rule, theme.faint())));
+            // THREE columns, not the full pane width (§A.1). A full-width rule
+            // inside a reply competes with OSA's own turn separator, which *is*
+            // legitimately full width; at three columns the two can never be
+            // confused for one another.
+            lines.push(Line::from(Span::styled("───".to_string(), theme.faint())));
             continue;
         }
 
@@ -228,9 +270,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         // ── Task checkboxes ──────────────────────────────────────────────────
         if let Some((checked, text)) = detect_checkbox(trimmed) {
             flush_para!();
-            let indent = raw_line.len() - raw_line.trim_start().len();
-            let indent_level = indent / 2;
-            let indent_str = "  ".repeat(indent_level);
+            let indent_str = source_indent(raw_line);
 
             let icon_str = if checked {
                 format!("{}✓ ", indent_str)
@@ -242,8 +282,12 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             } else {
                 theme.faint()
             };
+            // A checked item is NOT struck through (§A.1). Models routinely
+            // write checked items whose text is still the thing the reader
+            // needs to read; `CROSSED_OUT` renders exactly that content as
+            // retracted, and on several terminals as barely legible.
             let text_style = if checked {
-                theme.faint().add_modifier(Modifier::CROSSED_OUT)
+                theme.faint()
             } else {
                 Style::default()
             };
@@ -268,18 +312,23 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         }
 
         // ── Unordered lists (indent-aware, word-wrapped) ─────────────────────
+        // DELIBERATE DEVIATION from §A.1, which says `+` is not a bullet and
+        // renders literally. Under an overlay renderer "literally" still means
+        // one source line per output row; under this line-oriented rebuilder a
+        // run of `+ a\n+ b` would instead be swallowed by the paragraph
+        // accumulator and glued into a single sentence. Rendering `+` as a
+        // bullet is closer to the intent than that is.
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
             flush_para!();
             let text = &trimmed[2..];
-            let indent = raw_line.len() - raw_line.trim_start().len();
-            let indent_level = indent / 2;
-            let indent_str = "  ".repeat(indent_level);
-            let bullet = match indent_level {
-                0 => "• ",
-                1 => "◦ ",
-                _ => "▪ ",
-            };
-            let prefix = format!("{}{}", indent_str, bullet);
+            // ONE bullet glyph at every depth, and the model's OWN indentation
+            // (§A.1). The old `• / ◦ / ▪` ladder was keyed on `indent / 2`,
+            // which classifies 3-space CommonMark nesting and 4-space nesting
+            // alike and so gave the same logical depth a different glyph
+            // depending only on how the model happened to indent. Reusing the
+            // source's leading whitespace verbatim is both simpler and correct.
+            let indent_str = source_indent(raw_line);
+            let prefix = format!("{}• ", indent_str);
             // DISPLAY COLUMNS, not bytes. The bullet glyphs are multi-byte but
             // single-column ("• " is 4 bytes / 2 columns), so `.len()` here indented
             // every continuation line 2 columns further than its own first line — a
@@ -304,37 +353,37 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         }
 
         // ── Ordered lists (indent-aware, depth-styled markers) ───────────────
-        if let Some(pos) = trimmed.find(". ") {
-            let num_part = &trimmed[..pos];
-            if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
-                flush_para!();
-                let text = &trimmed[pos + 2..];
-                let indent = raw_line.len() - raw_line.trim_start().len();
-                let indent_level = indent / 2;
-                let indent_str = "  ".repeat(indent_level);
-                let marker = match num_part.parse::<usize>() {
-                    Ok(n) => format_list_number(n, indent_level),
-                    Err(_) => format!("{}.", num_part),
-                };
-                // Hanging-indent wrap, mirroring the unordered-list branch: the
-                // numbered marker on the first line, blank padding of the same
-                // width on continuation lines. Without this a long numbered item
-                // clipped at the pane edge and its tail was silently lost.
-                let prefix = format!("{}{} ", indent_str, marker);
-                let prefix_len = prefix.len();
-                let wrap_width = (width as usize).saturating_sub(prefix_len);
-                for (i, row) in parse_and_wrap(text, wrap_width, &theme).into_iter().enumerate() {
-                    let mut spans = Vec::new();
-                    if i == 0 {
-                        spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
-                    } else {
-                        spans.push(Span::styled(" ".repeat(prefix_len), Style::default()));
-                    }
-                    spans.extend(row);
-                    lines.push(Line::from(spans));
+        // The marker is STYLED, never rewritten (§A.1): `1. `, `10) `, `3. `
+        // all render literally. The old `1. / a. / i.` depth ladder renamed the
+        // model's own numbering, which is wrong every time the model was
+        // numbering something the prose then refers back to. Both `. ` and `) `
+        // separators are recognised.
+        if let Some(marker) = ordered_marker(trimmed) {
+            flush_para!();
+            let text = trimmed[marker.len() + 1..].trim_start_matches(' ');
+            let indent_str = source_indent(raw_line);
+            // Hanging-indent wrap, mirroring the unordered-list branch: the
+            // numbered marker on the first line, blank padding of the same
+            // width on continuation lines. Without this a long numbered item
+            // clipped at the pane edge and its tail was silently lost.
+            //
+            // Measured in DISPLAY COLUMNS. `.len()` (what this used to use)
+            // over-indents every continuation row of a multi-byte marker and
+            // narrows the wrap width by the same amount.
+            let prefix = format!("{}{} ", indent_str, marker);
+            let prefix_cols = UnicodeWidthStr::width(prefix.as_str());
+            let wrap_width = (width as usize).saturating_sub(prefix_cols);
+            for (i, row) in parse_and_wrap(text, wrap_width, &theme).into_iter().enumerate() {
+                let mut spans = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
+                } else {
+                    spans.push(Span::styled(" ".repeat(prefix_cols), Style::default()));
                 }
-                continue;
+                spans.extend(row);
+                lines.push(Line::from(spans));
             }
+            continue;
         }
 
         // ── Empty lines ───────────────────────────────────────────────────────
@@ -347,6 +396,20 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         // ── Plain paragraph line: accumulate for soft-break merging ────────────
         // The paragraph is flushed by the next block-level construct, a blank
         // line, or EOF (see `flush_paragraph`).
+        //
+        // §A.1 CONTINUATION GUARD. A soft break collapses to a space *except*
+        // when the byte right after it is `' '`, `'\t'`, `'>'` or `'|'` — those
+        // four signal a list, blockquote or table continuation and the line
+        // ending has to survive so the continuation gets its own row. `>` and
+        // `|` already have their own branches above, so what is left to handle
+        // here is leading whitespace: the previous line is marked as ending in
+        // a break so this indented line starts a row of its own instead of
+        // being glued onto the end of the previous sentence.
+        if raw_line.starts_with([' ', '\t']) {
+            if let Some(last) = para_buf.last_mut() {
+                last.1 = true;
+            }
+        }
         para_buf.push((raw_line.trim_end().to_string(), hard_break));
     }
 
@@ -373,8 +436,26 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 /// Append syntax-highlighted code lines, wrapping any line wider than `width`
 /// on grapheme boundaries so code blocks never clip horizontally (CC parity —
 /// HighlightedCode wraps to the render width).
+///
+/// Every emitted row carries the **full-row code background** (§A.1): the
+/// `Line`-level style sets it, and the row is padded out to `width` so the
+/// background actually paints the trailing empty space rather than stopping at
+/// the last token. This is what makes a fence read as a *block* instead of as
+/// differently-coloured prose. Blank rows inside the block, and the final
+/// newline-less row of an unterminated fence, are padded the same way — which
+/// is why membership is decided by "this row came out of `push_code_lines`"
+/// rather than by re-testing a byte range.
 fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>, width: u16) {
     let max_w = (width as usize).max(1);
+    let bg = crate::style::theme().code_block();
+    let mut emit = |spans: Vec<Span<'static>>| {
+        let w: usize = spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+        let mut spans = spans;
+        if w < max_w {
+            spans.push(Span::styled(" ".repeat(max_w - w), bg));
+        }
+        out.push(Line::from(spans).style(bg));
+    };
     for line in highlighted {
         let total: usize = line
             .spans
@@ -382,7 +463,7 @@ fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
         if total <= max_w {
-            out.push(line);
+            emit(line.spans);
             continue;
         }
         let parts: Vec<(String, Style)> = line
@@ -391,11 +472,11 @@ fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>
             .map(|s| (s.content.to_string(), s.style))
             .collect();
         for row in crate::render::diff::wrap_styled(parts, max_w) {
-            out.push(Line::from(
+            emit(
                 row.into_iter()
                     .map(|(t, st)| Span::styled(t, st))
                     .collect::<Vec<_>>(),
-            ));
+            );
         }
     }
 }
@@ -506,6 +587,35 @@ fn parse_quote_depth(line: &str) -> (usize, String) {
     (depth.max(1), rest.to_string())
 }
 
+/// The model's OWN leading whitespace, verbatim.
+///
+/// List nesting is expressed by the indentation the model typed, not by a
+/// renderer-chosen ladder — see the unordered-list branch. Rounding it to a
+/// multiple of two (`"  ".repeat(indent / 2)`, the previous behaviour) both
+/// mis-classified 3-space CommonMark nesting and silently re-indented output
+/// the model had aligned deliberately. Tabs are already expanded to 4-column
+/// stops by [`expand_tabs`], so this is a display-column-safe run of spaces.
+fn source_indent(raw_line: &str) -> String {
+    raw_line[..raw_line.len() - raw_line.trim_start().len()].to_string()
+}
+
+/// An ordered-list marker at the head of `trimmed`: a run of ASCII digits
+/// followed by `.` or `)` and then a space. Returns the marker INCLUDING its
+/// separator (`"1."`, `"10)"`) and excluding the space, or `None`.
+fn ordered_marker(trimmed: &str) -> Option<String> {
+    let digits = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .filter(|&i| i > 0)?;
+    let sep = trimmed.as_bytes()[digits];
+    if sep != b'.' && sep != b')' {
+        return None;
+    }
+    if trimmed.as_bytes().get(digits + 1) != Some(&b' ') {
+        return None;
+    }
+    Some(trimmed[..=digits].to_string())
+}
+
 /// A setext heading underline: a run of only `=` (level 1) or only `-` (level
 /// 2), non-empty and containing nothing else.
 fn is_setext_underline(line: &str) -> Option<u8> {
@@ -581,11 +691,30 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 
     // Natural column widths: each column's WIDEST cell measured after inline
     // markdown markup is stripped (so `**bold**` measures as `bold`).
+    //
+    // Alongside them, the TWO FLOORS (§A.2). A minimum column width has to be
+    // derived from the content, not fixed at a constant:
+    //
+    //   * `word_floor[c]` — the widest unbreakable word in the column, using
+    //     the same break rule the cell wrapper uses. Below this the wrapper has
+    //     to hard-split words mid-token.
+    //   * `hard_floor[c]` — the widest single grapheme. This is the narrowest
+    //     width at which text can reflow at all without losing content; a
+    //     column of CJK cannot be one column wide.
+    //
+    // A constant `MIN_COL_W = 3` starves a column below its longest word on one
+    // side and wastes room on the other, and says nothing at all about whether
+    // a bordered table is drawable.
     let mut natural: Vec<usize> = vec![MIN_COL_W; num_cols];
+    let mut word_floor: Vec<usize> = vec![1; num_cols];
+    let mut hard_floor: Vec<usize> = vec![0; num_cols];
     for row in &parsed {
         for (i, cell) in row.iter().enumerate() {
             if i < num_cols {
+                let plain = inline_plain(cell, theme);
                 natural[i] = natural[i].max(inline_visible_width(cell, theme));
+                word_floor[i] = word_floor[i].max(widest_unbreakable_word(&plain));
+                hard_floor[i] = hard_floor[i].max(widest_grapheme(&plain));
             }
         }
     }
@@ -599,10 +728,18 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     // trailing border.
     let chrome = 4 + num_cols.saturating_sub(1) * 3;
 
-    // Too narrow for a bordered table even at one column per cell: a box drawn
-    // here is pure noise (and would overflow the terminal). Degrade to plain
-    // wrapped text so the CONTENT survives.
-    if (width as usize) < chrome + num_cols {
+    // Too narrow for a bordered table: a box drawn here is pure noise (and
+    // would overflow the terminal). Degrade to plain wrapped text so the
+    // CONTENT survives.
+    //
+    // The trigger fires only AFTER the floors have been tried (§A.2): a table
+    // is drawable whenever every column can be given at least its widest single
+    // grapheme. Below that the grid would clip every cell mid-glyph, which
+    // destroys more than it frames.
+    let content_budget = (width as usize).saturating_sub(chrome);
+    if (width as usize) < chrome + num_cols
+        || hard_floor.iter().map(|f| (*f).max(1)).sum::<usize>() > content_budget
+    {
         let w = (width as usize).max(1);
         for row in &parsed {
             let joined = row
@@ -618,7 +755,7 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         return result;
     }
 
-    let col_widths = allocate_col_widths(&natural, (width as usize) - chrome);
+    let col_widths = allocate_col_widths(&natural, &word_floor, &hard_floor, content_budget);
 
     // `true` as soon as any cell's tail had to be dropped, which is the ONLY
     // condition under which the `▼` continues-below marker is drawn.
@@ -711,6 +848,10 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 /// Pad every line out to exactly `width` display columns, so each rendered row
 /// owns every column of its region. See the note at the end of [`render_table`]
 /// for why a row that does not own its full width can corrupt the scrollback.
+/// The over-wide side is clipped on GRAPHEME boundaries with **no ellipsis**
+/// (§A.2). Letting the terminal clip at the edge instead desyncs by a column on
+/// any glyph the terminal renders wider than measured, which strands a ghost
+/// cell past the trailing border for the rest of the scrollback's life.
 fn pad_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     lines
         .into_iter()
@@ -718,6 +859,14 @@ fn pad_lines_to_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'stat
             let w: usize = l.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
             if w < width {
                 l.spans.push(Span::raw(" ".repeat(width - w)));
+            } else if w > width {
+                l.spans = clip_spans(l.spans, width);
+                let cw: usize = l.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+                if cw < width {
+                    // A straddling wide grapheme left a 1-column gap; the row
+                    // still has to own every column of its region.
+                    l.spans.push(Span::raw(" ".repeat(width - cw)));
+                }
             }
             l
         })
@@ -768,7 +917,16 @@ const MAX_CELL_LINES: usize = 8;
 /// columns that actually need room split what is left. Any remainder is then
 /// handed to the still-clipped columns, largest unmet demand first, so no
 /// column is short by more than one column of a fair share.
-fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
+/// The floors are per-column, content-derived, and tried in order: the
+/// word minimums first, the grapheme floors if those do not fit, and a flat 1
+/// only if even those do not (the caller has already degraded to plain text by
+/// then, so that last case is defensive).
+fn allocate_col_widths(
+    natural: &[usize],
+    word_floor: &[usize],
+    hard_floor: &[usize],
+    avail: usize,
+) -> Vec<usize> {
     let n = natural.len();
     if n == 0 {
         return Vec::new();
@@ -781,18 +939,42 @@ fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
         return vec![1; n];
     }
 
-    // Highest ceiling whose capped total still fits. `floor` is never above
-    // `avail / n`, so the starting level always fits and `level` is well-defined.
-    let floor = MIN_COL_W.min(avail / n).max(1);
-    let mut level = floor;
-    for l in floor..=avail {
-        if natural.iter().map(|w| (*w).min(l)).sum::<usize>() <= avail {
+    // Per-column floors, in descending order of preference.
+    let clamp = |v: &[usize]| -> Vec<usize> {
+        v.iter()
+            .enumerate()
+            .map(|(i, f)| (*f).max(1).min(natural[i].max(1)))
+            .collect()
+    };
+    let words = clamp(word_floor);
+    let hards = clamp(hard_floor);
+    let floors: Vec<usize> = if words.iter().sum::<usize>() <= avail {
+        words
+    } else if hards.iter().sum::<usize>() <= avail {
+        hards
+    } else {
+        vec![1; n]
+    };
+
+    // Highest ceiling whose capped total still fits, never below a column's own
+    // floor. `floors` is known to fit, so `level = 0` always fits and `level` is
+    // well-defined.
+    let mut level = 0usize;
+    let capped = |l: usize| -> usize {
+        (0..n)
+            .map(|i| natural[i].min(l).max(floors[i]))
+            .sum::<usize>()
+    };
+    for l in 0..=avail {
+        if capped(l) <= avail {
             level = l;
         } else {
             break;
         }
     }
-    let mut out: Vec<usize> = natural.iter().map(|w| (*w).min(level)).collect();
+    let mut out: Vec<usize> = (0..n)
+        .map(|i| natural[i].min(level).max(floors[i]))
+        .collect();
 
     // Spend the remainder on whichever column is still furthest from its
     // content width.
@@ -875,11 +1057,13 @@ enum ColAlign {
 /// alignment. `base` is the cell's default style, under which each inline span's
 /// own style is patched (so header bold + a code cell both apply).
 ///
-/// When the styled content fits on one line, full inline styling is preserved.
-/// When it does not, the cell WRAPS on word boundaries (previously it was
-/// hard-clipped to `w-1` columns plus `…`, which destroyed the content of every
-/// row of a narrow column) — inline styling is dropped on that path rather than
-/// mis-measuring escape-laden spans across a wrap point.
+/// Inline styling survives WRAPPING (§A.2). The wrapped path used to render the
+/// markup-stripped plain text, so any cell that did not fit on one line lost
+/// its bold, its code colour and its hyperlink — and in a narrow table that is
+/// most cells. Wrapping the *styled spans* instead means there is no mapping
+/// back from rendered text to source spans at all, and therefore none of the
+/// "a linked `aa` followed by a plain `aa`" mis-attribution that a
+/// find-the-substring approach has to defend against.
 ///
 /// All measurement and cutting is display-column and grapheme based
 /// ([`crate::util::cols`] / [`UnicodeSegmentation::graphemes`]); nothing here
@@ -905,28 +1089,92 @@ fn cell_lines(
         return vec![pad_cell_spans(styled, total, w, align, base)];
     }
 
-    // Overflow: wrap the plain (markup-stripped) text across as many rows as it
-    // needs, capped so one runaway cell cannot swallow the screen.
-    let plain = inline_plain(cell, theme);
-    let mut wrapped = wrap_text(&plain, w);
+    // Overflow: wrap across as many rows as it needs, capped so one runaway
+    // cell cannot swallow the screen.
+    let mut wrapped = wrap_cell_spans(styled, w);
     if wrapped.is_empty() {
-        wrapped.push(String::new());
+        wrapped.push(Vec::new());
     }
     if wrapped.len() > MAX_CELL_LINES {
         *elided = true;
         wrapped.truncate(MAX_CELL_LINES);
         if let Some(last) = wrapped.last_mut() {
-            *last = elide_cols(last, w);
+            *last = elide_spans(std::mem::take(last), w, base);
         }
     }
     wrapped
         .into_iter()
-        .map(|l| {
-            let l = clip_cols(&l, w);
-            let lw = crate::util::cols(&l);
-            pad_cell_spans(vec![Span::styled(l, base)], lw, w, align, base)
+        .map(|row| {
+            let row = clip_spans(row, w);
+            let lw: usize = row.iter().map(|s| visible_width(s.content.as_ref())).sum();
+            pad_cell_spans(row, lw, w, align, base)
         })
         .collect()
+}
+
+/// Cut a styled row to at most `w` display columns on GRAPHEME boundaries,
+/// preserving each span's style. A span carrying an escape sequence (an OSC-8
+/// hyperlink) is atomic: it goes out whole or not at all, because half an
+/// escape corrupts the terminal.
+fn clip_spans(row: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
+    let total: usize = row.iter().map(|s| visible_width(s.content.as_ref())).sum();
+    if total <= w {
+        return row;
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(row.len());
+    let mut used = 0usize;
+    for span in row {
+        if used >= w {
+            break;
+        }
+        let sw = visible_width(span.content.as_ref());
+        if used + sw <= w {
+            used += sw;
+            out.push(span);
+            continue;
+        }
+        if span.content.as_bytes().contains(&0x1b) {
+            break; // atomic and it does not fit
+        }
+        let mut buf = String::new();
+        for g in UnicodeSegmentation::graphemes(span.content.as_ref(), true) {
+            let gw = UnicodeWidthStr::width(g);
+            if used + gw > w {
+                break;
+            }
+            buf.push_str(g);
+            used += gw;
+        }
+        if !buf.is_empty() {
+            out.push(Span::styled(buf, span.style));
+        }
+        break;
+    }
+    out
+}
+
+/// Mark a styled row as elided: cut to `w - 1` columns and append `…` in the
+/// cell's base style. The marker is ALWAYS added — the caller only reaches here
+/// when content past this point is being dropped.
+fn elide_spans(row: Vec<Span<'static>>, w: usize, base: Style) -> Vec<Span<'static>> {
+    if w == 0 {
+        return Vec::new();
+    }
+    let mut out = clip_spans(row, w.saturating_sub(1));
+    // Trailing spaces before the marker read as a gap, not as elision.
+    while let Some(last) = out.last_mut() {
+        let trimmed = last.content.trim_end().to_string();
+        if trimmed.is_empty() {
+            out.pop();
+            continue;
+        }
+        if trimmed.len() != last.content.len() {
+            *last = Span::styled(trimmed, last.style);
+        }
+        break;
+    }
+    out.push(Span::styled("\u{2026}".to_string(), base));
+    out
 }
 
 /// Pad `spans` (already `total` columns wide) out to exactly `w` columns.
@@ -974,20 +1222,95 @@ fn clip_cols(s: &str, w: usize) -> String {
     out
 }
 
-/// Mark `s` as elided: cut to at most `w` display columns with a trailing `…`.
-/// The marker is ALWAYS added — the caller only reaches here when content past
-/// this point is being dropped, so the reader must be told even if `s` itself
-/// happened to fit.
-fn elide_cols(s: &str, w: usize) -> String {
-    if w == 0 {
-        return String::new();
+// ─── Cell word separator (§A.2) ──────────────────────────────────────────────
+
+/// Byte offsets inside `token` at which a table cell may be broken, in addition
+/// to spaces.
+///
+/// Prose wraps on spaces; table cells are narrow enough that a column full of
+/// `src/render/markdown.rs` or `2026-08-13` would otherwise be forced to
+/// hard-split mid-identifier. A break point sits next to a punctuation or
+/// symbol character when:
+///
+///   * the character after it is **alphabetic** — `foo/bar`, `hello-world`; or
+///   * the character after it is a **digit and the character before the
+///     punctuation was also a digit** — `555-0101`, `2019-03-15` — *unless* the
+///     punctuation is `,` or `.`, which is number formatting: `$145,000`,
+///     `3.14` and `1.0.2` stay whole. `EMP-1001` also stays whole, because
+///     there is no digit before its `-`.
+///
+/// **URLs are protected**: a token that looks like a URL yields no break points
+/// at all, so click-to-open still works on a wrapped cell.
+///
+/// Each break point attaches the punctuation to whichever side minimises
+/// `max(left, right)`, ties going left — `foo/bar` → `foo/` + `bar`, but
+/// `ABCD-EFG` → `ABCD` + `-EFG`.
+fn cell_break_points(token: &str) -> Vec<usize> {
+    if token.contains("://") || token.starts_with("www.") || token.contains('@') {
+        return Vec::new();
     }
-    if w == 1 {
-        return "\u{2026}".to_string();
+    let chars: Vec<(usize, char)> = token.char_indices().collect();
+    let total = crate::util::cols(token);
+    let mut out = Vec::new();
+    for k in 0..chars.len() {
+        let (i, c) = chars[k];
+        if !is_break_punct(c) {
+            continue;
+        }
+        let Some(&(_, next)) = chars.get(k + 1) else {
+            continue;
+        };
+        let prev = k.checked_sub(1).map(|j| chars[j].1);
+        let ok = if next.is_alphabetic() {
+            true
+        } else if next.is_ascii_digit() {
+            prev.is_some_and(|p| p.is_ascii_digit()) && c != ',' && c != '.'
+        } else {
+            false
+        };
+        if !ok {
+            continue;
+        }
+        // Attachment: break after the punctuation, or before it, whichever
+        // balances the two halves better. Ties keep it on the left.
+        let after = i + c.len_utf8();
+        let left_after = crate::util::cols(&token[..after]);
+        let left_before = crate::util::cols(&token[..i]);
+        let cost = |left: usize| left.max(total.saturating_sub(left));
+        out.push(if cost(left_before) < cost(left_after) { i } else { after });
     }
-    let mut out = clip_cols(s.trim_end(), w - 1);
-    out.push('\u{2026}');
+    out.retain(|&b| b > 0 && b < token.len());
+    out.dedup();
     out
+}
+
+/// A punctuation or symbol character eligible to carry a cell break point.
+/// `_` is deliberately excluded: `snake_case_name` is one word to a reader.
+fn is_break_punct(c: char) -> bool {
+    c != '_' && !c.is_alphanumeric() && !c.is_whitespace()
+}
+
+/// Widest run of text in `s` that the cell wrapper cannot break — the column's
+/// word-minimum floor.
+fn widest_unbreakable_word(s: &str) -> usize {
+    let mut max = 1usize;
+    for token in s.split_whitespace() {
+        let mut prev = 0usize;
+        for b in cell_break_points(token).into_iter().chain([token.len()]) {
+            max = max.max(crate::util::cols(&token[prev..b]));
+            prev = b;
+        }
+    }
+    max
+}
+
+/// Widest single grapheme in `s` — the column's hard floor, below which text
+/// cannot reflow without losing content. `0` for an empty string.
+fn widest_grapheme(s: &str) -> usize {
+    UnicodeSegmentation::graphemes(s, true)
+        .map(|g| UnicodeWidthStr::width(g))
+        .max()
+        .unwrap_or(0)
 }
 
 /// A cell's inline markdown rendered to plain text (markup stripped, OSC-8
@@ -1078,48 +1401,6 @@ fn strip_escapes(s: &str) -> String {
     out
 }
 
-/// Depth-styled ordered-list markers (CC `getListNumber` parity):
-/// depth 0-1 → `1.`, depth 2 → `a.`, depth 3+ → `i.` (lowercase roman).
-fn format_list_number(n: usize, depth: usize) -> String {
-    match depth {
-        0 | 1 => format!("{}.", n),
-        2 => format!("{}.", number_to_letter(n)),
-        _ => format!("{}.", number_to_roman(n)),
-    }
-}
-
-fn number_to_letter(n: usize) -> String {
-    // 1→a … 26→z, 27→aa (spreadsheet-style)
-    let mut n = n.max(1);
-    let mut s = String::new();
-    while n > 0 {
-        let rem = ((n - 1) % 26) as u8;
-        s.insert(0, (b'a' + rem) as char);
-        n = (n - 1) / 26;
-    }
-    s
-}
-
-fn number_to_roman(n: usize) -> String {
-    if n == 0 || n > 3999 {
-        return n.to_string();
-    }
-    const VALS: [(usize, &str); 13] = [
-        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"),
-        (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"),
-        (5, "v"), (4, "iv"), (1, "i"),
-    ];
-    let mut n = n;
-    let mut s = String::new();
-    for (v, sym) in VALS {
-        while n >= v {
-            s.push_str(sym);
-            n -= v;
-        }
-    }
-    s
-}
-
 // ─── Task checkbox detector ──────────────────────────────────────────────────
 
 /// Detects GFM task checkboxes: `- [ ] text`, `- [x] text`, `* [X] text`, etc.
@@ -1172,6 +1453,25 @@ fn detect_checkbox(line: &str) -> Option<(bool, &str)> {
 ///     escape — and it is measured with `util::cols`, which skips escapes,
 ///     rather than `UnicodeWidthStr`, which would count them as glyphs.
 pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    wrap_spans_inner(spans, max_width, false)
+}
+
+/// Word-wrap already-styled spans for a **table cell**: identical to
+/// [`wrap_spans`] except that the extra punctuation break points of §A.2 are
+/// honoured, so `src/render/markdown.rs` can wrap inside a 20-column column
+/// instead of being hard-split mid-identifier.
+pub(crate) fn wrap_cell_spans(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    wrap_spans_inner(spans, max_width, true)
+}
+
+fn wrap_spans_inner(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+    cell_breaks: bool,
+) -> Vec<Vec<Span<'static>>> {
     let max_width = max_width.max(1);
     let total: usize = spans.iter().map(|s| crate::util::cols(s.content.as_ref())).sum();
     if total <= max_width {
@@ -1203,7 +1503,20 @@ pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec
             // cannot happen with `split_inclusive`; the last piece continues
             // into the NEXT span, which is what `ends` = false expresses.
             let _ = it.peek();
-            atoms.push((piece.to_string(), style, ends));
+            if !cell_breaks {
+                atoms.push((piece.to_string(), style, ends));
+                continue;
+            }
+            // Cell mode: split further at the punctuation break points, each of
+            // which ENDS a word (so the wrapper may break there) without
+            // consuming any character.
+            let token = piece.trim_end_matches(' ');
+            let mut prev = 0usize;
+            for b in cell_break_points(token) {
+                atoms.push((piece[prev..b].to_string(), style, true));
+                prev = b;
+            }
+            atoms.push((piece[prev..].to_string(), style, ends));
         }
     }
 
@@ -1410,8 +1723,12 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 }
                 if !code.is_empty() {
                     flush_plain!();
-                    let style = Style::default().fg(theme.colors.muted);
-                    spans.push(Span::styled(code, style));
+                    // Code foreground + BOLD, no background (§A.1/§A.3).
+                    // Rendering inline code `muted` with no weight made it
+                    // *less* prominent than the prose around it, which is
+                    // backwards: `retry_after_ms` is the part of the sentence
+                    // the reader is looking for.
+                    spans.push(Span::styled(code, theme.inline_code()));
                 } else {
                     // Lone backtick — treat as literal.
                     plain.push('`');
@@ -1569,13 +1886,48 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 }
             }
 
-            // ── `~` is always literal ─────────────────────────────────────
-            // Strikethrough is deliberately disabled (CC parity, marked's
-            // del() override): models write `~~100ms~~` meaning
-            // "approximately", so CROSSED_OUT rendering corrupts the reply.
+            // ── Strikethrough: `~~x~~` only ───────────────────────────────
+            //
+            // A SINGLE tilde is literal text and must stay that way: model
+            // output is full of `~50ms`, `~**10%**` and `~/src/main.rs`, and
+            // striking those through is both wrong and unreadable. Only the
+            // doubled, properly-closed form strikes. The previous behaviour
+            // disabled strikethrough outright, which over-corrected — `~~x~~`
+            // is genuine markdown that models use to mark superseded values.
             '~' => {
-                chars.next();
-                plain.push('~');
+                chars.next(); // consume first `~`
+                if chars.peek() == Some(&'~') {
+                    chars.next(); // consume second `~`
+                    let mut content = String::new();
+                    let mut closed = false;
+                    while let Some(&nc) = chars.peek() {
+                        if nc == '~' {
+                            chars.next();
+                            if chars.peek() == Some(&'~') {
+                                chars.next();
+                                closed = true;
+                                break;
+                            }
+                            // A lone `~` inside the run stays literal.
+                            content.push('~');
+                        } else {
+                            chars.next();
+                            content.push(nc);
+                        }
+                    }
+                    if closed && !content.is_empty() {
+                        flush_plain!();
+                        spans.push(Span::styled(
+                            content,
+                            Style::default().add_modifier(Modifier::CROSSED_OUT),
+                        ));
+                    } else {
+                        plain.push_str("~~");
+                        plain.push_str(&content);
+                    }
+                } else {
+                    plain.push('~');
+                }
             }
 
             // ── Links: [text](url) ────────────────────────────────────────
@@ -1800,7 +2152,7 @@ fn parse_chip_index(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_tabs, format_list_number, is_setext_underline, next_bare_url, parse_chip_index,
+        expand_tabs, is_setext_underline, next_bare_url, parse_chip_index,
         parse_inline, parse_quote_depth, render_markdown, trim_url_trailing, wrap_text,
     };
     use ratatui::style::{Modifier, Style};
@@ -1848,15 +2200,34 @@ mod tests {
         assert_eq!(wrapped, vec![input]);
     }
 
+    /// `~~x~~` strikes; a SINGLE `~` never does.
+    ///
+    /// The single-tilde demotion is the load-bearing half: models write `~50ms`,
+    /// `~**10%**` and `~/src/main.rs` constantly, and a renderer that treats one
+    /// tilde as an opener strikes through the rest of the sentence looking for
+    /// its partner.
     #[test]
-    fn strikethrough_is_disabled_and_renders_literally() {
+    fn double_tilde_strikes_and_single_tilde_stays_literal() {
         let theme = crate::style::theme();
-        let spans = parse_inline("~~100ms~~", &theme);
-        assert_eq!(flat(&spans), "~~100ms~~");
-        assert!(spans.iter().all(|s| !s
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::CROSSED_OUT)));
+        let struck = parse_inline("~~gone~~", &theme);
+        assert_eq!(flat(&struck), "gone");
+        assert!(struck
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT)));
+
+        for src in ["~50ms", "about ~10% of the time", "see ~/src/main.rs"] {
+            let spans = parse_inline(src, &theme);
+            assert_eq!(flat(&spans), src, "single tilde was consumed in {src:?}");
+            assert!(
+                spans
+                    .iter()
+                    .all(|s| !s.style.add_modifier.contains(Modifier::CROSSED_OUT)),
+                "a single tilde struck through {src:?}"
+            );
+        }
+        // Unclosed `~~` falls back to its literal source.
+        let open = parse_inline("~~half written", &theme);
+        assert_eq!(flat(&open), "~~half written");
     }
 
     #[test]
@@ -1952,12 +2323,18 @@ mod tests {
         assert_eq!(flat(&spans), "a@b.co");
     }
 
+    /// The model's own numbering survives verbatim, at every depth and with
+    /// either separator. The old depth ladder rewrote `2.` as `b.` and `4.` as
+    /// `iv.` once nested, which renames content the prose refers back to.
     #[test]
-    fn ordered_list_depth_markers() {
-        assert_eq!(format_list_number(2, 0), "2.");
-        assert_eq!(format_list_number(2, 2), "b.");
-        assert_eq!(format_list_number(4, 3), "iv.");
-        assert_eq!(format_list_number(27, 2), "aa.");
+    fn ordered_list_markers_are_never_rewritten() {
+        assert_eq!(super::ordered_marker("2. x").as_deref(), Some("2."));
+        assert_eq!(super::ordered_marker("10) x").as_deref(), Some("10)"));
+        assert_eq!(super::ordered_marker("2.x"), None);
+        assert_eq!(super::ordered_marker(". x"), None);
+        assert_eq!(super::ordered_marker("2a. x"), None);
+        let rows = render_lines("1. one\n  2. two\n    10) ten\n", 40);
+        assert_eq!(rows, vec!["1. one", "  2. two", "    10) ten"]);
     }
 
     #[test]
@@ -2174,7 +2551,7 @@ mod tests {
 
     #[test]
     fn allocate_col_widths_is_identity_when_the_table_fits() {
-        assert_eq!(super::allocate_col_widths(&[5, 40, 40], 200), vec![5, 40, 40]);
+        assert_eq!(super::allocate_col_widths(&[5, 40, 40], &[5, 6, 6], &[1, 1, 1], 200), vec![5, 40, 40]);
     }
 
     /// The bug: an equal split gave the 5-column heading the same share as two
@@ -2182,7 +2559,7 @@ mod tests {
     /// spends everything it saved on the columns that actually need it.
     #[test]
     fn allocate_col_widths_shrinks_only_the_greedy_columns() {
-        let out = super::allocate_col_widths(&[5, 40, 40], 60);
+        let out = super::allocate_col_widths(&[5, 40, 40], &[5, 6, 6], &[1, 1, 1], 60);
         assert_eq!(out.iter().sum::<usize>(), 60, "{out:?} must spend the budget");
         assert_eq!(out[0], 5, "a column that already fits must not be padded: {out:?}");
         assert!(out[1] > 5 && out[2] > 5, "{out:?}");
@@ -2202,7 +2579,9 @@ mod tests {
         ];
         for nat in naturals {
             for avail in 0usize..=200 {
-                let out = super::allocate_col_widths(nat, avail);
+                let floors: Vec<usize> = nat.iter().map(|w| (*w).min(4)).collect();
+                let hards: Vec<usize> = vec![1; nat.len()];
+                let out = super::allocate_col_widths(nat, &floors, &hards, avail);
                 assert_eq!(out.len(), nat.len());
                 if avail >= nat.len() {
                     assert!(
@@ -2566,3 +2945,318 @@ mod wrap_across_inline_markup_tests {
     }
 }
 
+
+/// **Part A of `docs/design/tui-output-rendering.md`** — the blank-line policy,
+/// the element inventory, and the table rules that were previously only
+/// described.
+///
+/// These are the tests that stop the renderer from drifting back to a
+/// per-block-pair spacing table, which is the failure the whole of §A.5 exists
+/// to prevent: it looks right on the common case and wrong everywhere the model
+/// asked for more or less air.
+#[cfg(test)]
+mod part_a {
+    use super::render_markdown;
+    use ratatui::style::Modifier;
+    use unicode_width::UnicodeWidthStr;
+
+    fn rows(src: &str, w: u16) -> Vec<String> {
+        render_markdown(src, w)
+            .lines
+            .iter()
+            .map(|l| {
+                let raw: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                let mut out = String::new();
+                let mut chars = raw.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\x1b' {
+                        for n in chars.by_ref() {
+                            if n == '\\' {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    // ── §A.5 the blank-line policy ──────────────────────────────────────────
+
+    /// `k` consecutive newlines produce `k − 1` blank rows, **uniformly**, for
+    /// every pair of block types. No lookup table, no per-pair exceptions.
+    #[test]
+    fn k_newlines_produce_k_minus_one_blank_rows_for_every_block_pair() {
+        let blocks = [
+            "# Heading",
+            "## Sub",
+            "Paragraph text",
+            "- bullet item",
+            "1. numbered item",
+            "> quoted line",
+            "- [ ] a task",
+        ];
+        for a in blocks {
+            for b in blocks {
+                for k in 1usize..=4 {
+                    let src = format!("{a}{}{b}", "\n".repeat(k));
+                    let got = rows(&src, 60);
+                    let blanks = got.iter().filter(|l| l.is_empty()).count();
+                    assert_eq!(
+                        blanks,
+                        k - 1,
+                        "{a:?} + {k} newlines + {b:?} produced {blanks} blank rows, want {}\n{got:#?}",
+                        k - 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// The specific regression: a heading must not manufacture air the model
+    /// did not ask for. `# A\n# B\n# C` is three adjacent rows.
+    #[test]
+    fn adjacent_headings_stay_adjacent() {
+        assert_eq!(rows("# A\n# B\n# C", 40), vec!["A", "B", "C"]);
+        assert_eq!(rows("# Title\nBody", 40), vec!["Title", "Body"]);
+        assert_eq!(rows("Setext\n======\nBody", 40), vec!["Setext", "Body"]);
+    }
+
+    /// §A.5 Modifier 3 — the ONE blank row the renderer manufactures: before an
+    /// *opening* fence whose previous row has content. Erasing the fence line
+    /// would otherwise collapse `1. Hello` straight onto the first row of code.
+    /// It is not emitted before the *closing* fence, and not when the model
+    /// already left a blank line.
+    #[test]
+    fn one_synthetic_blank_row_before_an_opening_fence_only() {
+        assert_eq!(
+            rows("1. Hello\n```\nx = 1\n```\nAfter", 40),
+            vec!["1. Hello", "", "x = 1", "After"],
+        );
+        // The model's own blank line is never doubled.
+        assert_eq!(
+            rows("Para\n\n```\nx = 1\n```\n\nAfter", 40),
+            vec!["Para", "", "x = 1", "", "After"],
+        );
+        // Nothing manufactured at the very start of a document.
+        assert_eq!(rows("```\nx = 1\n```", 40), vec!["x = 1"]);
+    }
+
+    /// Blank rows *inside* a fence are part of the code and survive verbatim.
+    #[test]
+    fn blank_rows_inside_a_fence_survive() {
+        let got = rows("```\na\n\nb\n```", 40);
+        assert_eq!(got, vec!["a", "", "b"]);
+    }
+
+    // ── §A.1 element inventory ──────────────────────────────────────────────
+
+    /// A markdown rule is three columns, not the pane width: a full-width rule
+    /// inside a reply is indistinguishable from OSA's own turn separator.
+    #[test]
+    fn a_horizontal_rule_is_three_columns() {
+        for w in [20u16, 60, 120] {
+            assert_eq!(rows("a\n\n---\n\nb", w)[2], "───");
+        }
+    }
+
+    /// One bullet glyph at every depth, and the model's own indentation.
+    #[test]
+    fn every_unordered_depth_uses_the_same_bullet_and_the_source_indent() {
+        let got = rows("- top\n  - two space\n   - three space\n    - four space", 40);
+        assert_eq!(
+            got,
+            vec!["• top", "  • two space", "   • three space", "    • four space"]
+        );
+    }
+
+    /// A completed task is not struck through: models write checked items whose
+    /// text is still the thing the reader needs.
+    #[test]
+    fn a_checked_task_is_not_struck_through() {
+        let text = render_markdown("- [x] Ship the fix\n", 40);
+        for line in &text.lines {
+            for span in &line.spans {
+                assert!(
+                    !span.style.add_modifier.contains(Modifier::CROSSED_OUT),
+                    "checked task span {:?} is struck through",
+                    span.content
+                );
+            }
+        }
+    }
+
+    /// Inline code is the code colour + BOLD, and is never *less* prominent
+    /// than the prose around it.
+    #[test]
+    fn inline_code_is_bold() {
+        let text = render_markdown("call `retry_after_ms` now", 40);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("retry_after_ms"))
+            .expect("inline code span");
+        assert!(span.style.add_modifier.contains(Modifier::BOLD), "{span:?}");
+        assert!(!span.content.contains('`'), "backticks survived: {span:?}");
+    }
+
+    /// A fenced block paints a full-row background on EVERY row it owns —
+    /// including its blank rows — so it reads as a block rather than as
+    /// differently-coloured prose. Rows are padded to the pane width for the
+    /// background to have anything to paint on.
+    #[test]
+    fn a_code_block_owns_every_column_of_every_row() {
+        let has_bg = crate::style::theme().code_block().bg.is_some();
+        let text = render_markdown("before\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\nafter", 40);
+        // Rows 2..=4 are the fence body ("before", "", code, "", code, "",
+        // "after" once Modifier 3 and the model's own blanks are applied).
+        let body: Vec<_> = text
+            .lines
+            .iter()
+            .filter(|l| {
+                let flat: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                flat.contains("fn a()") || flat.contains("fn b()")
+            })
+            .collect();
+        assert_eq!(body.len(), 2, "both code rows must be present");
+        for l in &body {
+            let w: usize = l.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+            assert_eq!(w, 40, "code row does not own its full width: {l:?}");
+            assert_eq!(l.style.bg.is_some(), has_bg, "code row background: {l:?}");
+        }
+        if has_bg {
+            // Including the blank row BETWEEN them — the whole block is painted.
+            let painted = text.lines.iter().filter(|l| l.style.bg.is_some()).count();
+            assert_eq!(painted, 3, "the blank row inside the fence lost its background");
+            // Prose rows are untouched.
+            assert!(text.lines.iter().filter(|l| l.style.bg.is_none()).count() >= 4);
+        }
+    }
+
+    /// The info string resolves by its FIRST word, so ```` ```rust ignore ````
+    /// still highlights instead of silently falling back to plain text.
+    #[test]
+    fn the_info_string_resolves_by_its_first_word() {
+        let tagged = render_markdown("```rust ignore\nfn main() {}\n```", 40);
+        let bare = render_markdown("```rust\nfn main() {}\n```", 40);
+        let styles = |t: &ratatui::text::Text<'_>| {
+            t.lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| (s.content.to_string(), s.style)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(styles(&tagged), styles(&bare));
+    }
+
+    // ── §A.2 tables ─────────────────────────────────────────────────────────
+
+    /// Inline styling survives a cell WRAP. Before this, any cell that did not
+    /// fit on one line was re-rendered as markup-stripped plain text and lost
+    /// its bold, its code colour and its link — which in a narrow table is most
+    /// cells.
+    #[test]
+    fn a_wrapped_cell_keeps_its_inline_styling() {
+        let src = "| Col | Note |\n|---|---|\n| a | **emphasised text** that must wrap over rows |\n";
+        let text = render_markdown(src, 34);
+        let bold: Vec<String> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.to_string())
+            .collect();
+        let joined = bold.join(" ");
+        assert!(
+            joined.contains("emphasised") && joined.contains("text"),
+            "the wrapped cell lost its bold: {bold:?}"
+        );
+        // …and the markers are gone, not rendered literally.
+        for line in &text.lines {
+            let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!flat.contains("**"), "literal markers in {flat:?}");
+        }
+    }
+
+    /// A repeated substring must not leak styling onto its plain twin — the
+    /// classic failure of a find-the-substring span mapper.
+    #[test]
+    fn a_repeated_substring_does_not_leak_styling() {
+        let src = "| H |\n|---|\n| `aa` then aa then more words to force a wrap here |\n";
+        let text = render_markdown(src, 26);
+        let plain_runs: Vec<&str> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            plain_runs.iter().any(|s| s.contains("aa")),
+            "the plain `aa` was styled as code too: {plain_runs:?}"
+        );
+    }
+
+    /// The cell word separator: punctuation is a break opportunity, number
+    /// formatting is not.
+    #[test]
+    fn cell_break_points_split_paths_but_not_numbers() {
+        fn split(s: &str) -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut prev = 0;
+            for b in super::cell_break_points(s).into_iter().chain([s.len()]) {
+                out.push(&s[prev..b]);
+                prev = b;
+            }
+            out
+        }
+        assert_eq!(split("foo/bar"), vec!["foo/", "bar"]);
+        assert_eq!(split("ABCD-EFG"), vec!["ABCD", "-EFG"]);
+        assert_eq!(split("$145,000"), vec!["$145,000"]);
+        assert_eq!(split("3.14"), vec!["3.14"]);
+        assert_eq!(split("1.0.2"), vec!["1.0.2"]);
+        assert_eq!(split("EMP-1001"), vec!["EMP-1001"]);
+        assert_eq!(split("555-0101"), vec!["555-", "0101"]);
+        // URLs are protected so click-to-open survives a wrap.
+        assert_eq!(split("https://osa.dev/a/b"), vec!["https://osa.dev/a/b"]);
+    }
+
+    /// Every row of a table is exactly the same total display width, at every
+    /// width, for content that stresses the wrapper. This is the invariant a
+    /// mis-measured cell breaks, and it is permanent once the row reaches
+    /// native scrollback.
+    #[test]
+    fn every_table_row_is_exactly_as_wide_as_every_other() {
+        let srcs = [
+            "| Path | Note |\n|---|---|\n| src/render/markdown.rs | wraps inside the identifier |\n| 2019-03-15 | $145,000 and 3.14 stay whole |\n",
+            "| A | B | C |\n|---|---|---|\n| 模型模型模型 | ｶﾞｶﾞ | 日本語のテキスト |\n",
+        ];
+        for src in srcs {
+            for w in 1u16..=120 {
+                let got = rows(src, w);
+                let grid: Vec<&String> = got
+                    .iter()
+                    .filter(|l| l.starts_with(['┌', '├', '└', '│']))
+                    .collect();
+                if grid.is_empty() {
+                    continue;
+                }
+                let first = UnicodeWidthStr::width(grid[0].as_str());
+                for l in &grid {
+                    assert_eq!(
+                        UnicodeWidthStr::width(l.as_str()),
+                        first,
+                        "w={w}: ragged row {l:?}\n{}",
+                        got.join("\n")
+                    );
+                    assert!(
+                        UnicodeWidthStr::width(l.as_str()) <= w as usize,
+                        "w={w}: row {l:?} overflows the pane"
+                    );
+                }
+            }
+        }
+    }
+}

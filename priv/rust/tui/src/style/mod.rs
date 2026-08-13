@@ -32,6 +32,13 @@ pub struct ThemeColors {
     pub button_active_text: Color,
     pub grad_a: Color,
     pub grad_b: Color,
+    /// Full-row background painted behind a fenced code block. Must be
+    /// distinguishable from the terminal's own background in BOTH polarities
+    /// and must never collide with `code_fg` once quantised — see
+    /// [`Theme::code_block`].
+    pub code_bg: Color,
+    /// Foreground for untagged/unknown-language code and for inline `` `code` ``.
+    pub code_fg: Color,
     // Diff colors (for file edit rendering)
     pub diff_del_bg: Color,
     pub diff_add_bg: Color,
@@ -347,10 +354,6 @@ impl Theme {
     }
 
     // === Code ===
-    pub fn code_block(&self) -> Style {
-        Style::default().fg(self.colors.muted)
-    }
-
     pub fn file_path(&self) -> Style {
         Style::default()
             .fg(self.colors.secondary)
@@ -589,6 +592,56 @@ impl Theme {
     /// row). Uses the theme's neutral `border` so the grid reads as thin
     /// light-grey chrome in every theme and in both light and dark modes —
     /// never a hardcoded colour.
+    /// The full-row background of a fenced code block.
+    ///
+    /// Applied as a `Line`-level style AND as an explicit trailing pad span, so
+    /// it paints the whole terminal row rather than only the cells the code
+    /// happens to occupy — including blank rows inside the block and the final
+    /// newline-less row of an unterminated fence.
+    ///
+    /// It degrades to *no background at all* when the terminal cannot show
+    /// colour (`NO_COLOR`, a non-colour TTY). A background that quantises onto
+    /// the foreground makes code unreadable, and OSA hands finalized rows to
+    /// native scrollback where they can never be repainted.
+    pub fn code_block(&self) -> Style {
+        if matches!(
+            crate::render::colors::color_level(),
+            crate::render::colors::ColorLevel::NoColor
+        ) {
+            return Style::default();
+        }
+        Style::default().bg(crate::render::colors::quantize_for_terminal(self.colors.code_bg))
+    }
+
+    /// Untagged / unknown-language code text: body-weight foreground on the
+    /// code background, never `faint` — a whole block rendered dim reads as
+    /// disabled rather than as code.
+    pub fn code_plain(&self) -> Style {
+        let base = self.code_block();
+        if matches!(
+            crate::render::colors::color_level(),
+            crate::render::colors::ColorLevel::NoColor
+        ) {
+            return base;
+        }
+        base.fg(crate::render::colors::quantize_for_terminal(self.colors.code_fg))
+    }
+
+    /// Inline `` `code` `` — the code foreground plus BOLD, and deliberately
+    /// **no background**: a background on a three-character run is visual
+    /// noise. Muted-with-no-bold (the previous styling) made inline code *less*
+    /// prominent than the prose around it, which is backwards.
+    pub fn inline_code(&self) -> Style {
+        let s = Style::default().add_modifier(Modifier::BOLD);
+        if matches!(
+            crate::render::colors::color_level(),
+            crate::render::colors::ColorLevel::NoColor
+        ) {
+            return s;
+        }
+        s.fg(crate::render::colors::quantize_for_terminal(self.colors.code_fg))
+    }
+
     pub fn table_rule(&self) -> Style {
         Style::default().fg(self.colors.border)
     }

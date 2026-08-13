@@ -616,6 +616,54 @@ Done.
         assert_stream_matches_full("Para one\n\n\n\nPara two\n\n", &[8, 12, 20, 24]);
     }
 
+    /// §A.6 correctness contract: **streaming output equals one-shot output,
+    /// row for row**, at every granularity — not just at the byte-by-byte and
+    /// small-irregular-chunk sizes already pinned above. Real providers deliver
+    /// 50–200-byte deltas, and a coarse chunk can straddle a construct in ways
+    /// a 3-byte one never does.
+    #[test]
+    fn coarse_chunk_granularities_match_full() {
+        for step in [50usize, 100, 200] {
+            let cuts: Vec<usize> = (0..)
+                .map(|i| i * step)
+                .take_while(|p| *p <= COMPREHENSIVE.len() + step)
+                .collect();
+            assert_stream_matches_full(COMPREHENSIVE, &cuts);
+        }
+    }
+
+    /// The two partial constructs that are the COMMON case while streaming,
+    /// not an edge case: an unterminated fence and a half-written table. Both
+    /// must render, must stay in the mutable tail (never frozen), and must
+    /// agree with a one-shot render at every prefix.
+    #[test]
+    fn partial_fences_and_tables_stay_in_the_tail_and_match_full() {
+        let docs = [
+            "Intro.\n\n```rust\nfn main() {\n    let x = 1;",
+            "Intro.\n\n| Name | Value |\n| --- | ---",
+            "Intro.\n\n| Name | Value |\n| --- | --- |\n| a | 1 |",
+        ];
+        for doc in docs {
+            let mut r = StreamingRenderer::new(W);
+            for end in 0..=doc.len() {
+                if !doc.is_char_boundary(end) {
+                    continue;
+                }
+                r.update(&doc[..end]);
+                assert_eq!(
+                    flat(&r.body_with_cursor()),
+                    full_with_cursor(&doc[..end]),
+                    "prefix {end} of {doc:?}"
+                );
+            }
+            assert_eq!(
+                r.frozen_bytes(),
+                "Intro.\n\n".len(),
+                "the partial construct was frozen: {doc:?}"
+            );
+        }
+    }
+
     #[test]
     fn width_change_rebuilds_consistently() {
         let doc = "# Heading\n\nBody paragraph one.\n\nBody paragraph two.\n\n";

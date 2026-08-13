@@ -382,14 +382,18 @@ impl ResumableHighlighter {
 
 /// Single-line plain fallback matching [`plain_fallback`]'s per-line style.
 fn plain_line(line: &str) -> Line<'static> {
-    let style = crate::style::theme().faint();
+    let style = crate::style::theme().code_plain();
     Line::from(Span::styled(line.trim_end_matches('\n').to_owned(), style))
 }
 
 /// Plain-text fallback: render every line in the dim/muted theme style.
 fn plain_fallback(code: &str) -> Vec<Line<'static>> {
     let theme = crate::style::theme();
-    let style = theme.faint();
+    // Body-weight code colour, NOT `faint`: an untagged fence is still code,
+    // and the full-row background applied by `markdown::push_code_lines` is
+    // what marks it as a block. Rendering the whole body dim made an untagged
+    // block read as disabled text.
+    let style = theme.code_plain();
     code.lines()
         .map(|l| Line::from(Span::styled(l.to_owned(), style)))
         .collect()
