@@ -49,7 +49,18 @@ config :optimal_system_agent,
   rules_respect_always_apply: true,
 
   # Agent configuration
-  max_iterations: 200,
+  #
+  # Per-turn ReAct step cap. Raised from 200, which a genuinely long autonomous
+  # run reaches legitimately — a multi-agent dispatch plus the verification
+  # passes after it can spend two hundred steps without anything being wrong.
+  #
+  # Not removed, unlike the wall-clock ceilings. This is the designed logical
+  # bound on a turn (with :max_budget_usd), and it is the only thing that ends
+  # a model stuck in a true loop rather than one doing slow work. The
+  # distinction that matters: a wall-clock cap punishes work for TAKING long,
+  # while a step cap punishes it for GOING nowhere, and only the second is a
+  # fault. Set :infinity to remove it entirely.
+  max_iterations: 10_000,
 
   # Should a text-only answer (visible text, no tool calls) be nudged back into
   # the ReAct loop because of how its PROSE reads?
@@ -146,9 +157,19 @@ config :optimal_system_agent,
   tool_timeout_ms: :infinity,
 
   # When false, the stall detector escalates (graded nudges) but never hard-halts
-  # a long read/analysis phase — appropriate for autonomous runs. The "autonomous"
-  # preset sets this false; interactive sessions keep the hard halt.
-  stall_hard_halt: true,
+  # a long read/analysis phase.
+  #
+  # Now false by default. It was true for interactive sessions, and a long read
+  # or analysis phase is indistinguishable from a stall to a detector watching
+  # for tool activity — so the runs most worth protecting were the ones most
+  # likely to be killed. The graded nudges still fire, so a model that really is
+  # going nowhere still gets pushed; it just no longer gets to end the turn on
+  # that suspicion.
+  #
+  # :overdrive and the :auto tier already bypassed this. Making it the default
+  # closes the gap where the same long run died only because it was started
+  # from a normal interactive prompt.
+  stall_hard_halt: false,
   temperature: 0.7,
   max_tokens: 4096,
 

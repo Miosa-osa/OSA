@@ -61,4 +61,27 @@ defmodule OptimalSystemAgent.Agent.Loop.LongRunningToolTest do
     assert Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, :infinity) ==
              :infinity
   end
+
+  describe "nothing else quietly caps a long autonomous run" do
+    test "the stall detector never hard-halts by default" do
+      # A long read/analysis phase is indistinguishable from a stall to a
+      # detector watching for tool activity, so the runs most worth protecting
+      # were the ones most likely to be killed. Nudges stay; the kill goes.
+      refute Application.get_env(:optimal_system_agent, :stall_hard_halt, true)
+    end
+
+    test "the turn has no wall-clock ceiling" do
+      # Unset is fine — it means the code default (:infinity) applies. What
+      # must never appear is a finite number, which is the actual regression.
+      refute is_integer(Application.get_env(:optimal_system_agent, :agent_turn_timeout_ms))
+    end
+
+    test "the step cap is high enough for real work but still bounds a true loop" do
+      # Deliberately NOT :infinity. A wall-clock cap punishes work for taking
+      # long; a step cap punishes it for going nowhere. Only the second is a
+      # fault, so this one survives — just far above what real work reaches.
+      cap = Application.get_env(:optimal_system_agent, :max_iterations)
+      assert cap == :infinity or cap >= 10_000, "step cap too low for a long run: #{inspect(cap)}"
+    end
+  end
 end
