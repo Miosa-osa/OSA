@@ -1267,8 +1267,26 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     _, _ -> "medium"
   end
 
-  defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}),
-    do: %{input_tokens: inp, output_tokens: out}
+  # Cached input is reported by every OpenAI-compatible provider that supports
+  # it (OpenAI, DeepSeek, Groq, OpenRouter, xAI) under
+  # `prompt_tokens_details.cached_tokens` — and this dropped it on the floor,
+  # so those providers reported cache_read = 0 even when they HAD cached. The
+  # key name matters as much as the value: `CacheAttribution` reads
+  # `:cache_read_input_tokens`, which is why openai_responses.ex storing the
+  # same number under `:cached_tokens` is invisible to it.
+  defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out} = u}) do
+    %{
+      input_tokens: inp,
+      output_tokens: out,
+      cache_read_input_tokens: cached_input(u)
+    }
+  end
+
+  defp cached_input(%{"prompt_tokens_details" => %{"cached_tokens" => n}}) when is_integer(n),
+    do: n
+
+  defp cached_input(%{"cached_tokens" => n}) when is_integer(n), do: n
+  defp cached_input(_), do: 0
 
   defp parse_usage(_), do: %{}
 

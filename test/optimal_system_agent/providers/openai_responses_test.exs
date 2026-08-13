@@ -163,7 +163,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
 
       assert result.usage.input_tokens == 12
       assert result.usage.output_tokens == 5
-      assert result.usage.cached_tokens == 4
+      # `:cache_read_input_tokens`, not `:cached_tokens`. CacheAttribution reads
+      # the former, so the old key collected the number and nothing ever saw it —
+      # this assertion pinned that gap in place.
+      assert result.usage.cache_read_input_tokens == 4
       assert result.stop_reason == "tool_calls"
     end
 

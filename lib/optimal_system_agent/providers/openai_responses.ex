@@ -457,7 +457,9 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
       %{
         input_tokens: input,
         output_tokens: output,
-        cached_tokens: get_in(usage, ["input_tokens_details", "cached_tokens"]) || 0,
+        # `:cache_read_input_tokens`, not `:cached_tokens` — CacheAttribution
+        # reads the former, so the latter was collected and never seen.
+        cache_read_input_tokens: get_in(usage, ["input_tokens_details", "cached_tokens"]) || 0,
         reasoning_tokens: get_in(usage, ["output_tokens_details", "reasoning_tokens"]) || 0
       }
     else
