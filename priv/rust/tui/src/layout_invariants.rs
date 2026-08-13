@@ -204,29 +204,31 @@ mod activity_invariants {
         }
     }
 
-    /// **LATENT HAZARD, pinned.** `Activity::draw` sizes its tool feed from the
-    /// RECT it is handed (`budget = content.height - next_y`), not from its own
-    /// `height()`. So the reserved-vs-drawn invariant above holds only because
-    /// `draw_inline` is careful to pass exactly `height()` rows.
+    /// **The latent hazard is gone, pinned so it stays gone.**
     ///
-    /// Hand it a taller rect — which any future caller might, e.g. by passing the
-    /// whole `max_height()` slot instead of bottom-anchoring inside it — and it
-    /// happily paints feed rows all the way down, over whatever the layout gave
-    /// to the widget below. This test records that behaviour so the coupling is
-    /// visible and a change to it is loud rather than silent.
+    /// `Activity::draw` used to size its tool feed from the RECT it was handed
+    /// rather than from its own `height()`, so a caller that passed a taller rect
+    /// got feed rows painted all the way down, over whatever the layout had given
+    /// to the widget below. The reserved-vs-drawn invariant held only because
+    /// `draw_inline` was careful to pass exactly `height()`.
     ///
-    /// The fix (in `components/activity.rs`, which this module does not own)
-    /// would be for `draw` to clamp `content.height` to `self.height()`.
+    /// With the feed deleted there is nothing left whose count depends on the
+    /// rect: the band inks the status row plus the details block and stops. An
+    /// over-tall rect is now simply under-filled, which is safe.
     #[test]
-    fn activity_draw_is_rect_driven_not_reservation_driven() {
-        let act = saturated(Verbosity::New, false);
-        assert_eq!(act.height(), 2, "New declares 2 rows");
-        let overdrawn = drawn(&act, 6);
-        assert_eq!(
-            overdrawn, 6,
-            "handed 6 rows, `New` fills all 6 despite declaring 2.\n{}",
-            screen(&act, 6)
-        );
+    fn activity_draw_never_paints_past_what_it_reserved() {
+        for verbosity in ALL_VERBOSITIES {
+            let act = saturated(verbosity, false);
+            let declared = act.height();
+            let overdrawn = drawn(&act, declared + 4);
+            assert_eq!(
+                overdrawn, declared,
+                "{verbosity:?}: handed {} rows, inked {overdrawn}, reserved {declared} — \
+                 the band is painting into rows it does not own.\n{}",
+                declared + 4,
+                screen(&act, declared + 4)
+            );
+        }
     }
 
     /// **Dead-space half of the invariant, saturated.** With the feed past every
@@ -284,19 +286,23 @@ mod activity_invariants {
         }
     }
 
-    /// The regression above, pinned as a passing characterisation test so the
-    /// suite records the current (wrong) behaviour and fails loudly the moment
-    /// somebody fixes or worsens it.
+    /// The row `New` used to waste before its first tool. It reserved two rows
+    /// unconditionally and inked one until a tool arrived, so every turn opened
+    /// with a blank row between the spinner and the composer. Verbosity no longer
+    /// selects a depth, so there is no second row to leave empty.
     #[test]
-    fn activity_new_verbosity_wastes_one_row_before_the_first_tool() {
-        let act = started(Verbosity::New, false);
-        assert_eq!(act.height(), 2, "height() reserves a constant 2 rows");
-        assert_eq!(
-            drawn(&act, 2),
-            1,
-            "…but only the spinner row is inked before the first tool.\n{}",
-            screen(&act, 2)
-        );
+    fn no_verbosity_reserves_a_row_it_does_not_ink() {
+        for verbosity in ALL_VERBOSITIES {
+            let act = started(verbosity, false);
+            let declared = act.height();
+            assert_eq!(declared, 1, "{verbosity:?}: a bare turn is one status row");
+            assert_eq!(
+                drawn(&act, declared),
+                declared,
+                "{verbosity:?}: reserved {declared}, inked fewer.\n{}",
+                screen(&act, declared)
+            );
+        }
     }
 
     /// The `└ ` details block must be reserved by exactly as many rows as it

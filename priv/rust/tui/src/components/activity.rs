@@ -364,35 +364,7 @@ fn is_agent_tool(name: &str) -> bool {
 /// looks like a value). Detect that exact shape — two-or-more comma-separated
 /// bare identifiers — and drop it, rather than painting schema noise. A genuine
 /// hint (a path, a command, a query, a skill name) contains separators, spaces
-/// or punctuation and is never mistaken for one.
-fn is_param_name_list(hint: &str) -> bool {
-    let parts: Vec<&str> = hint.split(',').map(|p| p.trim()).collect();
-    parts.len() >= 2
-        && parts.iter().all(|p| {
-            !p.is_empty()
-                && p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        })
-}
 
-/// Tool activity entry in the feed
-struct ToolEntry {
-    name: String,
-    emoji: &'static str,
-    verb: &'static str,
-    detail: String,
-    start: std::time::Instant,
-    duration_ms: Option<u64>,
-    success: Option<bool>,
-    /// Backend call ids currently merged into this row. Pairing `ToolCallEnd`
-    /// against these (rather than against the tool NAME) is what keeps two
-    /// concurrent `delegate` calls from ending each other's row.
-    call_ids: Vec<String>,
-    /// How many in-flight calls this single row represents. `>1` when identical
-    /// concurrent calls were folded together; rendered as a `×N` multiplier
-    /// instead of N byte-identical lines stacked on top of each other.
-    concurrent: usize,
-}
 
 /// Verbosity level for tool display (Hermes-inspired 4-level toggle)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -427,8 +399,15 @@ impl Verbosity {
 pub struct Activity {
     active: bool,
     phase: ProcessingPhase,
-    tool_feed: Vec<ToolEntry>,
-    last_tool_name: String,
+    /// How many tool calls are in flight right now.
+    ///
+    /// All that survives of the tool feed. Two readers need it and neither needs
+    /// a row: the spinner colours itself green while a tool runs, and the
+    /// accessibility line distinguishes "running a tool" from "thinking". The
+    /// per-call rows themselves are gone — a run commits as ONE summary line to
+    /// scrollback, and the in-flight form of that same line rides the details
+    /// slot.
+    running_tools: usize,
     input_tokens: u64,
     output_tokens: u64,
     /// Reasoning tokens for the latest iteration (item 4). Included in the true
@@ -660,8 +639,7 @@ impl Activity {
         Self {
             active: false,
             phase: ProcessingPhase::Waiting,
-            tool_feed: Vec::new(),
-            last_tool_name: String::new(),
+            running_tools: 0,
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
@@ -792,11 +770,18 @@ impl Activity {
                 return reason.label().to_lowercase();
             }
         }
-        if let Some(entry) = self.tool_feed.iter().rev().find(|e| e.duration_ms.is_none()) {
-            if entry.detail.is_empty() {
-                return format!("{} ({})", entry.verb, entry.name);
+        // The in-flight tool run, in the words the committed summary line will
+        // use ("reading 2 files"). This is the details block, which the run
+        // mirrors itself into while it folds — the same source the sighted status
+        // row reads, so the two cannot describe the turn differently.
+        if self.running_tools > 0 {
+            if let Some(d) = self.details.as_deref() {
+                let d = d.trim();
+                if !d.is_empty() {
+                    return d.to_lowercase();
+                }
             }
-            return format!("{} {}", entry.verb, entry.detail);
+            return "running a tool".to_string();
         }
         if let Some(v) = self.active_verb.as_deref() {
             return v.to_string();
@@ -862,9 +847,8 @@ impl Activity {
     pub fn start(&mut self) {
         self.active = true;
         self.phase = ProcessingPhase::Waiting;
-        self.tool_feed.clear();
+        self.running_tools = 0;
         self.clear_command_output();
-        self.last_tool_name.clear();
         self.input_tokens = 0;
         self.output_tokens = 0;
         self.reasoning_tokens = 0;
@@ -1210,64 +1194,17 @@ impl Activity {
         self.tool_start_with_id(name, args, None);
     }
 
-    /// Record a tool call start, carrying the backend's stable per-call id when
-    /// it sent one. The id is what lets [`Self::tool_end_with_id`] close the
-    /// RIGHT row when several same-name calls are in flight at once.
+    /// Record a tool call start.
     ///
-    /// Identical concurrent calls (same tool, same argument hint, both still
-    /// running) are folded into ONE row with a `×N` multiplier: two `delegate`
-    /// calls previously drew two byte-identical lines, which read as a rendering
-    /// glitch rather than as two workers.
-    pub fn tool_start_with_id(&mut self, name: &str, args: &str, call_id: Option<&str>) {
-        let (emoji, verb) = tool_display(name);
-        // Argument preview. Three shapes have to be rejected or reduced here:
-        //   * schema parameter-name fallbacks (`"options, question"`) — dropped;
-        //   * raw JSON args (file-edit ships its whole arg map so the diff
-        //     renderer can work) — reduced to the identifying value, i.e. the
-        //     PATH, instead of dumping `{"new_string":"  @doc \"Start…`;
-        //   * anything over the column budget — width-aware, and for a path the
-        //     filename (the tail) is what survives, not the head.
-        let hint = crate::util::arg_summary(args.trim());
-        let hint = hint.trim();
-        let detail = if hint.is_empty() || is_param_name_list(hint) {
-            String::new()
-        } else {
-            crate::util::fit_arg_summary(hint, 60)
-        };
-
-        // Fold an identical still-running call into the existing row.
-        if let Some(existing) = self
-            .tool_feed
-            .iter_mut()
-            .rev()
-            .find(|e| e.name == name && e.detail == detail && e.duration_ms.is_none())
-        {
-            existing.concurrent += 1;
-            if let Some(id) = call_id {
-                existing.call_ids.push(id.to_string());
-            }
-            self.last_tool_name = name.to_string();
-            self.last_output_at = Some(std::time::Instant::now());
-            return;
-        }
-
-        self.tool_feed.push(ToolEntry {
-            name: name.to_string(),
-            emoji,
-            verb,
-            detail,
-            start: std::time::Instant::now(),
-            duration_ms: None,
-            success: None,
-            call_ids: call_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
-            concurrent: 1,
-        });
-        self.last_tool_name = name.to_string();
+    /// `call_id` is accepted and ignored: it existed to close the RIGHT feed row
+    /// when several same-name calls were in flight, and there are no rows left to
+    /// close. The concurrent-identical fold died with them for the same reason —
+    /// a run commits as one summary line, which already counts its calls.
+    pub fn tool_start_with_id(&mut self, _name: &str, _args: &str, _call_id: Option<&str>) {
+        self.running_tools += 1;
+        // The stall clock. A tool starting IS output flowing: without this a
+        // tool-heavy turn reddens as though it had frozen.
         self.last_output_at = Some(std::time::Instant::now());
-        // Keep feed bounded
-        if self.tool_feed.len() > 20 {
-            self.tool_feed.remove(0);
-        }
     }
 
     /// Record a tool call end
@@ -1275,62 +1212,20 @@ impl Activity {
         self.tool_end_with_id(name, duration_ms, success, None);
     }
 
-    /// Close a tool call, pairing by the backend's per-call id when present.
+    /// Close a tool call.
     ///
-    /// Name-only pairing closed whichever same-name row happened to be last,
-    /// so with two concurrent `delegate` calls the first completion froze the
-    /// second worker's line. When the id is known we close the row that actually
-    /// owns it; a row standing in for several folded concurrent calls just loses
-    /// one of them and keeps running until the last id is retired.
+    /// Every argument but the count is now the committed summary line's business.
+    /// `saturating_sub` rather than `-= 1` because an end without a matching start
+    /// is reachable (a reconnect mid-run replays ends the TUI never saw begin), and
+    /// an underflow here would wrap to a permanently "running" spinner.
     pub fn tool_end_with_id(
         &mut self,
-        name: &str,
-        duration_ms: u64,
-        success: bool,
-        call_id: Option<&str>,
+        _name: &str,
+        _duration_ms: u64,
+        _success: bool,
+        _call_id: Option<&str>,
     ) {
-        let idx = call_id
-            .and_then(|id| {
-                self.tool_feed
-                    .iter()
-                    .rposition(|e| e.duration_ms.is_none() && e.call_ids.iter().any(|c| c == id))
-            })
-            .or_else(|| {
-                self.tool_feed
-                    .iter()
-                    .rposition(|e| e.name == name && e.duration_ms.is_none())
-            });
-        if let Some(i) = idx {
-            let entry = &mut self.tool_feed[i];
-            if let Some(id) = call_id {
-                entry.call_ids.retain(|c| c != id);
-            }
-            if entry.concurrent > 1 {
-                // Other folded calls are still in flight — the row keeps running.
-                entry.concurrent -= 1;
-            } else {
-                // The wire type is a bare `u64`, so a 0 is ambiguous: either the
-                // backend did not track this call, or the call really did finish
-                // in under a millisecond. Disambiguate with the TUI-side clock,
-                // which is an UPPER bound on the true duration (it also contains
-                // the SSE round trip).
-                //
-                // Below the threshold a 0 is credible and is kept — substituting
-                // the TUI measurement there would inflate a genuine 0.4 ms read
-                // into "15ms" of mostly transport latency. Above it, the call was
-                // demonstrably not instant, so the backend simply did not report
-                // and the TUI measurement is the only number available.
-                const UNREPORTED_MS: u64 = 250;
-                let observed_ms = entry.start.elapsed().as_millis() as u64;
-                let effective_ms = if duration_ms == 0 && observed_ms >= UNREPORTED_MS {
-                    observed_ms
-                } else {
-                    duration_ms
-                };
-                entry.duration_ms = Some(effective_ms);
-                entry.success = Some(success);
-            }
-        }
+        self.running_tools = self.running_tools.saturating_sub(1);
         self.last_output_at = Some(std::time::Instant::now());
     }
 
@@ -1445,11 +1340,7 @@ impl Activity {
     /// interpolated toward error-red by the stall intensity so a frozen turn
     /// visibly reddens. Retry/cancel states are colored at the call site.
     fn verb_base_color(&self, theme: &crate::style::Theme, stall: f64) -> Color {
-        let tool_running = self
-            .tool_feed
-            .iter()
-            .any(|e| e.duration_ms.is_none());
-        let base = if tool_running {
+        let base = if self.running_tools > 0 {
             theme.colors.success
         } else if matches!(
             self.phase,
@@ -1521,6 +1412,16 @@ impl Activity {
         }
     }
 
+    /// The rows this slot claims: the status line, plus whatever the details
+    /// block wraps to.
+    ///
+    /// A constant, and that is the whole point. The slot used to add a row per
+    /// tool in flight, and every growth rebuilt the inline viewport — a cursor
+    /// re-anchor that stacked a fresh composer and status bar down the screen.
+    /// The band can no longer grow or shrink, so it can no longer do that.
+    ///
+    /// `Verbosity` survives as a user-facing preference but no longer selects a
+    /// depth: there is no depth left to select.
     pub fn height(&self) -> u16 {
         if !self.active {
             return 0;
@@ -1529,68 +1430,17 @@ impl Activity {
         if self.a11y {
             return 1;
         }
-        // The `└ ` details block sits between the status line and the feed, so it
-        // adds rows in EVERY verbosity (including `Off`, which is "status line
-        // only" — the details are part of that status row, not the tool feed).
-        let details = self.details_rows();
-        match self.verbosity {
-            Verbosity::Off => 1 + details,
-            Verbosity::New => 2 + details,
-            Verbosity::All => {
-                let feed_lines = self.visible_feed_count().min(4) as u16;
-                1 + details + feed_lines // spinner + details + feed
-            }
-            Verbosity::Verbose => {
-                let feed_lines = self.visible_feed_count().min(8) as u16;
-                1 + details + feed_lines
-            }
-        }
+        1 + self.details_rows()
     }
 
-    /// The MAXIMUM rows [`Self::height`] can return for the CURRENT mode, independent
-    /// of how many tools are currently in the feed.
+    /// Identical to [`Self::height`] by construction.
     ///
-    /// The inline viewport reserves THIS so the slot height stays constant for the
-    /// whole turn: a slot that tracks the live feed grows one row per tool, and every
-    /// growth rebuilds the viewport (a DSR cursor re-anchor) — which stacks a fresh
-    /// composer + status bar down the screen. Reserving a mode-derived ceiling is
-    /// stable (verbosity only changes on explicit user action, never mid-turn) while
-    /// never UNDER-reserving: the previous flat 6-row cap clipped `Verbose` (which
-    /// wants 9), silently dropping the three oldest feed rows.
+    /// Kept as a separate name because the inline viewport reserves the maximum
+    /// and paints the current, and a caller that conflates the two is a bug even
+    /// when the two agree. Reserved must equal painted: reserve more and dead
+    /// rows sit above the composer, reserve less and the block is clipped.
     pub fn max_height(&self) -> u16 {
-        if !self.active {
-            return 0;
-        }
-        if self.a11y {
-            return 1;
-        }
-        // Must use the SAME `details_rows()` as `height()` — a details block that
-        // is drawn but not reserved gets clipped; one reserved but not drawn
-        // leaves dead rows (bare accent-rail glyphs) above the composer.
-        let details = self.details_rows();
-        match self.verbosity {
-            Verbosity::Off => 1 + details,
-            Verbosity::New => 2 + details,
-            // spinner + details + the per-verbosity feed cap used by `height()`.
-            Verbosity::All => 1 + details + 4,
-            Verbosity::Verbose => 1 + details + 8,
-        }
-    }
-
-    fn visible_feed_count(&self) -> usize {
-        match self.verbosity {
-            Verbosity::Off => 0,
-            Verbosity::New => {
-                // Only show if tool changed
-                if self.tool_feed.is_empty() {
-                    0
-                } else {
-                    1
-                }
-            }
-            Verbosity::All => self.tool_feed.len().min(4),
-            Verbosity::Verbose => self.tool_feed.len().min(8),
-        }
+        self.height()
     }
 }
 
@@ -1933,10 +1783,10 @@ impl Component for Activity {
 
         // ── `└ ` details block (Codex status_indicator_widget) ───────────
         // The concrete thing behind the verb, wrapped with a hanging indent and
-        // ellipsized on the last kept row. Rendered whenever the slot has spare
-        // height, ABOVE the tool feed and regardless of verbosity (it is part of
-        // the status row, not the feed).
-        let mut next_y = content.y + 1;
+        // ellipsized on the last kept row. Now the ONLY content under the status
+        // line: it carries the in-flight run ("Reading 2 files") that the tool
+        // feed used to spell out a row at a time. It is capped and records its own
+        // wrap width, so rows reserved equal rows painted.
         if content.height > 1 {
             let room = (content.height - 1) as usize;
             for (i, row) in self
@@ -1953,160 +1803,7 @@ impl Component for Activity {
                     Paragraph::new(Line::from(Span::styled(row, theme.faint()))),
                     Rect::new(content.x, y, content.width, 1),
                 );
-                next_y = y + 1;
             }
-        }
-
-        if self.verbosity == Verbosity::Off || next_y >= content.y + content.height {
-            return;
-        }
-
-        // Live command output claims the BOTTOM rows of the remaining budget.
-        //
-        // It deliberately does NOT add rows: `height()`/`max_height()` reserve a
-        // fixed slot for the whole turn, and growing that slot mid-turn rebuilds
-        // the inline viewport (a DSR cursor re-anchor that stacks a fresh
-        // composer down the screen — see `max_height`'s note). So the live tail
-        // SHARES the feed budget rather than extending it.
-        let budget = (content.y + content.height - next_y) as usize;
-        let live_lines = if self.verbosity == Verbosity::New {
-            // "New" mode is a single summary row — no room for a tail.
-            Vec::new()
-        } else {
-            let mut lines = self.live_output_lines();
-            // Never let the tail swallow the feed: keep one row for the running
-            // tool itself when there is one.
-            let cap = budget.saturating_sub(usize::from(!self.tool_feed.is_empty()));
-            if lines.len() > cap {
-                lines.drain(..lines.len() - cap);
-            }
-            lines
-        };
-
-        // Tool feed lines (Hermes-style: ┊ emoji verb  detail  duration)
-        let max_lines = budget - live_lines.len();
-        let feed_start = if self.tool_feed.len() > max_lines {
-            self.tool_feed.len() - max_lines
-        } else {
-            0
-        };
-
-        for (i, entry) in self.tool_feed[feed_start..].iter().enumerate() {
-            if i >= max_lines {
-                break;
-            }
-            let y = next_y + i as u16;
-            if y >= content.y + content.height {
-                break;
-            }
-
-            // `{:<10}` alone produced `delegatingname, role`: the verb "delegating"
-            // is exactly 10 chars, so the pad emitted NOTHING and the detail was
-            // glued straight onto it. The trailing space is unconditional so every
-            // verb — short or exactly-at-the-pad — is separated from its detail.
-            // WEIGHT ENCODES STATE, not category.
-            //
-            // Every feed row painted its verb in the same bold accent, so four
-            // finished calls shouted exactly as loudly as the one still running —
-            // and the feed as a whole shouted as loudly as the spinner verb
-            // directly above it. Colour is rationed to state (all three reference
-            // TUIs converge on this): the RUNNING call keeps the accent, finished
-            // ones recede to the meta tier, and their outcome is already carried
-            // by the duration span's colour at the end of the row.
-            //
-            // The gutter is chrome and therefore always the quietest tier.
-            let running = entry.duration_ms.is_none();
-            let verb_style = if running {
-                theme.prefix_active()
-            } else {
-                theme.faint()
-            };
-            let mut spans: Vec<Span<'_>> = vec![
-                Span::styled("\u{2506} ", theme.recede()),
-                Span::raw(format!("{} ", entry.emoji)),
-                Span::styled(format!("{:<10} ", entry.verb), verb_style),
-            ];
-
-            if !entry.detail.is_empty() && self.verbosity != Verbosity::New {
-                spans.push(Span::styled(&entry.detail, theme.faint()));
-                spans.push(Span::raw("  "));
-            }
-
-            // Concurrency multiplier for folded identical calls (`×2`), so two
-            // workers read as two workers instead of one duplicated line.
-            if entry.concurrent > 1 {
-                spans.push(Span::styled(
-                    format!("\u{00d7}{}  ", entry.concurrent),
-                    theme.faint(),
-                ));
-            }
-
-            // Duration / status.
-            //
-            // ONE clock per surface: a RUNNING sub-agent tool gets no duration
-            // here at all. Its age is already on that worker's fleet-roster row,
-            // and the turn clock is on the status line above — printing it a third
-            // time on the delegate line is what put four live timers on screen.
-            // Completed calls still report their duration (the roster row is gone
-            // by then, and the number is now a fact, not a competing clock).
-            let suppress_running_timer = is_agent_tool(&entry.name);
-            match (entry.duration_ms, entry.success) {
-                (Some(ms), Some(true)) => {
-                    spans.push(Span::styled(fmt_tool_duration(ms), theme.task_done()));
-                }
-                (Some(ms), Some(false)) => {
-                    spans.push(Span::styled(
-                        format!("{} [error]", fmt_tool_duration(ms)),
-                        theme.error_text(),
-                    ));
-                }
-                // Duration known but the outcome is not: report the fact we have
-                // and stay silent about the one we don't, rather than falling
-                // through to the running branch and restarting a dead clock.
-                (Some(ms), None) => {
-                    spans.push(Span::styled(fmt_tool_duration(ms), theme.faint()));
-                }
-                _ if suppress_running_timer => {}
-                _ => {
-                    // Still running — a live, still-growing measurement.
-                    let running_ms = entry.start.elapsed().as_millis() as u64;
-                    spans.push(Span::styled(
-                        format!("{}...", fmt_tool_duration(running_ms)),
-                        theme.faint(),
-                    ));
-                }
-            }
-
-            let line = Line::from(spans);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(content.x, y, content.width, 1),
-            );
-        }
-
-        // ── Live command output tail ─────────────────────────────────────
-        // Rendered under the feed, faint and dim, so the eye reads it as the
-        // machine's voice rather than OSA's. Each row is clipped to the pane
-        // width (never wrapped) so one long line can never displace the rows
-        // below it.
-        let live_y0 = next_y + max_lines.min(self.tool_feed.len().saturating_sub(feed_start)) as u16;
-        for (i, text) in live_lines.iter().enumerate() {
-            let y = live_y0 + i as u16;
-            if y >= content.y + content.height {
-                break;
-            }
-            let avail = content.width.saturating_sub(2) as usize;
-            let body = sanitize_live_line(text, avail);
-            let line = Line::from(vec![
-                // Gutter is chrome: quietest tier, same as the feed above it, so
-                // the two blocks read as one column rather than two.
-                Span::styled("\u{2506} ", theme.recede()),
-                Span::styled(body, theme.faint()),
-            ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(content.x, y, content.width, 1),
-            );
         }
     }
 }
@@ -2159,12 +1856,57 @@ mod activity_tests {
     fn tool_start_multibyte_args_never_panic() {
         // Args whose byte 57 lands inside a multi-byte char (the old &args[..57]
         // slice would panic). Leading 'a' shifts the 3-byte '€' run off byte 57.
+        // The arguments are no longer summarised here, so this now guards the
+        // call boundary rather than the truncation — kept because the panic it
+        // describes was real and the summariser still runs on the same strings
+        // one layer up.
         let mb = format!("a{}", "\u{20ac}".repeat(40));
         let mut act = Activity::new();
         act.tool_start("Bash", &mb);
         act.tool_start("Read", "short ascii");
         act.tool_start("Web", &"\u{1f600}".repeat(30)); // 4-byte emoji run
-        assert!(!act.tool_feed.is_empty());
+        assert_eq!(act.running_tools, 3);
+    }
+
+    #[test]
+    fn the_band_reserves_no_rows_for_tools() {
+        // The point of the whole change, asserted where it can't drift: a turn
+        // running many tools claims exactly what an idle one claims. Growth here
+        // is what rebuilt the inline viewport mid-turn and stacked composers.
+        for verbosity in [
+            Verbosity::Off,
+            Verbosity::New,
+            Verbosity::All,
+            Verbosity::Verbose,
+        ] {
+            let mut act = Activity::new();
+            act.start();
+            act.verbosity = verbosity;
+            let bare = act.height();
+            for i in 0..20 {
+                act.tool_start(&format!("tool{i}"), "{}");
+            }
+            assert_eq!(
+                act.height(),
+                bare,
+                "{verbosity:?}: twenty running tools must not add a row"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_end_cannot_strand_the_spinner_on_running() {
+        // A reconnect mid-run replays ends whose starts the TUI never saw. An
+        // underflow here would wrap to usize::MAX and colour the spinner
+        // tool-green for the rest of the session.
+        let mut act = Activity::new();
+        act.start();
+        act.tool_end("Read", 12, true);
+        assert_eq!(act.running_tools, 0);
+        act.tool_start("Read", "{}");
+        act.tool_end("Read", 12, true);
+        act.tool_end("Read", 12, true);
+        assert_eq!(act.running_tools, 0);
     }
 
     // ── effects that must survive the tool-feed deletion ───────────────────
@@ -3005,142 +2747,6 @@ mod slot_invariant_tests {
             .collect()
     }
 
-    /// The verb "delegating" is exactly the 10 columns the pad reserved, so
-    /// `{:<10}` emitted NOTHING and the detail was glued straight onto it:
-    /// `delegatingname, role`. The separator must be unconditional.
-    #[test]
-    fn tool_feed_always_separates_the_verb_from_its_detail() {
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        // A hint that is a real value (not the schema's parameter names).
-        act.tool_start("delegate", "/w/codex");
-        let rows = delegating(&act);
-        assert_eq!(rows.len(), 1, "one delegate row: {rows:?}");
-        assert!(
-            !rows[0].contains("delegating/w/codex"),
-            "verb ran into its detail: {rows:?}"
-        );
-        assert!(rows[0].contains("delegating "), "missing separator: {rows:?}");
-    }
-
-    /// The backend's `tool_call_hint/1` falls back to the SCHEMA's parameter
-    /// names (`args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")`), so a
-    /// `delegate` call arrived as the literal string `"name, role"`. That is not
-    /// a preview of anything and must never be painted as the tool's label.
-    #[test]
-    fn schema_parameter_name_hints_are_not_rendered_as_a_label() {
-        assert!(is_param_name_list("name, role"));
-        assert!(is_param_name_list("task_id, prompt"));
-        // Real hints must survive.
-        assert!(!is_param_name_list("/Users/user/.osa/workspace/codex"));
-        assert!(!is_param_name_list("cargo test --release"));
-        assert!(!is_param_name_list("explorer"));
-        assert!(!is_param_name_list("find the dead code, then report"));
-
-        // The backend no longer emits the key-name shape at all (it returns an
-        // empty hint instead — see `Loop.ToolHint`), so this guard is now
-        // belt-and-braces for older backends. What matters is that it does not
-        // swallow the summaries the fixed backend DOES send.
-        for legitimate in [
-            "Which parser should we keep?",  // ask_user
-            "/proj/lib/agent/loop.ex",       // file tools
-            "cargo test --release",          // shell_execute
-            "smoke-e2e",                     // delegate teammate
-            "Refactor the parser +2 more",   // task_write add_multiple
-            "complete t-7",                  // task_write status change
-        ] {
-            assert!(
-                !is_param_name_list(legitimate),
-                "guard swallowed a real summary: {legitimate:?}"
-            );
-        }
-
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        act.tool_start("delegate", "name, role");
-        let rows = delegating(&act);
-        assert_eq!(rows.len(), 1, "one delegate row: {rows:?}");
-        assert!(
-            !rows[0].contains("name, role"),
-            "schema parameter names leaked into the label: {rows:?}"
-        );
-    }
-
-    /// ONE clock per surface. A RUNNING sub-agent's age belongs to its fleet
-    /// roster row; the turn clock belongs to the status line. The delegate feed
-    /// line must add no third live timer.
-    #[test]
-    fn running_delegate_line_carries_no_timer() {
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        act.tool_start("delegate", "/w/codex");
-        let rows = delegating(&act);
-        let has_timer = rows[0]
-            .split_whitespace()
-            .any(|t| {
-                let t = t.trim_end_matches('.');
-                t.ends_with('s')
-                    && t.starts_with(|c: char| c.is_ascii_digit())
-                    && t.chars().all(|c| c.is_ascii_digit() || matches!(c, 'm' | 's' | '.'))
-            });
-        assert!(!has_timer, "running delegate line shows a timer: {rows:?}");
-
-        // A COMPLETED call still reports its duration — the roster row is gone by
-        // then, so the number is a fact rather than a competing clock.
-        act.tool_end("delegate", 4200, true);
-        let done = delegating(&act);
-        assert!(done[0].contains("4.2s"), "finished delegate keeps its duration: {done:?}");
-    }
-
-    /// Two concurrent `delegate` calls drew two byte-identical lines. Fold them
-    /// into one row with a `×N` multiplier instead.
-    #[test]
-    fn identical_concurrent_calls_fold_into_one_row_with_a_multiplier() {
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        act.tool_start_with_id("delegate", "name, role", Some("call-a"));
-        act.tool_start_with_id("delegate", "name, role", Some("call-b"));
-        let rows = delegating(&act);
-        assert_eq!(rows.len(), 1, "identical concurrent calls fold: {rows:?}");
-        assert!(rows[0].contains("\u{00d7}2"), "missing ×2 multiplier: {rows:?}");
-        assert_eq!(act.tool_feed.len(), 1, "one feed entry backs the folded row");
-    }
-
-    /// Pairing by tool NAME closed whichever same-name row happened to be last,
-    /// so the first completion froze the OTHER worker's line. With per-call ids
-    /// the row stays live until its last id is retired.
-    #[test]
-    fn tool_end_pairs_by_call_id_not_by_tool_name() {
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        act.tool_start_with_id("delegate", "name, role", Some("call-a"));
-        act.tool_start_with_id("delegate", "name, role", Some("call-b"));
-
-        // First completion retires one of the two folded calls; the row runs on.
-        act.tool_end_with_id("delegate", 1000, true, Some("call-a"));
-        assert_eq!(act.tool_feed[0].concurrent, 1, "one call still in flight");
-        assert!(act.tool_feed[0].duration_ms.is_none(), "row must stay live");
-
-        // Second completion closes it for real.
-        act.tool_end_with_id("delegate", 2500, true, Some("call-b"));
-        assert_eq!(act.tool_feed[0].duration_ms, Some(2500));
-
-        // Distinct details are NOT folded, and each id closes its own row.
-        let mut act = Activity::new();
-        act.start();
-        act.tool_start_with_id("delegate", "/a", Some("id-a"));
-        act.tool_start_with_id("delegate", "/b", Some("id-b"));
-        assert_eq!(act.tool_feed.len(), 2);
-        act.tool_end_with_id("delegate", 900, true, Some("id-a"));
-        assert_eq!(act.tool_feed[0].duration_ms, Some(900), "id-a's own row closed");
-        assert!(act.tool_feed[1].duration_ms.is_none(), "id-b still running");
-    }
-
     /// An inactive activity must reserve nothing, so the slot collapses when idle.
     #[test]
     fn idle_activity_reserves_no_rows() {
@@ -3249,16 +2855,24 @@ mod slot_invariant_tests {
         assert_eq!(act.max_height(), max);
     }
 
+    /// The band no longer paints streamed command output — it has no rows to
+    /// paint it into. The buffers stay: they are still fed by the backend (which
+    /// is also what keeps the stall clock alive during a long command), and the
+    /// committed execute block is where that output is going next.
     #[test]
-    fn live_output_renders_into_the_feed_area() {
+    fn live_output_is_buffered_but_never_painted_into_the_band() {
         let mut act = Activity::new();
         act.start();
         act.tool_start("Bash", r#"{"command":"make"}"#);
         act.push_command_output("make", "linking target\n");
+        assert!(
+            !act.live_output_lines().is_empty(),
+            "the buffer still collects output"
+        );
         let text = render_live(&act, 100, act.max_height().max(1));
         assert!(
-            text.contains("linking target"),
-            "live tail must be painted: {text:?}"
+            !text.contains("linking target"),
+            "the band must not paint a tail it did not reserve: {text:?}"
         );
     }
 
@@ -3269,8 +2883,6 @@ mod slot_invariant_tests {
         act.push_command_output("make", "linking target\n");
         act.clear_command_output();
         assert!(act.live_output_lines().is_empty());
-        let text = render_live(&act, 100, act.max_height().max(1));
-        assert!(!text.contains("linking target"));
     }
 
     #[test]
@@ -3328,60 +2940,6 @@ mod slot_invariant_tests {
 // rendered `40ms` in the transcript below it (`tools::format_duration`). These
 // tests pin the feed to that one shared formatter.
 // ---------------------------------------------------------------------------
-#[cfg(test)]
-mod duration_render_tests {
-    use super::*;
-
-    fn render(act: &Activity, w: u16) -> String {
-        use ratatui::{backend::TestBackend, Terminal};
-        let h = act.max_height().max(1);
-        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| act.draw(f, f.area())).unwrap();
-        term.backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
-
-    fn feed_with(duration_ms: u64, success: bool) -> Activity {
-        let mut act = Activity::new();
-        act.start();
-        act.verbosity = Verbosity::All;
-        act.tool_start_with_id("file_read", "/tmp/x.rs", Some("c1"));
-        act.tool_end_with_id("file_read", duration_ms, success, Some("c1"));
-        act
-    }
-
-    #[test]
-    fn sub_second_tool_durations_keep_millisecond_resolution() {
-        // A 40 ms read is a real measurement, not zero.
-        let act = feed_with(40, true);
-        let out = render(&act, 100);
-        assert!(out.contains("40ms"), "expected millisecond resolution: {out:?}");
-        assert!(
-            !out.contains("0.0s"),
-            "a 40ms call must never render as zero seconds: {out:?}"
-        );
-    }
-
-    #[test]
-    fn a_failed_sub_second_call_also_keeps_millisecond_resolution() {
-        let act = feed_with(12, false);
-        let out = render(&act, 100);
-        assert!(out.contains("12ms"), "expected 12ms: {out:?}");
-        assert!(!out.contains("0.0s"), "failed fast call showed 0.0s: {out:?}");
-    }
-
-    #[test]
-    fn multi_second_durations_still_render_in_seconds() {
-        let act = feed_with(2_500, true);
-        let out = render(&act, 100);
-        assert!(out.contains("2.5s"), "expected 2.5s: {out:?}");
-    }
-}
-
 #[cfg(test)]
 mod turn_start_indicator_tests {
     use super::*;
