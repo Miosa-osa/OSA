@@ -1,0 +1,158 @@
+{
+    "id": "856e5c63-96b3-4cd7-a58c-f3f786117621",
+    "task_name": "terminal-bench/train-fasttext",
+    "trial_name": "train-fasttext__pLwPb3a",
+    "trial_uri": "file:///home/miosa/projects/osa/OSA/bench/recoverybench/runs/delta-01/fresh/harbor/2026-08-14__02-45-10/train-fasttext__pLwPb3a",
+    "task_id": {
+        "path": "/home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2/train-fasttext"
+    },
+    "source": "terminal-bench-2",
+    "task_checksum": "78f5138e10a52db20a6dfd075ec3245b0ceb1e8446a75297519ba2309edf86ec",
+    "config": {
+        "task": {
+            "path": "/home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2/train-fasttext",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench-2"
+        },
+        "trial_name": "train-fasttext__pLwPb3a",
+        "trials_dir": "/home/miosa/projects/osa/OSA/bench/recoverybench/runs/delta-01/fresh/harbor/2026-08-14__02-45-10",
+        "install_only": false,
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": "osa_agent:OsaAgent",
+            "import_path": null,
+            "model_name": null,
+            "n_concurrent": null,
+            "concurrency_group": null,
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "resume_trajectory": false,
+            "load_trajectory": null,
+            "extra_allowed_hosts": [],
+            "kwargs": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "override_tpu": null,
+            "mounts": null,
+            "extra_docker_compose": [
+                "/home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml"
+            ],
+            "kwargs": {},
+            "extra_allowed_hosts": []
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "disable": false
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "49c255e8-ca15-4c16-bb06-ec4936355761",
+        "source_trial": null
+    },
+    "agent_info": {
+        "name": "osa",
+        "version": "1.0.95",
+        "model_info": null
+    },
+    "agent_result": {
+        "n_input_tokens": 1999102,
+        "n_cache_tokens": null,
+        "n_output_tokens": 8045,
+        "cost_usd": 1.217162,
+        "rollout_details": null,
+        "metadata": {
+            "osa_status": "ok",
+            "osa_error": null,
+            "osa_turns": 59,
+            "osa_tool_calls": 65,
+            "osa_saw_done": true,
+            "osa_boot_s": 2.07,
+            "osa_run_s": 366.87,
+            "osa_model": "glm-5.2:cloud",
+            "osa_last_event_type": "done",
+            "osa_event_type_counts": {
+                "connected": 1,
+                "system_event": 785,
+                "streaming_token": 2556,
+                "llm_response": 118,
+                "cost_update": 59,
+                "tool_call": 130,
+                "tool_result": 65,
+                "context_pressure": 60,
+                "command_output_delta": 25,
+                "background_command_started": 4,
+                "doom_loop_detected": 8,
+                "background_command_completed": 3,
+                "task_notification": 3,
+                "agent_response": 1,
+                "turn_recap": 1,
+                "done": 1
+            },
+            "osa_self_inflicted": {},
+            "osa_self_inflicted_samples": {},
+            "osa_usage_sum": {
+                "input_tokens": 1999102,
+                "output_tokens": 8045,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+            },
+            "osa_spend_sidecar": {
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost_usd": 1.217162,
+                "input_tokens": 1999102,
+                "output_tokens": 8045,
+                "started_at": "2026-08-13T19:45:52.314829Z"
+            }
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0.0
+        }
+    },
+    "verifier_environment_mode": "shared",
+    "exception_info": null,
+    "started_at": "2026-08-13T19:45:11.134790Z",
+    "finished_at": "2026-08-13T19:52:27.494219Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T19:45:11.173540Z",
+        "finished_at": "2026-08-13T19:45:36.711365Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T19:45:36.711390Z",
+        "finished_at": "2026-08-13T19:45:48.989197Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-13T19:45:48.989250Z",
+        "finished_at": "2026-08-13T19:51:59.593767Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-13T19:52:00.802665Z",
+        "finished_at": "2026-08-13T19:52:15.570693Z"
+    },
+    "step_results": null
+}

@@ -265,6 +265,15 @@ class FailureAnalysis:
     by_repo: dict[str, int]
     leads: list[str]
     transcripts_missing: int
+    #: The Bucket object actually used for each code seen in this run.
+    #: `bucket_for(code)` only knows the static registry, so a schema-v2 code
+    #: like `model_fix_incomplete_fail_to_pass_still_failing` renders as
+    #: "unknown / unclassified" through it even though `analyse()` built a
+    #: perfectly good Bucket for it. Callers should look here first.
+    bucket_objects: dict[str, "Bucket"] = field(default_factory=dict)
+
+    def bucket(self, code: str) -> "Bucket":
+        return self.bucket_objects.get(code) or bucket_for(code)
 
     def to_json(self) -> dict:
         return {
@@ -379,4 +388,5 @@ def analyse(run: "Run") -> FailureAnalysis:
         by_repo=dict(sorted(by_repo.items(), key=lambda kv: -kv[1])),
         leads=_leads(failures, run),
         transcripts_missing=missing,
+        bucket_objects={f.bucket.code: f.bucket for f in failures},
     )

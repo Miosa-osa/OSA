@@ -341,14 +341,197 @@ class TestHonestyRefusals(unittest.TestCase):
         )
         self.assertIn("config_timestamps_inconsistent_with_work", self._codes(self._v(doc)))
 
-    def test_zero_cost_is_labelled_unpriced_not_free(self):
-        v = self._v(make_results(n=40, k=20, cost=0.0))
-        self.assertIn("cost_is_zero_because_unpriced", self._codes(v))
-
     def test_empty_run_short_circuits(self):
         v = self._v(make_results(n=0, k=0))
         self.assertIn("empty_run", self._codes(v))
         self.assertFalse(v.may_quote_headline_rate)
+
+    def test_zero_cost_on_an_unknown_model_stays_ambiguous(self):
+        """Model not in the price table: we cannot tell a bug from a freebie."""
+        v = self._v(make_results(n=40, k=20, cost=0.0, model="m"))
+        self.assertIn("cost_is_zero_and_model_pricing_unknown", self._codes(v))
+
+    def test_zero_cost_on_a_priced_model_is_called_a_defect(self):
+        """glm-5.2:cloud IS priced, so a zero is broken accounting, not a
+        subscription. The old wording asserted the flattering reading."""
+        v = self._v(make_results(n=40, k=20, cost=0.0, model="glm-5.2:cloud"))
+        codes = self._codes(v)
+        self.assertIn("cost_is_zero_but_model_is_priced", codes)
+        self.assertNotIn("cost_is_zero_and_model_pricing_unknown", codes)
+
+    def test_zero_cost_on_a_local_model_is_correct(self):
+        v = self._v(make_results(n=40, k=20, cost=0.0, model="qwen2.5:7b"))
+        self.assertIn("cost_is_zero_because_model_is_local", self._codes(v))
+
+    def test_nonzero_cost_produces_no_cost_finding(self):
+        codes = self._codes(self._v(make_results(n=40, k=20, cost=1.5, model="glm-5.2:cloud")))
+        self.assertFalse([c for c in codes if c.startswith("cost_is_zero")])
+
+    def test_model_pricing_classifier(self):
+        self.assertEqual(honesty.model_pricing("glm-5.2:cloud")[0], "priced")
+        self.assertEqual(honesty.model_pricing("GLM-5.2:cloud")[0], "priced")
+        self.assertEqual(honesty.model_pricing("llama3.1:8b")[0], "free")
+        self.assertEqual(honesty.model_pricing("ollama/whatever")[0], "free")
+        self.assertEqual(honesty.model_pricing(None)[0], "unknown")
+        self.assertEqual(honesty.model_pricing("MIXED:a,b")[0], "unknown")
+
+
+class TestSeedProvenance(unittest.TestCase):
+    """`config.sampling.seed` is the run's own record of how it was drawn.
+
+    The reporter used to read only the `--seed` CLI flag, so every schema-v2
+    sample was told it had not declared a seed while its full provenance sat
+    in the artefact next to the finding.
+    """
+
+    def _codes(self, doc, **kw):
+        with tempfile.TemporaryDirectory() as t:
+            run = write_run(Path(t), doc)
+            return {f.code for f in honesty.evaluate(run, **kw).findings}
+
+    def _sampled(self, **samp):
+        doc = make_results(n=40, k=20)
+        doc["schema_version"] = 2
+        base = {
+            "method": "stratified-by-repo+hard-weighted",
+            "seed": 20260813,
+            "n_requested": 40,
+            "population": 500,
+            "hard_weighted": True,
+            "weight_formula": "(0.10 + hardness)**2",
+            "hardness_formula": "0.40*difficulty + ...",
+            "mean_hardness_sample": 0.4434,
+            "mean_hardness_population": 0.2967,
+        }
+        base.update(samp)
+        doc["config"]["sampling"] = base
+        return doc
+
+    def test_recorded_seed_satisfies_the_declaration(self):
+        codes = self._codes(self._sampled())
+        self.assertNotIn("selection_not_a_declared_random_sample", codes)
+        self.assertIn("selection_is_a_declared_seeded_sample", codes)
+
+    def test_no_sampling_block_still_fires(self):
+        doc = make_results(n=40, k=20)
+        codes = self._codes(doc)
+        self.assertIn("selection_not_a_declared_random_sample", codes)
+
+    def test_cli_seed_still_overrides_for_out_of_band_draws(self):
+        doc = make_results(n=40, k=20)
+        codes = self._codes(doc, declared_random_seed=7)
+        self.assertNotIn("selection_not_a_declared_random_sample", codes)
+
+    def test_hard_weighting_is_reported_separately_from_seeding(self):
+        """A seeded sample can still be unrepresentative, and that is a
+        different claim from 'selection is undeclared'."""
+        codes = self._codes(self._sampled())
+        self.assertIn("sample_deliberately_weighted_hard", codes)
+        codes_uniform = self._codes(self._sampled(hard_weighted=False))
+        self.assertNotIn("sample_deliberately_weighted_hard", codes_uniform)
+
+    def test_a_seeded_sample_is_not_thereby_quotable(self):
+        """Declaring the seed removes one WARN; it does not remove a BLOCK."""
+        with tempfile.TemporaryDirectory() as t:
+            run = write_run(Path(t), self._sampled())
+            self.assertFalse(honesty.evaluate(run).may_quote_headline_rate)
+
+
+class TestAirgapStatus(unittest.TestCase):
+    """The web-lookup BLOCK closes only on recorded, probe-backed evidence."""
+
+    def _run(self, tmp, *, airgap=None, net=None):
+        doc = make_results(n=40, k=20)
+        doc["schema_version"] = 2
+        doc["config"]["f2p_hint"] = False
+        if airgap is not None:
+            doc["config"]["airgap"] = airgap
+        if net is not None:
+            doc["aggregate"]["network_tool_use"] = net
+        return write_run(Path(tmp), doc)
+
+    _CLEAN_NET = {
+        "calls_by_tool": {},
+        "succeeded_by_tool": {},
+        "refused_by_tool": {},
+        "residual_shell_egress": {"instances": {}, "scanned": 40},
+    }
+    _GOOD_AIRGAP = {"enforced": True, "denial_evidence": "permission denied"}
+
+    def test_absent_by_default(self):
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(honesty.airgap_status(self._run(t))[0], "absent")
+
+    def test_requested_but_unproven_is_its_own_block(self):
+        with tempfile.TemporaryDirectory() as t:
+            run = self._run(t, airgap={"enforced": False, "error": "HTTP 500"})
+            self.assertEqual(honesty.airgap_status(run)[0], "unverified")
+            codes = {f.code for f in honesty.evaluate(run).blocks}
+            self.assertIn("airgap_requested_but_not_verified", codes)
+
+    def test_unscanned_residual_surface_is_not_a_pass(self):
+        """A missing key must never read as clean."""
+        with tempfile.TemporaryDirectory() as t:
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net={"calls_by_tool": {}})
+            self.assertEqual(honesty.airgap_status(run)[0], "unverified")
+
+    def test_successful_calls_despite_a_passing_probe_is_a_breach(self):
+        with tempfile.TemporaryDirectory() as t:
+            net = dict(self._CLEAN_NET, calls_by_tool={"web_fetch": 3},
+                       succeeded_by_tool={"web_fetch": 3})
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=net)
+            self.assertEqual(honesty.airgap_status(run)[0], "breached")
+            self.assertIn(
+                "airgap_verified_but_breached", {f.code for f in honesty.evaluate(run).blocks}
+            )
+
+    def test_refused_attempts_are_not_a_breach(self):
+        """The airgap working looks like attempts in the log. Treating those as
+        a breach reported the first successful airgap as a failure."""
+        with tempfile.TemporaryDirectory() as t:
+            net = dict(self._CLEAN_NET,
+                       calls_by_tool={"web_search": 5, "web_fetch": 2},
+                       refused_by_tool={"web_search": 5, "web_fetch": 2},
+                       succeeded_by_tool={},
+                       instances_that_used_one=["a__b-1", "a__b-2"])
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=net)
+            self.assertEqual(honesty.airgap_status(run)[0], "verified")
+            codes = {f.code for f in honesty.evaluate(run).findings}
+            self.assertIn("web_lookup_attempted_and_refused", codes)
+            self.assertNotIn("defect:web_lookup_of_solution_not_prevented", codes)
+
+    def test_a_pre_split_run_stays_conservative(self):
+        """Older results.json has no succeeded_by_tool; any call is a breach."""
+        with tempfile.TemporaryDirectory() as t:
+            net = {"calls_by_tool": {"web_fetch": 1},
+                   "residual_shell_egress": {"instances": {}, "scanned": 1}}
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=net)
+            self.assertEqual(honesty.airgap_status(run)[0], "breached")
+
+    def test_shell_egress_hits_are_a_breach(self):
+        with tempfile.TemporaryDirectory() as t:
+            net = dict(
+                self._CLEAN_NET,
+                residual_shell_egress={"instances": {"a__b-1": [{"command": "urlopen"}]}},
+            )
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=net)
+            self.assertEqual(honesty.airgap_status(run)[0], "breached")
+
+    def test_verified_closes_the_web_lookup_defect(self):
+        with tempfile.TemporaryDirectory() as t:
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=self._CLEAN_NET)
+            self.assertEqual(honesty.airgap_status(run)[0], "verified")
+            codes = {f.code for f in honesty.evaluate(run).findings}
+            self.assertNotIn("defect:web_lookup_of_solution_not_prevented", codes)
+            self.assertIn("web_lookup_prevention_verified", codes)
+
+    def test_verified_does_not_make_a_subset_quotable(self):
+        """Closing one block must not be mistaken for closing the gate."""
+        with tempfile.TemporaryDirectory() as t:
+            run = self._run(t, airgap=self._GOOD_AIRGAP, net=self._CLEAN_NET)
+            v = honesty.evaluate(run)
+            self.assertFalse(v.may_quote_headline_rate)
+            self.assertIn("subset_not_a_dataset_score", {f.code for f in v.blocks})
 
 
 class TestSchemaV2(unittest.TestCase):

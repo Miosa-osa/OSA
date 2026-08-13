@@ -60,11 +60,26 @@ def _find_controls(run: Run) -> dict[str, Run]:
 
 
 def _find_siblings(run: Run) -> list[Run]:
-    """Other runs of the same runner+model over the same instance set."""
+    """Other runs of the SAME CONFIGURATION over the same instance set.
+
+    Sibling runs exist for one purpose: to say something about run-to-run
+    variance. That only works if the two runs differ in nothing but the random
+    seed of the model's sampling. Matching on runner+model+instances alone is
+    too loose -- `osa-hard40-v2` and `osa-hard40-airgap` match on all three and
+    differ in whether the agent could look the answer up, which is the single
+    biggest thing about them. Counting those as repeats would have silently
+    withdrawn the "no variance estimate" warning from a run that has none.
+    """
     out: list[Run] = []
     runs_dir = run.path.parent.parent
     if not runs_dir.is_dir():
         return out
+    mine = (
+        honesty.airgap_status(run)[0],
+        run.config.get("f2p_hint", True),
+        run.config.get("test_bridge"),
+        run.attempts,
+    )
     for cand in sorted(runs_dir.glob("*/results.json")):
         if cand == run.path:
             continue
@@ -72,10 +87,17 @@ def _find_siblings(run: Run) -> list[Run]:
             other = Run.load(cand)
         except SchemaError:
             continue
+        theirs = (
+            honesty.airgap_status(other)[0],
+            other.config.get("f2p_hint", True),
+            other.config.get("test_bridge"),
+            other.attempts,
+        )
         if (
             other.runner == run.runner
             and other.model == run.model
             and other.id_set == run.id_set
+            and theirs == mine
         ):
             out.append(other)
     return out

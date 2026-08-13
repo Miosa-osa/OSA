@@ -16,6 +16,7 @@ does not, the harness is broken rather than the agent.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -30,6 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import airgap  # noqa: E402
 import diagnose  # noqa: E402
 import evaluate  # noqa: E402
 import report as report_mod  # noqa: E402
@@ -249,6 +251,39 @@ def select(rows: list[dict], args) -> tuple[list[dict], dict]:
     return [by_id[i] for i in wanted], provenance
 
 
+def _osa_git_state(repo: Path) -> dict:
+    """The exact OSA revision this run is about to measure.
+
+    Includes a hash of the uncommitted diff, because "commit X, dirty" is not a
+    identifier -- two runs can both be "X, dirty" and be different programs.
+    The diff itself is not stored (it can be large and can contain anything);
+    the hash is enough to tell two working trees apart.
+    """
+
+    def run(*args: str) -> str | None:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True, text=True, timeout=15,
+            )
+            return r.stdout.strip() if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    diff = run("diff", "HEAD") or ""
+    return {
+        "commit": run("rev-parse", "HEAD"),
+        "branch": run("rev-parse", "--abbrev-ref", "HEAD"),
+        "describe": run("describe", "--tags", "--always", "--dirty"),
+        "working_tree_clean": diff == "" and (run("status", "--porcelain") or "") == "",
+        "uncommitted_diff_sha256": (
+            hashlib.sha256(diff.encode()).hexdigest() if diff else None
+        ),
+        "uncommitted_diff_bytes": len(diff),
+        "captured": "at run start, before inference",
+    }
+
+
 def free_gb(path: Path) -> float:
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize / 1e9
@@ -318,7 +353,34 @@ def main() -> int:
     run.add_argument("--reuse-inference", action="store_true",
                      help="re-grade and re-report an existing run without re-running the agent")
 
+    air = ap.add_argument_group("web-lookup prevention")
+    air.add_argument(
+        "--airgap", action="store_true",
+        help="require that the backend refuses web_search/web_fetch/download/"
+             "browser/github. The backend must have been started with "
+             "OSA_SETTINGS=<the file printed by --write-airgap-settings>. The "
+             "run ABORTS unless a live differential probe observes the refusal.",
+    )
+    air.add_argument(
+        "--write-airgap-settings", metavar="PATH", default=None,
+        help="write the OSA_SETTINGS deny-list file and exit. Start the "
+             "benchmark backend with OSA_SETTINGS=<PATH>, then re-run with "
+             "--airgap.",
+    )
+    air.add_argument(
+        "--airgap-probe-timeout", type=int, default=240,
+        help="seconds to wait for the probe's agent turn",
+    )
+
     args = ap.parse_args()
+
+    if args.write_airgap_settings:
+        p = Path(args.write_airgap_settings)
+        airgap.write_settings(p)
+        log(f"wrote {p}")
+        log(f"start the benchmark backend with:  OSA_SETTINGS={p.resolve()} "
+            f"OSA_HTTP_PORT=<port> mix osa.serve")
+        return 0
 
     run_id = args.run_id or f"{args.runner}-{time.strftime('%Y%m%d-%H%M%S')}"
     out = HERE / "runs" / run_id
@@ -356,6 +418,10 @@ def main() -> int:
         # How the subset was built, recorded verbatim so the number can never
         # be quoted without its qualification.
         "sampling": sampling,
+        # Properties of the HARNESS THIS RUN USED, so a report over old results
+        # reflects the code that produced them rather than whatever is checked
+        # out when the report is generated. A missing key means an old run.
+        "harness": {"strip_list_from_test_patch": True},
         "attempts": args.attempts,
         "agent_timeout_s": args.agent_timeout,
         "max_turns": args.max_turns,
@@ -367,7 +433,49 @@ def main() -> int:
         "swebench_version": swebench.__version__,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "host": {"platform": platform.platform(), "python": platform.python_version()},
+        # WHICH OSA was measured, captured NOW rather than whenever a report
+        # happens to be generated. On an actively developed checkout those are
+        # different programs, and a manifest that reads git at report time
+        # attributes a number to code that never produced it.
+        "osa_git": _osa_git_state(Path(args.osa_repo)),
     }
+
+    # ---------------- web-lookup prevention, proved before anything runs ----
+    #
+    # The order matters. Probing AFTER the run would produce a number first and
+    # ask whether it was earned second, and the number would get quoted. So the
+    # probe is a precondition: either a live backend is observed refusing a
+    # denied tool, or this exits without spending a single instance.
+    #
+    # It is deliberately impossible to record `airgap.enforced: true` without
+    # having probed. The reporter reads that key, so a knob that quietly did
+    # nothing would silently unblock the gate -- which is exactly the failure
+    # the previous attempt at this shipped.
+    if args.airgap:
+        if args.runner != "osa" or args.osa_mode != "http":
+            log("--airgap requires --runner osa --osa-mode http (the probe "
+                "drives the same HTTP entry point the run does)")
+            return 2
+        log(f"probing {args.osa_url} for web-lookup prevention…")
+        att = airgap.probe(
+            base_url=args.osa_url,
+            auth_token=args.osa_token,
+            timeout_s=args.airgap_probe_timeout,
+        )
+        config["airgap"] = att
+        (out / "airgap-probe.json").write_text(json.dumps(att, indent=2) + "\n")
+        if not att.get("enforced"):
+            log("AIRGAP NOT ENFORCED — refusing to run.")
+            log(f"  {att.get('error') or 'the probe saw no refusal'}")
+            log(f"  tool calls seen: {att.get('tool_calls_seen')}")
+            log("  Start the backend with OSA_SETTINGS pointing at the file "
+                "from --write-airgap-settings, then retry.")
+            log(f"  full attestation: {out / 'airgap-probe.json'}")
+            return 3
+        log(f"airgap ENFORCED: denied tool refused in "
+            f"{json.loads(att['denied_tool_evidence']).get('duration_ms')}ms, "
+            f"control tool {airgap.CONTROL_TOOL} still works")
+
     (out / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
     attempt_docs: list[dict] = []

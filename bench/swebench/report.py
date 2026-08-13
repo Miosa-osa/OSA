@@ -15,6 +15,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+import airgap
 import diagnose
 
 #: Tools that can reach the public internet, where the real fix for a 2019-2023
@@ -23,39 +24,119 @@ import diagnose
 #: SWE-bench's own checklist requires that the agent cannot look the answer up;
 #: Epoch runs airgapped for exactly this reason.
 #:
-#: OSA has no per-session tool allowlist on the orchestrate API, so the harness
-#: cannot currently switch these off. What it CAN do is measure: every tool
-#: invocation is counted by name, so "was the answer looked up" is answered
-#: with evidence rather than assumed either way.
-NETWORK_TOOLS = ("web_search", "web_fetch", "download", "browser", "github")
+#: Enforcement is now possible and is done by `airgap.py`: a permissions deny
+#: list in the BACKEND's OSA_SETTINGS (flag) layer, which outranks overdrive.
+#: Measurement stays regardless, because a control that is only ever asserted
+#: is how the last one shipped broken.
+NETWORK_TOOLS = airgap.NETWORK_TOOLS
+
+_ENFORCEMENT_NONE = (
+    "NONE. Measured, not prevented. This run's backend was not started with "
+    "the OSA_SETTINGS deny list (bench/swebench/airgap.py), so web_search / "
+    "web_fetch / download / browser were callable and permission_mode "
+    "overdrive disabled the approval path. Note that a workspace-local "
+    ".osa/settings.local.json deny hook was tried EARLIER and verified "
+    "ineffective -- Settings.layer(:local) resolves through a process-global "
+    "Workspace.Cwd, so a per-request working_dir cannot scope it. The flag "
+    "layer is what works; see airgap.py."
+)
+
+_ENFORCEMENT_PROBED = (
+    "DENY LIST in the backend's OSA_SETTINGS (flag) layer, verified by a live "
+    "differential probe before this run started: the denied tool was called "
+    "and refused in 0ms while a non-denied control tool succeeded in the same "
+    "session under permission_mode overdrive. Permissions.rules/0 reads the "
+    "flag layer and ToolExecutor consults deny rules BEFORE any permission-"
+    "mode short-circuit, so overdrive does not bypass it. The attestation is "
+    "in config.airgap and airgap-probe.json. RESIDUAL: shell_execute remains "
+    "available; deny rules cover it by command prefix only, so egress built "
+    "inside a Python one-liner is detected after the fact (see "
+    "residual_shell_egress) rather than prevented."
+)
 
 
-def network_tool_use(rows: list[dict]) -> dict:
-    used: dict[str, int] = {}
+def network_tool_use(rows: list[dict], attestation: dict | None = None) -> dict:
+    """Who reached for the network, and who actually got there.
+
+    These are two different questions and the first version of this function
+    answered only one of them, which produced a false alarm the first time the
+    airgap worked: the agent ATTEMPTED seven lookups across five instances, was
+    refused every time, and the run was reported as a breach.
+
+    So attempts and successes are counted separately now.
+    `osa_signals.tool_names` counts `tool_call phase=start` frames (attempts);
+    `tool_failure_names` counts `phase=end, success=false` (refusals, and
+    genuine tool errors -- indistinguishable from the stream, which is why the
+    probe attestation is what establishes that a refusal is a refusal).
+    A DENIED attempt cannot have leaked anything, so only a SUCCEEDED call
+    invalidates a score. The attempts stay in the record because they are
+    evidence in their own right: they show how often this agent's strategy is
+    "look it up".
+    """
+    attempted: dict[str, int] = {}
+    failed: dict[str, int] = {}
+    succeeded: dict[str, int] = {}
     instances = []
+    instances_succeeded = []
+    residual: dict[str, list] = {}
+    scanned = 0
     for r in rows:
-        names = (r.get("osa_signals") or {}).get("tool_names") or {}
+        sig = r.get("osa_signals") or {}
+        names = sig.get("tool_names") or {}
+        fails = sig.get("tool_failure_names") or {}
         hit = {k: v for k, v in names.items() if k in NETWORK_TOOLS}
         if hit:
             instances.append(r["instance_id"])
+            got_through = False
             for k, v in hit.items():
-                used[k] = used.get(k, 0) + v
+                attempted[k] = attempted.get(k, 0) + v
+                f = min(int(fails.get(k, 0)), v)
+                failed[k] = failed.get(k, 0) + f
+                if v - f > 0:
+                    succeeded[k] = succeeded.get(k, 0) + (v - f)
+                    got_through = True
+            if got_through:
+                instances_succeeded.append(r["instance_id"])
+        # The surface the deny rules cannot cover, scanned from the recorded
+        # SSE stream. Absence of this key means nobody looked, which the
+        # reporter treats as unproven rather than clean.
+        log_path = r.get("event_log")
+        if log_path:
+            scanned += 1
+            hits = airgap.residual_egress_evidence(Path(log_path))
+            if hits:
+                residual[r["instance_id"]] = hits
+
+    enforced = bool(attestation and attestation.get("enforced"))
     return {
         "tools_watched": list(NETWORK_TOOLS),
-        "available_to_agent": True,
-        "enforcement": (
-            "NONE. Measured, not prevented. OSA has no per-session tool "
-            "allowlist on /api/v1/orchestrate, and a workspace-local "
-            ".osa/settings.local.json deny hook was tried and verified "
-            "ineffective: Settings.layer(:local) resolves through a "
-            "process-global Workspace.Cwd, so the per-request working_dir "
-            "cannot scope it. A probe with the hook installed still returned "
-            "live web_search results."
-        ),
-        "enforcement_verified_ineffective": True,
-        "calls_by_tool": used,
+        "available_to_agent": not enforced,
+        "enforcement": _ENFORCEMENT_PROBED if enforced else _ENFORCEMENT_NONE,
+        "enforcement_probed": enforced,
+        "probe_attestation": attestation or None,
+        # `calls_by_tool` is retained under its old name and old meaning
+        # (ATTEMPTS) so an existing results.json keeps reading the same.
+        "calls_by_tool": attempted,
+        "attempted_by_tool": attempted,
+        "refused_by_tool": failed,
+        "succeeded_by_tool": succeeded,
         "instances_that_used_one": sorted(instances),
-        "clean": not used,
+        "instances_that_got_through": sorted(instances_succeeded),
+        "residual_shell_egress": {
+            "scanned": scanned,
+            "of_instances": len(rows),
+            "instances": residual,
+            "note": (
+                "Markers (urllib/requests.get/urlopen/github.com URLs) inside "
+                "shell_execute or repl commands. A hit is a pointer at a "
+                "transcript for a human to read, not proof of a lookup. An "
+                "empty map means the recorded streams contain no evidence, "
+                "which is weaker than 'no egress happened'."
+            ),
+        },
+        # "clean" means nothing GOT THROUGH. Refused attempts are recorded
+        # above and do not make a run dirty -- they cannot carry information.
+        "clean": not succeeded and not residual,
     }
 
 #: 2 adds: per-instance failure_bucket/failure_fault/failure_evidence and the
@@ -237,7 +318,7 @@ def build(
         "diagnosis": diagnose.summarize(rows),
         "probable_osa_bugs": diagnose.repeated_harness_failures(rows),
         # Whether the agent could have looked the answer up, and whether it did.
-        "network_tool_use": network_tool_use(rows),
+        "network_tool_use": network_tool_use(rows, config.get("airgap")),
     }
 
     return {
@@ -360,7 +441,7 @@ def merge_attempts(attempt_docs: list[dict], config: dict) -> dict:
             ),
             "diagnosis": diagnose.summarize(merged_rows),
             "probable_osa_bugs": diagnose.repeated_harness_failures(merged_rows),
-            "network_tool_use": network_tool_use(merged_rows),
+            "network_tool_use": network_tool_use(merged_rows, config.get("airgap")),
         }
     )
     ti, to = agg["tokens_in_total"], agg["tokens_out_total"]
@@ -461,15 +542,45 @@ def summary_md(results: dict) -> str:
 
     net = a.get("network_tool_use") or {}
     if net:
-        if net.get("clean"):
+        resid = net.get("residual_shell_egress") or {}
+        if net.get("enforcement_probed") and net.get("clean"):
+            lines += [
+                "> **Web lookup was PREVENTED, and the prevention was probed.** "
+                f"`{'`, `'.join(net['tools_watched'])}` are denied by a "
+                "permissions rule in the backend's `OSA_SETTINGS` layer, which "
+                "`ToolExecutor` consults before any permission-mode "
+                "short-circuit — so `overdrive` does not bypass it. Before this "
+                "run started, a live differential probe called a denied tool "
+                "(refused, 0 ms) and a non-denied control tool (succeeded) in "
+                "one session; the attestation is in `airgap-probe.json`. Zero "
+                "network-tool calls were recorded across the run, and "
+                f"{resid.get('scanned', 0)} of {resid.get('of_instances', 0)} "
+                "event streams were scanned for shell-based egress with no "
+                "hits. **Residual surface**: `shell_execute` stays available "
+                "and is denied only by command prefix, so an egress path built "
+                "inside a Python one-liner is detected after the fact rather "
+                "than prevented.",
+                "",
+            ]
+        elif net.get("enforcement_probed") and not net.get("clean"):
+            lines += [
+                "> **The airgap was verified and network access happened "
+                "anyway — do not use this run.** "
+                f"Calls: `{net['calls_by_tool']}`; shell egress markers: "
+                f"`{list((resid.get('instances') or {}).keys())[:10]}`. Either "
+                "enforcement regressed mid-run or this harness is "
+                "mis-recording. Establish which before quoting anything.",
+                "",
+            ]
+        elif net.get("clean"):
             lines += [
                 "> **Web access**: the agent *could* reach the internet "
                 f"(`{'`, `'.join(net['tools_watched'])}` were all available — "
-                "OSA has no per-session tool allowlist, so the harness can "
-                "measure this but not prevent it). It **did not call any of "
-                "them** on any instance, so no answer was looked up in this "
-                "run. That is an observation, not a guarantee: `shell_execute` "
-                "can also reach the network.",
+                "this run was NOT started with the `--airgap` deny list). It "
+                "**did not call any of them** on any instance, so no answer "
+                "was looked up in this run. That is an observation, not a "
+                "guarantee: `shell_execute` can also reach the network. Re-run "
+                "with `--airgap` to make it a guarantee.",
                 "",
             ]
         else:

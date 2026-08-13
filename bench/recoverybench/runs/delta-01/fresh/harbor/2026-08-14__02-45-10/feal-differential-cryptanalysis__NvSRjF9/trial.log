@@ -1,0 +1,21 @@
+Running command: apt-get update && apt-get install -y python3 tar ca-certificates procps git
+Command outputs captured
+Running command: mkdir -p /installed-agent
+Command outputs captured
+Running command: set -eu; tar -C /installed-agent -xzf /installed-agent/osa-release.tar.gz && rm -f /installed-agent/osa-release.tar.gz && rm -rf /installed-agent/osa && mv /installed-agent/osagent /installed-agent/osa && chmod +x /installed-agent/osa_headless.py
+Command outputs captured
+Running command: set -eu; chmod u+s /installed-agent/osa/lib/erlexec-*/priv/*/exec-port; printf '\n-erlexec root true user root limit_users [root]\n' >> /installed-agent/osa/releases/*/vm.args
+Command outputs captured
+Running command: mkdir -p "$HOME/.osa"
+Command outputs captured
+Running command: mv /tmp/osa-dotenv "$HOME/.osa/.env" && chmod 600 "$HOME/.osa/.env"
+Command outputs captured
+Running command: mv /tmp/osa-config "$HOME/.osa/config.json" && chmod 600 "$HOME/.osa/config.json"
+Command outputs captured
+Running command: /installed-agent/osa/bin/osagent version
+Command outputs captured
+Running command: chmod 644 /installed-agent/instruction.txt
+Command outputs captured
+Running command: mkdir -p /logs/agent && python3 -u /installed-agent/osa_headless.py /installed-agent/instruction.txt 2>&1 | tee /logs/agent/osa-driver.log
+Command outputs captured
+Collecting main service artifacts

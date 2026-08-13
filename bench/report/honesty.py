@@ -116,30 +116,46 @@ KNOWN_HARNESS_DEFECTS: list[Defect] = [
             "checklist requires 'Does not have web-browsing OR has taken steps "
             "to prevent lookup of SWE-bench solutions via web-browsing'. Until "
             "the bench disables those tools (or the run is executed with no "
-            "egress), the score cannot be attributed to problem-solving."
+            "egress), the score cannot be attributed to problem-solving. "
+            "Closing this needs THREE things recorded in the run's own "
+            "artefacts, all checked by airgap_status(): a probe attestation "
+            "in config.airgap showing a live backend refusing a denied tool; "
+            "zero network-tool calls in aggregate.network_tool_use; and an "
+            "explicit (possibly empty) residual_shell_egress list. See "
+            "bench/swebench/airgap.py."
         ),
+        applies_when=lambda run: airgap_status(run)[0] != "verified",
     ),
     Defect(
         code="pytest_instances_unwinnable",
         severity=WARN,
         direction="deflates",
         message=(
-            "19 of the 500 SWE-bench Verified instances are unwinnable by "
-            "construction, and fail as 'no_patch_produced' rather than as a "
-            "harness fault."
+            "FIXED. Runs recorded before the fix stripped legitimate source "
+            "files and reported the result as 'no_patch_produced'."
         ),
         detail=(
-            "bench/swebench/runners.py:_is_test_path() matches the substring "
-            "'test/', which is contained in 'src/_pytest/'. Every "
-            "pytest-dev/pytest instance therefore has its entire source patch "
-            "stripped from the diff before grading. Verified against all 500 "
-            "gold patches: 19 are stripped in full, 0 in part. The same "
-            "predicate also matches legitimate source paths such as "
-            "django/test/client.py. Effects: the achievable ceiling is 96.2%, "
-            "and the failure taxonomy misattributes a harness bug to the agent."
+            "bench/swebench/runners.py used to guess which files the grader "
+            "would revert by matching the substring 'test/', which is "
+            "contained in 'src/_pytest/'. Every pytest-dev/pytest instance "
+            "therefore had its entire source patch stripped before grading, "
+            "and the empty diff was then charged to the agent. Verified "
+            "against all 500 gold patches: 19 stripped in full, 0 in part, an "
+            "achievable ceiling of 96.2%. It also matched legitimate source "
+            "paths such as django/test/client.py.\n\n"
+            "The fix is `test_patch_files()`, which derives the strip list "
+            "from the instance's own test_patch — the exact set the grader "
+            "reverts — so it is correct by construction rather than merely "
+            "less wrong. Re-verified across all 500 gold patches: 0 damaged, "
+            "ceiling 100.0%.\n\n"
+            "This entry is retained rather than deleted because it still "
+            "applies to results recorded BEFORE the fix, and a report over old "
+            "data must keep carrying the caveat. It fires only on runs whose "
+            "harness predates it."
         ),
-        applies_when=lambda run: any(
-            i.instance_id.startswith("pytest-dev__pytest") for i in run.instances
+        applies_when=lambda run: (
+            any(i.instance_id.startswith("pytest-dev__pytest") for i in run.instances)
+            and not _strip_list_derived_from_test_patch(run)
         ),
     ),
     Defect(
@@ -161,6 +177,142 @@ KNOWN_HARNESS_DEFECTS: list[Defect] = [
         ),
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Was web lookup actually prevented?
+# ---------------------------------------------------------------------------
+
+
+def airgap_status(run: "Run") -> tuple[str, str]:
+    """Classify a run's web-lookup posture from its own artefacts.
+
+    Returns `(status, reason)` where status is one of:
+
+      "absent"      no airgap was installed. The original defect stands.
+      "unverified"  an airgap was requested but the live probe did not observe
+                    a refusal. This is WORSE than absent, because a knob that
+                    silently does nothing invites the number to be quoted.
+      "breached"    the airgap was verified and network tools were used anyway.
+                    Either the enforcement regressed mid-run or the harness is
+                    mis-recording; either way the run is not usable.
+      "verified"    probe observed a refusal, no network tool call was
+                    recorded, and the residual shell surface was explicitly
+                    scanned.
+
+    Deliberately evidence-first and fail-closed: every unknown maps to a state
+    that keeps the block standing. A missing key is never read as a pass.
+    """
+    ag = run.airgap
+    net = run.network_tool_use
+
+    if not ag:
+        return "absent", "no config.airgap block; no airgap was installed"
+
+    if ag.get("enforced") is not True:
+        return (
+            "unverified",
+            "config.airgap is present but `enforced` is not true — the probe "
+            "did not observe a live backend refusing a denied tool"
+            + (f" ({ag['error']})" if ag.get("error") else ""),
+        )
+
+    # Attempts and successes are different questions. A DENIED web_fetch
+    # cannot have carried the answer back, so it is not a breach -- it is
+    # evidence that enforcement bit. Only a call that RETURNED invalidates a
+    # score. Runs recorded before this split have no `succeeded_by_tool`, and
+    # for those the conservative reading (any call is a breach) is kept.
+    succeeded = net.get("succeeded_by_tool")
+    if succeeded is None:
+        succeeded = net.get("calls_by_tool") or {}
+    if succeeded:
+        return (
+            "breached",
+            "the airgap probe passed but network tool calls still SUCCEEDED: "
+            f"{succeeded}"
+            + (
+                f" on {net.get('instances_that_got_through')}"
+                if net.get("instances_that_got_through")
+                else ""
+            ),
+        )
+
+    # The residual surface (shell/python egress) must have been LOOKED AT.
+    # An absent key means nobody scanned, which is not the same as clean.
+    if "residual_shell_egress" not in net:
+        return (
+            "unverified",
+            "no residual_shell_egress key in network_tool_use — the surface "
+            "the deny rules cannot cover was never scanned, so 'clean' is "
+            "unsupported",
+        )
+
+    residual = net.get("residual_shell_egress") or {}
+    hits = residual.get("instances") if isinstance(residual, dict) else residual
+    if hits:
+        return (
+            "breached",
+            f"shell commands with egress markers were recorded: {hits}",
+        )
+
+    return (
+        "verified",
+        "a live probe observed the backend refusing web_fetch under "
+        "permission_mode overdrive; no network tool call and no shell egress "
+        "marker appears anywhere in this run's recorded streams",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Is a reported cost of zero a property of the provider, or a defect?
+# ---------------------------------------------------------------------------
+
+#: Models OSA's own pricing table prices, transcribed from
+#: lib/optimal_system_agent/agent/pricing.ex and the provider catalogs it
+#: merges (Providers.OllamaCloud etc.). This is a duplicate of OSA's data and
+#: will drift; it is here so `bench/report` stays pure Python and needs no BEAM
+#: to tell a subscription apart from a bug. Only entries actually used by a run
+#: on disk need to be present -- an unknown model falls through to "unknown",
+#: which keeps the softer wording rather than asserting a defect.
+KNOWN_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "glm-5.2:cloud": (0.60, 2.20),
+    "glm-5.1:cloud": (0.60, 2.20),
+    "glm-4.7:cloud": (0.60, 2.20),
+    "glm-4.6:cloud": (0.60, 2.20),
+    "glm-4.6": (0.60, 2.20),
+    "glm-4.5": (0.60, 2.20),
+    "claude-3-5-sonnet": (3.0, 15.0),
+    "claude-sonnet-4": (3.0, 15.0),
+    "claude-opus-4": (15.0, 75.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4.1": (2.0, 8.0),
+}
+
+#: `Pricing.ollama_local?/1` — a tag with a colon naming a local model family
+#: and NOT containing "cloud" is genuinely free. Mirrored so the reporter
+#: reaches the same verdict OSA does.
+_LOCAL_FAMILIES = ("llama", "qwen", "mistral", "gemma", "phi")
+
+
+def model_pricing(model: str | None) -> tuple[str, tuple[float, float] | None]:
+    """`("priced"|"free"|"unknown", rates)` for a model id.
+
+    Mirrors `Agent.Pricing.rates/1` closely enough to answer one question: is a
+    reported cost of exactly zero explicable by the price list?
+    """
+    if not model or model in ("unknown", "osa") or model.startswith("MIXED:"):
+        return "unknown", None
+    key = model.lower()
+    if key.startswith("ollama/"):
+        return "free", (0.0, 0.0)
+    if ":" in key and "cloud" not in key and any(f in key for f in _LOCAL_FAMILIES):
+        return "free", (0.0, 0.0)
+    if key in KNOWN_MODEL_PRICING:
+        return "priced", KNOWN_MODEL_PRICING[key]
+    for family, rates in (("glm", (0.60, 2.20)), ("claude", (3.0, 15.0))):
+        if key.startswith(family):
+            return "priced", rates
+    return "unknown", None
 
 
 def _applicable_defects(run: "Run") -> list[Defect]:
@@ -300,7 +452,15 @@ def evaluate(
 
     # -- 5. how were the instances chosen? ---------------------------------
     if not run.is_full_dataset:
-        if declared_random_seed is None:
+        # Read the run's OWN provenance first. `--seed` remains as an operator
+        # override for a set whose selection is declared out of band (an
+        # --instances file copied from an earlier seeded draw, say), but a run
+        # that recorded config.sampling.seed must not be told it failed to
+        # declare a seed -- that finding was firing against every schema-v2
+        # sample and training readers to skip it.
+        samp = run.sampling
+        seed = declared_random_seed if declared_random_seed is not None else run.declared_seed
+        if seed is None:
             v.add(
                 WARN,
                 "selection_not_a_declared_random_sample",
@@ -309,8 +469,52 @@ def evaluate(
                 detail=(
                     "SWE-bench instances vary enormously in difficulty and the "
                     "dataset ships a `difficulty` field. A hand-picked or "
-                    "first-N subset can be made to say almost anything. Pass "
-                    "--seed and select randomly, or state the selection rule."
+                    "first-N subset can be made to say almost anything. Draw "
+                    "the set with `--sample N --sample-seed S` (which records "
+                    "config.sampling), pass --seed to declare an out-of-band "
+                    "draw, or state the selection rule."
+                ),
+            )
+        else:
+            v.add(
+                NOTE,
+                "selection_is_a_declared_seeded_sample",
+                f"Instances were drawn with seed {seed}"
+                + (f" by '{samp['method']}'." if samp.get("method") else "."),
+                detail=(
+                    "Provenance is recorded in config.sampling and the full "
+                    "instance list is in config.instance_ids, so the draw is "
+                    "reproducible and the set was not chosen after seeing any "
+                    "result."
+                ),
+            )
+
+        # A seeded sample can still be a deliberately unrepresentative one, and
+        # that is a separate claim from "selection is undeclared". Say which
+        # way it cuts rather than leaving the reader to assume it is neutral.
+        if run.sample_is_hard_weighted:
+            ms = samp.get("mean_hardness_sample")
+            mp = samp.get("mean_hardness_population")
+            v.add(
+                WARN,
+                "sample_deliberately_weighted_hard",
+                "This set was drawn hard-weighted on purpose; it is NOT a "
+                "representative sample of the dataset.",
+                detail=(
+                    (
+                        f"Mean hardness {ms:.3f} against {mp:.3f} for the full "
+                        f"dataset. "
+                        if isinstance(ms, (int, float)) and isinstance(mp, (int, float))
+                        else ""
+                    )
+                    + "Weighting formula: "
+                    + str(samp.get("weight_formula", "unrecorded"))
+                    + " over hardness = "
+                    + str(samp.get("hardness_formula", "unrecorded"))
+                    + ". The rate measured here is therefore a LOWER bound "
+                    "relative to a uniform draw of the same size, and the "
+                    "direction of the bias is known even though its magnitude "
+                    "is not. Do not correct for it; quote the subset."
                 ),
             )
         ids = run.instance_ids
@@ -398,18 +602,65 @@ def evaluate(
         )
     priced = [i for i in run.instances if i.cost_usd is not None]
     if priced and all(i.cost_usd == 0 for i in priced):
-        v.add(
-            NOTE,
-            "cost_is_zero_because_unpriced",
-            "Reported cost is 0 USD. That means the provider is a "
-            "subscription or local model with no per-token price, not that "
-            "the run was free.",
-            detail=(
-                "Do not present a 0 USD cost-per-resolved-task next to another "
-                "harness's metered API cost. Compare tokens, which are "
-                "measured, rather than dollars, which here are absent."
-            ),
-        )
+        # "Zero" has two completely different meanings and the old wording
+        # asserted the flattering one. If the model IS in the price table, a
+        # zero is an accounting failure in OSA, and saying "subscription or
+        # local model" hides a live bug behind a caveat.
+        status, rates = model_pricing(run.model)
+        tok_in = run.aggregate.get("tokens_in_total") or 0
+        if status == "priced" and rates:
+            implied = (tok_in / 1e6) * rates[0]
+            v.add(
+                WARN,
+                "cost_is_zero_but_model_is_priced",
+                f"Reported cost is 0 USD, but `{run.model}` IS priced at "
+                f"{{{rates[0]}, {rates[1]}}} USD per 1M tokens. A zero here is "
+                f"a DEFECT in cost accounting, not a free run.",
+                detail=(
+                    f"On input tokens alone this run implies at least "
+                    f"${implied:,.2f}. The known cause is OSA-side: the agent "
+                    f"loop's state carried `model: nil`, so `Pricing.cost/2` "
+                    f"priced every turn at $0.00 and logged '[Pricing] No "
+                    f"price for model nil' once per turn "
+                    f"(bench/README.md §7.3). Two consequences beyond the "
+                    f"report: `max_budget_usd` can never trip, and "
+                    f"`provider_context_window/1` returns 0 so compaction "
+                    f"thresholds never fire. NO cost figure from this run may "
+                    f"be quoted in any direction -- not as a cost, and not as "
+                    f"evidence the run was cheap. Note separately that the "
+                    f"real billing relationship may still be a subscription, "
+                    f"in which case the marginal dollar cost is genuinely "
+                    f"zero; that is a question about the invoice, and it does "
+                    f"not make the accounting correct."
+                ),
+            )
+        elif status == "free":
+            v.add(
+                NOTE,
+                "cost_is_zero_because_model_is_local",
+                f"Reported cost is 0 USD and `{run.model}` is a locally "
+                f"served model with no per-token price. Zero is correct here, "
+                f"and it does not mean the run consumed no resources.",
+                detail=(
+                    "Compare tokens and wall-clock, which are measured, rather "
+                    "than dollars, which for this provider do not exist."
+                ),
+            )
+        else:
+            v.add(
+                NOTE,
+                "cost_is_zero_and_model_pricing_unknown",
+                f"Reported cost is 0 USD and `{run.model}` is not in the "
+                f"reporter's price table, so a subscription/local model and a "
+                f"broken accounting path cannot be told apart.",
+                detail=(
+                    "Add the model to honesty.KNOWN_MODEL_PRICING (mirroring "
+                    "lib/optimal_system_agent/agent/pricing.ex) to resolve "
+                    "this into a defect or a genuine zero. Until then, do not "
+                    "present a 0 USD cost-per-resolved-task next to another "
+                    "harness's metered API cost. Compare tokens."
+                ),
+            )
     cache_read = sum(i.tokens_cache_read or 0 for i in run.instances)
     if cache_read == 0 and (run.aggregate.get("tokens_in_total") or 0) > 0:
         v.add(
@@ -478,6 +729,77 @@ def evaluate(
             ),
         )
 
+    # -- 9d. web-lookup posture, stated explicitly either way ---------------
+    #
+    # The defect below fires whenever this is not "verified". This finding
+    # exists so the report always says WHICH of the four states the run is in
+    # and on what evidence, instead of leaving a reader to infer it from the
+    # presence or absence of a block.
+    ag_status, ag_reason = airgap_status(run)
+    if ag_status == "verified":
+        v.add(
+            NOTE,
+            "web_lookup_prevention_verified",
+            "Web lookup of the published fix was prevented, and the "
+            "prevention was probed rather than assumed.",
+            detail=(
+                ag_reason
+                + ". Enforcement is a permissions deny list in the backend's "
+                "OSA_SETTINGS (flag) layer, which Permissions.rules/0 reads "
+                "and ToolExecutor consults BEFORE any permission-mode "
+                "short-circuit, so overdrive does not bypass it. RESIDUAL "
+                "SURFACE, stated because it is not zero: shell_execute stays "
+                "available and the deny rules cover it only by command "
+                "prefix, so an egress path built inside a Python one-liner is "
+                "not prevented, only detected after the fact. A network "
+                "namespace would close that; it is unavailable on this host "
+                "(apparmor_restrict_unprivileged_userns=1, bwrap not setuid) "
+                "and both attempts were executed and failed."
+            ),
+        )
+        refused = run.network_tool_use.get("refused_by_tool") or {}
+        if refused:
+            tried = sorted(run.network_tool_use.get("instances_that_used_one") or [])
+            v.add(
+                NOTE,
+                "web_lookup_attempted_and_refused",
+                f"The agent tried to use a denied network tool "
+                f"{sum(refused.values())} time(s) — {refused} — across "
+                f"{len(tried)} instance(s), and was refused every time.",
+                detail=(
+                    "This is the airgap doing its job, and it is also a "
+                    "finding about the agent: reaching for a web lookup on "
+                    f"{len(tried)}/{run.n} instances is how much of the "
+                    "earlier, unairgapped number was resting on retrieval "
+                    "rather than reasoning. Instances: " + ", ".join(tried)
+                ),
+            )
+    elif ag_status == "unverified":
+        v.add(
+            BLOCK,
+            "airgap_requested_but_not_verified",
+            "This run asked for an airgap and did not prove it worked.",
+            detail=(
+                ag_reason
+                + ". A control that is believed rather than measured is worse "
+                "than no control: the previous workspace-local deny hook "
+                "looked correct, was shipped, and did nothing. Run "
+                "bench/swebench/airgap.py's probe against the backend and "
+                "record the attestation, or run without the flag and take the "
+                "unmitigated block."
+            ),
+        )
+    elif ag_status == "breached":
+        v.add(
+            BLOCK,
+            "airgap_verified_but_breached",
+            "The airgap probe passed and network access happened anyway.",
+            detail=ag_reason
+            + ". Either enforcement regressed during the run or the harness is "
+            "mis-recording. Do not quote anything from this run until which "
+            "one is established.",
+        )
+
     # -- 10. is this even one measurement? ---------------------------------
     if run.model.startswith("MIXED:"):
         v.add(
@@ -542,3 +864,16 @@ def claim_label(run: "Run", verdict: Verdict) -> str:
     if not run.is_full_dataset:
         return f"subset estimate over {run.n} of {run.dataset_size} instances"
     return f"{run.dataset} pass@1, all {run.n} instances"
+
+
+def _strip_list_derived_from_test_patch(run) -> bool:
+    """Whether this run's harness derived its strip list from `test_patch`.
+
+    Recorded per run rather than read from the working tree: a report over a
+    run from last week must reflect the harness THAT RUN used, not whatever is
+    checked out now. Absent the marker we assume the old behaviour, because a
+    missing field means an old run — never the reverse.
+    """
+    config = getattr(run, "config", None) or {}
+    harness = config.get("harness") or {}
+    return bool(harness.get("strip_list_from_test_patch"))

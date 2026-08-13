@@ -48,9 +48,10 @@ python bench/report/test_report.py
 ```
 
 `--confidence` (default 0.95) and `--method` (`wilson` | `clopper-pearson`)
-apply to all commands. Pass `--seed N` to declare that the instance set was
-drawn as a seeded random sample; without it, selection bias is reported as
-unquantified.
+apply to all commands. The seed is read from the run's own
+`config.sampling.seed`; `--seed N` remains for declaring a draw made out of
+band (an `--instances` file copied from an earlier seeded sample, say). With no
+seed from either source, selection bias is reported as unquantified.
 
 Gold and empty control runs over the *same instance set* are discovered
 automatically from sibling directories under `runs/`.
@@ -75,10 +76,17 @@ automatically from sibling directories under `runs/`.
 pipeline. Every report generated while a defect is open carries it on its face,
 labelled with whether it *inflates*, *deflates* or *distorts*.
 
-**Two BLOCK-level defects are currently open, so no run is quotable as a rate
-at all.** That is intended: both are violations of the official SWE-bench
-submission checklist, and a number produced under them is not measuring what it
-claims to. See `METHODOLOGY.md` §4 for the full audit.
+`web_lookup_of_solution_not_prevented` is **conditional**: it fires unless
+`honesty.airgap_status()` returns `verified`, which requires three things in
+the run's own artefacts — a probe attestation in `config.airgap`, zero
+network-tool calls, and an explicit (possibly empty) `residual_shell_egress`
+scan. A missing key never reads as a pass. Two further states are their own
+BLOCKs: `airgap_requested_but_not_verified` (a control that was believed rather
+than measured, which is worse than no control) and `airgap_verified_but_breached`.
+
+A subset run still is not quotable as a rate, because
+`subset_not_a_dataset_score` blocks independently of any of this. See
+`METHODOLOGY.md` §4 for the full audit.
 
 Removing an entry from that list is a claim that the defect is fixed, and
 should be made in the same commit that fixes it.

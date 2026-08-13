@@ -137,8 +137,8 @@ def render(
                 [
                     f"`{code}`",
                     str(c),
-                    fail_mod.bucket_for(code).attribution,
-                    fail_mod.bucket_for(code).label,
+                    analysis.bucket(code).attribution,
+                    analysis.bucket(code).label,
                 ]
                 for code, c in analysis.by_bucket.items()
             ],

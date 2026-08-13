@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING
 
 import honesty
 
+import honesty
+
 if TYPE_CHECKING:
     from loader import Run
 
@@ -40,6 +42,7 @@ REPO_ROOT = BENCH_DIR.parent
 #: Files whose content changes the meaning of a result.
 PINNED_SOURCES = [
     "swebench/run_bench.py",
+    "swebench/airgap.py",
     "swebench/runners.py",
     "swebench/osa_runner.py",
     "swebench/workspace.py",
@@ -105,6 +108,21 @@ def docker_images(instance_ids: list[str], namespace: str = "swebench") -> dict:
         image_id = _run(["docker", "image", "inspect", "--format", "{{.Id}}", key])
         out[iid] = {"image": key, "repo_digest": digest, "image_id": image_id}
     return out
+
+
+def _network_posture(run: "Run") -> str:
+    status = honesty.airgap_status(run)[0]
+    if status == "verified":
+        return (
+            "web/network TOOLS denied by a permissions rule in the backend's "
+            "OSA_SETTINGS layer, verified by a live probe before inference; "
+            "shell_execute remained available and is covered by prefix and "
+            "substring deny rules only (a filter, not a boundary) — the host "
+            "itself had unrestricted egress"
+        )
+    if status == "absent":
+        return "unrestricted (agent runs on the host, no deny list installed)"
+    return f"claimed but not established ({status})"
 
 
 @dataclass
@@ -191,10 +209,35 @@ def build(run: "Run", *, with_docker: bool = True) -> Manifest:
                 ),
                 None,
             ),
-            "osa_git": git_state(REPO_ROOT),
+            # Prefer the revision the run RECORDED at inference time. Reading
+            # git now describes whatever the tree happens to be when the report
+            # is generated, which on an actively developed checkout is a
+            # different program from the one that was measured.
+            "osa_git": c.get("osa_git") or dict(
+                git_state(REPO_ROOT),
+                captured="at report time, NOT at inference time — this run "
+                "predates config.osa_git and the tree may have moved since",
+            ),
             "permission_mode": "overdrive (approvals disabled)",
-            "network_access_during_inference": "unrestricted (agent runs on host)",
-            "web_tools_available": ["web_search", "web_fetch", "download"],
+            # Read from the run, not asserted. The airgap makes both of these
+            # false, and a manifest that hardcodes them is a manifest that
+            # lies in exactly the direction that flatters the number.
+            "network_access_during_inference": _network_posture(run),
+            "web_tools_available": (
+                []
+                if honesty.airgap_status(run)[0] == "verified"
+                else list(
+                    (run.aggregate.get("network_tool_use") or {}).get(
+                        "tools_watched"
+                    )
+                    or ["web_search", "web_fetch", "download"]
+                )
+            ),
+            "web_lookup_prevention": {
+                "status": honesty.airgap_status(run)[0],
+                "reason": honesty.airgap_status(run)[1],
+                "probe_attestation": (run.config.get("airgap") or None),
+            },
         },
         # -- the limits that define the result --------------------------
         "budgets": {

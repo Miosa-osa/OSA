@@ -1,0 +1,43 @@
+{
+    "id": "49c255e8-ca15-4c16-bb06-ec4936355761",
+    "started_at": "2026-08-14T02:45:11.062598",
+    "updated_at": "2026-08-13T19:52:28.490863Z",
+    "finished_at": null,
+    "n_total_trials": 6,
+    "stats": {
+        "n_completed_trials": 3,
+        "n_errored_trials": 0,
+        "n_running_trials": 2,
+        "n_pending_trials": 1,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "osa__terminal-bench-2": {
+                "n_trials": 3,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.3333333333333333
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "0.0": [
+                            "video-processing__Ns6aUMo",
+                            "train-fasttext__pLwPb3a"
+                        ],
+                        "1.0": [
+                            "feal-differential-cryptanalysis__NvSRjF9"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": 4370184,
+        "n_cache_tokens": null,
+        "n_output_tokens": 32910,
+        "cost_usd": 2.694514
+    }
+}

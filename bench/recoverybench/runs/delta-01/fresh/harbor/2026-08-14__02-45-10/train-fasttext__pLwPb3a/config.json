@@ -1,0 +1,18 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2/train-fasttext",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "train-fasttext__pLwPb3a",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/recoverybench/runs/delta-01/fresh/harbor/2026-08-14__02-45-10",
+    "agent": {
+        "name": "osa_agent:OsaAgent"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "job_id": "49c255e8-ca15-4c16-bb06-ec4936355761"
+}

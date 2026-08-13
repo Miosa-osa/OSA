@@ -259,6 +259,53 @@ class Run:
     def is_full_dataset(self) -> bool:
         return self.dataset_size is not None and self.n == self.dataset_size
 
+    # -- selection provenance ----------------------------------------------
+    @property
+    def sampling(self) -> dict:
+        """`config.sampling` — schema v2's selection provenance block.
+
+        Written by `run_bench.stratified_sample()` and carrying the seed, the
+        weighting formula, and the resulting repo/difficulty mix next to the
+        population's. Empty when the instances came from `--instances`,
+        `--instance-ids` or `--limit`, in which case selection really is
+        undeclared.
+        """
+        s = self.config.get("sampling")
+        return s if isinstance(s, dict) else {}
+
+    @property
+    def declared_seed(self) -> int | None:
+        """The seed the sample was actually drawn with, per the run's own record.
+
+        Read from the artefact rather than from a CLI flag: a reporter that
+        only believes `--seed` fires "selection is not a declared random
+        sample" against a run whose full provenance is on disk, which teaches
+        readers to ignore the finding.
+        """
+        v = self.sampling.get("seed")
+        return v if isinstance(v, int) else None
+
+    @property
+    def sample_is_hard_weighted(self) -> bool:
+        return bool(self.sampling.get("hard_weighted"))
+
+    @property
+    def airgap(self) -> dict:
+        """`config.airgap` — the probe attestation, if the run installed one.
+
+        `bench/swebench/airgap.py` writes this only after observing a live
+        backend refuse a denied tool. Absent means no airgap; present with
+        `enforced: false` means one was requested and did not work, which is
+        worse than not trying and is reported as such.
+        """
+        a = self.config.get("airgap")
+        return a if isinstance(a, dict) else {}
+
+    @property
+    def network_tool_use(self) -> dict:
+        n = self.aggregate.get("network_tool_use")
+        return n if isinstance(n, dict) else {}
+
     @property
     def instance_ids(self) -> list[str]:
         return [i.instance_id for i in self.instances]

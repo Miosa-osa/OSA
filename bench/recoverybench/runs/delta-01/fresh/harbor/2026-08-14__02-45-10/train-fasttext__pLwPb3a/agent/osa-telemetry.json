@@ -1,0 +1,51 @@
+{
+  "status": "ok",
+  "error": null,
+  "session_id": "train-fasttext__pLwPb3a__agent",
+  "working_dir": "/app",
+  "tool_calls": 65,
+  "turns": 59,
+  "usage_sum": {
+    "input_tokens": 1999102,
+    "output_tokens": 8045,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "cost_usd": 1.217162,
+  "model": "glm-5.2:cloud",
+  "boot_s": 2.07,
+  "run_s": 366.87,
+  "saw_done": true,
+  "assistant_text_frames": 0,
+  "last_event_type": "done",
+  "event_type_counts": {
+    "connected": 1,
+    "system_event": 785,
+    "streaming_token": 2556,
+    "llm_response": 118,
+    "cost_update": 59,
+    "tool_call": 130,
+    "tool_result": 65,
+    "context_pressure": 60,
+    "command_output_delta": 25,
+    "background_command_started": 4,
+    "doom_loop_detected": 8,
+    "background_command_completed": 3,
+    "task_notification": 3,
+    "agent_response": 1,
+    "turn_recap": 1,
+    "done": 1
+  },
+  "self_inflicted": {
+    "counts": {},
+    "samples": {}
+  },
+  "spend_sidecar": {
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "cost_usd": 1.217162,
+    "input_tokens": 1999102,
+    "output_tokens": 8045,
+    "started_at": "2026-08-13T19:45:52.314829Z"
+  }
+}

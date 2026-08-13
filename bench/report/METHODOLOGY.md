@@ -115,10 +115,24 @@ none.
 
 The official leaderboard **does not report cost**; `metadata.yaml` requires
 only agent, org, and model names. Third-party cost figures vary with prompt
-caching, which providers expose inconsistently. A run against a subscription
-or local model reports **0 USD**, which means "unpriced", not "free" — the
-reporter says so explicitly rather than letting a 0 sit next to someone else's
-metered API bill.
+caching, which providers expose inconsistently.
+
+A reported **0 USD** has two entirely different meanings and the reporter now
+distinguishes them, because collapsing them hides bugs behind a caveat:
+
+- the model genuinely has no per-token price (local, or `ollama/…`) — then zero
+  is correct, and it still does not mean the run was free of resources;
+- the model **is** priced and the harness reported zero anyway — then zero is a
+  **defect**. This is the actual case for OSA: `glm-5.2:cloud` is priced at
+  {0.60, 2.20} per 1M tokens in `Agent.Pricing` (via
+  `Providers.OllamaCloud`), and the run reported $0.00 because the agent loop's
+  state carried `model: nil`. `honesty.model_pricing()` mirrors OSA's price
+  table well enough to tell the two apart, and fires
+  `cost_is_zero_but_model_is_priced` for the second, which forbids quoting a
+  cost figure *in either direction* — not as a cost, and not as evidence the
+  run was cheap. Whether the underlying billing relationship is a subscription
+  is a separate question about the invoice; it does not make the accounting
+  correct.
 
 ---
 
@@ -257,8 +271,14 @@ long-horizon behaviour because there is almost no long-horizon work in it.
 `bench/report` refuses to emit a number without all of the following.
 
 **Sample and selection.** n and the full denominator, always together. The
-instance ID list, and a SHA-256 of it. Whether selection was a declared,
-seeded random sample — if not, that is reported as unquantified selection bias.
+instance ID list, and a SHA-256 of it. Whether selection was a declared, seeded
+random sample — read from the run's own `config.sampling` block, not from a CLI
+flag, so a run whose provenance is on disk is never told it failed to declare a
+seed. If no seed is recorded anywhere, that is reported as unquantified
+selection bias. Declaring the seed is a separate question from whether the
+sample is *representative*: a seeded draw that was deliberately weighted toward
+hard instances gets its own finding stating the direction of the bias (the rate
+is a lower bound relative to a uniform draw) and the weighting formula.
 
 **An interval, never a bare percentage.** We use the **Wilson score interval**
 by default (Brown, Cai & DasGupta 2001, *Statistical Science* 16(2):101–133),
@@ -350,14 +370,69 @@ recorded `pass_at_1` as the comparable number, and reports `pass^k` (resolved
 on *every* attempt) as the reliability figure — which is the one that actually
 matters for a harness people depend on.
 
-**`web_lookup_of_solution_not_prevented`.** The task container runs
-`--network none`, but the agent runs **on the host**, and
-`osa_runner._run_http()` sets `permission_mode overdrive`, disabling the
-approval path entirely. OSA ships `web_search`, `web_fetch` and `download`
-builtins. The prompt names the repository and the exact base commit, and every
-SWE-bench fix is a public commit. This violates the checklist item "Does not
-have web-browsing OR has taken steps to prevent lookup of SWE-bench solutions
-via web-browsing". Epoch runs with no network access for exactly this reason.
+**`web_lookup_of_solution_not_prevented` — CLOSED, on evidence, for runs that
+carry an attestation.** The task container runs `--network none`, but the agent
+runs **on the host**, and `osa_runner._run_http()` sets `permission_mode
+overdrive`, disabling the approval path entirely. OSA ships `web_search`,
+`web_fetch` and `download` builtins. The prompt names the repository and the
+exact base commit, and every SWE-bench fix is a public commit. This violates the
+checklist item "Does not have web-browsing OR has taken steps to prevent lookup
+of SWE-bench solutions via web-browsing". Epoch runs with no network access for
+exactly this reason.
+
+It was not a hypothetical. In `runs/osa-hard40-v2`, six of forty instances
+called `web_fetch` and **all six resolved**, against 52.9% on the rest; two of
+those six additionally shelled out — `curl -s
+https://raw.githubusercontent.com/django/...` and `python3 -c "import
+urllib.request; url='https://raw.githubusercontent.com/sympy/...'"` — i.e. they
+fetched the upstream source directly.
+
+*What did not work.* A `PreToolUse` deny hook in the workspace's
+`.osa/settings.local.json`. Probed against a live backend: `web_search` ran
+normally. `Settings.layer(:local)` resolves through the process-global
+`Workspace.Cwd`, so the per-request `working_dir` cannot scope a policy file.
+Preserved as a documented negative result in `workspace.py:write_airgap`.
+
+*What does work,* and needs no change to OSA: a `permissions.deny` list in the
+**backend process's `OSA_SETTINGS`** file — the `:flag` settings layer.
+`Settings.trusted_layer/1` withholds only the `:project` layer pending
+workspace trust, so `:flag` always applies; `Permissions.rules/0` reads
+`deny`/`ask`/`allow` from it; and `ToolExecutor` consults deny rules at step 1b,
+*before* any permission-mode short-circuit, so `overdrive` does not bypass them.
+Per-session scoping is unnecessary because the benchmark backend is a dedicated
+daemon on its own port. `bench/swebench/airgap.py` writes that file; `run_bench.py
+--airgap` refuses to start until a live probe confirms it.
+
+*The probe is differential, and the run aborts if it fails.* One session, four
+steps: `web_fetch` on a public URL (must be refused), a `python3 -c "import
+urllib..."` through `shell_execute` (must be refused — this is the substring
+rule closing the hole a prefix rule cannot see), `echo` through `shell_execute`
+(must **succeed**, proving the blunt substring rules did not swallow the shell
+the agent needs), and `dir_list` (must succeed, proving the backend is alive).
+Observed on this host, in `permission_mode overdrive`: refusals at 0 ms and
+2 ms with `Blocked: <tool> is denied by a saved permission rule` in the backend
+log, successes at 25 ms and 4 ms. Against a backend started *without*
+`OSA_SETTINGS` the same probe returns `web_fetch success=true, 225 ms` and the
+page body — so the probe can fail, which is the only reason a pass means
+anything.
+
+*What is still not closed.* `shell_execute` remains available, because a
+benchmark that removes the shell measures something else. The deny rules cover
+it by command prefix and by egress substring, which is a filter, not a
+boundary — an egress path that mentions none of the listed tokens is not
+prevented. It is *detected*: `airgap.residual_egress_evidence()` scans every
+recorded SSE stream afterwards, `results.json` carries the result under
+`network_tool_use.residual_shell_egress`, and `honesty.airgap_status()` treats
+any hit as a **breach** that re-blocks the run. A network namespace would make
+this a boundary rather than a filter. It is unavailable on this host and both
+routes were executed rather than assumed: `unshare --net` fails with `write
+failed /proc/self/uid_map: Operation not permitted` because Ubuntu 24.04 sets
+`kernel.apparmor_restrict_unprivileged_userns = 1`, and `/usr/bin/bwrap` is not
+setuid so `bwrap --unshare-net` fails at `RTM_NEWADDR`. With root, or on a host
+with unprivileged user namespaces enabled, run the backend under `unshare -rn`
+with a unix-socket relay to the provider (the provider here is a loopback
+Ollama, so the relay is the only hole that needs punching) and the deny list
+becomes belt-and-braces.
 
 ### 4.3 OPEN — deflates the score and corrupts the failure taxonomy
 

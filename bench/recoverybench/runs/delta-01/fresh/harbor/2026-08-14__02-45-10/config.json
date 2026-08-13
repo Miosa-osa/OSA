@@ -1,0 +1,29 @@
+{
+    "job_name": "2026-08-14__02-45-10",
+    "jobs_dir": "/home/miosa/projects/osa/OSA/bench/recoverybench/runs/delta-01/fresh/harbor",
+    "n_concurrent_trials": 2,
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "agents": [
+        {
+            "name": "osa_agent:OsaAgent"
+        }
+    ],
+    "datasets": [
+        {
+            "path": "/home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2",
+            "task_names": [
+                "largest-eigenval",
+                "feal-differential-cryptanalysis",
+                "train-fasttext",
+                "video-processing",
+                "db-wal-recovery",
+                "schemelike-metacircular-eval"
+            ]
+        }
+    ]
+}

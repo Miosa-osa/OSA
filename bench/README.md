@@ -20,6 +20,7 @@ bench/
     workspace.py       materialises an instance as an editable host workspace
     evaluate.py        wrapper around the official swebench grading harness
     diagnose.py        failure taxonomy: which failures are OSA's fault
+    airgap.py          denies the web tools, and PROVES the denial by probe
     report.py          merges telemetry + grading -> results.json / summary.md
     instances/         curated instance-id subsets
     runs/<run_id>/     all output (gitignored)
@@ -132,25 +133,41 @@ cd bench/swebench
 nothing and **must score 0%**. If either is wrong, the harness is broken and no
 OSA number from it means anything. Do this on every new machine.
 
-### Step 2 — start a benchmark OSA backend
+### Step 2 — start a benchmark OSA backend, airgapped
 
-Use a dedicated port so you do not disturb your everyday daemon (default 9089):
+Use a dedicated port so you do not disturb your everyday daemon (default 9089),
+and point it at the deny list that stops the agent looking the fix up (§5):
 
 ```bash
+cd bench/swebench
+./.venv/bin/python run_bench.py --write-airgap-settings ./airgap-settings.json
+
 export PATH="$HOME/.asdf/shims:$HOME/.asdf/bin:$PATH"
-cd /path/to/OSA && OSA_HTTP_PORT=19801 mix osa.serve
+cd /path/to/OSA && \
+  OSA_HTTP_PORT=19801 \
+  OSA_SETTINGS=/path/to/OSA/bench/swebench/airgap-settings.json \
+  mix osa.serve
 ```
+
+`OSA_SETTINGS` is the `:flag` settings layer. It is process-wide, which is
+exactly right here — the whole daemon is the benchmark — and it is the one
+layer that is neither trust-gated nor bypassed by `overdrive`. **Never point
+your everyday daemon at it**; it would deny your web tools too.
 
 ### Step 3 — run OSA
 
 ```bash
 cd bench/swebench
 ./.venv/bin/python run_bench.py \
-  --runner osa --osa-url http://127.0.0.1:19801 \
+  --runner osa --osa-url http://127.0.0.1:19801 --airgap \
   --instances instances/smoke4.txt \
   --run-id osa-$(date +%Y%m%d) \
   --agent-timeout 900 --eval-workers 2
 ```
+
+`--airgap` probes the backend *before* spending a single instance and **aborts
+the run** unless it observes a refusal (exit 3). It is not a declaration; it is
+a precondition. Omit it and the reporter's web-lookup BLOCK stands, correctly.
 
 Useful flags: `--limit N`, `--repo psf/requests`, `--difficulty '<15 min fix'`,
 `--instance-ids a b c`, `--dataset princeton-nlp/SWE-bench_Lite`,
@@ -366,35 +383,56 @@ SWE-bench Verified, OSA v1.0.95 backend, provider `ollama`, model
 |---|---|---|
 | `gold-apply`, the 40-instance set | **40/40 resolved** | the set is fully winnable, and patch extraction is correct through the real workspace path |
 | `empty`, the 40-instance set | **0/40 resolved** | no accidental credit |
-| `osa`, 40 hard-weighted instances | **24/40 (60.0%)** pass@1 | the scaled run — see below |
+| `osa`, 40 hard-weighted instances, **airgapped** | **23/40** pass@1 | `runs/osa-hard40-airgap` — the current number |
+| `osa`, the same 40, **not** airgapped | 24/40 | `runs/osa-hard40-v2` — superseded; the agent could look the fix up |
 | `osa`, `--osa-mode cli`, 1 instance | 1/1 | the CLI transport, executed for the first time |
 
-**The 40-instance run (`runs/osa-hard40-v2`)**, seed 20260813, stratified by
+**The current run (`runs/osa-hard40-airgap`)**, seed 20260813, stratified by
 repo and hard-weighted (mean hardness 0.443 vs 0.297 for the full dataset; only
-4 of 40 are `<15 min fix`, against 39% of the dataset):
+4 of 40 are `<15 min fix`, against 39% of the dataset), with web lookup denied
+and the denial probed before the run started (§5, "Web lookup"):
 
 | | |
 |---|---|
-| resolved | **24 / 40 = 60.0%** pass@1, single attempt |
-| 95% interval | 44.6% – 73.7% (29 points wide — this ranks nothing) |
-| wall clock | 4715 s of agent time, 3 workers |
-| tokens | 59.9M in / 262k out, **0 cache reads** |
-| cost | **$0.00 reported, which is an OSA bug, not a free run** (§7.3) |
-| tool calls | 1510 total, 37.8 mean/task, **158 failed** |
+| resolved | **23 / 40** pass@1, single attempt |
+| 95% interval | 42.2% – 71.5% (29 points wide — this ranks nothing) |
+| wall clock | 5527 s of agent time, 2 workers |
+| tokens | 76.7M in / 286k out, **0 cache reads** |
+| cost | **$46.66** — real, for the first time; the `model: nil` defect that made this $0.00 has been fixed |
+| tool calls | 1612 total, 40.3 mean/task |
+| failures | **17, all classified `model`. Zero harness faults, down from 4.** |
 
-Failures split **11 model / 4 harness / 1 bench** — i.e. **25% of all failures
-were OSA's fault rather than the model's**. Two adjusted views, both stated
-because neither alone is honest:
+**What changed against `osa-hard40-v2`, and why the headline moved so little.**
+24 → 23 is a two-point drop that hides two much larger, opposing movements,
+because two things changed at once — the airgap went on, *and* OSA itself was
+patched between the runs (`ca8f4827` → `82a61cc4` plus a working tree). The
+difference is **+2.5 pp, 95% CI [−18.3, +23.0]**, i.e. statistically
+indistinguishable; the decomposition is the informative part:
 
-- excluding the 3 instances OSA *refused* (unwinnable, §7.7): **24/37 = 64.9%**
-- excluding the 6 instances where the agent used `web_fetch`: **18/34 = 52.9%**
-  — and those 6 resolved **6/6**, against 52.9% elsewhere. That gap is why the
-  web-lookup defect is a BLOCK and not a footnote.
+| flip | instances | attribution |
+|---|---|---|
+| resolved → failed | `django-16263`, `pydata__xarray-7229`, `sympy-22080` | **all three had used `web_fetch` in the unairgapped run.** Denying the lookup cost exactly these. |
+| failed → resolved | `matplotlib-25311`, `scikit-learn-14629`, `scikit-learn-26323` | all three were *harness* faults before — one workspace-permissions error and two prompt-injection refusals (§7.8, §7.7). OSA fixes, not model gains. |
+| both directions, unattributed | `django-11532` (−), `django-14631` (+), `sympy-13877` (−) | run-to-run noise; this is the best estimate of it available |
 
-`bench/report/cli.py gate` **refuses to print this as a rate**, on two blocking
-findings: web lookup is not prevented, and 40 of 500 is not a dataset score.
-That is the correct outcome and the number must not be quoted as OSA's
-SWE-bench Verified score.
+So the airgap cost 3 instances and the OSA fixes recovered 3, with one instance
+of noise on top. **A −2.5 pp headline understates the effect of preventing web
+lookup**, and anyone quoting the delta as "the airgap barely mattered" would be
+wrong.
+
+Two further observations from the airgapped run:
+
+- **The agent still tried.** `web_search` ×5 and `web_fetch` ×2 across five
+  instances, refused every time (0–11 ms, `Blocked: … is denied by a saved
+  permission rule`). Reaching for a lookup on 5 of 40 hard instances is itself
+  a measurement of how much the earlier number rested on retrieval.
+- **It costs more to work it out.** Input tokens rose 59.9M → 76.7M (+28%) and
+  tool calls 1510 → 1612 for one fewer resolved instance.
+
+`bench/report/cli.py gate` now emits **one** blocking finding —
+`subset_not_a_dataset_score`, 40 of 500 — which no amount of engineering can
+close short of running all 500. The web-lookup block is closed on evidence.
+The number must still not be quoted as OSA's SWE-bench Verified score.
 
 Every layer — dataset, workspace, agent, patch extraction, official grading,
 report — has run against real data. Nothing in the pipeline is mocked.
@@ -412,7 +450,7 @@ measurement tool must never have:
 | FAIL_TO_PASS node ids baked into `run_tests.sh`, where test names state the required behaviour | inflates | **fixed** (now `--f2p-hint`, default off) |
 | pass@k reported in `instances_resolved` | inflates | **fixed** (pass@1 primary; the field is `null` for k>1) |
 | gold control bypassed workspace prep and `git_diff()`, so it could not see defect 1 | hides defects | **fixed** (`--runner gold-apply`) |
-| web lookup of the published fix not prevented | inflates | **STILL OPEN** — see below |
+| web lookup of the published fix not prevented | inflates | **fixed** (`airgap.py`, probed) — see below |
 
 The stripping predicate is now derived from the instance's own `test_patch`
 rather than guessed from filenames. That is exact by construction: the grader
@@ -420,30 +458,84 @@ reverts precisely the files in `test_patch`, so the recorded patch and the
 graded patch cannot drift. Verified against all 500 gold patches: 0 damaged,
 ceiling 100.0%.
 
-**Still open — web lookup.** The prompt names the repo and the exact base
-commit, and the upstream fix is a public commit. The test container is
-`--network none`, but OSA runs on the *host* in `overdrive`, with
-`web_search` / `web_fetch` / `download` / `browser` / `github` all available.
-A workspace-local `.osa/settings.local.json` deny hook was implemented and
-**probed against a live backend: it does not work.** `Settings.layer(:local)`
-resolves through a process-global `Workspace.Cwd`, so the per-request
-`working_dir` cannot scope a policy file. Enforcing this needs an OSA change —
-a per-session tool allowlist on `/api/v1/orchestrate`, or session-scoped
-settings. Until then the harness *measures* instead: every tool call is counted
-by name, and `results.json` carries `network_tool_use` with the per-instance
-evidence. Measurement is not prevention, and `bench/report`'s gate correctly
-refuses to print a rate while this stands.
+**Web lookup — closed, by a deny list that is proved before every run.**
+The prompt names the repo and the exact base commit, and the upstream fix is a
+public commit. The test container is `--network none`, but OSA runs on the
+*host* in `overdrive`, with `web_search` / `web_fetch` / `download` / `browser`
+all available. In `runs/osa-hard40-v2` this was not hypothetical: six instances
+called `web_fetch` and all six resolved, and two of them additionally shelled
+out to `curl https://raw.githubusercontent.com/...` and `python3 -c "import
+urllib.request; url='https://raw.githubusercontent.com/sympy/...'"`.
+
+*What did not work*: a `PreToolUse` deny hook in the workspace's
+`.osa/settings.local.json`. Probed live — `web_search` ran normally, because
+`Settings.layer(:local)` resolves through the process-global `Workspace.Cwd`
+and a per-request `working_dir` cannot move it. Kept as a documented negative
+result in `workspace.py:write_airgap`, default off.
+
+*What works*: `permissions.deny` in the **backend process's `OSA_SETTINGS`**
+file — the `:flag` layer. It is never trust-gated, `Permissions.rules/0` reads
+it, and `ToolExecutor` consults deny rules *before* any permission-mode
+short-circuit, so `overdrive` does not bypass it. No OSA change was needed, and
+no per-session scoping is needed either, because the benchmark backend is a
+dedicated daemon. `airgap.py` writes the file; `--airgap` refuses to start the
+run until a live probe confirms it.
+
+*The probe is differential and the run aborts if it fails.* One session, four
+steps: `web_fetch` on a public URL (must be refused), a `python3 -c "import
+urllib..."` through `shell_execute` (must be refused), `echo` through
+`shell_execute` (must **succeed** — proving the blunt substring rules did not
+swallow the shell the agent needs), `dir_list` (must succeed — proving the
+backend is alive). Observed, in `overdrive`: refusals at 0 ms and 2 ms with
+`Blocked: <tool> is denied by a saved permission rule` in the backend log;
+successes at 25 ms and 4 ms. Against a backend started *without* `OSA_SETTINGS`
+the same probe returns `web_fetch success=true, 225 ms` and the page body — the
+probe can fail, which is the only reason a pass means anything.
+
+*Residual surface, stated because it is not zero.* `shell_execute` stays
+available; the rules cover it by command prefix and by egress substring, which
+is a filter, not a boundary. An egress path mentioning none of the listed
+tokens is not prevented — it is *detected*: every recorded SSE stream is scanned
+afterwards (`residual_egress_evidence`), the result is in
+`results.json:network_tool_use.residual_shell_egress`, and any hit re-blocks the
+run. A network namespace would make this a boundary. It is unavailable on this
+host and both routes were executed rather than assumed: `unshare --net` fails
+with `write failed /proc/self/uid_map: Operation not permitted`
+(`kernel.apparmor_restrict_unprivileged_userns = 1` on Ubuntu 24.04), and
+`/usr/bin/bwrap` is not setuid so `bwrap --unshare-net` fails at `RTM_NEWADDR`.
+
+*One more thing the split buys.* Attempts and successes are now counted
+separately. The first airgapped run recorded seven network-tool calls, all
+refused — and the gate initially called that a breach, because the counter
+measured attempts. A denied call cannot carry information, so only a
+*succeeded* call invalidates a score; the attempts stay in the record because
+"the agent reached for a lookup on 5 of 40 instances" is a finding in its own
+right.
 
 **Not proven / stubbed:**
 
 - **Full dataset.** Nothing has been run at N=500. Expect image-pull volume
   (~2 TB at `--cache-level instance`) and long-tail agent timeouts there.
-- **Terminal-Bench**: researched, documented in §1, **not built**.
-- **Cost in dollars** has never been observed non-zero — but the reason is now
-  known and it is an OSA bug, not a property of the provider: the loop state
-  carries `model: nil`, so `Pricing.cost/2` prices every turn at $0.00 and logs
-  `[Pricing] No price for model nil`. `glm-5.2:cloud` *is* priced at
-  {0.60, 2.20} in the table. See §7.
+- **Terminal-Bench**: a separate harness now exists under `bench/terminalbench`;
+  it has run 10 hard tasks, not the full 89. See its own README.
+- **Variance.** Every OSA number here is a single run. Vendors average over
+  5–10 trials for this reason; the intervals quoted cover sampling over *tasks*
+  only and say nothing about run-to-run variation on the same tasks. Nine of
+  the forty instances flipped verdict between two runs of the same set, in both
+  directions.
+- **Prompt caching.** `cache_read_tokens` is 0 on every task in every run. Not
+  established whether that is OSA not requesting caching or the Ollama path not
+  reporting it; it must be checked against a hosted provider before being
+  called an OSA bug.
+- **Cost in dollars** — *resolved*, and worth recording as an example of what
+  this harness is for. Every earlier run reported $0.00 because the agent
+  loop's state carried `model: nil`, so `Pricing.cost/2` priced every turn at
+  $0.00 and logged `[Pricing] No price for model nil`, while `glm-5.2:cloud`
+  *is* priced {0.60, 2.20}. `runs/osa-hard40-airgap` is the first run to report
+  a real figure: **$46.66**, $2.03 per resolved instance. The reporter's rule
+  that produced the old wording ("0 USD means unpriced, i.e. a subscription")
+  was itself wrong, and now distinguishes an unpriced model from a priced model
+  reporting zero — the second is a defect, not a caveat.
 - **Grader determinism.** Some instances have network-dependent tests:
   `psf__requests-1921` failed and then passed on an identical re-run of the
   *gold* patch (`test_DIGESTAUTH_WRONG_HTTP_401_GET`). The official grader is
@@ -475,7 +567,10 @@ worth acting on independently, found while wiring it up:
 2. `<id>.spend.json` is never reset for a session id, so any tool that reuses a
    session id accumulates across runs. This harness works around it by putting
    the run id in the session id and clearing the sidecar first.
-3. **The agent loop's state carries `model: nil`.** Every `cost_update` frame
+3. **The agent loop's state carried `model: nil`.** *(FIXED between
+   `runs/osa-hard40-v2` and `runs/osa-hard40-airgap`; the latter reports a real
+   $46.66. Kept here because the two silent consequences below are the reason
+   it mattered, and because the reporter still checks for the symptom.)* Every `cost_update` frame
    ships `"model": null`, and the daemon logs `[Pricing] No price for model nil
    — cost recorded as $0.0` once per turn. Two independent consequences, both
    silent:
@@ -497,13 +592,19 @@ worth acting on independently, found while wiring it up:
    the documented event stream gets nothing.
 5. **`Settings.layer(:local)` is not session-scoped.** It resolves through a
    process-global `Workspace.Cwd`, so the per-request `working_dir` on
-   `/api/v1/orchestrate` cannot scope a policy file. This is what makes it
-   impossible to restrict tools for one session — see the web-lookup defect in
-   §5.
+   `/api/v1/orchestrate` cannot scope a policy file. *Still true as far as this
+   harness knows — it was not re-tested, because the benchmark stopped needing
+   it: the `:flag` layer (`OSA_SETTINGS`) is process-wide, which is the right
+   granularity for a dedicated benchmark daemon (§5).* It remains a real gap
+   for anything that genuinely needs per-session policy, such as a multi-tenant
+   backend.
 6. **`~/.osa/permission_mode.json` has no eviction.** One row per session id,
    for ever; it is already several hundred entries. This harness cleans up its
    own rows on `close()`.
-7. **The prompt-injection guard hard-refuses ordinary bug reports.** The
+7. **The prompt-injection guard hard-refused ordinary bug reports.** *(Appears
+   FIXED: this cost 3 of 40 instances in `runs/osa-hard40-v2` and cost 0 of the
+   same 40 in `runs/osa-hard40-airgap`; two of the three now resolve. Not
+   independently re-tested against the 15 matching issue bodies.)* The
    structural detector in `Agent.Safety.PromptInjection` matches
    `/(?:^|\n)\s*(?:system|assistant|user)\s*:/i`, and scikit-learn's and
    matplotlib's issue templates paste an environment block that begins with a

@@ -1,0 +1,320 @@
+
+19:53:03.776 [notice]     :alarm_handler: {:set, {:system_memory_high_watermark, []}}
+
+19:53:03.796 [warning] [boot] Running as root. OSA runs normally, with one exception: OpenComputers interactive PTY sessions (pty_open) are unavailable, because erlexec's port program refuses to run as root. Nothing else is affected — shell_execute, file tools, the HTTP API and the agent loop all work.
+
+19:53:03.810 [info] [Soul] Loaded 0/3 bootstrap files, 0 agent soul(s)
+
+19:53:03.812 [info] [PromptLoader] Loaded 7/7 prompts, 0 command templates
+
+19:53:03.857 [info] [Auth] Running in open-access mode on loopback only — unauthenticated JWT issuance is permitted for local development.
+
+19:53:04.083 [info] Event bus started — :osa_event_router compiled
+
+19:53:04.083 [info] [DLQ] Started
+
+19:53:04.137 [info] [EventStream] Initialized — topic=command_center:events
+
+19:53:04.137 [info] [Providers.HealthChecker] Circuit breaker started
+
+19:53:04.149 [info] Provider registry initialized with 30 providers (default: ollama)
+
+19:53:04.149 [info] Providers: ollama, anthropic, openai, groq, openrouter, together, fireworks, deepseek, mistral, cerebras, google, cohere, perplexity, xai, sambanova, hyperbolic, lmstudio, llamacpp, miosa, replicate, qwen, moonshot, zhipu, volcengine, baichuan, ollama_cloud, openai_codex, claude_cli, copilot_cli, bedrock
+
+19:53:04.563 [info] Tools registry: 82 tools, 10 skills, 82 LLM tools
+
+19:53:04.566 [info] Machines activated: [:core]
+
+19:53:04.605 [info] [Memory.Store] starting
+
+19:53:04.618 [warning] [Memory.Store] failed to load from SQLite: no such table: memories
+SELECT m0."id", m0."content", m0."category", m0."scope", m0."source", m0."tags", m0."keywords", m0."description", m0."links", m0."signal_weight", m0."relevance", m0."access_count", m0."session_id", m0."created_at", m0."accessed_at", m0."updated_at" FROM "memories" AS m0
+
+19:53:04.619 [info] [Memory.Learning] SICA engine started
+
+19:53:04.619 [info] [Dream] enabled — check every 1800000ms
+
+19:53:04.622 [info] [Tasks.Workflow] 0 workflow(s) loaded from /root/.osa/workflows
+
+19:53:04.651 [warning] [Tasks.Queue] Failed to load from DB: %Exqlite.Error{message: "no such table: task_queue", statement: "SELECT t0.\"id\", t0.\"task_id\", t0.\"agent_id\", t0.\"payload\", t0.\"status\", t0.\"leased_until\", t0.\"leased_by\", t0.\"result\", t0.\"error\", t0.\"attempts\", t0.\"max_attempts\", t0.\"completed_at\", t0.\"inserted_at\", t0.\"updated_at\" FROM \"task_queue\" AS t0 WHERE (t0.\"status\" IN (SELECT value FROM JSON_EACH('[\"pending\",\"leased\"]'))) ORDER BY t0.\"inserted_at\""}
+
+19:53:04.651 [info] [Agent.Tasks] Started — 0 workflow(s), queue ready
+
+19:53:04.651 [info] [Agent.Tasks] Singleton instance active
+
+19:53:04.653 [info] [Budget] started, daily: none, monthly: none
+
+19:53:04.656 [info] [Hooks] Pipeline initialized with 21 hooks
+
+19:53:04.659 [info] Scheduler started — heartbeat every 30 min, 0 cron job(s), 0 trigger(s)
+
+19:53:04.659 [info] Compactor started (context window is resolved per-model, per-call)
+
+19:53:04.659 [info] [ContextMesh.Archiver] started (interval=1800000ms)
+
+19:53:04.659 [info] [Healing.Orchestrator] Started
+
+19:53:04.659 [info] [RegionLock] Started — ETS tables initialised
+
+19:53:04.659 [info] [Speculative.Executor] Started
+
+19:53:04.659 [info] [Extensions] ContextRefs enabled — registering @ref expansion hook
+
+19:53:04.659 [info] [Extensions] FSCheckpoint enabled — starting filesystem checkpoint server
+
+19:53:04.659 [info] [Extensions] Skin engine enabled — starting theme management
+
+19:53:04.659 [info] [Extensions] Skill curator enabled
+
+19:53:04.674 [info] [fs_checkpoint] Shadow repo initialized at /root/.osa/fs_checkpoints
+
+19:53:04.680 [info] [skin] Engine started — 4 skin(s) loaded, active: dark
+
+19:53:04.680 [info] Channels.Starter: starting configured channel adapters
+
+19:53:04.683 [info] Channels.Manager: Starting configured channel adapters...
+
+19:53:04.685 [info] [Telegram] No bot token configured — adapter disabled
+
+19:53:04.686 [info] [Discord] No bot token configured — adapter disabled
+
+19:53:04.688 [info] [Slack] No bot token configured — adapter disabled
+
+19:53:04.691 [info] Signal: No API URL configured, adapter disabled
+
+19:53:04.693 [info] [WhatsApp] Adapter disabled — set whatsapp_enabled: true
+
+19:53:04.696 [info] [Matrix] Not configured — adapter disabled
+
+19:53:04.698 [info] [Email] Not configured — adapter disabled
+
+19:53:04.700 [info] [LINE] No channel token — adapter disabled
+
+19:53:04.702 [info] [DingTalk] Not configured — adapter disabled
+
+19:53:04.705 [info] [Feishu] Not configured — adapter disabled
+
+19:53:04.707 [info] [WeCom] Not configured — adapter disabled
+
+19:53:04.707 [info] Channels.Manager: 0/11 channel adapters started
+
+19:53:04.713 [info] Running OptimalSystemAgent.Channels.HTTP with Bandit 1.10.3 at 127.0.0.1:19899 (http)
+
+19:53:05.354 [info] [AgentRegistry] Loaded 18 agent definitions (built_in: 18, user: 0)
+
+19:53:05.358 [info] [Ollama] Using explicitly configured model: glm-5.2:cloud
+
+19:53:05.363 [info] [Tier] Ollama tiers: elite=glm-flash-max:latest, specialist=kimi-k2.6:cloud, utility=glm-5:cloud
+
+19:53:05.365 [info] [FleetResumer] boot recovery: enabled=false resumed=0 failed=0 skipped=0 reconciled=0
+
+19:53:05.365 [info] [BootTiming] 60 children (+4 subsystem) started in 784ms — slowest: Root/Supervisors.Infrastructure 708ms, Infrastructure/Tools.Registry 358ms, Infrastructure/Events.Bus 204ms, Root/Supervisors.AgentServices 92ms, Infrastructure/Providers.Registry 62ms
+
+19:53:05.365 [info] OSA boot complete (1574ms)
+OSA serving on :19899
+
+19:53:05.467 [info] [Catalog] Refreshed from https://models.dev/api.json
+
+19:53:06.442 [info] [SessionManager] Started Loop for session db-wal-recovery__SPgySSP__agent
+
+19:53:06.483 [info] [loop] Entering ReactLoop for session db-wal-recovery__SPgySSP__agent
+
+19:53:06.527 [info] [Soul] Static base (native tools) cached: 6812 tokens
+
+19:53:06.585 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:08.024 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:08.025 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:09.713 [info] [loop] LLM call completed in 3130ms (24260 input tokens)
+
+19:53:09.760 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:09.769 [info] [ctx] estimated=24260 max=1000000 util=2.5%
+
+19:53:09.777 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:10.788 [info] [loop] LLM call completed in 1011ms (24307 input tokens)
+
+19:53:10.816 [info] [ctx] estimated=24307 max=1000000 util=2.5%
+
+19:53:10.817 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:12.103 [info] [loop] LLM call completed in 1285ms (24428 input tokens)
+
+19:53:12.116 [info] [Tools.Registry] Fallback for 'shell_execute': 'file_read'
+
+19:53:12.116 [info] [loop] Tool 'shell_execute' failed ("Exit 127:\n/usr/bin/sh: 1: file: not found\n"), trying fallback 'file_read'
+
+19:53:12.120 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:12.121 [info] [ctx] estimated=24428 max=1000000 util=2.5%
+
+19:53:12.123 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:13.379 [info] [loop] LLM call completed in 1257ms (24485 input tokens)
+
+19:53:13.397 [info] [ctx] estimated=24485 max=1000000 util=2.5%
+
+19:53:13.398 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:14.570 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:14.583 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:14.604 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:14.604 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:15.007 [info] [loop] LLM call completed in 1608ms (25179 input tokens)
+
+19:53:15.019 [info] [ctx] estimated=25179 max=1000000 util=2.6%
+
+19:53:15.021 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:16.833 [info] [loop] LLM call completed in 1811ms (25337 input tokens)
+
+19:53:16.842 [info] [ctx] estimated=25337 max=1000000 util=2.6%
+
+19:53:16.844 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:18.005 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:18.061 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:18.061 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.031 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.032 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.034 [info] [loop] LLM call completed in 2190ms (25841 input tokens)
+
+19:53:19.063 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.063 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.066 [info] [ctx] estimated=25841 max=1000000 util=2.6%
+
+19:53:19.068 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:19.961 [info] [loop] LLM call completed in 893ms (25978 input tokens)
+
+19:53:19.970 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:19.973 [info] [ctx] estimated=25978 max=1000000 util=2.7%
+
+19:53:19.975 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:21.154 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:21.403 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:21.903 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:21.923 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.239 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.239 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.240 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.252 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.275 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.276 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.276 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.277 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.279 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.418 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:22.497 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:24.452 [info] [loop] LLM call completed in 4478ms (26013 input tokens)
+
+19:53:24.479 [info] [Tools.Registry] Fallback for 'shell_execute': 'file_read'
+
+19:53:24.479 [info] [loop] Tool 'shell_execute' failed ("Exit 1:\nTraceback (most recent call last):\n  File \"<string>\", line 15, in <module>\nTypeError: a bytes-like object is required, not 'int'\nWAL size: 16512\nFirst 32 bytes (hex): 753d44c0426fa05a4242524242424242d2da2e574cd1a443a811d9e1e6604414\nFirst 4 bytes: 753d44c0\n"), trying fallback 'file_read'
+
+19:53:24.482 [warning] [Bus] Signal failure mode fidelity_failure on tool_render: Signal S/N ratio 0.27 is below acceptable threshold of 0.3
+
+19:53:24.482 [info] [ctx] estimated=26013 max=1000000 util=2.7%
+
+19:53:24.485 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:27.061 [info] [loop] LLM call completed in 2576ms (26570 input tokens)
+
+19:53:27.090 [info] [ctx] estimated=26570 max=1000000 util=2.7%
+
+19:53:27.092 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:28.000 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.000 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.001 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.082 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.203 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.271 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:28.597 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:31.110 [info] [loop] LLM call completed in 4019ms (26974 input tokens)
+
+19:53:31.148 [info] [ctx] estimated=26974 max=1000000 util=2.8%
+
+19:53:31.149 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:33.137 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:33.142 [info] [loop] LLM call completed in 1993ms (27643 input tokens)
+
+19:53:33.158 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:33.159 [info] [ctx] estimated=27643 max=1000000 util=2.8%
+
+19:53:33.161 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:34.125 [info] [loop] LLM call completed in 964ms (27720 input tokens)
+
+19:53:34.139 [info] [ctx] estimated=27720 max=1000000 util=2.8%
+
+19:53:34.140 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:35.335 [info] [loop] LLM call completed in 1194ms (27755 input tokens)
+
+19:53:35.357 [info] [ctx] estimated=27755 max=1000000 util=2.8%
+
+19:53:35.359 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:37.114 [info] [loop] LLM call completed in 1755ms (27819 input tokens)
+
+19:53:37.146 [info] [ctx] estimated=27819 max=1000000 util=2.8%
+
+19:53:37.148 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:38.316 [info] [loop] LLM call completed in 1168ms (27912 input tokens)
+
+19:53:38.329 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:38.331 [info] [ctx] estimated=27912 max=1000000 util=2.8%
+
+19:53:38.332 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
+
+19:53:39.667 [warning] [Bus] Signal failure mode fidelity_failure on system_event: Signal S/N ratio 0.24 is below acceptable threshold of 0.3
+
+19:53:39.949 [info] [loop] LLM call completed in 1616ms (28044 input tokens)
+
+19:53:39.969 [info] [ctx] estimated=28044 max=1000000 util=2.9%
+
+19:53:39.970 [info] [Registry] Calling Elixir.OptimalSystemAgent.Providers.Ollama.chat_stream/3 (native, retryable)
