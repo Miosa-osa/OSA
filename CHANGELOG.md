@@ -9,6 +9,160 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.96] — displays as `v1.0.096`
+
+Two benchmark harnesses were built and run against OSA for the first time.
+They found that a quarter of failures were OSA's fault rather than the model's,
+and this release is mostly those fixes.
+
+### Fixed — a nil model silently disabled compaction and shrank the window 30x
+
+A session started without an explicit model carried `model: nil` all the way
+through. nil is not an absence here; it is a value that breaks everything keyed
+on the model.
+
+`ContextWindow.resolve/1` returned `:unknown`, so the pressure meter read
+`max=0 util=0.0%` and `above_compact` could never become true — **compaction
+never fired at all**, on 37 of 40 measured sessions. Pricing logged `No price
+for model nil`, so cost stayed at $0.00 against 59.9M input tokens and
+`max_budget_usd` could never trip.
+
+Worse downstream: a nil model cannot match the `":cloud"` test that exempts
+hosted tags from the local ollama ceiling, so **a 1M-token model was budgeted as
+32,768**. The "small window" then took the *larger* static prompt (17,733 tokens
+instead of 9,332), the dynamic budget went negative and was clamped to its floor
+while world state was evicted section by section, and the native tool array was
+cut from 37 tools to 10.
+
+Provider and model now resolve at session start through the same path the
+request uses.
+
+### Fixed — an ESSENTIAL context block that vanishes is a bug, not a budget
+
+Every world-state section was hardcoded `group: :essential`, so rank-0 tool
+doctrine and the rank-3 slash-command catalog screamed at identical severity.
+Severity now keys on actual rank. And the 1,000-token floor silently absorbed a
+negative budget: a prompt that does not fit now logs at `:error` with the full
+arithmetic and emits `[:osa, :context, :overflow]`, stating that the evictions
+below it are symptoms rather than the cause.
+
+### Fixed — the injection guard refused ordinary bug reports
+
+A single role header at line start (`SYSTEM:`) refused the turn outright: no
+tool calls, no LLM turn, a canned refusal in about a second.
+`sklearn.show_versions()` prints a block beginning `System:`, as does
+matplotlib's bug template and any pasted log, stack trace or captured
+transcript. It refused 15 of 500 SWE-bench instances; outside benchmarks the
+blast radius is wider, because pasting a log is one of the most common things
+anyone does here.
+
+The signal is not the header but what follows it: an instruction means attack, a
+version table means label. The bare pattern is kept for untrusted third-party
+text, where a false positive costs a pair of defanging markers rather than the
+user's turn.
+
+### Fixed — OSA could not boot as root
+
+`erlexec` started unconditionally, its port program refuses to run as root, and
+`CLI.serve/0` raised a `MatchError` on the failure. This broke every
+containerised OSA. `erlexec` now leaves the application tree entirely and starts
+lazily on first PTY use; running as root logs one line naming PTY as the only
+casualty. Verified end to end in a root container on ubuntu:24.04 with a
+production release.
+
+### Fixed — a missing `git` took down the whole application
+
+`FSCheckpoint`'s `init/1` shells out to git, and in a container without it the
+`:enoent` propagated through the extensions supervisor and killed OSA at boot —
+a filesystem-checkpoint convenience taking the agent with it. It degrades now
+and names the cause.
+
+### Fixed — overdrive did not bypass the circuit breaker
+
+The breaker was mixing two different things and now says so. Catastrophic
+actions stay blocked in every mode, overdrive included. Bounded, recoverable
+ones are waived under overdrive with a warning naming the reason and the
+authorising mode. Clause order is load-bearing: the catastrophic class is
+scanned across all variants first, so a compound command cannot be waived on its
+weaker match. A waiver is not an auto-allow — deny rules, safety-ask and the
+subagent boundary all still apply.
+
+### Fixed — session settings were daemon-wide
+
+`set_session/2` wrote one shared row, so "session" settings were shared by every
+concurrent session, which made per-session tool policy impossible. Now scoped
+per session id.
+
+### Fixed — cached input tokens were collected and never counted
+
+`openai_compat.ex` dropped `prompt_tokens_details.cached_tokens` entirely, so
+OpenAI, DeepSeek, Groq, OpenRouter and xAI all reported `cache_read = 0` even
+when the provider had cached. `openai_responses.ex` read it and stored it under
+a key `CacheAttribution` never looks at.
+
+### Fixed — smaller things
+
+`mix osa.run --format json` always reported `"cost": 0` (it indexed an
+`{:ok, status}` tuple, and wanted a key that does not exist). `serve` printed
+`:9089` while bound elsewhere, ignoring `OSA_HTTP_PORT`. `permission_mode.json`
+grew without bound; now capped by age and count, with the timestamp persisted so
+a restart cannot reset the age.
+
+### Changed — the TUI
+
+Tool output budget cut from 50 KB to 16 KB. At 50 KB a single tool result
+carries ~12.8k tokens, so twenty tool calls could put ~256k tokens into one
+request. Nothing is discarded: over-budget results were already persisted whole
+and previewed head+tail with a reference the agent can read on demand.
+
+Shell cells show head **and** tail. They were head-only, so a failing
+`cargo build` spent its entire budget on `Compiling foo v0.1.0` and hid the
+error. Carriage-return redraws collapse to their final frame, so a progress bar
+no longer smears every frame it ever painted into one row.
+
+Markdown spacing is now uniform — k newlines produce k−1 blank rows, pinned
+across every block-type pair. Fenced code blocks paint a full-row background.
+Lists nest on the model's own indentation instead of a rounded guess. Tables get
+a real word-break rule that keeps `$145,000` whole while breaking `555-0101`.
+
+Reasoning is visible while it streams: a fixed three-row window onto the tail,
+where the default was collapsed. Hook counters render per row. The task panel
+no longer drops items past its cap silently. Diff hunks report how many lines
+they skipped. A long wait names what it is waiting for instead of showing a
+decorative verb.
+
+### Added — benchmark harnesses
+
+`bench/swebench/` runs SWE-bench Verified with grading delegated to the official
+`swebench` package, so the same scoring code grades OSA, the gold patch and an
+empty control. `bench/terminalbench/` runs Terminal-Bench with OSA installed
+*inside* the task container as a self-contained OTP release, because grading
+inspects container state rather than a patch.
+
+`bench/report/` is a gate rather than a formatter: Wilson intervals, failure-first
+reporting with per-failure transcript paths, a reproducibility manifest, and a
+rules engine that refuses to print a rate for an unquotable run.
+
+**No score is published with this release, deliberately.** The gate currently
+refuses one, on two blocking findings: a 40-instance subset is not a dataset
+score, and OSA runs on the host with web tools available while the container is
+airgapped — the six instances that used `web_fetch` resolved six of six.
+
+An audit of the harness found six ways it could mislead, four now fixed. The
+worst was ours: a path predicate matched `"test/"` as a substring, which is
+contained in `src/_pytest/`, so legitimate source files were stripped from model
+patches and the result reported as the agent producing no patch. Checked against
+all 500 gold patches, that destroyed 19 of them outright.
+
+### Known — not verified on a real terminal
+
+Three display changes in this release cannot be checked by any automated test,
+because the test backend answers cursor queries from a perfect model: Ctrl+T
+through the task-panel pin states, a progress-bar command showing its final
+frame, and the hook bracket on a narrow terminal. The PTY resize suite and both
+screen probes pass.
+
+
 ## [1.0.95] — displays as `v1.0.095`
 
 ### Fixed — a long dispatch was killed while its agents were still working
