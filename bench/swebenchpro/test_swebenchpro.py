@@ -303,6 +303,32 @@ class TestReportLayoutAdapter(unittest.TestCase):
             self.assertFalse(shared.sb_diagnose.patch_apply_failed(d, "rid", "m", "i1"))
 
 
+class TestHonestyKeys(unittest.TestCase):
+    """The reporter's fail-closed gates must be able to read our config.
+
+    `bench/report/honesty.py` decides whether a run may be quoted by looking up
+    specific keys in `config.json`, and treats an ABSENT key as the unsafe
+    value. That is the correct default, but it means a Pro run that named the
+    same concept differently got flagged for leaking FAIL_TO_PASS test names it
+    never leaked. Publishing under the name the checker reads is our job, and
+    this test is what keeps the two from drifting apart again.
+    """
+
+    def test_run_bench_publishes_f2p_hint(self):
+        src = (HERE / "run_bench.py").read_text()
+        self.assertIn('"f2p_hint"', src)
+
+    def test_honesty_gate_reads_that_key(self):
+        honesty = HERE.parent / "report" / "honesty.py"
+        if not honesty.exists():
+            self.skipTest("bench/report not present")
+        self.assertIn(
+            'config.get("f2p_hint"', honesty.read_text(),
+            "bench/report/honesty.py no longer gates on config.f2p_hint; "
+            "re-check which key it reads and publish that one.",
+        )
+
+
 class TestDockerWaitTimeout(unittest.TestCase):
     """Guard against the upstream defect in PR #111.
 

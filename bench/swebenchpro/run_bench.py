@@ -264,6 +264,19 @@ def main() -> int:
         "max_turns": args.max_turns,
         "test_bridge": not args.no_test_bridge,
         "test_file_hint": args.test_file_hint,
+        # `bench/report/honesty.py` gates the "test names leaked to the agent"
+        # defect on `config.f2p_hint`, and defaults it to True when absent --
+        # fail-closed, which is the right default: a run that does not say
+        # whether it leaked test knowledge should be treated as though it did.
+        #
+        # Pro's analogue of that flag is `--test-file-hint`, so it has to be
+        # published under the name the checker reads or every run is flagged
+        # for a leak it did not have. Note the two are not the same strength:
+        # Verified's --f2p-hint bakes FAIL_TO_PASS *node ids* into
+        # run_tests.sh, whereas --test-file-hint would pass
+        # `selected_test_files_to_run`, i.e. file paths with no test names in
+        # them. Both are off here, so the honest value is False either way.
+        "f2p_hint": args.test_file_hint,
         "infer_workers": args.infer_workers,
         "eval_workers": args.eval_workers,
         "eval_block_network": not args.eval_network,

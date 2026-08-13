@@ -179,6 +179,52 @@ extraction bug — which is exactly the bug that hid on Verified.
 | `test_swebenchpro.py` | 40 tests, one per way this pipeline can lie |
 | `harness/` | Pinned clone of scaleapi/SWE-bench_Pro-os (gitignored) |
 
+## Measured during the first real run (`runs/osa-s12-full`)
+
+Two things the automated checks do **not** catch. Both are recorded here
+because a reader of that run's `summary.md` would otherwise conclude more than
+the evidence supports.
+
+**1. The airgap does not stop toolchain egress.** `bench/report`'s gate reports
+`web_lookup_prevention_verified`, and that claim is sound *for lookup of the
+fix*: `web_search` was attempted twice and `web_fetch` once, and all three were
+refused. But the deny list matches shell commands by prefix, and `go build` /
+`go test` are not fetchers by name. Three instances show `go: downloading
+github.com/...` in their recorded output — real outbound network from
+`shell_execute` on the host, pulling pinned module versions. It does not
+retrieve the solution (the modules are dependencies at fixed versions, and the
+repo history no longer contains the fix), so the score stands, but "no network
+egress occurred" would be false and `residual_shell_egress` did not flag it.
+Its scanner looks for `urllib` / `requests.get` / github URLs *in commands*,
+and `go build` contains none of those. Closing it properly needs a network
+namespace, which this host cannot provide (see `bench/swebench/airgap.py` for
+the measured reasons).
+
+**2. `shell_execute` did not always run in the session's `working_dir`.**
+The runner sends `working_dir` on every `/api/v1/orchestrate` call. Measured in
+the transcripts: in 4 of 12 instances a `pwd` through `shell_execute` returned
+`/home/miosa/projects/osa/OSA` — the backend's own boot directory — rather than
+the instance workspace. In another instance a *relative* `./run_tests.sh`
+resolved correctly and succeeded 36 times out of 36, so the behaviour is not
+uniform and not simply "working_dir is ignored". None of the 253 recorded shell
+commands used an absolute workspace path, so where the cwd was wrong the
+command silently operated on the wrong tree.
+
+This can only depress a score, never inflate it: an agent whose shell lands in
+the wrong repository cannot run the project's tests and cannot inspect its own
+edits. It also means the `git log` calls seen in two transcripts read *OSA's*
+history, not the task repository's — so it is not a leak.
+
+The mechanism is **not established**. `Workspace.Cwd.get/0` is the source both
+`shell_execute` and the test bridge consult, and `turn_pipeline` publishes the
+session's `working_dir` into the process dictionary of the Loop process; a tool
+executing outside that process would miss the override and fall back to the
+boot directory. That is a hypothesis consistent with the evidence, not a
+diagnosis — it has not been reproduced in isolation, and a sequential probe
+written to confirm it hit an unrelated failure
+(`:ets.lookup(:osa_permission_responses, ...)` on a table that did not exist).
+Reproducing it is the next step, not a claim to carry forward.
+
 ## Known upstream defects
 
 Carried here so a reader of a run does not have to rediscover them.
