@@ -1131,10 +1131,36 @@ impl App {
                     // a screen with room it is the identity.
                     let old_top = last_inline_top
                         .unwrap_or_else(|| size.rows.saturating_sub(cur_inline_h));
-                    let new_top = if terminal_resized {
-                        resize_clear_top_from_bottom(size.rows, desired_inline_h)
+                    // Which erase this resize will use decides where the region may
+                    // be rebuilt, so resolve it ONCE and let both follow from it.
+                    // Splitting the two is what produced the blank band: the clear
+                    // was anchored at the remembered top while the rebuild was
+                    // anchored at `rows - h`, and on a shrink `rows - h` is BELOW
+                    // the remembered top — so the rows between them were erased by
+                    // the clear and then never occupied by the rebuild. Nothing
+                    // repaints a row no one owns.
+                    let resize_clear = if terminal_resized {
+                        Some(resize_clear_strategy(&TermIdent::from_env()))
                     } else {
-                        old_top.min(size.rows.saturating_sub(desired_inline_h))
+                        None
+                    };
+                    let new_top = match resize_clear {
+                        // Full-screen wipe: the emulator reflowed, the screen is
+                        // erased and the cursor homed, so there is no surviving row
+                        // to honour and bottom-pinning is the only sound anchor.
+                        Some(ResizeClear::FullScreen) => {
+                            resize_clear_top_from_bottom(size.rows, desired_inline_h)
+                        }
+                        // Multiplexer resize (tmux/screen do not reflow, which is the
+                        // whole premise of the surgical erase below) and every pure
+                        // height change: the remembered top is still valid, so keep
+                        // it. `min` only stops the region hanging off the bottom.
+                        //
+                        // A shrink then vacates rows at the BOTTOM, under the
+                        // composer, instead of tearing a hole above it — and those
+                        // rows are reclaimed by the next `insert_before`, which
+                        // re-anchors the region after the content it commits.
+                        _ => old_top.min(size.rows.saturating_sub(desired_inline_h)),
                     };
 
                     if terminal_resized {
@@ -1195,9 +1221,9 @@ impl App {
                         // history). It worked, but destroyed the user's
                         // scrollback on every resize to clean up a mess this
                         // branch did not need to make.
-                        let surgical_top = match resize_clear_strategy(&TermIdent::from_env()) {
-                            ResizeClear::Surgical => last_inline_top,
-                            ResizeClear::FullScreen => None,
+                        let surgical_top = match resize_clear {
+                            Some(ResizeClear::Surgical) => last_inline_top,
+                            _ => None,
                         };
                         if let Some(top) = surgical_top {
                             let max_row = size.rows.saturating_sub(1);
