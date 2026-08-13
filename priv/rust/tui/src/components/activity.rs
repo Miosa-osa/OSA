@@ -2167,6 +2167,74 @@ mod activity_tests {
         assert!(!act.tool_feed.is_empty());
     }
 
+    // ── effects that must survive the tool-feed deletion ───────────────────
+    //
+    // `tool_start` / `tool_end_with_id` do three things besides pushing a feed
+    // row, and those three have readers OUTSIDE the band — which is exactly
+    // where a silent regression hides when the row-pushing is removed. These
+    // pin the effects to behaviour rather than to the diff.
+
+    #[test]
+    fn a_starting_tool_keeps_the_stall_clock_alive() {
+        // `last_output_at` drives the stall intensity: seconds since output
+        // last flowed, bleeding the whole status row red when a turn freezes.
+        // A tool starting IS output flowing. If the row-push removal takes this
+        // with it, a healthy turn full of tool calls reddens as though hung —
+        // green on every unit test, wrong on screen.
+        let mut act = Activity::new();
+        act.start();
+        // `start()` arms the clock, so clear it to observe tool_start alone.
+        act.last_output_at = None;
+
+        act.tool_start("Read", r#"{"path":"/a.rs"}"#);
+        let marked = act.last_output_at.expect("tool_start must mark output");
+        assert!(
+            marked.elapsed().as_secs() < 1,
+            "the stall clock must be fresh, not stale"
+        );
+    }
+
+    #[test]
+    fn a_finishing_tool_keeps_the_stall_clock_alive() {
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("Read", r#"{"path":"/a.rs"}"#);
+        act.last_output_at = None;
+
+        act.tool_end_with_id("Read", 12, true, None);
+        assert!(
+            act.last_output_at.is_some(),
+            "tool_end must mark output, or a run of fast tools reads as a stall"
+        );
+    }
+
+    #[test]
+    fn a_fresh_turn_arms_the_stall_clock() {
+        // `start()` arms the clock rather than clearing it, and that is
+        // deliberate: a turn that produces nothing for thirty seconds IS a
+        // stall, and an unset clock reports 0.0 intensity forever.
+        let mut act = Activity::new();
+        act.start();
+        let armed = act.last_output_at.expect("start() must arm the stall clock");
+        assert!(armed.elapsed().as_secs() < 1);
+    }
+
+    #[test]
+    fn concurrent_identical_calls_still_mark_output() {
+        // The concurrent-identical fold returns EARLY from tool_start, before
+        // the push. The stall-clock update lives on that early path too, and
+        // has to stay there when the push around it goes away.
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("delegate", r#"{"task":"a"}"#);
+        act.last_output_at = None;
+        act.tool_start("delegate", r#"{"task":"a"}"#);
+        assert!(
+            act.last_output_at.is_some(),
+            "the folded-call early return must still mark output"
+        );
+    }
+
     #[test]
     fn thinking_stretch_is_tracked_across_phases() {
         let mut act = Activity::new();
