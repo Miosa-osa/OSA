@@ -9,6 +9,41 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.93] — displays as `v1.0.093`
+
+### Removed — the live tool feed above the composer
+
+The activity band painted a row per tool call — `┊ $ executing cargo test  1.2s…`
+— stacked above the composer for the length of a turn. It is gone. A run of
+tool calls says what it did in **one** committed summary line, and while the run
+is still folding, that same line rides the status slot in the present tense:
+
+    Reading 2 files, Searching 1 pattern
+
+Both come from one renderer, so the live line and the line it becomes cannot
+word themselves differently.
+
+**The band can no longer change height, which is the real fix.** Its height
+policy reserved a per-verbosity ceiling — four rows in `all`, eight in
+`verbose` — and reserved-minus-painted is precisely the dead space that shows up
+as blank rows above the composer. `height()` is now `1 + details`, and the
+maximum equals it. A slot that cannot grow cannot rebuild the inline viewport
+mid-turn, which is the mechanism behind a whole family of these gaps rather than
+one instance of it.
+
+Two layout invariants that had been pinning defects as characterisation tests —
+`new` reserving a row it never inked, and `draw` sizing itself from the rect it
+was handed rather than from what it reserved — now assert those defects stay
+gone.
+
+Streamed shell output is still collected but is no longer painted into the band;
+it is heading for the committed execute block instead. Tool durations are
+unaffected — they were always on the committed cell (`● Bash(make)  2.5s`), not
+on the feed row.
+
+`/verbosity` still cycles, but it no longer selects a feed depth, because there
+is no feed to be deep.
+
 ## [1.0.92] — displays as `v1.0.092`
 
 ### Changed — reasoning is visible while it streams
