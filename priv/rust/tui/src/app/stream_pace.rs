@@ -1,8 +1,19 @@
 //! A de-jitter buffer between the provider's deltas and the assistant buffer.
 //!
-//! **Default OFF.** Read "What the measurements actually said" before turning
-//! it on — on the streams measured here it is not needed, and the honest reason
-//! is written down rather than the flattering one.
+//! **Default AUTO** (`PaceMode::Auto`, see `from_env`) — the pacer engages only
+//! when the measured stream is clumpy enough to need it.
+//!
+//! It shipped OFF, on the reasoning recorded under "What the measurements
+//! actually said": the streams sampled at the time did not need it. A later
+//! trace of 2,442 real deltas said otherwise — small deltas (mean 5.4 chars)
+//! arriving in clumps (p50 gap 0.2 ms, p90 25 ms), against an engage threshold
+//! of 40 ms that therefore could never fire. Lowering the thresholds and
+//! defaulting to Auto took the worst single paint from 358 characters to 100.
+//!
+//! The older note is kept below because its method is still the right one; only
+//! its conclusion was overtaken by a wider sample. Do not tune the constants in
+//! this file against a synthetic bench — a bench feeds deltas at a cadence its
+//! author chose, which is exactly how the first three attempts went wrong.
 //!
 //! # What the field does
 //!

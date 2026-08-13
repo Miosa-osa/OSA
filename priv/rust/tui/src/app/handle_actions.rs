@@ -450,18 +450,24 @@ impl App {
             }
         }
 
-        // WS5 — keep typing while it works (CC parity): while the agent is
-        // Processing, a PLAIN message becomes an automatic mid-turn STEER (no
-        // /steer needed) — the backend folds it into the RUNNING turn at its
-        // next step boundary. Slash commands and !shell stay FIFO-queued to
-        // run when the turn ends (CC defers those to turn end too).
-        if self.state == AppState::Processing {
-            if text.starts_with('/') || text.starts_with('!') {
-                self.enqueue_message(text);
-            } else {
-                self.chat.add_user_message(text);
-                self.steer_message(text);
-            }
+        // Keep typing while it works: everything typed mid-turn is QUEUED and
+        // runs FIFO when the turn ends. Enter never interrupts and never
+        // diverts the running turn.
+        //
+        // Plain text used to become an automatic mid-turn steer — folded into
+        // the RUNNING turn at its next step boundary. It read as the agent
+        // lurching off course mid-thought, because that is what it was: the
+        // turn had already spent tool calls establishing a line of work, and a
+        // new instruction landed on top of it with no way to tell whether the
+        // turn was one step or thirty from done.
+        //
+        // Queueing costs nothing by comparison. The message lands at the next
+        // turn boundary with every tool result the turn produced still in
+        // context, so the work is kept rather than re-derived. Steering remains
+        // available — it is just explicit now (`/steer`, handled above), which
+        // is the right shape for a gesture that overrides work in flight.
+        if self.turn_is_active() {
+            self.enqueue_message(text);
             return;
         }
 
