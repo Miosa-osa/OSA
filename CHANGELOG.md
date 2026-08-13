@@ -9,6 +9,66 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.95] — displays as `v1.0.095`
+
+### Fixed — a long dispatch was killed while its agents were still working
+
+A three-agent dispatch was declared a tool timeout at ten minutes. The agents
+were fine: they finished normally at 5m44s, 8m50s and 11m37s, and the delegate
+result arrived at 11m42s — to a turn that had already been torn down. **The work
+happened and there was nothing left to receive it.**
+
+Three ceilings sat on that one path, each already raised once to chase a
+workload that outgrew it: a 600s await in the streaming tool executor, a 300s
+`:timeout_ms` passed down from the react loop, and a `:tool_timeout_ms` pinned to
+300s in `config.exs` that overrode the code default outright. All three are now
+unbounded, and the orchestrator's expiry check is explicit rather than relying on
+term ordering to make a comparison against `:infinity` come out false.
+
+The config pin is why the new test earns its place: fixing the code-level default
+alone would have looked correct and changed nothing. The test asserts the config
+values, and pairs the no-limit case with a 50 ms case that must still expire — so
+"no ceiling" cannot quietly become "the check never runs".
+
+A generic wrapper is the wrong place to enforce a duration: it cannot know
+whether it is timing a 200 ms file read or a dispatch that legitimately runs for
+hours, so every number it picks is wrong for one of them. The layers that *do*
+know keep their own bounds — per-command shell timeouts, provider receive
+timeouts, the bounded summarizer — and interrupting is always available, which
+is the user's call rather than a constant's.
+
+### Fixed — long autonomous runs no longer halt themselves
+
+Two more caps behind the same wall. The stall detector no longer hard-halts: it
+watches tool activity, which makes a long reading phase indistinguishable from a
+genuine stall, and `/overdrive` already bypassed it — so an identical run lived
+or died on which prompt started it. And the iteration cap moved from 200 to
+10,000 rather than being removed: a wall-clock cap punishes work for taking long,
+a step cap punishes it for going nowhere, and only the second is a fault worth
+stopping.
+
+**Not yet proven end to end:** the ceilings are gone in tests, but no multi-hour
+dispatch has been run start to finish. If something further out still caps it,
+it will be a different mechanism than these.
+
+### Fixed — a six-step plan printed six identical rows
+
+The plan tools were never classified as collapsible at all, so each step emitted
+its own `Todos` row.
+
+### Fixed — bare `/compact` showed nothing while it worked
+
+Compaction progress events existed only on the automatic path, so the form people
+actually type ran silently.
+
+### Fixed — `← for agents` did nothing in the state that advertises it
+
+The hint is shown only while a turn is processing, and that was the one state the
+transition table had no entry for. The fleet roster now opens as a proper overlay
+rather than a state transition with a hard-coded exit to idle — without that,
+opening the roster mid-turn and closing it would have dropped a live turn to
+idle, trading a dead key for a corrupted turn.
+
 ## [1.0.94] — displays as `v1.0.094`
 
 ### Fixed — a hook that blocked a tool call said nothing
