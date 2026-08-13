@@ -543,29 +543,7 @@ impl App {
     /// Idle (turn fully ended — not mid-turn, not auto-continued by /goal, no
     /// open dialog). FIFO: oldest first. Called at every turn-completion site.
     pub(super) fn maybe_dequeue_message(&mut self) {
-        // Only fire when we're back at a clean Idle prompt. This guards against
-        // dialog states (Permissions / PlanReview / Survey) that route through
-        // the same completion handlers.
-        if self.state != AppState::Idle {
-            return;
-        }
-        // …and only when the TURN is over, which `Idle` alone does not tell us.
-        //
-        // `handle_agent_response` runs full teardown — including the
-        // Processing → Idle transition — on EVERY agent_response, and one turn
-        // can emit several (text → subagent/tool → more text). So the state
-        // read Idle while the turn was genuinely still running, and this drain
-        // fired a queued message straight into it. That is the mechanism behind
-        // a queued `/overdrive` appearing to do nothing: it applied to session
-        // state the real turn end then overwrote, so the mode read unchanged
-        // and it had to be typed a second time. It needed a multi-generation
-        // turn to reproduce, which is why it was intermittent.
-        //
-        // `turn_done` is set by the backend's `done` event — broadcast on every
-        // terminal path and by nothing else — and by `finalize_turn_state` for
-        // the abnormal terminations (cancel, disconnect, error) that never
-        // reach one.
-        if !self.turn_done {
+        if !queue_may_drain(self.state, self.turn_done) {
             return;
         }
         if self.message_queue.is_empty() {
@@ -2014,6 +1992,33 @@ pub(crate) fn update_notice_line(update: &crate::client::types::HealthUpdate) ->
     }
 }
 
+
+/// Whether a queued message may be auto-submitted now.
+///
+/// Extracted as a free function for one reason: it is the decision that a
+/// queued `/overdrive` had to be typed twice for, and inside a method on `App`
+/// it could not be tested at all — nothing in this crate can construct an
+/// `App`, so the only "tests" available were ones that restated the code.
+///
+/// Both conditions are load-bearing and neither implies the other.
+///
+/// `Idle` says the composer is free. It is NOT sufficient on its own:
+/// `handle_agent_response` runs full turn teardown — including the
+/// Processing → Idle transition — on EVERY agent_response, and one turn can
+/// emit several (text → subagent/tool → more text). So the state read Idle
+/// while the turn was genuinely still running, and the drain fired a queued
+/// message straight into it, where it applied to session state the real turn
+/// end then overwrote. Reproducing it needed a multi-generation turn, which is
+/// why it was intermittent.
+///
+/// `turn_done` says the turn is over. It is NOT sufficient on its own either:
+/// it stays true through the dialog states (Permissions / PlanReview / Survey)
+/// that route through the same completion handlers, and draining under an open
+/// dialog would fire a message the user is still being asked about.
+pub(crate) fn queue_may_drain(state: AppState, turn_done: bool) -> bool {
+    state == AppState::Idle && turn_done
+}
+
 #[cfg(test)]
 mod update_notice_tests {
     use super::{should_show_update_notice, update_notice_line};
@@ -2125,5 +2130,47 @@ mod goal_done_tests {
         assert!(!App::reply_signals_done(""));
         assert!(!App::reply_signals_done("done"));
         assert!(!App::reply_signals_done("DONE deal, moving on"));
+    }
+}
+
+// ── the gate behind the queued-/overdrive bug ───────────────────────────────
+#[cfg(test)]
+mod queue_gate_tests {
+    use super::queue_may_drain;
+    use crate::app::AppState;
+
+    #[test]
+    fn a_finished_turn_at_an_idle_prompt_drains() {
+        assert!(queue_may_drain(AppState::Idle, true));
+    }
+
+    #[test]
+    fn an_idle_state_mid_turn_does_not_drain() {
+        // The actual bug: teardown sets Idle on every agent_response, and a
+        // turn emits several. Idle alone let a queued message into a live turn.
+        assert!(!queue_may_drain(AppState::Idle, false));
+    }
+
+    #[test]
+    fn a_finished_turn_under_an_open_dialog_does_not_drain() {
+        // turn_done survives into the dialog states that route through the same
+        // completion handlers; draining here fires a message the user is still
+        // being asked about.
+        for state in [AppState::Processing, AppState::Quit] {
+            assert!(
+                !queue_may_drain(state, true),
+                "{state:?} must hold the queue"
+            );
+        }
+    }
+
+    #[test]
+    fn neither_condition_implies_the_other() {
+        // Guards against a future simplification collapsing the two checks into
+        // one — each has a state the other does not cover.
+        assert!(!queue_may_drain(AppState::Idle, false));
+        assert!(!queue_may_drain(AppState::Processing, true));
+        assert!(!queue_may_drain(AppState::Processing, false));
+        assert!(queue_may_drain(AppState::Idle, true));
     }
 }
