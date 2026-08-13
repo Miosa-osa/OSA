@@ -433,3 +433,65 @@ mod tests {
         }
     }
 }
+
+// ── code blocks must stay readable after quantization ───────────────────────
+//
+// The fenced-code background is the one colour decision that cannot be taken
+// back: those rows are committed into NATIVE SCROLLBACK, where the app can
+// never repaint them. If the background quantises onto the foreground on a
+// 16-colour terminal, the code is unreadable for the rest of that session and
+// no redraw fixes it.
+//
+// `cargo test` cannot see a terminal, but it CAN see the quantiser, which is
+// where the collision would happen.
+#[cfg(test)]
+mod code_block_contrast {
+    use super::*;
+    use crate::style::themes;
+
+    fn themes_under_test() -> Vec<(&'static str, crate::style::Theme)> {
+        vec![
+            ("dark", themes::dark()),
+            ("light", themes::light()),
+            ("catppuccin", themes::by_name("catppuccin").unwrap_or_else(themes::dark)),
+            ("tokyo-night", themes::by_name("tokyo-night").unwrap_or_else(themes::dark)),
+        ]
+    }
+
+    #[test]
+    fn code_fg_never_collapses_onto_code_bg_at_any_colour_depth() {
+        for (name, theme) in themes_under_test() {
+            let fg = theme.colors.code_fg;
+            let bg = theme.colors.code_bg;
+
+            for level in [ColorLevel::TrueColor, ColorLevel::Ansi256, ColorLevel::Ansi16] {
+                let qfg = adapt_color(fg, level);
+                let qbg = adapt_color(bg, level);
+                assert_ne!(
+                    qfg, qbg,
+                    "{name} at {level:?}: code foreground and background quantise to the \
+                     same colour — code would be invisible, permanently, in scrollback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_color_drops_the_code_background_entirely() {
+        // Under NO_COLOR the background must not survive as a block of colour
+        // the terminal then renders against its own foreground.
+        for (name, theme) in themes_under_test() {
+            assert_eq!(
+                adapt_color(theme.colors.code_bg, ColorLevel::NoColor),
+                Color::Reset,
+                "{name}: NO_COLOR must drop the code background"
+            );
+            assert_eq!(
+                adapt_color(theme.colors.code_fg, ColorLevel::NoColor),
+                Color::Reset,
+                "{name}: NO_COLOR must drop the code foreground"
+            );
+        }
+    }
+
+}
