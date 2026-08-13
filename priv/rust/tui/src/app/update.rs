@@ -566,7 +566,10 @@ impl App {
         }
         self.agents_dashboard_selected = 0;
         if self.state.can_transition_to(AppState::FleetSelect) {
-            self.transition(AppState::FleetSelect);
+            // `enter_overlay`, not `transition`: the roster is reachable from a
+            // live Processing turn, and the caller has to be remembered so
+            // leaving it does not drop a running turn to Idle.
+            self.enter_overlay(AppState::FleetSelect);
         }
     }
 
@@ -619,7 +622,10 @@ impl App {
     fn exit_fleet_select(&mut self) {
         self.agents.set_roster_selected(None);
         if self.state == AppState::FleetSelect {
-            self.transition(AppState::Idle);
+            // Back to whoever opened it. Hard-coding Idle here would have ended
+            // a live turn on the way out — the roster is most useful precisely
+            // while agents are running.
+            self.exit_overlay();
         }
     }
 

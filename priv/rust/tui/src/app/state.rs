@@ -90,6 +90,10 @@ impl AppState {
                 | (Processing, Survey)
                 | (Processing, Quit)
                 | (Processing, AgentsDashboard)
+                // `← for agents` is only SHOWN while subagents are running,
+                // which is always Processing. Without this edge the hint was
+                // advertised in the one state where the key could not work.
+                | (Processing, FleetSelect)
                 | (Processing, Rewind)
                 | (Processing, Status)
                 | (Processing, ThemePicker)
@@ -282,6 +286,27 @@ mod fleet_select_transition_tests {
     fn fleet_select_can_start_processing() {
         // Submitting from the composer after leaving FleetSelect must be reachable
         // (the roster mode never traps the user out of a turn).
+        assert!(FleetSelect.can_transition_to(Processing));
+    }
+
+    #[test]
+    fn a_running_turn_can_open_the_roster_it_advertises() {
+        // The reported bug: `← for agents` is only SHOWN while subagents are
+        // running, and subagents run during Processing — so the hint was
+        // advertised in the exact state where the edge did not exist and the
+        // key silently did nothing. The dashboard's `↓ to manage` edge was
+        // there all along, which is why one hint worked and the other did not.
+        assert!(
+            Processing.can_transition_to(FleetSelect),
+            "`← for agents` is shown during Processing, so it must be reachable from it"
+        );
+        assert!(Processing.can_transition_to(AgentsDashboard));
+    }
+
+    #[test]
+    fn the_roster_can_hand_a_running_turn_back() {
+        // Leaving the roster returns to whoever opened it via exit_overlay, so
+        // a turn opened it must be able to receive it back.
         assert!(FleetSelect.can_transition_to(Processing));
     }
 
