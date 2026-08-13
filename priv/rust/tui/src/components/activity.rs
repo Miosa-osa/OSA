@@ -591,6 +591,10 @@ pub fn progress_bar(done: u32, total: u32) -> String {
     )
 }
 
+/// How long a flavour verb may be the only thing on screen before the status
+/// row switches to naming what it is actually waiting for.
+const FLAVOR_VERB_GRACE_SECS: u64 = 4;
+
 /// Rotating counter so consecutive requests pick different starting verbs.
 static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1091,10 +1095,28 @@ impl Activity {
     /// (CC parity — seeded per request via `verb_offset`, never cycled
     /// mid-turn).
     fn spinner_verb(&self) -> &str {
-        match self.active_verb.as_deref() {
-            Some(v) => v,
-            None => SPINNER_VERBS[self.verb_offset % SPINNER_VERBS.len()],
+        if let Some(v) = self.active_verb.as_deref() {
+            return v;
         }
+        // A flavour verb is charming for three seconds and useless for forty.
+        //
+        // Reported: a turn sat on `Transducing… (35s)` with nothing else on
+        // screen, and the honest reading of that is "I have no idea whether
+        // this is working". The word is decorative — it is drawn from a
+        // rotating list and says nothing about what the turn is doing — so
+        // while it is the ONLY thing on screen it is actively misleading.
+        //
+        // Once a wait stops looking instant, name what is being waited on. The
+        // playful verb still opens every turn; it just stops being the whole
+        // story. `Waiting` specifically means the request went out and not one
+        // byte has come back, which is exactly the state the user could not
+        // distinguish from a hang.
+        if self.phase == ProcessingPhase::Waiting
+            && self.elapsed_secs().unwrap_or(0) >= FLAVOR_VERB_GRACE_SECS
+        {
+            return "Waiting for the model";
+        }
+        SPINNER_VERBS[self.verb_offset % SPINNER_VERBS.len()]
     }
 
     /// Set processing phase (auto-activates if inactive). Tracks thinking
