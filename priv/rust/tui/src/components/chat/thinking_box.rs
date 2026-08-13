@@ -21,7 +21,7 @@ use ratatui::widgets::Paragraph;
 ///                       lines with an overflow indicator.
 pub struct ThinkingBox {
     content: String,
-    expanded: bool,
+    mode: DisplayMode,
     /// When reasoning first started streaming (set on the first
     /// [`update`](Self::update)/[`start`](Self::start)). `None` before any
     /// content arrives.
@@ -36,12 +36,30 @@ pub struct ThinkingBox {
     reasoning_title: Option<String>,
 }
 
+/// How much of the reasoning body is on screen.
+///
+/// Three modes, not two. Collapsed and Expanded alone force a choice between
+/// seeing nothing and surrendering the screen, and the default landed on
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// Header row only.
+    Collapsed,
+    /// Header plus a fixed window onto the tail of the stream. The default,
+    /// and what "see the thinking" means in practice.
+    Truncated,
+    /// Header plus the body.
+    Expanded,
+}
+
 impl ThinkingBox {
     pub fn new() -> Self {
         Self {
             content: String::new(),
-            // CC parity: thinking is collapsed to a one-liner by default.
-            expanded: false,
+            // A tail window, NOT collapsed. Collapsed-by-default meant that
+            // while the model reasoned the user saw one dim line and nothing
+            // else — "I want to see the thinking" is that default being wrong.
+            mode: DisplayMode::Truncated,
             started_at: None,
             elapsed: None,
             running: false,
@@ -101,10 +119,18 @@ impl ThinkingBox {
         self.reasoning_title = None;
     }
 
-    // Thinking panel expand/collapse (alt+t — chat:thinkingToggle). Wired via
+    // Thinking panel mode cycle (alt+t — chat:thinkingToggle). Wired via
     // keymap_dispatch Action::ThinkingToggle.
+    //
+    // Tail window -> Expanded -> Collapsed -> tail window. Three modes rather
+    // than two: the live tail is the useful default, expanded is for reading
+    // back, and collapsed is for getting it out of the way.
     pub fn toggle(&mut self) {
-        self.expanded = !self.expanded;
+        self.mode = match self.mode {
+            DisplayMode::Truncated => DisplayMode::Expanded,
+            DisplayMode::Expanded => DisplayMode::Collapsed,
+            DisplayMode::Collapsed => DisplayMode::Truncated,
+        };
     }
 
     pub fn is_empty(&self) -> bool {
@@ -128,9 +154,19 @@ impl ThinkingBox {
     /// overflow indicator. Held CONSTANT so it can be a fixed inline-viewport slot.
     pub const EXPANDED_ROWS: u16 = 12;
 
+    /// Rows the tail-window mode reserves: 1 header + a 3-row window. Fixed for
+    /// the same reason `EXPANDED_ROWS` is — a box that grows as reasoning
+    /// streams rebuilds the inline viewport on every line.
+    pub const TAIL_ROWS: u16 = 4;
+
     pub fn height(&self, _width: u16) -> u16 {
-        if !self.expanded || self.content.is_empty() {
+        if self.content.is_empty() {
             return 1;
+        }
+        match self.mode {
+            DisplayMode::Collapsed => return 1,
+            DisplayMode::Truncated => return Self::TAIL_ROWS,
+            DisplayMode::Expanded => {}
         }
 
         // FIXED-height slot when expanded — the same fixed-slot cure applied to the
@@ -155,7 +191,12 @@ impl ThinkingBox {
         let theme = crate::style::theme();
         let header = self.header_text();
 
-        if !self.expanded || self.content.is_empty() {
+        if matches!(self.mode, DisplayMode::Truncated) && !self.content.is_empty() {
+            self.draw_tail_window(frame, area, &header, &theme);
+            return;
+        }
+
+        if matches!(self.mode, DisplayMode::Collapsed) || self.content.is_empty() {
             // Collapsed: dim-italic one-liner. Show the expand hint once there is
             // body content to expand.
             let indicator = if self.content.is_empty() {
@@ -208,6 +249,46 @@ impl ThinkingBox {
                 format!("  … +{} lines", total - 10),
                 theme.faint().add_modifier(Modifier::ITALIC),
             )));
+        }
+
+        frame.render_widget(Paragraph::new(Text::from(text_lines)), area);
+    }
+
+    /// The header, then the LAST rows of the reasoning body.
+    ///
+    /// The tail, not the head. While reasoning streams the head stops changing
+    /// almost immediately, so a window onto it shows a frozen paragraph while
+    /// the model is visibly still working. The tail is what is arriving.
+    fn draw_tail_window(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        header: &str,
+        theme: &crate::style::Theme,
+    ) {
+        let inner_w = (area.width as usize).saturating_sub(2).max(1);
+        let body = self.body_lines(inner_w);
+        let window = (Self::TAIL_ROWS as usize).saturating_sub(1);
+        let start = body.len().saturating_sub(window);
+
+        let mut text_lines: Vec<Line<'static>> = Vec::with_capacity(window + 1);
+        text_lines.push(Line::from(Span::styled(
+            header.to_string(),
+            theme.faint().add_modifier(Modifier::ITALIC),
+        )));
+
+        let dim = theme.colors.dim;
+        for line in &body[start..] {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::raw("  "));
+            for sp in &line.spans {
+                let mut st = sp.style.add_modifier(Modifier::ITALIC);
+                if st.fg.is_none() {
+                    st = st.fg(dim);
+                }
+                spans.push(Span::styled(sp.content.to_string(), st));
+            }
+            text_lines.push(Line::from(spans));
         }
 
         frame.render_widget(Paragraph::new(Text::from(text_lines)), area);
@@ -301,12 +382,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collapsed_by_default_toggle_expands() {
+    fn reasoning_is_visible_by_default() {
         let mut tb = ThinkingBox::new();
         tb.update("line one\nline two");
-        assert_eq!(tb.height(80), 1, "collapsed by default");
+        // The default used to be Collapsed, which meant that while the model
+        // reasoned the user saw one dim line and nothing else.
+        assert_eq!(
+            tb.height(80),
+            ThinkingBox::TAIL_ROWS,
+            "reasoning must be visible while it streams"
+        );
+    }
+
+    #[test]
+    fn the_toggle_cycles_all_three_modes_and_returns_home() {
+        let mut tb = ThinkingBox::new();
+        tb.update("line one\nline two");
+        let tail = tb.height(80);
+
         tb.toggle();
-        assert!(tb.height(80) > 1, "expanded shows the box");
+        assert_eq!(tb.height(80), ThinkingBox::EXPANDED_ROWS, "then expanded");
+        tb.toggle();
+        assert_eq!(tb.height(80), 1, "then collapsed");
+        tb.toggle();
+        assert_eq!(tb.height(80), tail, "and back to the tail window");
+    }
+
+    #[test]
+    fn an_empty_box_is_one_row_in_every_mode() {
+        let mut tb = ThinkingBox::new();
+        for _ in 0..3 {
+            assert_eq!(tb.height(80), 1, "nothing to show is always one row");
+            tb.toggle();
+        }
+    }
+
+    #[test]
+    fn the_reserved_height_never_varies_with_content() {
+        // A box that grows as reasoning streams rebuilds the inline viewport on
+        // every line — the bug the fixed-slot heights exist to prevent.
+        let mut tb = ThinkingBox::new();
+        tb.update("one");
+        let first = tb.height(80);
+        for i in 0..40 {
+            tb.update(&format!("\nline {i}"));
+            assert_eq!(tb.height(80), first, "height moved while streaming");
+        }
     }
 
     // ── Item 1: "Thought for Ns" formatting + running/done header ──────────
