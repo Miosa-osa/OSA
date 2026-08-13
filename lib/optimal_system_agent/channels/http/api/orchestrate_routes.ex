@@ -458,6 +458,25 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   # normal turn ends with (`agent_response` then `done`) — so the TUI both
   # shows the error and resolves its spinner.
   defp emit_terminal_error(session_id, message) do
+    # Claimed, not merely sent. This fallback exists for the crash and `:exit`
+    # cases, where nothing broadcast anything and the SSE loop would otherwise
+    # spin on keepalives forever. But it also fires for a plain
+    # `{:error, reason}` — and TurnPipeline already broadcasts a terminal frame
+    # before returning one for the turn/budget limit gate and for a
+    # UserPromptSubmit hook block. Those turns were terminated twice.
+    #
+    # The second `done` is not harmless: the TUI gates its message-queue drain
+    # on `done`, so done #1 drains the queue, the drained message opens a new
+    # turn, and done #2 then lands mid-turn — the early-drain bug the gate was
+    # added to fix, reproduced through a narrower door.
+    if OptimalSystemAgent.Agent.TurnTermination.claim(session_id) do
+      do_emit_terminal_error(session_id, message)
+    else
+      :ok
+    end
+  end
+
+  defp do_emit_terminal_error(session_id, message) do
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:session:#{session_id}",

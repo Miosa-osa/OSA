@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Compactor
+  alias OptimalSystemAgent.Agent.TurnTermination
   alias OptimalSystemAgent.Agent.Loop.ContextWindow
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.GenreRouter
@@ -47,6 +48,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
           {:reply, term(), map()} | {:dispatch, map(), boolean()}
   def run(message, opts, state) do
     skip_plan = Keyword.get(opts, :skip_plan, false)
+
+    # A fresh turn — release the previous turn's terminal-frame claim, so this
+    # turn's own terminal frame can be sent exactly once.
+    TurnTermination.open(state.session_id)
 
     clear_cancel_flag(state)
 
@@ -98,6 +103,17 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   # path, so async clients render the message and leave the Processing state
   # promptly instead of waiting out the full request timeout.
   defp broadcast_terminal(state, text) do
+    # Claimed, not merely sent: the orchestrate route terminates the same
+    # `{:error, reason}` a second time, and a duplicate `done` drives the TUI's
+    # queue drain into a live turn.
+    if TurnTermination.claim(state.session_id) do
+      do_broadcast_terminal(state, text)
+    else
+      :ok
+    end
+  end
+
+  defp do_broadcast_terminal(state, text) do
     topic = "osa:session:#{state.session_id}"
 
     Phoenix.PubSub.broadcast(
