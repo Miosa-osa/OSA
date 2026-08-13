@@ -23,18 +23,7 @@ have, on sample size. That is correct. Do not route around it.
 
 ## Open — OSA defects
 
-### 1. `shell_execute` does not always honour the session's `working_dir`
-**Found:** SWE-bench Pro, 4 of 12 instances. `pwd` returned the backend's boot
-directory rather than the workspace. None of 253 shell commands used absolute
-workspace paths, and the `git log` calls therefore read OSA's own history rather
-than the task repo's.
-**Status:** mechanism NOT established. A hypothesis around `Workspace.Cwd.get/0`
-and the Loop process dictionary fits, but the isolating probe hit an unrelated
-`:ets.lookup(:osa_permission_responses, ...)` failure on a missing table.
-**Impact:** can only depress a score. Reproducing it is the next step; it is not
-yet a claim.
-
-### 2. `context_pressure` has no traced delivery path
+### 1. `context_pressure` has no traced delivery path
 **Found:** the stranded-events audit
 (`test/optimal_system_agent/events/stranded_events_test.exs`).
 It is emitted only via `Bus.emit`, is not in the forwarder allowlist, and has no
@@ -44,6 +33,29 @@ facts cannot both be true through the path traced.
 **Impact:** either the meter has a path the audit does not know about, or it runs
 on locally-derived numbers that happen to look right. The second would be a real
 bug wearing a correct-looking face.
+
+### 2. A provider outage returns as a successful reply
+**Found:** the no-spec ablation, where five instances ended in 6-8 seconds with
+zero tool calls after the provider hit its session cap (HTTP 429).
+**Mechanism, traced:** `react_loop.handle_result({:error, reason}, ...)` returns
+`{ErrorCatalog.user_message(reason), state}` — a normal reply whose *text*
+happens to be an error. `process_message` therefore returns `{:ok, message}`,
+and `mix osa.run --format json` emits `type: "result"`. A programmatic consumer
+cannot tell a total provider failure from an answer.
+
+For a human in the TUI this is correct behaviour — you want to read the error.
+For an API consumer it is not: the bench recorded these as the model producing
+no patch, and only caught it because someone checked the transcripts.
+
+**Not fixed deliberately.** Changing the agent-response contract while three
+benchmark runs are executing against this code would invalidate them. The
+`:error` / `kind: :llm_error` system_event IS already emitted, so a consumer has
+something to key on today; the bench now does exactly that
+(`runners.provider_failure()`).
+
+**When fixing:** the useful shape is for the turn to carry its terminal status
+distinctly from its text, so `{:ok, "…quota exhausted…"}` stops being the same
+value as `{:ok, "here is your answer"}`.
 
 ### 3. The stall detector fires on healthy work
 **Found:** Terminal-Bench, 224 times across 6 tasks — including 4 that PASSED,
@@ -128,6 +140,14 @@ every Pro score, ours included.
   as a substring of `src/_pytest/`. Ceiling was 96.2%; now 100.0%.
 - **F2P test names leaked** into `run_tests.sh` in the agent's own working
   directory.
+- **Tools ran in the backend's directory, not the session's.** `Cwd.get/0` reads
+  the process dictionary and a spawned Task does not inherit one, so
+  `shell_execute` defaulted to wherever the BACKEND booted. Seen in 4 of 12 Pro
+  instances; `git log` read OSA's own history rather than the task repo's. It
+  looked intermittent only because a command with an explicit `cwd`, or its own
+  `cd`, never consults the default. Fixed on both spawn paths (786ac7b8). On a
+  shared daemon this was one session's tool running in another's directory, and
+  it failed silently — a command in the wrong directory still succeeds.
 - **Web lookup was unprevented** — 6 instances used `web_fetch` and resolved 6/6.
 
 ---
