@@ -29,6 +29,19 @@ only `/` and `!` were queued. So a follow-up thought became a mid-flight
 instruction change, which is rarely what typing it meant. Text now queues and
 submits when the turn ends — including when the turn ends by interrupt.
 
+### Fixed — a queued message could fire into a turn that was still running
+
+The drain gate was `AppState::Idle`, and `Idle` lies mid-turn: full turn
+teardown runs on *every* agent response, and one turn emits several (text →
+tool/subagent → more text). So a queued message released early, applying to
+session state that the real turn end then overwrote. That is the mechanism
+behind a queued `/overdrive` that appeared to do nothing and had to be typed a
+second time — it needed a multi-generation turn to reproduce, which is why it
+was intermittent. The backend's `done` event is now parsed as a first-class
+turn-end edge, and the queue hangs off that. Abnormal terminations — interrupt,
+cancel, disconnect, error, local command — set the same flag, so the queue
+still drains after an interrupt rather than stranding for the session.
+
 ### Changed — one summary row per tool run, with a clause per kind
 
 A run of foldable calls emitted a separate line per kind, because a kind change
