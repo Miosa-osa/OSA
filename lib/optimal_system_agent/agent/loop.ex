@@ -1947,6 +1947,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
          type: :agent_response,
          session_id: state.session_id,
          message_id: LLMClient.current_message_id(),
+         # Additive: absent on a normal turn, present when the turn ended
+         # because every provider call failed rather than because the model
+         # answered. Old consumers ignore it; new ones can stop scoring an
+         # outage as a model failure.
+         turn_error: Map.get(state, :turn_error),
          response: response,
          response_type: "agent"
        }}

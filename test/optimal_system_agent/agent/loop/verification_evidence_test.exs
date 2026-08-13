@@ -122,7 +122,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
 
       {directive, new_state} = VerificationGate.build_directive(state)
 
-      assert directive.role == "system"
+      # `user`, not `system`: Anthropic and Gemini reject a system message that
+      # follows assistant TEXT with a 400, which made this gate a no-op on
+      # those families. The steer is an instruction injected into the
+      # conversation, not part of the system prompt.
+      assert directive.role == "user"
       assert directive.content =~ path
       assert directive.content =~ "VERIFICATION REQUIRED"
       assert new_state.verification_gate_prompts == 1

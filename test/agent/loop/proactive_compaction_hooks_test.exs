@@ -47,6 +47,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompactionHooksTest do
     end
 
     test "the before_compaction hook is exposed by ProactiveCompaction" do
+      # `function_exported?/3` answers false for a module that is merely not
+      # LOADED yet, so without this the test reports a missing function
+      # whenever compile order happens to leave the module unloaded — which is
+      # a property of the build, not of the code under test.
+      Code.ensure_loaded?(ProactiveCompaction)
+
       assert function_exported?(ProactiveCompaction, :maybe_flush, 2),
              "the :before_compaction hook must live in ProactiveCompaction, " <>
                "as hook_contract/0 specifies"

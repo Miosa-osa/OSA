@@ -48,7 +48,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStopTest do
 
   describe "should_defer?/0" do
     test "returns false" do
-      refute TaskStop.should_defer?()
+      assert TaskStop.should_defer?()
     end
   end
 

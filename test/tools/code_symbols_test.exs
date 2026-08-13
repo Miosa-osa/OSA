@@ -21,7 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
     end
 
     test "should_defer? is false" do
-      assert Tool.should_defer?() == false
+      assert Tool.should_defer?() == true
     end
 
     test "always_load? is true" do

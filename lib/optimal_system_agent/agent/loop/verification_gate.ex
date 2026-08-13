@@ -110,7 +110,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       end
 
     directive = %{
-      role: "system",
+      # `user`, not `system` — this directive is appended after assistant TEXT,
+      # and Anthropic/Gemini reject a system message in that position with a
+      # 400. That made the verification gate a no-op on those families: it
+      # never ran once. See react_loop's handle_result for the full note.
+      role: "user",
       content:
         "[VERIFICATION REQUIRED — grounded check #{step}/#{@max_reprompts}] " <>
           "You modified #{files_note} this turn (last write: `#{last_write || "a file"}`) but no " <>

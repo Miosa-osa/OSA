@@ -195,7 +195,30 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def providers, do: Map.keys(@provider_configs)
 
   @doc "Return the default model for a given provider."
-  def default_model(provider), do: get_config!(provider).default_model
+  # Honour the SAME configured key `chat/3` honours.
+  #
+  # This returned the compile-time constant, and that constant is what
+  # `Registry.resolved_default_model/1` pins onto `state.model` at session
+  # start. The Loop then passes `state.model` to `chat/3` as `opts[:model]`,
+  # which takes precedence over the app-env lookup below it — so setting
+  # `:openrouter_model` had NO effect and every request silently ran the
+  # provider's built-in default.
+  #
+  # Caught by a logging proxy during a model sweep: with `z-ai/glm-5.2`
+  # configured in two files and reported by /health, the wire showed 6 requests
+  # to `anthropic/claude-opus-5` and ZERO to glm. A per-model comparison would
+  # have produced a clean table in which every row was the same model.
+  def default_model(provider) do
+    fallback = get_config!(provider).default_model
+
+    # NOT `Application.get_env(app, key, fallback)`: that returns nil when the
+    # key is present and explicitly nil, which several providers configure. The
+    # value must be a usable model name or we fall back.
+    case Application.get_env(:optimal_system_agent, :"#{provider}_model") do
+      m when is_binary(m) and m != "" -> m
+      _ -> fallback
+    end
+  end
 
   @doc "Return available models for a given provider."
   def available_models(provider) do

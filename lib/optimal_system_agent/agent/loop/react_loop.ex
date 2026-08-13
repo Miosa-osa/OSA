@@ -639,7 +639,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end)
 
     directive = %{
-      role: "system",
+      role: "user",
       content:
         if kept_any? do
           "[System: Your previous message was truncated by the token limit. Any tool call that " <>
@@ -663,6 +663,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   # No tool calls — final response or behavioural nudge
+
+  # Mid-conversation steering is sent as `user`, not `system`.
+  #
+  # Anthropic rejects a `system` message that follows assistant TEXT:
+  #
+  #     messages.N: role 'system' must follow a 'user' message or an
+  #     assistant message ending in a server tool result
+  #
+  # Bisected against the live API: after a tool result it is accepted; after an
+  # assistant text answer it is a hard 400. Gemini behaves the same way. Every
+  # site below appends `[assistant(text), steer]`, so on those two families the
+  # request failed — meaning OSA's auto-continue, zero-tool gate and
+  # verification gate NEVER RAN AT ALL there. The harness had been developed
+  # against model families that happen to tolerate an invalid shape.
+  #
+  # `user` is also the honest role: these are instructions injected into the
+  # conversation, not part of the system prompt. The same correction was made
+  # to the compaction boundary for a related reason — a leading `system`
+  # message was being absorbed into Anthropic's system block behind the cache
+  # breakpoints.
+  #
+  # Note for compaction: turn boundaries are counted at `role: "user"`, so
+  # these injected steers now register as boundaries. That is consistent with
+  # how the compact boundary is already handled.
   defp handle_result({:ok, %{content: content, tool_calls: []}}, state, _context) do
     # Capture whether the model produced NO visible answer (pure reasoning / an
     # empty generation) BEFORE we substitute a "..." placeholder. This is what
@@ -688,7 +712,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         nudge = %{
-          role: "system",
+          role: "user",
           content:
             "[System: You described what you would do but did not call any tools. " <>
               "EXECUTE by calling the appropriate tools NOW. " <>
@@ -712,7 +736,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         nudge = %{
-          role: "system",
+          role: "user",
           content:
             "[CRITICAL: You wrote code in markdown instead of using a tool. " <>
               "You MUST call file_write with the code as content to create the file. " <>
@@ -736,7 +760,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         verification = %{
-          role: "system",
+          role: "user",
           content:
             "[System: VERIFICATION REQUIRED — You completed #{state.iteration} iterations with a task/goal " <>
               "but executed zero tools successfully. Before returning a final response, verify your answer: " <>
@@ -789,7 +813,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
           {:ok, state} ->
             nudge = %{
-              role: "system",
+              role: "user",
               content:
                 "[System: your last generation produced no answer and called no tools. " <>
                   "Either give a concrete answer now, or call a specific tool to make " <>
@@ -833,7 +857,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         nudge = %{
-          role: "system",
+          role: "user",
           content:
             "[System: You have an output-token target of #{target} tokens for this task and are " <>
               "under it. Keep working toward it — continue with the next concrete step or add depth/" <>
@@ -1000,7 +1024,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # can never itself crash the turn.
   defp forced_wrapup(state, max_iter) do
     directive = %{
-      role: "system",
+      role: "user",
       content:
         "[System: You have reached the maximum of #{max_iter} steps for this task and " <>
           "tools are now DISABLED for this final turn. Do not attempt to call any tool. " <>
@@ -1494,6 +1518,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason) <>
               executed_tools_note(executed_tools)
 
+          # Record that this turn ended in a PROVIDER failure, not an answer.
+          #
+          # Without this the turn is indistinguishable from a successful one:
+          # the reply is a human-readable error string, `process_message`
+          # returns `{:ok, message}`, and the `done` frame is clean. Measured
+          # directly during benchmarking — a turn with 11 retries, the fallback
+          # chain exhausted and ZERO tokens exchanged still reported
+          # `status: ok` with `saw_done: true`.
+          #
+          # That is right for a human reading the TUI, who wants to see the
+          # error text. It is wrong for anything programmatic: two benchmark
+          # harnesses independently scored these as the MODEL failing to
+          # produce output, and one nearly published a fake result because the
+          # instances that died were the ones the baseline had solved.
+          #
+          # Carried on state and surfaced as an additive field on the
+          # agent_response event, so existing consumers are unaffected and new
+          # ones can tell an outage from an answer.
+          state = Map.put(state, :turn_error, %{category: category, reason: reason_str})
+
           {message, state}
         end
       end
@@ -1795,7 +1839,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         Logger.info("[loop] Explore-first nudge: model edited files before reading (iteration 1)")
 
         nudge = %{
-          role: "system",
+          role: "user",
           content:
             "[System: You modified existing files without reading them first. " <>
               "Always explore before you act: call dir_list and file_read to understand " <>
@@ -1810,7 +1854,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     if length(tool_calls) >= 5 and state.iteration == 1 do
       nudge_msg = %{
-        role: "system",
+        role: "user",
         content:
           "[System: You've used 5+ tools this turn. " <>
             "If this is a reusable pattern, consider create_skill.]"

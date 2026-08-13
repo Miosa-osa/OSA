@@ -60,7 +60,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Tool do
 
   # ── Loading semantics ─────────────────────────────────────────────────
   @impl true
-  def should_defer?, do: false
+  # DEFERRED, overriding an earlier deliberate `false`.
+  #
+  # The original reasoning was that this should be usable from turn 1. That is
+  # a testable claim and the measurement contradicts it: across 15 SWE-bench Pro
+  # transcripts covering 863 turns and 963 tool calls, this tool was invoked
+  # ZERO times while its schema was re-sent on every single request.
+  #
+  # Reason it is safe to defer: background-task management, meaningless until a task has been spawned.
+  #
+  # Nothing is lost — deferred tools stay registered and discoverable mid-turn
+  # through `tool_search`. What changes is that the model is no longer billed
+  # for a description it never reads.
+  #
+  # Reopen this if a workload appears where it IS called early. The measurement
+  # is from coding tasks; it is not a claim about every workload.
+  def should_defer?, do: true
 
   @impl true
   def always_load?, do: true

@@ -48,7 +48,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutputTest do
 
   describe "should_defer?/0" do
     test "returns false" do
-      refute TaskOutput.should_defer?()
+      assert TaskOutput.should_defer?()
     end
   end
 

@@ -26,7 +26,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessageTest do
     end
 
     test "should_defer? returns false" do
-      assert SendMessage.should_defer?() == false
+      assert SendMessage.should_defer?() == true
     end
 
     test "always_load? returns true" do

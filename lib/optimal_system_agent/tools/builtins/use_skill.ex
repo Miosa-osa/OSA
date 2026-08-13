@@ -29,6 +29,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
   @impl true
   def safety, do: :write_safe
 
+  # Deferred: absent from the default toolbox, discovered mid-turn via
+  # `tool_search`. Reason: paired with skill_manager; discovered together when skills are in play.
+  #
+  # Every schema in the default set is re-sent on EVERY request. Measured
+  # across 15 SWE-bench Pro transcripts, this tool was called zero times while
+  # costing its schema on all 863 turns.
+  @impl true
+  def should_defer?, do: true
+
   @impl true
   def name, do: "use_skill"
 
