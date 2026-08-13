@@ -235,7 +235,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
   end
 
   defp open_unix_pty(_session_id, shell, cols, rows, cwd, env) do
-    with true <- shell_allowed?(shell),
+    # erlexec is started HERE, on first PTY use, not as an OTP dependency at
+    # boot. Its port program refuses to run as root, and as an auto-started
+    # dependency that failure took the whole application down inside every
+    # root container. Degrading here costs a PTY session; degrading there cost
+    # the entire agent. See OptimalSystemAgent.System.Erlexec.
+    with :ok <- OptimalSystemAgent.System.Erlexec.ensure_started(),
+         true <- shell_allowed?(shell),
          resolved when is_binary(resolved) <- System.find_executable(shell) || shell,
          true <- File.exists?(resolved) do
       # Build env list for erlexec
@@ -271,6 +277,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
         _, _ -> {:error, :spawn_failed}
       end
     else
+      {:error, _erlexec_reason} -> {:error, :exec_unavailable}
       false -> {:error, :shell_not_allowed}
       _ -> {:error, :shell_not_allowed}
     end

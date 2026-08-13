@@ -164,6 +164,17 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # Cwd.get() to the session's dir — mechanism for "live Loop state" in the
     # Cwd resolution order — never the backend's boot dir.
     OptimalSystemAgent.Workspace.Cwd.put_process_override(Map.get(state, :working_dir))
+
+    # Same mechanism, for session identity: publish which session this process
+    # is acting for so `Settings.current_session/0` can scope the session
+    # settings layer (and so skill-touch / diagnostics lookups that already read
+    # :osa_session_id resolve on the loop process too). Without this the
+    # "session" layer is one daemon-wide namespace shared by every session.
+    case Map.get(state, :session_id) do
+      sid when is_binary(sid) and sid != "" -> Process.put(:osa_session_id, sid)
+      _ -> :ok
+    end
+
     state
   end
 

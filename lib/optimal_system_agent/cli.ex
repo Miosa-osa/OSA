@@ -17,7 +17,7 @@ defmodule OptimalSystemAgent.CLI do
     # Silence boot logs for clean CLI startup
     Logger.configure(level: :none)
 
-    {:ok, _} = Application.ensure_all_started(@app)
+    start_app!("chat")
 
     Logger.configure(level: :warning)
 
@@ -27,6 +27,48 @@ defmodule OptimalSystemAgent.CLI do
     OptimalSystemAgent.Onboarding.seed_workspace()
 
     OptimalSystemAgent.Channels.CLI.start()
+  end
+
+  @doc false
+  # Boot the application for a CLI entry point.
+  #
+  # `{:ok, _} = Application.ensure_all_started(@app)` was a MatchError waiting to
+  # happen: when ANY application in the tree failed to start, the operator got a
+  # 30-line `** (MatchError) no match of right hand side value: {:error, ...}`
+  # with the real cause buried in the middle of it, and no statement of what
+  # OSA was even trying to do. That is exactly how the "OSA cannot boot as root"
+  # report read — the visible failure was a MatchError in cli.ex:44, not
+  # "erlexec will not run as root".
+  #
+  # A failed boot is still fatal (there is no agent to run), but it now exits
+  # with a diagnostic that names the failing application and its reason.
+  # Non-essential dependencies must not reach this path at all: see
+  # `OptimalSystemAgent.System.Erlexec` for the pattern (lazy, rescued start).
+  @spec start_app!(String.t()) :: :ok
+  def start_app!(command) do
+    case Application.ensure_all_started(@app) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {app, reason}} ->
+        Logger.configure(level: :warning)
+
+        safe_puts("""
+        OSA could not start (#{command}).
+
+          failing application: #{inspect(app)}
+          reason: #{inspect(reason, limit: 8, printable_limit: 400)}
+
+        Run `osagent doctor` for a full diagnosis.
+        """)
+
+        System.halt(1)
+
+      {:error, reason} ->
+        Logger.configure(level: :warning)
+        safe_puts("OSA could not start (#{command}): #{inspect(reason, limit: 8)}")
+        System.halt(1)
+    end
   end
 
   def setup do
@@ -41,7 +83,7 @@ defmodule OptimalSystemAgent.CLI do
   end
 
   def serve do
-    {:ok, _} = Application.ensure_all_started(@app)
+    start_app!("serve")
     migrate!()
     OptimalSystemAgent.Onboarding.seed_workspace()
 

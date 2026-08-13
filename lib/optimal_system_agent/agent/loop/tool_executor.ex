@@ -315,11 +315,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # mode). Public (@doc false) so the permission stack can be unit-tested.
   #
   # Order matters and is preserved exactly:
-  #   1. NON-BYPASSABLE circuit-breaker — a hard blocklist of catastrophic
-  #      commands (fork bombs, dd to block devices, mkfs, force-push to
-  #      protected branches, …). Evaluated ONCE, before everything else, so it
-  #      applies in EVERY permission mode — including :overdrive — and cannot be
-  #      bypassed.
+  #   1. circuit-breaker (`DangerousCommands.classify/1`) — evaluated ONCE,
+  #      before everything else. Two severity classes:
+  #        :catastrophic → NON-BYPASSABLE in every mode, :overdrive included
+  #          (rm -rf /, fork bombs, dd to a block device, mkfs, DROP DATABASE).
+  #          Unrecoverable destruction; operator intent does not make it safe.
+  #        :overridable  → blocked in every mode EXCEPT :overdrive/:bypass
+  #          (force-push to a protected branch, curl|sh). Bounded, recoverable
+  #          risk that is frequently the literal requested task; overdrive is an
+  #          explicit "full auto" statement, and a breaker that refuses it with
+  #          no recourse is a defect, not a safety property.
+  #      This is the ONLY place that distinction is applied — see
+  #      DangerousCommands' moduledoc for the rationale.
   #   1b. saved DENY rules — evaluated before every permission-mode
   #      short-circuit (CC permissions.ts step-1 ordering), so an explicit deny
   #      rule holds even in :overdrive/:bypass and :accept_edits.
@@ -337,7 +344,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   @doc false
   def approve_tool_call(tool_call, state) do
     circuit_breaker =
-      OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
+      OptimalSystemAgent.Agent.Safety.DangerousCommands.classify(tool_call)
 
     # Resolve the mode from the sticky store FIRST (it is the durable, disk-backed
     # record of what the operator last chose in the TUI), falling back to the live
@@ -360,16 +367,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # Computed once; consumed by step 1b′ below.
     hard_deny = handler_hard_deny(tool_call)
 
+    # Step 1 — the breaker, resolved against the mode. `:ok` here means either
+    # nothing matched, or an :overridable pattern matched under overdrive and
+    # was consciously waived (logged). Everything else in the cond still runs:
+    # a waived breaker match is NOT an automatic allow.
+    breaker_decision = enforce_circuit_breaker(circuit_breaker, mode, tool_call, state)
+
     cond do
-      match?({:blocked, _}, circuit_breaker) ->
-        {:blocked, reason} = circuit_breaker
-
-        Logger.error(
-          "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} (mode=#{mode}, tier=#{state.permission_tier}, session: #{state.session_id})"
-        )
-
-        {:blocked,
-         "Blocked: #{reason} (hard safety limit — not overridable in any permission mode)"}
+      match?({:blocked, _}, breaker_decision) ->
+        breaker_decision
 
       # Step 1b (CC permissions.ts step-1 ordering): an explicit saved DENY rule
       # beats every mode short-circuit — overdrive/bypass and accept_edits
@@ -487,6 +493,56 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # a pure `check_permissions/2` (the edit family ignores ctx) are consulted; a
   # `{:deny, msg}` becomes a clean block, everything else falls through.
   @path_guarded_writes ~w(file_write file_edit multi_file_edit notebook_edit file_create)
+  # Resolve a circuit-breaker verdict against the session's permission mode.
+  #
+  #   * `:catastrophic` → blocked, always. There is no mode, flag or setting
+  #     that permits it; the message says so explicitly so the model stops
+  #     retrying variants of the same command.
+  #   * `:overridable` under :overdrive/:bypass → WAIVED. Logged at :warning
+  #     (not swallowed) with the reason and the mode that authorised it, so the
+  #     operator can see in the log exactly what full-auto let through.
+  #   * `:overridable` in any other mode → blocked, with the message naming
+  #     overdrive as the recourse — the thing the old unconditional breaker
+  #     could not do.
+  @spec enforce_circuit_breaker(
+          OptimalSystemAgent.Agent.Safety.DangerousCommands.classified(),
+          atom(),
+          map(),
+          map()
+        ) :: {:blocked, String.t()} | :ok
+  defp enforce_circuit_breaker({:blocked, reason, :catastrophic}, mode, tool_call, state) do
+    Logger.error(
+      "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} " <>
+        "(catastrophic, mode=#{mode}, tier=#{state.permission_tier}, session: #{state.session_id})"
+    )
+
+    {:blocked, "Blocked: #{reason} (hard safety limit — not overridable in any permission mode)"}
+  end
+
+  defp enforce_circuit_breaker({:blocked, reason, :overridable}, mode, tool_call, state)
+       when mode in [:overdrive, :bypass] do
+    Logger.warning(
+      "[loop] CIRCUIT-BREAKER waived for #{tool_call.name}: #{reason} — " <>
+        "permitted because mode=#{mode} (full auto) and this rule is recoverable, not " <>
+        "catastrophic (tier=#{state.permission_tier}, session: #{state.session_id})"
+    )
+
+    :ok
+  end
+
+  defp enforce_circuit_breaker({:blocked, reason, :overridable}, mode, tool_call, state) do
+    Logger.error(
+      "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} " <>
+        "(mode=#{mode}, tier=#{state.permission_tier}, session: #{state.session_id})"
+    )
+
+    {:blocked,
+     "Blocked: #{reason} (safety limit). If this is genuinely what you were asked to do, " <>
+       "the operator can permit it by switching to overdrive (full auto)."}
+  end
+
+  defp enforce_circuit_breaker(_no_match, _mode, _tool_call, _state), do: :ok
+
   defp handler_hard_deny(tool_call) do
     if tool_call.name in @path_guarded_writes do
       args = Map.get(tool_call, :arguments) || %{}

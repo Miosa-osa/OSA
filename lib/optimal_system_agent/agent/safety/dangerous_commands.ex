@@ -1,13 +1,43 @@
 defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   @moduledoc """
-  POLICY DATA: the HARD, non-bypassable circuit-breaker blocklist.
+  POLICY DATA: the circuit-breaker blocklist, in two severity classes.
 
   This module is the last line of defence. Unlike the auto-mode `Rules`
   (which are risk-tiered — `:caution`/`:dangerous` verdicts that the Guardian
   may *allow*, block, or pause depending on the session's permission tier), the
-  patterns here are **ALWAYS blocked, in every permission tier** — including
-  `:full` / bypass. There is no counter, no pause-after-N, no allowlist, no
-  config toggle: a match is a hard stop.
+  patterns here are blocked **in every permission tier**, with exactly one
+  documented exception described below. There is no counter, no pause-after-N,
+  no allowlist, no config toggle.
+
+  ## The two classes, and why there are two
+
+  A breaker that blocks work the operator explicitly authorised is not a safety
+  feature — it is a bug that teaches people to switch the breaker off. Overdrive
+  ("full auto, stop asking me") is an explicit, deliberate operator statement,
+  so the blocklist is split by *what happens if the command runs and the
+  operator was wrong*:
+
+    * `:catastrophic` — **never overridable, in any mode, ever.** The damage is
+      unbounded and unrecoverable from inside the session: the machine, its
+      filesystem, or a database is destroyed, and no amount of operator intent
+      makes that a thing OSA should do on its behalf. `rm -rf /`, fork bombs,
+      `dd` to a block device, `mkfs`, `DROP DATABASE`, `TRUNCATE` on prod.
+
+    * `:overridable` — **blocked in every mode EXCEPT `:overdrive`/`:bypass`.**
+      These are genuinely risky *conventions*, not destruction: the blast radius
+      is bounded, recoverable, and frequently the literal task the operator
+      asked for. Force-pushing a protected branch is recoverable via reflog and
+      is routine in a throwaway container or a personal repo; `curl … | sh` is
+      how a large share of the world's software installs itself. Blocking these
+      under overdrive leaves the operator with a refusal, no recourse, and no
+      way to say "yes, that is what I meant" — which is what
+      `configure-git-webserver` hit four times in Terminal-Bench.
+
+  Enforcement of that distinction lives in ONE place —
+  `OptimalSystemAgent.Agent.Loop.ToolExecutor.approve_tool_call/2` — which
+  consults `classify/1`. Every other caller uses `blocked?/1` / `check_command/1`
+  and gets the strict, mode-independent verdict (both classes blocked), because
+  those callers have no permission mode to reason about.
 
   Separation of concerns:
 
@@ -31,16 +61,23 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   the bare `rm -rf /`. Normalizing the input is the only fix that generalizes;
   hardening the regexes loses to the next encoding.
 
-  ## What is always blocked
+  ## What is blocked
+
+  `:catastrophic` (never overridable):
 
     * `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf /*`, `rm -rf .` and other
       recursive-force deletes rooted at a broad root.
-    * `git push --force` / `-f` / `+ref` to a protected branch
-      (main, master, production, release, develop, staging, prod).
     * Fork bombs (`:(){ :|:& };:` and obfuscated variants).
     * `dd` writing to a block device (`of=/dev/sda`, `/dev/nvme…`, `/dev/disk…`).
     * `mkfs` / filesystem creation on any device.
-    * `DROP DATABASE` / `TRUNCATE` targeting a production database/table.
+    * `DROP DATABASE` / `DROP SCHEMA`.
+    * `DROP TABLE` / `TRUNCATE` targeting a production database/table.
+    * `file_delete` on a root/home path.
+
+  `:overridable` (blocked everywhere except overdrive/bypass):
+
+    * `git push --force` / `-f` / `+ref` to a protected branch
+      (main, master, production, release, develop, staging, prod).
     * Pipe-to-shell of downloaded content (`curl … | sh`, `wget … | bash`,
       `curl … | sudo sh`).
   """
@@ -49,6 +86,17 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
   @type reason :: String.t()
   @type result :: {:blocked, reason()} | :ok
+
+  @typedoc """
+  Severity class of a breaker match.
+
+    * `:catastrophic` — unrecoverable destruction. Blocked in EVERY mode.
+    * `:overridable` — bounded, recoverable risk. Blocked in every mode except
+      `:overdrive`/`:bypass`, where the operator has taken explicit
+      responsibility for unattended execution.
+  """
+  @type severity :: :catastrophic | :overridable
+  @type classified :: {:blocked, reason(), severity()} | :ok
 
   # Tool names whose primary argument is a shell command string.
   @shell_tools ~w(shell_execute shell run_command bash code_sandbox repl)
@@ -112,38 +160,57 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   inspected; every other tool short-circuits to `:ok`.
   """
   @spec blocked?(map() | String.t() | any()) :: result()
-  def blocked?(%{name: name} = call) do
+  def blocked?(input), do: input |> classify() |> drop_severity()
+
+  @doc """
+  Like `blocked?/1`, but keeps the severity class of the match.
+
+  Returns `{:blocked, reason, :catastrophic | :overridable}` or `:ok`. Only the
+  permission boundary (`ToolExecutor.approve_tool_call/2`) should use this — it
+  is the one caller that knows the session's permission mode and can therefore
+  decide whether an `:overridable` match has been authorised.
+  """
+  @spec classify(map() | String.t() | any()) :: classified()
+  def classify(%{name: name} = call) do
     blocked_tool_call(name, call_arguments(call))
   end
 
-  def blocked?(%{"name" => name} = call) do
+  def classify(%{"name" => name} = call) do
     blocked_tool_call(name, call_arguments(call))
   end
 
-  def blocked?(text) when is_binary(text) do
-    check_command(text)
+  def classify(text) when is_binary(text) do
+    check_command_classified(text)
   end
 
-  def blocked?(_), do: :ok
+  def classify(_), do: :ok
+
+  @doc "True when `severity` may be waived by overdrive/bypass."
+  @spec overridable?(severity()) :: boolean()
+  def overridable?(:overridable), do: true
+  def overridable?(_), do: false
+
+  defp drop_severity({:blocked, reason, _severity}), do: {:blocked, reason}
+  defp drop_severity(:ok), do: :ok
 
   # ── tool-call dispatch ──────────────────────────────────────────────
 
   defp blocked_tool_call(name, args) when is_binary(name) do
     cond do
       name in @shell_tools ->
-        check_command(shell_text(args))
+        check_command_classified(shell_text(args))
 
       name in @delete_tools ->
-        check_path(path_text(args))
+        check_path_classified(path_text(args))
 
       # Outbound MCP tools (mcp__<server>__<tool>) may be shell/desktop-command
       # servers running on the host. We can't know which one is a shell, so scan
       # their string arguments for the same hard-blocked patterns. The breaker
       # must apply to mcp_* tools even in :full/bypass tier.
       String.starts_with?(name, "mcp__") ->
-        case check_command(shell_text(args)) do
-          {:blocked, _} = blocked -> blocked
-          :ok -> check_path(path_text(args))
+        case check_command_classified(shell_text(args)) do
+          {:blocked, _, _} = blocked -> blocked
+          :ok -> check_path_classified(path_text(args))
         end
 
       true ->
@@ -196,18 +263,32 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   wrapper payloads) — see `CommandVariants`. A match on any variant blocks.
   """
   @spec check_command(String.t()) :: result()
-  def check_command(command) when is_binary(command) do
-    command
-    |> CommandVariants.variants()
-    |> Enum.find_value(:ok, fn variant ->
+  def check_command(command), do: command |> check_command_classified() |> drop_severity()
+
+  @doc """
+  `check_command/1` keeping the severity class. See `classify/1`.
+  """
+  @spec check_command_classified(String.t()) :: classified()
+  def check_command_classified(command) when is_binary(command) do
+    variants = CommandVariants.variants(command)
+
+    # A catastrophic match anywhere in the variant set outranks an overridable
+    # one: `curl x | sh` next to `rm -rf /` must report as catastrophic, or
+    # overdrive would waive the whole command on the strength of the weaker
+    # match. Scan for catastrophic first, then for overridable.
+    find_match(variants, :catastrophic) || find_match(variants, :overridable) || :ok
+  end
+
+  def check_command_classified(_), do: :ok
+
+  defp find_match(variants, severity) do
+    Enum.find_value(variants, fn variant ->
       case check_variant(variant) do
-        {:blocked, _} = blocked -> blocked
-        :ok -> nil
+        {:blocked, _, ^severity} = blocked -> blocked
+        _ -> nil
       end
     end)
   end
-
-  def check_command(_), do: :ok
 
   @doc """
   The unrecoverable **filesystem/system destruction** subset of the breaker:
@@ -231,31 +312,50 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   def catastrophic_destruction?(_), do: false
 
   # A single variant against every pattern.
+  #
+  # ORDER IS LOAD-BEARING: every `:catastrophic` clause precedes every
+  # `:overridable` one, so a command that matches both classes reports as
+  # catastrophic and can never be waived on the strength of the weaker match
+  # (`git push --force origin main && mkfs.ext4 /dev/sda1`).
   defp check_variant(command) when is_binary(command) do
     cond do
+      # ── :catastrophic — unrecoverable, blocked in EVERY mode ───────────
       rm_rf_broad_root?(command) ->
-        {:blocked, "recursive force-delete of a root/home path (rm -rf) is never permitted"}
-
-      force_push_protected?(command) ->
-        {:blocked, "force-push to a protected branch is never permitted"}
+        {:blocked, "recursive force-delete of a root/home path (rm -rf) is never permitted",
+         :catastrophic}
 
       Regex.match?(@fork_bomb, command) ->
-        {:blocked, "fork bomb pattern is never permitted"}
+        {:blocked, "fork bomb pattern is never permitted", :catastrophic}
 
       Regex.match?(@dd_block_device, command) ->
-        {:blocked, "dd writing directly to a block device is never permitted"}
+        {:blocked, "dd writing directly to a block device is never permitted", :catastrophic}
 
       Regex.match?(@mkfs, command) ->
-        {:blocked, "creating a filesystem (mkfs) on a device is never permitted"}
+        {:blocked, "creating a filesystem (mkfs) on a device is never permitted", :catastrophic}
 
       Regex.match?(@drop_database, command) ->
-        {:blocked, "DROP DATABASE/SCHEMA is never permitted"}
+        {:blocked, "DROP DATABASE/SCHEMA is never permitted", :catastrophic}
 
       Regex.match?(@drop_truncate_prod, command) ->
-        {:blocked, "DROP TABLE/TRUNCATE on a production database is never permitted"}
+        {:blocked, "DROP TABLE/TRUNCATE on a production database is never permitted",
+         :catastrophic}
 
+      # ── :overridable — recoverable, waived only under overdrive/bypass ─
+      #
+      # Force-push to a protected branch: destructive to *history*, not to the
+      # machine, and recoverable from the remote's reflog. It is also a normal
+      # operation in a scratch container or a solo repo, which is why refusing
+      # it under an explicit full-auto mode is a dead end for the operator.
+      force_push_protected?(command) ->
+        {:blocked, "force-push to a protected branch is never permitted", :overridable}
+
+      # curl|sh: a supply-chain hazard (unreviewed remote code), not
+      # destruction — and the documented install path for a large amount of
+      # real software. Under overdrive the operator has already accepted
+      # unattended execution of remote instructions.
       Regex.match?(@pipe_to_shell, command) ->
-        {:blocked, "piping downloaded content directly into a shell (curl|sh) is never permitted"}
+        {:blocked, "piping downloaded content directly into a shell (curl|sh) is never permitted",
+         :overridable}
 
       true ->
         :ok
@@ -264,14 +364,18 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
   # A file-delete tool targeting a broad root path is a hard stop.
   @spec check_path(String.t()) :: result()
-  def check_path(path) when is_binary(path) do
+  def check_path(path), do: path |> check_path_classified() |> drop_severity()
+
+  @doc "`check_path/1` keeping the severity class (always `:catastrophic`)."
+  @spec check_path_classified(String.t()) :: classified()
+  def check_path_classified(path) when is_binary(path) do
     # A path argument is not shell-processed, but it may still arrive quoted
     # from a model that wrote it as it would in a shell. Check both forms.
     unquoted = CommandVariants.shell_unquote(path)
 
     if unquoted != path do
       case check_one_path(unquoted) do
-        {:blocked, _} = blocked -> blocked
+        {:blocked, _, _} = blocked -> blocked
         :ok -> check_one_path(path)
       end
     else
@@ -279,8 +383,10 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
     end
   end
 
-  def check_path(_), do: :ok
+  def check_path_classified(_), do: :ok
 
+  # Deleting a root/home path outright is unrecoverable — :catastrophic, and
+  # therefore not waivable by overdrive.
   defp check_one_path(path) do
     expanded = safe_expand(path)
 
@@ -304,10 +410,10 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
     cond do
       trimmed in ["/", "~", "~/", "/*", "*", ".", "..", "$HOME"] ->
-        {:blocked, "deleting a root/home path is never permitted"}
+        {:blocked, "deleting a root/home path is never permitted", :catastrophic}
 
       expanded in broad_roots ->
-        {:blocked, "deleting a root/home path is never permitted"}
+        {:blocked, "deleting a root/home path is never permitted", :catastrophic}
 
       true ->
         :ok

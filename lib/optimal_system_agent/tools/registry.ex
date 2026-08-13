@@ -253,8 +253,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
   """
   def execute_direct(tool_name, arguments) do
     case circuit_breaker(tool_name, arguments) do
-      {:blocked, reason} ->
-        {:error, circuit_breaker_message(tool_name, reason)}
+      {:blocked, reason, severity} ->
+        {:error, circuit_breaker_message(tool_name, reason, severity)}
 
       :ok ->
         execute_direct_unguarded(tool_name, arguments)
@@ -294,32 +294,83 @@ defmodule OptimalSystemAgent.Tools.Registry do
   """
   def execute(tool_name, arguments) do
     case circuit_breaker(tool_name, arguments) do
-      {:blocked, reason} ->
+      {:blocked, reason, severity} ->
         # Authoritative enforcement point. Every non-loop caller (MCP server
         # dispatcher, Tools.Pipeline, HTTP tool routes, sub-agent Tasks) reaches
         # tool execution through here, so the hard circuit-breaker cannot be
         # bypassed by skipping the agent loop.
-        {:error, circuit_breaker_message(tool_name, reason)}
+        {:error, circuit_breaker_message(tool_name, reason, severity)}
 
       :ok ->
         execute_unguarded(tool_name, arguments)
     end
   end
 
-  # Hard, tier-independent circuit-breaker enforced at the tool-execution
-  # MECHANISM (this module) so every caller — the agent loop, the MCP server
-  # dispatcher, Tools.Pipeline, the cron scheduler, and sub-agent Tasks — is
-  # covered. It cannot be bypassed by skipping the agent loop.
+  # Circuit-breaker enforced at the tool-execution MECHANISM (this module) so
+  # every caller — the agent loop, the MCP server dispatcher, Tools.Pipeline,
+  # the cron scheduler, and sub-agent Tasks — is covered. It cannot be bypassed
+  # by skipping the agent loop.
+  #
+  # Severity handling mirrors `Loop.ToolExecutor.approve_tool_call/2` (see
+  # `DangerousCommands`' moduledoc for why there are two classes):
+  #
+  #   * `:catastrophic` → blocked here unconditionally. No session, mode or
+  #     argument can unblock it.
+  #   * `:overridable`  → blocked UNLESS the owning session is in overdrive.
+  #     Without this the split would be pointless: the loop waives the rule at
+  #     the permission boundary and this layer, one call later, blocks the same
+  #     command again with a message that names no recourse.
+  #
+  # The session is read from the `__session_id__` argument the loop injects, and
+  # the mode from the same sticky `PermissionMode` store the loop consults — so
+  # a caller with no session (cron, MCP dispatcher, pipeline) gets the strict
+  # verdict by construction. A forged `__session_id__` can at most reach a mode
+  # the OPERATOR set to overdrive on this machine, and only ever waives the
+  # recoverable class.
   defp circuit_breaker(tool_name, arguments) do
-    OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(%{
-      name: tool_name,
-      arguments: arguments
-    })
+    case OptimalSystemAgent.Agent.Safety.DangerousCommands.classify(%{
+           name: tool_name,
+           arguments: arguments
+         }) do
+      {:blocked, reason, :overridable} = blocked ->
+        if overdrive_session?(arguments) do
+          Logger.warning(
+            "[tools] CIRCUIT-BREAKER waived for #{tool_name}: #{reason} — session is in " <>
+              "overdrive (full auto) and this rule is recoverable, not catastrophic"
+          )
+
+          :ok
+        else
+          blocked
+        end
+
+      other ->
+        other
+    end
   end
 
-  defp circuit_breaker_message(tool_name, reason) do
+  defp overdrive_session?(arguments) when is_map(arguments) do
+    case Map.get(arguments, "__session_id__") || Map.get(arguments, :__session_id__) do
+      sid when is_binary(sid) and sid != "" ->
+        OptimalSystemAgent.Agent.PermissionMode.overdrive?(sid)
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp overdrive_session?(_), do: false
+
+  defp circuit_breaker_message(tool_name, reason, :catastrophic) do
     "Blocked by a hard safety limit (#{tool_name}): #{reason}. " <>
       "This action is never permitted, in any permission tier."
+  end
+
+  defp circuit_breaker_message(tool_name, reason, _overridable) do
+    "Blocked by a safety limit (#{tool_name}): #{reason}. " <>
+      "The operator can permit it by switching to overdrive (full auto)."
   end
 
   defp action_authority_result(tool_name, arguments) do
@@ -813,8 +864,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
   def handle_call({:execute, tool_name, arguments}, _from, state) do
     result =
       case circuit_breaker(tool_name, arguments) do
-        {:blocked, reason} ->
-          {:error, circuit_breaker_message(tool_name, reason)}
+        {:blocked, reason, severity} ->
+          {:error, circuit_breaker_message(tool_name, reason, severity)}
 
         :ok ->
           case Map.get(state.builtin_tools, tool_name) do

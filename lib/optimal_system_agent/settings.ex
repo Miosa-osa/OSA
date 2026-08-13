@@ -17,6 +17,40 @@ defmodule OptimalSystemAgent.Settings do
   File reads are cached in the `:osa_settings_cache` ETS table keyed by
   `{path, {mtime, size}}`; `reset_cache/0` is the single reset, called by the
   file watcher and by every internal write.
+
+  ## Session scoping (and what is still not scoped)
+
+  The FILE layers resolve against `Workspace.Cwd.get/0`, which is already
+  per-process: the agent loop publishes the session's `working_dir` into the
+  process dictionary at the start of every turn, so two sessions in two
+  different directories genuinely read two different `.osa/settings.local.json`
+  files. What was NOT scoped is the **session layer itself**: `set_session/2`
+  wrote a single daemon-wide `{{:session, key}, value}` row, so "session"
+  settings were shared by every concurrent session in the backend. That is what
+  made per-session policy (e.g. disabling network tools for one run) impossible
+  — not the cwd.
+
+  The session layer now has two scopes:
+
+    * `:global` — rows written with no session in context. Unchanged key shape,
+      unchanged behaviour, still daemon-wide.
+    * a session id — rows written by (or for) one session. They shadow the
+      global rows for that session only.
+
+  A process states which session it is acting for via `:osa_session_id` in its
+  process dictionary (published by the loop's turn pipeline, exactly like the
+  cwd override); `set_session_for/3` addresses a session explicitly, and
+  `clear_session/1` drops its rows.
+
+  **Still not scoped, deliberately:** two sessions sharing one working directory
+  share their `:project`/`:local` file layers, because those are properties of
+  the directory, not of the session. A complete fix would add a per-session
+  OVERLAY above the flag layer — a settings map handed to a session at creation
+  (HTTP `POST /sessions`, `mix osa.run --settings-json`, subagent spawn) and
+  carried in the loop state rather than in ETS — so a caller could impose policy
+  on a session it does not run inside, without touching any file or any other
+  session. The scoping mechanism here is the prerequisite for that; the wiring
+  of the session-creation surfaces is not done.
   """
   require Logger
 
@@ -109,13 +143,74 @@ defmodule OptimalSystemAgent.Settings do
       List.wrap(flag_settings_path())
   end
 
-  @doc "Set a session-level setting (in-memory only, not persisted)."
-  def set_session(key, value) do
-    try do
-      :ets.insert(:osa_settings, {{:session, key}, value})
-    rescue
-      _ -> :ok
+  @doc """
+  Set a session-level setting (in-memory only, not persisted).
+
+  Scoped to the CURRENT session when one is resolvable from the calling process
+  (`Settings.current_session/0`), and to the daemon-wide `:global` scope
+  otherwise — see the "Session scoping" section of the moduledoc.
+  """
+  def set_session(key, value), do: put_session(current_session(), key, value)
+
+  @doc """
+  Set a session-level setting for a SPECIFIC session id.
+
+  This is the entry point for per-session policy (e.g. "no network tools for
+  this benchmark run"): the value is visible only to code running on behalf of
+  `session_id`, and is invisible to every other concurrent session.
+  """
+  @spec set_session_for(String.t() | nil, atom() | String.t(), term()) :: :ok
+  def set_session_for(session_id, key, value) when is_binary(session_id) and session_id != "",
+    do: put_session(session_id, key, value)
+
+  def set_session_for(_session_id, key, value), do: put_session(:global, key, value)
+
+  @doc """
+  Drop every session-scoped setting for `session_id` (call on session end).
+
+  Without this the ETS table grows one row per {session, key} for the daemon's
+  whole lifetime.
+  """
+  @spec clear_session(String.t()) :: :ok
+  def clear_session(session_id) when is_binary(session_id) do
+    :ets.match_delete(:osa_settings, {{:session, session_id, :_}, :_})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def clear_session(_), do: :ok
+
+  @doc """
+  The session id the current process is acting for, or `:global`.
+
+  Resolution mirrors `Workspace.Cwd.get/0`: a process-dictionary value published
+  by the agent loop at the start of every turn (`:osa_session_id`), else no
+  session at all. There is deliberately no node-wide fallback — guessing "the"
+  session is how a per-session setting silently becomes a global one.
+  """
+  @spec current_session() :: String.t() | :global
+  def current_session do
+    case Process.get(:osa_session_id) do
+      sid when is_binary(sid) and sid != "" -> sid
+      _ -> :global
     end
+  end
+
+  defp put_session(:global, key, value) do
+    # NB: the global row keeps its original 2-element key shape so existing
+    # readers/writers of `{{:session, key}, value}` are unaffected.
+    :ets.insert(:osa_settings, {{:session, key}, value})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp put_session(session_id, key, value) do
+    :ets.insert(:osa_settings, {{:session, session_id, to_string(key)}, value})
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @doc """
@@ -281,15 +376,28 @@ defmodule OptimalSystemAgent.Settings do
 
   # ── Private ──────────────────────────────────────────────────────────
 
+  # The session layer, as seen by the CALLING process: daemon-wide `:global`
+  # rows first, then rows scoped to this process's session id, which win.
+  #
+  # Two concurrent sessions therefore see different session layers even though
+  # they share one ETS table and one OS process — which is what makes
+  # per-session tool policy expressible at all.
   defp get_all_session do
     try do
-      :ets.match(:osa_settings, {{:session, :"$1"}, :"$2"})
-      |> Enum.reduce(%{}, fn [key, value], acc ->
-        Map.put(acc, to_string(key), value)
-      end)
+      global = session_rows({{:session, :"$1"}, :"$2"})
+
+      case current_session() do
+        :global -> global
+        sid -> Map.merge(global, session_rows({{:session, sid, :"$1"}, :"$2"}))
+      end
     rescue
       _ -> %{}
     end
+  end
+
+  defp session_rows(pattern) do
+    :ets.match(:osa_settings, pattern)
+    |> Enum.reduce(%{}, fn [key, value], acc -> Map.put(acc, to_string(key), value) end)
   end
 
   defp layer_hooks(layer) when is_map(layer) do

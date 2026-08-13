@@ -39,6 +39,8 @@ defmodule OptimalSystemAgent.Application do
     # OSA source tree, not the user's project.
     OptimalSystemAgent.Workspace.Cwd.set_original_cwd()
 
+    warn_if_root()
+
     # ── Phase 0: Environment & Configuration ──────────────────────────
     # Load .env file FIRST (before anything reads env vars)
     load_dotenv()
@@ -603,6 +605,26 @@ defmodule OptimalSystemAgent.Application do
   # build) load the key as `ANTHROPIC_API_KEY` instead of as an invisibly
   # different string that nothing ever reads. This loop used `String.trim/1`,
   # and U+FEFF is category Cf, not whitespace.
+  # Running as root is normal inside a container and is NOT a boot failure —
+  # but one capability really is unavailable there, so say which one, once, at
+  # boot. Before this, root simply killed the boot with a MatchError in
+  # `CLI.serve/0` (erlexec's port program refuses to run as root); OSA now boots
+  # and prints what it gave up.
+  defp warn_if_root do
+    if OptimalSystemAgent.System.Erlexec.root?() do
+      Logger.warning(
+        "[boot] Running as root. OSA runs normally, with one exception: OpenComputers " <>
+          "interactive PTY sessions (pty_open) are unavailable, because erlexec's port " <>
+          "program refuses to run as root. Nothing else is affected — shell_execute, " <>
+          "file tools, the HTTP API and the agent loop all work."
+      )
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   defp load_dotenv do
     env_file = Path.expand("~/.osa/.env")
 

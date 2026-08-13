@@ -51,7 +51,16 @@ defmodule OptimalSystemAgent.MixProject do
         # breaks compile on OTP 26. We pin OTP 26 because OTP 27 has Mix release
         # bugs (TypedStruct.MixProject + Decimal.Error already compiled). When
         # OTP 27 Mix issues are resolved upstream, this pin can be relaxed.
-        {:erlexec, "== 2.0.6"},
+        #
+        # `runtime: false` is LOAD-BEARING, not a build tweak: erlexec's C port
+        # program refuses to start as root, and as an auto-started dependency
+        # that failure propagated out of `Application.ensure_all_started/1` and
+        # killed OSA's boot entirely — inside every stock Docker image, for a
+        # feature (OpenComputers PTY sessions) a headless run never uses. It is
+        # now started lazily and fallibly by
+        # `OptimalSystemAgent.System.Erlexec.ensure_started/0`, and shipped in
+        # the release as a load-only application (see releases/0).
+        {:erlexec, "== 2.0.6", runtime: false},
         # bcrypt_elixir compiles a C NIF via a Unix Makefile and does NOT build on
         # the Windows CI runner (no compatible C toolchain). Password-hash auth is
         # optional (Windows uses token auth); exclude it on win32 so the release
@@ -148,7 +157,12 @@ defmodule OptimalSystemAgent.MixProject do
         # call. On a Unix build host this only adds the extra .bat; the Unix
         # scripts are byte-for-byte unchanged.
         include_executables_for: [:unix, :windows],
-        applications: [runtime_tools: :permanent],
+        # erlexec is `runtime: false` (see unix_only_deps/0), so it is not in the
+        # app tree and would not be assembled into the release at all. `:load`
+        # ships it and puts it on the code path WITHOUT starting it, which is
+        # exactly what the lazy PTY start path needs — and is what keeps a
+        # root container from taking a boot failure for a feature it never uses.
+        applications: release_applications(),
         steps: [
           :assemble,
           &prune_build_artifacts/1,
@@ -163,6 +177,7 @@ defmodule OptimalSystemAgent.MixProject do
       # Build via CI (see .github/workflows/release.yml); cross-compile on
       # your local machine is not supported.
       burrito: [
+        applications: release_applications(),
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
           targets: [
@@ -174,6 +189,17 @@ defmodule OptimalSystemAgent.MixProject do
         ]
       ]
     ]
+  end
+
+  # Applications a release must carry beyond the auto-computed app tree.
+  #
+  # `erlexec: :load` — present on the code path, NOT started (see the dep note
+  # in unix_only_deps/0). On Windows the dep does not exist at all, so it must
+  # not be named or `mix release` fails to assemble.
+  defp release_applications do
+    base = [runtime_tools: :permanent]
+
+    if match?({:win32, _}, :os.type()), do: base, else: base ++ [erlexec: :load]
   end
 
   # Copy the pre-built Go tokenizer binary into the release's priv directory.
