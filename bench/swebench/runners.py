@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -44,6 +44,10 @@ class Task:
     container: Optional[str] = None
     #: Hard wall-clock budget for the agent, in seconds.
     timeout_s: int = 1800
+    #: Files the grader will revert to base_commit before grading, i.e. the
+    #: file list of the hidden test_patch. Used ONLY after the agent finishes,
+    #: to make the recorded patch equal the graded one. Never shown to it.
+    graded_away_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -58,7 +62,8 @@ class RunResult:
     instance_id: str
     #: Unified diff the agent produced. "" means it changed nothing.
     patch: str = ""
-    #: ok | empty_patch | timeout | runner_error | agent_error | skipped
+    #: ok | empty_patch | tests_only_patch | timeout | runner_error
+    #: | agent_error | skipped
     status: str = "ok"
     error: Optional[str] = None
 
@@ -100,31 +105,56 @@ class Runner(Protocol):
 # Shared helpers
 # --------------------------------------------------------------------------
 
-#: Files an agent patch must never touch. SWE-bench's own eval script reverts
-#: test files to the base commit before applying test_patch, so edits here are
-#: silently discarded by the grader -- we strip them so the recorded patch
-#: matches what is actually graded.
-TEST_PATH_MARKERS = ("tests/", "test/", "testing/")
+#: `diff --git a/<path> b/<path>` -- how we recover a patch's file list.
+_DIFF_PATH_RE = re.compile(r"^diff --git a/.* b/(.*)$", re.MULTILINE)
 
 
-def _is_test_path(path: str) -> bool:
-    base = os.path.basename(path)
-    if base.startswith("test_") or base.endswith("_test.py") or base == "conftest.py":
-        return True
-    return any(m in path for m in TEST_PATH_MARKERS)
+def test_patch_files(test_patch: str) -> list[str]:
+    """The exact files the grader will revert, read from the instance's test_patch.
+
+    This is the ONLY correct definition of "a file the agent cannot usefully
+    edit". The grader does not guess from filenames: it runs
+    `git checkout <base_commit> -- <files in test_patch>` and then applies
+    test_patch. Any other file the agent touched is kept and graded.
+
+    The previous implementation guessed from the path instead, and matched
+    `"test/"` as a *substring*. That is contained in `src/_pytest/`, so every
+    edit to pytest's own source was silently deleted from the submission --
+    and, because the result was then an empty diff, reported as the agent
+    having produced no patch. Checked against all 500 SWE-bench Verified gold
+    patches, that predicate destroyed 19 of them outright: an unreachable
+    ceiling of 96.2%, charged to the agent. It also matched the legitimate
+    source file `django/test/client.py`.
+
+    Deriving the list from test_patch is exact, cannot drift from the grader,
+    and leaks nothing to the agent -- it is applied after the agent has
+    finished, purely to make the recorded patch equal the graded one.
+    """
+    return sorted(set(_DIFF_PATH_RE.findall(test_patch or "")))
 
 
-def git_diff(workspace: Path, exclude_tests: bool = True) -> str:
+def git_diff(workspace: Path, strip_paths: list[str] | None = None) -> tuple[str, list[str]]:
     """Produce the model_patch for a workspace.
 
     Uses `git add -A` into the index so that newly created files show up, then
     `git diff --cached`. The index mutation is local to the throwaway
     workspace clone, so it does not matter that it is destructive.
+
+    `strip_paths` should be `test_patch_files(instance["test_patch"])`: the
+    files the grader reverts, and therefore the only ones worth removing.
+    Passing None strips nothing, which is the safe default -- an over-eager
+    strip silently deletes the agent's real work.
+
+    Returns `(patch, dropped_paths)`. The second element matters for diagnosis:
+    an agent whose only edits were to graded-away test files produces an empty
+    patch, and that is a different mistake from an agent that produced nothing.
     """
+    drop: list[str] = []
     subprocess.run(
         ["git", "add", "-A"], cwd=workspace, check=True, capture_output=True
     )
-    if exclude_tests:
+    if strip_paths:
+        wanted = set(strip_paths)
         names = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
             cwd=workspace,
@@ -132,7 +162,7 @@ def git_diff(workspace: Path, exclude_tests: bool = True) -> str:
             capture_output=True,
             text=True,
         ).stdout.split()
-        drop = [n for n in names if _is_test_path(n)]
+        drop[:] = [n for n in names if n in wanted]
         if drop:
             subprocess.run(
                 ["git", "restore", "--staged", "--worktree", "--", *drop],
@@ -147,7 +177,7 @@ def git_diff(workspace: Path, exclude_tests: bool = True) -> str:
         text=True,
         errors="replace",
     ).stdout
-    return out
+    return out, drop
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +212,63 @@ class GoldRunner:
             model="oracle",
             tool_calls=0,
             turns=0,
+        )
+
+    def close(self) -> None:  # pragma: no cover - trivial
+        pass
+
+
+class GoldApplyRunner:
+    """Upper control that goes through the REAL path, not around it.
+
+    `GoldRunner` hands the dataset's patch straight to the grader. That proves
+    the dataset, the grading invocation and the report are wired up -- but it
+    never touches the workspace, never runs `git diff`, and therefore cannot
+    detect a bug in patch *extraction*. One lived there undetected: the
+    strip predicate substring-matched `"test/"`, which is inside
+    `src/_pytest/`, and silently deleted 19 of the 500 gold patches in full
+    while `GoldRunner` reported a clean 100%.
+
+    This runner applies the gold patch to the prepared workspace with `git
+    apply` and then extracts it back out exactly the way an agent's work is
+    extracted. It must also score 100%; when it does not, extraction is broken
+    even though `gold` looks fine. Run both.
+    """
+
+    name = "gold-apply"
+
+    def __init__(self, dataset_by_id: dict[str, dict]):
+        self._ds = dataset_by_id
+
+    def prepare(self) -> None:  # pragma: no cover - trivial
+        pass
+
+    def run(self, task: Task) -> RunResult:
+        t0 = time.monotonic()
+        gold = self._ds[task.instance_id]["patch"]
+        proc = subprocess.run(
+            ["git", "apply", "-"],
+            cwd=task.workspace,
+            input=gold,
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            return RunResult(
+                instance_id=task.instance_id, patch="", status="runner_error",
+                error=f"git apply of the gold patch failed: {proc.stderr[:400]}",
+                wall_clock_s=time.monotonic() - t0, model="oracle",
+            )
+        patch, dropped = git_diff(task.workspace, strip_paths=task.graded_away_paths)
+        return RunResult(
+            instance_id=task.instance_id,
+            patch=patch,
+            status="ok" if patch.strip() else "empty_patch",
+            wall_clock_s=time.monotonic() - t0,
+            model="oracle",
+            tool_calls=0,
+            turns=0,
+            raw={"dropped_test_paths": dropped},
         )
 
     def close(self) -> None:  # pragma: no cover - trivial
@@ -223,10 +310,14 @@ class EmptyRunner:
 def build_runner(kind: str, *, dataset_by_id: dict[str, dict], opts: dict) -> Runner:
     if kind == "gold":
         return GoldRunner(dataset_by_id)
+    if kind == "gold-apply":
+        return GoldApplyRunner(dataset_by_id)
     if kind == "empty":
         return EmptyRunner()
     if kind == "osa":
         from osa_runner import OsaRunner  # local import: keeps controls dependency-free
 
         return OsaRunner(**opts)
-    raise SystemExit(f"unknown runner: {kind!r} (want: gold | empty | osa)")
+    raise SystemExit(
+        f"unknown runner: {kind!r} (want: gold | gold-apply | empty | osa)"
+    )

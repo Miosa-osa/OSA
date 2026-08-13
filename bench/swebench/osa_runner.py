@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -93,21 +94,243 @@ def read_spend(session_id: str) -> dict:
         return {}
 
 
-def clear_session_files(session_id: str) -> None:
-    """Remove any prior on-disk state for this session id.
+def clear_session_files(session_id: str, archive_to: Path | None = None) -> None:
+    """Reset this session's on-disk state, ARCHIVING it rather than deleting it.
 
-    Without this a re-run inherits the previous run's spend sidecar and
-    transcript, and the reported token totals become the sum of both runs.
+    The reset itself is required: OSA's spend sidecar is cumulative and never
+    reset for a session id, so without this a re-run reports the sum of both
+    runs' tokens.
+
+    But the previous implementation `unlink()`ed the transcript, and the
+    transcript is the primary diagnostic artefact this whole exercise exists to
+    produce. Re-running the same run-id -- exactly what you do when you are
+    chasing a failure -- destroyed the evidence of the failure you were
+    chasing. So the old files are moved aside into the run directory first, and
+    only then removed from OSA's session store.
     """
     sdir = _osa_home() / "sessions"
     if not sdir.is_dir():
         return
     stem = _sanitize(session_id)
+    dest = None
+    if archive_to is not None:
+        dest = archive_to / "_superseded" / stem
     for p in sdir.glob(f"{stem}.*"):
+        try:
+            if dest is not None:
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dest / p.name)
+        except OSError:
+            pass
         try:
             p.unlink()
         except OSError:
             pass
+
+
+#: Substrings that mark a tool result OSA truncated or spilled to a sidecar
+#: file rather than handing the model the whole thing. If the model then fails,
+#: it may have failed on a partial observation -- an OSA problem, not a model
+#: problem, and the distinction is the reason this collector exists.
+TRUNCATION_MARKERS = (
+    "[truncated",
+    "... (truncated",
+    "output truncated",
+    "result truncated",
+    "/.osa/tool-results/",
+)
+
+#: A quiet stretch this long with no frame at all is worth flagging: several
+#: long-run ceilings (a 10-minute per-tool wrapper, a 5-minute orchestrator
+#: deadline, a stall detector) were only just removed, and a run that dies in a
+#: silent phase looks exactly like this from outside.
+STALL_SECONDS = 120.0
+
+
+class _SignalCollector:
+    """Mine the SSE stream for signs that OSA, not the model, was the problem.
+
+    Everything here is descriptive. It records what happened; deciding whether
+    a given failure was OSA's fault is `diagnose.py`'s job, so that the rule
+    can be changed without re-running the benchmark.
+    """
+
+    def __init__(self) -> None:
+        self.tool_failures = 0
+        self.tool_failure_names: dict[str, int] = {}
+        self.tool_names: dict[str, int] = {}
+        self.truncated_results = 0
+        self.compactions = 0
+        self.max_utilization = 0.0
+        self.max_estimated_tokens = 0
+        self.context_window_reported = None
+        self.hit_blocking_limit = False
+        self.above_compact = False
+        self.errors: list[str] = []
+        self.slowest_tool_ms = 0
+        self.max_gap_s = 0.0
+        self.last_agent_response = ""
+        self.turn_recap: dict = {}
+        self._last_t = time.monotonic()
+        self._t0 = self._last_t
+
+    def observe(self, ev: dict) -> None:
+        now = time.monotonic()
+        gap = now - self._last_t
+        if gap > self.max_gap_s:
+            self.max_gap_s = gap
+        self._last_t = now
+
+        etype = ev.get("type") or ev.get("_event")
+
+        if etype == "tool_call":
+            name = ev.get("name") or "?"
+            if ev.get("phase") == "start":
+                self.tool_names[name] = self.tool_names.get(name, 0) + 1
+            elif ev.get("phase") == "end":
+                ms = ev.get("duration_ms")
+                if isinstance(ms, int):
+                    self.slowest_tool_ms = max(self.slowest_tool_ms, ms)
+                if ev.get("success") is False:
+                    self.tool_failures += 1
+                    self.tool_failure_names[name] = (
+                        self.tool_failure_names.get(name, 0) + 1
+                    )
+        elif etype == "tool_result":
+            body = ev.get("result")
+            if isinstance(body, str) and any(
+                m in body[:4000] or m in body[-2000:] for m in TRUNCATION_MARKERS
+            ):
+                self.truncated_results += 1
+            if ev.get("success") is False:
+                err = str(ev.get("error") or body or "")[:300]
+                if err:
+                    self.errors.append(f"tool_result: {err}")
+        elif etype == "context_pressure":
+            u = ev.get("utilization")
+            if isinstance(u, (int, float)):
+                self.max_utilization = max(self.max_utilization, float(u))
+            est = ev.get("estimated_tokens")
+            if isinstance(est, int):
+                self.max_estimated_tokens = max(self.max_estimated_tokens, est)
+            mt = ev.get("max_tokens")
+            if isinstance(mt, int):
+                # Keep the LAST reading; 0 means OSA could not resolve the
+                # window at all, which disables its own compaction thresholds.
+                self.context_window_reported = mt
+            self.hit_blocking_limit |= bool(ev.get("at_blocking_limit"))
+            self.above_compact |= bool(ev.get("above_compact"))
+        elif etype == "system_event":
+            sub = str(ev.get("event") or "")
+            if "compact" in sub:
+                self.compactions += 1
+            if sub in ("error", "agent_error") or ev.get("outcome") == "error":
+                self.errors.append(f"{sub}: {str(ev.get('message') or ev)[:300]}")
+        elif etype in ("error", "agent_error"):
+            self.errors.append(str(ev.get("message") or ev.get("error") or ev)[:300])
+        elif etype == "agent_response":
+            r = ev.get("response")
+            if isinstance(r, str):
+                self.last_agent_response = r
+        elif etype == "turn_recap":
+            self.turn_recap = {
+                k: ev.get(k) for k in ("tool_calls", "tools_used", "elapsed_ms")
+            }
+
+    def finish(self) -> dict:
+        return {
+            "tool_failures": self.tool_failures,
+            "tool_failure_names": dict(
+                sorted(self.tool_failure_names.items(), key=lambda kv: -kv[1])
+            ),
+            "tool_names": dict(sorted(self.tool_names.items(), key=lambda kv: -kv[1])),
+            "truncated_results": self.truncated_results,
+            "compactions": self.compactions,
+            "max_utilization": round(self.max_utilization, 2),
+            "max_estimated_tokens": self.max_estimated_tokens,
+            "context_window_reported": self.context_window_reported,
+            "hit_blocking_limit": self.hit_blocking_limit,
+            "above_compact": self.above_compact,
+            "slowest_tool_ms": self.slowest_tool_ms,
+            "max_event_gap_s": round(self.max_gap_s, 1),
+            "stalled": self.max_gap_s >= STALL_SECONDS,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "turn_recap": self.turn_recap,
+            # The final message is often the only place the agent says it gave
+            # up, or that a tool it needed never worked.
+            "final_message_tail": self.last_agent_response[-1200:],
+        }
+
+
+def _free_port() -> int:
+    """An ephemeral port the OS says is free right now."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+_PERMISSION_LOCK = threading.Lock()
+
+
+def seed_permission_mode(session_id: str, mode: str = "overdrive") -> None:
+    """Pre-set a session's sticky permission mode in `~/.osa/permission_mode.json`.
+
+    Needed only by the CLI transport, which starts a fresh BEAM per task and so
+    has no live process to send a `permission_mode` command to. OSA rehydrates
+    its ETS table from this file on first use, so writing the entry first has
+    the same effect.
+
+    Read-modify-write under a lock because instances run concurrently, and this
+    file is shared with the user's real daemon -- clobbering it would change
+    permission behaviour outside the benchmark.
+    """
+    p = _osa_home() / "permission_mode.json"
+    with _PERMISSION_LOCK:
+        try:
+            data = json.loads(p.read_text()) if p.exists() else {}
+            if not isinstance(data, dict):
+                data = {}
+        except (json.JSONDecodeError, OSError):
+            return
+        data[_sanitize(session_id)] = mode
+        try:
+            tmp = p.with_suffix(".json.bench-tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(p)
+        except OSError:
+            pass
+
+
+def unseed_permission_modes(prefix: str) -> int:
+    """Drop this run's entries from the shared sticky-permission store.
+
+    The store has no eviction, so a benchmark that left its entries behind
+    would grow the user's real permission file by one row per instance, for
+    ever. Cleaning up is the harness's job, not OSA's.
+    """
+    p = _osa_home() / "permission_mode.json"
+    with _PERMISSION_LOCK:
+        try:
+            data = json.loads(p.read_text()) if p.exists() else {}
+            if not isinstance(data, dict):
+                return 0
+        except (json.JSONDecodeError, OSError):
+            return 0
+        drop = [k for k in data if k.startswith(prefix)]
+        if not drop:
+            return 0
+        for k in drop:
+            data.pop(k, None)
+        try:
+            tmp = p.with_suffix(".json.bench-tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(p)
+        except OSError:
+            return 0
+        return len(drop)
 
 
 class OsaRunner:
@@ -128,6 +351,7 @@ class OsaRunner:
         log_dir: Path | None = None,
         with_test_bridge: bool = True,
         run_id: str = "adhoc",
+        transcript_dir: Path | None = None,
     ):
         if mode not in ("http", "cli"):
             raise SystemExit(f"--osa-mode must be http or cli, got {mode!r}")
@@ -143,8 +367,20 @@ class OsaRunner:
         self.log_dir = log_dir
         self.with_test_bridge = with_test_bridge
         self.run_id = run_id
-        self._session = requests.Session()
+        self.transcript_dir = transcript_dir
+        # `requests.Session` is not thread-safe, and instances now run
+        # concurrently (`--infer-workers`). One session per thread; connection
+        # pooling still works, it is just not shared across workers.
+        self._local = threading.local()
         self._backend: dict = {}
+
+    @property
+    def _session(self) -> requests.Session:
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            self._local.session = s
+        return s
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -181,7 +417,37 @@ class OsaRunner:
             ) from e
 
     def close(self) -> None:
-        self._session.close()
+        # Per-thread sessions are closed by GC when the worker threads exit;
+        # only this thread's is reachable from here.
+        s = getattr(self._local, "session", None)
+        if s is not None:
+            s.close()
+        unseed_permission_modes(f"swebench-{_sanitize(self.run_id)}-")
+
+    # -- transcript capture ------------------------------------------------
+
+    def _capture_transcript(self, session_id: str) -> dict:
+        """Copy OSA's own session files into the run directory.
+
+        `~/.osa/sessions/` is shared mutable state that later runs overwrite, so
+        a failure cannot be diagnosed from it weeks later. Failures are the
+        deliverable here, so the transcript travels with the result.
+        """
+        if not self.transcript_dir:
+            return {}
+        src = _osa_home() / "sessions"
+        if not src.is_dir():
+            return {}
+        dest = self.transcript_dir / session_id
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for p in src.glob(f"{_sanitize(session_id)}.*"):
+            try:
+                shutil.copy2(p, dest / p.name)
+                copied.append(p.name)
+            except OSError:
+                pass
+        return {"transcript_dir": str(dest), "transcript_files": sorted(copied)}
 
     # -- prompt ------------------------------------------------------------
 
@@ -200,7 +466,7 @@ class OsaRunner:
         # session and is deliberately never reset, so a stable id would make a
         # second run of the same instance report the sum of both runs.
         session_id = _sanitize(f"swebench-{self.run_id}-{task.instance_id}")
-        clear_session_files(session_id)
+        clear_session_files(session_id, archive_to=self.transcript_dir)
         t0 = time.monotonic()
         try:
             if self.mode == "http":
@@ -213,14 +479,20 @@ class OsaRunner:
 
         wall = time.monotonic() - t0
 
+        dropped_tests: list[str] = []
         try:
-            patch = git_diff(task.workspace)
+            patch, dropped_tests = git_diff(
+                task.workspace, strip_paths=task.graded_away_paths
+            )
         except subprocess.CalledProcessError as e:
             patch = ""
             status, error = "runner_error", f"git diff failed: {e.stderr!r}"
 
         if status == "ok" and not patch.strip():
-            status = "empty_patch"
+            # An agent that edited ONLY test files looks identical to one that
+            # did nothing, unless we say so -- and they are very different
+            # mistakes, so they get different buckets.
+            status = "tests_only_patch" if dropped_tests else "empty_patch"
 
         # `<id>.spend.json` is OSA's own cumulative per-session ledger and is
         # the authoritative number. The summed SSE frames are the cross-check;
@@ -257,6 +529,14 @@ class OsaRunner:
                 "provider": self.provider,
                 "transport": self.mode,
                 "backend_version": self._backend.get("version"),
+                "dropped_test_paths": dropped_tests,
+                "event_log": str(self._event_log_path(task.instance_id) or ""),
+                # OSA-side pathologies (tool failures, stalls, compaction,
+                # truncation, early stop) mined from the event stream. This is
+                # what separates "the model wrote a wrong patch" from "OSA got
+                # in its own way", which is the whole point of the exercise.
+                "osa_signals": telemetry.get("signals") or {},
+                **self._capture_transcript(session_id),
             },
         )
 
@@ -311,12 +591,14 @@ class OsaRunner:
         model = None
         deadline = time.monotonic() + task.timeout_s
         log = self._open_log(task.instance_id)
+        sig = _SignalCollector()
 
         def snapshot(status: str, error: str | None = None) -> dict:
             return {
                 "status": status, "error": error,
                 "usage_sum": dict(usage_sum), "cost_usd": cost,
                 "tool_calls": tool_calls, "turns": turns, "model": model,
+                "signals": sig.finish(),
             }
 
         try:
@@ -334,6 +616,7 @@ class OsaRunner:
                     return snapshot("runner_error", "SSE stream closed before done")
                 if log:
                     log.write(json.dumps(ev) + "\n")
+                sig.observe(ev)
 
                 etype = ev.get("type") or ev.get("_event")
                 if etype == "tool_call" and ev.get("phase") == "start":
@@ -353,11 +636,17 @@ class OsaRunner:
             if log:
                 log.close()
 
-    def _open_log(self, instance_id: str):
+    def _event_log_path(self, instance_id: str) -> Path | None:
         if not self.log_dir:
             return None
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        return (self.log_dir / f"{instance_id}.events.jsonl").open("w")
+        return self.log_dir / f"{instance_id}.events.jsonl"
+
+    def _open_log(self, instance_id: str):
+        p = self._event_log_path(instance_id)
+        if not p:
+            return None
+        self.log_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+        return p.open("w")
 
     def _cancel(self, session_id: str) -> None:
         try:
@@ -412,6 +701,14 @@ class OsaRunner:
     # -- cli transport -----------------------------------------------------
 
     def _run_cli(self, task: Task, session_id: str) -> dict:
+        # The HTTP transport POSTs `permission_mode overdrive` before it
+        # dispatches. The CLI transport had no equivalent, so every mutating
+        # tool would have failed closed and the run would have scored 0 for
+        # reasons unrelated to OSA's ability. PermissionMode rehydrates its ETS
+        # table from this file when a fresh BEAM starts, which is exactly what
+        # `mix osa.run` is, so seeding the file is enough.
+        seed_permission_mode(session_id, "overdrive")
+
         cmd = [
             "mix", "osa.run",
             "--format", "stream-json",
@@ -429,15 +726,35 @@ class OsaRunner:
         env = os.environ.copy()
         env["OSA_ORIGINAL_CWD"] = str(task.workspace.resolve())
         env["MIX_ENV"] = env.get("MIX_ENV", "dev")
+        # `mix osa.run` boots the whole application, HTTP listener included. Two
+        # of them, or one alongside a daemon, fight over the port and the loser
+        # dies at boot with an error that has nothing to do with the task. Give
+        # each invocation its own.
+        env["OSA_HTTP_PORT"] = str(_free_port())
 
         log = self._open_log(task.instance_id)
         tool_calls = 0
+        sig = _SignalCollector()
+        timed_out = threading.Event()
         try:
             proc = subprocess.Popen(
                 cmd, cwd=self.repo_root, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, errors="replace",
             )
+
+            # `proc.wait(timeout=...)` after draining stdout can never fire: the
+            # drain loop blocks until the child closes stdout, so a hung agent
+            # hangs the whole benchmark. A watchdog that kills the child is what
+            # actually bounds this.
+            def _watchdog() -> None:
+                if not timed_out.wait(task.timeout_s):
+                    timed_out.set()
+                    proc.kill()
+
+            wd = threading.Thread(target=_watchdog, daemon=True)
+            wd.start()
+
             try:
                 for line in proc.stdout:  # type: ignore[union-attr]
                     if log:
@@ -449,18 +766,27 @@ class OsaRunner:
                         ev = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if ev.get("type") == "tool_use" and ev.get("phase") == "start":
+                    sig.observe(ev)
+                    # `mix osa.run --format stream-json` labels tool frames
+                    # `tool_use`; the HTTP stream calls them `tool_call`. Accept
+                    # both so the two transports report comparable numbers.
+                    if ev.get("type") in ("tool_use", "tool_call") and ev.get(
+                        "phase"
+                    ) in ("start", None):
                         tool_calls += 1
-                rc = proc.wait(timeout=task.timeout_s)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                rc = proc.wait()
+            finally:
+                was_timeout = timed_out.is_set()
+                timed_out.set()  # release the watchdog
+
+            if was_timeout:
                 return {"status": "timeout", "error": f"exceeded {task.timeout_s}s",
-                        "tool_calls": tool_calls}
+                        "tool_calls": tool_calls, "signals": sig.finish()}
             if rc != 0:
-                err = (proc.stderr.read() if proc.stderr else "")[:500]
+                err = (proc.stderr.read() if proc.stderr else "")[:800]
                 return {"status": "agent_error", "error": f"exit {rc}: {err}",
-                        "tool_calls": tool_calls}
-            return {"status": "ok", "tool_calls": tool_calls}
+                        "tool_calls": tool_calls, "signals": sig.finish()}
+            return {"status": "ok", "tool_calls": tool_calls, "signals": sig.finish()}
         finally:
             if log:
                 log.close()

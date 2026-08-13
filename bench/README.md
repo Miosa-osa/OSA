@@ -19,6 +19,7 @@ bench/
     osa_runner.py      drives OSA headlessly (HTTP SSE, or `mix osa.run`)
     workspace.py       materialises an instance as an editable host workspace
     evaluate.py        wrapper around the official swebench grading harness
+    diagnose.py        failure taxonomy: which failures are OSA's fault
     report.py          merges telemetry + grading -> results.json / summary.md
     instances/         curated instance-id subsets
     runs/<run_id>/     all output (gitignored)
@@ -157,18 +158,111 @@ Useful flags: `--limit N`, `--repo psf/requests`, `--difficulty '<15 min fix'`,
 without re-running the agent), `--keep-workspaces` (leave the checkouts on disk
 for debugging), `--osa-mode cli` (drive `mix osa.run` instead of HTTP).
 
+### Choosing a subset: `--sample`, not `--limit`
+
+`--limit N` takes the first N rows in dataset order. That is not a sample and
+the resulting number means nothing — it is kept only for quick smoke runs, and
+`results.json` labels it `head-of-dataset-order (NOT a random sample)`.
+
+```bash
+--sample 40 --sample-seed 20260813 --sample-bias hard
+```
+
+`--sample` is **stratified by repo** — the repo mix of the subset matches the
+dataset's, which matters because `django/django` is 231 of the 500 and any
+accidental bias lands there — and, with `--sample-bias hard` (the default),
+**weighted toward the hard end** within each repo. Hardness is
+`0.40*difficulty + 0.25*min(files_in_gold_patch/4,1) +
+0.20*min(len(PASS_TO_PASS)/250,1) + 0.15*min(len(patch)/6000,1)`, and the draw
+weight is `(0.10 + hardness)**2`.
+
+This is on purpose, and it cuts *against* the score. This harness exists to
+find things to fix; an easy instance that passes teaches nothing. The whole
+provenance block — seed, formula, and the resulting repo/difficulty mix next to
+the population's — is written into `config.json` and quoted in `summary.md`, so
+a subset can never be mistaken for a representative one.
+
+### Reliability: `--attempts K`
+
+`--attempts 3` runs three independent attempts at every instance and reports:
+
+| metric | meaning |
+|---|---|
+| **pass@1** | mean resolve rate over the K attempts — the unbiased single-sample estimate |
+| **pass@K** | resolved by *at least one* attempt — "can it do this at all" |
+| **pass^K** | resolved by *every* attempt — the reliability figure |
+
+The gap between pass@1 and pass@K is the interesting part: a wide gap means the
+agent can solve the task but is unreliable, which is a different problem from
+not being able to solve it. `pass^K` is the number that matters if you intend
+to run the agent unattended, and almost nobody reports it. Token and wall-clock
+totals are summed across all K attempts — pass@K is not free and the report
+does not pretend otherwise.
+
+### Parallelism and disk
+
+`--infer-workers N` (default 2) runs N instances against the agent
+concurrently; `--eval-workers N` is the official grader's own parallelism.
+Inference concurrency is deliberately modest: every worker holds a container, a
+workspace and an OSA session, and they all share one backend, so a high value
+distorts the very per-task latencies being measured.
+
+Instance images are 3-5 GB each. `--min-free-gb` (default 40) aborts an
+instance rather than filling the disk, and `--prune-images` deletes this run's
+instance images afterwards while keeping the shared base and env layers that
+make the next run fast.
+
 ### Output
 
 ```
 runs/<run_id>/
-  config.json        exactly how the run was parameterised
+  config.json        exactly how the run was parameterised, INCLUDING sampling
   inference.jsonl    one record per task, as the agent left it
   predictions.jsonl  the official submission format
   eval/              the official harness's own report + per-instance logs
   logs/*.jsonl       raw SSE event stream per task
-  results.json       <- machine readable, schema_version 1
+  transcripts/<sid>/ OSA's own session files, copied out of ~/.osa/sessions
+  failures/*.md      one dossier per failed instance  <- read these first
+  results.json       <- machine readable, schema_version 2
   summary.md         <- human readable
 ```
+
+With `--attempts K > 1` the per-attempt artefacts move under `attempt1/`,
+`attempt2/`, … and `results.json` / `summary.md` at the top level are the
+merged pass@K report.
+
+---
+
+## 3a. The failure taxonomy — the actually useful output
+
+The pass rate is the least useful number here. What you want from a run is a
+ranked list of things to fix, and that requires separating two failures that
+look identical in a score:
+
+- **model failure** — OSA worked correctly and the model still produced a wrong
+  or incomplete patch. Nothing to fix in OSA.
+- **harness failure** — OSA got in the model's way: a tool errored, a result
+  came back truncated past usefulness, the context meter was broken so
+  compaction could never fire, the stream died, the turn ended early. **These
+  are OSA bugs and they are the reason for running this at all.**
+
+`diagnose.py` puts every failure in exactly one named bucket and tags it
+`model` / `harness` / `bench`. `summary.md` leads with the split and with
+`probable_osa_bugs` — any harness-fault bucket seen more than once in a single
+run, which is a bug report rather than bad luck.
+
+The evidence comes from `osa_signals`, mined from the SSE stream per task: tool
+failure counts by tool name, truncated/offloaded tool results, compaction
+events, peak context utilisation and the window OSA *thought* it had, the
+longest gap between frames (a stall detector), and the agent's final message.
+Every failed instance also gets `failures/<instance_id>.md` carrying the
+submitted patch, exactly which F2P/P2P tests moved, the signals, and a pointer
+to the copied OSA session transcript — enough to diagnose it weeks later,
+which `~/.osa/sessions/` alone is not, because later runs overwrite it.
+
+The split is deliberately conservative: an instance is only called a harness
+failure on positive evidence of OSA misbehaving. Over-claiming OSA bugs would
+make the tool useless in the other direction.
 
 ---
 
@@ -270,33 +364,91 @@ SWE-bench Verified, OSA v1.0.95 backend, provider `ollama`, model
 
 | run | result | meaning |
 |---|---|---|
-| `gold`, 2 instances | **2/2 resolved** | pipeline correct end to end |
-| `empty`, 2 instances | **0/2 resolved** | no accidental credit |
-| `osa`, `psf__requests-1921` | 0/1, `regression_pass_to_pass_broke` | failure taxonomy works on a real failure |
-| `osa`, 2 instances | **2/2 resolved**, 80.6 s, 716k tokens, 25 tool calls | full loop with real telemetry |
+| `gold-apply`, the 40-instance set | **40/40 resolved** | the set is fully winnable, and patch extraction is correct through the real workspace path |
+| `empty`, the 40-instance set | **0/40 resolved** | no accidental credit |
+| `osa`, 40 hard-weighted instances | **24/40 (60.0%)** pass@1 | the scaled run — see below |
+| `osa`, `--osa-mode cli`, 1 instance | 1/1 | the CLI transport, executed for the first time |
+
+**The 40-instance run (`runs/osa-hard40-v2`)**, seed 20260813, stratified by
+repo and hard-weighted (mean hardness 0.443 vs 0.297 for the full dataset; only
+4 of 40 are `<15 min fix`, against 39% of the dataset):
+
+| | |
+|---|---|
+| resolved | **24 / 40 = 60.0%** pass@1, single attempt |
+| 95% interval | 44.6% – 73.7% (29 points wide — this ranks nothing) |
+| wall clock | 4715 s of agent time, 3 workers |
+| tokens | 59.9M in / 262k out, **0 cache reads** |
+| cost | **$0.00 reported, which is an OSA bug, not a free run** (§7.3) |
+| tool calls | 1510 total, 37.8 mean/task, **158 failed** |
+
+Failures split **11 model / 4 harness / 1 bench** — i.e. **25% of all failures
+were OSA's fault rather than the model's**. Two adjusted views, both stated
+because neither alone is honest:
+
+- excluding the 3 instances OSA *refused* (unwinnable, §7.7): **24/37 = 64.9%**
+- excluding the 6 instances where the agent used `web_fetch`: **18/34 = 52.9%**
+  — and those 6 resolved **6/6**, against 52.9% elsewhere. That gap is why the
+  web-lookup defect is a BLOCK and not a footnote.
+
+`bench/report/cli.py gate` **refuses to print this as a rate**, on two blocking
+findings: web lookup is not prevented, and 40 of 500 is not a dataset score.
+That is the correct outcome and the number must not be quoted as OSA's
+SWE-bench Verified score.
 
 Every layer — dataset, workspace, agent, patch extraction, official grading,
 report — has run against real data. Nothing in the pipeline is mocked.
 
+### The correctness audit — read this before trusting any earlier number
+
+An audit of this harness found that **every number it produced before
+2026-08-14 was wrong in both directions at once**. Three of the four defects
+were the harness misrepresenting the agent, which is the failure mode a
+measurement tool must never have:
+
+| defect | direction | status |
+|---|---|---|
+| `_is_test_path` substring-matched `"test/"`, which is inside `src/_pytest/` — 19 of the 500 gold patches were stripped **in full**, ceiling 96.2%, and the result was reported as the agent's `no_patch_produced` | deflates, and blames the agent | **fixed** |
+| FAIL_TO_PASS node ids baked into `run_tests.sh`, where test names state the required behaviour | inflates | **fixed** (now `--f2p-hint`, default off) |
+| pass@k reported in `instances_resolved` | inflates | **fixed** (pass@1 primary; the field is `null` for k>1) |
+| gold control bypassed workspace prep and `git_diff()`, so it could not see defect 1 | hides defects | **fixed** (`--runner gold-apply`) |
+| web lookup of the published fix not prevented | inflates | **STILL OPEN** — see below |
+
+The stripping predicate is now derived from the instance's own `test_patch`
+rather than guessed from filenames. That is exact by construction: the grader
+reverts precisely the files in `test_patch`, so the recorded patch and the
+graded patch cannot drift. Verified against all 500 gold patches: 0 damaged,
+ceiling 100.0%.
+
+**Still open — web lookup.** The prompt names the repo and the exact base
+commit, and the upstream fix is a public commit. The test container is
+`--network none`, but OSA runs on the *host* in `overdrive`, with
+`web_search` / `web_fetch` / `download` / `browser` / `github` all available.
+A workspace-local `.osa/settings.local.json` deny hook was implemented and
+**probed against a live backend: it does not work.** `Settings.layer(:local)`
+resolves through a process-global `Workspace.Cwd`, so the per-request
+`working_dir` cannot scope a policy file. Enforcing this needs an OSA change —
+a per-session tool allowlist on `/api/v1/orchestrate`, or session-scoped
+settings. Until then the harness *measures* instead: every tool call is counted
+by name, and `results.json` carries `network_tool_use` with the per-instance
+evidence. Measurement is not prevention, and `bench/report`'s gate correctly
+refuses to print a rate while this stands.
+
 **Not proven / stubbed:**
 
-- **Scale.** The largest run so far is 4 instances. Nothing has been run at
-  N=100 or N=500; expect to hit image-pull volume, disk, and long-tail agent
-  timeouts there. The 2/2 OSA result is a pipeline demonstration, not a score.
-- **`--osa-mode cli`** is implemented but **never executed**. Only the HTTP
-  transport has been exercised.
-- **Parallel inference is not implemented.** Tasks run strictly sequentially
-  (grading is parallel via `--eval-workers`). Concurrency would need one OSA
-  session per worker and has not been tested.
-- **Non-Python repos**: the test bridge's default `python -m pytest` invocation
-  is wrong for `django/django`, which uses its own runner. Django tasks still
-  grade correctly (grading is independent), but `run_tests.sh` will not work
-  for the agent on those instances.
+- **Full dataset.** Nothing has been run at N=500. Expect image-pull volume
+  (~2 TB at `--cache-level instance`) and long-tail agent timeouts there.
 - **Terminal-Bench**: researched, documented in §1, **not built**.
-- **Cost in dollars** has never been observed non-zero, because the configured
-  provider does not price per token. The cost path is therefore untested
-  against a real bill.
-- **Retry / pass@k** is not implemented; every task gets exactly one attempt.
+- **Cost in dollars** has never been observed non-zero — but the reason is now
+  known and it is an OSA bug, not a property of the provider: the loop state
+  carries `model: nil`, so `Pricing.cost/2` prices every turn at $0.00 and logs
+  `[Pricing] No price for model nil`. `glm-5.2:cloud` *is* priced at
+  {0.60, 2.20} in the table. See §7.
+- **Grader determinism.** Some instances have network-dependent tests:
+  `psf__requests-1921` failed and then passed on an identical re-run of the
+  *gold* patch (`test_DIGESTAUTH_WRONG_HTTP_401_GET`). The official grader is
+  not deterministic on those, which is a further reason single-sample numbers
+  are noisy.
 
 ---
 
@@ -319,7 +471,60 @@ worth acting on independently, found while wiring it up:
 
 1. `mix osa.run --format json` reports `"cost": 0` always — `get_session_cost/0`
    in `lib/mix/tasks/osa.run.ex` reads a `:total_cost_usd` key that
-   `Budget.get_status/0` does not return. The sidecar has the real numbers.
+   `Budget.get_status/0` does not return. *(Fixed in 7e44213a.)*
 2. `<id>.spend.json` is never reset for a session id, so any tool that reuses a
    session id accumulates across runs. This harness works around it by putting
    the run id in the session id and clearing the sidecar first.
+3. **The agent loop's state carries `model: nil`.** Every `cost_update` frame
+   ships `"model": null`, and the daemon logs `[Pricing] No price for model nil
+   — cost recorded as $0.0` once per turn. Two independent consequences, both
+   silent:
+   - **all cost accounting is dead.** `glm-5.2:cloud` is priced
+     {0.60, 2.20} per 1M in `Agent.Pricing`, so a 40-instance run that really
+     cost single-digit dollars reports $0.00. `max_budget_usd` is therefore
+     unenforceable in headless mode — the cap can never trip.
+   - **compaction thresholds are dead.** `Telemetry.emit_context_pressure/1`
+     starts `provider_context_window(state)`, which returns `0` when the model
+     is nil. Every frame reads `max=0 util=0.0% percent_left=100`, so
+     `above_compact` and `at_blocking_limit` can never become true no matter
+     how large the transcript grows. Observed live: `[ctx] estimated=42538
+     max=0 util=0.0%`. `/health` reports the model and a 1,000,000 context
+     window correctly, so this is state population, not configuration.
+4. **`mix osa.run --format stream-json` is not a stream.** It registers Bus
+   handlers for `:tool_call` and streaming tokens, but a full run emitted
+   exactly one JSON line — the terminal `{"type":"result",...}`. Zero
+   `tool_use` frames across a 39-second, multi-tool session. Anything consuming
+   the documented event stream gets nothing.
+5. **`Settings.layer(:local)` is not session-scoped.** It resolves through a
+   process-global `Workspace.Cwd`, so the per-request `working_dir` on
+   `/api/v1/orchestrate` cannot scope a policy file. This is what makes it
+   impossible to restrict tools for one session — see the web-lookup defect in
+   §5.
+6. **`~/.osa/permission_mode.json` has no eviction.** One row per session id,
+   for ever; it is already several hundred entries. This harness cleans up its
+   own rows on `close()`.
+7. **The prompt-injection guard hard-refuses ordinary bug reports.** The
+   structural detector in `Agent.Safety.PromptInjection` matches
+   `/(?:^|\n)\s*(?:system|assistant|user)\s*:/i`, and scikit-learn's and
+   matplotlib's issue templates paste an environment block that begins with a
+   bare `System:` line — the header of `sklearn.show_versions()`. OSA replies
+   `"I can't share my internal configuration or system instructions."` and ends
+   the turn: **zero tool calls, zero LLM turns, ~1 second**. It cost 3 of 40
+   instances in the run above, and the pattern matches **15 of the 500**
+   SWE-bench Verified issue bodies (3.0%).
+
+   The blast radius is much wider than this benchmark: any pasted log, version
+   dump, stack trace or chat transcript containing a line that starts with
+   `System:`, `User:` or `Assistant:` gets the user's request refused outright.
+   A structural marker in the *middle of quoted third-party text* is not a user
+   trying to extract the system prompt — OSA's own
+   `@untrusted_directive_patterns` comment already makes exactly this argument
+   ("refusing the user's turn is the wrong response"), but the structural tier
+   does not follow it.
+8. **The bind-mounted workspace can become unwritable to the host.** One
+   instance (`matplotlib__matplotlib-25311`) died in `git add -A` with
+   `insufficient permission for adding an object to repository database
+   .git/objects`. The test container runs as root over the same inodes, so a
+   tool run inside it can leave root-owned objects that the host user can no
+   longer write. `PreparedWorkspace.teardown` chowns back, but only at the end
+   — too late for the extraction that happens first.

@@ -15,7 +15,53 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+import diagnose
+
+#: Tools that can reach the public internet, where the real fix for a 2019-2023
+#: GitHub issue is published. The container the tests run in is `--network
+#: none`, but OSA itself runs on the HOST, so the sandbox does not constrain it.
+#: SWE-bench's own checklist requires that the agent cannot look the answer up;
+#: Epoch runs airgapped for exactly this reason.
+#:
+#: OSA has no per-session tool allowlist on the orchestrate API, so the harness
+#: cannot currently switch these off. What it CAN do is measure: every tool
+#: invocation is counted by name, so "was the answer looked up" is answered
+#: with evidence rather than assumed either way.
+NETWORK_TOOLS = ("web_search", "web_fetch", "download", "browser", "github")
+
+
+def network_tool_use(rows: list[dict]) -> dict:
+    used: dict[str, int] = {}
+    instances = []
+    for r in rows:
+        names = (r.get("osa_signals") or {}).get("tool_names") or {}
+        hit = {k: v for k, v in names.items() if k in NETWORK_TOOLS}
+        if hit:
+            instances.append(r["instance_id"])
+            for k, v in hit.items():
+                used[k] = used.get(k, 0) + v
+    return {
+        "tools_watched": list(NETWORK_TOOLS),
+        "available_to_agent": True,
+        "enforcement": (
+            "NONE. Measured, not prevented. OSA has no per-session tool "
+            "allowlist on /api/v1/orchestrate, and a workspace-local "
+            ".osa/settings.local.json deny hook was tried and verified "
+            "ineffective: Settings.layer(:local) resolves through a "
+            "process-global Workspace.Cwd, so the per-request working_dir "
+            "cannot scope it. A probe with the hook installed still returned "
+            "live web_search results."
+        ),
+        "enforcement_verified_ineffective": True,
+        "calls_by_tool": used,
+        "instances_that_used_one": sorted(instances),
+        "clean": not used,
+    }
+
+#: 2 adds: per-instance failure_bucket/failure_fault/failure_evidence and the
+#: osa_signals block; multi-attempt (pass@k) aggregates; the sampling
+#: provenance block. `failure_reason` is retained unchanged for compatibility.
+SCHEMA_VERSION = 2
 
 
 def _instance_detail(report_dir: Path, run_id: str, model: str, iid: str) -> dict:
@@ -95,12 +141,36 @@ def build(
         outcome = outcomes.get(iid, "incomplete")
         detail = _instance_detail(report_dir, run_id, model, iid)
         status = detail.get("tests_status") or {}
+        raw = inf.get("raw") or {}
+        verdict = diagnose.classify(
+            outcome=outcome,
+            inference=inf,
+            detail=detail,
+            patch_did_not_apply=(
+                outcome == "eval_error"
+                and diagnose.patch_apply_failed(report_dir, run_id, model, iid)
+            ),
+        )
         rows.append(
             {
                 "instance_id": iid,
                 "resolved": outcome == "resolved",
                 "outcome": outcome,
                 "failure_reason": _failure_reason(outcome, inf, detail),
+                # The bucket every failure lands in, and whose fault it was.
+                # See diagnose.py: `harness` means OSA got in the model's way
+                # and is a bug report, not a score.
+                "failure_bucket": verdict["bucket"],
+                "failure_fault": verdict["fault"],
+                "failure_evidence": verdict["evidence"],
+                "osa_signals": raw.get("osa_signals") or {},
+                # Carried for failures only -- it is the primary diagnostic
+                # artefact, and carrying it for passes would double the file
+                # size to say "this one worked".
+                "model_patch": "" if outcome == "resolved" else inf.get("patch", ""),
+                "transcript_dir": raw.get("transcript_dir"),
+                "event_log": raw.get("event_log"),
+                "dropped_test_paths": raw.get("dropped_test_paths") or [],
                 "wall_clock_s": round(inf.get("wall_clock_s") or 0.0, 2),
                 "tokens_in": inf.get("tokens_in"),
                 "tokens_out": inf.get("tokens_out"),
@@ -162,6 +232,12 @@ def build(
         "tool_calls_mean": _mean(r["tool_calls"] for r in rows),
         "turns_mean": _mean(r["turns"] for r in rows),
         "failure_taxonomy": dict(sorted(taxonomy.items(), key=lambda kv: -kv[1])),
+        # The actionable half of the report: every failure in a named bucket,
+        # split by whether OSA or the model was responsible.
+        "diagnosis": diagnose.summarize(rows),
+        "probable_osa_bugs": diagnose.repeated_harness_failures(rows),
+        # Whether the agent could have looked the answer up, and whether it did.
+        "network_tool_use": network_tool_use(rows),
     }
 
     return {
@@ -172,6 +248,139 @@ def build(
             k: v for k, v in harness_report.items() if not k.endswith("_ids")
         },
         "instances": rows,
+    }
+
+
+def merge_attempts(attempt_docs: list[dict], config: dict) -> dict:
+    """Fold k independent attempts at the same instances into one document.
+
+    Single-sample SWE-bench scores are noisy enough that the industry reports
+    both pass@1 and pass@k, and the gap between them says something real: a
+    large gap means the agent *can* solve the task but is unreliable, which is
+    a different problem from not being able to solve it at all.
+
+    Definitions used here, stated because they are not universal:
+
+      pass@1  -- mean resolve rate across the k attempts (not "attempt 1"),
+                 which is the unbiased estimator of a single sample's success.
+      pass@k  -- fraction of instances resolved by *at least one* attempt.
+      pass^k  -- fraction resolved by *every* attempt. The reliability figure;
+                 almost nobody reports it, and it is the one that matters if
+                 you intend to trust the agent unattended.
+    """
+    if len(attempt_docs) == 1:
+        doc = attempt_docs[0]
+        doc["aggregate"]["attempts"] = 1
+        doc["aggregate"]["pass_at_1"] = doc["aggregate"]["resolve_rate"]
+        doc["aggregate"]["pass_at_k"] = doc["aggregate"]["resolve_rate"]
+        doc["aggregate"]["pass_hat_k"] = doc["aggregate"]["resolve_rate"]
+        return doc
+
+    k = len(attempt_docs)
+    base = attempt_docs[0]
+    by_id: dict[str, list[dict]] = {}
+    for doc in attempt_docs:
+        for r in doc["instances"]:
+            by_id.setdefault(r["instance_id"], []).append(r)
+
+    merged_rows = []
+    for iid, attempts in sorted(by_id.items()):
+        oks = [a["resolved"] for a in attempts]
+        # Report the FIRST failing attempt as the representative row: a passing
+        # attempt has nothing to diagnose, and the point of this file is the
+        # failures.
+        rep = next((a for a in attempts if not a["resolved"]), attempts[0])
+        merged_rows.append(
+            rep
+            | {
+                "attempts_n": len(attempts),
+                "attempts_resolved": sum(oks),
+                "resolved_any": any(oks),
+                "resolved_all": all(oks),
+                # `resolved` keeps its per-attempt meaning for the
+                # representative row; use resolved_any/_all for pass@k.
+                "per_attempt": [
+                    {
+                        "attempt": i + 1,
+                        "resolved": a["resolved"],
+                        "bucket": a.get("failure_bucket"),
+                        "fault": a.get("failure_fault"),
+                        "wall_clock_s": a.get("wall_clock_s"),
+                    }
+                    for i, a in enumerate(attempts)
+                ],
+            }
+        )
+
+    n = len(merged_rows)
+    per_attempt_rates = [d["aggregate"]["resolve_rate"] or 0.0 for d in attempt_docs]
+    agg = dict(base["aggregate"])
+    agg.update(
+        {
+            "attempts": k,
+            "instances_attempted": n,
+            # DELIBERATELY None for k>1. Reporting `resolved_any` here would be
+            # pass@k wearing pass@1's name, which is the single most common way
+            # a multi-sample SWE-bench number gets overstated. There is no
+            # honest scalar "resolved count" across k attempts, so the field is
+            # withheld and the reader is forced onto a labelled metric.
+            "instances_resolved": None,
+            "instances_resolved_any": sum(1 for r in merged_rows if r["resolved_any"]),
+            "instances_resolved_all": sum(1 for r in merged_rows if r["resolved_all"]),
+            "instances_resolved_per_attempt": [
+                d["aggregate"]["instances_resolved"] for d in attempt_docs
+            ],
+            # The primary metric. pass@k is reported alongside, never instead.
+            "pass_at_1": round(sum(per_attempt_rates) / k, 4),
+            "pass_at_k": round(
+                sum(1 for r in merged_rows if r["resolved_any"]) / n, 4
+            )
+            if n
+            else None,
+            "pass_hat_k": round(
+                sum(1 for r in merged_rows if r["resolved_all"]) / n, 4
+            )
+            if n
+            else None,
+            "resolve_rate_per_attempt": [round(x, 4) for x in per_attempt_rates],
+            # `resolve_rate` stays pass@1 so a k=1 and a k>1 run can be
+            # compared without reading the schema.
+            "resolve_rate": round(sum(per_attempt_rates) / k, 4),
+            # Cost/time are the SUM over all attempts -- k attempts really did
+            # cost k times as much, and pretending otherwise would make pass@k
+            # look free.
+            "wall_clock_total_s": round(
+                sum(d["aggregate"]["wall_clock_total_s"] for d in attempt_docs), 2
+            ),
+            "tokens_in_total": _total(
+                d["aggregate"]["tokens_in_total"] for d in attempt_docs
+            ),
+            "tokens_out_total": _total(
+                d["aggregate"]["tokens_out_total"] for d in attempt_docs
+            ),
+            "diagnosis": diagnose.summarize(merged_rows),
+            "probable_osa_bugs": diagnose.repeated_harness_failures(merged_rows),
+            "network_tool_use": network_tool_use(merged_rows),
+        }
+    )
+    ti, to = agg["tokens_in_total"], agg["tokens_out_total"]
+    agg["tokens_total"] = (ti + to) if (ti is not None and to is not None) else None
+    # Efficiency is quoted per *resolved-at-all* task, and says so, because the
+    # denominator has to be a real count of tasks that produced a fix.
+    nres = agg["instances_resolved_any"]
+    agg["tokens_per_resolved"] = (
+        round(agg["tokens_total"] / nres, 1) if nres and agg["tokens_total"] else None
+    )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "config": config,
+        "aggregate": agg,
+        "harness_report": base.get("harness_report", {}),
+        "instances": merged_rows,
+        "per_attempt_aggregates": [
+            {"attempt": i + 1, **d["aggregate"]} for i, d in enumerate(attempt_docs)
+        ],
     }
 
 
@@ -192,11 +401,34 @@ def summary_md(results: dict) -> str:
         "",
         "## Headline",
         "",
-        f"**{a['instances_resolved']} / {a['instances_attempted']} resolved "
-        f"({(a['resolve_rate'] or 0) * 100:.1f}%)**",
-        "",
     ]
+    if a.get("attempts", 1) > 1:
+        lines += [
+            f"**pass@1 = {(a['pass_at_1'] or 0) * 100:.1f}%** "
+            f"(mean of {a['attempts']} independent attempts at "
+            f"{a['instances_attempted']} instances; per attempt: "
+            f"{', '.join(f'{x * 100:.1f}%' for x in a['resolve_rate_per_attempt'])})",
+            "",
+            "pass@1 is the primary metric and the only one comparable to a "
+            "published SWE-bench number. The two below are reported because "
+            "single samples are noisy, and must never be quoted as the score.",
+            "",
+            f"- pass@{a['attempts']} (resolved by **at least one** attempt): "
+            f"{(a['pass_at_k'] or 0) * 100:.1f}% "
+            f"({a['instances_resolved_any']}/{a['instances_attempted']})",
+            f"- pass^{a['attempts']} (resolved by **every** attempt — the "
+            f"reliability figure): {(a['pass_hat_k'] or 0) * 100:.1f}% "
+            f"({a['instances_resolved_all']}/{a['instances_attempted']})",
+            "",
+        ]
+    else:
+        lines += [
+            f"**{a['instances_resolved']} / {a['instances_attempted']} resolved "
+            f"({(a['resolve_rate'] or 0) * 100:.1f}%)**  — pass@1, single attempt.",
+            "",
+        ]
     if not a["is_full_dataset_run"]:
+        samp = cfg.get("sampling") or {}
         lines += [
             "> This is a **subset** run. It is a pipeline and regression signal, "
             "not a SWE-bench Verified score, and must not be quoted as one. "
@@ -204,6 +436,95 @@ def summary_md(results: dict) -> str:
             "enough to swallow most of the leaderboard.",
             "",
         ]
+        if samp:
+            lines += [
+                f"> **Sampling**: `{samp.get('method')}`, seed `{samp.get('seed')}`, "
+                f"{samp.get('n_selected')} of {samp.get('population')} instances"
+                + (
+                    f", deliberately weighted toward the hard end "
+                    f"(difficulty/patch-size/PASS_TO_PASS-count). "
+                    f"**This subset is harder than the full dataset, so the rate "
+                    f"here should read LOWER than a full-dataset score, not higher.**"
+                    if samp.get("hard_weighted")
+                    else ""
+                ),
+                "",
+            ]
+    if cfg.get("f2p_hint"):
+        lines += [
+            "> **The agent was given the FAIL_TO_PASS test ids** via "
+            "`run_tests.sh`. That is an advantage leaderboard agents do not "
+            "have, it violates the official checklist, and it inflates this "
+            "number. Re-run without `--f2p-hint` before quoting anything.",
+            "",
+        ]
+
+    net = a.get("network_tool_use") or {}
+    if net:
+        if net.get("clean"):
+            lines += [
+                "> **Web access**: the agent *could* reach the internet "
+                f"(`{'`, `'.join(net['tools_watched'])}` were all available — "
+                "OSA has no per-session tool allowlist, so the harness can "
+                "measure this but not prevent it). It **did not call any of "
+                "them** on any instance, so no answer was looked up in this "
+                "run. That is an observation, not a guarantee: `shell_execute` "
+                "can also reach the network.",
+                "",
+            ]
+        else:
+            lines += [
+                "> **WEB ACCESS WAS USED — this run is not a valid measurement.** "
+                f"Network tools were called: `{net['calls_by_tool']}` on "
+                f"instances {', '.join('`' + i + '`' for i in net['instances_that_used_one'][:10])}. "
+                "The fix for these issues is published online, so any instance "
+                "here may have been looked up rather than solved.",
+                "",
+            ]
+
+    diag = a.get("diagnosis") or {}
+    if diag.get("failures_total"):
+        by = diag.get("by_fault", {})
+        share = diag.get("harness_fault_share")
+        lines += [
+            "## Whose fault were the failures",
+            "",
+            "The point of this run is the failures, and they are only "
+            "actionable once OSA's own faults are separated from the model's.",
+            "",
+            "| fault | count | meaning |",
+            "|---|---|---|",
+            f"| **harness (OSA)** | {by.get('harness', 0)} | OSA got in the "
+            "model's way — these are bugs to fix |",
+            f"| model | {by.get('model', 0)} | OSA worked; the patch was wrong |",
+            f"| bench | {by.get('bench', 0)} | this harness or Docker misbehaved |",
+            "",
+            f"**{(share or 0) * 100:.0f}% of failures were OSA's fault**, not the model's."
+            if share is not None
+            else "",
+            "",
+        ]
+        bugs = a.get("probable_osa_bugs") or []
+        if bugs:
+            lines += [
+                "### Probable OSA bugs (same harness failure seen more than once)",
+                "",
+            ]
+            for b in bugs:
+                lines.append(
+                    f"- **`{b['bucket']}`** × {b['count']} — "
+                    + ", ".join(f"`{i}`" for i in b["instances"][:8])
+                )
+            lines.append("")
+
+        lines += ["### Every failure, bucketed", "", "| bucket | fault | count |", "|---|---|---|"]
+        fault_of = {}
+        for r in results["instances"]:
+            if r.get("failure_bucket"):
+                fault_of[r["failure_bucket"]] = r.get("failure_fault")
+        for k, v in diag.get("buckets", {}).items():
+            lines.append(f"| `{k}` | {fault_of.get(k, '?')} | {v} |")
+        lines.append("")
     lines += [
         "## Cost of the result",
         "",
@@ -240,8 +561,8 @@ def summary_md(results: dict) -> str:
         lines.append(
             "| `{iid}` | {ok} | {reason} | {w} | {ti} | {to} | {tc} | {c} |".format(
                 iid=r["instance_id"],
-                ok="yes" if r["resolved"] else "no",
-                reason=r["failure_reason"] or "-",
+                ok="yes" if r.get("resolved_any", r["resolved"]) else "no",
+                reason=r.get("failure_bucket") or r["failure_reason"] or "-",
                 w=r["wall_clock_s"],
                 ti=_fmt(r["tokens_in"]),
                 to=_fmt(r["tokens_out"]),
