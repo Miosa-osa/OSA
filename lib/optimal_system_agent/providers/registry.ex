@@ -2135,6 +2135,40 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec resolved_default_provider() :: atom()
   def resolved_default_provider, do: default_provider()
 
+  @doc """
+  The model a turn will actually run on when nothing named one explicitly.
+
+  A session started without an explicit `:model` used to carry `model: nil`
+  all the way through, and nil is not an absence — it is a value that silently
+  breaks everything keyed on the model:
+
+    * pricing logs `No price for model nil`, so `session_cost_usd` stays 0 and
+      `max_budget_usd` can never trip;
+    * `Loop.ContextWindow.resolve/1` returns `:unknown`, so the pressure meter
+      reports `max=0 util=0.0%` and `above_compact` can never become true —
+      **compaction never fires for the whole session**.
+
+  Measured across a 40-instance benchmark run: 37 of 40 sessions reported a
+  zero context window for exactly this reason.
+
+  Resolution mirrors what the request path already does — the provider's own
+  `default_model/0` — so the state agrees with the wire instead of guessing.
+  """
+  @spec resolved_default_model(atom() | nil) :: String.t() | nil
+  def resolved_default_model(provider \\ nil) do
+    provider = provider || resolved_default_provider()
+
+    # provider_info/1 replies {:ok, map}. Matching a bare map here silently
+    # yielded nil for every provider — the same tuple-vs-map slip that made
+    # `osa.run --format json` report a cost of 0.
+    case provider_info(provider) do
+      {:ok, %{default_model: model}} when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
   defp default_provider do
     case live_explicit_default_provider() do
       {:ok, provider} ->

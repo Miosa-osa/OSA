@@ -939,8 +939,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
       channel: Keyword.get(opts, :channel, :cli),
-      provider: Keyword.get(opts, :provider),
-      model: Keyword.get(opts, :model),
+      # Resolve provider AND model up front. Carrying `model: nil` is not an
+      # absence, it is a value that silently disables both cost accounting and
+      # compaction — see `Registry.resolved_default_model/1`.
+      provider:
+        Keyword.get(opts, :provider) ||
+          OptimalSystemAgent.Providers.Registry.resolved_default_provider(),
+      model:
+        Keyword.get(opts, :model) ||
+          OptimalSystemAgent.Providers.Registry.resolved_default_model(
+            Keyword.get(opts, :provider)
+          ),
       messages: messages,
       iteration: iteration,
       plan_mode: plan_mode,
