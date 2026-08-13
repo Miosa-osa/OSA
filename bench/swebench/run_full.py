@@ -163,7 +163,16 @@ def prune_wave(ids: list[str]) -> float:
         img = ws.instance_image(iid)
         if ws.image_present(img):
             subprocess.run(["docker", "rmi", "-f", img], capture_output=True)
-    subprocess.run(["docker", "container", "prune", "-f"], capture_output=True)
+    # NOT `docker container prune -f`: that removes every stopped container on
+    # the host, including ones belonging to whoever else uses this machine.
+    # Only this harness's own leftovers are ours to delete.
+    stale = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", "status=exited",
+         "--filter", "name=^bench-", "--filter", "name=^sweb.eval"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    if stale:
+        subprocess.run(["docker", "rm", "-f", *stale], capture_output=True)
     freed = free_gb() - before
     log(f"pruned wave images: freed {freed:.1f} GB, {free_gb():.0f} GB free")
     return freed

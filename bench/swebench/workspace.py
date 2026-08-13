@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -207,8 +208,74 @@ def image_present(image: str) -> bool:
     )
 
 
-def pull_image(image: str) -> None:
-    subprocess.run(["docker", "pull", image], check=True)
+def mirror_image(instance_id: str, tag: str = "latest") -> str:
+    """The Epoch Research mirror of the same instance image.
+
+    Note the naming differs from Docker Hub's in TWO ways, both verified by
+    `docker manifest inspect` rather than read off a README:
+
+      docker.io   swebench/sweb.eval.x86_64.astropy_1776_astropy-13236:latest
+      ghcr.io     ghcr.io/epoch-research/swe-bench.eval.x86_64.astropy__astropy-13236:latest
+
+    `sweb` -> `swe-bench`, and the `__` -> `_1776_` rewrite that Docker Hub tags
+    require is NOT applied. Getting either wrong yields a 404 that looks exactly
+    like "the mirror does not have this instance".
+    """
+    return (
+        f"ghcr.io/epoch-research/swe-bench.eval.{ARCH}.{instance_id}:{tag}"
+    )
+
+
+#: Docker Hub's anonymous pull cap is 100 per 6 hours per IP, and a 500-instance
+#: SWE-bench run needs 500 pulls. This is the failure that does not appear at
+#: n=40 and is guaranteed at n=500.
+_RATE_LIMITED = ("429", "too many requests", "toomanyrequests", "rate limit")
+
+
+def pull_image(image: str, instance_id: str | None = None) -> None:
+    """Pull an instance image, falling back to the GHCR mirror on a 429.
+
+    OBSERVED, not anticipated: wave 0 of a full-dataset run pulled 50 images
+    fine; wave 1 lost 28 of 50 to
+    `unexpected status from HEAD request to https://registry-1.docker.io/...:
+    429 Too Many Requests`, and those 28 were recorded as
+    `bench_workspace_error` -- i.e. the gold control scored 21/50 for reasons
+    that had nothing to do with the patches.
+
+    The mirror is pulled and then RE-TAGGED to the Docker Hub name, because the
+    official grader builds its own image reference from the instance id and
+    looks it up locally first. Re-tagging means one fallback here fixes both the
+    inference pull and the grading pull, with no change to how the harness is
+    invoked.
+    """
+    r = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+    if r.returncode == 0:
+        return
+    err = (r.stderr or "") + (r.stdout or "")
+    low = err.lower()
+    if instance_id is None or not any(m in low for m in _RATE_LIMITED):
+        raise subprocess.CalledProcessError(
+            r.returncode, ["docker", "pull", image], output=r.stdout, stderr=r.stderr
+        )
+
+    mirror = mirror_image(instance_id)
+    print(f"[workspace] docker.io rate-limited; trying mirror {mirror}",
+          file=sys.stderr)
+    m = subprocess.run(["docker", "pull", mirror], capture_output=True, text=True)
+    if m.returncode != 0:
+        raise subprocess.CalledProcessError(
+            m.returncode, ["docker", "pull", mirror],
+            output=m.stdout,
+            stderr=(
+                f"docker.io said: {err.strip()[:500]}\n"
+                f"mirror said: {(m.stderr or '').strip()[:500]}"
+            ),
+        )
+    subprocess.run(["docker", "tag", mirror, image], check=True)
+    # Drop the mirror's own tag; the layers are shared, so this frees the name
+    # without freeing the data, and the local image now answers to exactly the
+    # reference the grader will ask for.
+    subprocess.run(["docker", "rmi", mirror], capture_output=True)
 
 
 @dataclass
@@ -256,7 +323,7 @@ def prepare(
     default_tests = default_test_args(instance) if f2p_hint else NO_DEFAULT_TESTS_MSG
     image = instance_image(iid, namespace=namespace)
     if not image_present(image):
-        pull_image(image)
+        pull_image(image, instance_id=iid)
 
     dest = root / iid
     shutil.rmtree(dest, ignore_errors=True)
