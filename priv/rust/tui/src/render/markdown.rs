@@ -142,7 +142,6 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                         .add_modifier(Modifier::BOLD)
                 };
                 lines.push(Line::from(Span::styled(text, style)));
-                lines.push(Line::from(Span::raw("")));
                 continue;
             }
         }
@@ -184,7 +183,6 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD);
             push_heading_raw(&mut lines, text, width, style);
-            lines.push(Line::from(Span::raw(""))); // breathing room after h2
             continue;
         }
         if raw_line.starts_with("# ") {
@@ -193,7 +191,6 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             push_heading_raw(&mut lines, text, width, style);
-            lines.push(Line::from(Span::raw("")));
             continue;
         }
 
