@@ -49,6 +49,11 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @response_reserve 8_192
 
+  # Smallest dynamic budget the assembler will operate with. See
+  # `report_budget_shortfall/2` for why reaching it is reported rather than
+  # absorbed. Declared here, before its first use in `token_budget/1`.
+  @dynamic_budget_floor 1_000
+
   # A window at or below this is "small": it gets the trimmed prompt variant and
   # the trimmed tool list. This is a property of the MODEL's resolved window, not
   # of the provider transport — see `small_window?/2`.
@@ -108,13 +113,32 @@ defmodule OptimalSystemAgent.Agent.Context do
     # Single source of truth for the window OSA actually operates within. For
     # local providers this is capped to :ollama_num_ctx (the same num_ctx we send
     # to Ollama), so the assembled prompt is budgeted against the REAL window
-    # rather than the model's trained maximum. nil/"" model resolves to the config
-    # default, preserving prior cloud behavior.
-    max_tok =
-      OptimalSystemAgent.Providers.Registry.effective_context_window(
-        Map.get(state, :model),
-        provider
-      )
+    # rather than the model's trained maximum.
+    #
+    # The model is RESOLVED, never read raw. A state with `model: nil` — which is
+    # what every non-CLI entry point produces today, `serve`/HTTP included — used
+    # to resolve as an unknown local model: `effective_context_window(nil,
+    # :ollama)` falls through to the 128k config default and then applies the
+    # local `:ollama_num_ctx` ceiling, because a nil model cannot match the
+    # ":cloud" tag test that exempts hosted tags. MEASURED: 32,768 for `nil`
+    # against 1,000,000 for the `glm-5.2:cloud` that was actually serving the
+    # request — a 30x under-budget, with two knock-on effects, both of them the
+    # wrong way round:
+    #
+    #   * `lite?` went true, so the request took the :lite static base (17,733
+    #     tokens MEASURED) instead of the :native_tools one (9,332) — the small
+    #     window got the BIGGER prompt;
+    #   * `dynamic_budget` bottomed out on its floor, and the world state was
+    #     gutted section by section (Terminal-Bench `dna-assembly` /
+    #     `make-mips-interpreter`: tool doctrine truncated, environment, apps and
+    #     agent roster dropped) to fit a window that was never the real one.
+    #
+    # `environment_block/1` already resolves the same way — it has to, or the
+    # prompt tells the model it is a model it is not. Budgeting and the identity
+    # line must agree, so both go through the same resolver.
+    model = Map.get(state, :model) || get_active_model(provider)
+
+    max_tok = OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider)
 
     # Local providers (or any small effective window) get the LITE static base:
     # only the core-tool allowlist is inlined; every other tool is advertised by
@@ -165,7 +189,19 @@ defmodule OptimalSystemAgent.Agent.Context do
     # RECALL group (memory/project/skills) is additionally capped to a fraction
     # of the REAL window so trivial turns can't balloon into the free space.
     reserve = response_reserve(max_tok)
-    dynamic_budget = max(max_tok - reserve - conversation_tokens - static_tokens, 1_000)
+    raw_dynamic = max_tok - reserve - conversation_tokens - static_tokens
+
+    dynamic_budget =
+      report_budget_shortfall(raw_dynamic, %{
+        max_tok: max_tok,
+        reserve: reserve,
+        conversation: conversation_tokens,
+        static: static_tokens,
+        session: Map.get(state, :session_id, "default"),
+        model: model,
+        provider: provider
+      })
+
     {world_state, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok)
 
     ws_tokens = estimate_tokens(world_state)
@@ -224,7 +260,12 @@ defmodule OptimalSystemAgent.Agent.Context do
       end)
 
     reserve = response_reserve(max_tok)
-    dynamic_budget = max(max_tok - reserve - conversation_tokens - static_tokens, 1_000)
+
+    # No `report_budget_shortfall/2` here: inspecting the budget must be silent,
+    # or `/context` would emit the overflow report the next real build owns.
+    dynamic_budget =
+      max(max_tok - reserve - conversation_tokens - static_tokens, @dynamic_budget_floor)
+
     # emit: false — inspecting the budget must never advance the world-state
     # ledger, or the next real turn would think everything was already sent.
     {ws, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok, emit: false)
@@ -299,10 +340,19 @@ defmodule OptimalSystemAgent.Agent.Context do
   Single source of truth for `Agent.Context` and `Agent.Loop.ToolFilter`, so
   the inlined prose and the native tool array can never disagree about which
   regime a request is in.
+
+  A `nil` model is RESOLVED to the provider's configured model before the window
+  is looked up, exactly as `build/1` does. `Agent.Loop.ToolFilter` passes
+  `state.model` straight through, and that is `nil` on every non-CLI entry point
+  — so an unresolved nil made a hosted 1M-window tag (which cannot match the
+  ":cloud" test while it is nil) fall to the local `:ollama_num_ctx` ceiling,
+  answer `true` here, and cut the native tool array to ten tools on the model
+  that least needed it.
   """
   @spec small_window?(String.t() | nil, atom() | nil) :: boolean()
   def small_window?(model, provider) do
     provider = provider || Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    model = model || get_active_model(provider)
 
     OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider) <
       @small_window_tokens
@@ -387,6 +437,79 @@ defmodule OptimalSystemAgent.Agent.Context do
   # window. Labels owned by `WorldState.managed_labels/0` never reach this split.
   @essential_labels ~w(task_brief runtime git_state task_state workflow)
 
+  # `@dynamic_budget_floor` is declared with the other budget constants at the
+  # top of the module — a module attribute read before its definition silently
+  # evaluates to nil, and `max(x, nil)` is a comparison Elixir will happily make.
+  #
+  # This floor is a FICTION, and that is the point of `report_budget_shortfall/2`.
+  # When the static base plus the conversation plus the response reserve already
+  # exceed the window, the honest budget is negative: there is no room for
+  # dynamic context because there is no room for the prompt. Clamping to 1_000
+  # and carrying on is what turned a window/compaction failure into five
+  # "ESSENTIAL context block dropped" lines that blamed the block for the budget.
+  # The floor stays — a build that returns no prompt at all is worse — but it is
+  # now announced, with the arithmetic that produced it, at a severity that
+  # matches what actually happened.
+
+  # Returns the budget to assemble against, and says so out loud when that budget
+  # is the floor rather than real slack.
+  #
+  #   raw < 0     — the prompt does not fit the window AT ALL. Nothing the fitter
+  #                 does can fix this; compaction or a correct window is the fix.
+  #                 Logged at :error, because every eviction that follows is a
+  #                 SYMPTOM and reading them as the disease sends the next
+  #                 investigation to the wrong module (it did: the Terminal-Bench
+  #                 report opened on "ESSENTIAL blocks are dropped", and the
+  #                 cause was `model: nil` resolving a 1M window to 32k).
+  #   0 <= raw < floor — degraded but coherent: real slack exists, just not
+  #                 enough for the world state. Logged at :warning.
+  defp report_budget_shortfall(raw, _meta) when raw >= @dynamic_budget_floor, do: raw
+
+  defp report_budget_shortfall(raw, meta) do
+    deficit = @dynamic_budget_floor - raw
+
+    if raw < 0 do
+      Logger.error(
+        "[Context] PROMPT DOES NOT FIT: window=#{meta.max_tok} " <>
+          "static=#{meta.static} conversation=#{meta.conversation} reserve=#{meta.reserve} " <>
+          "→ dynamic budget #{raw} (over by #{-raw}). session=#{meta.session} " <>
+          "model=#{inspect(meta.model)} provider=#{meta.provider}. " <>
+          "Assembling against the #{@dynamic_budget_floor}-token floor anyway; any " <>
+          "context block evicted below is a SYMPTOM of this, not its own bug. " <>
+          "Fix the window resolution or compact the conversation."
+      )
+    else
+      Logger.warning(
+        "[Context] dynamic budget floored: window=#{meta.max_tok} " <>
+          "static=#{meta.static} conversation=#{meta.conversation} reserve=#{meta.reserve} " <>
+          "→ #{raw}, raised to #{@dynamic_budget_floor} (short by #{deficit}). " <>
+          "session=#{meta.session} model=#{inspect(meta.model)} provider=#{meta.provider}."
+      )
+    end
+
+    emit_overflow_telemetry(raw, deficit, meta)
+    @dynamic_budget_floor
+  end
+
+  defp emit_overflow_telemetry(raw, deficit, meta) do
+    :telemetry.execute(
+      [:osa, :context, :overflow],
+      %{
+        raw_budget: raw,
+        deficit: deficit,
+        window: meta.max_tok,
+        static: meta.static,
+        conversation: meta.conversation,
+        reserve: meta.reserve
+      },
+      %{session: meta.session, model: meta.model, provider: meta.provider, fits: raw >= 0}
+    )
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   defp assemble_dynamic_context(state, budget, effective_window, opts \\ []) do
     blocks = gather_dynamic_blocks(state)
     session_id = Map.get(state, :session_id, "default")
@@ -432,7 +555,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     # "what model are you". The reservation is capped so the reverse failure —
     # one pathological essential (a large git diff) pushing the doctrine out —
     # cannot happen either.
-    reserved = essential_reserve(essential, budget)
+    reserved = essential_reserve(essential, budget, ws_sections)
 
     {ws_parts, ws_used, ws_dropped} =
       fit_world_state(ws_sections, max(budget - reserved, 0), session_id)
@@ -483,16 +606,38 @@ defmodule OptimalSystemAgent.Agent.Context do
   # point where neither group can silently erase the other.
   @essential_reserve_frac 0.5
 
+  # Floor under the ESSENTIAL group, so guaranteeing the rank-0 world state can
+  # never zero it out. Both groups shrink under pressure; neither is erased.
+  @essential_reserve_floor_frac 0.25
+
   # Withhold only what the essentials will actually SPEND — reserving a flat
   # fraction would hand budget back to nobody on a turn with no task brief and
   # no git state.
-  defp essential_reserve(essential, budget) do
+  #
+  # The reservation is additionally bounded by what the RANK-0 world-state
+  # sections need. Rank 0 is the operating mode and the tool doctrine: the two
+  # sections the registry declares can never lose a budget race. Withholding
+  # half the budget for the volatile essentials could nevertheless push them out
+  # from the other side — which is what truncated `ws:tools` on Terminal-Bench,
+  # a 1367-token doctrine block fitted against ~812 tokens. Order of claim is
+  # now: rank-0 world state, then essentials down to their floor, then the rest
+  # of the world state by rank, then recall.
+  defp essential_reserve(essential, budget, ws_sections) do
     wanted =
       Enum.reduce(essential, 0, fn {content, _priority, _label}, acc ->
         acc + estimate_tokens(content)
       end)
 
-    min(wanted, floor(budget * @essential_reserve_frac))
+    critical_ws =
+      Enum.reduce(ws_sections, 0, fn {id, chunk}, acc ->
+        if WorldState.rank(id) == 0, do: acc + estimate_tokens(chunk), else: acc
+      end)
+
+    hard_floor = min(wanted, floor(budget * @essential_reserve_floor_frac))
+
+    [wanted, floor(budget * @essential_reserve_frac), max(budget - critical_ws, 0)]
+    |> Enum.min()
+    |> max(hard_floor)
   end
 
   defp join(parts) do
@@ -506,6 +651,35 @@ defmodule OptimalSystemAgent.Agent.Context do
   # a partial copy beats nothing. Below it, what is left is a stub that reads as
   # a corrupted instruction — drop the section whole and say so.
   @ws_truncation_floor 0.6
+
+  # Highest `WorldState.rank/1` that still counts as ESSENTIAL when it is evicted.
+  #
+  # Every world-state eviction used to be recorded and logged as ESSENTIAL,
+  # because `fit_world_state/3` passed `group: :essential` for all of them. That
+  # is not a severity, it is a constant — and it made the label meaningless in
+  # exactly the situation the label exists for. On Terminal-Bench the same
+  # five-line burst announced the tool-usage doctrine (rank 0, the model loses
+  # instructions it cannot rediscover) and the slash-command catalog (rank 3, a
+  # convenience listing of things the USER types) at identical severity.
+  #
+  # Rank is already the deliberate, reviewed statement of what outranks what
+  # under pressure, so it is what the severity keys on rather than a second
+  # hand-maintained list that could disagree with it:
+  #
+  #   rank 0-1 → :essential — tool doctrine, collaboration mode, AGENTS.md,
+  #              environment, onboarding. Losing one is a capability regression.
+  #              Logged at :warning.
+  #   rank 2+  → :optional  — personality overlay, scratchpad guidance, the
+  #              slash-command catalog, the subagent roster. Losing one degrades
+  #              the turn without removing a capability. Logged at :info, so it
+  #              is still visible and still lands in `evictions/1` — under-
+  #              reporting it would just recreate the silent-drop bug at a lower
+  #              rank.
+  @ws_essential_max_rank 1
+
+  defp ws_group(id) do
+    if WorldState.rank(id) <= @ws_essential_max_rank, do: :essential, else: :optional
+  end
 
   # Fitting for world-state sections.
   #
@@ -526,7 +700,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       |> Enum.reduce({[], 0, []}, fn {{id, chunk}, idx}, {acc, used, dropped} ->
         cost = estimate_tokens(chunk)
         available = budget - used
-        opts = [session_id: session_id, group: :essential]
+        opts = [session_id: session_id, group: ws_group(id)]
 
         cond do
           cost <= available ->
@@ -900,17 +1074,27 @@ defmodule OptimalSystemAgent.Agent.Context do
       at: DateTime.utc_now()
     }
 
-    if group == :essential do
-      Logger.warning(
-        "[Context] ESSENTIAL context block #{kind}: label=#{label} session=#{session_id} " <>
-          "wanted=#{wanted}tok kept=#{kept}tok — the model will NOT see " <>
-          "#{if kind == :dropped, do: "this block at all", else: "all of this block"}. " <>
-          "The dynamic budget is too small; reduce the static base or raise the context window."
-      )
-    else
-      Logger.debug(
-        "[Context] recall block #{kind}: label=#{label} wanted=#{wanted}tok kept=#{kept}tok"
-      )
+    unseen = if kind == :dropped, do: "this block at all", else: "all of this block"
+
+    case group do
+      :essential ->
+        Logger.warning(
+          "[Context] ESSENTIAL context block #{kind}: label=#{label} session=#{session_id} " <>
+            "wanted=#{wanted}tok kept=#{kept}tok — the model will NOT see #{unseen}. " <>
+            "The dynamic budget is too small; reduce the static base or raise the context window."
+        )
+
+      :optional ->
+        Logger.info(
+          "[Context] optional context block #{kind}: label=#{label} session=#{session_id} " <>
+            "wanted=#{wanted}tok kept=#{kept}tok — the model will not see #{unseen}. " <>
+            "Degraded, not a capability loss; the budget spent it on higher-ranked context."
+        )
+
+      _ ->
+        Logger.debug(
+          "[Context] recall block #{kind}: label=#{label} wanted=#{wanted}tok kept=#{kept}tok"
+        )
     end
 
     safe_telemetry(entry)

@@ -175,12 +175,45 @@ defmodule OptimalSystemAgent.Agent.Loop.SmallWindowRegimeTest do
       assert length(filtered) == 10
     end
 
-    test "no model on a local transport falls back to the small-window cap" do
-      # nil model resolves to the config default, which is num_ctx-capped.
-      filtered =
-        ToolFilter.filter(many_tools(37), %{provider: :ollama, messages: []})
+    # `model: nil` is not "unknown model, be conservative" — it is the normal
+    # shape of every non-CLI entry point (`serve`/HTTP included), and the request
+    # that follows is sent with the provider's CONFIGURED model. Treating nil as
+    # unknown made a nil-model state fall to the local num_ctx ceiling, which
+    # cannot match the ":cloud" exemption while the model is nil: on
+    # Terminal-Bench that budgeted a live `glm-5.2:cloud` (1M window) as a 32k
+    # local model and cut its tool array to ten. `Context.small_window?/2` now
+    # resolves nil the same way `build/1` does, so the regime follows the model
+    # that will actually serve the request.
+    test "no model in state resolves the provider's configured model — cloud tag" do
+      with_ollama_model("glm-5.2:cloud", fn ->
+        filtered = ToolFilter.filter(many_tools(37), %{provider: :ollama, messages: []})
 
-      assert length(filtered) == 10
+        assert length(filtered) == 37,
+               "the configured model is a hosted 1M tag; nil in the state is not a reason " <>
+                 "to pretend otherwise"
+      end)
+    end
+
+    test "no model in state resolves the provider's configured model — local weights" do
+      with_ollama_model(@small_model, fn ->
+        filtered = ToolFilter.filter(many_tools(37), %{provider: :ollama, messages: []})
+
+        assert length(filtered) == 10,
+               "genuinely small configured weights must still take the cap"
+      end)
+    end
+
+    defp with_ollama_model(model, fun) do
+      previous = Application.get_env(:optimal_system_agent, :ollama_model)
+      Application.put_env(:optimal_system_agent, :ollama_model, model)
+
+      try do
+        fun.()
+      after
+        if previous,
+          do: Application.put_env(:optimal_system_agent, :ollama_model, previous),
+          else: Application.delete_env(:optimal_system_agent, :ollama_model)
+      end
     end
 
     test "the cap prefers file and shell tools when it does apply" do
