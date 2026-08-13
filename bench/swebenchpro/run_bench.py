@@ -270,6 +270,12 @@ def main() -> int:
         "dockerhub_user": args.dockerhub_user,
         "harness_repo": "github.com/scaleapi/SWE-bench_Pro-os",
         "harness_commit": evaluate.harness_commit(harness_dir),
+        # `bench/swebench/report.py` renders `swebench_version` as "graded by
+        # harness v<x>". Pro's harness has no version, tag or release, so the
+        # pinned commit is the only honest thing to put there -- and leaving it
+        # unset rendered "v?", which reads as "we do not know" rather than
+        # "upstream does not version this".
+        "swebench_version": f"SWE-bench_Pro-os@{evaluate.harness_commit(harness_dir)[:12]}",
         "revert_list_disagreements": disagree,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "host": {"platform": platform.platform(), "python": platform.python_version()},
@@ -398,6 +404,29 @@ def main() -> int:
     return 0
 
 
+_ATTEST_LOCK = threading.Lock()
+
+
+def _attest(out: Path, prepared) -> None:
+    """Record, per instance, that the answer was not in the workspace we handed over.
+
+    The results schema is owned by `bench/swebench/report.py` and carries only
+    a fixed set of `raw` keys, so this evidence would otherwise be dropped on
+    the floor. It gets its own file instead of a schema change, because "we
+    stripped the solution out of git" is exactly the kind of claim that must be
+    checkable from the run's own artefacts rather than from a README.
+    """
+    doc = {
+        "instance_id": prepared.instance_id,
+        "image": prepared.image,
+        "preexisting_untracked": prepared.preexisting_untracked,
+        **prepared.history,
+    }
+    with _ATTEST_LOCK:
+        with (out / "workspace-attestations.jsonl").open("a") as fh:
+            fh.write(json.dumps(doc) + "\n")
+
+
 def run_inference(*, args, chosen, dataset_by_id, harness_dir: Path,
                   out: Path, run_id: str) -> list[dict]:
     """One attempt at every instance. Returns the inference records."""
@@ -468,6 +497,8 @@ def run_inference(*, args, chosen, dataset_by_id, harness_dir: Path,
             )
             res = runner.run(task)
             res.raw.setdefault("preexisting_untracked", prepared.preexisting_untracked)
+            res.raw.setdefault("history_strip", prepared.history)
+            _attest(out, prepared)
         except Exception as e:  # noqa: BLE001 - one bad instance must not end the run
             res = RunResult(instance_id=iid, status="runner_error",
                             error=f"{type(e).__name__}: {e}")
