@@ -1,0 +1,21 @@
+# Compose overlay: let the task container reach a model provider running on the
+# host (e.g. a local Ollama on :11434).
+#
+# Harbor's docker environment puts each trial on its own compose network and
+# does not add a host-gateway alias, so `host.docker.internal` does not resolve
+# by default. Pass this with:
+#
+#     --extra-docker-compose bench/terminalbench/compose-host-provider.yaml
+#
+# and point OSA at it:
+#
+#     --ae OLLAMA_URL=http://host.docker.internal:11434
+#
+# This is only needed for a host-local provider. With a hosted API (Anthropic,
+# OpenAI, ...) the container's normal egress is enough and this file should be
+# left out — it widens what the task container can reach, which is a thing a
+# benchmark should do deliberately and never by default.
+services:
+  main:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

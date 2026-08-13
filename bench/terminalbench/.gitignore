@@ -1,0 +1,12 @@
+# The OTP release artefact: ~17 MB of bundled ERTS, rebuilt with ./build_release.sh
+dist/
+.buildctx/
+
+# Local clone of harbor-framework/terminal-bench-2 (89 task definitions)
+tasks/
+
+# Harbor + report output
+runs/
+
+.venv/
+__pycache__/
