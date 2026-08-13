@@ -108,3 +108,6 @@ desktop/vite.config.ts.timestamp-*
 # the repo per release. They are build OUTPUT — they belong on the release, not
 # in history.
 dist/
+
+# Benchmark upstream clones — vendored repos, not our source
+bench/*/upstream/
