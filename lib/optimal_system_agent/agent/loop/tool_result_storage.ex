@@ -198,8 +198,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
         # a BYTE cap, so this must be a byte-bounded cut — String.slice/3
         # counts graphemes and would emit ~3x the advertised size on CJK and
         # ~4x on emoji while claiming "showing first #{threshold} bytes".
-        Text.utf8_head(result_str, threshold) <>
-          "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{threshold} bytes]"
+        # Head AND tail, matching the on-disk preview above. A head-only cut
+        # drops the end of the output, which for a build or a test run is the
+        # part that says whether it passed — the single most likely reason the
+        # tool was called at all.
+        half = div(threshold, 2)
+
+        Text.utf8_head(result_str, half) <>
+          "\n\n[Output truncated — #{byte_size(result_str)} bytes total, " <>
+          "showing first and last #{half} bytes; persisting the full result failed]\n\n" <>
+          Text.utf8_tail(result_str, half)
     end
   rescue
     _ ->

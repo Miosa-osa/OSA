@@ -173,9 +173,25 @@ config :optimal_system_agent,
   temperature: 0.7,
   max_tokens: 4096,
 
-  # Tool output truncation — raised from 10 KB to 50 KB so the agent can read
-  # large files and see full build/test output without losing critical lines.
-  max_tool_output_bytes: 51_200,
+  # Tool output budget, in bytes, before a result is spilled to disk and
+  # replaced by a head+tail preview plus a reference the agent can read on
+  # demand.
+  #
+  # 16 KB, down from 50 KB. 50 KB is roughly 12.8k tokens PER TOOL RESULT, so
+  # twenty tool calls could put ~256k tokens of tool output into a single
+  # request on their own. Measured live: a working session sat at 370.5k input
+  # tokens, and against a 1M window that is a real 37% of the budget spent
+  # before the model reasons about any of it.
+  #
+  # Nothing is lost by lowering it. Over-budget results are already persisted
+  # whole and previewed head+tail — the agent sees the beginning and the end
+  # (where the signal in build output, test runs and large files almost always
+  # is) and can read the full file when the middle actually matters. Cutting
+  # the threshold shifts more results onto that path; it does not discard them.
+  #
+  # `verbose` still bypasses this entirely, and :max_tool_output_lines bounds
+  # the other axis.
+  max_tool_output_bytes: 16_384,
 
   # Context compaction thresholds (3-tier)
   compaction_warn: 0.80,
