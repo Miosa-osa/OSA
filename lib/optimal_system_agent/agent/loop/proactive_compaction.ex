@@ -239,7 +239,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             # again for the rest of the session.
             Flush.reset_cycle(session_id)
 
-            summary_msg = %{role: "system", content: compact_boundary_content(summary)}
+            # `role: "user"`, NOT `role: "system"`.
+            #
+            # This message leads the rebuilt conversation, and `Context.build/1`
+            # prepends the real system prompt in front of it. Anthropic's
+            # `split_system/2` takes the *consecutive leading run* of system
+            # messages and absorbs it into the system-prompt block array — which
+            # sits AFTER both cache breakpoints. A `role: "system"` boundary
+            # therefore rode into the uncached region, so a multi-thousand-token
+            # summary plus up to 50k characters of re-injected file bodies were
+            # re-sent uncached on every request until the next compaction: the
+            # single largest recurring cost in a busy turn.
+            #
+            # Sending it as a user turn is also what already happened to every
+            # NON-leading system message on this path — `split_system/2` demotes
+            # them. This just stops the position from deciding it.
+            summary_msg = %{role: "user", content: compact_boundary_content(summary)}
 
             restore =
               case CompactRestore.build_restore_message(session_id) do

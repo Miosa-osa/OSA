@@ -1257,6 +1257,52 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Step 2 helpers: merge consecutive same-role messages
   # ---------------------------------------------------------------------------
 
+  # Join two message contents WITHOUT flattening structure.
+  #
+  # This used to be `safe_to_string(a) <> "\n" <> safe_to_string(b)`, and
+  # `safe_to_string/1` `Jason.encode!`s a list. Two consecutive user messages
+  # carrying the multimodal block-list shape were therefore merged into a JSON
+  # *string*: an image block became the literal text
+  # `{"type":"image","source":{"data":"<base64>"…}}`.
+  #
+  # That is data corruption, and it inverts the step's purpose. The image is
+  # destroyed as an image, and the base64 the estimator deliberately charges a
+  # flat 1,600 tokens becomes plain text hit by the byte_size/4 floor — tens of
+  # thousands of tokens. This runs BEFORE summarize_warm and compress_cold, so a
+  # step meant to save tokens multiplied them, and the corrupted content is what
+  # reached the provider and got persisted.
+  #
+  # Block lists now concatenate as lists. A binary joining a list is wrapped as
+  # a text block in whatever key style that list already uses — both the string
+  # and atom shapes are live in this codebase. Anything else declines to merge,
+  # which costs one extra message and corrupts nothing.
+  defp merge_contents(a, b) when is_binary(a) and is_binary(b), do: a <> "\n" <> b
+  defp merge_contents(a, b) when is_list(a) and is_list(b), do: a ++ b
+
+  defp merge_contents(a, b) when is_list(a) and is_binary(b),
+    do: a ++ [text_block(b, block_key_style(a))]
+
+  defp merge_contents(a, b) when is_binary(a) and is_list(b),
+    do: [text_block(a, block_key_style(b)) | b]
+
+  defp merge_contents(_, _), do: :incompatible
+
+  defp block_key_style(blocks) do
+    case Enum.find(blocks, &is_map/1) do
+      %{} = block -> if Map.has_key?(block, "type"), do: :string, else: :atom
+      _ -> :atom
+    end
+  end
+
+  defp text_block(text, :string), do: %{"type" => "text", "text" => text}
+  defp text_block(text, :atom), do: %{type: "text", text: text}
+
+  @doc """
+  Test seam for `merge_consecutive_same_role/1`.
+  """
+  @spec merge_consecutive(list()) :: list()
+  def merge_consecutive(annotated), do: merge_consecutive_same_role(annotated)
+
   @doc false
   defp merge_consecutive_same_role([]), do: []
 
@@ -1278,17 +1324,21 @@ defmodule OptimalSystemAgent.Agent.Compactor do
               not Map.has_key?(prev_msg, :tool_call_id) and
               not Map.has_key?(msg, :tool_call_id)
 
-          if can_merge do
-            merged_content =
-              safe_to_string(Map.get(prev_msg, :content)) <>
-                "\n" <>
-                safe_to_string(Map.get(msg, :content))
+          merged_content =
+            if can_merge do
+              merge_contents(Map.get(prev_msg, :content), Map.get(msg, :content))
+            else
+              :incompatible
+            end
 
-            merged_msg = Map.put(prev_msg, :content, merged_content)
-            merged_imp = max(prev_imp, importance)
-            [{merged_msg, merged_imp} | rest]
-          else
-            [{msg, importance} | acc]
+          case merged_content do
+            :incompatible ->
+              [{msg, importance} | acc]
+
+            content ->
+              merged_msg = Map.put(prev_msg, :content, content)
+              merged_imp = max(prev_imp, importance)
+              [{merged_msg, merged_imp} | rest]
           end
 
         _ ->

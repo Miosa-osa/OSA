@@ -43,18 +43,56 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
     end
   end
 
-  @doc "Token count at which the context-low warning band starts."
+  @doc """
+  Token count at which the context-low warning band starts.
+
+  The band between `warn_at` and `compact_at` is not decoration: it is the only
+  place `should_microcompact?/2` and `Memory.Flush.flush_at/1` can fire. Both
+  guard on `tokens >= warn_at and tokens < compact_at`, so an inverted or
+  one-token-wide band silently disables them.
+
+  It used to invert. For windows in `(66_000, 70_667]` the reserve path won for
+  `compact_at` while `warn_at` fell through to its `0.60 * cw` fallback, and
+  `0.60 * cw > cw - 33_000` across that whole range — at `cw = 70_000`,
+  `warn_at` came out at 42,000 against a `compact_at` of 37,000. Nothing warned:
+  `severity_for/2`'s ordered `cond` masks the inversion, the microcompaction
+  guard just became unsatisfiable, and the memory flush clamped itself to a band
+  one token wide. That range is reachable through a configured local `num_ctx`.
+
+  So the fallback is now a *preference*, not a licence to exceed `compact_at`.
+  The result is clamped to leave a band at least a quarter of `compact_at` wide,
+  which makes the ordering `warn_at < compact_at` structural rather than
+  something the two formulas happen to agree on.
+  """
   @spec warn_at(pos_integer()) :: pos_integer()
   def warn_at(cw) when is_integer(cw) and cw > 0 do
-    warn = compact_at(cw) - @warning_buffer
-    if warn > div(cw, 4), do: warn, else: trunc(cw * 0.60)
+    compact = compact_at(cw)
+    reserve_based = compact - @warning_buffer
+
+    preferred =
+      if reserve_based > div(cw, 4) do
+        reserve_based
+      else
+        # Small window (local models) — the reserve math would collapse.
+        trunc(cw * 0.60)
+      end
+
+    min(preferred, compact - min(@warning_buffer, div(compact, 4)))
   end
 
-  @doc "Hard blocking limit — requests above this should not be attempted."
+  @doc """
+  Hard blocking limit — requests above this should not be attempted.
+
+  Clamped above `compact_at` for the same reason `warn_at/1` is clamped below
+  it: a blocking limit at or under the compaction threshold would refuse the
+  very request compaction just made room for.
+  """
   @spec block_at(pos_integer()) :: pos_integer()
   def block_at(cw) when is_integer(cw) and cw > 0 do
-    block = effective_window(cw) - @manual_compact_buffer
-    if block > compact_at(cw), do: block, else: trunc(cw * 0.90)
+    compact = compact_at(cw)
+    reserve_based = effective_window(cw) - @manual_compact_buffer
+    preferred = if reserve_based > compact, do: reserve_based, else: trunc(cw * 0.90)
+    max(preferred, compact + 1)
   end
 
   @doc "All thresholds as a map (telemetry / TUI warning line)."

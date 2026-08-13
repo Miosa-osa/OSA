@@ -67,7 +67,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompactionCCTest do
 
     assert length(compacted) < length(messages)
     [first | _] = compacted
-    assert first.role == "system"
+    # A leading `role: "system"` boundary is absorbed into Anthropic's
+    # system-prompt block array, which sits after both cache breakpoints — the
+    # summary would be re-sent uncached on every request until the next
+    # compaction. It leads the conversation as a user turn instead.
+    assert first.role == "user"
     assert first.content =~ "[Compact boundary]"
     assert first.content =~ "being continued from a previous conversation"
 

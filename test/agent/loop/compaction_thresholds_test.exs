@@ -71,4 +71,48 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholdsTest do
     assert blocked.at_blocking_limit
     assert blocked.percent_left == 0
   end
+
+  # ── the bands must be ordered at EVERY window, not just the big ones ───────
+  #
+  # For cw in (66_000, 70_667] the reserve path won for compact_at while warn_at
+  # fell through to its 0.60*cw fallback, and 0.60*cw > cw - 33_000 across that
+  # whole range. At cw = 70_000 that put warn_at (42_000) ABOVE compact_at
+  # (37_000), which silently made `should_microcompact?/2`'s guard
+  # (tokens >= warn_at and tokens < compact_at) unsatisfiable and clamped the
+  # memory flush to a band one token wide. Both failures were invisible.
+
+  test "warn_at stays below compact_at at the window that used to invert it" do
+    assert T.warn_at(70_000) < T.compact_at(70_000)
+  end
+
+  test "the bands are strictly ordered across every plausible window" do
+    windows =
+      [1_000, 4_096, 8_192, 16_384, 32_768, 65_536, 128_000, 200_000, 1_000_000] ++
+        Enum.to_list(60_000..80_000//500)
+
+    for cw <- windows do
+      warn = T.warn_at(cw)
+      compact = T.compact_at(cw)
+      block = T.block_at(cw)
+
+      assert warn < compact, "cw=#{cw}: warn_at #{warn} must be below compact_at #{compact}"
+      assert compact < block, "cw=#{cw}: compact_at #{compact} must be below block_at #{block}"
+      assert warn > 0, "cw=#{cw}: warn_at must be positive"
+    end
+  end
+
+  test "the microcompaction band is wide enough to be reachable" do
+    # A one-token band is an unreachable band in practice: nothing exists to
+    # write durable notes in, and the cheap non-LLM path never runs.
+    for cw <- Enum.to_list(60_000..80_000//500) ++ [1_000, 8_192, 128_000, 200_000] do
+      compact = T.compact_at(cw)
+      width = compact - T.warn_at(cw)
+      # The full warning buffer where the window can afford it, and a quarter of
+      # compact_at where it cannot — never one token.
+      floor = min(20_000, div(compact, 4))
+
+      assert width >= floor,
+             "cw=#{cw}: band of #{width} tokens is narrower than the #{floor} floor"
+    end
+  end
 end
