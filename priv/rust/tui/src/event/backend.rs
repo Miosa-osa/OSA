@@ -438,6 +438,18 @@ pub enum BackendEvent {
     },
 
     // === Hooks/Budget ===
+    /// One hook invocation finished.
+    ///
+    /// `outcome` is the backend's own vocabulary — `ok`, `blocked`, `crashed`,
+    /// `timed_out` — and is deliberately not reduced to a boolean here. Blocking
+    /// is a hook doing its job, and a status line that counted a policy hook's
+    /// refusal as a failure would report a working setup as broken.
+    HookRun {
+        hook_name: String,
+        hook_event: String,
+        outcome: String,
+        duration_ms: u64,
+    },
     HookBlocked { hook_name: String, reason: String },
     BudgetWarning { utilization: f64, message: String },
     BudgetExceeded { message: String },

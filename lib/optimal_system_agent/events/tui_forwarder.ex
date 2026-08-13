@@ -40,6 +40,8 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     scratchpad_activity
     coordinator_mode
     error
+    hook_run
+    hook_blocked
     fleet_node_started
     fleet_node_progress
     fleet_node_completed

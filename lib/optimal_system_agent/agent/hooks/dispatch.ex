@@ -245,11 +245,48 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
     timeout = Keyword.get(hook.opts, :timeout_ms)
     fail_closed = Keyword.get(hook.opts, :fail_closed, false)
 
-    if is_integer(timeout) and timeout > 0 do
-      invoke_with_timeout(hook, payload, event, timeout, fail_closed)
-    else
-      invoke_inline(hook, payload, event)
-    end
+    started = System.monotonic_time(:microsecond)
+
+    raw =
+      if is_integer(timeout) and timeout > 0 do
+        invoke_with_timeout(hook, payload, event, timeout, fail_closed)
+      else
+        invoke_inline(hook, payload, event)
+      end
+
+    us = System.monotonic_time(:microsecond) - started
+    {outcome, result} = classify(raw)
+    emit_hook_run(hook, event, payload, outcome, us)
+    result
+  end
+
+  # What the counter means, decided in ONE place.
+  #
+  # A hook that crashed and a hook that deliberately returned `:skip` both used
+  # to leave `invoke_inline` as a bare `:skip`, which makes "failed" unknowable
+  # from the outside. The failure paths now return a private tagged tuple that
+  # never escapes this module: `classify/1` reads the tag, reports it, and hands
+  # `run_chain` the same `:skip` it always saw, so the chain's behaviour is
+  # unchanged and only the reporting is new.
+  #
+  # `:blocked` is counted apart from `:failed` on purpose. A hook that blocks did
+  # its job — a policy hook that denies a dangerous command is the system working,
+  # not an error — and folding the two together would make a correctly-configured
+  # setup look broken.
+  defp classify({:__hook_error__, kind}), do: {kind, :skip}
+  defp classify({:block, _} = r), do: {:blocked, r}
+  defp classify({:deny, _} = r), do: {:blocked, r}
+  defp classify(r), do: {:ok, r}
+
+  defp emit_hook_run(hook, event, payload, outcome, us) do
+    Bus.emit(:system_event, %{
+      event: :hook_run,
+      hook_name: hook.name,
+      hook_event: event,
+      outcome: outcome,
+      duration_ms: div(us, 1000),
+      session_id: Map.get(payload, :session_id, "unknown")
+    })
   end
 
   # Default path: run inline (zero overhead, preserves legacy behaviour).
@@ -258,11 +295,11 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
   rescue
     e ->
       Logger.error("[Hooks] #{hook.name} crashed on #{event}: #{Exception.message(e)}")
-      :skip
+      {:__hook_error__, :crashed}
   catch
     :exit, reason ->
       Logger.error("[Hooks] #{hook.name} exited on #{event}: #{inspect(reason)}")
-      :skip
+      {:__hook_error__, :crashed}
   end
 
   # Opt-in path: run under a wall-clock timeout in a supervised task.
@@ -279,7 +316,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
         if fail_closed do
           {:block, "hook #{hook.name} timed out (fail-closed)"}
         else
-          :skip
+          {:__hook_error__, :timed_out}
         end
     end
   end

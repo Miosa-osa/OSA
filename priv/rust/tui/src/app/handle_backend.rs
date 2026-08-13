@@ -2164,6 +2164,19 @@ impl App {
                     crate::components::toast::ToastLevel::Warning,
                 );
             }
+            BackendEvent::HookRun { hook_name, hook_event, outcome, duration_ms } => {
+                self.status.note_hook_run(&outcome);
+                // A failing hook is worth a line the user can scroll back to.
+                // A passing one is not — that is what the counter is for, and a
+                // toast per hook would bury the turn under its own plumbing.
+                if outcome == "crashed" || outcome == "timed_out" {
+                    self.toasts.push(
+                        format!("Hook {} {} on {}", hook_name, outcome.replace('_', " "), hook_event),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
+                debug!("Hook {} on {}: {} ({}ms)", hook_name, hook_event, outcome, duration_ms);
+            }
             BackendEvent::HookBlocked { hook_name, reason } => {
                 self.toasts.push(
                     format!("Blocked by {}: {}", hook_name, reason),

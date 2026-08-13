@@ -571,6 +571,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_completed"
         | "goal_verifier_round"
         | "scratchpad_activity"
+        | "hook_run"
         | "hook_blocked"
         | "budget_warning"
         | "budget_exceeded"
@@ -1604,6 +1605,29 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 swarm_id: ev.swarm_id,
                 converged: ev.converged,
                 rounds: ev.rounds,
+            })
+        }
+
+        "hook_run" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                hook_name: String,
+                #[serde(default)]
+                hook_event: String,
+                #[serde(default)]
+                outcome: String,
+                #[serde(default)]
+                duration_ms: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("hook_run", e)),
+            };
+            Some(BackendEvent::HookRun {
+                hook_name: ev.hook_name,
+                hook_event: ev.hook_event,
+                outcome: ev.outcome,
+                duration_ms: ev.duration_ms,
             })
         }
 

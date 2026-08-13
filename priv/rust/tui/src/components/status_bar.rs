@@ -198,6 +198,20 @@ fn watcher_label(monitors: usize, loops: usize) -> Option<String> {
 /// U-T26 — the MCP chip text: "N MCP" once servers are known, `None` when there
 /// are none. (LSP is not modelled by the OSA backend, so no "N LSP" half is
 /// emitted.)
+/// `hooks 54 ok, 19 failed` — or nothing at all before a hook has ever run, so a
+/// session with no hooks configured carries no chip for them.
+///
+/// The failure clause is omitted entirely at zero rather than printed as
+/// `0 failed`: a standing zero trains the eye to skip the whole segment, and the
+/// number only matters on the rare session where it is not zero.
+fn hooks_label(ok: u32, failed: u32) -> Option<String> {
+    match (ok, failed) {
+        (0, 0) => None,
+        (_, 0) => Some(format!("hooks {} ok", ok)),
+        _ => Some(format!("hooks {} ok, {} failed", ok, failed)),
+    }
+}
+
 fn mcp_label(count: usize) -> Option<String> {
     if count > 0 {
         Some(format!("{} MCP", count))
@@ -391,6 +405,14 @@ pub struct StatusBar {
     /// U-B5 — live swarm-intelligence status ("swarm · round N"), driven by the
     /// SwarmIntelligence* events. None ⇒ no swarm running ⇒ chip omitted.
     swarm_label: Option<String>,
+    /// Hook invocations this session: how many ran, and how many failed.
+    ///
+    /// Blocks are NOT counted as failures. A policy hook refusing a dangerous
+    /// command is the system working; folding that into a failure count would
+    /// report a correctly-configured setup as broken. Only a crash, an exit or a
+    /// timeout counts here.
+    hooks_ok: u32,
+    hooks_failed: u32,
     /// U-T28 — active sub-agent count + estimated cost, for the compact
     /// "⛓ N subagents · $cost · ↓ manage" footer cue. 0 ⇒ omitted.
     subagent_count: usize,
@@ -447,6 +469,8 @@ impl StatusBar {
             context_low: false,
             mcp_count: 0,
             swarm_label: None,
+            hooks_ok: 0,
+            hooks_failed: 0,
             subagent_count: 0,
             subagent_cost: None,
             fleet_select: false,
@@ -528,6 +552,16 @@ impl StatusBar {
     /// U-T26 — number of connected MCP servers, feeding the row-0 MCP chip.
     pub fn set_mcp(&mut self, count: usize) {
         self.mcp_count = count;
+    }
+
+    /// Record one finished hook invocation. `outcome` is the backend's own
+    /// vocabulary rather than a boolean — see `BackendEvent::HookRun`.
+    pub fn note_hook_run(&mut self, outcome: &str) {
+        match outcome {
+            "crashed" | "timed_out" => self.hooks_failed += 1,
+            // `blocked` deliberately falls here: the hook ran and did its job.
+            _ => self.hooks_ok += 1,
+        }
     }
 
     /// U-B5 — set (or clear with None) the live swarm-intelligence chip.
@@ -1224,6 +1258,20 @@ impl Component for StatusBar {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
             let style = Style::default().fg(theme.colors.primary);
             spans.push(Span::styled(mcp, style));
+        }
+
+        // Hook chip (`hooks 54 ok, 19 failed`). Omitted until a hook has run.
+        // Coloured by the failure count rather than by category: quiet while
+        // everything passes, error-toned the moment one did not, because that is
+        // the only state where the number is worth reading.
+        if let Some(hooks) = hooks_label(self.hooks_ok, self.hooks_failed) {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            let style = if self.hooks_failed > 0 {
+                Style::default().fg(theme.colors.error)
+            } else {
+                theme.faint()
+            };
+            spans.push(Span::styled(hooks, style));
         }
 
         // Swarm-intelligence chip (`swarm · round 3`). U-B5. Omitted when idle.
@@ -2159,5 +2207,58 @@ mod status_bar_tests {
         let (f, e) = braille_bar(1.0, 8);
         assert_eq!(f.chars().count(), 8);
         assert!(e.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod hook_counter_tests {
+    use super::{hooks_label, StatusBar};
+
+    #[test]
+    fn a_session_with_no_hooks_carries_no_chip() {
+        assert_eq!(hooks_label(0, 0), None);
+    }
+
+    #[test]
+    fn a_standing_zero_is_not_printed() {
+        // `hooks 54 ok, 0 failed` trains the eye to skip the segment, and the
+        // failure count only earns its width on the session where it is not zero.
+        assert_eq!(hooks_label(54, 0).as_deref(), Some("hooks 54 ok"));
+        assert_eq!(
+            hooks_label(54, 19).as_deref(),
+            Some("hooks 54 ok, 19 failed")
+        );
+    }
+
+    #[test]
+    fn blocking_is_not_failing() {
+        // A policy hook that refuses a dangerous command is the system working.
+        // Counting that as a failure reports a correct setup as broken — which is
+        // worse than not counting it at all, because it is a lie the user acts on.
+        let mut bar = StatusBar::new();
+        bar.note_hook_run("blocked");
+        bar.note_hook_run("ok");
+        assert_eq!(hooks_label(bar.hooks_ok, bar.hooks_failed).as_deref(), Some("hooks 2 ok"));
+    }
+
+    #[test]
+    fn only_crashes_and_timeouts_count_as_failures() {
+        let mut bar = StatusBar::new();
+        for outcome in ["ok", "blocked", "crashed", "timed_out", "ok"] {
+            bar.note_hook_run(outcome);
+        }
+        assert_eq!(bar.hooks_ok, 3);
+        assert_eq!(bar.hooks_failed, 2);
+    }
+
+    #[test]
+    fn an_unknown_outcome_is_not_a_failure() {
+        // The backend owns this vocabulary and may add to it. A new verb must not
+        // silently start reddening the status line before anyone has decided it
+        // means failure.
+        let mut bar = StatusBar::new();
+        bar.note_hook_run("rewrote_input");
+        assert_eq!(bar.hooks_failed, 0);
+        assert_eq!(bar.hooks_ok, 1);
     }
 }
