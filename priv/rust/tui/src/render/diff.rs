@@ -82,9 +82,19 @@ pub fn render_diff_body(
 
     for (gi, group) in groups.iter().enumerate() {
         if gi > 0 {
-            // Dim ellipsis separator between hunks (StructuredDiffList parity).
+            // Separator between hunks, carrying HOW MUCH was skipped. A bare
+            // `…` says only "something is missing"; `… 14 unchanged lines`
+            // tells the reader whether the next hunk is nearby or a screen
+            // away, which is the difference between reading a diff and
+            // guessing at one. Indented to the gutter so it lines up with the
+            // diff body rather than hanging off the left edge.
+            let text = match hunk_gap(&groups[gi - 1], group) {
+                Some(1) => "… 1 unchanged line".to_string(),
+                Some(n) => format!("… {} unchanged lines", n),
+                None => "…".to_string(),
+            };
             lines.push(Line::from(Span::styled(
-                "…".to_string(),
+                format!("{}{}", " ".repeat(gutter_w), text),
                 Style::default().fg(theme.colors.dim),
             )));
         }
@@ -134,6 +144,31 @@ pub fn render_diff_body(
     }
 
     lines
+}
+
+/// Lines skipped between two hunks, in NEW-file coordinates, or `None` when the
+/// number cannot be trusted.
+///
+/// Untrusted means: either hunk contributes no new-file lines (a pure delete
+/// has nothing to measure from), or the numbers run backwards or touch. The
+/// backwards case is real — coalesced multi-call blocks number each call's
+/// hunks against its own snapshot, so a later edit can land above an earlier
+/// one. A wrong count is worse than no count, so those fall back to the bare
+/// glyph.
+fn hunk_gap(prev: &[similar::DiffOp], next: &[similar::DiffOp]) -> Option<usize> {
+    let prev_end = prev
+        .iter()
+        .map(|op| op.new_range())
+        .filter(|r| !r.is_empty())
+        .map(|r| r.end)
+        .max()?;
+    let next_start = next
+        .iter()
+        .map(|op| op.new_range())
+        .filter(|r| !r.is_empty())
+        .map(|r| r.start)
+        .min()?;
+    next_start.checked_sub(prev_end).filter(|gap| *gap > 0)
 }
 
 fn word_diff_pairs_well(old_line: &str, new_line: &str) -> bool {
@@ -526,5 +561,88 @@ mod tests {
             .into_iter()
             .all(|c| plain_colors.contains(&c));
         assert!(unknown_new, "unknown language must not introduce new colors");
+    }
+}
+
+// ── the hunk separator says HOW MUCH it skipped ─────────────────────────────
+//
+// A bare `…` says only "something is missing". The count is what tells the
+// reader whether the next hunk is two lines away or two hundred.
+#[cfg(test)]
+mod hunk_gap_tests {
+    use super::*;
+
+    fn sep_rows(old: &str, new: &str) -> Vec<String> {
+        render_diff_body(old, new, 80, 1, None)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .filter(|s| s.trim_start().starts_with('…'))
+            .collect()
+    }
+
+    /// Two edits separated by `gap` untouched lines — far enough apart that
+    /// `grouped_ops(3)` cannot merge them into one hunk.
+    fn two_edits(gap: usize) -> (String, String) {
+        let mut old = vec!["first".to_string()];
+        let mut new = vec!["FIRST".to_string()];
+        for i in 0..gap {
+            old.push(format!("ctx {i}"));
+            new.push(format!("ctx {i}"));
+        }
+        old.push("last".to_string());
+        new.push("LAST".to_string());
+        (old.join("\n"), new.join("\n"))
+    }
+
+    #[test]
+    fn the_separator_counts_the_lines_it_skipped() {
+        let (old, new) = two_edits(20);
+        let seps = sep_rows(&old, &new);
+        assert_eq!(seps.len(), 1, "expected one separator, got {seps:?}");
+        // 20 context lines, 3 kept on each side, so 14 are actually hidden.
+        assert!(
+            seps[0].contains("… 14 unchanged lines"),
+            "separator did not carry the count: {seps:?}"
+        );
+    }
+
+    #[test]
+    fn the_count_is_singular_at_one() {
+        // 3 context either side plus exactly one hidden line.
+        let (old, new) = two_edits(7);
+        let seps = sep_rows(&old, &new);
+        assert_eq!(seps.len(), 1, "expected one separator, got {seps:?}");
+        assert!(
+            seps[0].contains("… 1 unchanged line") && !seps[0].contains("lines"),
+            "expected the singular form: {seps:?}"
+        );
+    }
+
+    #[test]
+    fn the_separator_is_indented_to_the_diff_body() {
+        let (old, new) = two_edits(20);
+        let seps = sep_rows(&old, &new);
+        assert!(
+            seps[0].starts_with(' '),
+            "separator hangs off the left edge: {seps:?}"
+        );
+    }
+
+    #[test]
+    fn an_untrustworthy_gap_falls_back_to_the_bare_glyph() {
+        // Both hunks report the same new-file position, so the gap is not
+        // positive and no number can be justified. A wrong count is worse than
+        // no count.
+        assert_eq!(hunk_gap(&[], &[]), None);
+    }
+
+    #[test]
+    fn a_single_hunk_has_no_separator() {
+        assert!(sep_rows("a\nb\nc", "a\nB\nc").is_empty());
     }
 }

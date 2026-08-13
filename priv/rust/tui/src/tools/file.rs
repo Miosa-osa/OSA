@@ -644,12 +644,19 @@ mod diff_render_tests {
     }
 
     #[test]
-    fn distant_changes_get_hunk_ellipsis_separator() {
+    fn distant_changes_get_hunk_separator_with_the_skipped_count() {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
         let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
         let theme = crate::style::theme();
         let rendered = text(&render_inline_diff(old, new, 80, &theme, None));
-        assert!(rendered.iter().any(|l| l.trim() == "…"), "{:?}", rendered);
+        // 12 lines, edits at both ends, 3 context rows kept either side — so
+        // exactly 4 lines are hidden and the separator has to say so. A bare
+        // `…` only reported that something was missing.
+        assert!(
+            rendered.iter().any(|l| l.trim() == "… 4 unchanged lines"),
+            "{:?}",
+            rendered
+        );
     }
 
     #[test]
