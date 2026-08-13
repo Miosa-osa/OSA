@@ -90,15 +90,20 @@ GRADER_EXCEPTIONS = {
 #: `HTTP 429 ... reached your session usage limit` for every cloud model. The
 #: 0-token rule below would have filed that as `agent_never_reached_model`
 #: against every single arm.
+#: Every alternative must be specific enough that it cannot fire on ordinary
+#: log noise. A bare `\b429\b` was the first draft and is WRONG: "wrote 429
+#: bytes" would void an otherwise valid run, and a detector that voids good
+#: runs gets switched off, which is worse than not having one. So 429 and 503
+#: only count when they appear next to a status/error word.
 PROVIDER_OUTAGE = re.compile(
     r"(reached your session usage limit"
-    r"|\b429\b"
-    r"|rate.?limit(ed)? exceeded"
+    r"|(status(_?code)?|http|returned|code)\W{0,4}(429|503)\b"
+    r"|\b(429|503)\W{0,4}(too many requests|service unavailable)"
+    r"|rate.?limit(ed)?\s+(exceeded|reached)"
     r"|quota (exceeded|exhausted)"
     r"|insufficient_quota"
-    r"|was retired at"
-    r"|model .* not found"
-    r"|503 Service Unavailable)",
+    r"|\bwas retired at\b"
+    r"|model .{0,60}\bdoes not exist\b)",
     re.I,
 )
 
@@ -106,6 +111,31 @@ PROVIDER_OUTAGE = re.compile(
 #: signature always appears near the provider call, so a bounded scan is enough
 #: and keeps a 100 MB serve log out of memory.
 _OUTAGE_SCAN_BYTES = 8 * 1024 * 1024
+
+#: Harbor's own error classifier already recognises provider-side refusals and
+#: raises a typed exception for them. Trusting that is strictly better than
+#: re-deriving it from logs: it works even when an arm writes no log at all.
+#: Observed live -- mini-swe-agent's 429 surfaced as `ApiRateLimitError`.
+#: (Names from harbor/agents/installed/base.py ERROR_PATTERNS.)
+PROVIDER_EXCEPTIONS = {
+    "ApiRateLimitError",
+    "ApiUsageLimitError",
+    "ApiOverloadedError",
+    "ApiInternalServerError",
+    "ApiProviderResourceNotFoundError",
+    "ModelNotFoundError",
+}
+
+#: The provider dropped the connection or the model refused. Real events, but
+#: NOT clean outages -- an arm that cannot survive a mid-stream disconnect is
+#: showing something about itself. Left with the harness so a fragile arm is
+#: not excused, and listed here so the choice is visible rather than implicit.
+_NOT_PROVIDER_OUTAGE = {
+    "ApiConnectionClosedError",
+    "ApiResponseStalledError",
+    "ContextWindowExceededError",
+    "OutputTokenExceededError",
+}
 
 HARNESS_REASONS = {
     "agent_install_failed",
@@ -268,6 +298,18 @@ def classify(result: dict, trial_dir: Path) -> tuple[str, str, str]:
 
     setup_s = _seconds(setup.get("started_at"), setup.get("finished_at"))
     exec_s = _seconds(execution.get("started_at"), execution.get("finished_at"))
+
+    # -- 0. the shared provider refused to serve ------------------------
+    # Checked FIRST, ahead of every other rule. A quota-exhausted provider
+    # produces zero tokens, a crashed CLI, or a timeout depending on the arm,
+    # so every downstream rule would misfile it -- and misfile it as the ARM's
+    # fault, which is the one direction that must never be guessed.
+    if exc_type in PROVIDER_EXCEPTIONS:
+        return ("provider_outage", "provider",
+                f"harbor classified this as {exc_type}: {exc_msg}")
+    outage = detect_provider_outage(trial_dir)
+    if outage:
+        return "provider_outage", "provider", outage
 
     # -- 1. install never completed ------------------------------------
     if setup.get("started_at") and not setup.get("finished_at"):

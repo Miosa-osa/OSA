@@ -73,14 +73,30 @@ difference in the environment under test.
 Every one of these was verified to **install** into a live task container via
 `--install-only` (costs no tokens):
 
-| arm | version installed | `-m` | wire protocol |
-|---|---|---|---|
-| `osa` | 1.0.96 (snapshot release) | `ollama/glm-5.2:cloud` | Ollama-native `/api/chat` |
-| `codex` | 0.147.0 | `openai/glm-5.2:cloud` | OpenAI **Responses** `/v1/responses` |
-| `opencode` | 1.18.18 | `openai/glm-5.2:cloud` | OpenAI chat-completions |
-| `goose` | 1.46.0 | `openai/glm-5.2:cloud` | OpenAI chat-completions |
-| `mini-swe-agent` | 2.4.6 | `openai/glm-5.2:cloud` | OpenAI chat-completions |
-| `aider` | 0.86.2 | `openai/openai/glm-5.2:cloud` | OpenAI chat-completions |
+| arm | version installed | `-m` | wire protocol | model connection |
+|---|---|---|---|---|
+| `osa` | 1.0.96 (snapshot release) | `ollama/glm-5.2:cloud` | Ollama-native `/api/chat` | **verified live** |
+| `opencode` | 1.18.18 | `openai/glm-5.2:cloud` | OpenAI **Responses** `/v1/responses` (observed) | **verified live** |
+| `goose` | 1.46.0 | `openai/glm-5.2:cloud` | OpenAI chat-completions | **verified live** |
+| `mini-swe-agent` | 2.4.6 | `openai/glm-5.2:cloud` | OpenAI chat-completions | **verified live** |
+| `aider` | 0.86.2 | `openai/openai/glm-5.2:cloud` | OpenAI chat-completions | **verified live** |
+| `codex` | 0.147.0 | `openai/glm-5.2:cloud` | OpenAI **Responses** `/v1/responses` | configured, **not yet verified** |
+
+**"Verified live" means something specific**: in the smoke run, that arm's own
+error payload showed it reaching the shared daemon with the shared model and
+receiving the upstream's 429 — i.e. host, port, path, credential and model id
+were all correct, proven by the provider answering. An outage is an unpleasant
+way to confirm a connection, but it is a conclusive one.
+
+Notably this confirms the two non-obvious fixes: aider's **double** `openai/`
+prefix produced a LiteLLM call that reached the daemon (it then retried the 429
+with backoff), and mini-swe-agent's `OPENAI_API_KEY`-not-`MSWEA_API_KEY`
+routing worked.
+
+`codex` is the one exception: it timed out during install (Finding 5) and never
+reached the provider, so its configuration is derived from source and untested
+end to end. It should not be treated as proven until a run with a working
+provider says so.
 
 Three of these needed a non-obvious fix, all recorded in `arms.py`:
 
@@ -125,10 +141,12 @@ so that option was rejected rather than taken and caveated.
 Every arm hits **one daemon** serving **one model**. But not over one wire:
 
 * OSA → `/api/chat` (Ollama-native)
-* codex → `/v1/responses`
-* everything else → `/v1/chat/completions`
+* codex, opencode → `/v1/responses`
+* goose, mini-swe-agent, aider → `/v1/chat/completions`
 
-Same weights, same daemon, three serialisations. This is real and it is
+Same weights, same daemon, three serialisations. (opencode's route was
+corrected from *assumed* to *observed* after a live trial's error payload named
+the URL — see Finding 3.) This is real and it is
 declared in `config.model_fixed_caveat`, in every report, and here.
 
 It is also the *smallest* available asymmetry. The alternative — running OSA
@@ -136,6 +154,180 @@ through its own `openai_compat` provider to match the others — would have move
 OSA off its default configuration, which is a bigger confound than a
 serialisation format. If you want that control arm, it is one line in
 `arms.py`.
+
+---
+
+## Findings from building this
+
+### 1. The shared provider ran out of quota mid-build — and that is its own fault owner
+
+Partway through the first live smoke run, the Ollama cloud account began
+returning, for **every** cloud model:
+
+```
+HTTP 429  you (focused_varahamihira_355) have reached your session usage limit,
+          add extra usage: https://ollama.com/settings
+```
+
+This matters far beyond "we ran out of credit", because of **how** it presented:
+
+* `/v1/models` kept returning all 46 models happily. **Listing is not
+  serving.** The original preflight probe only listed, and would have given a
+  green light to a run in which every arm failed identically.
+* With zero tokens exchanged, the generic `agent_never_reached_model` rule
+  would have filed the outage as a **harness fault against every single arm** —
+  producing a report that read as six broken harnesses instead of one exhausted
+  account.
+
+Both are fixed:
+
+* `provider_probe()` now **spends one real 1-token completion** and reports
+  `servable` separately from `reachable`/`shared_model_present`. The runner
+  refuses to start unless `servable` is true.
+* `attribution.py` has a fifth owner, **`provider`**, checked *before* every
+  other rule. A provider outage is neither the harness's fault nor the model's,
+  and both alternatives are lies.
+* `report_h2h.py` gates on it: any provider outage sets
+  `honesty.provider_integrity.comparison_valid = false` and the claim label
+  becomes **`VOID — THE SHARED PROVIDER FAILED DURING THE RUN`**.
+
+The outage is time-varying and the arms run sequentially, so it does *not* hit
+them equally. That is why it voids the comparison rather than merely
+discounting it.
+
+### 2. OSA reports `status: ok` on a turn where every provider call failed
+
+From the live OSA trial (`runs/smoke1/arms/osa/.../agent/osa-telemetry.json`):
+
+```json
+{ "status": "ok", "error": null, "turns": 1, "tool_calls": 0,
+  "saw_done": true, "cost_usd": 0.0,
+  "usage_sum": { "input_tokens": 0, "output_tokens": 0 } }
+```
+
+while the same trial's `osa-serve.log` says:
+
+```
+[error] Provider ollama stream failed, no fallback: Ollama returned 429 ...
+[error] LLM call failed: All providers failed: ollama: "Ollama returned 429 ..."
+```
+
+OSA retried 11 times, exhausted its fallback chain, failed completely — and
+then terminated the turn with `status: ok`, `saw_done: true` and a clean
+`done` frame. An operator reading OSA's own telemetry would conclude the task
+was attempted and the model simply got it wrong.
+
+**This is an OSA defect and it is exactly the kind this benchmark exists to
+find**: a total inference failure that is indistinguishable, from the outside,
+from a completed attempt.
+
+It also retroactively justifies the central design decision here. Because
+`attribution.py` derives fault ownership from fields *every* agent produces and
+never from `osa_status`, it caught this: the trial is filed as
+`provider_outage`, not as a model failure. Had attribution trusted OSA's
+self-report — as `bench/terminalbench/report.py` does — this trial would have
+been scored `completed_without_acting`, i.e. **a capability failure charged to
+the model**.
+
+### 3. The same outage, reported honestly by opencode and dishonestly by OSA
+
+Because the outage hit both arms of the smoke run, it produced an accidental
+but genuine **robustness comparison** — the exact kind of harness-level
+difference this benchmark exists to expose.
+
+**opencode**, given a 429, emitted a structured error event and exited non-zero:
+
+```json
+{"type":"error","error":{"name":"APIError","data":{
+  "message":"... reached your session usage limit ...","statusCode":429,
+  "metadata":{"url":"http://host.docker.internal:11434/v1/responses"}}}}
+```
+
+Harbor recorded `NonZeroAgentExitCodeError`. An operator is told exactly what
+happened, by whom, and at which URL.
+
+**OSA**, given the same 429, retried 11 times, exhausted its fallback chain,
+and reported `status: ok` with a clean `done` frame and zero tokens.
+
+Same provider, same failure, opposite honesty. opencode's behaviour is correct;
+OSA's is the defect in Finding 2.
+
+That error payload is also the empirical confirmation that opencode's
+connection config is right — correct host, port and model — and it corrected an
+assumption: opencode routes over **`/v1/responses`**, not
+`/v1/chat/completions`, because the AI SDK's `openai` provider now defaults to
+the Responses API. `arms.py` records that as *observed*, not assumed.
+
+### 4. The OSA arm benchmarks a stale snapshot
+
+`osa_release_provenance` reports the artefact was built at 19:35 UTC and that
+**three `lib/` commits have landed since**, including:
+
+```
+786ac7b8 fix(agent): tools ran in the backend's directory, not the session's
+97e2f9ae fix(tools): a tool declaring itself deferred is now actually deferred
+2dd817c1 fix(events): make the verification gate observable
+```
+
+The first of those is material to exactly this benchmark — Terminal-Bench
+grades container state, and a tool running in the wrong directory is a direct
+route to a zero. Any OSA finding produced here is a finding about the
+**snapshot**, not about the tree, and the runner records the delta rather than
+asserting freshness. Rebuild with `bench/terminalbench/build_release.sh --force`
+before quoting an OSA number.
+
+### 5. Install cost differs by ~30x, and the default budget scores it as a fault
+
+| arm | install | what it does |
+|---|---|---|
+| `osa` | ~11 s | unpack a 17 MB self-contained OTP release |
+| `codex` | **> 360 s** | bootstrap nvm, install Node 22, `npm i -g @openai/codex` |
+
+`regex-log`'s default agent-setup budget is 360 s, and codex blew straight
+through it: `AgentSetupTimeoutError: Agent setup timed out after 360.0 seconds`.
+
+Left alone, that is recorded as a **codex harness fault** — which would be a
+lie. Nothing about codex failed; our npm was slow. So
+`--agent-setup-timeout-multiplier` (default 4.0) is applied **identically to
+every arm**, and install cost is reported as `agent_setup_mean_s` in the cost
+table. The difference is real and belongs in a cost column where it can be
+read, not in a fault column where it reads as a defect.
+
+This is a general trap in agent benchmarking: a per-task budget tuned for one
+agent silently converts another agent's *cost* into its *failure rate*.
+
+### 6. The host was not idle, and that is probably why the quota died
+
+While this was being built, **other benchmark runs from other sessions were
+active on the same machine** — a full 500-instance SWE-bench run and a
+SWE-bench Pro ablation. At probe time: load average 3.5–5.4 on 24 CPUs, 10
+other benchmark processes, and the image cache had grown by ~40 GB.
+
+That matters three ways, and none of them are cosmetic:
+
+1. **They share the Ollama account.** The `reached your session usage limit`
+   429 is per-account, not per-process. The most likely cause of the outage
+   that voided the smoke run is another session's SWE-bench work spending the
+   quota — nothing to do with this comparison at all.
+2. **Wall clock is one of the reported measurements.** Under contention it is
+   an upper bound, not a measurement.
+3. **It plausibly caused the codex install timeout** in Finding 5 — a slow npm
+   under CPU contention, scored as a harness fault.
+
+`host_contention_before` / `host_contention_after` now record load average,
+CPU count and the number of foreign benchmark processes, and the report prints
+a **"Measured under contention"** warning whenever that count is non-zero. It
+is recorded rather than corrected for: this harness has no authority to stop
+another session's run, but it can refuse to pretend it was alone.
+
+**For a definitive run, this host should be quiet.**
+
+### 7. `claude-code` and `gemini-cli` install fine — they are blocked one layer later
+
+Both install cleanly into a task container (`claude-code` 2.1.231, `gemini-cli`
+0.55.1), as does `cursor-cli`. They are blocked at the **model connection**, not
+at install. Recorded as `installs_ok` on the blocked-arm rows so "blocked" is
+never read as "broken".
 
 ---
 
@@ -187,9 +379,14 @@ affects `--shuffle` (which shuffles *order*, shared across arms).
 
 ### Integrity checks that run automatically
 
-* **Provider probe before and after.** A daemon that died halfway through
-  produces a silent, direction-biased failure: arms that ran first look fine,
-  arms that ran later look broken. Both readings are recorded.
+* **Provider probe before and after — spending a real token.** A daemon that
+  died halfway through produces a silent, direction-biased failure: arms that
+  ran first look fine, arms that ran later look broken. Both readings are
+  recorded, and the probe issues an actual 1-token completion because
+  **listing is not serving** (Finding 1).
+* **Host contention.** Load average, CPU count and the number of foreign
+  benchmark processes, before and after. Non-zero puts a "measured under
+  contention" warning in the report (Finding 6).
 * **Contamination probe** (`bench/terminalbench/contamination_probe.py`)
   against **live containers**, not assumptions. Terminal-Bench images are not
   supposed to ship their solutions — SWE-bench Pro's do — and this is checked
@@ -319,6 +516,45 @@ one task, because a total built from a subset is not a total.
 
 ---
 
+## Current status
+
+| phase | state |
+|---|---|
+| **1 — determine what is runnable** | **Complete.** 6 arms runnable with the model held fixed, all install-verified in live task containers; 5 of the 6 additionally had their model connection confirmed against the live daemon. 6 arms blocked, each with a named missing credential or protocol. |
+| **2 — run the head-to-head** | **Blocked on the shared provider.** The Ollama cloud account is returning HTTP 429 `reached your session usage limit` for every cloud model, so `glm-5.2:cloud` cannot be served to any arm. `run_h2h.py` refuses to start in this state, by design. The pipeline itself is proven: a live 6-arm smoke run over `regex-log` exercised install, model connection, grading, attribution and reporting end to end — every arm's failure was correctly attributed to the `provider`, not to the arm. |
+| **3 — report** | **Implemented and validated** against a synthetic fixture and live trials; 22/22 tests pass. Awaiting Phase 2 data. |
+
+### To run it once quota returns
+
+Wait for the host to be quiet (Finding 6) and for quota to return, then:
+
+```bash
+cd bench/headtohead
+python3 run_h2h.py --list-arms          # sanity
+python3 run_h2h.py --run-id h2h-1 \
+    --arms osa codex opencode goose mini-swe-agent \
+    --task-set default6
+```
+
+The runner will refuse to start until a **real 1-token completion** succeeds,
+so it cannot begin another run into an outage.
+
+**Rebuild the OSA release first** (`bench/terminalbench/build_release.sh
+--force`) or the `osa` arm benchmarks a snapshot that predates three `lib/`
+commits, including a tool-working-directory fix that bears directly on
+container-state grading.
+
+### Options if the quota does not return
+
+* **A local model.** `gemma4:12b`, `qwen3.5:9b`, `granite4.1:8b` and
+  `glm-flash-fast:latest` were all verified servable while the cloud models
+  were 429ing. Change `SHARED_MODEL` in `arms.py`. Expect near-zero resolve
+  rates on hard tasks — but **harness-fault rate remains measurable**, and that
+  is the number this comparison is actually for.
+* **Top up the Ollama account** and re-run against `glm-5.2:cloud` as designed.
+
+---
+
 ## Files
 
 | file | what it is |
@@ -329,6 +565,7 @@ one task, because a total built from a subset is not a total.
 | `paired.py` | exact McNemar, and the minimum-discordant-pairs arithmetic |
 | `report_h2h.py` | `results.json` + `report.md`, schema-compatible with `bench/report` |
 | `preflight.sh` | `--install-only` probe: does each CLI land in a container (no tokens) |
+| `test_headtohead.py` | 20 tests over the attribution ordering and paired statistics |
 | `runs/<id>/` | per-run artefacts: `config.json`, `results.json`, `report.md`, per-arm Harbor job dirs |
 
 Raw material is kept per trial under

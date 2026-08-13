@@ -77,7 +77,8 @@ def _fmt(v, suffix=""):
 def _arm_aggregate(rows: list[dict]) -> dict:
     n = len(rows)
     resolved = [r for r in rows if r["resolved"]]
-    owners = {"resolved": 0, "model": 0, "harness": 0, "ambiguous": 0, "grader": 0}
+    owners = {"resolved": 0, "model": 0, "harness": 0, "ambiguous": 0,
+              "grader": 0, "provider": 0}
     for r in rows:
         owners[r["fault_owner"]] = owners.get(r["fault_owner"], 0) + 1
 
@@ -94,7 +95,10 @@ def _arm_aggregate(rows: list[dict]) -> dict:
             inflicted_tasks.setdefault(k, []).append(r["task"])
 
     n_harness = owners["harness"]
-    n_scoreable = n - n_harness
+    n_provider = owners["provider"]
+    # A task the shared provider refused to serve was not attempted by anyone.
+    # It leaves BOTH denominators.
+    n_scoreable = n - n_harness - n_provider
     tok_in = _total(r["tokens_in"] for r in rows)
     tok_out = _total(r["tokens_out"] for r in rows)
 
@@ -116,6 +120,8 @@ def _arm_aggregate(rows: list[dict]) -> dict:
         "is_full_dataset_run": n == TERMINAL_BENCH_2_SIZE,
         "fault_owner_counts": owners,
         "harness_fault_rate": round(n_harness / n, 4) if n else None,
+        "provider_outage_count": n_provider,
+        "provider_outage_rate": round(n_provider / n, 4) if n else None,
         "failure_taxonomy": dict(sorted(taxonomy.items(), key=lambda kv: -kv[1])),
         "self_inflicted_totals": dict(sorted(inflicted.items(), key=lambda kv: -kv[1])),
         "self_inflicted_tasks": inflicted_tasks,
@@ -197,14 +203,40 @@ def build(*, config: dict, job_dirs: dict[str, str], arms: list) -> dict[str, An
         "pairwise": pairwise,
     }
 
+    # -- provider integrity ----------------------------------------------
+    # If the SHARED provider refused to serve on any trial, the comparison is
+    # void for those tasks -- and if it refused a lot, void full stop. This is
+    # a hard gate rather than a caveat: a run in which the provider was down is
+    # not a weak comparison, it is not a comparison.
+    outage_total = sum(a["provider_outage_count"] for a in aggregates.values())
+    trials_total = sum(a["tasks_attempted"] for a in aggregates.values())
+    provider_integrity = {
+        "trials_hit_by_provider_outage": outage_total,
+        "trials_total": trials_total,
+        "outage_rate": round(outage_total / trials_total, 4) if trials_total else None,
+        "probe_before_servable": (config.get("provider_probe_before") or {}).get("servable"),
+        "probe_after_servable": (config.get("provider_probe_after") or {}).get("servable"),
+        "comparison_valid": outage_total == 0,
+        "note": (
+            "The shared provider served every trial."
+            if outage_total == 0 else
+            f"THE SHARED PROVIDER REFUSED {outage_total} of {trials_total} "
+            "trials (quota/rate limit/retirement). Those trials measured "
+            "nothing about any harness. Any arm's score here is a lower bound "
+            "on an experiment that did not fully run, and the arms are NOT "
+            "comparable unless the outage hit them equally — which it does not, "
+            "because the arms ran sequentially and the outage is time-varying."),
+    }
+
     # -- the headline claim, stated as a limit rather than a result -------
     honesty = {
+        "provider_integrity": provider_integrity,
         "is_full_dataset_run": n_tasks == TERMINAL_BENCH_2_SIZE,
         "model_held_fixed": config.get("model_held_fixed"),
         "model_fixed_caveat": config.get("model_fixed_caveat"),
         "arms_blocked_not_beaten": sorted(config.get("blocked_arms", {})),
         "attempts_per_task": 1,
-        "claim_label": _claim_label(config, n_tasks, comparison),
+        "claim_label": _claim_label(config, n_tasks, comparison, provider_integrity),
         "must_not_be_quoted_as": [
             "a Terminal-Bench 2.0 score (subset run)",
             "a ranking of agent harnesses (n too small, see ranking_note)",
@@ -225,7 +257,14 @@ def build(*, config: dict, job_dirs: dict[str, str], arms: list) -> dict[str, An
     }
 
 
-def _claim_label(config: dict, n_tasks: int, comparison: dict) -> str:
+def _claim_label(config: dict, n_tasks: int, comparison: dict,
+                 provider_integrity: dict) -> str:
+    if not provider_integrity["comparison_valid"]:
+        return (
+            "VOID — THE SHARED PROVIDER FAILED DURING THE RUN "
+            f"({provider_integrity['trials_hit_by_provider_outage']} of "
+            f"{provider_integrity['trials_total']} trials). Nothing below is a "
+            "comparison between harnesses.")
     if n_tasks != TERMINAL_BENCH_2_SIZE:
         base = (f"PIPELINE / DIAGNOSTIC RUN over {n_tasks} of "
                 f"{TERMINAL_BENCH_2_SIZE} Terminal-Bench 2.0 tasks")
@@ -265,6 +304,31 @@ def report_md(results: dict) -> str:
         f"- **Attempts**: 1 per task per arm (best-of-1, no reranking)",
         f"- **Graded by**: {cfg.get('graded_by')}",
         "",
+    ]
+    # A results.json written before the provider-outage owner existed has no
+    # integrity block. Degrade to "unknown" rather than crashing: a reporter
+    # that cannot re-render last week's artefact is a reporter that quietly
+    # stops being used on old runs.
+    pi = hon.get("provider_integrity") or {
+        "comparison_valid": True,
+        "trials_hit_by_provider_outage": 0,
+        "trials_total": sum(a["tasks_attempted"] for a in agg.values()),
+        "note": "results.json predates provider-outage detection; unknown.",
+    }
+    if not pi["comparison_valid"]:
+        L += [
+            "> ## THIS RUN IS VOID AS A COMPARISON",
+            ">",
+            f"> {pi['note']}",
+            ">",
+            "> A `provider` fault is neither the harness's fault nor the "
+            "model's — it is the experiment's own infrastructure failing. It "
+            "is given its own owner precisely so it cannot be silently charged "
+            "to an arm. Read the tables below as evidence about the pipeline, "
+            "not about the agents.",
+            "",
+        ]
+    L += [
         "## Why this exists",
         "",
         "Published leaderboard numbers are not comparable to ours: scaffold "
@@ -286,8 +350,8 @@ def report_md(results: dict) -> str:
 
     # -- headline --------------------------------------------------------
     L += ["", "## Per-arm result", "",
-          "| arm | solved | accuracy | 95% CI | harness faults | model faults | ambiguous |",
-          "|---|---|---|---|---|---|---|"]
+          "| arm | solved | accuracy | 95% CI | harness | model | ambiguous | provider outage |",
+          "|---|---|---|---|---|---|---|---|"]
     for n in names:
         a = agg[n]
         fo = a["fault_owner_counts"]
@@ -296,7 +360,8 @@ def report_md(results: dict) -> str:
         L.append(
             f"| `{n}` | {a['tasks_resolved']}/{a['tasks_attempted']} "
             f"| {(a['accuracy'] or 0)*100:.1f}% | {ci_s} "
-            f"| {fo['harness']} | {fo['model']} | {fo['ambiguous']} |")
+            f"| {fo['harness']} | {fo['model']} | {fo['ambiguous']} "
+            f"| {fo.get('provider', 0)} |")
     L += ["",
           "> Every interval above is wide enough to contain most of the other "
           "arms. That is not a hedge, it is the measurement: "
@@ -315,14 +380,15 @@ def report_md(results: dict) -> str:
         "where a real internal ceiling and a slow model are indistinguishable "
         "from outside.",
         "",
-        "| arm | resolved | model fault | harness fault | ambiguous | grader fault | harness-fault rate |",
-        "|---|---|---|---|---|---|---|",
+        "| arm | resolved | model fault | harness fault | ambiguous | grader fault | provider outage | harness-fault rate |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for n in names:
         fo = agg[n]["fault_owner_counts"]
         L.append(
             f"| `{n}` | {fo['resolved']} | {fo['model']} | {fo['harness']} "
             f"| {fo['ambiguous']} | {fo.get('grader', 0)} "
+            f"| {fo.get('provider', 0)} "
             f"| {(agg[n]['harness_fault_rate'] or 0)*100:.1f}% |")
     L += ["",
           "> A non-zero harness-fault rate means that arm's accuracy above is "
@@ -340,11 +406,12 @@ def report_md(results: dict) -> str:
     # -- paired table ----------------------------------------------------
     L += ["## Per task, every arm", "",
           "`Y` solved. Otherwise the fault owner: `model` / `harness` / "
-          "`ambig` / `grader`.", "",
+          "`ambig` / `grader` / `provider down` (the shared provider refused "
+          "to serve — that trial measured nothing).", "",
           "| task | " + " | ".join(f"`{n}`" for n in names) + " | discriminating |",
           "|---|" + "---|" * (len(names) + 1)]
     short = {"model": "model", "harness": "**harness**", "ambiguous": "ambig",
-             "grader": "grader", "resolved": "Y"}
+             "grader": "grader", "resolved": "Y", "provider": "_provider down_"}
     for row in results["per_task"]:
         cells = []
         for n in names:
@@ -434,14 +501,31 @@ def report_md(results: dict) -> str:
     L += ["## Run integrity", "",
           "| check | result |", "|---|---|"]
     pb, pa = cfg.get("provider_probe_before", {}), cfg.get("provider_probe_after", {})
-    L += [f"| shared model reachable before | {pb.get('shared_model_present')} |",
-          f"| shared model reachable after | {pa.get('shared_model_present')} |",
+    L += [f"| shared model listed before / after | {pb.get('shared_model_present')} / {pa.get('shared_model_present')} |",
+          f"| shared model **servable** before / after | {pb.get('servable')} / {pa.get('servable')} |",
+          f"| provider outage trials | {pi['trials_hit_by_provider_outage']} of {pi['trials_total']} |",
           f"| contamination probe (live containers) | "
           f"{(cfg.get('contamination_probe') or {}).get('status', 'not run')} |",
           f"| disk free before / after | {cfg.get('disk_free_gb_before')} GB / "
           f"{cfg.get('disk_free_gb_after')} GB |",
-          f"| harbor exit code per arm | {cfg.get('arm_exit_codes')} |",
-          ""]
+          f"| harbor exit code per arm | {cfg.get('arm_exit_codes')} |"]
+    hc = cfg.get("host_contention_before") or {}
+    if hc:
+        L += [f"| host load avg (1/5/15) at start | "
+              f"{[round(x, 2) for x in hc.get('load_average_1_5_15', [])]} "
+              f"on {hc.get('cpu_count')} CPUs |",
+              f"| OTHER benchmark processes running | "
+              f"{hc.get('other_bench_processes')} |"]
+    L.append("")
+    if (hc.get("other_bench_processes") or 0) > 0:
+        L += ["> **Measured under contention.** Other benchmark runs were "
+              "active on this host during the run. They compete for CPU and "
+              "Docker, so wall-clock and install-time figures are upper "
+              "bounds; and they draw on the SAME provider account, which is a "
+              "plausible cause of any rate-limit seen above. Recorded rather "
+              "than corrected for — this harness cannot stop another "
+              "session's run, but it can refuse to pretend it was alone.",
+              ""]
 
     L += ["## What this can and cannot support", "",
           "**Can**: the harness-vs-model failure split per arm, on identical "
@@ -467,7 +551,10 @@ def print_headline(results: dict) -> None:
         fo = a["fault_owner_counts"]
         print(f"  {n:16} {a['tasks_resolved']}/{a['tasks_attempted']} solved   "
               f"model-fault={fo['model']} harness-fault={fo['harness']} "
-              f"ambiguous={fo['ambiguous']}")
+              f"ambiguous={fo['ambiguous']} provider-outage={fo.get('provider', 0)}")
+    pi = results["honesty"].get("provider_integrity") or {"comparison_valid": True}
+    if not pi["comparison_valid"]:
+        print(f"\n  !! {pi['note']}")
     print(f"\n  {results['comparison']['ranking_note']}\n")
 
 

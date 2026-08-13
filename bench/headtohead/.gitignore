@@ -1,0 +1,8 @@
+# Benchmark run outputs: large, machine-specific, and regenerable. The
+# artefacts that matter (results.json, report.md) are small, but the Harbor
+# job trees under them hold every arm's full logs and trajectories and can
+# reach gigabytes. Keep them out of the repo, same as bench/terminalbench does.
+runs/
+preflight/
+*.console.log
+__pycache__/

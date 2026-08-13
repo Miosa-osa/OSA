@@ -45,3 +45,217 @@ Share results by running `harbor upload
   return _merge_environment_host_overrides(baseline, trial_env_cfg)
 /home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
   agent_phase = resolve_agent_phase_policy(
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:06:15 0:00:00
+terminal-bench-2 • codex • glm-5.2:cloud
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      0 │          1 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception              ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ AgentSetupTimeoutError │     1 │
+└────────────────────────┴───────┘
+
+Job Info
+Total runtime: 6m 15s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/codex/harbor/2026
+-08-14__04-20-44/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/codex/harbor`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/codex/harbor/2026
+-08-14__04-20-44`
+
+[h2h 04:27:02] arm 'codex' finished rc=0 in 378.1s
+[h2h 04:27:02] --- arm 'opencode' : 1 task(s) ---
+[h2h 04:27:02] /home/miosa/projects/osa/OSA/bench/terminalbench/.venv/bin/harbor run -y -o /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/opencode/harbor -n 1 -p /home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2 -i regex-log -a opencode -m openai/glm-5.2:cloud --agent-timeout-multiplier 1.0 --extra-docker-compose /home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml --allow-agent-host host.docker.internal --allow-environment-host host.docker.internal
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:02:08 0:00:00
+terminal-bench-2 • opencode • glm-5.2:cloud
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      1 │          1 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception                 ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ NonZeroAgentExitCodeError │     1 │
+└───────────────────────────┴───────┘
+
+Job Info
+Total runtime: 2m 8s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/opencode/harbor/2
+026-08-14__04-27-02/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/opencode/harbor`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/opencode/harbor/2
+026-08-14__04-27-02`
+
+[h2h 04:29:14] arm 'opencode' finished rc=0 in 131.4s
+[h2h 04:29:14] --- arm 'goose' : 1 task(s) ---
+[h2h 04:29:14] /home/miosa/projects/osa/OSA/bench/terminalbench/.venv/bin/harbor run -y -o /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/goose/harbor -n 1 -p /home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2 -i regex-log -a goose -m openai/glm-5.2:cloud --agent-timeout-multiplier 1.0 --extra-docker-compose /home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml --allow-agent-host host.docker.internal --allow-environment-host host.docker.internal
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:01:01 0:00:00
+terminal-bench-2 • goose • glm-5.2:cloud
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      1 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+└────────┴───────┘
+
+Job Info
+Total runtime: 1m 1s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/goose/harbor/2026
+-08-14__04-29-14/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/goose/harbor`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/goose/harbor/2026
+-08-14__04-29-14`
+
+[h2h 04:30:18] arm 'goose' finished rc=0 in 64.5s
+[h2h 04:30:18] --- arm 'mini-swe-agent' : 1 task(s) ---
+[h2h 04:30:18] /home/miosa/projects/osa/OSA/bench/terminalbench/.venv/bin/harbor run -y -o /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/mini-swe-agent/harbor -n 1 -p /home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2 -i regex-log -a mini-swe-agent -m openai/glm-5.2:cloud --agent-timeout-multiplier 1.0 --extra-docker-compose /home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml --allow-agent-host host.docker.internal --allow-environment-host host.docker.internal
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:05:39 0:00:00
+terminal-bench-2 • mini-swe-agent • glm-5.2:cloud
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      1 │          1 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception         ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ ApiRateLimitError │     1 │
+└───────────────────┴───────┘
+
+Job Info
+Total runtime: 5m 39s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/mini-swe-agent/ha
+rbor/2026-08-14__04-30-18/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/mini-swe-agent/ha
+rbor`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/mini-swe-agent/ha
+rbor/2026-08-14__04-30-18`
+
+[h2h 04:36:01] arm 'mini-swe-agent' finished rc=0 in 342.7s
+[h2h 04:36:01] --- arm 'aider' : 1 task(s) ---
+[h2h 04:36:01] /home/miosa/projects/osa/OSA/bench/terminalbench/.venv/bin/harbor run -y -o /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/aider/harbor -n 1 -p /home/miosa/projects/osa/OSA/bench/terminalbench/tasks/terminal-bench-2 -i regex-log -a aider -m openai/openai/glm-5.2:cloud --ae OPENAI_API_BASE=http://host.docker.internal:11434/v1 --agent-timeout-multiplier 1.0 --extra-docker-compose /home/miosa/projects/osa/OSA/bench/terminalbench/compose-host-provider.yaml --allow-agent-host host.docker.internal --allow-environment-host host.docker.internal
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:88: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  return _merge_environment_host_overrides(baseline, trial_env_cfg)
+/home/miosa/projects/osa/OSA/bench/terminalbench/.venv/lib/python3.12/site-packages/harbor/trial/network_policy.py:157: UserWarning: Run-specific allowlist host(s) ['host.docker.internal'] are ignored because the effective network policy is public.
+  agent_phase = resolve_agent_phase_policy(
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:02:08 0:00:00
+terminal-bench-2 • aider • openai/glm-5.2:cloud
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      1 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+└────────┴───────┘
+
+Job Info
+Total runtime: 2m 8s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/aider/harbor/2026
+-08-14__04-36-01/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/aider/harbor`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/arms/aider/harbor/2026
+-08-14__04-36-01`
+
+[h2h 04:38:12] arm 'aider' finished rc=0 in 131.4s
+
+==================================================================
+PIPELINE / DIAGNOSTIC RUN over 1 of 89 Terminal-Bench 2.0 tasks — DOES NOT SUPPORT A RANKING
+==================================================================
+  aider            0/1 solved   model-fault=1 harness-fault=0 ambiguous=0
+  codex            0/1 solved   model-fault=0 harness-fault=1 ambiguous=0
+  goose            0/1 solved   model-fault=0 harness-fault=1 ambiguous=0
+  mini-swe-agent   0/1 solved   model-fault=0 harness-fault=1 ambiguous=0
+  opencode         0/1 solved   model-fault=0 harness-fault=1 ambiguous=0
+  osa              0/1 solved   model-fault=0 harness-fault=1 ambiguous=0
+
+  n=1. An exact paired test needs at least 6 DISCORDANT pairs before any result can reach p<0.05; this run produced 0 task(s) on which the arms disagreed at all. Ordering the arms by resolve count is describing this sample, not ranking the harnesses.
+
+[h2h 04:38:12] results: /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/results.json
+[h2h 04:38:12] report:  /home/miosa/projects/osa/OSA/bench/headtohead/runs/smoke1/report.md

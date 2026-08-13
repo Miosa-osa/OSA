@@ -203,6 +203,22 @@ RUNNABLE: dict[str, Arm] = {
             "OPENAI_BASE_URL": OPENAI_COMPAT_BASE_URL,
         },
         family="opencode",
+        # OBSERVED, not assumed. A live trial's own error payload carried
+        # `metadata.url = http://host.docker.internal:11434/v1/responses` --
+        # opencode routes through the AI SDK's openai provider, which now
+        # defaults to the Responses API rather than chat-completions. The
+        # connection config is confirmed correct by that same payload: right
+        # host, right port, right model.
+        wire="openai-responses (/v1/responses, observed)",
+        caveats=(
+            "Resolves its model catalog from models.dev and its provider "
+            "package (@ai-sdk/openai) on demand AT RUN TIME, so it needs "
+            "egress beyond install. XDG_DATA_HOME is redirected into /logs, so "
+            "that cache is cold on every trial.",
+            "The provider prefix must be literally `openai`: the adapter only "
+            "injects `baseURL` for providers in {anthropic, openai}, so "
+            "`ollama/...` would produce a provider block with no endpoint.",
+        ),
     ),
     "goose": Arm(
         name="goose",

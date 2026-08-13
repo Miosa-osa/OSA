@@ -139,7 +139,39 @@ def provider_probe() -> dict:
     except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
         out["reachable"] = False
         out["shared_model_present"] = False
+        out["servable"] = False
         out["error"] = str(e)[:200]
+        return out
+
+    # LISTING IS NOT SERVING. The Ollama cloud account can list all 46 models
+    # and then refuse every single completion with
+    #   429 "you have reached your session usage limit"
+    # A probe that only lists gives a green light to a run in which every arm
+    # fails identically for a reason that has nothing to do with any arm. So
+    # the probe spends one real (tiny) completion.
+    body = json.dumps({
+        "model": arms_mod.SHARED_MODEL,
+        "messages": [{"role": "user", "content": "ok"}],
+        "max_tokens": 1,
+    }).encode()
+    req = urllib.request.Request(
+        arms_mod.HOST_PROBE_URL + "/v1/chat/completions",
+        data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            payload = json.load(r)
+        if "error" in payload:
+            out["servable"] = False
+            out["serve_error"] = str(payload["error"])[:300]
+        else:
+            out["servable"] = True
+            out["probe_usage"] = payload.get("usage")
+    except urllib.error.HTTPError as e:
+        out["servable"] = False
+        out["serve_error"] = f"HTTP {e.code}: {e.read()[:300].decode('utf-8', 'replace')}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        out["servable"] = False
+        out["serve_error"] = str(e)[:300]
     return out
 
 
@@ -180,19 +212,58 @@ def osa_release_provenance() -> dict:
     return out
 
 
+def host_contention() -> dict:
+    """What else is competing for this host while the arms run.
+
+    Wall clock is one of the reported measurements, so anything else running is
+    a confound. Worse, other benchmark runs on this machine share the SAME
+    Ollama account -- concurrent SWE-bench work is a plausible cause of the
+    `reached your session usage limit` 429 that voided the first smoke run, and
+    of an npm install overrunning its budget.
+
+    Recorded rather than prevented: this harness has no authority to stop
+    another session's run, but it can refuse to pretend it was alone.
+    """
+    out: dict = {}
+    try:
+        out["load_average_1_5_15"] = list(os.getloadavg())
+        out["cpu_count"] = os.cpu_count()
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(
+            ["pgrep", "-af", "run_bench|swebench|recoverybench"],
+            capture_output=True, text=True, timeout=20)
+        procs = [l for l in r.stdout.splitlines() if "headtohead" not in l]
+        # Command lines can carry credentials; keep only the benchmark path.
+        out["other_bench_processes"] = len(procs)
+        out["other_bench_hint"] = sorted({
+            seg for line in procs for seg in line.split()
+            if "/bench/" in seg})[:10]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        r = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=20)
+        names = r.stdout.split()
+        out["foreign_bench_containers"] = [
+            n for n in names
+            if n.startswith(("swebp-", "sweb.eval", "swebench"))][:20]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    out["note"] = (
+        "Any non-zero count here means wall-clock and install-time figures in "
+        "this run were measured under contention, and that the shared Ollama "
+        "account was being drawn on by something other than these arms.")
+    return out
+
+
 def disk_free_gb(path: Path) -> float:
     st = os.statvfs(path)
     return round(st.f_bavail * st.f_frsize / 1e9, 1)
 
 
-def contamination_probe() -> dict:
-    """Run bench/terminalbench/contamination_probe.py against live containers.
-
-    Terminal-Bench grades container state, so a task image that ships its own
-    solution would let every arm score without solving anything -- and it
-    would do so identically for every arm, which is exactly the kind of shared
-    bias a head-to-head cannot detect from the numbers.
-    """
+def _probe_once() -> dict:
     probe = TBENCH / "contamination_probe.py"
     try:
         r = subprocess.run([sys.executable, str(probe), "--all"],
@@ -203,6 +274,46 @@ def contamination_probe() -> dict:
         r.returncode, f"rc={r.returncode}")
     return {"status": status, "returncode": r.returncode,
             "output": (r.stdout + r.stderr)[-4000:]}
+
+
+def start_contamination_probe(result_slot: dict, stop) -> "threading.Thread":
+    """Probe live task containers WHILE an arm is running.
+
+    Terminal-Bench grades container state, so a task image that shipped its own
+    solution would let every arm score without solving anything -- identically
+    for every arm, which is exactly the kind of shared bias a head-to-head
+    cannot detect from its own numbers. (SWE-bench Pro images really do ship
+    the fix commit; this is not hypothetical.)
+
+    It has to run CONCURRENTLY. Harbor starts its environments with
+    `delete: true`, so by the time an arm's subprocess returns there is nothing
+    left to probe -- the first version of this called the probe after the first
+    arm finished and would have reported `no_containers_to_probe` forever,
+    which is the failure mode where a check that never runs looks exactly like
+    a check that passed.
+    """
+    import threading
+
+    def _worker():
+        deadline = time.time() + 1800
+        while time.time() < deadline and not stop.is_set():
+            names = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True, check=False).stdout.split()
+            if any(n.endswith("__env-main-1") for n in names):
+                result_slot.update(_probe_once())
+                result_slot["probed_at"] = datetime.now(timezone.utc).isoformat()
+                return
+            time.sleep(5)
+        result_slot.setdefault(
+            "status", "no_containers_to_probe",
+        )
+        result_slot.setdefault(
+            "note", "no task container was observed alive during the run window")
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t
 
 
 def run_arm(arm, tasks: list[str], out_dir: Path, args) -> tuple[Path | None, int]:
@@ -218,6 +329,19 @@ def run_arm(arm, tasks: list[str], out_dir: Path, args) -> tuple[Path | None, in
         cmd += ["-i", t]
     cmd += arm.harbor_args()
     cmd += ["--agent-timeout-multiplier", str(args.agent_timeout_multiplier)]
+    # Install budget, applied IDENTICALLY to every arm.
+    #
+    # Install cost differs enormously between arms -- OSA unpacks a 17 MB OTP
+    # release in ~11 s; codex bootstraps nvm, Node 22 and an npm global install
+    # and blew through regex-log's default 360 s agent-setup budget on this
+    # host, producing an `AgentSetupTimeoutError`. Left alone, that would be
+    # recorded as a codex HARNESS FAULT, which would be a lie: nothing about
+    # codex failed, our npm was slow.
+    #
+    # Install time is still reported, as `agent_setup_mean_s` in the cost
+    # table. The difference belongs in a cost column where it can be read,
+    # not in a fault column where it reads as a defect.
+    cmd += ["--agent-setup-timeout-multiplier", str(args.agent_setup_timeout_multiplier)]
     # The overlay goes to EVERY arm. Applying it to one arm and not another is
     # a difference in the environment under test, not in the agent.
     cmd += ["--extra-docker-compose", str(TBENCH / "compose-host-provider.yaml")]
@@ -264,6 +388,12 @@ def main() -> int:
                          "by every arm; it is never re-drawn per arm")
     ap.add_argument("--n-concurrent", type=int, default=2)
     ap.add_argument("--agent-timeout-multiplier", type=float, default=1.0)
+    ap.add_argument("--agent-setup-timeout-multiplier", type=float, default=4.0,
+                    help="install budget, applied identically to every arm. "
+                         "Default 4.0 because codex's nvm+node+npm bootstrap "
+                         "exceeds the default 360s on this host, and an arm "
+                         "that times out installing would be scored as a "
+                         "harness fault it did not commit")
     ap.add_argument("--report-only", action="store_true",
                     help="re-report an existing run directory without running")
     args = ap.parse_args()
@@ -293,12 +423,18 @@ def main() -> int:
     selected = [arms_mod.get(n) for n in args.arms]
 
     pre = provider_probe()
-    if not args.report_only and not pre.get("shared_model_present"):
+    if not args.report_only and not pre.get("servable"):
         raise SystemExit(
-            f"shared model {arms_mod.SHARED_MODEL} not reachable at "
-            f"{arms_mod.HOST_PROBE_URL}: {pre}\n"
-            "Refusing to run: an arm that cannot reach the model produces a "
-            "harness fault that looks like a capability result.")
+            f"shared model {arms_mod.SHARED_MODEL} is not SERVABLE at "
+            f"{arms_mod.HOST_PROBE_URL}\n"
+            f"  reachable={pre.get('reachable')} "
+            f"listed={pre.get('shared_model_present')} "
+            f"servable={pre.get('servable')}\n"
+            f"  {pre.get('serve_error') or pre.get('error')}\n\n"
+            "Refusing to run. A provider that lists the model and then refuses "
+            "to serve it fails EVERY arm identically, and the resulting run "
+            "would look like six broken harnesses instead of one exhausted "
+            "account.")
 
     free_gb = disk_free_gb(HERE)
     log(f"disk free: {free_gb} GB")
@@ -336,6 +472,13 @@ def main() -> int:
             "wall_clock": "task.toml agent.timeout_sec x "
                           f"{args.agent_timeout_multiplier}",
             "agent_timeout_multiplier": args.agent_timeout_multiplier,
+            "agent_setup_timeout_multiplier": args.agent_setup_timeout_multiplier,
+            "setup_budget_note": (
+                "Install budget is scaled equally for all arms. Install cost "
+                "itself is NOT equalised and is reported as agent_setup_mean_s "
+                "in the cost table: OSA ~11s (unpack an OTP release) vs codex "
+                ">360s (nvm + Node 22 + npm global). That difference is real "
+                "and belongs in a cost column, not a fault column."),
             "turn_cap": None,
             "turn_cap_note": (
                 "Deliberately unset. Only goose and mini-swe-agent expose a "
@@ -349,6 +492,7 @@ def main() -> int:
         "harbor_version": harbor_version(),
         "provider_probe_before": pre,
         "osa_release_provenance": osa_release_provenance(),
+        "host_contention_before": host_contention(),
         "disk_free_gb_before": free_gb,
         "blocked_arms": {b.name: {"blocker": b.blocker, "reason": b.reason,
                                   "what_would_unblock": b.what_would_unblock}
@@ -362,25 +506,46 @@ def main() -> int:
 
     job_dirs: dict[str, str] = {}
     if args.report_only:
+        # Carry forward the facts that can only be captured WHILE the run was
+        # happening. Re-reporting must not silently drop a live probe result
+        # and leave "we never checked" looking like "we checked and it passed".
+        prior_path = out / "config.json"
+        if prior_path.exists():
+            try:
+                prior = json.loads(prior_path.read_text())
+                for key in ("contamination_probe", "provider_probe_before",
+                            "arm_exit_codes", "started_at",
+                            "osa_release_provenance"):
+                    if key in prior:
+                        config[key] = prior[key]
+                config["reported_again_at"] = datetime.now(timezone.utc).isoformat()
+            except (json.JSONDecodeError, OSError):
+                pass
         for a in selected:
             jobs = sorted((out / "arms" / a.name / "harbor").glob("*/"),
                           key=lambda p: p.stat().st_mtime)
             if jobs:
                 job_dirs[a.name] = str(jobs[-1])
     else:
-        contamination_done = False
+        import threading
+
+        # Armed BEFORE the first arm starts and left to catch a live container
+        # while that arm runs. See start_contamination_probe().
+        contamination: dict = {}
+        stop = threading.Event()
+        start_contamination_probe(contamination, stop)
+
         for a in selected:
             job_dir, rc = run_arm(a, tasks, out, args)
             config.setdefault("arm_exit_codes", {})[a.name] = rc
             if job_dir:
                 job_dirs[a.name] = str(job_dir)
-            # Probe live containers once, during the first arm's run window,
-            # while a task container actually exists to probe.
-            if not contamination_done:
-                config["contamination_probe"] = contamination_probe()
-                contamination_done = True
+        stop.set()
+        config["contamination_probe"] = contamination or {
+            "status": "no_containers_to_probe"}
 
     config["provider_probe_after"] = provider_probe()
+    config["host_contention_after"] = host_contention()
     config["disk_free_gb_after"] = disk_free_gb(HERE)
     config["finished_at"] = datetime.now(timezone.utc).isoformat()
     config["arm_job_dirs"] = job_dirs
