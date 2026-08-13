@@ -111,3 +111,6 @@ dist/
 
 # Benchmark upstream clones — vendored repos, not our source
 bench/*/upstream/
+
+# Benchmark run outputs — regenerable, and written live while a run is in flight
+bench/*/runs/

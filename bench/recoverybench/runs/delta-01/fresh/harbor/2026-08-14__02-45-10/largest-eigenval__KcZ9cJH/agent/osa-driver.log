@@ -1,2 +1,0 @@
-[osa-driver 19:52:52] health ok after 3s: {"status":"ok","version":"1.0.95","update":{"available":false,"current_version":"1.0.95","latest_version":null},"provider":"ollama","model":"glm-5.2:cloud","effort":"medium","context_window":1000000,"
-[osa-driver 19:52:53] overdrive -> HTTP 200 {"command":"permission_mode overdrive","output":"Permission mode set to overdrive.","mode":"overdrive"}
