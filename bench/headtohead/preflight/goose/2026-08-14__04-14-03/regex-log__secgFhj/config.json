@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__secgFhj",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/goose/2026-08-14__04-14-03",
+    "install_only": true,
+    "agent": {
+        "name": "goose"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "0b8db23a-86b5-43f9-821a-1261439a8e09"
+}

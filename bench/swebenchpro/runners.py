@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
 
 import dataset as ds
 import shared
@@ -236,6 +237,59 @@ class EmptyRunner:
 # ---------------------------------------------------------------------------
 
 
+#: Markers that mean the *provider* failed outright, not that the model tried
+#: and produced nothing. Taken verbatim from the frames OSA emits.
+PROVIDER_FAILURE_MARKERS = (
+    "All providers failed",
+    "session usage limit",
+    "Rate limited (429)",
+    "insufficient_quota",
+    "quota exceeded",
+)
+
+#: A retry alone is not a failure -- OSA retries up to 11 times and usually
+#: wins. Only a run that ends with no patch AND a terminal provider error is
+#: reclassified.
+PROVIDER_RETRY_MARKER = "provider_retry"
+
+
+def provider_failure(event_log: str | None) -> str:
+    """The provider error that ended this turn, or "" if the provider was fine.
+
+    ## Why this exists
+
+    A total provider outage was being recorded as `empty_patch`, which
+    `diagnose.classify` buckets as `model_no_patch` with fault=**model**. So an
+    exhausted API quota was scored as the model failing to write a patch.
+
+    Measured: during the no-spec ablation the Ollama Cloud account hit its
+    session cap and returned HTTP 429. Five instances ended in 6-8 seconds with
+    zero tool calls, an `All providers failed: ... session usage limit` system
+    event, and a `Rate limited (429)` agent response -- and the bench logged
+    each as `empty_patch, 0B patch`, indistinguishable in the results from a
+    model that thought hard and gave up.
+
+    That misattribution is worse than a lost instance: it silently moves
+    infrastructure failures into the column the whole benchmark exists to
+    measure. Detecting it here keeps the split honest, and `run_bench` then
+    labels these rows `bench_provider_exhausted` / fault=bench so they are
+    excluded from the model's score rather than counted against it.
+    """
+    if not event_log:
+        return ""
+    p = Path(event_log)
+    if not p.exists():
+        return ""
+    try:
+        text = p.read_text(errors="replace")
+    except OSError:
+        return ""
+    for m in PROVIDER_FAILURE_MARKERS:
+        if m in text:
+            return m
+    return ""
+
+
 def _osa_runner_class():
     """Import lazily: the controls must stay dependency-free (no `requests`)."""
     OsaRunner = shared.osa_runner_class()
@@ -261,6 +315,22 @@ def _osa_runner_class():
                 context_mode=self._context_mode,
                 test_hint=bool(self.with_test_bridge and task.container),
             )
+
+        def run(self, task: Task) -> RunResult:
+            res = super().run(task)
+            # A provider outage must never be charged to the model. See
+            # `provider_failure` for the measurement that motivated this.
+            if not res.patch.strip():
+                marker = provider_failure((res.raw or {}).get("event_log"))
+                if marker:
+                    res.status = "agent_error"
+                    res.error = (
+                        f"provider failure, not a model failure: {marker!r} in the "
+                        f"event stream; the turn ended after "
+                        f"{res.wall_clock_s:.1f}s with no patch"
+                    )
+                    res.raw["provider_failure"] = marker
+            return res
 
     return ProOsaRunner
 

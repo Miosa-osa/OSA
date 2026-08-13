@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__RyfeQnr",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/gemini-cli/2026-08-14__04-19-04",
+    "install_only": true,
+    "agent": {
+        "name": "gemini-cli"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "a75d92e6-e736-43f8-b857-6f8eaceb517e"
+}

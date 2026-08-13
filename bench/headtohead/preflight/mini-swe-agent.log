@@ -1,0 +1,19 @@
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:00:56 0:00:00
+terminal-bench-2 • mini-swe-agent
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      0 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+Job Info
+Total runtime: 56s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent/2026-08-1
+4__04-15-24/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent/2026-08-1
+4__04-15-24`
+

@@ -1,0 +1,19 @@
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:00:43 0:00:00
+terminal-bench-2 • aider
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      0 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+Job Info
+Total runtime: 43s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/aider/2026-08-14__04-14-
+38/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/aider`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/aider/2026-08-14__04-14-
+38`
+

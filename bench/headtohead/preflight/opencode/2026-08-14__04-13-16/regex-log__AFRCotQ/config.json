@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__AFRCotQ",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/opencode/2026-08-14__04-13-16",
+    "install_only": true,
+    "agent": {
+        "name": "opencode"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "0f8ef14d-7bb1-403a-a19b-7c043e8e6b55"
+}

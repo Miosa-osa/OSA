@@ -1,0 +1,29 @@
+Running command: apt-get update && apt-get install -y curl bzip2 libxcb1 libgomp1
+Command outputs captured
+Running command: mkdir -p ~/.config/goose && cat > ~/.config/goose/config.yaml << 'INNEREOF'
+GOOSE_MODEL: ${GOOSE_MODEL}
+GOOSE_PROVIDER: ${GOOSE_PROVIDER}
+extensions:
+  developer:
+    bundled: true
+    display_name: Developer
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin
+  todo:
+    bundled: true
+    display_name: Todo
+    enabled: true
+    name: todo
+    type: platform
+  summon:
+    bundled: true
+    display_name: Summon
+    enabled: true
+    name: summon
+    type: platform
+INNEREOF
+Command outputs captured
+Running command: set -euo pipefail; curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | bash && export PATH="$HOME/.local/bin:$PATH" && goose --version
+Command outputs captured

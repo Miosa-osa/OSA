@@ -79,6 +79,11 @@ def network_tool_use(rows: list[dict], attestation: dict | None = None) -> dict:
     instances = []
     instances_succeeded = []
     residual: dict[str, list] = {}
+    #: FINDINGS.md #6 -- build tools that fetch as a side effect (`go:
+    #: downloading`, `pip install`). Reported separately from `residual`
+    #: because an ambiguous `go build` must not void a run's score; see
+    #: airgap._TOOLCHAIN_CMD_HINTS.
+    toolchain_fetch: dict[str, list] = {}
     scanned = 0
     for r in rows:
         sig = r.get("osa_signals") or {}
@@ -103,9 +108,13 @@ def network_tool_use(rows: list[dict], attestation: dict | None = None) -> dict:
         log_path = r.get("event_log")
         if log_path:
             scanned += 1
-            hits = airgap.residual_egress_evidence(Path(log_path))
-            if hits:
-                residual[r["instance_id"]] = hits
+            explicit, toolchain = airgap.split_egress_hits(
+                airgap.residual_egress_evidence(Path(log_path))
+            )
+            if explicit:
+                residual[r["instance_id"]] = explicit
+            if toolchain:
+                toolchain_fetch[r["instance_id"]] = toolchain
 
     enforced = bool(attestation and attestation.get("enforced"))
     return {
@@ -132,6 +141,24 @@ def network_tool_use(rows: list[dict], attestation: dict | None = None) -> dict:
                 "transcript for a human to read, not proof of a lookup. An "
                 "empty map means the recorded streams contain no evidence, "
                 "which is weaker than 'no egress happened'."
+            ),
+        },
+        # FINDINGS.md #6: the egress scan used to grep for urllib/requests and
+        # therefore missed `go: downloading` and `pip install`, which are real
+        # outbound network from shell_execute. Both the commands and the tools'
+        # own download lines are scanned now. Kept OUT of
+        # `residual_shell_egress` on purpose: a hit there sets the gate's
+        # `breached` verdict, and `go build` on a warm module cache does not
+        # touch the network. This block is for a human to read.
+        "toolchain_fetch": {
+            "scanned": scanned,
+            "instances": toolchain_fetch,
+            "note": (
+                "Build/package tools that CAN fetch (evidence=command) or that "
+                "printed a download line (evidence=output). Output evidence is "
+                "the strong kind. This does not set `clean` to false -- it is a "
+                "pointer at a transcript, and the airgap is a filter on this "
+                "surface rather than a boundary (FINDINGS.md #7)."
             ),
         },
         # "clean" means nothing GOT THROUGH. Refused attempts are recorded

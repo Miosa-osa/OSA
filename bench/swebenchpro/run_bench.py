@@ -382,6 +382,7 @@ def main() -> int:
             harness_report=harness_report, report_dir=eval_dir,
             run_id=arun_id, model=model_name,
         )
+        _relabel_provider_failures(doc)
         attempt_docs.append(doc)
         a = doc["aggregate"]
         log(f"attempt {attempt}: RESOLVED {a['instances_resolved']}/"
@@ -415,6 +416,49 @@ def main() -> int:
         freed = ws.prune_images(chosen, args.dockerhub_user)
         log(f"pruned {freed} instance image(s); {ws.free_gb(HERE):.0f} GB free")
     return 0
+
+
+#: The bucket a provider outage belongs in. `diagnose.py` has no name for it --
+#: its closest match, `osa_agent_crashed`, blames OSA for someone else's quota
+#: -- so the row is relabelled here rather than left in a wrong bucket.
+PROVIDER_BUCKET = "bench_provider_exhausted"
+
+
+def _relabel_provider_failures(doc: dict) -> int:
+    """Move provider outages out of the model's column.
+
+    `runners.ProviderOsaRunner.run` marks these `agent_error`, which already
+    keeps them clear of `model_no_patch`. But `diagnose.classify` then files
+    `agent_error` as `osa_agent_crashed` / fault=harness, and an exhausted API
+    quota is neither OSA crashing nor the model failing -- it is the benchmark's
+    environment running out. `bench` is the honest column, and it is the one
+    `bench/report/loader.py` already excludes from the rate as an infra event.
+
+    Returns how many rows were relabelled, so the caller can say so out loud.
+    """
+    n = 0
+    for row in doc.get("instances", []):
+        marker = (row.get("osa_signals") or {}).get("_provider_failure") or \
+            ((row.get("raw") or {}).get("provider_failure"))
+        if not marker and row.get("failure_reason") == "agent_error":
+            marker = "agent_error with provider failure recorded by the runner"
+        if not marker:
+            continue
+        row["failure_bucket"] = PROVIDER_BUCKET
+        row["failure_fault"] = "bench"
+        row["failure_reason"] = "provider_exhausted"
+        row["failure_evidence"] = [
+            f"the provider, not the model, ended this turn: {marker}",
+            "counted as an infrastructure event; it is NOT evidence about the "
+            "model and must not be scored as a miss",
+        ]
+        n += 1
+    if n:
+        agg = doc.setdefault("aggregate", {})
+        agg["provider_failures"] = n
+        agg["diagnosis"] = diagnose.summarize(doc["instances"])
+        agg["probable_osa_bugs"] = diagnose.repeated_harness_failures(doc["instances"])
+    return n
 
 
 _ATTEST_LOCK = threading.Lock()

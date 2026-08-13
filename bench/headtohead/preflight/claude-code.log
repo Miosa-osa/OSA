@@ -1,0 +1,19 @@
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:02:38 0:00:00
+terminal-bench-2 • claude-code
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      0 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+Job Info
+Total runtime: 2m 38s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/claude-code/2026-08-14__
+04-16-23/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/claude-code`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/claude-code/2026-08-14__
+04-16-23`
+

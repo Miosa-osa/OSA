@@ -1,0 +1,19 @@
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:00:32 0:00:00
+terminal-bench-2 • goose
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      0 │          0 │ 0.000 │
+└────────┴────────────┴───────┘
+
+Job Info
+Total runtime: 32s
+Results written to 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/goose/2026-08-14__04-14-
+03/result.json
+Inspect results by running `harbor view 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/goose`
+Share results by running `harbor upload 
+/home/miosa/projects/osa/OSA/bench/headtohead/preflight/goose/2026-08-14__04-14-
+03`
+

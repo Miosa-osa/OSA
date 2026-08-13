@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__nVUkWGo",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent/2026-08-14__04-15-24",
+    "install_only": true,
+    "agent": {
+        "name": "mini-swe-agent"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "31804e52-d700-42eb-a95b-d3e7b679ae70"
+}

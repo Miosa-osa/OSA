@@ -303,6 +303,81 @@ class TestReportLayoutAdapter(unittest.TestCase):
             self.assertFalse(shared.sb_diagnose.patch_apply_failed(d, "rid", "m", "i1"))
 
 
+class TestProviderFailureAttribution(unittest.TestCase):
+    """A provider outage must never be scored as the model failing.
+
+    Measured during the no-spec ablation: the Ollama Cloud account hit its
+    session cap, five instances ended in 6-8s with zero tool calls, and the
+    bench recorded each as `empty_patch` -- which `diagnose.classify` buckets
+    as `model_no_patch`, fault=model. An exhausted quota was being charged to
+    the model's score.
+    """
+
+    def _log(self, td: Path, text: str) -> str:
+        p = td / "ev.jsonl"
+        p.write_text(text)
+        return str(p)
+
+    def test_detects_the_terminal_provider_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._log(Path(td), json.dumps(
+                {"type": "system_event",
+                 "reason": 'All providers failed: ollama: "Ollama returned 429: '
+                           'you have reached your session usage limit"'}) + "\n")
+            self.assertEqual(runners.provider_failure(p), "All providers failed")
+
+    def test_detects_the_rate_limit_response(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._log(Path(td), json.dumps(
+                {"type": "agent_response",
+                 "response": "API Error: Rate limited (429)"}) + "\n")
+            self.assertTrue(runners.provider_failure(p))
+
+    def test_a_healthy_run_is_not_flagged(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Token counts containing "429" must not read as a rate limit --
+            # this is exactly what a naive grep for "429" got wrong: the
+            # full-spec run had "429" in 10 of 12 logs, all of them
+            # input_tokens=34298.
+            p = self._log(Path(td), json.dumps(
+                {"type": "llm_response",
+                 "usage": {"input_tokens": 34298, "output_tokens": 94}}) + "\n")
+            self.assertEqual(runners.provider_failure(p), "")
+
+    def test_retry_alone_is_not_a_failure(self):
+        # OSA retries up to 11 times and usually wins; only a terminal error counts.
+        with tempfile.TemporaryDirectory() as td:
+            p = self._log(Path(td), json.dumps(
+                {"type": "provider_retry", "reason": "Ollama stream HTTP 429",
+                 "attempt": 2}) + "\n")
+            self.assertEqual(runners.provider_failure(p), "")
+
+    def test_missing_log_is_not_a_failure(self):
+        self.assertEqual(runners.provider_failure(None), "")
+        self.assertEqual(runners.provider_failure("/nonexistent/x.jsonl"), "")
+
+    def test_relabel_moves_the_row_out_of_the_model_column(self):
+        import run_bench
+
+        doc = {
+            "instances": [
+                {"instance_id": "i1", "resolved": False, "failure_reason": "agent_error",
+                 "failure_bucket": "osa_agent_crashed", "failure_fault": "harness",
+                 "raw": {"provider_failure": "session usage limit"}},
+                {"instance_id": "i2", "resolved": False, "failure_reason": "no_patch_produced",
+                 "failure_bucket": "model_no_patch", "failure_fault": "model", "raw": {}},
+            ],
+            "aggregate": {},
+        }
+        n = run_bench._relabel_provider_failures(doc)
+        self.assertEqual(n, 1)
+        self.assertEqual(doc["instances"][0]["failure_fault"], "bench")
+        self.assertEqual(doc["instances"][0]["failure_bucket"], run_bench.PROVIDER_BUCKET)
+        # A genuine model failure must be left exactly as it was.
+        self.assertEqual(doc["instances"][1]["failure_fault"], "model")
+        self.assertEqual(doc["instances"][1]["failure_bucket"], "model_no_patch")
+
+
 class TestHonestyKeys(unittest.TestCase):
     """The reporter's fail-closed gates must be able to read our config.
 

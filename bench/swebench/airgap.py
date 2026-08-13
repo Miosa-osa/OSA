@@ -521,15 +521,90 @@ _EGRESS_HINTS = (
     "://bitbucket.org",
 )
 
+#: A SECOND, SEPARATELY-REPORTED class: build tools that fetch as a side effect.
+#:
+#: FINDINGS.md #6. Three SWE-bench Pro instances logged `go: downloading
+#: github.com/...` — real outbound network from `shell_execute`, invisible to
+#: the scan above because `go build` contains neither "urllib" nor "requests".
+#: The command text alone is not enough either: `go test ./...` downloads only
+#: if the module cache is cold, and `pip install` of a local path never leaves
+#: the machine. So the command is a *candidate* and the tool's OUTPUT is the
+#: evidence, which is why both are scanned and reported separately.
+#:
+#: These hits deliberately do NOT feed the `breached` verdict. A false breach
+#: on an ambiguous `go build` would block a 500-instance run on a guess, and
+#: the honest reading of a toolchain hit is "a human must read this
+#: transcript", not "the score is void".
+_TOOLCHAIN_CMD_HINTS = (
+    "go get", "go mod download", "go mod tidy", "go build", "go test",
+    "go run", "go install",
+    "pip install", "pip3 install", "pip download", "python -m pip",
+    "uv pip", "uv sync", "poetry install", "poetry add", "pipenv install",
+    "conda install", "conda create", "mamba install",
+    "npm install", "npm ci", "npm i ", "yarn add", "yarn install",
+    "pnpm install", "pnpm add", "bundle install", "gem install",
+    "cargo build", "cargo fetch", "cargo test", "cargo install", "cargo add",
+    "apt-get install", "apt install", "apk add", "yum install", "dnf install",
+    "mvn ", "gradle ", "composer install", "nuget restore", "dotnet restore",
+    "setup.py develop", "setup.py install", "pip wheel",
+)
+
+#: Markers in tool OUTPUT that a fetch actually happened. These are the strong
+#: evidence: they are printed by the tool at the moment it goes to the network.
+_TOOLCHAIN_OUTPUT_HINTS = (
+    "go: downloading",
+    "go: extracting",
+    "go: finding",
+    "downloading from https://",
+    # NOT "collecting " (pip's first line): pytest prints "collecting ..." on
+    # every single test run, and it fired on 3 logs of ordinary Python test
+    # output. pip's *network* line is "Downloading http…", which is below and
+    # is unambiguous.
+    "downloading http",         # pip / setuptools
+    "fetching https://",        # cargo / npm
+    "updating crates.io index",
+    "cloning into '",
+    "receiving objects:",
+    "remote: enumerating objects",
+    # NOT included, and the reason is worth keeping: npm's "added N packages"
+    # was tried and fired 24 times across 11 instances of the 40-instance
+    # Verified run, every one of it ordinary Python test output containing the
+    # word "added". A marker that common is not evidence, and shipping it would
+    # have put a fake toolchain-fetch finding on every future run.
+)
+
+#: Tools whose commands can reach the network without the deny prefixes seeing it.
+_SHELLY = ("shell_execute", "repl", "pty", "bash_output")
+
+
+def _cmd_of(ev: dict) -> str:
+    args = ev.get("arguments") or ev.get("args") or ev.get("input") or {}
+    if isinstance(args, dict):
+        return str(args.get("command") or args.get("code") or args)
+    return str(args)
+
 
 def residual_egress_evidence(event_log: Path) -> list[dict]:
-    """Scan one instance's SSE log for shell commands that may have reached out.
+    """Scan one instance's SSE log for evidence of egress the deny rules miss.
 
-    Returns a list of `{tool, command}` hits. Empty means the recorded stream
-    contains no evidence of egress through the surface the deny rules cannot
-    cover. That is weaker than "no egress happened" and the report says so.
+    Returns a list of hits, each tagged with a `kind`:
+
+      `explicit_network`  -- the command names an HTTP client or a source-host
+                             URL outright. This is the historical behaviour and
+                             it is what makes a run `breached`.
+      `toolchain_fetch`   -- a build/package tool ran (`cmd` evidence) or
+                             printed a download line (`output` evidence). It is
+                             reported, and it does NOT void the score by
+                             itself; see `_TOOLCHAIN_CMD_HINTS`.
+
+    Empty means the recorded stream contains no evidence of egress through the
+    surface the deny rules cannot cover. That is weaker than "no egress
+    happened" and the report says so.
     """
     hits: list[dict] = []
+    #: tool_call_id -> command, so an output hit can name the command that
+    #: produced it rather than reporting a bare line of text.
+    cmd_by_call: dict[str, str] = {}
     try:
         with Path(event_log).open() as fh:
             for line in fh:
@@ -537,20 +612,72 @@ def residual_egress_evidence(event_log: Path) -> list[dict]:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (ev.get("type") or ev.get("_event")) != "tool_call":
+                # Some recorded streams contain a bare JSON array on a line.
+                # The previous version of this scanner raised AttributeError on
+                # them, which `network_tool_use` did not catch -- so a single
+                # malformed line could take down the whole report.
+                if not isinstance(ev, dict):
                     continue
+                etype = ev.get("type") or ev.get("_event")
                 name = ev.get("tool") or ev.get("name") or ev.get("tool_name")
-                if name not in ("shell_execute", "repl", "pty", "bash_output"):
-                    continue
-                args = ev.get("arguments") or ev.get("args") or ev.get("input") or {}
-                cmd = ""
-                if isinstance(args, dict):
-                    cmd = str(args.get("command") or args.get("code") or args)
-                else:
-                    cmd = str(args)
-                low = cmd.lower()
-                if any(h in low for h in _EGRESS_HINTS):
-                    hits.append({"tool": name, "command": cmd[:400]})
+                call_id = ev.get("tool_call_id")
+
+                if etype == "tool_call":
+                    if name not in _SHELLY:
+                        continue
+                    cmd = _cmd_of(ev)
+                    if call_id:
+                        cmd_by_call[call_id] = cmd
+                    low = cmd.lower()
+                    if any(h in low for h in _EGRESS_HINTS):
+                        hits.append({
+                            "kind": "explicit_network",
+                            "evidence": "command",
+                            "tool": name,
+                            "command": cmd[:400],
+                        })
+                    elif any(h in low for h in _TOOLCHAIN_CMD_HINTS):
+                        hits.append({
+                            "kind": "toolchain_fetch",
+                            "evidence": "command",
+                            "tool": name,
+                            "command": cmd[:400],
+                        })
+
+                elif etype in ("tool_result", "command_output_delta"):
+                    text = str(
+                        ev.get("result") or ev.get("chunk") or ev.get("tail") or ""
+                    )
+                    if not text:
+                        continue
+                    low = text.lower()
+                    for h in _TOOLCHAIN_OUTPUT_HINTS:
+                        if h not in low:
+                            continue
+                        i = low.index(h)
+                        hits.append({
+                            "kind": "toolchain_fetch",
+                            "evidence": "output",
+                            "tool": name or "shell_execute",
+                            "marker": h,
+                            "command": (
+                                cmd_by_call.get(call_id, ev.get("command") or "")
+                            )[:400],
+                            "excerpt": text[max(0, i - 80):i + 240],
+                        })
+                        break
     except OSError:
         return hits
     return hits
+
+
+def split_egress_hits(hits: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(explicit_network, toolchain_fetch). Untagged hits are treated as explicit.
+
+    Untagged means an older run's records, produced before the split existed.
+    Reading them as the stricter class keeps an old result from silently
+    becoming cleaner because the code around it changed.
+    """
+    explicit = [h for h in hits if h.get("kind", "explicit_network") == "explicit_network"]
+    toolchain = [h for h in hits if h.get("kind") == "toolchain_fetch"]
+    return explicit, toolchain

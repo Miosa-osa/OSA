@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__gJy37qT",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/aider/2026-08-14__04-14-38",
+    "install_only": true,
+    "agent": {
+        "name": "aider"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "177ce264-6620-4024-a0ef-a7a813fca796"
+}

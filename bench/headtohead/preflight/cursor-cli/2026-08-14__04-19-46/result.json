@@ -1,0 +1,33 @@
+{
+    "id": "ca7ec897-7d4c-4733-873e-43f374900c30",
+    "started_at": "2026-08-14T04:19:46.866136",
+    "updated_at": "2026-08-14T04:20:19.173883",
+    "finished_at": "2026-08-14T04:20:19.173883",
+    "n_total_trials": 1,
+    "stats": {
+        "n_completed_trials": 1,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "cursor-cli__terminal-bench-2": {
+                "n_trials": 0,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.0
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {},
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null
+    }
+}

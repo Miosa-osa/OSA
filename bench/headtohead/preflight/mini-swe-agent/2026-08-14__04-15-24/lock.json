@@ -1,0 +1,71 @@
+{
+    "schema_version": 3,
+    "created_at": "2026-08-13T21:15:24.606411Z",
+    "harbor": {
+        "version": "0.21.0",
+        "is_editable": false
+    },
+    "n_concurrent_trials": 1,
+    "retry": {
+        "max_retries": 0,
+        "exclude_exceptions": [
+            "VerifierOutputParseError",
+            "AgentAuthenticationError",
+            "RewardFileNotFoundError",
+            "AgentTimeoutError",
+            "ModelNotFoundError",
+            "ApiUsageLimitError",
+            "VerifierTimeoutError",
+            "AgentSafetyRefusalError",
+            "RewardFileEmptyError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "trials": [
+        {
+            "schema_version": 2,
+            "task": {
+                "name": "regex-log",
+                "type": "local",
+                "digest": "sha256:802c16cfd132e6c457529cb864be5a757c1b23b6cadc57f2d01983cb0110292a",
+                "source": "terminal-bench-2",
+                "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log"
+            },
+            "install_only": true,
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "name": "mini-swe-agent",
+                "skills": [],
+                "resume_trajectory": false,
+                "extra_allowed_hosts": [],
+                "kwargs": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "extra_docker_compose": [
+                    "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+                ],
+                "kwargs": {},
+                "extra_allowed_hosts": []
+            },
+            "extra_docker_compose": [
+                {
+                    "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml",
+                    "digest": "sha256:4dde174253e2e7100a9d99870f18f178899ac7bf0a15fd25ad3611b24d75baba"
+                }
+            ],
+            "verifier": {
+                "disable": true,
+                "environment_mode": "shared"
+            }
+        }
+    ]
+}

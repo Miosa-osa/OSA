@@ -1,0 +1,33 @@
+{
+    "id": "e18f2d7f-a4c1-4171-9f50-f0905ce793bd",
+    "started_at": "2026-08-14T04:16:23.791219",
+    "updated_at": "2026-08-14T04:19:02.114415",
+    "finished_at": "2026-08-14T04:19:02.114415",
+    "n_total_trials": 1,
+    "stats": {
+        "n_completed_trials": 1,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "claude-code__terminal-bench-2": {
+                "n_trials": 0,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.0
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {},
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null
+    }
+}

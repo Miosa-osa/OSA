@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__5NeBAM7",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/claude-code/2026-08-14__04-16-23",
+    "install_only": true,
+    "agent": {
+        "name": "claude-code"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "e18f2d7f-a4c1-4171-9f50-f0905ce793bd"
+}

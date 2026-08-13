@@ -1,0 +1,22 @@
+{
+    "task": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+        "source": "terminal-bench-2"
+    },
+    "trial_name": "regex-log__c3f3wa5",
+    "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/cursor-cli/2026-08-14__04-19-46",
+    "install_only": true,
+    "agent": {
+        "name": "cursor-cli"
+    },
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "job_id": "ca7ec897-7d4c-4733-873e-43f374900c30"
+}

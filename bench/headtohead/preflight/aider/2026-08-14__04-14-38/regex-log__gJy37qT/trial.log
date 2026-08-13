@@ -1,0 +1,4 @@
+Running command: apt-get update && apt-get install -y curl
+Command outputs captured
+Running command: set -euo pipefail; curl -LsSf https://aider.chat/install.sh | sh && if [ -f "$HOME/.local/bin/env" ]; then source "$HOME/.local/bin/env"; fi && aider --version
+Command outputs captured

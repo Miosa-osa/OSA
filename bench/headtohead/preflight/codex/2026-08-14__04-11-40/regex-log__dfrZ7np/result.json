@@ -1,0 +1,97 @@
+{
+    "id": "8f31f31a-87d5-40f6-b36e-ab9e79c027fa",
+    "task_name": "terminal-bench/regex-log",
+    "trial_name": "regex-log__dfrZ7np",
+    "trial_uri": "file:///home/miosa/projects/osa/OSA/bench/headtohead/preflight/codex/2026-08-14__04-11-40/regex-log__dfrZ7np",
+    "task_id": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log"
+    },
+    "source": "terminal-bench-2",
+    "task_checksum": "8e6fca84d707d9c8736d83027308f7b9be7cbb2013df8fb40f4343c1c58bac1f",
+    "config": {
+        "task": {
+            "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench-2"
+        },
+        "trial_name": "regex-log__dfrZ7np",
+        "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/codex/2026-08-14__04-11-40",
+        "install_only": true,
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": "codex",
+            "import_path": null,
+            "model_name": null,
+            "n_concurrent": null,
+            "concurrency_group": null,
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "resume_trajectory": false,
+            "load_trajectory": null,
+            "extra_allowed_hosts": [],
+            "kwargs": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "override_tpu": null,
+            "mounts": null,
+            "extra_docker_compose": [
+                "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+            ],
+            "kwargs": {},
+            "extra_allowed_hosts": []
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "disable": true
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "69697c93-7575-49e0-ba55-b2d983b661bd",
+        "source_trial": null
+    },
+    "agent_info": {
+        "name": "codex",
+        "version": "0.147.0",
+        "model_info": null
+    },
+    "agent_result": null,
+    "verifier_result": null,
+    "verifier_environment_mode": "shared",
+    "exception_info": null,
+    "started_at": "2026-08-13T21:11:40.595828Z",
+    "finished_at": "2026-08-13T21:13:14.157820Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T21:11:40.632541Z",
+        "finished_at": "2026-08-13T21:11:41.521894Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T21:11:41.521934Z",
+        "finished_at": "2026-08-13T21:13:02.738002Z"
+    },
+    "agent_execution": null,
+    "verifier": null,
+    "step_results": null
+}

@@ -1,0 +1,97 @@
+{
+    "id": "a8a6fdbc-c00e-4eef-a28b-6654379640be",
+    "task_name": "terminal-bench/regex-log",
+    "trial_name": "regex-log__nVUkWGo",
+    "trial_uri": "file:///home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent/2026-08-14__04-15-24/regex-log__nVUkWGo",
+    "task_id": {
+        "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log"
+    },
+    "source": "terminal-bench-2",
+    "task_checksum": "8e6fca84d707d9c8736d83027308f7b9be7cbb2013df8fb40f4343c1c58bac1f",
+    "config": {
+        "task": {
+            "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2/regex-log",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench-2"
+        },
+        "trial_name": "regex-log__nVUkWGo",
+        "trials_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/mini-swe-agent/2026-08-14__04-15-24",
+        "install_only": true,
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": "mini-swe-agent",
+            "import_path": null,
+            "model_name": null,
+            "n_concurrent": null,
+            "concurrency_group": null,
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "resume_trajectory": false,
+            "load_trajectory": null,
+            "extra_allowed_hosts": [],
+            "kwargs": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "override_tpu": null,
+            "mounts": null,
+            "extra_docker_compose": [
+                "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+            ],
+            "kwargs": {},
+            "extra_allowed_hosts": []
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "disable": true
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "31804e52-d700-42eb-a95b-d3e7b679ae70",
+        "source_trial": null
+    },
+    "agent_info": {
+        "name": "mini-swe-agent",
+        "version": "2.4.6",
+        "model_info": null
+    },
+    "agent_result": null,
+    "verifier_result": null,
+    "verifier_environment_mode": "shared",
+    "exception_info": null,
+    "started_at": "2026-08-13T21:15:24.642823Z",
+    "finished_at": "2026-08-13T21:16:21.032689Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T21:15:24.673468Z",
+        "finished_at": "2026-08-13T21:15:25.583960Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T21:15:25.584002Z",
+        "finished_at": "2026-08-13T21:16:09.743904Z"
+    },
+    "agent_execution": null,
+    "verifier": null,
+    "step_results": null
+}

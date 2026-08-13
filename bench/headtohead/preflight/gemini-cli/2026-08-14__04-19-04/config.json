@@ -1,0 +1,27 @@
+{
+    "jobs_dir": "/home/miosa/projects/osa/OSA/bench/headtohead/preflight/gemini-cli",
+    "install_only": true,
+    "n_concurrent_trials": 1,
+    "environment": {
+        "type": "docker",
+        "extra_docker_compose": [
+            "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/compose-host-provider.yaml"
+        ]
+    },
+    "verifier": {
+        "disable": true
+    },
+    "agents": [
+        {
+            "name": "gemini-cli"
+        }
+    ],
+    "datasets": [
+        {
+            "path": "/home/miosa/projects/osa/OSA/bench/headtohead/../terminalbench/tasks/terminal-bench-2",
+            "task_names": [
+                "regex-log"
+            ]
+        }
+    ]
+}

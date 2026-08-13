@@ -1,0 +1,4 @@
+Running command: apt-get update && apt-get install -y curl bash
+Command outputs captured
+Running command: set -euo pipefail; curl https://cursor.com/install -fsS | bash && export PATH="$HOME/.local/bin:$PATH" && cursor-agent --version
+Command outputs captured
