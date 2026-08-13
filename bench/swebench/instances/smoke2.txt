@@ -1,0 +1,4 @@
+# Two small, fast-to-evaluate SWE-bench Verified instances.
+# Used to prove the pipeline end to end without a large Docker pull.
+psf__requests-1921
+pallets__flask-5014
