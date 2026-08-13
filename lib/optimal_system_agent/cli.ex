@@ -45,7 +45,13 @@ defmodule OptimalSystemAgent.CLI do
     migrate!()
     OptimalSystemAgent.Onboarding.seed_workspace()
 
-    port = Application.get_env(@app, :http_port, 9089)
+    # Report the port we actually bound, not the app-env default.
+    #
+    # `OSA_HTTP_PORT` wins at bind time, so this printed ":9089" while serving
+    # somewhere else entirely — which is worse than printing nothing, because
+    # anyone reading it then connects to the wrong place. `Net.Port` is the one
+    # resolver boot, doctor and onboarding already share; serve now shares it too.
+    port = OptimalSystemAgent.Net.Port.configured_http_port()
     safe_puts("OSA serving on :#{port}")
     Process.sleep(:infinity)
   end

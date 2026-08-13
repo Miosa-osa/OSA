@@ -200,9 +200,48 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     )
 
     repo = Config.repo_path()
+
+    # An OPTIONAL feature must not be able to take down the application.
+    #
+    # `ensure_shadow_repo/1` shells out to git. In a container without git
+    # installed that raises `:enoent`, and because this runs in `init/1` the
+    # failure propagated through Supervisors.Extensions and killed OSA at boot
+    # — a filesystem-checkpoint convenience taking the whole agent with it.
+    # Found by running OSA inside a Terminal-Bench task image.
+    #
+    # Degrading is the correct behaviour: checkpoints are unavailable, and
+    # everything else works. The warning names the cause so it is obvious what
+    # to install, rather than leaving a silently missing feature.
+    case start_checkpoints(repo) do
+      :ok ->
+        {:ok, %{}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[fs_checkpoint] disabled — #{reason}. " <>
+            "File checkpoints and /rewind are unavailable this session; " <>
+            "install git to enable them."
+        )
+
+        {:ok, %{disabled: true}}
+    end
+  end
+
+  defp start_checkpoints(repo) do
     ensure_shadow_repo(repo)
     publish_head(repo)
-    {:ok, %{}}
+    :ok
+  rescue
+    e in ErlangError ->
+      case e do
+        %ErlangError{original: :enoent} -> {:error, "git is not installed"}
+        other -> {:error, Exception.message(other)}
+      end
+
+    e ->
+      {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, "git failed: #{inspect(reason)}"}
   end
 
   @impl true
