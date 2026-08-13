@@ -48,6 +48,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
 
+  alias OptimalSystemAgent.Agent.CompactionEvents
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
@@ -1271,19 +1272,45 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call(:compact, _from, state) do
+    # Bare `/compact` reports progress like every other compaction path.
+    #
+    # It did not, and it is the form people actually type. `CompactionEvents`
+    # were only emitted on the proactive path, so `/compact` with instructions
+    # showed a spinner and a chunk counter while bare `/compact` sat there
+    # rendering nothing at all — indistinguishable from a hung command for
+    # however long the summarizer took.
+    #
+    # `completed` must fire on EVERY exit from here, including the bounded
+    # timeout and the no-op, or the TUI stays in its Compacting state forever.
+    # `bounded_compaction/2` always returns, which is what makes the plain
+    # sequence safe.
+    messages = state.messages
+    tokens_before = OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages)
+    started_at = System.monotonic_time(:millisecond)
+
+    CompactionEvents.started(state.session_id, :manual, tokens_before)
+
     # The window MUST come from the registry's honest per-model resolver — the
     # compactor no longer has (and must never regrow) a hardcoded default.
     # Bounded: a wedged summarizer must not hang `/compact` forever — see
     # TurnPipeline.bounded_compaction/2.
     compacted =
-      TurnPipeline.bounded_compaction(state.messages, fn ->
+      TurnPipeline.bounded_compaction(messages, fn ->
         OptimalSystemAgent.Agent.Compactor.maybe_compact(
-          state.messages,
+          messages,
           Map.get(state, :last_input_tokens, 0),
           state.session_id,
           context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state)
         )
-      end) || state.messages
+      end) || messages
+
+    CompactionEvents.completed(state.session_id,
+      tokens_before: tokens_before,
+      tokens_after: OptimalSystemAgent.Agent.Compactor.estimate_tokens(compacted),
+      messages_before: length(messages),
+      messages_after: length(compacted),
+      duration_ms: System.monotonic_time(:millisecond) - started_at
+    )
 
     {:reply, :ok, %{state | messages: compacted}}
   end

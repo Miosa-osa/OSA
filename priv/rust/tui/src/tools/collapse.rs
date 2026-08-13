@@ -38,6 +38,8 @@ pub enum ToolKind {
     IntegrationSearch,
     /// Subagent lifecycle.
     Subagent,
+    /// Plan / todo-list mutation.
+    Todo,
     /// Shell execute.
     Command,
     /// File edit **and** file write. There is deliberately no separate "write"
@@ -96,6 +98,13 @@ impl ToolKind {
                     "Editing"
                 } else {
                     "Edited"
+                }
+            }
+            Todo => {
+                if running {
+                    "Updating"
+                } else {
+                    "Updated"
                 }
             }
             McpCall(_) => {
@@ -175,6 +184,13 @@ impl ToolKind {
                     "subagents"
                 }
             }
+            Todo => {
+                if one {
+                    "todo"
+                } else {
+                    "todos"
+                }
+            }
             Command => {
                 if one {
                     "command"
@@ -204,7 +220,7 @@ impl ToolKind {
         use ToolKind::*;
         matches!(
             self,
-            File | Skill | Search | Dir | MemorySearch | IntegrationSearch
+            File | Skill | Search | Dir | MemorySearch | IntegrationSearch | Todo
         )
     }
 
@@ -248,6 +264,11 @@ pub fn classify(name: &str, args: &str) -> ToolKind {
         // Edits and writes are one kind.
         "edit" | "file_edit" | "write" | "file_write" | "file_create" | "multiedit"
         | "apply_patch" => ToolKind::EditFile,
+        // Plan mutations. A single plan is built with one call PER STEP, so a
+        // six-step plan emitted six identical `Todos` rows — the tool that
+        // reports progress was the noisiest thing on screen, and the committed
+        // plan snapshot at turn end already shows the outcome.
+        "todoread" | "todowrite" | "todos" | "task_write" | "update_plan" => ToolKind::Todo,
         "use_tool" | "call_tool" => ToolKind::McpCall("mcp".to_string()),
         "skill" | "invoke_skill" | "slash_command" => ToolKind::Skill,
         // Unclassified: labelled `Ran N tools` in a truncation header, but it
@@ -1057,6 +1078,26 @@ mod multi_bucket_summary_tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(out.contains("2 failed"), "{out:?}");
+    }
+
+    #[test]
+    fn a_plan_built_step_by_step_is_one_row_not_six() {
+        // Observed: six consecutive `Todos` rows for one six-step plan, each
+        // with its own duration. The plan panel already shows the result.
+        let mut acc = Accumulator::default();
+        for _ in 0..6 {
+            acc.add(&classify("todowrite", "{}"), "{}", true);
+        }
+        assert_eq!(acc.summary_text(), "Updated 6 todos");
+    }
+
+    #[test]
+    fn every_todo_tool_alias_folds() {
+        for name in ["todoread", "todowrite", "todos", "task_write", "update_plan"] {
+            let kind = classify(name, "{}");
+            assert_eq!(kind, ToolKind::Todo, "{name} must classify as a todo");
+            assert!(kind.folds_eagerly(), "{name} must fold");
+        }
     }
 
     #[test]
