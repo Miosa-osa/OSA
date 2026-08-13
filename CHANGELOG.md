@@ -9,6 +9,78 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.91] — displays as `v1.0.091`
+
+### Fixed — a mid-turn resize left a blank band above the live reply
+
+The clear and the rebuild disagreed about where the inline viewport starts.
+The clear was anchored at the remembered top; the rebuild placed the viewport
+at `rows - height`. On a shrink that lands *below* the remembered top, so the
+rows in between were erased and then never reoccupied — a band of blank that
+grew with every resize. Both anchors now come from one resolved strategy, so a
+full-screen clear rebuilds from the bottom and a surgical clear rebuilds from
+the row it actually cleared. A PTY probe that measured seven blank rows now
+measures one.
+
+### Changed — typing mid-turn queues instead of diverting the running turn
+
+Plain text sent while a turn was live was posted into that turn as a steer;
+only `/` and `!` were queued. So a follow-up thought became a mid-flight
+instruction change, which is rarely what typing it meant. Text now queues and
+submits when the turn ends — including when the turn ends by interrupt.
+
+### Changed — one summary row per tool run, with a clause per kind
+
+A run of foldable calls emitted a separate line per kind, because a kind change
+flushed the accumulator. Three lines said less than one:
+
+    ◆ Read 1 skill, Searched 8 patterns, Listed 4 dirs, Read 2 files
+
+Verb, noun and fold policy now live on the tool kind rather than in the
+formatter, so a newly-added tool cannot silently render as "Ran 1 tools". The
+per-kind counters are an ordered bucket list whose append-on-miss *is* the
+ordering rule: clauses appear in the order their first call happened, which
+makes the row a literal trace rather than a fixed category listing. A lone read
+run still names its files. The live label comes off the same renderer, so
+`Reading 2 files` and the committed row cannot drift.
+
+### Fixed — headings manufactured a blank row on top of the source's own
+
+Markdown rendering pushed an extra blank line after every heading, on top of
+whatever blank line the source already had, so headings rendered
+double-spaced against single-spaced body text. Spacing is now uniformly the
+source's own: `k` consecutive newlines produce `k-1` blank rows, with no
+per-block-pair table. Uniformity is what reads as airy; extra rows read as
+drift.
+
+### Fixed — three compaction defects that each failed silently
+
+* **The threshold bands inverted between ~66k and ~71k.** For windows in that
+  range `compact_at` took the reserve path while `warn_at` fell through to its
+  `0.60 * cw` fallback, and across the whole range `0.60 * cw` exceeds
+  `cw - 33_000`. At a 70k window `warn_at` came out at 42k against a
+  `compact_at` of 37k. Nothing warned, the microcompaction guard became
+  unsatisfiable, and the durable-notes flush clamped itself to a band one token
+  wide — so notes were never written before a rollover. The range is reachable
+  through a configured local `num_ctx`. The fallback is now a preference rather
+  than a licence to exceed `compact_at`, clamped to leave a band at least a
+  quarter of `compact_at` wide, with the mirror clamp on `block_at`. Ordering
+  is structural now, not something two formulas happen to agree on.
+* **Consecutive-message merging corrupted multimodal content.** It joined
+  contents as strings, so two user messages carrying block lists merged into a
+  JSON *string* and an image block became literal `{"type":"image",...}` text.
+  The image was destroyed, and base64 the estimator deliberately charges a flat
+  rate became plain text hit by the byte-size floor — a step meant to save
+  tokens multiplied them, and the corruption is what reached the provider and
+  got persisted. Block lists now concatenate as lists; anything that cannot
+  merge cleanly declines to merge.
+* **The summary was re-sent uncached every turn.** The compact boundary was
+  built as a `system` message and leads the rebuilt conversation, so the
+  Anthropic system split absorbed it into the system-prompt block array — which
+  sits after both cache breakpoints. A multi-thousand-token summary plus up to
+  50k characters of re-injected file bodies rode uncached on every request
+  until the next compaction. It leads as a user turn now.
+
 ## [1.0.90] — displays as `v1.0.090`
 
 ### Fixed — the CLI banner stated two numbers that were both false
