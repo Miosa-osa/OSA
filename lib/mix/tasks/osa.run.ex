@@ -177,11 +177,22 @@ defmodule Mix.Tasks.Osa.Run do
   end
 
   defp get_session_cost do
-    try do
-      budget = OptimalSystemAgent.Budget.get_status()
-      budget[:total_cost_usd] || 0
-    rescue
+    # Two bugs lived here, and each one alone was enough to make `--format json`
+    # always report "cost": 0.
+    #
+    # `get_status/0` replies `{:ok, status}` — a TUPLE — so `budget[:key]` raised
+    # and the rescue swallowed it. And `:total_cost_usd` is not a key it returns;
+    # the same dead lookup was already found and fixed in `Loop.Limits`
+    # (where it silently disabled the budget cap) and in `Agent.Context`.
+    #
+    # `daily_spent` is the honest aggregate available here. It is the day's
+    # spend, not this invocation's, which is stated rather than papered over —
+    # a wrong number reported confidently is worse than a labelled approximation.
+    case OptimalSystemAgent.Budget.get_status() do
+      {:ok, %{daily_spent: spent}} when is_number(spent) -> spent
       _ -> 0
     end
+  rescue
+    _ -> 0
   end
 end
