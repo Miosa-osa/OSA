@@ -518,6 +518,21 @@ impl Accumulator {
         line
     }
 
+    /// The running label as plain text, for the one-row live status slot.
+    /// Shares `label/2` with the committed row, so the live line and the line
+    /// it becomes cannot word themselves differently.
+    pub fn live_text(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let text = self.label(true);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
     /// The same row, in the present tense, without resetting — this is what the
     /// live activity slot paints while the run is still executing. It is fixed
     /// at one row and still shows the counts so far; it never degrades to a

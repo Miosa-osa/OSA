@@ -10,7 +10,21 @@ impl App {
     /// reads → "Read 3 files") as one scrollback line, if any. Called at every
     /// break site (non-collapsible tool, different kind, interstitial text,
     /// turn end).
+    /// Mirror the in-flight collapsed run into the one-row live status slot.
+    ///
+    /// This is the signal that has to exist BEFORE the live tool feed is
+    /// deleted, or there is a window in the turn with no in-flight tool signal
+    /// at all. It rides the `details` block deliberately: that block is already
+    /// capped and records its own wrap width, so the rows reserved equal the
+    /// rows painted — which a feed that grew per tool never managed.
+    pub(super) fn sync_live_tool_summary(&mut self) {
+        self.activity.set_details(self.collapse.live_text(), 1);
+    }
+
     pub(super) fn flush_collapse(&mut self) {
+        // The run is closing — retire the live label with it, so the status row
+        // never keeps describing work that has already been committed.
+        self.activity.set_details(None, 1);
         if let Some(line) = self.collapse.take_summary_line() {
             self.chat.add_collapsed_tool_summary(line);
         }
@@ -580,6 +594,7 @@ impl App {
                     // assistant prose, a non-foldable tool, a permission prompt
                     // and turn end, all handled at their own sites.
                     self.collapse.add(&kind, &args, success);
+                    self.sync_live_tool_summary();
                     debug!(
                         "Tool call end (collapsed): {} ({}ms, success={})",
                         name, duration_ms, success
