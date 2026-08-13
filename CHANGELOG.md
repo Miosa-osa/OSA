@@ -9,6 +9,47 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.92] — displays as `v1.0.092`
+
+### Changed — reasoning is visible while it streams
+
+The thinking box had two modes and defaulted to collapsed, so for the whole
+time the model was reasoning the screen showed a single dim line and the work
+appeared only once it was over. A third mode is now the default: a fixed
+four-row tail window that follows the reasoning as it arrives. `alt+t` cycles
+tail → expanded → collapsed.
+
+**Visible behaviour change:** the thinking box reserves four rows rather than
+one whenever reasoning is actively streaming, so a turn takes more vertical
+space than it did. An empty box is still one row in every mode, and `alt+t`
+returns the old single-line behaviour in two keypresses. The layout-invariant
+suite holds on it.
+
+### Changed — the diff hunk separator says how much it skipped
+
+`… 14 unchanged lines` rather than a bare `…`, measured in new-file
+coordinates and indented to the gutter. It declines to a bare glyph when the
+count cannot be trusted: a coalesced multi-call block numbers each call's hunks
+against that call's own snapshot, so a later edit can land above an earlier one
+and the arithmetic stops meaning anything.
+
+### Fixed — the orchestrate route terminated a turn twice
+
+`TurnPipeline` broadcasts its own terminal event and *then* returns
+`{:error, reason}`, and `POST /api/v1/orchestrate` treated that return as an
+unterminated failure and broadcast a second one. Two paths did it — the
+turn/budget limit gate and the `UserPromptSubmit` hook block. (The
+prompt-injection refusal returns `{:ok, refusal}`, so it never reached the
+error branch.)
+
+This was not cosmetic once the queue drain moved onto the turn-end edge in
+1.0.91: the first event released a queued message, that message opened a new
+turn, and the second event then marked the *new* turn done — reproducing the
+early drain through a narrower door. Termination now runs through a claim latch
+whose `insert_new` resolves racing terminators to one winner. A session that
+never opened a claim is never pre-latched, so the route's crash and `:exit`
+fallbacks still fire when genuinely nothing else has broadcast.
+
 ## [1.0.91] — displays as `v1.0.091`
 
 ### Fixed — a mid-turn resize left a blank band above the live reply
