@@ -87,8 +87,19 @@ defmodule OptimalSystemAgent.Tools.Registry do
           true
 
         # Built-in tool declaring itself deferred.
+        #
+        # BOTH callbacks are checked, and that is not belt-and-braces. A module
+        # written as `use MiosaTools.Behaviour` gets a generated
+        # `deferred?/0` delegating to `should_defer?/0`; a module written as
+        # `@behaviour MiosaTools.Behaviour` gets no such delegate. Checking
+        # only `deferred?/0` meant adding `should_defer?` to a
+        # `@behaviour`-style module was DEAD CODE — it compiled, read as a
+        # fix, and deferred nothing. Every schema in the default set is re-sent
+        # on every request, so a tool that fails to defer is paid for by every
+        # turn.
         (mod = Map.get(builtin_tools, tool.name)) != nil ->
-          function_exported?(mod, :deferred?, 0) and mod.deferred?()
+          (function_exported?(mod, :deferred?, 0) and mod.deferred?()) or
+            (function_exported?(mod, :should_defer?, 0) and mod.should_defer?())
 
         # MCP tool marked should_defer? — CRITICAL: keep these out of the base
         # prompt so MCP tools don't flood the system prompt. They stay
