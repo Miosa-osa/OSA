@@ -9,6 +9,49 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.94] — displays as `v1.0.094`
+
+### Fixed — a hook that blocked a tool call said nothing
+
+The TUI had a renderer for `hook_blocked` and never once drew it. The backend
+emits that event on the internal event bus; the only bridge from the bus to a
+session's SSE stream is an allowlist, and `hook_blocked` was not on it. So a
+hook that stopped a tool call stopped it **silently**, and the turn simply did
+not do the thing, with no explanation anywhere on screen. The Rust side had been
+correct and waiting the whole time.
+
+### Added — hook counters in the status bar
+
+`hooks 54 ok, 19 failed`, with a toast only when one actually fails.
+
+What "failed" means had to be decided, because the dispatcher could not
+previously answer it: a hook that crashed and a hook that deliberately returned
+`:skip` both surfaced as the same bare `:skip`, so a broken hook and a hook with
+no opinion were indistinguishable from outside. The failure paths now carry a
+tag that never leaves the dispatcher — the chain receives exactly what it always
+did, and only the reporting is new.
+
+**A block is not a failure.** A policy hook refusing a dangerous command is the
+system working, and counting that as an error would report a correct setup as
+broken — a lie the user would act on. An unrecognised outcome counts as ok for
+the same reason: the backend owns that vocabulary and may extend it, and a new
+verb must not start reddening the status line before anyone has decided it means
+failure. The chip omits `0 failed` rather than printing a standing zero, and
+omits itself entirely until a hook has run.
+
+**Known limit:** an HTTP webhook hook is fire-and-forget from the dispatcher's
+side, so it counts as ok on dispatch regardless of what the POST later does. The
+counter measures invocations the dispatcher observed, which is a narrower claim
+than "the webhook succeeded".
+
+### Internal — the queue-drain decision is testable without an `App`
+
+The gate behind the queued-`/overdrive` fix was source-audited only. It is now a
+free function with tests that pin both directions: `Idle` does not imply the turn
+ended, and the turn ending does not imply draining is safe (a permission prompt
+or plan review routes through the same completion handlers). Checked by
+mutation — reverting the gate to its buggy form fails exactly two of them.
+
 ## [1.0.93] — displays as `v1.0.093`
 
 ### Removed — the live tool feed above the composer
