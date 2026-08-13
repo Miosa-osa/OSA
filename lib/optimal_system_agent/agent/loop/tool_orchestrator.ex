@@ -225,10 +225,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
       if cancelled?(sid) do
         Enum.map(chunk, fn tc -> {tc, interrupted_result(tc)} end)
       else
+        # Carry the session's cwd ACROSS the process boundary.
+        #
+        # `Workspace.Cwd.get/0` reads the process dictionary, and a process
+        # dictionary does not propagate to a spawned Task. Every tool runs in
+        # one of these Tasks, so `shell_execute` — which defaults to
+        # `Cwd.get/0` — fell through to `original_cwd()`, the directory the
+        # BACKEND booted in, rather than the session's working_dir.
+        #
+        # Observed in a SWE-bench Pro run: `pwd` returned the backend's boot
+        # directory, so `git log` read OSA's own history instead of the task
+        # repo's. It only showed in 4 of 12 instances because a command that
+        # passes an explicit `cwd`, or that starts with its own `cd`, never
+        # consults the default and is unaffected.
+        #
+        # Read on the CALLER (which has the override) and re-publish inside the
+        # Task. Captured per batch rather than per call because it cannot change
+        # mid-batch — `apply_overrides/2` publishes it once at turn start.
+        caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
+
         tasks =
           Enum.map(chunk, fn tc ->
             {tc,
              Task.Supervisor.async_nolink(supervisor, fn ->
+               OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
                executor.execute_tool_call(tc, state)
              end)}
           end)

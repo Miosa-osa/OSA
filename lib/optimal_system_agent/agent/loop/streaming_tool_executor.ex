@@ -47,10 +47,17 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   def tool_block_complete(ctx, tool_call, state) do
     executor = executor_for(state)
 
+    # Same process-boundary problem as ToolOrchestrator: `Cwd.get/0` reads the
+    # process dictionary and a Task does not inherit one, so a tool spawned here
+    # would default to the backend's boot directory rather than the session's
+    # working_dir. Read on the caller, re-publish inside the Task.
+    caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
+
     task =
       Task.Supervisor.async_nolink(
         OptimalSystemAgent.TaskSupervisor,
         fn ->
+          OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
           executor.execute_tool_call(tool_call, state)
         end
       )
