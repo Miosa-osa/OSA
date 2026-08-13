@@ -67,7 +67,24 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   Wait for all in-flight tool executions to complete.
   Returns results in the same order as tool_calls were received.
 
-  Timeout: 10 minutes per tool (matches existing orchestrator timeout).
+  **Unbounded by default.** This wrapper used to `Task.await(task, 600_000)`
+  every tool call, so a fleet dispatch that legitimately runs for hours was
+  killed at ten minutes and reported as a tool timeout — while the agents it
+  launched carried on running in the background, invisible to the turn that
+  started them. The turn lost its own work; nothing else stopped.
+
+  A generic wrapper is the wrong place to enforce a duration. It cannot know
+  whether it is wrapping a 200 ms file read or a multi-agent dispatch, so any
+  single number it picks is both far too long for the first and far too short
+  for the second. Tools that need a bound already carry their own: shell has a
+  per-command timeout, the HTTP providers have receive timeouts, and
+  `bounded_compaction/2` bounds the summarizer. Those are the layers that know
+  what they are timing.
+
+  Set `:tool_await_timeout_ms` to a positive integer to reimpose a ceiling
+  (useful in tests); anything else means no limit. A wedged tool is still
+  escapable — the turn is interruptible, which is the affordance that actually
+  belongs to the user rather than to a constant.
   """
   def collect_results(ctx) do
     # Wait for all in-flight tasks
@@ -75,15 +92,20 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Enum.reduce(ctx.in_flight, ctx.completed, fn {tool_id, task}, acc ->
         result =
           try do
-            Task.await(task, 600_000)
+            Task.await(task, await_timeout())
           catch
             # RESPOND-TO-MODEL (non-fatal tool error contract): a timeout or a
             # crashed tool task is a readable tool result, not a dead turn. The
             # "Error:" prefix is the convention finalize_result/Reminders/
             # DoomLoop key on — the old "[timeout]"/"[crash]" bodies were
             # invisible to every one of those checks.
+            #
+            # Only reachable when :tool_await_timeout_ms is configured; the
+            # default no longer times out at all. The message reports the
+            # configured bound rather than a hardcoded "10 minutes", which was
+            # already a lie whenever the constant and the text drifted.
             :exit, {:timeout, _} ->
-              failure(tool_id, "tool timed out after 10 minutes")
+              failure(tool_id, "tool timed out after #{timeout_text()}")
 
             :exit, reason ->
               failure(tool_id, ToolError.exit_text(reason))
@@ -207,4 +229,21 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Logger.warning("[streaming_tools] drain exited: #{inspect(reason)}")
       :none
   end
+
+  # No ceiling unless one is explicitly configured. See `collect_results/1`.
+  defp await_timeout do
+    case Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, :infinity) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> :infinity
+    end
+  end
+
+  defp timeout_text do
+    case await_timeout() do
+      :infinity -> "no limit"
+      ms when ms >= 60_000 -> "#{div(ms, 60_000)} minutes"
+      ms -> "#{div(ms, 1000)}s"
+    end
+  end
+
 end

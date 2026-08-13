@@ -69,7 +69,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
     * `:max_concurrency` (pos_integer)  — passed to `async_stream_nolink`
       (default: 10)
-    * `:timeout_ms` (pos_integer)       — per-tool timeout (default: 60_000)
+    * `:timeout_ms` (pos_integer | :infinity) — per-tool timeout (default: 60_000)
     * `:supervisor` (module)            — defaults to
       `OptimalSystemAgent.TaskSupervisor`
     * `:executor`   (module)            — defaults to
@@ -233,7 +233,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
              end)}
           end)
 
-        deadline = System.monotonic_time(:millisecond) + timeout
+        deadline =
+          case timeout do
+            # No ceiling. A generic wrapper cannot know whether it is timing a
+            # 200 ms file read or a three-agent dispatch that legitimately runs
+            # for hours, so any single number it picks is wrong for one of them.
+            :infinity -> :infinity
+            ms -> System.monotonic_time(:millisecond) + ms
+          end
+
         collect_tasks(tasks, [], sid, deadline)
       end
     end)
@@ -265,7 +273,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
         Enum.reverse(done) ++ killed
 
-      System.monotonic_time(:millisecond) > deadline ->
+      deadline != :infinity and System.monotonic_time(:millisecond) > deadline ->
         timed_out =
           Enum.map(pending, fn {tc, task} ->
             case Task.shutdown(task, :brutal_kill) do

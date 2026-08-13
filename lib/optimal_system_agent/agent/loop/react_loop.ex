@@ -1120,7 +1120,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # Raised from a hardcoded 60s to 300s (config `:tool_timeout_ms`) so a
         # long build/test/install batched into the parallel path isn't killed
         # before shell_execute's own 300s default gets to run.
-        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, 300_000)
+        # No default ceiling. A five-minute cap killed multi-agent dispatches
+        # mid-flight: the wrapper reported a tool timeout and ended the turn
+        # while the agents it launched carried on in the background, so the
+        # turn lost its own work and nothing else stopped. Tools that need a
+        # bound carry their own (shell per-command, provider receive timeouts,
+        # bounded_compaction). Set :tool_timeout_ms to reimpose one.
+        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, :infinity)
       )
 
     # Collect streaming tool results (these may already be done). Pair by

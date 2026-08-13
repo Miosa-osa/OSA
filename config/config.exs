@@ -130,10 +130,20 @@ config :optimal_system_agent,
   # opts[:timeout].
   agent_turn_timeout_ms: :infinity,
 
-  # Per-tool timeout for the parallel tool-orchestrator path. Raised from the
-  # old hardcoded 60s to 300s to match shell_execute's own default so long
-  # builds/tests/installs in a parallel batch aren't killed early.
-  tool_timeout_ms: 300_000,
+  # Per-tool ceiling for the parallel tool-orchestrator path. NO LIMIT.
+  #
+  # This was 60s, then 300s, each raise chasing a workload that outgrew it. A
+  # three-agent dispatch then blew past 300s too: the wrapper reported a tool
+  # timeout and ended the turn, while the agents it had launched carried on in
+  # the background and finished normally minutes later — the turn lost its own
+  # work and nothing else stopped.
+  #
+  # A generic wrapper cannot know whether it is timing a 200ms file read or a
+  # dispatch that legitimately runs for hours, so every number it picks is
+  # wrong for one of them. The tools that need a bound carry their own
+  # (shell_execute per-command, provider receive timeouts, bounded_compaction),
+  # and an interrupt is always available. Set an integer here to reimpose one.
+  tool_timeout_ms: :infinity,
 
   # When false, the stall detector escalates (graded nudges) but never hard-halts
   # a long read/analysis phase — appropriate for autonomous runs. The "autonomous"
