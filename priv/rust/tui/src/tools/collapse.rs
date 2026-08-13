@@ -388,6 +388,129 @@ fn named_read_summary(verb: &str, paths: &[String]) -> String {
     }
 }
 
+// ─── The hook counter bracket ───────────────────────────────────────────────
+
+/// Per-group / per-call tally of finished hook invocations.
+///
+/// Three outcomes, not two. **Blocked is not a failure**: a policy hook that
+/// denies a dangerous command is the system working exactly as configured, and
+/// folding it into `failed` would report a correctly-wired setup as broken. A
+/// *skipped* hook increments nothing at all — it did not run, so it is not a
+/// data point, and a group whose every hook was skipped renders no bracket.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HookRunCounts {
+    pub ok: usize,
+    pub blocked: usize,
+    pub failed: usize,
+}
+
+impl HookRunCounts {
+    /// Fold in one `BackendEvent::HookRun`, using the backend's own outcome
+    /// vocabulary rather than a boolean (`agent/hooks/dispatch.ex` `classify/1`).
+    pub fn note(&mut self, outcome: &str) {
+        match outcome {
+            "crashed" | "timed_out" | "failed" | "error" => self.failed += 1,
+            "blocked" | "denied" | "deny" | "block" => self.blocked += 1,
+            // `skip`/`skipped` never ran — deliberately uncounted (§3.1).
+            "skip" | "skipped" => {}
+            _ => self.ok += 1,
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.ok + self.blocked + self.failed
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    fn add(&mut self, other: HookRunCounts) {
+        self.ok += other.ok;
+        self.blocked += other.blocked;
+        self.failed += other.failed;
+    }
+}
+
+/// Which bracket shape a row gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookBracket {
+    /// Aggregate/group rows: `[hooks: 54 ok, 3 blocked, 19 failed]`. Every
+    /// outcome is NAMED, because a group row shows no member detail that could
+    /// explain the numbers.
+    Labeled,
+    /// Individual rows: `[hooks: 9/1]` — completed/failed. `completed` counts
+    /// blocked hooks in its numerator: they completed normally, and the row's
+    /// own detail explains any block.
+    Compact,
+}
+
+/// The trailing `  [hooks: …]` suffix for a row, or `None`.
+///
+/// **`None` at zero is the whole contract of §3.4**: no brackets, no
+/// `[hooks: 0]`, no trailing spaces. A user with no hooks configured never sees
+/// the word "hooks" anywhere in their transcript, and neither does a user whose
+/// hooks all skipped.
+pub fn hook_bracket(counts: HookRunCounts, shape: HookBracket) -> Option<Vec<Span<'static>>> {
+    if counts.is_empty() {
+        return None;
+    }
+    let theme = crate::style::theme();
+    // Chrome tier for the punctuation, and DIM on every number so the whole
+    // bracket recedes below the label it trails.
+    let chrome = theme.recede();
+    let dim = Modifier::DIM;
+    let ok_style = Style::default().fg(theme.colors.success).add_modifier(dim);
+    let blocked_style = Style::default().fg(theme.colors.warning).add_modifier(dim);
+    let failed_style = Style::default().fg(theme.colors.error).add_modifier(dim);
+
+    let mut spans = vec![Span::styled("  [hooks: ".to_string(), chrome)];
+    match shape {
+        HookBracket::Labeled => {
+            // Fixed order ok → blocked → failed; zero-count outcomes are omitted
+            // ENTIRELY rather than printed as `0 ok`.
+            let mut first = true;
+            let mut seg = |n: usize, label: &str, style: Style, spans: &mut Vec<Span<'static>>| {
+                if n == 0 {
+                    return;
+                }
+                if !first {
+                    spans.push(Span::styled(", ".to_string(), chrome));
+                }
+                first = false;
+                spans.push(Span::styled(format!("{}", n), style));
+                if !label.is_empty() {
+                    spans.push(Span::styled(format!(" {}", label), style));
+                }
+            };
+            // With nothing to disambiguate, the label word is noise: a clean run
+            // reads `[hooks: 54]`, not `[hooks: 54 ok]`.
+            let bare = counts.blocked == 0 && counts.failed == 0;
+            seg(counts.ok, if bare { "" } else { "ok" }, ok_style, &mut spans);
+            seg(counts.blocked, "blocked", blocked_style, &mut spans);
+            seg(counts.failed, "failed", failed_style, &mut spans);
+        }
+        HookBracket::Compact => {
+            // Blocked hooks completed normally, so they stay in the numerator.
+            let completed = counts.ok + counts.blocked;
+            let failed = counts.failed;
+            if completed > 0 {
+                spans.push(Span::styled(format!("{}", completed), ok_style));
+            }
+            // The `/` is emitted only when BOTH sides are non-zero — a run of
+            // pure failures is `[hooks: 3]` in the error colour, not `[hooks: /3]`.
+            if completed > 0 && failed > 0 {
+                spans.push(Span::styled("/".to_string(), chrome));
+            }
+            if failed > 0 {
+                spans.push(Span::styled(format!("{}", failed), failed_style));
+            }
+        }
+    }
+    spans.push(Span::styled("]".to_string(), chrome));
+    Some(spans)
+}
+
 /// One clause of the summary row. Buckets are held in call order.
 struct Bucket {
     kind: ToolKind,
@@ -415,6 +538,10 @@ pub struct Accumulator {
     buckets: Vec<Bucket>,
     any_error: bool,
     failed: usize,
+    /// Hook runs summed across the MEMBERS of this run, per §3.2 — not a
+    /// session total. It resets with the run, because the row it labels
+    /// describes only the calls folded into that row.
+    hooks: HookRunCounts,
 }
 
 impl Accumulator {
@@ -424,9 +551,23 @@ impl Accumulator {
 
     /// Fold one finished collapsible tool into the run.
     pub fn add(&mut self, kind: &ToolKind, args: &str, success: bool) {
+        self.add_with_hooks(kind, args, success, HookRunCounts::default());
+    }
+
+    /// [`Self::add`], carrying the hook runs that wrapped THIS call. The counts
+    /// come in with the member rather than being sampled off a wall clock: a
+    /// group row's bracket must describe the calls it labels and nothing else.
+    pub fn add_with_hooks(
+        &mut self,
+        kind: &ToolKind,
+        args: &str,
+        success: bool,
+        hooks: HookRunCounts,
+    ) {
         if matches!(kind, ToolKind::NonCollapsible) {
             return;
         }
+        self.hooks.add(hooks);
         if !success {
             self.any_error = true;
             self.failed += 1;
@@ -527,6 +668,11 @@ impl Accumulator {
                 " (failed)".to_string(),
                 Style::default().fg(theme.colors.error),
             ));
+        }
+        // The labeled shape (§3.3): this is an aggregate row, so no member
+        // detail is on screen to explain the numbers and every outcome is named.
+        if let Some(bracket) = hook_bracket(self.hooks, HookBracket::Labeled) {
+            spans.extend(bracket);
         }
         Some(Line::from(spans))
     }
@@ -728,6 +874,170 @@ fn output_base_style(is_error: bool, bg: Color) -> Style {
     Style::default().fg(fg).bg(bg)
 }
 
+// ─── The committed capped execute block ─────────────────────────────────────
+//
+// Shell output is the noisiest thing in the transcript, and the live activity
+// band that used to carry a running command's tail no longer exists — so this
+// block is the ONLY place a command's output is ever seen. That raises the bar
+// on it twice over: it has to stay small, and it has to be the *informative*
+// small.
+//
+// The old cell was head-only: the first three wrapped rows and then a count.
+// For the commands people actually run that is precisely the wrong three rows.
+// A failing `cargo build` spent its whole budget on `Compiling foo v0.1.0` and
+// hid the error; a test run showed the runner banner and hid `812 passed`. The
+// verdict of a command is at the END of its output, essentially always.
+//
+// So the window is head + tail with the elision marker BETWEEN them, at the
+// same total height the head-only cell used. The marker's placement is not
+// cosmetic: a marker at the bottom would claim the hidden rows come after the
+// last row shown, which would be a lie about which rows were dropped. Rows are
+// never dropped silently — every hidden row is counted in the marker.
+
+/// Head/tail split of a **successful** execute block: one row of what the
+/// command started doing, two rows of what it concluded. Plus the marker that
+/// is four rows — the same ceiling the head-only cell had.
+const EXEC_HEAD_OK: usize = 1;
+const EXEC_TAIL_OK: usize = 2;
+
+/// Head/tail split of a **failed** execute block. The entire budget goes to the
+/// tail: when a command fails, none of the evidence is at the top. One extra
+/// row over the success case, because a failure is the one time the operator is
+/// actually going to read this cell.
+const EXEC_HEAD_ERR: usize = 0;
+const EXEC_TAIL_ERR: usize = 4;
+
+/// Apply terminal carriage-return semantics to one raw line, then drop the CR.
+///
+/// A progress bar (`cargo`, `pip`, `npm`, `docker pull`, anything using `\r` to
+/// redraw in place) emits every frame it ever painted into a single logical
+/// line. `scrub_rendered_span` drops the `\r` as a control character, which
+/// concatenated all of those frames into one multi-kilobyte row that then wrapped
+/// into dozens of rows of the same word repeated — a large part of the "shows
+/// some shit" complaint. A terminal shows only the last frame, so we do too.
+fn apply_carriage_returns(line: &str) -> &str {
+    match line.rfind('\r') {
+        Some(i) => &line[i + 1..],
+        None => line,
+    }
+}
+
+/// Logical output rows, compacted without dropping anything a reader needs.
+///
+/// Three passes, all of them information-preserving:
+/// 1. JSON object/array lines are pretty-printed (existing behaviour).
+/// 2. Carriage-return redraws collapse to the frame that would actually be on
+///    screen (see [`apply_carriage_returns`]).
+/// 3. Leading/trailing blank rows are dropped and interior runs of blanks
+///    squeeze to one. Vertical whitespace carries no information in a capped
+///    window, and it was competing for the budget with rows that do.
+fn normalized_output_rows(result: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending_blank = false;
+    for raw in result.lines() {
+        let logical = apply_carriage_returns(raw);
+        let expanded = match try_format_json(logical) {
+            Some(pretty) => pretty.lines().map(|l| l.to_string()).collect::<Vec<_>>(),
+            None => vec![logical.to_string()],
+        };
+        for line in expanded {
+            if line.trim().is_empty() {
+                // Never emit a leading blank; remember at most one interior run.
+                if !out.is_empty() {
+                    pending_blank = true;
+                }
+                continue;
+            }
+            if pending_blank {
+                out.push(String::new());
+                pending_blank = false;
+            }
+            out.push(line);
+        }
+    }
+    // `pending_blank` is deliberately not flushed: a trailing blank run is dropped.
+    out
+}
+
+/// The dim elision marker. `hidden` is the exact number of wrapped rows the
+/// window is not showing — never an estimate, never rounded.
+fn elision_marker(hidden: usize, cols: usize, bg: Color) -> Line<'static> {
+    let theme = crate::style::theme();
+    let text = format!("… +{} lines (ctrl+o to expand)", hidden);
+    let w = unicode_width::UnicodeWidthStr::width(text.as_str());
+    let span = Span::styled(text, Style::default().fg(theme.colors.dim).bg(bg));
+    panelize(vec![span], w, cols, bg)
+}
+
+/// The capped execute block: a bounded head+tail window over a command's output
+/// with an honest middle elision marker.
+///
+/// Height is bounded by `head + tail + 1` **regardless of how much the command
+/// printed**, which is what makes this safe in a print-once architecture: the
+/// rows this returns are the rows committed to native scrollback, and they can
+/// never be re-rendered or scrolled back through.
+///
+/// A block that fits in the window prints in full with no marker — the marker
+/// only ever appears when there is something behind it.
+pub(crate) fn capped_execute_block(
+    result: &str,
+    width: u16,
+    is_error: bool,
+) -> Vec<Line<'static>> {
+    let (head, tail) = if is_error {
+        (EXEC_HEAD_ERR, EXEC_TAIL_ERR)
+    } else {
+        (EXEC_HEAD_OK, EXEC_TAIL_OK)
+    };
+    capped_execute_block_with(result, width, is_error, head, tail)
+}
+
+/// [`capped_execute_block`] with an explicit window, so tests can pin the shape
+/// without depending on the tuned constants.
+pub(crate) fn capped_execute_block_with(
+    result: &str,
+    width: u16,
+    is_error: bool,
+    head: usize,
+    tail: usize,
+) -> Vec<Line<'static>> {
+    let cols = super::body_wrap_width(width);
+    let bg = output_panel_bg();
+    let base = output_base_style(is_error, bg);
+
+    let all: Vec<String> = normalized_output_rows(result)
+        .iter()
+        .flat_map(|l| super::wrap_plain(l, cols))
+        .collect();
+    if all.is_empty() {
+        return Vec::new();
+    }
+
+    let row = |text: &str| -> Line<'static> {
+        let (spans, w) = linkify_row(text, base);
+        panelize(spans, w, cols, bg)
+    };
+
+    // The window plus its marker is the same height as printing that many rows
+    // outright, so a block only one row over the window prints in full rather
+    // than spending a row to say it hid one row.
+    let budget = head + tail + 1;
+    if all.len() <= budget {
+        return all.iter().map(|r| row(r)).collect();
+    }
+
+    let hidden = all.len() - head - tail;
+    let mut body: Vec<Line<'static>> = Vec::with_capacity(budget);
+    for r in &all[..head] {
+        body.push(row(r));
+    }
+    body.push(elision_marker(hidden, cols, bg));
+    for r in &all[all.len() - tail..] {
+        body.push(row(r));
+    }
+    body
+}
+
 /// Collapsed tool-output block (CC's OutputLine/renderTruncatedContent) with the
 /// output-quality upgrades: JSON pretty-print, URL linkify, panel background.
 /// Up to 3 dimmed, width-wrapped rows; exactly 4 print in full; more get
@@ -782,7 +1092,10 @@ pub(crate) fn enhanced_output_lines(
     let bg = output_panel_bg();
     let base = output_base_style(is_error, bg);
     let mut body: Vec<Line<'static>> = Vec::new();
-    for l in expand_json_lines(result) {
+    // Same normalization as the capped block — carriage-return redraws collapse
+    // to their last frame and blank runs squeeze — so expanding a cell shows
+    // MORE of the same output rather than a differently-shaped rendering of it.
+    for l in normalized_output_rows(result) {
         for row in super::wrap_plain(&l, cols) {
             let (spans, w) = linkify_row(&row, base);
             body.push(panelize(spans, w, cols, bg));
@@ -886,6 +1199,308 @@ mod output_quality_tests {
         assert!(enhanced_collapsed_block("", 80, false).is_empty());
         assert!(enhanced_collapsed_block("   \n  ", 80, false).is_empty());
         assert!(enhanced_output_lines("", 80, false).is_empty());
+    }
+}
+
+// ── the committed capped execute block ──────────────────────────────────────
+//
+// The cell is bounded in height whatever the command printed, and it is bounded
+// around the part of the output that carries the verdict. Every row it does not
+// show is counted.
+#[cfg(test)]
+mod capped_execute_block_tests {
+    use super::*;
+
+    fn flat(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn build(result: &str) -> Vec<String> {
+        flat(&capped_execute_block(result, 80, false))
+    }
+
+    /// The regression this block exists for. A build's first rows are
+    /// `Compiling …`; its LAST rows are the error that made the operator look.
+    /// A head-only fold showed the former and hid the latter.
+    #[test]
+    fn a_long_run_shows_its_verdict_not_only_its_preamble() {
+        let mut out = String::from("Compiling foo v0.1.0\n");
+        for i in 0..40 {
+            out.push_str(&format!("Compiling dep{} v0.1.0\n", i));
+        }
+        out.push_str("error: could not compile `baz`\nwarning: build failed\n");
+        let rows = build(&out);
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("error: could not compile `baz`"),
+            "the verdict must survive the fold: {rows:?}"
+        );
+        assert!(
+            joined.contains("warning: build failed"),
+            "the last row must survive the fold: {rows:?}"
+        );
+        assert!(
+            rows[0].contains("Compiling foo"),
+            "the head row is still the first row of output: {rows:?}"
+        );
+    }
+
+    /// The marker sits BETWEEN the halves, because that is where the hidden rows
+    /// are. A marker at the bottom would misdescribe which rows were dropped.
+    #[test]
+    fn the_marker_sits_between_the_halves() {
+        let rows = build(&(1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+        let marker = rows
+            .iter()
+            .position(|r| r.starts_with('\u{2026}'))
+            .expect("a folded block has a marker");
+        assert!(marker > 0, "head rows come first: {rows:?}");
+        assert!(marker < rows.len() - 1, "tail rows come after: {rows:?}");
+    }
+
+    /// Nothing is ever dropped silently: the count is the exact number of
+    /// wrapped rows between the head and the tail.
+    #[test]
+    fn the_marker_counts_every_hidden_row_exactly() {
+        // 20 rows, window 1 + 2 → 17 hidden.
+        let rows = build(&(1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+        assert!(
+            rows.iter().any(|r| r.contains("+17 lines")),
+            "hidden count must be exact: {rows:?}"
+        );
+        // Shown + hidden accounts for the whole output, with the marker's own
+        // row excluded from the tally.
+        assert_eq!(rows.len() - 1 + 17, 20, "{rows:?}");
+    }
+
+    /// A block only one row over the window prints in full: spending a row to
+    /// say one row was hidden is strictly worse than showing the row.
+    #[test]
+    fn a_block_that_fits_the_window_prints_in_full() {
+        for n in 1..=4 {
+            let rows = build(&(1..=n).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+            assert_eq!(rows.len(), n, "{n} rows must print in full: {rows:?}");
+            assert!(!rows.iter().any(|r| r.starts_with('\u{2026}')), "{rows:?}");
+        }
+    }
+
+    /// A failure spends the whole budget on the tail — none of the evidence for
+    /// a failed command is at the top of its output.
+    #[test]
+    fn a_failed_block_is_all_tail() {
+        let out = (1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        let rows = flat(&capped_execute_block(&out, 80, true));
+        assert!(rows[0].starts_with('\u{2026}'), "marker leads: {rows:?}");
+        assert_eq!(rows.len(), 1 + EXEC_TAIL_ERR, "{rows:?}");
+        assert!(rows.last().unwrap().contains("l20"), "{rows:?}");
+    }
+
+    /// The height ceiling is what makes this safe to COMMIT: these rows go into
+    /// native scrollback and can never be re-rendered.
+    #[test]
+    fn height_is_bounded_regardless_of_how_much_the_command_printed() {
+        for n in [5usize, 50, 500, 5000] {
+            let out = (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+            let ok = capped_execute_block(&out, 80, false).len();
+            let err = capped_execute_block(&out, 80, true).len();
+            assert!(ok <= EXEC_HEAD_OK + EXEC_TAIL_OK + 1, "{n} rows → {ok}");
+            assert!(err <= EXEC_HEAD_ERR + EXEC_TAIL_ERR + 1, "{n} rows → {err}");
+        }
+    }
+
+    /// A progress bar redraws in place with `\r`. Dropping the CR as a bare
+    /// control character concatenated every frame it ever painted into one
+    /// enormous row, which then wrapped into dozens. A terminal shows the last
+    /// frame; so do we.
+    #[test]
+    fn carriage_return_redraws_collapse_to_their_last_frame() {
+        let rows = build("Downloading 10%\rDownloading 60%\rDownloading 100%\ndone");
+        assert_eq!(rows, vec!["Downloading 100%", "done"], "{rows:?}");
+    }
+
+    /// Blank rows carry no information and were competing for a budget measured
+    /// in single rows.
+    #[test]
+    fn blank_runs_squeeze_and_the_edges_are_dropped() {
+        let rows = build("\n\n  \nalpha\n\n\n\nbeta\n\n  \n");
+        assert_eq!(rows, vec!["alpha", "", "beta"], "{rows:?}");
+    }
+
+    /// Squeezing must not erase content: an all-blank result is empty, not a
+    /// block of empty rows.
+    #[test]
+    fn an_empty_or_blank_result_yields_no_block() {
+        assert!(capped_execute_block("", 80, false).is_empty());
+        assert!(capped_execute_block("\n\n   \n", 80, false).is_empty());
+    }
+
+    /// Long single lines still wrap first and are counted as the rows they
+    /// occupy — the cap is over VISUAL rows, which is what the screen spends.
+    #[test]
+    fn wrapped_rows_are_what_the_cap_counts() {
+        let long = "x".repeat(1000);
+        let rows = flat(&capped_execute_block_with(&long, 80, false, 1, 1));
+        assert_eq!(rows.len(), 3, "head + marker + tail: {rows:?}");
+        assert!(rows[1].contains("lines"), "{rows:?}");
+    }
+}
+
+// ── the hook counter bracket ────────────────────────────────────────────────
+#[cfg(test)]
+mod hook_bracket_tests {
+    use super::*;
+
+    fn text(counts: HookRunCounts, shape: HookBracket) -> Option<String> {
+        hook_bracket(counts, shape)
+            .map(|spans| spans.iter().map(|s| s.content.as_ref()).collect())
+    }
+
+    fn counts(ok: usize, blocked: usize, failed: usize) -> HookRunCounts {
+        HookRunCounts { ok, blocked, failed }
+    }
+
+    /// §3.4. A user with no hooks configured never sees the word "hooks".
+    #[test]
+    fn zero_runs_render_nothing_at_all() {
+        assert_eq!(text(HookRunCounts::default(), HookBracket::Labeled), None);
+        assert_eq!(text(HookRunCounts::default(), HookBracket::Compact), None);
+    }
+
+    /// Skipped hooks did not run, so they are not counted — and a group where
+    /// every hook skipped renders no bracket either.
+    #[test]
+    fn skipped_runs_are_uncounted() {
+        let mut c = HookRunCounts::default();
+        for outcome in ["skip", "skipped"] {
+            c.note(outcome);
+        }
+        assert!(c.is_empty(), "{c:?}");
+        assert_eq!(text(c, HookBracket::Labeled), None);
+    }
+
+    /// Blocking is a hook doing its job. It is counted apart from failure, and
+    /// it never lands in the failure bucket.
+    #[test]
+    fn the_backend_vocabulary_maps_onto_three_outcomes() {
+        let mut c = HookRunCounts::default();
+        for outcome in ["ok", "rewrote_input", "allow"] {
+            c.note(outcome);
+        }
+        for outcome in ["blocked", "denied"] {
+            c.note(outcome);
+        }
+        for outcome in ["crashed", "timed_out"] {
+            c.note(outcome);
+        }
+        assert_eq!(c, counts(3, 2, 2));
+    }
+
+    /// The bare form: with nothing to disambiguate, the label word is noise.
+    #[test]
+    fn a_clean_run_drops_the_label_word() {
+        assert_eq!(
+            text(counts(54, 0, 0), HookBracket::Labeled).as_deref(),
+            Some("  [hooks: 54]")
+        );
+    }
+
+    /// Fixed order, `", "` separator, and zero-count outcomes omitted ENTIRELY
+    /// rather than printed as `0 ok`.
+    #[test]
+    fn the_labeled_shape_names_every_nonzero_outcome_in_order() {
+        assert_eq!(
+            text(counts(54, 0, 19), HookBracket::Labeled).as_deref(),
+            Some("  [hooks: 54 ok, 19 failed]")
+        );
+        assert_eq!(
+            text(counts(54, 3, 19), HookBracket::Labeled).as_deref(),
+            Some("  [hooks: 54 ok, 3 blocked, 19 failed]")
+        );
+        assert_eq!(
+            text(counts(0, 0, 3), HookBracket::Labeled).as_deref(),
+            Some("  [hooks: 3 failed]")
+        );
+    }
+
+    /// Compact: `completed/failed`, where completed = ok + blocked. The slash
+    /// appears only when both sides are non-zero.
+    #[test]
+    fn the_compact_shape_keeps_blocked_in_the_numerator() {
+        assert_eq!(
+            text(counts(8, 1, 1), HookBracket::Compact).as_deref(),
+            Some("  [hooks: 9/1]")
+        );
+        assert_eq!(
+            text(counts(9, 0, 0), HookBracket::Compact).as_deref(),
+            Some("  [hooks: 9]")
+        );
+        // Only failures: a bare number in the error colour, never `/3`.
+        assert_eq!(
+            text(counts(0, 0, 3), HookBracket::Compact).as_deref(),
+            Some("  [hooks: 3]")
+        );
+    }
+
+    /// Colour roles: each number carries its outcome's accent plus DIM, so the
+    /// bracket recedes below the label it trails.
+    #[test]
+    fn numbers_carry_their_outcome_colour_and_recede() {
+        let theme = crate::style::theme();
+        let spans = hook_bracket(counts(5, 2, 1), HookBracket::Labeled).unwrap();
+        let find = |needle: &str| {
+            spans
+                .iter()
+                .find(|s| s.content.as_ref() == needle)
+                .unwrap_or_else(|| panic!("missing span {needle:?}"))
+                .style
+        };
+        for (needle, colour) in [
+            ("5", theme.colors.success),
+            ("2", theme.colors.warning),
+            ("1", theme.colors.error),
+        ] {
+            let st = find(needle);
+            assert_eq!(st.fg, Some(colour), "{needle}");
+            assert!(st.add_modifier.contains(Modifier::DIM), "{needle}");
+        }
+    }
+
+    /// Counts are per GROUP, not per session: the accumulator sums its members'
+    /// runs and resets with the run it labels.
+    #[test]
+    fn a_group_row_sums_its_members_and_resets_with_the_run() {
+        let mut acc = Accumulator::default();
+        acc.add_with_hooks(&ToolKind::Search, "", true, counts(4, 0, 0));
+        acc.add_with_hooks(&ToolKind::Dir, "", true, counts(2, 0, 1));
+        let row: String = acc
+            .take_summary_line()
+            .expect("a run renders")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(row.contains("[hooks: 6 ok, 1 failed]"), "{row:?}");
+        // The next run starts from zero — this is not a session tally.
+        let mut acc2 = Accumulator::default();
+        acc2.add(&ToolKind::Search, "", true);
+        let row2: String = acc2
+            .take_summary_line()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!row2.contains("hooks"), "a hookless run says nothing: {row2:?}");
     }
 }
 

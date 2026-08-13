@@ -60,8 +60,33 @@ pub struct ToolCallData {
     pub success: bool,
     /// Whether the tool call is currently in expanded view
     pub expanded: bool,
+    /// Hook runs that wrapped this call, rendered as the trailing
+    /// `[hooks: 9/1]` bracket on the header row.
+    ///
+    /// Stored on the cell rather than baked into `lines` because the cell
+    /// **re-renders**: the result arriving and ctrl+o both rebuild `lines` from
+    /// scratch, and a bracket appended once at construction would silently
+    /// vanish the moment either happened.
+    pub hook_runs: crate::tools::collapse::HookRunCounts,
     /// Pre-rendered styled lines from the tool renderer
     pub lines: Vec<Line<'static>>,
+}
+
+/// Append the compact hook bracket to a cell's header row, in place.
+///
+/// A no-op at zero runs (§3.4) and a no-op on an empty block, so every
+/// re-render path can call it unconditionally.
+pub(crate) fn append_hook_bracket(
+    lines: &mut [Line<'static>],
+    counts: crate::tools::collapse::HookRunCounts,
+) {
+    use crate::tools::collapse::{hook_bracket, HookBracket};
+    let Some(bracket) = hook_bracket(counts, HookBracket::Compact) else {
+        return;
+    };
+    if let Some(header) = lines.first_mut() {
+        header.spans.extend(bracket);
+    }
 }
 
 /// Stored survey Q&A data for summary rendering.
@@ -194,6 +219,7 @@ impl Message {
             duration_ms: 0,
             success: true,
             expanded: false,
+            hook_runs: Default::default(),
             lines: vec![Line::from("")], // 1 row; real rule drawn in draw_tool_call
         })
     }

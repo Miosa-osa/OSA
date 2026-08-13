@@ -39,11 +39,13 @@ impl ToolRenderer for BashRenderer {
         );
 
         if !opts.expanded {
-            // CC parity (BashToolResultMessage/OutputLine): up to 3 dimmed,
-            // WIDTH-WRAPPED output lines under the `⎿` connector; exactly 4
-            // print in full; more get "… +N lines (ctrl+o to expand)".
+            // The capped execute block: a bounded head+tail window over the
+            // command's output with the elision marker between the halves, so a
+            // long run shows both what it started doing and how it ended. A
+            // head-only fold spent this cell's whole budget on a build's
+            // `Compiling …` preamble and hid the error that made it interesting.
             // Errors render red; finished-but-empty shows "(No output)".
-            let body = super::collapse::enhanced_collapsed_block(
+            let body = super::collapse::capped_execute_block(
                 result,
                 opts.width,
                 opts.status == ToolStatus::Error,
@@ -126,17 +128,23 @@ mod collapsed_output_tests {
             .collect()
     }
 
+    /// The collapsed cell is a head+tail window, not a head-only fold: the first
+    /// row of output hangs off the `⎿` connector, the elision marker sits in the
+    /// middle counting exactly what it hides, and the command's LAST rows — the
+    /// ones carrying its verdict — are the ones that survive.
     #[test]
-    fn collapsed_output_caps_at_three_lines_with_expand_hint() {
+    fn collapsed_output_keeps_the_tail_and_counts_the_middle() {
         let result = "l1\nl2\nl3\nl4\nl5\nl6";
         let lines = BashRenderer.render("Bash", r#"{"command":"seq 6"}"#, result, &opts());
         let rendered = flat(&lines);
-        assert!(rendered[1].starts_with("  \u{23bf}  l1"), "{:?}", rendered);
+        assert_eq!(rendered.len(), 5, "header + 1 head + marker + 2 tail: {rendered:?}");
+        assert!(rendered[1].starts_with("  \u{23bf}  l1"), "{rendered:?}");
         assert!(
-            rendered.last().unwrap().contains("+3 lines (ctrl+o to expand)"),
-            "{:?}",
-            rendered
+            rendered[2].contains("+3 lines (ctrl+o to expand)"),
+            "the marker sits between the halves: {rendered:?}"
         );
+        assert!(rendered[3].contains("l5"), "{rendered:?}");
+        assert!(rendered[4].contains("l6"), "{rendered:?}");
     }
 
     #[test]

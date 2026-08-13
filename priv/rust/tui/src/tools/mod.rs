@@ -144,8 +144,54 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
     if opts.status == ToolStatus::Error {
         force_failure_body(&mut lines, result);
     }
+    apply_commit_cap(&mut lines);
     crate::render::sanitize::scrub_rendered_lines(&mut lines);
     lines
+}
+
+/// Default ceiling on the rows one committed tool block may occupy.
+///
+/// In a retained-widget TUI an expanded 5000-row body is merely long. OSA is
+/// **print-once**: these rows go into the terminal's own scrollback via
+/// `insert_before` and can never be re-rendered, re-wrapped or folded again. An
+/// uncapped commit therefore dumps thousands of rows the operator cannot
+/// usefully scroll past and cannot undo, and bursts them at the writer in one
+/// go. 2000 is generous enough that no ordinary tool cell ever meets it.
+pub(crate) const DEFAULT_MAX_COMMIT_ROWS: usize = 2000;
+
+/// The configured commit-row ceiling. `OSA_MAX_COMMIT_ROWS=0` means unbounded;
+/// an unset or unparseable value means [`DEFAULT_MAX_COMMIT_ROWS`].
+pub(crate) fn max_commit_rows() -> usize {
+    match std::env::var("OSA_MAX_COMMIT_ROWS") {
+        Ok(v) => v.trim().parse::<usize>().unwrap_or(DEFAULT_MAX_COMMIT_ROWS),
+        Err(_) => DEFAULT_MAX_COMMIT_ROWS,
+    }
+}
+
+/// Clip an over-long block to the commit ceiling, replacing the final row with
+/// an honest count of what was dropped.
+///
+/// **The block is laid out at its full height first and only then clipped**, so
+/// every surviving row wraps exactly where it would have in an uncapped commit.
+/// Re-wrapping at the cap would change the content of rows that were not
+/// dropped, which is a different and worse lie than dropping them.
+///
+/// The pointer is `/transcript` rather than `ctrl+o`, because ctrl+o cannot help
+/// here: the expanded form is what overflowed.
+fn apply_commit_cap(lines: &mut Vec<Line<'static>>) {
+    let cap = max_commit_rows();
+    if cap == 0 || lines.len() <= cap {
+        return;
+    }
+    let hidden = lines.len() - (cap - 1);
+    lines.truncate(cap - 1);
+    let theme = crate::style::theme();
+    lines.push(Line::from(Span::styled(
+        format!("\u{2026} {} more lines \u{2014} /transcript to view", hidden),
+        Style::default()
+            .fg(theme.colors.dim)
+            .bg(ratatui::style::Color::Reset),
+    )));
 }
 
 /// The failure of a tool call must be legible as TEXT, not only as the colour of
@@ -1233,5 +1279,119 @@ mod tool_header_newline_guard {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert_eq!(joined, "Read /src/main.rs");
+    }
+}
+
+// ── the print-once commit cap ───────────────────────────────────────────────
+//
+// These rows go into the terminal's own scrollback and can never be re-wrapped,
+// re-rendered or folded again. An uncapped expanded body therefore commits
+// thousands of rows the operator cannot undo.
+#[cfg(test)]
+mod commit_cap_tests {
+    use super::*;
+
+    fn block(n: usize) -> Vec<Line<'static>> {
+        (0..n).map(|i| Line::from(format!("row {i}"))).collect()
+    }
+
+    fn flat(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    fn opts(expanded: bool) -> RenderOpts {
+        RenderOpts {
+            status: ToolStatus::Success,
+            width: 80,
+            expanded,
+            compact: !expanded,
+            spinner_frame: None,
+            duration_ms: 1,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_block_under_the_cap_is_untouched() {
+        let _g = crate::test_env::EnvGuard::set("OSA_MAX_COMMIT_ROWS", "10");
+        let mut lines = block(10);
+        apply_commit_cap(&mut lines);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(flat(&lines).last().unwrap(), "row 9");
+    }
+
+    /// The surviving rows are the ones the uncapped commit would have produced,
+    /// byte for byte — the block is laid out at full height and only THEN
+    /// clipped. Re-wrapping at the cap would change rows that were not dropped.
+    #[test]
+    #[serial_test::serial]
+    fn an_over_long_block_is_clipped_not_rewrapped() {
+        let _g = crate::test_env::EnvGuard::set("OSA_MAX_COMMIT_ROWS", "10");
+        let mut lines = block(100);
+        apply_commit_cap(&mut lines);
+        assert_eq!(lines.len(), 10, "exactly the cap, marker included");
+        let rendered = flat(&lines);
+        for (i, row) in rendered.iter().take(9).enumerate() {
+            assert_eq!(row, &format!("row {i}"), "surviving rows are unchanged");
+        }
+        // 100 rows, 9 survive → 91 dropped, counted exactly.
+        assert_eq!(
+            rendered.last().unwrap(),
+            "\u{2026} 91 more lines \u{2014} /transcript to view"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zero_means_unbounded() {
+        let _g = crate::test_env::EnvGuard::set("OSA_MAX_COMMIT_ROWS", "0");
+        let mut lines = block(5000);
+        apply_commit_cap(&mut lines);
+        assert_eq!(lines.len(), 5000);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_unparseable_setting_falls_back_to_the_default() {
+        let _g = crate::test_env::EnvGuard::set("OSA_MAX_COMMIT_ROWS", "banana");
+        assert_eq!(max_commit_rows(), DEFAULT_MAX_COMMIT_ROWS);
+    }
+
+    /// End-to-end through the one entry point every renderer goes through: an
+    /// expanded shell body of 5000 rows commits bounded.
+    #[test]
+    #[serial_test::serial]
+    fn an_expanded_shell_body_commits_bounded() {
+        let _g = crate::test_env::EnvGuard::set("OSA_MAX_COMMIT_ROWS", "50");
+        let result = (0..5000)
+            .map(|i| format!("out {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = render_tool("bash", r#"{"command":"seq 5000"}"#, &result, &opts(true));
+        assert_eq!(lines.len(), 50, "the expanded body must not commit unbounded");
+        let last: String = lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(last.contains("/transcript to view"), "{last:?}");
+    }
+
+    /// The COLLAPSED shell cell never reaches the commit cap at all — it is
+    /// already bounded by its own head/tail window, which is the point.
+    #[test]
+    fn the_collapsed_shell_cell_is_bounded_far_below_the_commit_cap() {
+        let result = (0..5000)
+            .map(|i| format!("out {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = render_tool("bash", r#"{"command":"seq 5000"}"#, &result, &opts(false));
+        assert!(lines.len() <= 5, "header + a small window: {}", lines.len());
     }
 }

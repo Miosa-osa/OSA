@@ -1476,6 +1476,10 @@ impl App {
         self.assistant_stream.reset();
         self.thinking_buf.clear();
         self.pending_tool_args.clear();
+        // Hook attribution is per-call and per-session; a switch abandons any
+        // call still in flight, so its unclaimed runs must not follow us.
+        self.hook_runs_for_call.clear();
+        self.hook_runs_current_call = None;
         self.agent_header_sent = false;
         self.activity.stop();
         self.status.set_active(false);

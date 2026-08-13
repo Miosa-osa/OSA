@@ -2219,10 +2219,11 @@ impl App {
         // The checklist owns a real band. It used to be drawn as an OVERLAY into
         // the stream band's own rect — the same rect the reply had already
         // painted into — so a plan and a streaming markdown table interleaved.
-        let checklist = if self.task_checklist_hidden
-            || blocking_ask
-            || !self.task_checklist.is_visible()
-        {
+        // The Ctrl+T suppressor moved INTO the component as `PanelPin`, so the
+        // chord can un-hide an auto-hidden list rather than only hide further;
+        // `is_visible()` now answers for both. What stays here is the one gate
+        // the component cannot know about: a blocking ask owning the region.
+        let checklist = if blocking_ask || !self.task_checklist.is_visible() {
             0
         } else {
             self.task_checklist.desired_height(w)

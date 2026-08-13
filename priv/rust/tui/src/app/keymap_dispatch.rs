@@ -204,16 +204,15 @@ impl App {
                 Some(false)
             }
             Action::TodosToggle => {
-                self.task_checklist_hidden = !self.task_checklist_hidden;
-                self.toasts.push(
-                    if self.task_checklist_hidden {
-                        "Task panel hidden"
-                    } else {
-                        "Task panel shown"
-                    }
-                    .into(),
-                    ToastLevel::Info,
-                );
+                // A PIN, not a hide-toggle: `Auto → Pinned → Suppressed → Auto`.
+                // Now that the panel auto-hides a finished list, a boolean
+                // suppressor could only hide it further — it had no state from
+                // which it could bring an auto-hidden list back, which is the
+                // main reason to reach for this chord. `Pinned` additionally
+                // lifts the row cap and shows the whole plan.
+                let pin = self.task_checklist.cycle_pin();
+                self.recompute_layout();
+                self.toasts.push(pin.label().into(), ToastLevel::Info);
                 Some(false)
             }
             Action::CopyLast => {

@@ -300,6 +300,25 @@ pub struct App {
     /// also lets a genuinely new identical command count again later.
     pub counted_bg_shells: std::collections::HashSet<String>,
 
+    /// Hook runs attributed to the tool call they wrapped, keyed by
+    /// `tool_call_id` (the same id `pending_tool_args` uses, for the same
+    /// reason: hooks land out of order exactly as results do, and every shell
+    /// call is named `shell_execute`).
+    ///
+    /// **Attribution is by arrival window, because `hook_run` carries no call
+    /// id.** `agent/hooks/dispatch.ex` emits `hook_name / hook_event / outcome /
+    /// duration_ms` and nothing that names the call. The executor's order is
+    /// fixed and known (`loop/tool_executor.ex`: `emit_tool_call_start` →
+    /// `pre_tool_use` → the tool → `post_tool_use` → `tool_call_end`), so a
+    /// `HookRun` belongs to the most recently started unresolved call. That is
+    /// exact for sequential calls and can misattribute between two calls that
+    /// genuinely overlap; the fix is a `tool_call_id` on the backend event, at
+    /// which point `hook_runs_for_call` is keyed directly and this note goes away.
+    pub hook_runs_for_call: HashMap<String, crate::tools::collapse::HookRunCounts>,
+
+    /// The call `hook_runs_for_call` currently attributes arriving hook runs to.
+    pub hook_runs_current_call: Option<String>,
+
     /// Accumulator for collapsing consecutive same-kind tool calls into one
     /// scrollback summary line ("Read N files", "Ran N shell commands", …).
     pub collapse: crate::tools::collapse::Accumulator,
@@ -492,7 +511,6 @@ pub struct App {
     // Armed timestamp for the ctrl+x ctrl+k kill-all-agents press-twice confirm.
     pub kill_agents_armed: Option<Instant>,
     // Ctrl+T (chat:todosToggle) — hide/show the floating task checklist.
-    pub task_checklist_hidden: bool,
 }
 
 impl App {
@@ -711,6 +729,8 @@ impl App {
             pending_tool_args: HashMap::new(),
             pending_tool_results: HashMap::new(),
             counted_bg_shells: std::collections::HashSet::new(),
+            hook_runs_for_call: HashMap::new(),
+            hook_runs_current_call: None,
             collapse: crate::tools::collapse::Accumulator::default(),
             agent_header_sent: false,
 
@@ -764,7 +784,6 @@ impl App {
             keymap,
             chord_pending: None,
             kill_agents_armed: None,
-            task_checklist_hidden: false,
         })
     }
 

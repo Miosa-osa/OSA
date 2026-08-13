@@ -196,6 +196,7 @@ impl Chat {
                 duration_ms: 0,
                 success: true,
                 expanded: false,
+                hook_runs: Default::default(),
                 lines: vec![Line::from("")],
             }));
         }
@@ -356,6 +357,7 @@ impl Chat {
             duration_ms: 0,
             success: true,
             expanded: false,
+            hook_runs: Default::default(),
             lines: vec![line],
         }));
     }
@@ -412,6 +414,10 @@ impl Chat {
                         truncated: false,
                     };
                     td.lines = crate::tools::render_tool(&td.name, &td.args, &td.result, &opts);
+                    // The cell was rebuilt from scratch — re-attach the hook
+                    // bracket, which lives on the cell precisely because every
+                    // re-render would otherwise drop it.
+                    self::message::append_hook_bracket(&mut td.lines, td.hook_runs);
                     msg.invalidate_cache();
                     break;
                 }
@@ -440,6 +446,7 @@ impl Chat {
                     truncated: false,
                 };
                 td.lines = crate::tools::render_tool(&td.name, &td.args, &td.result, &opts);
+                self::message::append_hook_bracket(&mut td.lines, td.hook_runs);
                 msg.invalidate_cache();
                 break;
             }
@@ -1014,6 +1021,7 @@ mod concurrent_tool_pairing_tests {
             duration_ms: 0,
             success: true,
             expanded: false,
+            hook_runs: Default::default(),
             lines: vec![Line::from(args.to_string())],
         }
     }

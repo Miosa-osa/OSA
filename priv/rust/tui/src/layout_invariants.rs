@@ -586,6 +586,75 @@ mod panel_invariants {
         }
     }
 
+    /// The overflow marker is a ROW, so it has to be inside the reservation, not
+    /// an extra one bolted onto the bottom of it. A folding panel and a
+    /// non-folding one must both draw exactly `height()` rows.
+    #[test]
+    fn task_checklist_reserved_height_holds_across_the_overflow_boundary() {
+        // Sweep straight through the cap so the row that changes character —
+        // last item vs. `+N more` marker — is covered from both sides.
+        for n in 8usize..=24 {
+            let mut cl = TaskChecklist::new();
+            for i in 0..n {
+                cl.add(format!("t{i}"), format!("step number {i}"), None);
+            }
+            let reserved = cl.height();
+            let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, reserved);
+            assert_eq!(
+                drawn, reserved,
+                "{n} items: reserved {reserved} rows, drew {drawn}.\n{}",
+                snapshot_buffer(&render_to_buffer(|f| cl.draw(f, f.area()), W, reserved))
+            );
+        }
+    }
+
+    /// Pinned lifts the row cap, so `height()` grows to the full list — and the
+    /// paint must grow with it, or the pin buys nothing. When the SCREEN is
+    /// smaller than the pinned reservation the panel still folds inside the rows
+    /// it was actually handed, and never paints past them.
+    #[test]
+    fn a_pinned_task_checklist_reserves_and_draws_the_full_list() {
+        for n in 13usize..=20 {
+            let mut cl = TaskChecklist::new();
+            for i in 0..n {
+                cl.add(format!("t{i}"), format!("step number {i}"), None);
+            }
+            cl.cycle_pin(); // Auto → Pinned
+            let reserved = cl.height();
+            assert_eq!(reserved as usize, n + 1, "pinned reports the whole list");
+            let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, reserved);
+            assert_eq!(drawn, reserved, "{n} pinned items");
+
+            // A screen too short for the pinned list: the caller clamps, and the
+            // panel must live inside the clamp.
+            let squeezed = 6u16;
+            let buf = render_to_buffer(|f| cl.draw(f, f.area()), W, squeezed);
+            let first_inked = (0..squeezed)
+                .find(|&y| (0..W).any(|x| !super::is_blank(buf[(x, y)].symbol())))
+                .unwrap_or(squeezed);
+            assert!(
+                squeezed - first_inked <= squeezed,
+                "{n} pinned items overflowed a {squeezed}-row screen.\n{}",
+                snapshot_buffer(&buf)
+            );
+        }
+    }
+
+    /// A finished list stands down on its own, so the band it used to occupy
+    /// collapses to zero rather than reserving rows for a stale checklist.
+    #[test]
+    fn a_finished_task_checklist_reserves_no_rows() {
+        use crate::components::measure::Measured;
+        let mut cl = TaskChecklist::new();
+        for i in 0..4 {
+            cl.add(format!("t{i}"), format!("step {i}"), None);
+            cl.update(&format!("t{i}"), ChecklistStatus::Completed);
+        }
+        assert_eq!(cl.desired_height(W), 0, "a finished list must free its band");
+        let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, 8);
+        assert_eq!(drawn, 0, "and must paint nothing at all");
+    }
+
     /// **The regression that shipped.** `draw_inline` used to hand the checklist
     /// the SAME rect it had just handed `Chat::draw_live`, so a plan painted
     /// straight over the streaming reply (a checklist row landing mid-way through

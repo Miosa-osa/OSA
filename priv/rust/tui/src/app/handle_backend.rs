@@ -483,6 +483,10 @@ impl App {
                 // the per-call id when the backend sent one (exact pairing even
                 // with many concurrent same-name calls); otherwise by name with
                 // the legacy FIFO queue.
+                // Hook runs arriving from here until this call resolves belong
+                // to it (`pre_tool_use` runs inside `run_tool`, after the start
+                // event and before the end one).
+                self.hook_runs_current_call = Some(pending_key(&name, tool_call_id.as_deref()));
                 self.pending_tool_args
                     .entry(pending_key(&name, tool_call_id.as_deref()))
                     .or_default()
@@ -539,6 +543,13 @@ impl App {
                     }
                 }
                 let pending_key = pending_key(&name, tool_call_id.as_deref());
+                // Take this call's hook runs. Removing rather than reading is
+                // what keeps the map bounded and what stops a second call from
+                // inheriting the first's bracket.
+                let call_hooks = self.hook_runs_for_call.remove(&pending_key).unwrap_or_default();
+                if self.hook_runs_current_call.as_deref() == Some(pending_key.as_str()) {
+                    self.hook_runs_current_call = None;
+                }
                 self.activity
                     .tool_end_with_id(&name, duration_ms, success, tool_call_id.as_deref());
                 self.activity.set_phase(ProcessingPhase::Waiting);
@@ -593,7 +604,7 @@ impl App {
                     // patterns, Listed 4 dirs` row. The run is still broken by
                     // assistant prose, a non-foldable tool, a permission prompt
                     // and turn end, all handled at their own sites.
-                    self.collapse.add(&kind, &args, success);
+                    self.collapse.add_with_hooks(&kind, &args, success, call_hooks);
                     self.sync_live_tool_summary();
                     debug!(
                         "Tool call end (collapsed): {} ({}ms, success={})",
@@ -617,7 +628,15 @@ impl App {
                         duration_ms,
                         truncated: false,
                     };
-                    let lines = crate::tools::render_tool(&name, &args, "", &opts);
+                    let mut lines = crate::tools::render_tool(&name, &args, "", &opts);
+                    // The compact shape (§3.3) on an individual row: the row's
+                    // own detail explains any block, so blocked hooks stay in
+                    // the completed numerator and only `failed` gets its own
+                    // number. Zero runs render nothing at all.
+                    crate::components::chat::message::append_hook_bracket(
+                        &mut lines,
+                        call_hooks,
+                    );
                     if !lines.is_empty() {
                         use crate::components::chat::message::ToolCallData;
                         self.chat.add_tool_message_rich(ToolCallData {
@@ -628,6 +647,7 @@ impl App {
                             duration_ms,
                             success,
                             expanded: false,
+                            hook_runs: call_hooks,
                             lines,
                         });
                         built_tool_message = true;
@@ -2166,6 +2186,16 @@ impl App {
             }
             BackendEvent::HookRun { hook_name, hook_event, outcome, duration_ms } => {
                 self.status.note_hook_run(&outcome);
+                // Attach the run to the call it wrapped so the row for that call
+                // (or the group row that folds it) can carry a `[hooks: …]`
+                // bracket. See `App::hook_runs_for_call` for why the attribution
+                // is by arrival window rather than by id.
+                if let Some(id) = self.hook_runs_current_call.clone() {
+                    self.hook_runs_for_call
+                        .entry(id)
+                        .or_default()
+                        .note(&outcome);
+                }
                 // A failing hook is worth a line the user can scroll back to.
                 // A passing one is not — that is what the counter is for, and a
                 // toast per hook would bury the turn under its own plumbing.

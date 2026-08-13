@@ -1,7 +1,55 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+/// Total rows the panel may claim on its own, **header row included**, before
+/// it starts folding items behind a `+N more` marker.
+///
+/// The reference caps at 8 *items*; OSA counts the header in, so 12 here is 11
+/// items. Either convention is defensible — this one is stated so the two never
+/// silently disagree about what the number means.
+///
+/// The cap does not apply while the panel is [`PanelPin::Pinned`]: pinning is
+/// the operator asking to see the whole list, and the sizing caller still
+/// clamps whatever comes back to the screen.
 const MAX_HEIGHT: u16 = 12;
+
+/// What the operator's Ctrl+T chord has most recently asked of the panel.
+///
+/// This is a **pin**, not a hide-toggle, and the distinction is load-bearing.
+/// Once the panel auto-hides a finished list, a boolean suppressor can only
+/// ever hide it *further* — there is no state from which the chord makes an
+/// auto-hidden list appear, which is the single most likely reason to reach for
+/// the chord ("let me see the list I just finished").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelPin {
+    /// The panel decides for itself, every frame (§4.3).
+    #[default]
+    Auto,
+    /// Always visible, and the row cap is lifted.
+    Pinned,
+    /// Always hidden, whatever the auto-rule says.
+    Suppressed,
+}
+
+impl PanelPin {
+    /// `Auto → Pinned → Suppressed → Auto`.
+    pub fn cycled(self) -> Self {
+        match self {
+            PanelPin::Auto => PanelPin::Pinned,
+            PanelPin::Pinned => PanelPin::Suppressed,
+            PanelPin::Suppressed => PanelPin::Auto,
+        }
+    }
+
+    /// Short label for the confirmation toast.
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelPin::Auto => "Task panel: auto",
+            PanelPin::Pinned => "Task panel: pinned (full list)",
+            PanelPin::Suppressed => "Task panel: hidden",
+        }
+    }
+}
 
 pub struct ChecklistItem {
     pub id: String,
@@ -38,6 +86,8 @@ pub struct TaskChecklist {
     /// compares against this so a snapshot is only emitted when the set of items
     /// or any item's status actually differs from what history already shows.
     last_snapshot_key: Option<String>,
+    /// The operator's standing instruction from Ctrl+T.
+    pin: PanelPin,
 }
 
 impl TaskChecklist {
@@ -46,6 +96,7 @@ impl TaskChecklist {
             items: Vec::new(),
             visible: true,
             last_snapshot_key: None,
+            pin: PanelPin::Auto,
         }
     }
 
@@ -112,8 +163,46 @@ impl TaskChecklist {
         self.visible = false;
     }
 
+    /// Advance the Ctrl+T pin one step and report the new state (for the toast).
+    pub fn cycle_pin(&mut self) -> PanelPin {
+        self.pin = self.pin.cycled();
+        self.pin
+    }
+
+    pub fn pin(&self) -> PanelPin {
+        self.pin
+    }
+
+    /// Whether the row cap is lifted — pinned means "show me all of it".
+    fn expanded(&self) -> bool {
+        self.pin == PanelPin::Pinned
+    }
+
+    /// The panel decides its own visibility every frame (§4.3).
+    ///
+    /// The rule that matters is the last clause: **a list with nothing left to
+    /// do hides itself**, even mid-turn. Without it, last turn's finished
+    /// checklist sits at the top of this turn's live region saying nothing, and
+    /// the operator reads a stale `Plan 6/6` as if it described current work.
+    /// The rule is stateless, so a new turn that creates fresh pending tasks
+    /// re-shows the panel immediately with nothing to reset.
     pub fn is_visible(&self) -> bool {
-        self.visible && !self.items.is_empty()
+        if self.items.is_empty() {
+            return false;
+        }
+        match self.pin {
+            PanelPin::Pinned => true,
+            PanelPin::Suppressed => false,
+            PanelPin::Auto => {
+                self.visible
+                    && self.items.iter().any(|i| {
+                        matches!(
+                            i.status,
+                            ChecklistStatus::Pending | ChecklistStatus::InProgress
+                        )
+                    })
+            }
+        }
     }
 
     /// Retained for the app loop's per-frame tick. The inline checklist no longer
@@ -122,8 +211,57 @@ impl TaskChecklist {
 
     /// Total height of the inline panel: one header line plus one row per item,
     /// capped so a very long plan can never exceed the live region.
+    ///
+    /// When the cap bites, the last row is spent on the `+N more` marker rather
+    /// than on an item — see [`Self::visible_rows`]. That costs one item of
+    /// visibility and buys the guarantee that the panel never lies about how
+    /// long the plan is, which is the trade the old code got backwards: it drew
+    /// exactly `MAX_HEIGHT` rows and dropped everything past them with no
+    /// indication that anything had been dropped at all.
     pub fn height(&self) -> u16 {
-        ((self.items.len() + 1) as u16).min(MAX_HEIGHT)
+        let want = (self.items.len() + 1) as u16;
+        if self.expanded() {
+            want
+        } else {
+            want.min(MAX_HEIGHT)
+        }
+    }
+
+    /// Split `rows` total panel rows (header included) into
+    /// `(items_shown, hidden)`.
+    ///
+    /// `hidden == 0` means every item fits and no marker row is drawn; otherwise
+    /// the caller draws `items_shown` items followed by the marker, for exactly
+    /// `rows` rows either way. **Height parity is the whole point of returning
+    /// both numbers from one function**: the reservation and the paint compute
+    /// their row count here or not at all.
+    fn visible_rows(&self, rows: u16) -> (usize, usize) {
+        let total = self.items.len();
+        let body = (rows as usize).saturating_sub(1); // header
+        if total <= body {
+            return (total, 0);
+        }
+        // One body row goes to the marker.
+        let shown = body.saturating_sub(1);
+        (shown, total - shown)
+    }
+
+    /// `… +7 more · ctrl+t to expand`, dim.
+    ///
+    /// The chord hint is dropped once the panel is already pinned: at that point
+    /// the rows are missing because the *screen* is too short, not because the
+    /// panel chose to fold them, and offering a chord that cannot help is worse
+    /// than offering nothing.
+    fn overflow_line(&self, hidden: usize, theme: &crate::style::Theme, max_width: usize) -> Line<'static> {
+        let text = if self.expanded() {
+            format!("\u{2026} +{} more", hidden)
+        } else {
+            format!("\u{2026} +{} more \u{00b7} ctrl+t to expand", hidden)
+        };
+        Line::from(Span::styled(
+            crate::util::fit_cols(&text, max_width),
+            theme.faint(),
+        ))
     }
 
     pub fn clear(&mut self) {
@@ -305,13 +443,16 @@ impl TaskChecklist {
         let width = panel.width as usize;
         let max_rows = panel.height as usize;
 
+        // One split, shared with `height()`, so the rows reserved and the rows
+        // painted are the same number by construction rather than by agreement.
+        let (shown, hidden) = self.visible_rows(max_rows as u16);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(max_rows);
         lines.push(self.header_line(&theme));
-        for item in &self.items {
-            if lines.len() >= max_rows {
-                break;
-            }
+        for item in self.items.iter().take(shown) {
             lines.push(Self::item_line(item, &theme, Some(width)));
+        }
+        if hidden > 0 {
+            lines.push(self.overflow_line(hidden, &theme, width));
         }
 
         let para = Paragraph::new(lines);
@@ -337,6 +478,7 @@ mod tests {
             items,
             visible: true,
             last_snapshot_key: None,
+            pin: PanelPin::Auto,
         }
     }
 
@@ -511,6 +653,158 @@ mod tests {
             // Must never panic regardless of area size.
             term.draw(|f| c.draw(f, area)).unwrap();
         }
+    }
+
+    // ── auto-hide (§4.3) ────────────────────────────────────────────────
+    //
+    // The complaint this fixes: last turn's finished checklist sitting at the
+    // top of this turn's live region, saying nothing, while the operator reads
+    // a stale `Plan 6/6` as if it described current work.
+
+    #[test]
+    fn a_list_with_work_left_is_shown() {
+        for status in [ChecklistStatus::Pending, ChecklistStatus::InProgress] {
+            let c = checklist(vec![
+                item("1", "done", ChecklistStatus::Completed),
+                item("2", "next", status),
+            ]);
+            assert!(c.is_visible(), "a list with work left must show");
+        }
+    }
+
+    #[test]
+    fn a_finished_list_hides_itself_even_mid_turn() {
+        let c = checklist(vec![
+            item("1", "a", ChecklistStatus::Completed),
+            item("2", "b", ChecklistStatus::Failed),
+        ]);
+        assert!(!c.is_visible(), "nothing left to do — the panel must stand down");
+    }
+
+    /// The rule is stateless, so a new turn's fresh tasks re-show the panel with
+    /// nothing to reset.
+    #[test]
+    fn fresh_tasks_re_show_the_panel_with_no_reset() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Completed)]);
+        assert!(!c.is_visible());
+        c.add("2".into(), "b".into(), None);
+        assert!(c.is_visible());
+    }
+
+    // ── the pin tri-state (§4.7 gap 3) ──────────────────────────────────
+
+    #[test]
+    fn the_chord_cycles_auto_pinned_suppressed() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        assert_eq!(c.pin(), PanelPin::Auto);
+        assert_eq!(c.cycle_pin(), PanelPin::Pinned);
+        assert_eq!(c.cycle_pin(), PanelPin::Suppressed);
+        assert_eq!(c.cycle_pin(), PanelPin::Auto);
+    }
+
+    /// The whole reason a boolean was not enough: from `Auto` on a finished
+    /// list, the chord has to make the panel APPEAR.
+    #[test]
+    fn pinning_un_hides_an_auto_hidden_finished_list() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Completed)]);
+        assert!(!c.is_visible(), "auto-hidden");
+        c.cycle_pin();
+        assert!(c.is_visible(), "the pin must be able to bring it back");
+        c.cycle_pin();
+        assert!(!c.is_visible(), "suppressed hides it again");
+    }
+
+    #[test]
+    fn suppressing_hides_a_live_list() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
+        c.cycle_pin(); // Pinned
+        c.cycle_pin(); // Suppressed
+        assert!(!c.is_visible());
+    }
+
+    // ── the overflow row (§4.7 gap 2) ───────────────────────────────────
+    //
+    // The actual bug: items past the cap were dropped with NO indication that
+    // anything had been dropped.
+
+    fn long_list(n: usize) -> TaskChecklist {
+        checklist(
+            (0..n)
+                .map(|i| item(&i.to_string(), &format!("task {i}"), ChecklistStatus::Pending))
+                .collect(),
+        )
+    }
+
+    fn drawn(c: &TaskChecklist, w: u16, h: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| c.draw(f, Rect::new(0, 0, w, h))).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn items_past_the_cap_are_counted_not_silently_dropped() {
+        let c = long_list(30);
+        let rows = drawn(&c, 60, MAX_HEIGHT);
+        let marker = rows.last().unwrap();
+        assert!(marker.starts_with('\u{2026}'), "last row must be the marker: {rows:?}");
+        // 30 items, MAX_HEIGHT=12 → header + 10 items + marker → 20 hidden.
+        assert!(marker.contains("+20 more"), "exact count: {marker:?}");
+        assert!(marker.contains("ctrl+t to expand"), "{marker:?}");
+    }
+
+    /// The count is exact at every size: shown + hidden is always the whole list.
+    #[test]
+    fn the_overflow_count_is_exact_at_every_size() {
+        for n in 1..25usize {
+            let c = long_list(n);
+            let (shown, hidden) = c.visible_rows(c.height());
+            assert_eq!(shown + hidden, n, "{n} items");
+            if hidden > 0 {
+                assert_eq!(
+                    (shown + 2) as u16,
+                    c.height(),
+                    "header + items + marker must fill the reservation exactly ({n} items)"
+                );
+            }
+        }
+    }
+
+    /// Pinned lifts the cap — and when the SCREEN is still too short, the chord
+    /// hint is dropped, because the chord can no longer help.
+    #[test]
+    fn pinning_lifts_the_cap_and_drops_the_chord_hint() {
+        let mut c = long_list(30);
+        assert_eq!(c.height(), MAX_HEIGHT);
+        c.cycle_pin();
+        assert_eq!(c.height(), 31, "pinned reports the full list");
+        // A short screen still folds, but now without a hint that cannot help.
+        let rows = drawn(&c, 60, 6);
+        let marker = rows.last().unwrap();
+        assert!(marker.contains("+26 more"), "{marker:?}");
+        assert!(!marker.contains("ctrl+t"), "no dead-end hint when pinned: {marker:?}");
+    }
+
+    /// A list that fits gets no marker — the marker only appears when something
+    /// is behind it.
+    #[test]
+    fn a_list_that_fits_shows_no_marker() {
+        let c = long_list(4);
+        let rows = drawn(&c, 60, c.height());
+        assert!(
+            !rows.iter().any(|r| r.starts_with('\u{2026}')),
+            "no marker when nothing is hidden: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("task 3")), "{rows:?}");
     }
 
     #[test]
