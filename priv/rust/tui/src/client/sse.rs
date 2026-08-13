@@ -800,6 +800,10 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::TaskNotification { count: ev.count, summary: ev.summary })
         }
 
+        // The authoritative turn-end edge. Carries no payload — its arrival IS
+        // the information.
+        "done" => Some(BackendEvent::TurnDone),
+
         "turn_recap" => {
             #[derive(serde::Deserialize)]
             struct Ev {

@@ -260,6 +260,14 @@ pub struct App {
     /// (CC auto-restore on user-cancel).
     pub last_submitted_prompt: Option<String>,
     pub cancelled: bool,
+    /// Whether the turn in flight has reached a genuine end.
+    ///
+    /// `AppState::Idle` cannot answer this: `handle_agent_response` runs full
+    /// turn teardown on every agent_response, and one turn emits several. This
+    /// is cleared when a prompt is submitted and set only by the backend's
+    /// `done` event or by `finalize_turn_state` (cancel / disconnect / error),
+    /// so nothing keyed on it can fire into a live turn.
+    pub turn_done: bool,
     pub sse_reconnecting: bool,
 
     // Pending tool call args, used to pair with ToolCallEnd.
@@ -696,6 +704,8 @@ impl App {
             last_turn_client_elapsed_secs: None,
             last_submitted_prompt: None,
             cancelled: false,
+            // No turn in flight yet, so nothing is waiting on a turn end.
+            turn_done: true,
             sse_reconnecting: false,
 
             pending_tool_args: HashMap::new(),
@@ -864,6 +874,10 @@ impl App {
     /// status, agents panel). Extracted so the CancelTimeout path and the
     /// disconnect path finalize identically and can never drift apart.
     pub(crate) fn finalize_turn_state(&mut self) {
+        // This is where a turn ends WITHOUT a backend `done` — cancel, timeout,
+        // disconnect. Marking it done here is what stops a lost `done` from
+        // stranding the message queue for the rest of the session.
+        self.turn_done = true;
         // The turn these asks belong to is over — answering them would resume
         // nothing, so drop the visible prompt AND everything queued behind it
         // rather than leaving orphan dialogs over the next turn.

@@ -1246,7 +1246,9 @@ impl App {
                         self.activity.stop();
                     }
                     // The current turn errored out — don't let queued messages
-                    // get stuck; drain the next one if we're back at Idle.
+                    // get stuck; drain the next one if we're back at Idle. An
+                    // errored turn sends no `done`, so end it here.
+                    self.turn_done = true;
                     self.maybe_dequeue_message();
                 }
             },
@@ -2046,6 +2048,17 @@ impl App {
                     }
                 }
                 self.recompute_layout();
+            }
+            BackendEvent::TurnDone => {
+                // The genuine turn-end edge. Everything that must not fire into
+                // a live turn hangs off this, not off `AppState::Idle` — which
+                // `handle_agent_response` sets on every agent_response, several
+                // of which can occur inside one turn.
+                self.turn_done = true;
+                // The queue was held back for exactly this moment. Draining here
+                // means a queued message lands with every tool result the turn
+                // produced still in context.
+                self.maybe_dequeue_message();
             }
             BackendEvent::TurnRecap { elapsed_ms, tool_calls, tools_used } => {
                 // Only surface the recap when the turn did substantive, user-visible

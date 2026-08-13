@@ -289,6 +289,15 @@ pub enum BackendEvent {
         tool_calls: u32,
         tools_used: Vec<String>,
     },
+    /// The turn is genuinely over. Broadcast by the backend on EVERY terminal
+    /// path (normal reply, the pipeline's terminal broadcast, plan mode, and
+    /// the orchestrate route) and by nothing else.
+    ///
+    /// `AgentResponse` is not that edge: one turn can emit several of them
+    /// (text → subagent/tool → more text), and every one of them ran full turn
+    /// teardown. This is the only signal that distinguishes "the agent stopped
+    /// talking for a moment" from "the agent is finished".
+    TurnDone,
 
     // === Context ===
     ContextPressure {

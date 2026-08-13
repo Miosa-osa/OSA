@@ -204,6 +204,14 @@ impl App {
         // prose — it never finalizes a message, so it bypasses the buffer
         // handover below and only drains whatever had streamed.
         let interrupted = is_interrupt_marker(&display_response);
+        // A user interrupt IS a genuine turn end — the backend will not send a
+        // `done` for a turn it just stopped, and waiting on the 3s
+        // CancelTimeout before draining would make a queued command look
+        // ignored. The queue deliberately survives an interrupt (CC parity), so
+        // it has to fire promptly once the interrupt lands.
+        if interrupted {
+            self.turn_done = true;
+        }
 
         // Hand the buffer over to the backend's text. This is the ONE place a
         // streamed assistant message becomes final, and it happens BEFORE any
@@ -416,7 +424,10 @@ impl App {
             self.status.set_active(false);
         }
 
-        // A queued command/shell just finished — pull the next queued item.
+        // A queued command/shell just finished — pull the next queued item. A
+        // local command is its own whole turn, so it ends here; there is no
+        // backend `done` coming for it.
+        self.turn_done = true;
         self.maybe_dequeue_message();
     }
 
@@ -533,10 +544,28 @@ impl App {
     /// open dialog). FIFO: oldest first. Called at every turn-completion site.
     pub(super) fn maybe_dequeue_message(&mut self) {
         // Only fire when we're back at a clean Idle prompt. This guards against
-        // mid-turn agent_response events (still Processing) and dialog states
-        // (Permissions / PlanReview / Survey) that route through the same
-        // completion handlers.
+        // dialog states (Permissions / PlanReview / Survey) that route through
+        // the same completion handlers.
         if self.state != AppState::Idle {
+            return;
+        }
+        // …and only when the TURN is over, which `Idle` alone does not tell us.
+        //
+        // `handle_agent_response` runs full teardown — including the
+        // Processing → Idle transition — on EVERY agent_response, and one turn
+        // can emit several (text → subagent/tool → more text). So the state
+        // read Idle while the turn was genuinely still running, and this drain
+        // fired a queued message straight into it. That is the mechanism behind
+        // a queued `/overdrive` appearing to do nothing: it applied to session
+        // state the real turn end then overwrote, so the mode read unchanged
+        // and it had to be typed a second time. It needed a multi-generation
+        // turn to reproduce, which is why it was intermittent.
+        //
+        // `turn_done` is set by the backend's `done` event — broadcast on every
+        // terminal path and by nothing else — and by `finalize_turn_state` for
+        // the abnormal terminations (cancel, disconnect, error) that never
+        // reach one.
+        if !self.turn_done {
             return;
         }
         if self.message_queue.is_empty() {
@@ -615,6 +644,8 @@ impl App {
         if self.state != AppState::Processing {
             self.transition(AppState::Processing);
         }
+        // A turn opens here and is not done until the backend says so.
+        self.turn_done = false;
         self.activity.start();
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);
