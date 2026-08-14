@@ -177,11 +177,28 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   defp lookup_keys(key) do
     bare = key |> String.split("/") |> List.last()
 
-    [key, bare]
-    |> Enum.flat_map(&[&1, strip_routing_suffix(&1)])
+    literal =
+      [key, bare]
+      |> Enum.flat_map(&[&1, strip_routing_suffix(&1)])
+
+    (literal ++ Enum.map(literal, &dotted_version_to_dashed/1))
     |> Enum.reject(&(&1 == "" or is_nil(&1)))
     |> Enum.uniq()
   end
+
+  # A gateway spells a model VERSION with a dot where the vendor catalog spells
+  # it with a dash. OpenRouter's live id is `anthropic/claude-haiku-4.5`; the
+  # Anthropic catalog keys `claude-haiku-4-5`. `resolve/1` matches on a prefix,
+  # so the dotted form matched neither the exact map nor the SSOT and fell to
+  # the `@families` guess "claude-haiku" => {0.80, 4.0} — the retired Haiku 3.5
+  # rate — where the published Haiku 4.5 rate is {1.00, 5.00}. Every cost
+  # figure on that route came out 20% LOW, which is the direction that flatters
+  # us, and that route is how the Anthropic benchmark arm runs.
+  #
+  # Tried LAST, after every literal spelling, so a key that genuinely contains
+  # a dotted version (`z-ai/glm-5.2`, `openai/gpt-4.1`) still resolves on its
+  # own spelling first and nothing that prices correctly today can move.
+  defp dotted_version_to_dashed(key), do: String.replace(key, ~r/(\d)\.(\d)/, "\\1-\\2")
 
   defp strip_routing_suffix(key) do
     case String.split(key, ":") do

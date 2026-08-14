@@ -60,6 +60,27 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
       refute Pricing.rates("deepseek/deepseek-v4-pro") == {0.27, 1.10}
     end
 
+    # The gateway spells the VERSION with a dot; the vendor catalog uses a
+    # dash. `anthropic/claude-haiku-4.5` is the id OpenRouter actually serves,
+    # and it matched neither the exact map nor the catalog prefix — it fell to
+    # the "claude-haiku" family guess {0.80, 4.0}, the retired Haiku 3.5 rate,
+    # billing 20% UNDER the published {1.00, 5.00}. That is the route the
+    # Anthropic benchmark arm runs on, so the $/task it published was low.
+    test "a dotted gateway version resolves to the dashed catalog id" do
+      assert {1.00, 5.00} = Pricing.rates("anthropic/claude-haiku-4.5")
+      assert Pricing.rates("anthropic/claude-haiku-4.5") == Pricing.rates("claude-haiku-4-5")
+      refute Pricing.rates("anthropic/claude-haiku-4.5") == {0.80, 4.0}
+      assert Pricing.confidence("anthropic/claude-haiku-4.5") == :exact
+    end
+
+    test "a genuinely dotted key still resolves on its own spelling first" do
+      # The dashed rewrite is tried LAST; these must not move.
+      assert {0.63, 1.98} = Pricing.rates("z-ai/glm-5.2")
+      assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
+      assert {2.0, 8.0} = Pricing.rates("gpt-4.1")
+      assert {0.15, 0.60} = Pricing.rates("gpt-4o-mini")
+    end
+
     test "a real colon-tagged id still wins on the full string" do
       # `:cloud` is model identity; `:free`/`:nitro` are OpenRouter routing.
       assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
