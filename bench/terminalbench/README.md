@@ -599,14 +599,24 @@ not the one the token arithmetic above predicts:
 | think **true** (`pincheck-4fd9e135`) | **9** | **184,057** | 15,878 |
 
 Reasoning cost 14% more output and **4.1× less input**, because it converged in
-9 turns instead of 25. With no prompt cache and a 162:1 in:out ratio, turn count
-is what cost is made of — so on this task reasoning was both better *and*
-cheaper.
+9 turns instead of 25. With no prompt cache, turn count is what cost is made of —
+so on this task reasoning was both better *and* cheaper.
 
-**This is n=1 and confounded** (different artefacts, different code) and it is
-recorded here as a hypothesis to check against the full run, not as a result. It
-is stated because if it holds at scale it changes the OpenRouter estimate below
-by roughly 4×, and that is worth knowing.
+The full run's own first trial of the same task, on the artefact carrying the
+reasoning-default fix and three other loop fixes, goes further:
+
+| `regex-log` | turns | input tok | output tok |
+|---|---:|---:|---:|
+| think false, old artefact | 25 | 759,548 | 13,957 |
+| think true, old artefact | 9 | 184,057 | 15,878 |
+| **think true, `f6981b61`** | **3** | **54,237** | 16,469 |
+
+**14× less input than the reasoning-disabled baseline, at constant output.**
+
+These are n=1 per cell and confounded by differing artefacts, so they are
+recorded as a direction to verify against the full run, not as a result. They
+are stated because they make the OpenRouter projection below an upper bound
+rather than an estimate.
 
 ### Two dials, because they are not one dial
 
@@ -658,15 +668,30 @@ The budget for this arm is $50. Every central estimate is 3–9× over it, so th
 run goes through the local Ollama daemon and the serving-path difference is
 documented rather than eliminated.
 
-**Why it is so expensive is the actual point.** `cache_hit_rate` is `None` on
-every run this harness has ever produced — OSA does no prompt caching — and the
-measured in:out ratio is **162:1**. The entire conversation prefix is re-sent,
-uncached, on every turn, so cost scales with turns × context rather than with
-work done. OpenRouter would bill that at the full uncached rate ($1.19/M) when
-the cache-read rate is $0.221/M — a 5.4× penalty that is ours, not the
-provider's. This is the same split `docs/research/what-harnesses-benchmark.md`
-§5 found between harbor-installed harnesses ($0.24–0.42/M effective) and goose's
-own adapter ($3.00/M), with OSA on the expensive side.
+**Why it is so expensive.** `cache_hit_rate` is `None` on every run this harness
+has ever produced — OSA does no prompt caching on this path. The entire
+conversation prefix is re-sent, uncached, on every turn, so cost scales with
+turns × context rather than with work done. OpenRouter would bill that at the
+full uncached rate ($1.19/M) when the cache-read rate is $0.221/M — a **5.4×
+penalty that is ours, not the provider's**. This is the same split
+`docs/research/what-harnesses-benchmark.md` §5 found between harbor-installed
+harnesses ($0.24–0.42/M effective) and goose's own adapter ($3.00/M).
+
+> ⚠ **This projection is an UPPER BOUND from superseded conditions.** Every
+> token count feeding it came from runs with reasoning disabled. The
+> reasoning-on measurements now available point sharply the other way — see
+> below — so the real figure is likely well under these numbers. Recompute from
+> the first reasoning-on full run rather than quoting this.
+
+> ⚠ **Do not cite a 162:1 in:out ratio as a harness deficiency.** That figure
+> was a like-for-unlike comparison: OSA sent `think: false` while codex,
+> opencode and mini-swe-agent called the same model through their own clients
+> and received `reasoning_content` on nearly every step (82.8% of codex's
+> emitted characters on `schemelike`). We were dividing our *non-reasoning*
+> output into our input and setting it against their *reasoning-inclusive*
+> output. Corrected, excluding one runaway task: **OSA 69:1, codex 75:1,
+> opencode 76.5:1** — already inside the field's band. The 162:1 number is an
+> artifact of the reasoning-disabled condition, not a property of the harness.
 
 **A cheap calibration exists and is the recommended follow-up:** run only the
 8-task fixed cost probe through OpenRouter (~$13–33 at the rates above) to
