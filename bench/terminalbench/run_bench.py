@@ -119,8 +119,25 @@ def artifact_provenance() -> dict:
     dirty = _git("status", "--porcelain", "--", ":/lib")
     out["lib_dirty_at_launch"] = bool(dirty)
     out["lib_dirty_files"] = len(dirty.splitlines()) if dirty else 0
+    # Parsed, not compared as strings. `built_at` is rendered from a UTC-aware
+    # datetime ("...+00:00") while `head_committed_at` comes from git's %cI in
+    # LOCAL time ("...+07:00"), and a lexicographic comparison of two ISO
+    # timestamps at different offsets compares the printed digits rather than
+    # the instants. Measured on a real build: an artefact 3 minutes NEWER than
+    # HEAD compared as older, because "2026-08-14T17:51:39+00:00" sorts before
+    # "2026-08-15T00:48:17+07:00" as text while naming a later moment.
+    #
+    # The failure mode is the dangerous direction: a sound artefact reported as
+    # predating the commit it measures, on a field whose whole job is to say
+    # whether the run is measuring the code it claims to.
     if out.get("built_at") and out.get("head_committed_at"):
-        out["built_after_head_commit"] = out["built_at"] > out["head_committed_at"]
+        try:
+            built = datetime.fromisoformat(out["built_at"])
+            committed = datetime.fromisoformat(out["head_committed_at"])
+            out["built_after_head_commit"] = built > committed
+        except ValueError as exc:
+            out["built_after_head_commit"] = None
+            out["built_after_head_commit_error"] = str(exc)
 
     # The sidecar `build_release.sh` writes beside the tarball. This is the only
     # field that identifies the code that was MEASURED; everything above it

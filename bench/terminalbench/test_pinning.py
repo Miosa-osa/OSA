@@ -249,3 +249,33 @@ def test_provenance_reports_build_sidecar_field():
 
     out = run_bench.artifact_provenance()
     assert "build" in out
+
+
+def test_built_after_head_commit_compares_instants_not_digits():
+    """Two ISO timestamps at different UTC offsets must not be compared as text.
+
+    `built_at` is rendered UTC-aware ("+00:00"); `head_committed_at` is git's
+    %cI in local time ("+07:00"). Lexicographically the first sorts before the
+    second while naming a LATER instant, so a sound artefact reported as
+    predating the commit it measures -- on the one field whose job is to say
+    whether the run is measuring the code it claims to.
+
+    These are the real values from the build this was found on.
+    """
+    from datetime import datetime
+
+    built = "2026-08-14T17:51:39+00:00"
+    committed = "2026-08-15T00:48:17+07:00"
+    assert built < committed, "the string comparison that used to be used"
+    assert datetime.fromisoformat(built) > datetime.fromisoformat(committed)
+
+
+def test_provenance_reports_a_true_verdict_for_the_current_artifact():
+    import run_bench
+
+    out = run_bench.artifact_provenance()
+    if not out.get("present") or not out.get("head_committed_at"):
+        pytest.skip("no artefact built here")
+    # Not asserting the value -- asserting it is a verdict and not a crash.
+    assert out["built_after_head_commit"] in (True, False, None)
+    assert "built_after_head_commit_error" not in out
