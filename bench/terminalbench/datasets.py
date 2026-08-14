@@ -130,8 +130,30 @@ DATASETS: dict[str, Dataset] = {
     "tb2.0": Dataset(
         key="tb2.0",
         label="Terminal-Bench 2.0",
-        # Resolvable through the LEGACY registry as `terminal-bench@2.0`; there
-        # is no Hub id for it, because the Hub only carries the current line.
+        # Resolvable through the LEGACY registry as `terminal-bench@2.0`.
+        #
+        # The Hub DOES carry this line, contrary to the previous note here, and
+        # it is the canonical id the upstream docs use:
+        #   harbor run -d terminal-bench/terminal-bench-2 -a oracle
+        # Downloaded and compared 2026-08-15. `terminal-bench/terminal-bench-2`
+        # is semantically 2.0, not 2.1 -- against our local copies it differs on
+        # 1 instruction / 2 test dirs / 3 solutions, versus 11 / 9 / 11 for our
+        # 2.1 copy. So the Hub id is the 2.0 line and the leaderboard repo named
+        # `terminal-bench-2-leaderboard` is its board.
+        #
+        # Left as None deliberately rather than pointed at the Hub, because our
+        # local copy is NOT byte-identical to it and switching the id silently
+        # would change what historical runs are compared against. The drift,
+        # measured:
+        #   install-windows-3.11    -- named `install-windows-3-11` upstream
+        #   llm-inference-batching-scheduler -- tests differ
+        #   overfull-hbox           -- solution differs
+        #   rstan-to-pystan         -- solution differs, and ours carries what
+        #                              looks like a 2.1-era fix: upstream pins
+        #                              the apt versions of gfortran/liblapack/
+        #                              libblas, ours has them unpinned
+        # Anything intended for SUBMISSION must be run against the canonical id
+        # rather than this copy.
         hub_id=None,
         local_dir="terminal-bench-2",
         size=89,
@@ -157,12 +179,26 @@ DATASETS: dict[str, Dataset] = {
             "Same 89 task names as 2.0; 26 modified upstream to fix bugs, "
             "timeouts, resources and reward-hacking robustness. Many changes "
             "taken from Z.ai's terminal-bench-2-verified.",
-            "Community leaderboard submissions are CLOSED (maintainer-run "
-            "only), so our number can be compared against the board but "
-            "cannot be added to it.",
-            "The board's own protocol is 5 trials per task. A single-trial "
-            "run is not the same measurement and must not be laid beside a "
-            "board row without saying so.",
+            # RETRACTED 2026-08-15. This note used to assert that community
+            # submissions were CLOSED and maintainer-run only. That was wrong,
+            # it was never sourced, and it propagated out of here into planning
+            # decisions -- it is the reason a publishable number was treated as
+            # unpublishable. tbench.ai's "Running Terminal-Bench" page says:
+            #
+            #   "Leaderboard logs are stored in [this HuggingFace repo]
+            #    (huggingface.co/datasets/alexgshaw/terminal-bench-2-leaderboard).
+            #    To submit your results, open a PR there following the
+            #    instructions in the README."
+            #
+            # Submissions are OPEN, by PR to that dataset repo.
+            "Submissions are OPEN: PR to "
+            "huggingface.co/datasets/alexgshaw/terminal-bench-2-leaderboard.",
+            # This one is ALSO unsourced and is being verified. Treat it as a
+            # claim, not a fact, until a primary source is attached -- the note
+            # above it was wrong for exactly this reason.
+            "UNVERIFIED: the board's protocol may be 5 trials per task. If so "
+            "a single-trial run is a different measurement and cannot be laid "
+            "beside a board row without saying so.",
         ),
     ),
     "tb3": Dataset(
