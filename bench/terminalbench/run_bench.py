@@ -107,11 +107,36 @@ def artifact_provenance() -> dict:
 
     out["head_commit"] = _git("rev-parse", "HEAD")
     out["head_committed_at"] = _git("log", "-1", "--format=%cI")
-    dirty = _git("status", "--porcelain", "--", "lib")
+    # `:/lib` and not `lib`. `_git` runs with cwd=HERE, which is
+    # bench/terminalbench, and a plain `lib` pathspec is resolved relative to the
+    # CURRENT DIRECTORY -- so it matched `bench/terminalbench/lib`, which does
+    # not exist, and this check reported a clean tree unconditionally from the
+    # day it was written. The leading `:/` is git's magic prefix for
+    # "relative to the top of the working tree" and is cwd-independent.
+    #
+    # This is the guard that was supposed to catch benchmarking a half-applied
+    # tree. It caught nothing, twice.
+    dirty = _git("status", "--porcelain", "--", ":/lib")
     out["lib_dirty_at_launch"] = bool(dirty)
     out["lib_dirty_files"] = len(dirty.splitlines()) if dirty else 0
     if out.get("built_at") and out.get("head_committed_at"):
         out["built_after_head_commit"] = out["built_at"] > out["head_committed_at"]
+
+    # The sidecar `build_release.sh` writes beside the tarball. This is the only
+    # field that identifies the code that was MEASURED; everything above it
+    # describes the repo at LAUNCH, and the two diverge the moment anyone
+    # commits in between -- which, with several agents working in lib/, they do.
+    # `built_after_head_commit` in particular goes false on a perfectly sound
+    # artefact as soon as a later commit lands, so it must not be read as a
+    # staleness verdict when `build_sha` is present.
+    side = art.parent / "build-provenance.json"
+    if side.exists():
+        try:
+            out["build"] = json.loads(side.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            out["build"] = {"error": f"unreadable build-provenance.json: {exc}"}
+    else:
+        out["build"] = None
     return out
 
 

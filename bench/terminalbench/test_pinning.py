@@ -214,3 +214,38 @@ def test_summary_prints_the_pins_it_was_given():
     assert "**Effort**: `high`" in md
     assert "**ollama think**: `true`" in md
     assert "**timeout multiplier**: `2.0`" in md
+
+
+# ---------------------------------------------------------------- provenance
+
+
+def test_lib_dirty_check_is_cwd_independent():
+    """The dirty-tree guard must use a top-level-relative pathspec.
+
+    `artifact_provenance` runs git with `cwd=bench/terminalbench`. A plain `lib`
+    pathspec resolves against the CURRENT directory, which has no `lib/`, so the
+    check reported a clean tree unconditionally -- the one guard against
+    benchmarking a half-applied tree, silently answering "clean" for its whole
+    life. `:/lib` is git's magic prefix for "relative to the top of the working
+    tree" and does not depend on where the process is standing.
+
+    Asserted against the source rather than by mutating the repo, because the
+    only honest behavioural test would require dirtying `lib/` -- which other
+    agents are actively working in.
+    """
+    src = (HERE / "run_bench.py").read_text()
+    assert '":/lib"' in src, "pathspec must be top-level-relative"
+    assert '"--", "lib"' not in src, "cwd-relative pathspec has come back"
+
+
+def test_provenance_reports_build_sidecar_field():
+    """`build` is present whether or not the sidecar exists.
+
+    Absent means "built by a script that did not record its SHA", which is a
+    fact about the artefact and has to be legible as one rather than as a
+    missing key that a reader assumes was an oversight.
+    """
+    import run_bench
+
+    out = run_bench.artifact_provenance()
+    assert "build" in out
