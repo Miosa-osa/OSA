@@ -56,6 +56,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Constants do
   @max_line_chars 2_000
   def max_line_chars, do: @max_line_chars
 
+  # `byte_offset` reads: how many bytes one slice returns by default, and the
+  # ceiling an explicit `byte_limit` is clamped to.
+  #
+  # The default matches @max_line_chars on purpose. A clamped line's notice
+  # names the byte offset where the clamp stopped, so the obvious next call
+  # returns the next window of exactly the size the caller already accepted for
+  # the first one — the sequence tiles the line instead of overlapping it or
+  # leaving gaps.
+  #
+  # The ceiling is not a transport limit, it is the same judgement the clamp
+  # makes: an unbounded byte read would reintroduce the megabyte-into-context
+  # problem through a different parameter. 20 KB is roughly ten clamp windows —
+  # enough that a caller who KNOWS it needs a large contiguous span can say so
+  # in one call, and small enough that a mistaken `byte_limit: 999999999` costs
+  # a paragraph rather than a context window.
+  @default_byte_slice 2_000
+  def default_byte_slice, do: @default_byte_slice
+
+  @max_byte_slice 20_000
+  def max_byte_slice, do: @max_byte_slice
+
   # How much of a file's head is handed to `FileRead.Magic` for type sniffing.
   # Every signature it knows lives within the first 262 bytes; the rest is
   # headroom for the NUL/UTF-8 heuristic to see representative content.

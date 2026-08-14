@@ -217,6 +217,53 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   end
 
   @doc """
+  Terminator stamp for a `byte_offset` slice.
+
+  The byte axis needs its own stamp for the same reason the line axis does: the
+  content of a slice cannot say whether it ended because the window filled up or
+  because the file did. It names the next `byte_offset` so walking a long line
+  is a sequence of exact calls rather than a sequence of guesses — which is the
+  difference between "expensive" and "unrecoverable", and the whole reason the
+  byte axis exists.
+  """
+  @spec byte_range_stamp(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: String.t()
+  def byte_range_stamp(first_byte, last_byte, total_bytes) do
+    if last_byte + 1 >= total_bytes do
+      "\n(Bytes #{first_byte}-#{last_byte} of #{total_bytes} — end of file.)"
+    else
+      "\n(Bytes #{first_byte}-#{last_byte} of #{total_bytes}. " <>
+        "Use byte_offset=#{last_byte + 1} to continue.)"
+    end
+  end
+
+  @doc """
+  The requested `byte_offset` starts at or after the last byte of the file.
+
+  Names the file's real size, because the recoverable mistake here is asking
+  from too far in — and the caller cannot know how far is too far without being
+  told how big the file is.
+  """
+  @spec byte_offset_past_eof(String.t(), integer(), non_neg_integer()) :: String.t()
+  def byte_offset_past_eof(display_path, byte_offset, total_bytes) do
+    "byte_offset #{byte_offset} is at or past the end of #{display_path} — the file is " <>
+      "#{total_bytes} #{pluralise(total_bytes, "byte")} long. Call `file_read` again with a " <>
+      "byte_offset between 0 and #{max(total_bytes - 1, 0)}, or a negative byte_offset to " <>
+      "read that many bytes from the end."
+  end
+
+  @doc """
+  A `byte_offset` slice can cut a multi-byte character in half at either edge.
+
+  Said once, plainly, so a lone replacement character at the start or end of a
+  slice reads as an artefact of where the window landed rather than as content.
+  """
+  @spec byte_slice_utf8_note() :: String.t()
+  def byte_slice_utf8_note do
+    "\n(A byte window can start or end mid-character; any � at the edges is the cut, " <>
+      "not the file. Shift byte_offset by a byte or two to realign.)"
+  end
+
+  @doc """
   The requested `offset` starts after the last line of the file.
 
   Distinct from an empty file, and the distinction is the whole point: one means

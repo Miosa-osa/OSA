@@ -39,15 +39,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Tool do
       "properties" => %{
         "path" => %{
           "type" => "string",
-          "description" => "Absolute path to the file to read"
+          "description" => "Absolute path to the file"
         },
         "offset" => %{
           "type" => "integer",
-          "description" => "Line number to start reading from (1-based). Optional."
+          "description" => "1-based start line. Optional."
         },
         "limit" => %{
           "type" => "integer",
-          "description" => "Maximum number of lines to read. Optional."
+          "description" => "Max lines to read. Optional."
+        },
+        "byte_offset" => %{
+          "type" => "integer",
+          "description" =>
+            "Read raw BYTES from here instead of lines — the only way to reach the rest of " <>
+              "a clamped line. Negative reads from the end. Optional."
+        },
+        "byte_limit" => %{
+          "type" => "integer",
+          "description" => "Bytes per byte_offset read. Default 2000, max 20000. Optional."
         }
       },
       "required" => ["path"]

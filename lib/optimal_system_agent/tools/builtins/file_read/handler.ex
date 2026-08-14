@@ -36,14 +36,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
 
   @spec validate(map(), UseContext.t()) ::
           {:ok, map()} | {:error, String.t(), integer()}
-  def validate(%{"path" => path} = input, _ctx) when is_binary(path),
-    do: {:ok, input}
+  def validate(%{"path" => path} = input, _ctx) when is_binary(path) do
+    cond do
+      not integer_or_nil?(input["byte_offset"]) ->
+        {:error, "byte_offset must be an integer (negative reads from the end)", -32_602}
+
+      not integer_or_nil?(input["byte_limit"]) ->
+        {:error, "byte_limit must be an integer", -32_602}
+
+      true ->
+        {:ok, input}
+    end
+  end
 
   def validate(%{"path" => _}, _ctx),
     do: {:error, "path must be a string", -32_602}
 
   def validate(_, _ctx),
     do: {:error, "Missing required parameter: path", -32_602}
+
+  defp integer_or_nil?(nil), do: true
+  defp integer_or_nil?(n) when is_integer(n), do: true
+  defp integer_or_nil?(_), do: false
 
   # ── Stage 2: Permission check ─────────────────────────────────────────
 
@@ -71,7 +85,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   def execute(%{"path" => path} = input, ctx) do
     sid = session_id(ctx)
     target = resolve_target(path)
-    range = FileState.range_key(input["offset"], input["limit"])
+    range = range_key(input)
 
     notice = Messages.unchanged_since_last_read(path)
 
@@ -115,6 +129,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         end
 
         result
+    end
+  end
+
+  # Which WINDOW of the file this call asks for, for redundant-read suppression.
+  #
+  # The byte axis has to be part of the key. A byte-range read carries no
+  # `offset`/`limit`, so it would otherwise hash to `:whole` — and the byte read
+  # that recovers a clamped line's tail almost always follows the whole-file read
+  # that clamped it, in the same session. Suppression would then answer the
+  # recovery call with "unchanged since your last read", which is true, useless,
+  # and re-creates the exact dead end byte ranges exist to remove.
+  defp range_key(input) do
+    case {input["byte_offset"], input["byte_limit"]} do
+      {nil, nil} -> FileState.range_key(input["offset"], input["limit"])
+      {byte_offset, byte_limit} -> {{:bytes, byte_offset}, byte_limit}
     end
   end
 
@@ -202,6 +231,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       ext in Constants.image_extensions() ->
         read_image(expanded, path, ext)
 
+      # BEFORE the binary refusal, deliberately. A byte range is the one read
+      # whose caller has already said it wants raw bytes at a raw position, so
+      # "this file looks binary" is not new information and refusing is a dead
+      # end — the same reasoning that makes the `offset`/`limit` path scrub
+      # rather than refuse. Undecodable bytes become U+FFFD and the note says
+      # so; nothing invalid reaches the transport.
+      byte_range?(input) ->
+        read_byte_range(expanded, path, input["byte_offset"], input["byte_limit"])
+
       binary_verdict = binary_verdict(expanded) ->
         {:error, Messages.binary(path, binary_verdict)}
 
@@ -214,6 +252,108 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
 
       true ->
         read_whole(expanded, path)
+    end
+  end
+
+  # ── Byte-range reads ──────────────────────────────────────────────────
+  #
+  # `offset`/`limit` address LINES, and a line is not a bounded amount of text.
+  # When the per-line clamp fires, the tail of that line was previously
+  # unreachable by ANY call: the line was already fully selected, so there was
+  # nothing left to ask for. `mix osa.ablate` measured the consequence — the end
+  # of a minified file, a base64 blob's decodability and a deep JSON leaf were
+  # not expensive, they were gone.
+  #
+  # This is the missing axis. It is a second way to address the same file, not a
+  # replacement: lines are what a caller wants nearly always, and bytes are what
+  # a caller needs exactly when lines have stopped being a unit of anything.
+
+  defp byte_range?(input),
+    do: is_integer(input["byte_offset"]) or is_integer(input["byte_limit"])
+
+  defp read_byte_range(expanded, display_path, byte_offset, byte_limit) do
+    size = byte_size_of(expanded)
+    len_requested = resolve_byte_limit(byte_limit)
+    start = resolve_byte_start(byte_offset, size)
+
+    cond do
+      size == 0 ->
+        {:ok, Messages.empty_file(display_path)}
+
+      start >= size ->
+        {:error, Messages.byte_offset_past_eof(display_path, byte_offset || 0, size)}
+
+      true ->
+        pread(expanded, display_path, start, min(len_requested, size - start), size)
+    end
+  end
+
+  # A negative offset counts back from the end — the tail read. It is not sugar:
+  # "what is at the END of this file?" is a question about a position the caller
+  # cannot name, because naming it requires knowing the size, which requires
+  # another call. Clamped to 0 so `byte_offset: -999999` on a small file reads
+  # the whole thing instead of erroring, which is what the caller meant.
+  defp resolve_byte_start(nil, _size), do: 0
+  defp resolve_byte_start(n, size) when n < 0, do: max(size + n, 0)
+  defp resolve_byte_start(n, _size), do: n
+
+  defp resolve_byte_limit(n) when is_integer(n) and n > 0,
+    do: min(n, Constants.max_byte_slice())
+
+  defp resolve_byte_limit(_), do: Constants.default_byte_slice()
+
+  defp pread(expanded, display_path, start, len, size) do
+    case :file.open(expanded, [:read, :binary, :raw]) do
+      {:ok, io} ->
+        try do
+          case :file.pread(io, start, len) do
+            {:ok, data} ->
+              {:ok, render_byte_slice(data, start, size)}
+
+            :eof ->
+              {:error, Messages.byte_offset_past_eof(display_path, start, size)}
+
+            {:error, reason} ->
+              {:error,
+               "Cannot read bytes from #{display_path}: #{:file.format_error(reason)} " <>
+                 "(#{inspect(reason)})."}
+          end
+        after
+          :file.close(io)
+        end
+
+      {:error, reason} ->
+        {:error,
+         "Cannot open #{display_path}: #{:file.format_error(reason)} (#{inspect(reason)}). " <>
+           "Check its permissions, then retry."}
+    end
+  end
+
+  defp render_byte_slice(data, start, size) do
+    last = start + byte_size(data) - 1
+
+    body =
+      if String.valid?(data) do
+        data
+      else
+        OptimalSystemAgent.Utils.Text.scrub_utf8(data) <> Messages.byte_slice_utf8_note()
+      end
+
+    body <> byte_stamp(start, last, size)
+  end
+
+  # Behind `:read_stamps` like every other terminator, so the ablation prices
+  # the byte stamp on the same terms as the line ones. Without it a slice cannot
+  # say whether it stopped at the window or at the file, which on this axis also
+  # costs the caller the next offset.
+  defp byte_stamp(first, last, size) do
+    if Ablation.on?(:read_stamps), do: Messages.byte_range_stamp(first, last, size), else: ""
+  end
+
+  defp byte_size_of(expanded) do
+    case File.stat(expanded) do
+      {:ok, %{size: size}} -> size
+      _ -> 0
     end
   end
 
@@ -380,9 +520,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     # possible answer to "is there more after this?", which is the question the
     # model otherwise answers by issuing another read. The extra line is
     # dropped, never rendered — it exists only to set the stamp.
+    # Each line is carried with its ABSOLUTE byte offset in the file, accumulated
+    # over the whole stream rather than from the window's start — including the
+    # lines `Stream.drop/2` discards, whose bytes are read either way. A clamped
+    # line inside a window has to name a real `byte_offset` or the recovery it
+    # advertises lands somewhere else in the file, which is worse than admitting
+    # it does not know. One `byte_size/1` per line, O(1) each.
     raw =
       expanded
       |> File.stream!()
+      |> Stream.transform(0, fn line, offset -> {[{line, offset}], offset + byte_size(line)} end)
       |> Stream.drop(drop_count)
       |> then(fn stream ->
         if limit && limit > 0, do: Stream.take(stream, limit + 1), else: stream
@@ -395,9 +542,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     lines =
       window
       |> Enum.with_index(start_line)
-      |> Enum.map(fn {line, line_num} ->
+      |> Enum.map(fn {{line, byte_offset}, line_num} ->
         num_str = line_num |> Integer.to_string() |> String.pad_leading(5)
-        clamped = line |> String.trim_trailing("\n") |> Lines.clamp_line(line_num)
+
+        clamped =
+          line
+          |> String.trim_trailing("\n")
+          |> Lines.clamp_line(line_num, nil, byte_offset)
+
         "#{num_str}| #{clamped}"
       end)
       |> Enum.join("\n")

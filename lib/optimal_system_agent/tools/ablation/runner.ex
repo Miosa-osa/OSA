@@ -369,13 +369,28 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
     %{
       id: :minified_line,
       title: "single 900 KB minified line",
-      run: fn dir, ctx -> [read(dir, "minified.js", ctx, [])] end,
+      # TWO calls, because one is not what a caller would do. The first read is
+      # clamped and says so; the second is the recovery the clamp notice names.
+      # Scoring the clamp on the first call alone measured a truncation with no
+      # undo, which was the real defect — `tail_reachable` was `lost` because
+      # nothing in ANY tool could ask for the end of a line that was already
+      # fully selected by `limit`. The tail read is the undo.
+      run: fn dir, ctx ->
+        [
+          read(dir, "minified.js", ctx, []),
+          read(dir, "minified.js", ctx, byte_offset: -120)
+        ]
+      end,
       probes: [
         %{
           id: :truncation_announced,
           question: "Is what I am reading complete, or a fragment?",
+          # Judged on the FIRST call only. Once a recovery call is in the
+          # scenario the joined text contains the sentinel either way, and a
+          # probe that reads it would answer `:ok` even if the clamp stopped
+          # announcing anything at all.
           check: fn out ->
-            t = joined(out)
+            t = out |> List.first() |> to_text()
             full? = String.contains?(t, "window.SENTINEL_MINIFIED=1")
             announced? = Regex.match?(~r/truncat|clamp|omitted|\.\.\./i, t)
 
@@ -439,18 +454,44 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
     %{
       id: :opaque_base64,
       title: "three 200 KB base64 lines",
-      run: fn dir, ctx -> [read(dir, "base64_blob.txt", ctx, [])] end,
+      # The clamp cuts blob1 at 2000 characters, and the notice names byte 2000
+      # as where it stopped. The second call takes it at its word.
+      run: fn dir, ctx ->
+        [
+          read(dir, "base64_blob.txt", ctx, []),
+          read(dir, "base64_blob.txt", ctx, byte_offset: 2_000)
+        ]
+      end,
       probes: [
         %{
           id: :blob_usable,
           question: "Can I decode blob1?",
+          # This probe asks whether the blob's bytes are OBTAINABLE, and the
+          # honest answer changed from "no" to "yes, in N calls" — not to
+          # "yes, free". Clamped and with no byte axis, half a base64 line
+          # decodes to nothing and there was no second call to make, at any
+          # price. So the predicate is: does the slice that resumes AT the byte
+          # the clamp named come back as real base64, and does it say where the
+          # NEXT slice starts? Those two together are what make walking the line
+          # finite. Reassembling 200 KB is still 100 calls and a caller should
+          # almost always do something else — but "expensive" and "impossible"
+          # are different verdicts, and this table exists to tell them apart.
           check: fn out ->
-            t = joined(out)
+            first = out |> List.first() |> to_text()
+            recovered = out |> Enum.drop(1) |> joined()
+
+            resumed? = Regex.match?(~r|[A-Za-z0-9+/=]{1500}|, recovered)
+            next_named? = Regex.match?(~r/byte_offset=\d+/, recovered)
 
             cond do
-              Regex.match?(~r/truncat|clamp|omitted/i, t) -> :lost
-              String.contains?(t, "blob1=") -> :ok
-              true -> :lost
+              resumed? and next_named? -> :ok
+              # The clamp-ablated run: the whole blob came back on call one.
+              String.contains?(first, "blob1=") and
+                  not Regex.match?(~r/truncat|clamp|omitted/i, first) ->
+                :ok
+
+              true ->
+                :lost
             end
           end
         },
@@ -458,7 +499,7 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
           id: :loss_declared,
           question: "If I cannot decode it, was I told why?",
           check: fn out ->
-            t = joined(out)
+            t = out |> List.first() |> to_text()
 
             if Regex.match?(~r/truncat|clamp|omitted/i, t) or String.contains?(t, "blob3="),
               do: :ok,
@@ -494,7 +535,16 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
     %{
       id: :deep_nesting,
       title: "400-level nested JSON on one line",
-      run: fn dir, ctx -> [read(dir, "deep_nest.json", ctx, [])] end,
+      # The leaf sits at byte ~2420, just past the 2000-character clamp. There
+      # is no line to ask for — the whole document is one line — so before the
+      # byte axis this was the purest case of a fact that no subsequent call
+      # could reach. Continuing from the byte the notice named crosses it.
+      run: fn dir, ctx ->
+        [
+          read(dir, "deep_nest.json", ctx, []),
+          read(dir, "deep_nest.json", ctx, byte_offset: 2_000)
+        ]
+      end,
       probes: [
         %{
           id: :leaf_reachable,
@@ -628,6 +678,8 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
       %{"path" => Path.join(dir, name)}
       |> maybe_put("offset", Keyword.get(opts, :offset))
       |> maybe_put("limit", Keyword.get(opts, :limit))
+      |> maybe_put("byte_offset", Keyword.get(opts, :byte_offset))
+      |> maybe_put("byte_limit", Keyword.get(opts, :byte_limit))
 
     FileRead.execute(input, ctx)
   end

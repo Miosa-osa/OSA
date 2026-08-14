@@ -47,6 +47,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
     different files is independent work: issue those calls in parallel in one
     turn.
 
+    A line too wide to return whole is clamped, and the notice names the
+    `byte_offset` that continues it — bytes are a second axis, and the only one
+    that can reach the rest of a line `limit` already selected in full.
+
     Do NOT read a file to answer a question ABOUT it. For *does it contain X*,
     *how many Y*, or *is it well-formed*, use `#{transform_name}`'s `count` or
     `assert_balanced`, or a one-line `shell_execute` script: the answer costs its

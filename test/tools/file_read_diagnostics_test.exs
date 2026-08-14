@@ -446,7 +446,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
       assert content =~ "the line is 1000000 characters long"
       assert content =~ "only the first 2000 are shown"
       assert content =~ "This is a truncation, not the end of the line"
-      assert content =~ "Use `file_grep` to search inside the full line"
+
+      # A truncation that cannot say how to recover is what made the tail of a
+      # clamped line unreachable by any subsequent call — measured by
+      # `mix osa.ablate`, which scored three facts as permanently lost. The
+      # marker must name the exact byte the clamp stopped at: "first line\n" is
+      # 11 bytes, plus the 2000 characters shown.
+      assert content =~ "byte_offset: 2011"
+
       # The whole point: the payload no longer reaches the transport.
       assert byte_size(content) < 10_000
     end

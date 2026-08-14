@@ -116,16 +116,30 @@ defmodule OptimalSystemAgent.Tools.AblationHarnessTest do
                "stamp moved, or the probe stopped depending on it"
     end
 
-    test "the per-line clamp trades information for a large amount of money", %{dir: dir} do
+    test "the per-line clamp now saves a great deal and costs nothing", %{dir: dir} do
       %{rows: [row]} = Runner.run(dir: dir, flags: [:read_line_clamp])
 
       assert row.tokens_without > row.tokens_with * 5,
              "removing the clamp is no longer catastrophically expensive"
 
-      assert row.improvements != [],
-             "the clamp is no longer destroying anything — if true that is good " <>
-               "news, but it means this row's trade-off has changed and the " <>
-               "recommendation attached to it needs revisiting"
+      # This assertion is INVERTED from what it was, and the inversion is the
+      # finding. The clamp used to destroy three facts outright — the end of a
+      # minified file, a base64 blob's decodability, a deep JSON leaf — so
+      # ablating it RECOVERED them and the row showed improvements. That was the
+      # signature of a truncation with no undo: the tail of a clamped line was
+      # unreachable by any subsequent call, because `offset`/`limit` address
+      # lines and the line was already fully selected.
+      #
+      # `byte_offset` is the missing axis, and the clamp notice names the exact
+      # byte it stopped at. With a way back, ablating the clamp recovers nothing
+      # that was not already recoverable, and the row is what a good trade looks
+      # like: a large saving with an empty cost column. If improvements ever
+      # reappear here, the recovery path has broken and the clamp is destroying
+      # information again.
+      assert row.improvements == [],
+             "ablating the clamp recovered #{inspect(Enum.map(row.improvements, & &1.probe))} " <>
+               "— those facts are reachable only when the clamp is OFF, which means the " <>
+               "byte_offset recovery path no longer works"
     end
 
     test "baseline probes are mostly answerable, so regressions mean something", %{dir: dir} do
