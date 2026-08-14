@@ -279,3 +279,40 @@ def test_provenance_reports_a_true_verdict_for_the_current_artifact():
     # Not asserting the value -- asserting it is a verdict and not a crash.
     assert out["built_after_head_commit"] in (True, False, None)
     assert "built_after_head_commit_error" not in out
+
+
+# --------------------------------------------------------------- driver deadline
+
+
+@pytest.mark.parametrize(
+    "mult,expected",
+    [(None, None), ("", None), ("1.0", None), ("2.0", 3600), ("0.5", 900),
+     ("nonsense", None), ("0", None), ("-2", None)],
+)
+def test_driver_run_timeout_scales_with_multiplier(monkeypatch, mult, expected):
+    """The driver's hardcoded 1800s must follow the multiplier the run claims.
+
+    `driver/osa_headless.py` kills the episode at a fixed 1800s regardless of
+    every Harbor multiplier, so an arm invoked at `--timeout-multiplier 2.0`
+    recorded a doubled budget and enforced a single one. Unset/1.0/garbage all
+    return None so the driver keeps its own default rather than having it
+    restated -- an absent multiplier must not start writing an env var that was
+    previously absent.
+    """
+    mod = _load_osa_agent()
+    if mult is None:
+        monkeypatch.delenv("OSA_BENCH_TIMEOUT_MULTIPLIER", raising=False)
+    else:
+        monkeypatch.setenv("OSA_BENCH_TIMEOUT_MULTIPLIER", mult)
+    assert mod.driver_run_timeout() == expected
+
+
+def test_driver_base_matches_the_driver_itself():
+    """The base is duplicated across a container boundary; keep them equal.
+
+    If the driver's default and this constant drift apart, the scaled deadline
+    silently stops being 2x the real one.
+    """
+    mod = _load_osa_agent()
+    src = (HERE / "driver" / "osa_headless.py").read_text()
+    assert f'"OSA_BENCH_RUN_TIMEOUT", "{mod.DRIVER_RUN_TIMEOUT_BASE}"' in src

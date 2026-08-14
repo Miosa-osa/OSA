@@ -448,6 +448,14 @@ def main() -> int:
             env["OSA_BENCH_EFFORT"] = args.effort
         if args.ollama_think:
             env["OLLAMA_THINK"] = args.ollama_think
+        # The agent-phase multiplier, forwarded so the ADAPTER can scale the
+        # driver's own hardcoded 1800s deadline. Harbor's multipliers never
+        # reached it -- see `osa_agent.driver_run_timeout`. The agent-specific
+        # override wins over the global one here for the same reason Harbor
+        # applies it that way.
+        eff_mult = args.agent_timeout_multiplier or args.timeout_multiplier
+        if eff_mult:
+            env["OSA_BENCH_TIMEOUT_MULTIPLIER"] = str(eff_mult)
 
         log(f"run_id={run_id}  {len(chosen) or args.limit or 'all'} task(s)")
         log(" ".join(cmd))

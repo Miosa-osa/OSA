@@ -111,6 +111,57 @@ OSA_ABLATION_ENV_KEYS = (
 )
 
 
+#: The driver's own default deadline, duplicated from
+#: `driver/osa_headless.py:RUN_TIMEOUT`. Kept here so the multiplier can be
+#: applied host-side, where the multiplier is known -- the driver runs inside
+#: the container and has never been told what Harbor was invoked with.
+DRIVER_RUN_TIMEOUT_BASE = 1800
+
+
+def driver_run_timeout() -> int | None:
+    """The agent deadline the driver should enforce, scaled by the multiplier.
+
+    ## The bug this closes
+
+    `driver/osa_headless.py` kills the episode at a hardcoded 1800s. That
+    deadline is independent of every Harbor timeout multiplier, so a run
+    invoked with `--timeout-multiplier 2.0` -- whose `result.json` faithfully
+    records `timeout_multiplier: 2.0` -- still cut its agent off at 1800s
+    while Harbor was prepared to wait 3600s. The effective budget was
+    `min(Harbor, ours)`, and ours always won.
+
+    Measured on the first full-89 arm: `make-mips-interpreter` died at 1875s
+    wall with `osa_error: "agent exceeded 1800s"` -- our string, not Harbor's --
+    on a run that claimed a doubled budget. That arm gave every task half the
+    agent time cline's published GLM-5.2 rows got, which is precisely the axis
+    it existed to match.
+
+    ## Why it is computed here and not there
+
+    The driver executes inside the task container and is never told what Harbor
+    was invoked with. The multiplier is only knowable in this process, so the
+    scaling has to happen here and arrive as `OSA_BENCH_RUN_TIMEOUT`, which the
+    driver already reads. That also means **this fix requires no edit to the
+    driver**, which matters: the driver is uploaded per-trial during
+    `install()`, so changing it mid-run would hand later trials a different
+    budget from earlier ones and make the arm internally inconsistent.
+
+    Returns `None` when no multiplier is set, leaving the driver's own default
+    untouched rather than restating it -- an unset multiplier must not start
+    writing an env var that was previously absent.
+    """
+    raw = os.environ.get("OSA_BENCH_TIMEOUT_MULTIPLIER")
+    if not raw:
+        return None
+    try:
+        mult = float(raw)
+    except ValueError:
+        return None
+    if mult <= 0 or mult == 1.0:
+        return None
+    return int(DRIVER_RUN_TIMEOUT_BASE * mult)
+
+
 def ablation_env() -> dict[str, str]:
     """The ablation switches actually set in the host process, if any."""
     return {
@@ -155,6 +206,8 @@ class OsaAgent(BaseInstalledAgent):
         self._port = int(port)
         self._boot_timeout = int(boot_timeout_sec)
         self._run_timeout = int(run_timeout_sec) if run_timeout_sec else None
+        if self._run_timeout is None:
+            self._run_timeout = driver_run_timeout()
         super().__init__(*args, **kwargs)
         if not RELEASE_TARBALL.exists():
             raise FileNotFoundError(
