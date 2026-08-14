@@ -798,6 +798,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # can render.
   defp content_part(_), do: nil
 
+  @image_unusable_source "[An image was attached here but its source could not be read, so the image was not sent. Do not describe or reason about it; ask the user to re-share it if it matters.]"
+
   defp image_part(source) do
     media_type = get_in_either(source, :media_type, "media_type") || "image/png"
     data = get_in_either(source, :data, "data")
@@ -810,9 +812,42 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       is_binary(data) and data != "" ->
         %{"type" => "image_url", "image_url" => %{"url" => "data:#{media_type};base64,#{data}"}}
 
+      # An image block whose source carries neither a `url` nor `data` under
+      # the key names probed above. This returned `nil`, and `encode_content/1`
+      # rejects nils — so the block vanished from the content array with no
+      # placeholder, no log and no telemetry, on the transport with the widest
+      # provider fan-out in the registry. The model then answers confidently
+      # about a picture it never received, which is the failure mode
+      # `@image_unrenderable` and `encode_text/1` already exist to prevent for
+      # the `tool`/`assistant` roles, and which `google.ex` and `bedrock.ex`
+      # already prevent for an unsupported MIME type.
+      #
+      # Reachable on any image block OSA did not author itself — an MCP tool
+      # result, a rehydrated session, a source keyed `"bytes"`/`"base64"`.
       true ->
-        nil
+        report_dropped_image(source)
+        %{"type" => "text", "text" => @image_unusable_source}
     end
+  end
+
+  defp report_dropped_image(source) do
+    :telemetry.execute(
+      [:osa, :images, :dropped],
+      %{count: 1},
+      %{provider: :openai_compat, reason: :unrecognised_source}
+    )
+
+    Logger.warning(
+      "[OpenAICompat] image block dropped: source carries no usable url/data " <>
+        "(keys: #{inspect(if(is_map(source), do: Map.keys(source), else: source))}); " <>
+        "an explicit note was sent in its place"
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp get_in_either(map, atom_key, string_key) when is_map(map),
@@ -1219,28 +1254,154 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # "off") is mapped down via openai_reasoning_effort/1 — never passed raw.
   # For non-reasoning models this is a no-op.
   defp maybe_add_reasoning(body, model, opts) do
-    # `nil` used to mean a hardcoded "medium", which made the OSA effort ladder
-    # a no-op on this transport: nothing on the normal turn path passes
-    # `:reasoning_effort`, so every o-series / GPT-5.x request went out at
-    # "medium" no matter what `/effort` said. Fall back to the live setting the
-    # way `openai_responses`, `google`, and the DeepSeek arm already do — an
-    # unresolvable setting still lands on "medium" via openai_reasoning_effort/1,
-    # so a corrupt value cannot silently DISABLE reasoning.
+    case reasoning_decision(model, opts) do
+      {nil, _source} ->
+        body
+
+      {value, source} ->
+        report_reasoning(model, value, source)
+        Map.put(body, :reasoning_effort, value)
+    end
+  end
+
+  @doc """
+  The `reasoning_effort` this turn will carry on the OpenAI-compatible
+  transport, and the rule that produced it.
+
+  `{value_or_nil, source}` where source is one of `:opt`, `:catalog`,
+  `:name_heuristic`, `:effort_off`, `:model_unsupported`.
+
+  Split out for the same reason `Ollama.reasoning_decision/2` and
+  `Bedrock.reasoning_decision/2` were: a capability that can be silently off
+  needs something able to state what it is and why.
+  `Observability.current_reasoning/1` reads this so `turn_start` / `turn_end`
+  carry it next to `effort` on the ~19 providers routed through this module —
+  which, until this seam existed, recorded `reasoning: nil` meaning "this
+  provider has no such setting", for providers that do.
+
+  ## The defect this replaces
+
+  With no explicit opt — which is the live case, since nothing on the normal
+  turn path passes `:reasoning_effort` — the field was gated on
+  `reasoning_model?/1` alone, and that predicate is three hardcoded vendor
+  name-tables plus `String.contains?(name, "kimi")`. This module is the shared
+  transport for OpenRouter, Groq, Together, Fireworks, Cerebras, Zhipu, Qwen,
+  Moonshot and every user-defined `base_url`, and those gateways name models
+  `vendor/model`. So:
+
+      reasoning_model?("anthropic/claude-opus-5")  #=> false
+      reasoning_model?("google/gemini-3-pro")      #=> false
+      reasoning_model?("z-ai/glm-4.7")             #=> false
+
+  — MEASURED on this tree. `anthropic/claude-opus-5` is OpenRouter's *default*
+  model in `openai_compat_provider.ex`, so the whole `Agent.Effort` ladder was
+  a no-op on the out-of-the-box OpenRouter configuration, and the same
+  predicate gates `OpenAICompatProvider.maybe_extend_timeout/2`, so those turns
+  also kept the 120s non-reasoning HTTP timeout instead of 600s. `/effort ultra`
+  changed the status bar and nothing on the wire.
+
+  `scratchpad.ex` documents the symptom ("OSA sends that route no `thinking`
+  and no `reasoning_effort` at all") as a fact to design around. It was a bug.
+
+  The authority is now `ModelLimits.reasoning/2` — the Catalog flag, SOT-overlaid
+  from `AnthropicModels` / `GoogleModels` / `OpenAIModels` / `DeepSeekModels` /
+  `XAIModels` / `MistralModels` — consulted BEFORE the name tables, and it
+  already resolves `vendor/model` ids (measured: `ModelLimits.reasoning(
+  :openrouter, "anthropic/claude-opus-5") == true`). A model released after
+  this line was written picks itself up from the catalog instead of needing the
+  heuristic amended.
+
+  ## Why an unknown model still gets nothing
+
+  Unlike `deepseek_endpoint?(nil)`, an unknown here must NOT default the field
+  on. `reasoning_effort` on a model that does not reason is a hard 400 on
+  strict gateways, not a degraded answer — the same asymmetry
+  `Bedrock.reasoning_decision/2` respects for `amazon.nova-*`. Positive
+  evidence is required; the fix is that the evidence now includes the catalog,
+  not that the bar was lowered. An EXPLICIT `opts[:reasoning_effort]` is always
+  honoured (`:opt`), so a caller that knows better than the catalog still wins
+  and no existing caller loses anything.
+
+  > #### Not verified against a live gateway {: .warning}
+  >
+  > No OpenRouter, OpenAI or Groq credential exists on this machine. That
+  > OpenRouter accepts top-level `reasoning_effort` as an alias for its unified
+  > `reasoning.effort` parameter is read from its documentation, not observed
+  > on the wire. The request-shape change is pinned by
+  > `test/providers/silent_capability_loss_test.exs`; the acceptance is not.
+  """
+  @spec reasoning_decision(String.t() | nil, keyword()) :: {String.t() | nil, atom()}
+  def reasoning_decision(model, opts \\ []) do
     case Keyword.get(opts, :reasoning_effort) || Keyword.get(opts, :effort) do
       nil ->
-        with true <- reasoning_model?(model),
-             value when is_binary(value) <- openai_reasoning_effort(current_effort()) do
-          Map.put(body, :reasoning_effort, value)
-        else
-          _ -> body
+        case reasoning_model_source(model) do
+          nil ->
+            {nil, :model_unsupported}
+
+          source ->
+            case openai_reasoning_effort(current_effort()) do
+              nil -> {nil, :effort_off}
+              value -> {value, source}
+            end
         end
 
       effort ->
+        # An explicit request is honoured whatever the catalog thinks. This
+        # branch is unchanged from before the catalog consult existed, so the
+        # widening cannot regress a caller that was already passing a value.
         case openai_reasoning_effort(effort) do
-          nil -> body
-          value -> Map.put(body, :reasoning_effort, value)
+          nil -> {nil, :effort_off}
+          value -> {value, :opt}
         end
     end
+  end
+
+  # `:catalog` | `:name_heuristic` | nil — which authority answered yes. Union,
+  # for the reason given on `reasoning_model?/1`: a Catalog `false` must not
+  # veto a name table that was written because the Catalog was wrong.
+  defp reasoning_model_source(model) do
+    name = String.downcase(to_string(model))
+
+    cond do
+      catalog_reasoning(name) == true -> :catalog
+      name_reasoning?(name) -> :name_heuristic
+      true -> nil
+    end
+  end
+
+  defp catalog_reasoning(name) do
+    OptimalSystemAgent.Providers.ModelLimits.reasoning(nil, name)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # One log line per {model, value, source} per process, at :info. The whole
+  # point of this seam is that the previous state was unobservable; a fix that
+  # is also silent is not a fix.
+  defp report_reasoning(model, value, source) do
+    :telemetry.execute(
+      [:osa, :openai_compat, :reasoning],
+      %{count: 1},
+      %{model: to_string(model), effort: value, source: source}
+    )
+
+    key = {model, value, source}
+
+    if Process.get(:osa_compat_reasoning) != key do
+      Process.put(:osa_compat_reasoning, key)
+
+      Logger.info(
+        "[OpenAICompat] reasoning_effort=#{value} model=#{model} source=#{source}"
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # Map an OSA effort level (atom or string) to the OpenAI reasoning_effort value.
@@ -1277,15 +1438,86 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   "is this a reasoning model?" is now answered by the catalog, not by the name.
   Left as a literal comparison, this returned false for `deepseek-v4-pro` and
   silently dropped the long reasoning timeout.
+
+  The Catalog is consulted FIRST, for the reason set out at length on
+  `reasoning_decision/2`: the vendor name-tables below only know bare ids, and
+  every gateway this module serves names its models `vendor/model`, so
+  `anthropic/claude-opus-5` — OpenRouter's default — answered `false` and lost
+  both the reasoning field and the 600s timeout.
+
+  It is a UNION, not an override: a Catalog `false` does not veto the name
+  tables. Making the Catalog authoritative in the negative direction would be
+  this file's own defect shape pointed the other way — the bundled snapshot is
+  third-party data that lags, and it currently answers `false` for
+  `moonshotai/kimi-k2`, which the heuristic below deliberately includes. This
+  change can therefore only ADD models; no id that reasoned before stops.
   """
   def reasoning_model?(model) do
     name = String.downcase(to_string(model))
 
+    catalog_reasoning(name) == true or name_reasoning?(name)
+  end
+
+  defp name_reasoning?(name) do
     OptimalSystemAgent.Providers.OpenAIModels.reasoning?(name) or
       OptimalSystemAgent.Providers.DeepSeekModels.thinking_model?(name) or
       OptimalSystemAgent.Providers.XAIModels.reasoning?(name) or
       name == "deepseek-reasoner" or
-      String.contains?(name, "kimi")
+      String.contains?(name, "kimi") or
+      vendor_prefixed_reasoning?(name)
+  end
+
+  # `vendor/model` — the id shape every gateway this module serves uses.
+  #
+  # This exists as well as the Catalog consult, not instead of it, because the
+  # Catalog is an ETS table populated at boot from `priv/catalog/models_dev.json`
+  # and it is EMPTY under `mix test`, empty before its GenServer finishes
+  # starting, and empty for any consumer that never starts the supervision
+  # tree. `ModelLimits` documents every lookup as "best-effort … degrade to nil"
+  # — which is right for a limit, and would be a silent capability loss here:
+  # the whole reasoning ladder would come back or not depending on boot timing,
+  # with nothing saying which. The vendor SSOT modules are compile-time data
+  # and cannot be unavailable.
+  #
+  # Only the segment after the LAST `/` is taken, so
+  # `accounts/fireworks/models/…` resolves the same way `anthropic/…` does.
+  defp vendor_prefixed_reasoning?(name) do
+    case String.split(name, "/") do
+      [_single] ->
+        false
+
+      segments ->
+        bare = List.last(segments)
+
+        bare != "" and
+          (sot_thinks?(OptimalSystemAgent.Providers.AnthropicModels, bare) or
+             sot_thinks?(OptimalSystemAgent.Providers.GoogleModels, bare) or
+             OptimalSystemAgent.Providers.OpenAIModels.reasoning?(bare) or
+             OptimalSystemAgent.Providers.DeepSeekModels.thinking_model?(bare) or
+             OptimalSystemAgent.Providers.XAIModels.reasoning?(bare) or
+             String.contains?(bare, "kimi"))
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  # `resolve/1` FIRST, then `thinking_mode/1`.
+  #
+  # `AnthropicModels.thinking_mode/1` answers `:adaptive` for an id it has
+  # never seen — correct for its own caller (an unknown Anthropic id is far
+  # likelier to be a new Claude than a Claude 3), and catastrophic here, where
+  # the id may be `meta-llama/Llama-3.3-70B-Instruct`. Asking `thinking_mode/1`
+  # without first confirming the vendor actually owns the id would turn this
+  # into "every vendor-prefixed model reasons", which is the defect this whole
+  # file is about wearing the opposite sign.
+  defp sot_thinks?(mod, bare) do
+    mod.resolve(bare) != nil and mod.thinking_mode(bare) != :none
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   # DeepSeek V4 takes a `thinking` object in the request body (what the OpenAI
@@ -1396,6 +1628,16 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     do: n
 
   defp cached_input(%{"cached_tokens" => n}) when is_integer(n), do: n
+
+  # DeepSeek does NOT use `prompt_tokens_details.cached_tokens`. Its context
+  # caching is automatic and always on, and it reports the split at the top
+  # level as `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`. Neither
+  # spelling above matches, so every DeepSeek turn reported `cache_read = 0`
+  # while the provider was in fact serving a warm prefix at 0.1x — the cache
+  # worked and OSA billed it at the full rate, which is the same ~10x
+  # over-report the streamed-usage fix was written about, on a different
+  # provider and in silence.
+  defp cached_input(%{"prompt_cache_hit_tokens" => n}) when is_integer(n), do: n
   defp cached_input(_), do: 0
 
   # Cache WRITES bill at ~1.25x input, and nothing on this path captured them

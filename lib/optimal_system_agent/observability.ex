@@ -221,6 +221,41 @@ defmodule OptimalSystemAgent.Observability do
           {budget, source} -> "on:#{source}:#{budget}"
         end
 
+      :google when is_binary(model) ->
+        case OptimalSystemAgent.Providers.Google.build_thinking_config(model, []) do
+          %{thinkingLevel: level} -> "on:level:#{level}"
+          %{thinkingConfig: %{thinkingBudget: n}} -> "on:budget:#{n}"
+          _ -> "off:model_has_none"
+        end
+
+      # Everything routed through `OpenAICompat` — openrouter, groq, together,
+      # fireworks, deepseek, perplexity, mistral, cerebras, sambanova,
+      # hyperbolic, qwen, moonshot, zhipu, volcengine, baichuan, miosa,
+      # lmstudio and every user-defined base_url, plus :openai itself.
+      #
+      # This clause is the point of the exercise. `reasoning` was `nil` here —
+      # and `nil` on this field is DOCUMENTED above as meaning "the
+      # provider/model has no such setting". It was recorded for the ~19
+      # providers that have one, so the single instrument built to stop
+      # reasoning being silent was itself silent on the majority of the fleet:
+      # a benchmark row from an OpenRouter run stated `effort=ultra` beside
+      # `reasoning=` blank, and both the effort ladder being inert
+      # (`OpenAICompat.reasoning_decision/2` documents that defect) and the
+      # ladder working produce exactly that same row.
+      provider when is_atom(provider) and not is_nil(provider) and is_binary(model) ->
+        # Membership comes from `Registry.compat_routed?/1`, which is derived
+        # from `@providers` at compile time. Asking a hand-written list here
+        # would be the same drift that put six compat providers on the wrong
+        # billing convention in `Loop.Accounting`; asking every provider would
+        # report a decision `:claude_cli` / `:openai_codex` / `:cohere` never
+        # make.
+        if OptimalSystemAgent.Providers.Registry.compat_routed?(provider) do
+          case OptimalSystemAgent.Providers.OpenAICompat.reasoning_decision(model, []) do
+            {nil, source} -> "off:#{source}"
+            {value, source} -> "on:#{source}:#{value}"
+          end
+        end
+
       _ ->
         nil
     end

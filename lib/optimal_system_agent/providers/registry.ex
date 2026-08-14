@@ -178,6 +178,29 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec list_providers() :: list(atom())
   def list_providers, do: Map.keys(@providers)
 
+  @compat_providers @providers
+                    |> Enum.filter(&match?({_, {:compat, _}}, &1))
+                    |> Enum.map(&elem(&1, 0))
+                    |> Enum.sort()
+
+  @doc """
+  Every provider whose requests are assembled by `Providers.OpenAICompat`.
+
+  Derived from `@providers` at compile time rather than restated, so a provider
+  added to the registry cannot be missed by a consumer that needs to know which
+  request-shaping seam applies to it. `Observability.current_reasoning/1` is
+  that consumer: `OpenAICompat.reasoning_decision/2` is the only authority on
+  whether these requests carry `reasoning_effort`, and asking it of a provider
+  that does not use this transport (`:claude_cli`, `:openai_codex`, `:cohere`,
+  …) would report a decision nothing ever made.
+  """
+  @spec compat_providers() :: list(atom())
+  def compat_providers, do: @compat_providers
+
+  @doc "True when `provider`'s requests are built by `Providers.OpenAICompat`."
+  @spec compat_routed?(atom()) :: boolean()
+  def compat_routed?(provider), do: provider in @compat_providers
+
   @doc """
   Get information about a specific provider.
 
@@ -1080,6 +1103,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
         )
       else
         # Provider does not implement streaming — go straight to sync.
+        report_stream_downgrade(module, :primary)
         fallback_sync_stream(module, messages, callback, opts)
       end
 
@@ -1365,7 +1389,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   defp do_try_stream_provider(module, messages, callback, opts) when is_atom(module) do
-    if function_exported?(module, :chat_stream, 3) do
+    # `stream_capable?/1`, not a bare `function_exported?/3`. The comment on
+    # that function describes this exact defect — `function_exported?` answers
+    # `false` for a module that has not been LOADED yet — and the guard was
+    # added at the primary entrance (`stream_with_fallback/5`) and not at this
+    # one, the provider-fallback hop. A fallback provider is by definition a
+    # module this process has not touched yet this run, so the unguarded twin
+    # sits on the path where the false negative is most likely, not least.
+    if stream_capable?(module) do
       try do
         Logger.info("[Registry] Calling #{module}.chat_stream/3")
 
@@ -1395,8 +1426,43 @@ defmodule OptimalSystemAgent.Providers.Registry do
     else
       # Provider cannot stream at all — nothing was emitted, so the whole-body
       # push is the only delivery and is safe.
+      report_stream_downgrade(module, :fallback_hop)
       fallback_sync_stream(module, messages, callback, opts)
     end
+  end
+
+  @doc false
+  # A working stream announces itself (`Logger.info "Calling …chat_stream/3"`);
+  # a LOST stream said nothing at either entrance. That asymmetry is the one
+  # `report_dropped_images/4` was written to remove for images, on the stated
+  # principle that a capability silently removed must never be something
+  # someone has to go looking for. Streaming had not been given the same
+  # treatment, so a provider that quietly delivers the whole body as one
+  # `:text_delta` is indistinguishable from one that streams badly.
+  @spec report_stream_downgrade(module(), atom()) :: :ok
+  def report_stream_downgrade(module, entrance) do
+    :telemetry.execute(
+      [:osa, :stream, :downgraded],
+      %{count: 1},
+      %{provider: module, entrance: entrance}
+    )
+
+    key = {module, entrance}
+
+    if Process.get(:osa_stream_downgrade) != key do
+      Process.put(:osa_stream_downgrade, key)
+
+      Logger.warning(
+        "[Registry] #{inspect(module)} does not implement chat_stream/3 (#{entrance}) — " <>
+          "the response will arrive as a single block, not a live stream"
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # Same-provider retry/backoff now lives in `Providers.Resilience`. The

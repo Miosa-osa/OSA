@@ -84,7 +84,29 @@ defmodule OptimalSystemAgent.Providers.PromptCache do
   def restructure(messages, target, opts \\ [])
 
   def restructure(messages, target, opts) when is_list(messages) and messages != [] do
-    if applies?(target) and Registry.anthropic_prompt_cache?(target, Keyword.get(opts, :model)) and
+    # `Registry.resolved_model/2`, NOT `Keyword.get(opts, :model)`.
+    #
+    # `anthropic_prompt_cache?/2` guards on `is_binary(model)` and falls to
+    # `false` for nil, and `opts[:model]` is nil on every non-CLI entry point.
+    # `resolved_model/2` exists to close exactly that hole and its own docstring
+    # says so — but the fix was applied at `Registry.normalize_message_content/3`
+    # (registry.ex:699) and not here, 600 lines away in the same pipeline, so
+    # the two stages of one cache strategy disagreed about which model the
+    # request is for.
+    #
+    # The failure is partial, which is why it survived: the system-block
+    # `cache_control` breakpoints still land (that stage resolves the model), so
+    # the wire body looks cached. What is skipped is the volatile-tail
+    # relocation and the rolling history breakpoint — by this module's own
+    # measured table, the difference between the 95.0%/93.5% arm and the
+    # 78.1%/89.3% one. A partial win reads as a working cache.
+    #
+    # Reachable on every caller that does not name a model: `Agent.Compactor`
+    # (the largest payloads in the system), the classifier, keeper, weaver,
+    # dream and workflow callers, and EVERY provider-fallback hop —
+    # `cross_provider_opts/1` drops `:model` deliberately.
+    if applies?(target) and
+         Registry.anthropic_prompt_cache?(target, Registry.resolved_model(target, opts)) and
          not already_restructured?(messages) do
       do_restructure(messages)
     else

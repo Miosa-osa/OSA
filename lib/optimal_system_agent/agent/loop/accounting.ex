@@ -84,6 +84,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   """
   @spec record(map(), map() | nil) :: map()
   def record(state, usage) do
+    report_unaccounted(state, usage)
     do_record(state, usage)
   rescue
     e ->
@@ -97,6 +98,53 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     kind, reason ->
       Logger.warning("[Accounting] record caught #{kind}: #{inspect(reason)} — skipping")
       state
+  end
+
+  @doc """
+  Announce, once per provider per process, that a round-trip was billed as zero
+  because the provider reported nothing.
+
+  A provider that returns no `:usage` key is indistinguishable here from one
+  that genuinely used no tokens: `normalize_usage/1` turns both into all-zeros,
+  `Pricing.cost/2` returns `0.0`, and `max_budget_usd` — enforced by
+  `Loop.Limits` off these totals — becomes unenforceable. That is the whole
+  defect shape in one line: not an error, not a wrong-looking number, just a
+  session that costs nothing and a spend limit that never trips.
+
+  `Providers.Cohere` and `Providers.Replicate` return no usage; `ClaudeCli` and
+  `CopilotCli` collect real usage (including the provider's own authoritative
+  `total_cost_usd`) into a `:persistent_term` side channel that has no readers.
+  Rather than pin those four in a list that will drift, the instrument is
+  generic: any provider whose turns arrive unaccounted says so, at `:warning`,
+  the first time it happens.
+  """
+  @spec report_unaccounted(map(), map() | nil) :: :ok
+  def report_unaccounted(state, usage) do
+    if usage == nil or usage == %{} do
+      provider = Map.get(state, :provider)
+
+      :telemetry.execute(
+        [:osa, :accounting, :unaccounted_turn],
+        %{count: 1},
+        %{provider: provider, model: Map.get(state, :model)}
+      )
+
+      if Process.get(:osa_unaccounted_provider) != provider do
+        Process.put(:osa_unaccounted_provider, provider)
+
+        Logger.warning(
+          "[Accounting] provider #{inspect(provider)} reported no token usage — this " <>
+            "round-trip is billed as 0 tokens / $0.00 and max_budget_usd cannot be enforced " <>
+            "for it"
+        )
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc """
@@ -181,11 +229,34 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     cond do
       p in @disjoint_prompt_slices -> false
       p in @inclusive_prompt_slices -> true
+      # `{:compat, _}` above already answers `true`, but the provider handed in
+      # here is `state.provider` — a BARE atom, never the dispatch tuple — so
+      # that clause never fires on the live path and the hand-written list is
+      # what actually decides. The list had drifted: `:cerebras`, `:sambanova`,
+      # `:hyperbolic`, `:lmstudio`, `:llamacpp` and `:miosa` are all
+      # `{:compat, _}` entries in `Providers.Registry`, all parsed by
+      # `OpenAICompat.parse_usage/1`, and all fell through to the `false`
+      # default below — i.e. to Anthropic's disjoint convention, the 11x
+      # over-bill this whole function exists to prevent.
+      #
+      # Asking the Registry instead of restating it means a provider added to
+      # `@providers` cannot silently acquire the wrong billing convention. The
+      # explicit list is kept and consulted FIRST so `:google` (inclusive but
+      # not compat-routed) and the disjoint entries still win.
+      compat_routed?(p) -> true
       true -> false
     end
   end
 
   defp inclusive_prompt_slices?(_), do: false
+
+  defp compat_routed?(p) do
+    OptimalSystemAgent.Providers.Registry.compat_routed?(p)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
 
   defp safe_atom(p) do
     String.to_existing_atom(p)

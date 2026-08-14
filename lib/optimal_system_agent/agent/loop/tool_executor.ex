@@ -574,8 +574,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     if tool_call.name in @path_guarded_writes do
       args = Map.get(tool_call, :arguments) || %{}
 
+      # `Code.ensure_loaded?/1` before `function_exported?/2`: without it the
+      # answer is `false` for any module not yet loaded, this `with` falls to
+      # `_ -> :ok`, and the path guard on a WRITE tool is skipped — a security
+      # check failing open, silently, with the resulting write recorded as a
+      # clean success by the very instrumentation the comment below describes.
+      # Same defect as the `stream_capable?/1` one, on a guard where the
+      # consequence is not a slower stream.
       with mod when is_atom(mod) and not is_nil(mod) <- Tools.module_for(tool_call.name),
-           true <- function_exported?(mod, :check_permissions, 2),
+           true <- Code.ensure_loaded?(mod) and function_exported?(mod, :check_permissions, 2),
            {:deny, msg} <- safe_check_permissions(mod, args) do
         # The handler's message is raw ("Access denied: … is outside allowed
         # paths"). Every other `{:blocked, _}` in this module carries a

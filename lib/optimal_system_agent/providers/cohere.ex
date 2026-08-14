@@ -78,7 +78,7 @@ defmodule OptimalSystemAgent.Providers.Cohere do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls}}
+          {:ok, %{content: content, tool_calls: tool_calls, usage: extract_usage(resp)}}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -158,6 +158,41 @@ defmodule OptimalSystemAgent.Providers.Cohere do
 
   defp extract_content(%{"message" => %{"tool_calls" => _calls}}), do: ""
   defp extract_content(_), do: ""
+
+  # Cohere's V2 chat response carries `meta.tokens.{input_tokens,output_tokens}`
+  # (with `meta.billed_units` alongside it). This module parsed neither, so
+  # `chat/2` returned no `:usage` key at all and `Loop.Accounting.record/2`
+  # normalised `%{}` to all zeros — every Cohere turn billed 0 tokens and
+  # $0.00, and `max_budget_usd` was unenforceable on the provider, silently.
+  # Same defect as the Bedrock `extract_usage/1` key-name mismatch, one step
+  # earlier: there the keys were wrong, here there were no keys.
+  #
+  # The key names are the ones `Accounting.normalize_usage/1` reads and nothing
+  # else — a number filed under any other name is invisible to pricing.
+  # `:cohere` is neither in `@inclusive_prompt_slices` nor
+  # `@disjoint_prompt_slices`, which is correct: Cohere reports no cached
+  # slice, so there is nothing to reconcile in either direction.
+  @doc false
+  @spec extract_usage(map()) :: map()
+  def extract_usage(%{"meta" => %{"tokens" => tokens}}) when is_map(tokens) do
+    %{
+      input_tokens: int(Map.get(tokens, "input_tokens")),
+      output_tokens: int(Map.get(tokens, "output_tokens"))
+    }
+  end
+
+  def extract_usage(%{"meta" => %{"billed_units" => units}}) when is_map(units) do
+    %{
+      input_tokens: int(Map.get(units, "input_tokens")),
+      output_tokens: int(Map.get(units, "output_tokens"))
+    }
+  end
+
+  def extract_usage(_), do: %{}
+
+  defp int(n) when is_integer(n), do: n
+  defp int(n) when is_float(n), do: round(n)
+  defp int(_), do: 0
 
   defp extract_tool_calls(%{"message" => %{"tool_calls" => calls}}) when is_list(calls) do
     Enum.map(calls, fn call ->

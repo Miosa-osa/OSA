@@ -121,7 +121,53 @@ defmodule OptimalSystemAgent.Tools.Registry do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
     mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
-    list_tools_direct()
+    all = list_tools_direct()
+
+    active = do_list_active(all, builtin_tools, mcp_tools)
+
+    report_withheld(all, active)
+
+    active
+  end
+
+  # The docstring above says it plainly: under a native-tool provider, a
+  # removal here does not make a tool undocumented, it makes it UNCALLABLE —
+  # and it was measured at 23 of 82. This was the only stage in the entire tool
+  # pipeline with no log and no telemetry at any level, so the number was only
+  # ever discoverable by reading the code. `ToolDiscovery.widen/2` announces
+  # the restore at `:info`; the removal now announces itself too.
+  #
+  # Once per distinct count per process: the set is stable within a session, so
+  # this is one line at startup, not per-turn noise.
+  defp report_withheld(all, active) do
+    withheld = length(all) - length(active)
+
+    if withheld > 0 do
+      :telemetry.execute(
+        [:osa, :tools, :withheld],
+        %{withheld: withheld, active: length(active), total: length(all)},
+        %{}
+      )
+
+      if Process.get(:osa_tools_withheld) != withheld do
+        Process.put(:osa_tools_withheld, withheld)
+
+        Logger.info(
+          "[Tools.Registry] #{length(active)}/#{length(all)} tools in the default toolbox; " <>
+            "#{withheld} withheld (hidden or deferred) — reachable only via tool_search"
+        )
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp do_list_active(all, builtin_tools, mcp_tools) do
+    all
     |> Enum.reject(fn tool ->
       cond do
         # Harness/UI/redundant tools: registered + searchable, but never in the

@@ -25,10 +25,16 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Effort
+  alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.LLMClient
+  alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Providers.Bedrock
+  alias OptimalSystemAgent.Providers.Cohere
   alias OptimalSystemAgent.Providers.GoogleModels
   alias OptimalSystemAgent.Providers.Ollama
+  alias OptimalSystemAgent.Providers.OpenAICompat
+  alias OptimalSystemAgent.Providers.PromptCache
+  alias OptimalSystemAgent.Providers.Registry
 
   setup do
     prev = %{
@@ -339,6 +345,335 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
 
       body = Ollama.apply_tools(%{}, "anything-at-all", tools: tools)
       assert [%{} | _] = body[:tools]
+    end
+  end
+  # ── 5. The effort ladder reaches the gateways, not just the vendors ───────
+
+  describe "reasoning effort survives an OpenAI-compatible gateway" do
+    # `maybe_add_reasoning/3` was gated on `reasoning_model?/1`, which is three
+    # hardcoded vendor name-tables plus `String.contains?(name, "kimi")`. Every
+    # gateway this transport serves names its models `vendor/model`, so every
+    # one of those ids answered "no" — including `anthropic/claude-opus-5`,
+    # which is OpenRouter's DEFAULT model in `openai_compat_provider.ex`. The
+    # whole `Agent.Effort` ladder was inert on the out-of-the-box OpenRouter
+    # configuration, and the same predicate gates the 600s reasoning timeout,
+    # so those turns also kept the 120s non-reasoning one.
+    #
+    # `scratchpad.ex` documents the symptom as a fact to design around. It was
+    # a bug.
+    @gateway_reasoners [
+      "anthropic/claude-opus-5",
+      "anthropic/claude-sonnet-5",
+      "google/gemini-3.6-flash",
+      "openai/gpt-5.6-sol",
+      "deepseek/deepseek-v4-pro",
+      "x-ai/grok-4.5"
+    ]
+
+    setup do
+      Effort.set(:high)
+      :ok
+    end
+
+    test "a vendor-prefixed reasoning model is asked to reason" do
+      for model <- @gateway_reasoners do
+        assert {value, source} = OpenAICompat.reasoning_decision(model, [])
+
+        assert is_binary(value),
+               "#{model} is a reasoning model reached through a gateway; the effort ladder " <>
+                 "must not stop at the vendor prefix"
+
+        assert source in [:catalog, :name_heuristic]
+      end
+    end
+
+    test "the field actually lands in the request body" do
+      body =
+        OpenAICompat.build_stream_body(
+          "anthropic/claude-opus-5",
+          [%{role: "user", content: "hi"}],
+          [],
+          "https://openrouter.ai/api/v1"
+        )
+
+      assert body[:reasoning_effort] == "high"
+    end
+
+    test "the ladder is visible in the body — not one value at every tier" do
+      efforts =
+        for tier <- [:fast, :medium, :high, :xhigh, :ultra] do
+          Effort.set(tier)
+
+          OpenAICompat.build_stream_body(
+            "anthropic/claude-opus-5",
+            [%{role: "user", content: "hi"}],
+            [],
+            "https://openrouter.ai/api/v1"
+          )[:reasoning_effort]
+        end
+
+      assert Enum.all?(efforts, &is_binary/1)
+
+      assert length(Enum.uniq(efforts)) > 1,
+             "before this, all five tiers produced byte-identical OpenRouter requests " <>
+               "(no field at all); got #{inspect(efforts)}"
+    end
+
+    test "the 600s reasoning timeout follows the same answer" do
+      assert OpenAICompat.reasoning_model?("anthropic/claude-opus-5"),
+             "the reasoning HTTP timeout is gated on this predicate; a Claude reached " <>
+               "through OpenRouter thinks for minutes and was given 120s"
+    end
+
+    test "a model that does not reason still gets nothing" do
+      # The bar was not lowered, only the evidence widened. `reasoning_effort`
+      # on a non-reasoning model is a hard 400 on a strict gateway, not a
+      # degraded answer — the same asymmetry Bedrock respects for Nova.
+      assert {nil, :model_unsupported} =
+               OpenAICompat.reasoning_decision("llama-3.3-70b-versatile", [])
+
+      body =
+        OpenAICompat.build_stream_body(
+          "llama-3.3-70b-versatile",
+          [%{role: "user", content: "hi"}],
+          [],
+          "https://api.groq.com/openai/v1"
+        )
+
+      refute Map.has_key?(body, :reasoning_effort)
+    end
+
+    test "an explicit opt is honoured whatever the catalog thinks" do
+      # This branch is unchanged from before the catalog consult existed, so
+      # the widening cannot have cost an existing caller anything.
+      assert {"low", :opt} =
+               OpenAICompat.reasoning_decision("some-unknown-model", reasoning_effort: :low)
+    end
+
+    test "the catalog cannot VETO the name tables" do
+      # A Catalog `false` is third-party data that lags. Making it
+      # authoritative in the negative direction would be this file's own defect
+      # shape pointed the other way, so the two authorities are a union.
+      assert OpenAICompat.reasoning_model?("moonshotai/kimi-k2"),
+             "the kimi name rule exists because the catalog was wrong; it must survive"
+    end
+
+    test "the decision is announced at a level someone will see" do
+      Process.delete(:osa_compat_reasoning)
+
+      # `config/test.exs` pins the Logger at :warning, which drops the record
+      # BEFORE the capture handler sees it — so without this the assertion
+      # below would pass or fail on the test config rather than on the code.
+      prev = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: prev) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          OpenAICompat.build_stream_body(
+            "anthropic/claude-opus-5",
+            [%{role: "user", content: "hi"}],
+            [],
+            "https://openrouter.ai/api/v1"
+          )
+        end)
+
+      assert log =~ "reasoning_effort"
+      assert log =~ "[info]", "a fix that is also silent is not a fix"
+    end
+  end
+
+  # ── 6. The instrument built to stop this was itself silent ────────────────
+
+  describe "turn_start/turn_end record reasoning for the whole fleet" do
+    # `Observability.current_reasoning/1` had arms for :ollama, :anthropic and
+    # :bedrock and a `_ -> nil` catch-all — and `nil` on that field is
+    # DOCUMENTED as "the provider/model has no such setting". It was recorded
+    # for the ~19 compat-routed providers that DO have one. So a benchmark row
+    # from an OpenRouter run read `effort=ultra, reasoning=` — indistinguishable
+    # between the ladder being inert (which it was) and the ladder working.
+    test "every compat-routed provider reports a reasoning decision" do
+      Effort.set(:high)
+
+      for provider <- Registry.compat_providers() do
+        state = %{provider: provider, model: "anthropic/claude-opus-5"}
+
+        assert reported = Observability.current_reasoning(state),
+               "#{provider} is routed through OpenAICompat, which decides whether the " <>
+                 "request carries reasoning_effort. Recording nil there means 'no such " <>
+                 "setting', which is false."
+
+        assert reported =~ ~r/^(on|off):/
+      end
+    end
+
+    test "Google reports one too" do
+      assert reported = Observability.current_reasoning(%{provider: :google, model: "gemini-2.5-flash"})
+      assert reported =~ ~r/^on:/
+    end
+
+    test "the report names the rule, not just the value" do
+      Effort.set(:fast)
+
+      assert Observability.current_reasoning(%{
+               provider: :openrouter,
+               model: "llama-3.3-70b-versatile"
+             }) =~ "model_unsupported"
+    end
+  end
+
+  # ── 7. The same defect, unfixed at its twin site ──────────────────────────
+
+  describe "a fix applied at one of two entrances" do
+    # #6 in this file's history: `anthropic_prompt_cache?/2` guards on
+    # `is_binary(model)` and `opts[:model]` is nil on every non-CLI entry point.
+    # `Registry.resolved_model/2` was written to close that, applied at
+    # `normalize_message_content/3`, and NOT at `PromptCache.restructure/3` —
+    # the other consumer of the same predicate in the same pipeline.
+    test "PromptCache resolves the served model, not the named one" do
+      # The shape `Registry.normalize_message_content/3` hands on: a marked
+      # stable prefix block followed by the unmarked volatile tail.
+      messages = [
+        %{
+          role: "system",
+          content: [
+            %{
+              type: "text",
+              text: String.duplicate("stable prefix. ", 500),
+              cache_control: %{"type" => "ephemeral"}
+            },
+            %{type: "text", text: "the time is 12:00:00.123456"}
+          ]
+        },
+        %{role: "user", content: "hello"},
+        %{role: "assistant", content: "hi"},
+        %{role: "user", content: "again"}
+      ]
+
+      with_model = PromptCache.restructure(messages, {:compat, :openrouter}, model: "anthropic/claude-opus-5")
+      without_model = PromptCache.restructure(messages, {:compat, :openrouter}, [])
+
+      assert without_model == with_model,
+             "a caller that names no model — the compactor, the classifier, every " <>
+               "provider-fallback hop — reaches the same Claude and must get the same " <>
+               "cache structure"
+
+      refute without_model == messages,
+             "restructure/3 became a no-op whenever :model was absent from opts"
+    end
+
+    # #11: `function_exported?/3` answers false for a module not yet LOADED.
+    # `stream_capable?/1` was given `Code.ensure_loaded?` and the fallback-hop
+    # entrance — `do_try_stream_provider/4`, reached only from the provider
+    # fallback loop, i.e. only for modules this process has NOT touched yet —
+    # was left with the bare call.
+    #
+    # Asserted against the source rather than by purging a module: purging a
+    # provider out from under a live suite is a worse test than the bug.
+    test "the streaming entrance on the fallback hop is guarded too" do
+      src = File.read!("lib/optimal_system_agent/providers/registry.ex")
+
+      refute src =~ ~r/if function_exported\?\(module, :chat_stream/,
+             "both stream entrances must go through `stream_capable?/1`, which pairs " <>
+               "`Code.ensure_loaded?/1` with the export check"
+    end
+
+    test "a lost stream is announced, not just a working one" do
+      Process.delete(:osa_stream_downgrade)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Registry.report_stream_downgrade(OptimalSystemAgent.Providers.Cohere, :primary)
+        end)
+
+      assert log =~ "does not implement chat_stream"
+      assert log =~ "[warning]",
+             "the success case logged at :info and the loss said nothing at all"
+    end
+  end
+
+  # ── 8. Class-level: the shape, not the instances ──────────────────────────
+
+  describe "the class" do
+    @bare_fx_ratchet 43
+
+    # Worth more than any of the instance tests above. Twelve of the fixed
+    # defects were found one at a time; this one refuses the thirteenth
+    # occurrence of the SHAPE.
+    test "no NEW bare function_exported?/2,3 enters the tree" do
+      {out, 0} =
+        System.cmd(
+          "sh",
+          ["-c", ~s(grep -rn "function_exported?" lib --include='*.ex' | grep -vc "Code.ensure_loaded")],
+          cd: File.cwd!(),
+          stderr_to_stdout: true
+        )
+
+      count = out |> String.trim() |> String.to_integer()
+
+      assert count <= @bare_fx_ratchet, """
+      #{count} bare `function_exported?` calls, up from the reviewed baseline of #{@bare_fx_ratchet}.
+
+      `function_exported?/3` answers false for a module that has not been LOADED
+      yet, so a bare call is a capability question that silently answers "no"
+      under lazy code loading. It cost OSA a streaming provider
+      (`Registry.stream_capable?/1`) and a permission check on write tools
+      (`ToolExecutor.handler_hard_deny/1`, where it failed OPEN).
+
+      Pair every new call with `Code.ensure_loaded?/1`. If the site genuinely
+      fails closed and is harmless, lower this ratchet deliberately rather than
+      raising it.
+      """
+    end
+
+    # Every compat-routed provider bills on OpenAI's INCLUSIVE convention,
+    # because they are all parsed by `OpenAICompat.parse_usage/1`. The
+    # convention table was a hand-written list of atoms that had drifted:
+    # :cerebras, :sambanova, :hyperbolic, :lmstudio, :llamacpp and :miosa were
+    # all missing and fell through to Anthropic's disjoint convention — the 11x
+    # over-bill the reconciler exists to prevent.
+    test "no compat provider can silently acquire the wrong billing convention" do
+      usage = %{
+        input_tokens: 1000,
+        output_tokens: 10,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 900
+      }
+
+      for provider <- Registry.compat_providers() do
+        norm = Accounting.reconcile_prompt_slices(usage, provider)
+
+        assert norm.input_tokens == 100,
+               "#{provider} is parsed by OpenAICompat.parse_usage/1, whose input_tokens is " <>
+                 "INCLUSIVE of the cached slice. Left on the disjoint convention it bills " <>
+                 "the cached prefix twice."
+      end
+    end
+
+    # A provider that reports no usage is indistinguishable from one that used
+    # no tokens: both normalise to zero, both price at $0.00, and
+    # `max_budget_usd` silently stops being enforceable. Cohere and Replicate
+    # were both in that state.
+    test "a turn billed as zero because nothing was reported says so" do
+      Process.delete(:osa_unaccounted_provider)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Accounting.report_unaccounted(%{provider: :replicate, model: "x"}, %{})
+        end)
+
+      assert log =~ "no token usage"
+      assert log =~ "max_budget_usd"
+      assert log =~ "[warning]"
+    end
+
+    test "Cohere reports usage under the four key names anything reads" do
+      resp = %{"meta" => %{"tokens" => %{"input_tokens" => 120, "output_tokens" => 34}}}
+
+      assert %{input_tokens: 120, output_tokens: 34} = Cohere.extract_usage(resp)
+
+      assert Accounting.effective_input_tokens(Cohere.extract_usage(resp)) == 120,
+             "a number filed under any other key is invisible to pricing"
     end
   end
 end
