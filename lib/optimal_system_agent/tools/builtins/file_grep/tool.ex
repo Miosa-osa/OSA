@@ -40,29 +40,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Tool do
         "pattern" => %{"type" => "string", "description" => "Regex pattern to search for"},
         "path" => %{
           "type" => "string",
-          "description" => "File or directory to search in (default: current directory)"
+          "description" => "File or directory to search (default: cwd)"
         },
         "glob" => %{
           "type" => "string",
-          "description" => "File filter glob (e.g. '*.ex', '*.ts')"
+          "description" => "File filter glob, e.g. '*.ex'"
         },
         "case_insensitive" => %{
           "type" => "boolean",
-          "description" => "Case-insensitive search (default: false)"
+          "description" => "Case-insensitive search (default false)"
         },
         "context_lines" => %{
           "type" => "integer",
-          "description" => "Lines of context before and after each match"
+          "description" => "Lines of context around each match"
         },
         "output_mode" => %{
           "type" => "string",
           "enum" => ["content", "files_with_matches", "count"],
-          "description" =>
-            "Output mode: content (matching lines), files_with_matches (file paths only), count (match counts)"
+          "description" => "Result shape (default files_with_matches)"
         },
         "max_results" => %{
           "type" => "integer",
-          "description" => "Maximum matches per file (default: 50)"
+          "description" => "Max matches per file (default 50)"
         }
       },
       "required" => ["pattern"]

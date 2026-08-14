@@ -16,14 +16,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Prompt do
       )
 
     """
-    Search file contents for a regex pattern.
-
-    Usage:
-    - ALWAYS use file_grep for content search. NEVER use #{shell_name} with grep or rg.
-    - Supports full regex syntax (e.g., "log.*Error", "function\\\\s+\\\\w+")
-    - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")
-    - Output modes: 'content' shows matching lines, 'files' shows only file paths (default), 'count' shows match counts
-    - Use context parameter to see surrounding code lines
+    Search file contents for a regex pattern. ALWAYS use file_grep for content
+    search — NEVER #{shell_name} with grep or rg. Supports full regex syntax
+    (e.g. "log.*Error", "function\\\\s+\\\\w+").
     """
   end
 

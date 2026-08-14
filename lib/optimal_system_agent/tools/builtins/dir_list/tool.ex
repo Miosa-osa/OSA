@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Tool do
       "properties" => %{
         "path" => %{
           "type" => "string",
-          "description" => "Directory path to list (default: current directory)"
+          "description" => "Directory to list (default: cwd)"
         }
       },
       "required" => []

@@ -121,16 +121,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
   # ── Prompt ───────────────────────────────────────────────────────────────
 
   describe "Prompt.render/1" do
-    test "contains 'When to Use' section" do
-      assert Prompt.render([]) =~ "When to Use"
+    # These used to assert on markdown HEADINGS ("## When to Use"). The prompt
+    # was condensed to cut the static prefix, so the headings are gone and the
+    # guidance is prose. Assert the GUIDANCE instead — that is what the pins
+    # were protecting, and it survives a rewording of the section titles.
+    test "says what to delegate for" do
+      rendered = Prompt.render([])
+      assert rendered =~ "parallelizable"
+      assert rendered =~ "explore"
     end
 
-    test "contains 'When NOT to Use' section" do
-      assert Prompt.render([]) =~ "When NOT to Use"
+    test "says what NOT to delegate, and names the alternative" do
+      rendered = Prompt.render([])
+      assert rendered =~ "single-file"
+      # cross-tool reference — the model must be pointed at ask_user, not delegate
+      assert rendered =~ "ask_user"
     end
 
-    test "contains 'Writing the Prompt' section" do
-      assert Prompt.render([]) =~ "Writing the Prompt"
+    test "tells the model how to brief a subagent that cannot see the conversation" do
+      rendered = Prompt.render([])
+      assert rendered =~ "NOT seen this conversation"
+      assert rendered =~ "constraints"
+    end
+
+    test "carries the background/foreground contract" do
+      rendered = Prompt.render([])
+      assert rendered =~ "Background is the DEFAULT"
+      assert rendered =~ "do NOT poll"
+      assert rendered =~ "background=false"
     end
 
     test "contains 'Roles' section" do

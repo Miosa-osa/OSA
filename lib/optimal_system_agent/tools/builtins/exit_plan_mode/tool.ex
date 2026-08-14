@@ -30,8 +30,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Tool do
       "properties" => %{
         "plan" => %{
           "type" => "string",
-          "description" =>
-            "Summary of the plan to execute (logged for observability, shown to the user)"
+          "description" => "Full plan text, shown to the user for approval"
         }
       },
       "required" => []

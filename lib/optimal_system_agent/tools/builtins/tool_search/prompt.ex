@@ -19,13 +19,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   """
 
   @prompt_tail ~S"""
-   Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.
-
-  Result format: each matched tool appears as one <function>{"description": "...", "name": "...", "parameters": {...}}</function> line inside the <functions> block — the same encoding as the tool list at the top of this prompt.
+   Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. Matched tools' full JSONSchema definitions come back inside a <functions> block and are then callable like any other tool.
 
   Query forms:
-  - "select:Read,Edit,Grep" — fetch these exact tools by name
-  - "server:<name>" — list EVERY tool on one connected MCP server, unranked and uncapped
+  - "select:Read,Edit,Grep" — these exact tools by name
+  - "server:<name>" — EVERY tool on one connected MCP server, unranked and uncapped
   - "notebook jupyter" — keyword search, up to max_results best matches
   - "+slack send" — require "slack" in the name, rank by remaining terms
   """

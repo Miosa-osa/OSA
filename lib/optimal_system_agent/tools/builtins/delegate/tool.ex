@@ -57,30 +57,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
         "task" => %{
           "type" => "string",
           "description" =>
-            "Clear, specific description of the subtask to delegate. " <>
-              "Include all context the subagent needs — file paths, requirements, constraints. " <>
-              "The subagent has NO access to your conversation history."
+            "The subtask, self-contained: paths, requirements, constraints. " <>
+              "The subagent cannot see your conversation."
         },
         "tasks" => %{
           "type" => "array",
           "description" =>
-            "Optional fan-out: an array of subtasks to run in PARALLEL as a single wave. " <>
-              "Each item is an object with a required 'prompt' and an optional 'subagent_type' " <>
-              "(role) for that worker. When present, the top-level 'task' is the umbrella " <>
-              "description and these subtasks are dispatched concurrently, then their results " <>
-              "are synthesized. Omit for a single delegation.",
+            "Fan-out: subtasks run in PARALLEL as one wave, then synthesized. " <>
+              "'task' becomes the umbrella description. Omit for a single delegation.",
           "items" => %{
             "type" => "object",
             "required" => ["prompt"],
             "properties" => %{
               "prompt" => %{
                 "type" => "string",
-                "description" =>
-                  "Self-contained task for this worker — include all context it needs."
+                "description" => "Self-contained task for this worker."
               },
               "subagent_type" => %{
                 "type" => "string",
-                "description" => "Optional role/agent name for this worker (e.g. 'explorer')."
+                "description" => "Optional role for this worker."
               }
             }
           }
@@ -88,109 +83,84 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
         "name" => %{
           "type" => "string",
           "description" =>
-            "Stable teammate handle shown in the UI, e.g. 'smoke-e2e'. Rendered as @name " <>
-              "and used for the agent's id, its completion line (⏺ Teammate @name finished · 2h33m), " <>
-              "and @name addressing. Omit for an auto-numbered agent."
+            "Stable teammate handle shown as @name, e.g. 'smoke-e2e'. Omit to auto-number."
         },
         "role" => %{
           "type" => "string",
           "description" =>
-            "Agent role name (e.g., 'architect', 'backend', 'frontend', 'tester'). " <>
-              "Must match a loaded agent definition. Omit for a generic subagent."
+            "Agent role; must match a loaded definition. Omit for a generic subagent."
         },
         "subagent_type" => %{
           "type" => "string",
-          "description" =>
-            "Claude Code-compatible alias for role. Use the loaded agent name, " <>
-              "for example 'explorer' or 'planner'."
+          "description" => "Alias for role."
         },
         "tier" => %{
           "type" => "string",
           "enum" => Constants.tiers(),
           "description" =>
-            "Model tier — elite (strongest, slowest), specialist (balanced), " <>
-              "utility (fastest, cheapest). Defaults to the role's configured tier, or 'specialist'. " <>
-              "Note: utility is silently promoted to specialist — small models cannot reliably call tools."
+            "elite (strongest) / specialist (balanced) / utility (fastest, silently " <>
+              "promoted to specialist). Defaults to the role's tier."
         },
         "background" => %{
           "type" => "boolean",
           "description" =>
-            "Defaults to true: the delegation returns immediately and a " <>
-              "<task-notification> reaches you when it completes. Pass false only to " <>
-              "BLOCK until the agent returns — which also blocks the user, since " <>
-              "nothing they type can reach you while you are waiting inside a tool call."
+            "Default true. False BLOCKS you and the user until the agent returns."
         },
         "permissionMode" => %{
           "type" => "string",
           "enum" => ["default", "acceptEdits", "bypassPermissions", "plan", "read_only"],
-          "description" =>
-            "Claude Code-compatible permission mode override for the subagent. " <>
-              "default uses OSA subagent guardrails; plan/read_only prevents write tools."
+          "description" => "Subagent permission override. plan/read_only forbid write tools."
         },
         "maxTurns" => %{
           "type" => "integer",
-          "description" => "Claude Code-compatible alias for the subagent max iteration/turn cap."
+          "description" => "Subagent turn cap."
         },
         "model" => %{
           "type" => "string",
-          "description" => "Optional explicit model override for this subagent."
+          "description" => "Model override for this subagent."
         },
         "provider" => %{
           "type" => "string",
-          "description" => "Optional provider override for this subagent."
+          "description" => "Provider override for this subagent."
         },
         "cwd" => %{
           "type" => "string",
-          "description" =>
-            "Optional working directory for the subagent. Worktree isolation takes precedence."
+          "description" => "Working directory. Worktree isolation takes precedence."
         },
         "fork" => %{
           "type" => "boolean",
-          "description" =>
-            "Fork subagent with full parent conversation context. " <>
-              "The child inherits your conversation history for context-aware delegation."
+          "description" => "Give the subagent your full conversation history."
         },
         "resume_from_agent_id" => %{
           "type" => "string",
           "description" =>
-            "Seed this subagent with a PEER agent's accumulated context instead of your " <>
-              "own — sibling handoff for specialist chains (e.g. seed a fixer with a " <>
-              "debugger's findings). Give the agentId of a previously run/backgrounded " <>
-              "sibling (from a prior delegate call or task_wait result). Takes precedence " <>
-              "over 'fork'. If the peer has no saved transcript yet (still running), the " <>
-              "subagent starts fresh instead."
+            "Seed from a PEER agent's context instead of your own — sibling handoff. " <>
+              "Takes precedence over 'fork'; starts fresh if that peer is still running."
         },
         "isolation" => %{
           "type" => "string",
           "enum" => ["worktree"],
           "description" =>
-            "Run in an isolated git worktree — the agent gets its own copy " <>
-              "of the repo. Dirty worktrees are preserved for review unless merge_worktree " <>
-              "or discard_worktree is explicitly set."
+            "Run in an isolated git worktree. Dirty worktrees are preserved unless " <>
+              "merge_worktree or discard_worktree is set."
         },
         "merge_worktree" => %{
           "type" => "boolean",
-          "description" =>
-            "When using worktree isolation, explicitly merge the agent worktree back on success."
+          "description" => "Merge the agent's worktree back on success."
         },
         "discard_worktree" => %{
           "type" => "boolean",
-          "description" =>
-            "When using worktree isolation, discard dirty worktree changes instead of preserving them."
+          "description" => "Discard dirty worktree changes instead of preserving them."
         },
         "reconcile" => %{
           "type" => "boolean",
           "description" =>
-            "Fan-out only: after the parallel wave finishes, run one coordinator agent " <>
-              "that reads all workstream reports and reconciles them into a single integrated " <>
-              "deliverable (the all-hands closeout) — resolving conflicts and deduping overlap. " <>
-              "Defaults to false (plain concatenation of results)."
+            "Fan-out only: run a coordinator that reconciles all reports into one " <>
+              "deliverable. Default false (plain concatenation)."
         },
         "coordinator_role" => %{
           "type" => "string",
-          "description" =>
-            "Optional role/agent name for the reconcile coordinator (e.g. 'architect'). " <>
-              "Defaults to a generic coordinator. Only used when reconcile is true."
+          "description" => "Role for the reconcile coordinator. Only used when reconcile is true."
         }
       }
     }

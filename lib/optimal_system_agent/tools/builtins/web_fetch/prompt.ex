@@ -24,22 +24,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Prompt do
       )
 
     """
-    Fetches content from a URL and returns readable text. Returns cleaned text for HTML pages, \
-    pretty-printed JSON for API responses, and raw content for other types.
+    Fetches a URL and returns readable text: cleaned text for HTML pages, \
+    pretty-printed JSON for API responses, raw content otherwise.
 
-    Usage notes:
-      - The URL must be a fully-formed valid URL (scheme + host required).
-      - HTTPS URLs are required. HTTP is only allowed for localhost.
-      - Requests to private/internal IP addresses (RFC 1918, link-local, loopback) are blocked.
-      - DNS rebinding protection: hostnames are resolved and checked before the request is made.
-      - Up to #{OptimalSystemAgent.Tools.Builtins.WebFetch.Constants.max_redirects()} redirects are followed; each redirect target is validated.
-      - HTML pages have scripts/styles stripped and entities decoded before being returned.
-      - Results are truncated at `max_length` characters (default #{OptimalSystemAgent.Tools.Builtins.WebFetch.Constants.default_max_length()}).
-      - A successful result starts with the FINAL url (after redirects) and an `HTTP <status> <content-type>` line, then `---`, then the content.
-      - An error status (403/404/429/5xx), an empty body, or a bot-protection challenge page is returned as an ERROR naming the status and the reason — never as content. When you see one, fetch a different source rather than guessing at what the page said.
-      - This tool is read-only and does not modify any files.
-      - For GitHub URLs, prefer the `gh` CLI via shell_execute instead.
-      - To discover URLs to fetch, use `#{web_search_name}` first.
+    - HTTPS required; HTTP only for localhost. Private/internal IPs are blocked.
+    - A success starts with the FINAL url and an `HTTP <status> <content-type>` line, then `---`, then the content.
+    - An error status, empty body, or bot-protection page comes back as an ERROR, never as content — fetch a different source rather than guessing at what the page said.
+    - For GitHub URLs prefer the `gh` CLI via shell_execute. Use `#{web_search_name}` to discover URLs.
     """
   end
 

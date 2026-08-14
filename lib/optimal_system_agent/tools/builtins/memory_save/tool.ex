@@ -39,12 +39,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemorySave.Tool do
       "properties" => %{
         "content" => %{
           "type" => "string",
-          "description" => "The memory to save. Be specific and concise."
+          "description" => "The memory to save. Specific and concise."
         },
         "category" => %{
           "type" => "string",
-          "description" =>
-            "Category: decision, preference, pattern, lesson, context, or project. Auto-detected if omitted.",
+          "description" => "Category. Auto-detected if omitted.",
           "enum" => Constants.valid_categories()
         },
         "tags" => %{

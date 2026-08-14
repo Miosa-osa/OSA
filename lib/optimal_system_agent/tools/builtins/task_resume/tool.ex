@@ -56,9 +56,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskResume.Tool do
         "message" => %{
           "type" => "string",
           "description" =>
-            "Optional follow-up instruction for the resumed agent. It restarts " <>
-              "with its full prior transcript, so reference earlier findings freely. " <>
-              "Omit to have it continue its original task."
+            "Optional follow-up instruction. It restarts with its full prior " <>
+              "transcript; omit to continue the original task."
         }
       }
     }

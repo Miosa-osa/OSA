@@ -38,11 +38,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Tool do
       "properties" => %{
         "pattern" => %{
           "type" => "string",
-          "description" => "Glob pattern (e.g. '**/*.ex', 'lib/**/*.ex')"
+          "description" => "Glob pattern, e.g. '**/*.ex'"
         },
         "path" => %{
           "type" => "string",
-          "description" => "Base directory to search in (default: current directory)"
+          "description" => "Base directory (default: cwd)"
         }
       },
       "required" => ["pattern"]

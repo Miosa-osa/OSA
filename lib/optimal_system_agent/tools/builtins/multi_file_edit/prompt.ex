@@ -12,15 +12,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
 
     """
-    Apply edits across multiple files atomically. All edits succeed or none are applied.
+    Apply exact-string edits across multiple files atomically: all are validated
+    before any file is touched, so all succeed or none apply.
 
-    Usage:
-    - Provide a list of edits, each with `path`, `old_string`, and `new_string`.
-    - Validation runs on all edits before any file is touched — atomic guarantee.
-    - Relative paths resolve to ~/.osa/workspace/.
-    - ALWAYS use `#{file_read_name}` to read each file before editing.
+    - ALWAYS read each file with `#{file_read_name}` before editing it.
     - For single-file edits prefer `#{file_edit_name}`.
-    - Do NOT re-read the files to verify edits that succeeded. This tool errors when any edit does not apply, and nothing is written in that case.
+    - Relative paths resolve to ~/.osa/workspace/.
+    - Do NOT re-read to verify successful edits — this tool errors when any edit does not apply, and nothing is written then.
     """
   end
 

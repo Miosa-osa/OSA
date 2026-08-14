@@ -171,20 +171,31 @@ defmodule OptimalSystemAgent.Soul do
   Each variant gets its OWN persistent_term slot: the static base is
   process-wide cached and cannot vary per request from a single slot.
 
-  ## Measured sizes (v1.0.82)
+  ## Measured sizes
 
-      :full          30,901 tokens
-      :lite          24,375 tokens
-      :native_tools  16,059 tokens
+  On this machine, which carries one user rule (`~/.osa/rules/`) worth ~1.1k
+  tokens that a fresh install does not have:
 
-  `:lite` is NOT the small prompt its name suggests, and the numbers are
-  recorded here because the code around it used to claim it was ~4-6k — a
-  figure roughly five times off. Trimming the tool section removes about 6.5k
-  from `:full`; the remaining ~24k is the SYSTEM.md body itself, which `:lite`
-  does not touch. Anything reasoning about whether a small window can afford
-  this prompt must use `static_token_count/1`, never the name.
+      variant        v1.0.82   v1.0.98
+      :full          30,901    14,364
+      :lite          24,375    12,155
+      :native_tools  16,059     8,092
 
-  Note also that `:native_tools` is the SMALLEST variant, 8.3k below `:lite`.
+  The v1.0.98 column is the prompt-prefix cut: `SYSTEM_LEAN.md` condensed from
+  ~6.4k to ~4.2k tokens, `SOUL.md` de-duplicated against it, and every tool's
+  `description/0` and `parameters/0` prose shortened (which shrinks the native
+  schema array alongside the prose block). No instruction was dropped —
+  `test/optimal_system_agent/soul/lean_prompt_test.exs` pins the ones that live
+  in exactly one place.
+
+  `:lite` is still NOT the small prompt its name suggests; the numbers are
+  recorded here because the code around it once claimed ~4-6k, a figure five
+  times off. Trimming the tool section is most of what separates it from
+  `:full`; the rest is the SYSTEM template body, which `:lite` does not touch.
+  Anything reasoning about whether a small window can afford this prompt must
+  use `static_token_count/1`, never the name.
+
+  Note also that `:native_tools` is the SMALLEST variant.
   `Agent.Context.static_base_variant/2` still prefers `:lite` for local
   providers, deliberately: `:native_tools` omits the tool documentation on the
   assumption that the transport carries the schemas itself, which is not safe

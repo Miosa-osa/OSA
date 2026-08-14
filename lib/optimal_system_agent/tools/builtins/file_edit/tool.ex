@@ -50,15 +50,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Tool do
         },
         "old_string" => %{
           "type" => "string",
-          "description" => "Exact text to find (must be unique unless replace_all is true)"
+          "description" => "Exact text to find; unique unless replace_all"
         },
         "new_string" => %{
           "type" => "string",
-          "description" => "Text to replace it with"
+          "description" => "Replacement text"
         },
         "replace_all" => %{
           "type" => "boolean",
-          "description" => "Replace all occurrences (default: false)"
+          "description" => "Replace all occurrences (default false)"
         }
       },
       "required" => ["path", "old_string", "new_string"]

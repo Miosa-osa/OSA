@@ -23,17 +23,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Prompt do
       )
 
     """
-    Stop a running agent task by session ID.
-
-    Use when a background agent is taking too long, is stuck, or is no longer
-    needed. The cancellation is graceful — the agent's recorded task list (managed
-    by `#{task_write_name}`) is preserved; no task data is permanently lost.
-
-    To inspect an agent's status before stopping it, use `#{task_output_name}`.
-
-    After calling this tool the agent will not produce further output. If the
-    agent had already completed by the time this call is processed, the response
-    will indicate that rather than returning an error.
+    Stop a running agent task by session ID — use when a background agent is stuck, too
+    slow, or no longer needed. Cancellation is graceful: its `#{task_write_name}` task list is
+    preserved. The agent produces no further output; if it had already completed, the
+    response says so rather than erroring. Use `#{task_output_name}` to inspect status first.
     """
   end
 

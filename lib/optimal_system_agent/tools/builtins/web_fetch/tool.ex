@@ -39,15 +39,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Tool do
       "properties" => %{
         "url" => %{
           "type" => "string",
-          "description" =>
-            "The URL to fetch (must be https:// except for localhost). " <>
-              "HTTP URLs will be rejected unless the host is localhost/127.x/::1."
+          "description" => "URL to fetch. https:// required except for localhost."
         },
         "max_length" => %{
           "type" => "integer",
-          "description" =>
-            "Maximum characters to return (default #{Constants.default_max_length()}). " <>
-              "Content is truncated with a notice if it exceeds this limit."
+          "description" => "Max characters to return (default #{Constants.default_max_length()})"
         }
       },
       "required" => ["url"]

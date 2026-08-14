@@ -21,19 +21,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Prompt do
       )
 
     """
-    Fast file pattern matching tool that works with any codebase size.
-
-    Usage:
-    - Supports glob patterns like "**/*.js" or "src/**/*.ts"
-    - Returns matching paths sorted alphabetically; directories are suffixed with `/`
-    - Dotfiles and dot-directories ARE matched (`.env.example`, `.github/**`), so you
-      never need a separate `.*` pattern to see them
-    - Contents of `.git/` are omitted unless your pattern names `.git` explicitly
-    - Base directory comes from `path` (default: current directory). A `path` that does
-      not exist is reported as such — it is never silently reported as "no matches"
-    - Use this tool when you need to find files by name patterns
-    - ALWAYS use #{Constants.tool_name()} instead of #{shell_name} with find or ls
-    - Combine with #{read_name} to then read matched files
+    Fast file pattern matching at any codebase size, e.g. "**/*.js" or
+    "src/**/*.ts". Returns matching paths sorted alphabetically, directories
+    suffixed with `/`. Dotfiles and dot-directories ARE matched, so no separate
+    `.*` pattern is needed; `.git/` contents are omitted unless the pattern names
+    `.git`. A `path` that does not exist is reported as such, never as "no
+    matches". ALWAYS use #{Constants.tool_name()} rather than #{shell_name} with
+    find or ls, then #{read_name} to read the matches.
     """
   end
 

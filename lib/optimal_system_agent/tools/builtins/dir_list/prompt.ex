@@ -20,19 +20,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileGlob.Constants, :tool_name, "file_glob")
 
     """
-    Lists files and directories at the given path with type and size information.
-
-    Usage:
-    - The path parameter must be an absolute path, not a relative path.
-    - Omit path (or pass ".") to list the current working directory.
-    - First line is a header: `<directory> — <n> entries`; entries follow, one per line.
-    - Output format per entry: `<type>\\t<size>\\t<name>` where type is `dir`, `file`, or the raw fs type.
-    - Hidden entries (dotfiles) are always included — same as `#{file_glob_name}`.
-    - An empty directory reports itself explicitly; it never comes back as an empty result.
-    - Sizes use human-readable suffixes (B, K, M); directories always show `-`.
-    - To read a specific file use `#{file_read_name}`.
-    - To search for files matching a pattern use `#{file_glob_name}`.
-    - This tool does not recurse into subdirectories.
+    Lists files and directories at an absolute path (omit or pass "." for the
+    cwd). Does not recurse. Output is a `<directory> — <n> entries` header, then
+    one `<type>\\t<size>\\t<name>` line per entry (type `dir`/`file`/raw fs type;
+    size B/K/M, `-` for directories). Dotfiles are included; an empty directory
+    reports itself rather than returning empty. Use `#{file_read_name}` for a
+    file, `#{file_glob_name}` for a pattern.
     """
   end
 

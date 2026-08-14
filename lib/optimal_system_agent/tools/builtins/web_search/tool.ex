@@ -39,13 +39,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebSearch.Tool do
       "properties" => %{
         "query" => %{
           "type" => "string",
-          "description" => "Search query. Include the current year for time-sensitive topics."
+          "description" => "Search query. Include the current year if time-sensitive."
         },
         "limit" => %{
           "type" => "integer",
-          "description" =>
-            "Maximum number of results to return (default #{Constants.default_limit()}). " <>
-              "Capped at 10 by the underlying search engine."
+          "description" => "Max results (default #{Constants.default_limit()}, capped at 10)"
         }
       },
       "required" => ["query"]

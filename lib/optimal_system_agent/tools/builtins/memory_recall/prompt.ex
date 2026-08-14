@@ -22,22 +22,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemoryRecall.Prompt do
       )
 
     """
-    Search long-term memory for saved facts, decisions, preferences, and lessons.
-
-    Returns relevant memories ranked by relevance (vector similarity + recency).
-
-    ## WHEN TO RECALL:
-    - At session start — search for user preferences and project context
-    - Before making decisions — check for relevant past choices
-    - When user references something you might have saved before
-    - Before answering questions about past work or preferences
-
-    ## Search tips:
-    - Use natural language or keywords
-    - Filter by category (decision, preference, pattern, lesson, context, project)
-    - Limit results with the `limit` parameter (default 10)
-
-    Memories are saved with `#{save_name}` and persist across sessions.
+    Search long-term memory for facts, decisions, preferences, and lessons saved
+    with `#{save_name}`, ranked by vector similarity and recency. Recall at
+    session start for user preferences and project context, before decisions that
+    may have a precedent, and before answering about past work.
     """
   end
 

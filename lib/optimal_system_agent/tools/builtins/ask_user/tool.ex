@@ -39,22 +39,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Tool do
       "properties" => %{
         "question" => %{
           "type" => "string",
-          "description" => "The question to ask the user, as a single short sentence"
+          "description" => "The question, as a single short sentence"
         },
         "options" => %{
           "type" => "array",
           "items" => %{"type" => "string"},
-          "description" =>
-            "Optional multiple-choice answers. Provide 2-4 mutually exclusive choices, " <>
-              "the recommended one FIRST with a \"(Recommended)\" suffix, each a SHORT " <>
-              "label plus one line on the tradeoff. Do not include an \"Other\" " <>
-              "option — the client always renders a free-text row."
+          "description" => "2-4 exclusive choices, recommended first. No \"Other\"."
         },
         "header" => %{
           "type" => "string",
-          "description" =>
-            "Optional category chip for the question, at most 12 characters " <>
-              "(\"parser\", \"styling\", \"deploy\"). Omit when nothing short fits."
+          "description" => "Optional category chip, at most 12 characters"
         }
       },
       "required" => ["question"]

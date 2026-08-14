@@ -48,18 +48,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool do
       "properties" => %{
         "edits" => %{
           "type" => "array",
-          "description" =>
-            "List of edits to apply. Each edit requires path, old_string, and new_string.",
+          "description" => "Edits to apply, each with path, old_string, new_string",
           "items" => %{
             "type" => "object",
             "properties" => %{
               "path" => %{
                 "type" => "string",
-                "description" => "Path to the file. Relative paths resolve to ~/.osa/workspace/."
+                "description" => "File path; relative resolves to ~/.osa/workspace/"
               },
               "old_string" => %{
                 "type" => "string",
-                "description" => "Exact text to find and replace (first occurrence only)"
+                "description" => "Exact text to find (first occurrence only)"
               },
               "new_string" => %{
                 "type" => "string",

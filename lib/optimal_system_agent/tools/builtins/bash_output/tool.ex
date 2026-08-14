@@ -43,14 +43,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
       "properties" => %{
         "background_id" => %{
           "type" => "string",
-          "description" =>
-            "The background id returned by shell_execute when run_in_background was true."
+          "description" => "Id returned by shell_execute for a background command"
         },
         "kill" => %{
           "type" => "boolean",
-          "description" =>
-            "Optional. When true, terminate the background command (SIGTERM then " <>
-              "SIGKILL) and return its final output/status. Defaults to false."
+          "description" => "Terminate the command and return final output. Default false."
         }
       }
     }

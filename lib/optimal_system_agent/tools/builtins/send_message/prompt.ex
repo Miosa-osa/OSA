@@ -16,54 +16,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Prompt do
   def render(_opts \\ []) do
     """
     Send a message to another running agent — or to the user — by name or session ID.
+    `to` also accepts `"*"` to broadcast to all teammates (expensive — only when
+    everyone needs it).
 
-    The target receives the message injected into its context on the next reasoning
-    iteration. Messages addressed to the user appear immediately in their session.
-
-    ```json
-    {"to": "researcher", "message": "start on task #1"}
-    {"to": "user", "message": "the auth module has no tests at all — worth knowing before I keep going"}
-    ```
-
-    | `to` | |
-    |---|---|
-    | `"user"` | The session that delegated you — the human, via the lead agent |
-    | `"researcher"` | Teammate by name |
-    | `"*"` | Broadcast to all teammates (expensive — use only when everyone needs it) |
-    | `"session_..."` | Direct session ID |
-
-    Your plain text output is NOT visible to other agents — to communicate, you MUST
-    call this tool. Messages from teammates are delivered automatically; you don't
-    check an inbox. Refer to teammates by name, never by UUID.
+    Your plain text output is NOT visible to other agents — to communicate you MUST call
+    this tool. Incoming messages are delivered automatically; there is no inbox to check.
+    Refer to teammates by name, never by UUID.
 
     ## When to message the user
 
-    Speak only when NOT speaking costs them something. Three cases qualify:
+    Speak only when NOT speaking costs them something:
 
-      1. **A discovery that changes the shape of the task.** Not "this is hard" —
-         something that means the work they asked for is not the work that needs
-         doing.
-      2. **An ambiguity you are about to resolve by guessing.** Say which way you
-         are about to go, so they can stop you cheaply instead of reading it in
-         your report after you have built the wrong thing.
-      3. **A decision that is expensive to reverse later and cheap to redirect
-         now.** Schema, file layout, a dependency, a migration.
+      1. A discovery that changes the shape of the task — what they asked for is not
+         what needs doing.
+      2. An ambiguity you are about to resolve by guessing — say which way you are
+         going, so they can stop you cheaply.
+      3. A decision expensive to reverse and cheap to redirect now — schema, file
+         layout, a dependency, a migration.
 
-    Never for progress. Never per-tool. Never "I started" or "I'm on step 3".
-    Never anything that will still be true and still be readable in your final
-    report — the report is read in full, so everything else belongs there.
-
-    If you are unsure whether it qualifies, it does not. You are interrupting a
-    conversation between the user and someone else.
+    Never for progress, never per-tool, never anything still true in your final report.
+    If you are unsure it qualifies, it does not.
 
     ## Budget
 
-    #{Constants.max_messages_per_run()} messages per run, hard, with at least
-    #{div(Constants.min_spacing_ms(), 1000)}s between them and none in the first
-    #{div(Constants.warmup_ms(), 1000)}s. Messages are cut at
-    #{Constants.max_message_chars()} characters, so lead with the finding — one
-    sentence, no preamble, no restating your assignment. Spend the budget the way
-    you would spend an interruption in person.
+    #{Constants.max_messages_per_run()} messages per run, hard; at least #{div(Constants.min_spacing_ms(), 1000)}s apart and none in the first #{div(Constants.warmup_ms(), 1000)}s.
+    Cut at #{Constants.max_message_chars()} characters — lead with the finding, one sentence, no preamble.
     """
   end
 end

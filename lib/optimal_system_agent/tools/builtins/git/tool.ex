@@ -49,17 +49,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Tool do
       "properties" => %{
         "command" => %{
           "type" => "string",
-          "description" =>
-            "The git subcommand to run (e.g. status, diff, log, add, commit, branch, checkout, stash)"
+          "description" => "Git subcommand, e.g. status, diff, log, add, commit"
         },
         "args" => %{
           "type" => "string",
-          "description" => "Additional arguments for the git subcommand. Optional."
+          "description" => "Additional flags and arguments. Optional."
         },
         "path" => %{
           "type" => "string",
-          "description" =>
-            "Directory to run the command in. Defaults to ~/.osa/workspace. Optional."
+          "description" => "Working directory. Defaults to ~/.osa/workspace."
         }
       },
       "required" => ["command"]

@@ -21,16 +21,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileEdit.Constants, :tool_name, "file_edit")
 
     """
-    Writes a file to the local filesystem.
+    Writes a file to the local filesystem, overwriting any file already at that path.
 
-    Usage:
-    - This tool will overwrite the existing file if there is one at the provided path.
-    - If this is an existing file, you MUST use `#{read_name}` first to read the file's contents. This tool will fail if you did not read the file first.
-    - Prefer `#{edit_name}` for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.
-    - Do NOT re-read the file to verify a write that succeeded. This tool errors when the write fails, so a successful result already means the content is on disk.
-    - NEVER create documentation files (*.md) or README files unless explicitly requested by the user.
-    - Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
-    - Relative paths resolve to ~/.osa/workspace/. Absolute paths and ~ paths also accepted.
+    - For an existing file you MUST `#{read_name}` it first; this tool fails otherwise.
+    - Prefer `#{edit_name}` for modifying existing files; use this only for new files or full rewrites.
+    - Do NOT re-read to verify a successful write.
+    - NEVER create *.md or README files unless explicitly requested.
+    - Only use emojis if the user explicitly requests it.
+    - Relative paths resolve to ~/.osa/workspace/; absolute and ~ paths also work.
     """
   end
 

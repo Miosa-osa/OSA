@@ -23,19 +23,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskResume.Prompt do
       )
 
     """
-    Resume a paused, stopped, or backgrounded agent task by its agent id.
-
-    Use to continue a teammate that was cancelled with `#{task_stop_name}`, or a
-    background/parallel run that finished but needs another pass. The prior run's
-    task and a tail of its transcript are re-seeded so the resumed agent picks up
-    with context. The resumed agent runs in the background and reports back on
-    completion.
-
-    To inspect an agent's status or stored result first, use `#{task_output_name}`.
-
-    If the agent is still actively running, this is a no-op and the response says
-    so. If no run is known for the id, the response indicates that rather than
-    returning an error.
+    Resume a paused, stopped, or backgrounded agent task by its agent id — a teammate
+    cancelled with `#{task_stop_name}`, or a finished background run needing another pass. The
+    prior task and a transcript tail are re-seeded; it runs in the background and reports
+    on completion. No-op if it is still running; an unknown id returns a message, not an
+    error. Use `#{task_output_name}` to inspect status first.
     """
   end
 

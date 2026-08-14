@@ -52,13 +52,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool do
       "properties" => %{
         "query" => %{
           "type" => "string",
-          "description" =>
-            ~S|Query to find deferred tools. Use "select:<tool_name>" for direct selection, or keywords to search. Examples: "select:Read,Edit,Grep" · "notebook jupyter" · "+slack send"|
+          "description" => "Deferred-tool query; see the query forms above"
         },
         "max_results" => %{
           "type" => "integer",
-          "description" =>
-            "Maximum number of results to return (default: #{Constants.default_max_results()})"
+          "description" => "Max results (default #{Constants.default_max_results()})"
         }
       },
       "required" => ["query"]

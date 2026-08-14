@@ -31,8 +31,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Tool do
       "properties" => %{
         "reason" => %{
           "type" => "string",
-          "description" =>
-            "Optional brief description of why plan mode is being entered (e.g. 'multi-step refactor')"
+          "description" => "Brief reason for entering plan mode. Optional."
         }
       },
       "required" => []

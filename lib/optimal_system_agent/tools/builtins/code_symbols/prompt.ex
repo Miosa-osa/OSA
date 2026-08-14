@@ -9,13 +9,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
 
     """
-    List functions, classes, and modules defined in a source file.
-
-    Usage:
-    - The path parameter must be an absolute path.
-    - Supported languages: Elixir, Python, JavaScript/TypeScript, Go, Rust, Ruby, Java/Kotlin.
-    - Use the `type` parameter to filter by symbol kind: "function", "class", or "module".
-    - For full file contents use `#{file_read_name}` instead.
+    List functions, classes, and modules defined in a source file. `path` must be absolute.
+    Languages: Elixir, Python, JavaScript/TypeScript, Go, Rust, Ruby, Java/Kotlin.
+    For full file contents use `#{file_read_name}` instead.
     """
   end
 

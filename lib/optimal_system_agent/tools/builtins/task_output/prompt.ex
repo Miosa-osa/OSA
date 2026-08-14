@@ -23,18 +23,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Prompt do
       )
 
     """
-    Get the output and status of a running or completed agent task.
+    Get the output and status of a running or completed agent task — status, iteration
+    count, and token usage. An agent that already completed or never started yields a
+    descriptive message, not an error.
 
-    Use to check on background agents or retrieve their results. The response
-    includes the agent's current status, iteration count, and token usage when
-    the agent is still running.
-
-    Related tools:
-    - `#{task_write_name}` — inspect or update the agent's structured task list
-    - `#{task_stop_name}` — cancel the agent if it is no longer needed
-
-    If the agent has already completed or was never started, this tool returns
-    a descriptive message rather than an error.
+    Related: `#{task_write_name}` (its task list), `#{task_stop_name}` (cancel it).
     """
   end
 

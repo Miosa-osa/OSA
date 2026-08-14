@@ -165,10 +165,9 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   defp native?(opts), do: Keyword.get(opts, :native_schema_names) != nil
 
   defp native_preamble do
-    "Your tools are supplied with this request as structured tool definitions — " <>
-      "each one carries its full name, description, and parameter schema. Read them " <>
-      "there; they are not repeated here. Anything written below is guidance that " <>
-      "the schemas do not cover."
+    "Your tools ship with this request as structured tool definitions carrying " <>
+      "name, description, and parameter schema. Read them there. Below is only " <>
+      "guidance the schemas do not cover."
   end
 
   # ── MCP catalog ───────────────────────────────────────────────────────────
