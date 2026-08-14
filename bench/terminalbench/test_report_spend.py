@@ -129,5 +129,85 @@ class TestSpendReconciliation(unittest.TestCase):
         self.assertIsNone(fixed["cost_usd"])
 
 
+class TestCacheHitRate(unittest.TestCase):
+    """The hit rate had no denominator until a route actually cached.
+
+    `Loop.Accounting` subtracts the cached overlap back out of `input_tokens`
+    on every `{:compat, _}` route, so `tokens_in` is the UNCACHED input alone.
+    `cache_tokens / tokens_in` therefore is not a rate at all — it only looked
+    like one while it was pinned at 0 or None on Ollama, which reports no cache
+    counter. The figures below are real frames from the first Anthropic arm.
+    """
+
+    @staticmethod
+    def _rows(read, write, tin, tout=1_000):
+        return [
+            {
+                "task_name": "t",
+                "resolved": True,
+                "tokens_in": tin,
+                "tokens_out": tout,
+                "tokens_cache": (read or 0) + (write or 0) or None,
+                "tokens_cache_read": read,
+                "tokens_cache_write": write,
+                "cost_usd": 1.0,
+                "wall_clock_s": 1.0,
+                "agent_setup_s": 1.0,
+                "agent_exec_s": 1.0,
+                "osa_boot_s": 1.0,
+                "turns": 1,
+                "tool_calls": 1,
+                "self_inflicted": {},
+                "failure_reason": None,
+                "fault_owner": None,
+            }
+        ]
+
+    def _agg(self, rows):
+        return report.build(config={"run_id": "t", "dataset_size": 89}, rows=rows)[
+            "aggregate"
+        ]
+
+    def test_a_cached_run_reports_a_rate_between_0_and_1(self):
+        # One measured turn: 477 uncached input, 32,577 cache reads, 150 writes.
+        # The old formula published 32,727/477 = 6,861%.
+        a = self._agg(self._rows(read=32_577, write=150, tin=477))
+        self.assertLessEqual(a["cache_hit_rate"], 1.0)
+        self.assertAlmostEqual(a["cache_hit_rate"], 32_577 / (477 + 32_577 + 150), 4)
+        self.assertGreater(a["cache_hit_rate"], 0.9)
+
+    def test_writes_are_not_counted_as_hits(self):
+        """A run that re-writes its whole prefix every turn has hit nothing."""
+        a = self._agg(self._rows(read=0, write=30_000, tin=500))
+        self.assertEqual(a["cache_hit_rate"], 0.0)
+        self.assertEqual(a["cache_creation_tokens_total"], 30_000)
+
+    def test_no_cache_counter_stays_none_rather_than_zero(self):
+        """Ollama reports neither counter; that is absence, not a 0% hit rate."""
+        a = self._agg(self._rows(read=None, write=None, tin=2_821_177))
+        self.assertIsNone(a["cache_hit_rate"])
+
+    def test_input_per_task_counts_cache_reads_as_input(self):
+        """A cache read is input the model saw and was billed 0.1x for.
+
+        Excluding it put the first Anthropic arm at 33,849 input tokens/task
+        against a field that publishes 0.7-1.3M — a 25x flattery, purely from
+        the denominator. `bench/report/loader.py` has always summed the three.
+        """
+        a = self._agg(self._rows(read=2_320_315, write=77_815, tin=101_547))
+        self.assertAlmostEqual(a["input_tokens_per_task"], 2_499_677.0)
+        self.assertEqual(a["uncached_input_tokens_total"], 101_547)
+
+    def test_in_out_ratio_uses_the_same_numerator_as_input_per_task(self):
+        a = self._agg(self._rows(read=900, write=0, tin=100, tout=100))
+        self.assertAlmostEqual(a["input_tokens_per_task"], 1_000.0)
+        self.assertAlmostEqual(a["in_out_ratio"], 10.0)
+
+    def test_read_and_write_are_published_separately(self):
+        a = self._agg(self._rows(read=32_577, write=150, tin=477))
+        self.assertEqual(a["cache_read_tokens_total"], 32_577)
+        self.assertEqual(a["cache_creation_tokens_total"], 150)
+
+
 if __name__ == "__main__":
     unittest.main()

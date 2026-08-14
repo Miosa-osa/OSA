@@ -265,6 +265,14 @@ def _reconcile_spend(trial_dir: Path, agent_result: dict, meta: dict) -> dict:
         "tokens_cache": cache_total
         if (cache_r is not None or cache_w is not None) and cache_total
         else agent_result.get("n_cache_tokens"),
+        # READ and WRITE kept apart, because they are different events and only
+        # one of them is a hit. A read is a prefix that was already resident; a
+        # write is a miss that got stored, billed at 1.25x input rather than
+        # 0.1x. Collapsing them into one "cache tokens" figure — which is all
+        # this reader used to keep — makes the hit rate unrecoverable and hides
+        # a run that re-wrote its prefix every turn behind a run that reused it.
+        "tokens_cache_read": cache_r,
+        "tokens_cache_write": cache_w,
         "cost_usd": _max_num(
             agent_result.get("cost_usd"),
             spend.get("tree_cost_usd"),
@@ -361,6 +369,11 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
     tok_in = _total(r["tokens_in"] for r in rows)
     tok_out = _total(r["tokens_out"] for r in rows)
     tok_cache = _total(r["tokens_cache"] for r in rows)
+    tok_cache_r = _total(r.get("tokens_cache_read") for r in rows)
+    tok_cache_w = _total(r.get("tokens_cache_write") for r in rows)
+    #: Everything sent in, at any billing rate. The denominator for both the
+    #: hit rate and input-tokens/task; see those keys for why.
+    prompt_tok = (tok_in or 0) + (tok_cache_r or 0) + (tok_cache_w or 0) or None
     cost = _total(r["cost_usd"] for r in rows)
     n_scoreable = n - len(harness_faults)
     declared_size = config.get("dataset_size") or 0
@@ -410,19 +423,51 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         # not per-solved-task, on purpose: the denominator must not move when
         # the pass rate moves, or a change that solves fewer tasks looks like a
         # cost win.
-        "input_tokens_per_task": round(tok_in / n, 1) if tok_in and n else None,
-        "output_tokens_per_task": round(tok_out / n, 1) if tok_out and n else None,
-        "in_out_ratio": (
-            round(tok_in / tok_out, 1) if tok_in and tok_out else None
+        # Uncached input + cache reads + cache writes: every token sent in.
+        # A cache read is input the model SAW and was billed for (at 0.1x), so
+        # excluding it flatters a cached harness on token count — here by 25x,
+        # which would have put us at 34k input tokens/task against a field that
+        # publishes 0.7-1.3M. `bench/report/loader.py` has always summed the
+        # three; this is the same definition, so the two layers agree.
+        "input_tokens_per_task": (
+            round(prompt_tok / n, 1) if prompt_tok and n else None
         ),
-        # Harbor's own `n_cache_tokens`, as a fraction of input. Every adapter
-        # in the field parses cache_read separately and reports this; a value
-        # of 0.0 with a non-null denominator is a real finding, not missing
-        # data. `None` means the adapter reported nothing at all, which is a
-        # different thing and must not be rendered as zero.
+        "output_tokens_per_task": round(tok_out / n, 1) if tok_out and n else None,
+        # Same numerator as input_tokens_per_task, or the ratio would be quoted
+        # against a different denominator than the field's 56-85:1.
+        "in_out_ratio": (
+            round(prompt_tok / tok_out, 1) if prompt_tok and tok_out else None
+        ),
+        # Uncached input alone, kept separate: it is the figure that actually
+        # shrinks when caching works, and collapsing it into the total above
+        # would hide that.
+        "uncached_input_tokens_total": tok_in,
+        # Cache accounting. Every adapter in the field parses cache_read
+        # separately and reports a hit rate; a value of 0.0 with a non-null
+        # denominator is a real finding, not missing data. `None` means the
+        # adapter reported nothing at all, which is a different thing and must
+        # not be rendered as zero.
+        #
+        # The DENOMINATOR is the whole prompt, not the uncached remainder.
+        # `Loop.Accounting` subtracts the cached overlap back out of
+        # `input_tokens` for every `{:compat, _}` route (an OpenAI-shaped
+        # gateway reports `prompt_tokens` inclusive of its cached slice), so
+        # `tokens_in` here is the UNCACHED input alone. Dividing cache tokens by
+        # it was only ever ~0 or ~None while nothing cached; the first run that
+        # actually hit cache — 477 uncached input against 32,577 cache reads on
+        # a single turn — would have published a "hit rate" of 6,800%.
+        #
+        # Numerator is READS only. A write is a miss that got stored: billed at
+        # 1.25x input, not 0.1x. Counting writes as hits would score a run that
+        # re-writes its prefix every turn — the exact pathology this column
+        # exists to catch — as a perfect cache.
         "cache_tokens_total": tok_cache,
+        "cache_read_tokens_total": tok_cache_r,
+        "cache_creation_tokens_total": tok_cache_w,
         "cache_hit_rate": (
-            round(tok_cache / tok_in, 4) if tok_cache is not None and tok_in else None
+            round(tok_cache_r / prompt_tok, 4)
+            if tok_cache_r is not None and prompt_tok
+            else None
         ),
         "cost_usd_per_task": round(cost / n, 4) if cost is not None and n else None,
         "turns_mean": _mean(r["turns"] for r in rows),
@@ -539,17 +584,21 @@ def summary_md(results: dict) -> str:
         f"| agent setup mean (install OSA) | {_fmt(a['agent_setup_mean_s'], ' s')} |",
         f"| agent exec mean | {_fmt(a['agent_exec_mean_s'], ' s')} |",
         f"| OSA boot mean (in container) | {_fmt(a['osa_boot_mean_s'], ' s')} |",
-        f"| tokens in | {_fmt(a['tokens_in_total'])} |",
+        f"| tokens in (uncached only) | {_fmt(a['tokens_in_total'])} |",
         f"| tokens out | {_fmt(a['tokens_out_total'])} |",
         f"| tokens / solved task | {_fmt(a['tokens_per_resolved'])} |",
         f"| cost total | {_fmt(a['cost_usd_total'], ' USD')} |",
-        f"| **input tokens / task** | {_fmt(a['input_tokens_per_task'])} |",
+        f"| **input tokens / task** (incl. cache reads) | "
+        f"{_fmt(a['input_tokens_per_task'])} |",
         f"| **in:out ratio** | {_fmt(a['in_out_ratio'], ':1')} |",
         f"| **cache hit rate** | "
         + ("n/a (adapter reported no cache counter)"
            if a["cache_hit_rate"] is None
-           else f"{a['cache_hit_rate'] * 100:.1f}%")
+           else f"{a['cache_hit_rate'] * 100:.1f}% "
+                f"(reads {_fmt(a.get('cache_read_tokens_total'))} of "
+                f"{_fmt((a['tokens_in_total'] or 0) + (a.get('cache_read_tokens_total') or 0) + (a.get('cache_creation_tokens_total') or 0))} prompt tokens)")
         + " |",
+        f"| cache writes (billed 1.25x) | {_fmt(a.get('cache_creation_tokens_total'))} |",
         f"| **$ / task** | {_fmt(a['cost_usd_per_task'], ' USD')} |",
         f"| turns mean / task | {_fmt(a['turns_mean'])} |",
         f"| tool calls mean / task | {_fmt(a['tool_calls_mean'])} |",
