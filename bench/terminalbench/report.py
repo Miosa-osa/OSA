@@ -18,6 +18,7 @@ owners, and pooling them is how a harness ends up measuring nothing.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -50,6 +51,19 @@ HARNESS_FAULTS = {
     # Every harness-vs-model split published before the `owner` field existed
     # was computed with OSA's own faults credited to the model.
     "osa_internal_error",
+    # A task the model failed while OSA was refusing tool calls on paths inside
+    # the session's OWN workspace. `Permissions.denial_fault_owner/3` stamps
+    # `fault_owner: :osa` on exactly those (and deliberately on nothing else --
+    # a refused `/etc/shadow` is the boundary working), and the stamp rides out
+    # on both the `tool_call` phase-`end` and the `tool_result` frames.
+    #
+    # It was stamped and then not read. The whole reason the stamp exists is
+    # that a denial is a tool RESULT, not a turn error, so it never reached
+    # `_failure_reason` -- the run in which 142 denials drove one task to shuttle
+    # files with `cp` and another to instruct a headless benchmark to type
+    # `/add-dir /app` reported a harness fault rate of 0.0%. Reading the stamp
+    # here is what closes that loop.
+    "osa_workspace_denied",
 }
 
 
@@ -76,11 +90,20 @@ def _seconds(a: str | None, b: str | None) -> float | None:
         return None
 
 
-def _failure_reason(reward: float | None, exc: dict | None, meta: dict) -> str:
+def _failure_reason(
+    reward: float | None, exc: dict | None, meta: dict, events: dict | None = None
+) -> str:
     """One canonical reason per task, most-specific-first.
 
     Ordering matters: a trial that blew up in Harbor is reported as a harness
     exception even though its (absent) reward also reads as a plain failure.
+
+    `events` carries the per-episode counters from `_scan_events`. It only ever
+    RE-LABELS a task that already failed: a passing task is `resolved` no matter
+    how much OSA got in its own way, because the verifier is the authority on
+    whether the work got done. The obstruction on a passing task is still
+    reported -- as `osa_tool_faults` in its row and in the aggregate -- rather
+    than being allowed to move a green result into the harness bucket.
     """
     if reward is not None and reward >= 1.0:
         return ""
@@ -127,6 +150,13 @@ def _failure_reason(reward: float | None, exc: dict | None, meta: dict) -> str:
             return "turn_error_unattributed"
         return "provider_error"
     if status == "ok":
+        # A run that OSA obstructed is not a measurement of the model. This is
+        # checked BEFORE `completed_but_wrong`, because `completed_but_wrong` is
+        # a verdict on the model's competence and it is not one we are entitled
+        # to reach on an episode where our own path policy refused calls inside
+        # the workspace.
+        if (events or {}).get("osa_tool_faults"):
+            return "osa_workspace_denied"
         if not meta.get("osa_tool_calls"):
             # Ran to completion having never touched the machine. Terminal-Bench
             # grades container state, so this is an answer-shaped non-attempt.
@@ -188,6 +218,125 @@ def _rescan_serve_log(trial_dir: Path) -> tuple[dict, dict] | None:
     return counts, samples
 
 
+#: Result text of a tool call that OSA refused on path grounds. Kept broader
+#: than `Permissions`' own marker list on purpose: this counter is the *total*
+#: denial pressure on the episode, including the legitimate refusals, and it is
+#: reported next to -- never merged into -- the `fault_owner` split, which is
+#: the narrow OSA-at-fault subset.
+_DENIAL_RX = re.compile(
+    r"Permission denied|Access denied|outside allowed|not an allowed path"
+    r"|is not permitted|blocked by permission",
+    re.I,
+)
+
+#: The workaround signature. A headless benchmark episode cannot type a slash
+#: command, so an agent emitting `/add-dir` has concluded its own workspace is
+#: unreachable and is asking a human that is not there to fix it. Every
+#: occurrence is a self-report that the container fix did not land.
+_ADD_DIR_RX = re.compile(r"/add-dir\b")
+
+#: Tools whose call is a WRITE to the filesystem. Counted because the `cp`
+#: shuttle the denial bug forced (write to an allowed dir, then shell-copy it
+#: into place) inflates this number, so it falls when the bug is really gone.
+_WRITE_TOOLS = {
+    "file_write", "file_edit", "multi_file_edit", "file_transform",
+    "notebook_edit", "task_write",
+}
+
+
+def _scan_events(trial_dir: Path) -> dict:
+    """Per-episode counters that only the raw SSE log can answer.
+
+    Four things the trial-level `result.json` cannot tell you and the aggregate
+    was published without:
+
+      * `osa_tool_faults`   -- tool calls OSA itself refused on a path inside
+        the session workspace, read from the `fault_owner` stamp on the
+        `tool_call` (phase `end`) and `tool_result` frames. De-duplicated by
+        `tool_call_id`, because the two frames describe ONE call and counting
+        both would double every fault.
+      * `denials`           -- every path refusal the model saw, at fault or not.
+      * `add_dir_mentions`  -- the give-up signature.
+      * `write_ops` / `peak_context_tokens` -- the shape of the workaround.
+    """
+    path = trial_dir / "agent" / "osa-events.jsonl"
+    out = {
+        "osa_tool_faults": None,
+        "osa_tool_fault_tools": {},
+        "denials": None,
+        "denial_samples": [],
+        "add_dir_mentions": None,
+        "write_ops": None,
+        "peak_context_tokens": None,
+        "context_window": None,
+    }
+    if not path.exists():
+        return out
+
+    fault_ids: set[str] = set()
+    fault_tools: dict[str, int] = {}
+    denials = 0
+    denial_samples: list[str] = []
+    add_dir = 0
+    writes = 0
+    peak = 0
+    window = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if _ADD_DIR_RX.search(line):
+                    add_dir += 1
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type") or ev.get("_event")
+
+                # The stamp rides on both frames of the same call. Key on the
+                # id so one refusal counts once.
+                if etype in ("tool_call", "tool_result"):
+                    owner = ev.get("fault_owner")
+                    if isinstance(owner, str) and owner.lstrip(":") == "osa":
+                        cid = ev.get("tool_call_id") or f"{etype}:{len(fault_ids)}"
+                        if cid not in fault_ids:
+                            fault_ids.add(cid)
+                            name = ev.get("name") or "?"
+                            fault_tools[name] = fault_tools.get(name, 0) + 1
+
+                if etype == "tool_result":
+                    text = str(ev.get("result") or "")
+                    if _DENIAL_RX.search(text):
+                        denials += 1
+                        if len(denial_samples) < 5:
+                            denial_samples.append(
+                                f"{ev.get('name')}: {text.strip()[:220]}"
+                            )
+                elif etype == "tool_call":
+                    if ev.get("phase") in ("start", None) and ev.get("name") in _WRITE_TOOLS:
+                        writes += 1
+                elif etype == "context_pressure":
+                    est = ev.get("estimated_tokens")
+                    if isinstance(est, (int, float)):
+                        peak = max(peak, int(est))
+                    mx = ev.get("max_tokens")
+                    if isinstance(mx, (int, float)):
+                        window = int(mx)
+    except OSError:
+        return out
+
+    out.update(
+        osa_tool_faults=len(fault_ids),
+        osa_tool_fault_tools=dict(sorted(fault_tools.items(), key=lambda kv: -kv[1])),
+        denials=denials,
+        denial_samples=denial_samples,
+        add_dir_mentions=add_dir,
+        write_ops=writes,
+        peak_context_tokens=peak or None,
+        context_window=window,
+    )
+    return out
+
+
 def _max_num(*vals):
     """Largest readable number among cumulative readings of one counter."""
     nums = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
@@ -195,18 +344,42 @@ def _max_num(*vals):
 
 
 def _last_frame_spend(trial_dir: Path) -> dict:
-    """Cumulative cost from the LAST `cost_update` frame in the raw event log.
+    """Spend re-derived from the raw `cost_update` frames.
 
-    The event stream is the one record of a run that no writer can lag: each
-    `cost_update` carries the session-to-date totals as of that round-trip, and
-    the final frame therefore includes the closing answer that the spend sidecar
-    could miss. Cheap to scan (these logs are hundreds of KB) and absent on runs
-    that kept no raw log, in which case this contributes nothing.
+    Returns the LAST frame (whose `tree_cost_usd` / `session_cost_usd` are
+    session-to-date cumulative) with three extra keys holding the SUM of the
+    per-turn `usage` blocks: `_sum_input_tokens`, `_sum_output_tokens`,
+    `_sum_cache_read` / `_sum_cache_creation`.
+
+    Two different shapes in one frame, and mixing them up would be a 100x error
+    either way: `tree_cost_usd` is cumulative, `usage` is that round-trip alone.
+    Summing `usage` across frames is exactly how the driver builds the
+    `osa_usage_sum` it writes into telemetry -- verified on 15 trials across two
+    runs, where the sum reproduces the telemetry figure to the token.
+
+    ## Why sum here when the driver already did
+
+    Because the driver only writes telemetry if it survives to write it. A trial
+    Harbor kills on `AgentTimeoutError` leaves `agent_result` entirely null, and
+    the task then contributed ZERO tokens to a total whose denominator still
+    counted it. Measured: `path-tracing` timed out at 1800s having actually
+    burned 17.46M input tokens and $10.70 -- the single most expensive task in
+    the probe set -- and its absence pulled the published `input_tokens/task`
+    down by ~20% while the task still scored a pass. An unmeasured expensive
+    task that silently reads as free is the exact failure mode this reporter
+    exists to prevent, so the raw log is summed here as a fallback of record.
+
+    The values join `_reconcile_spend`'s `max` reconciliation rather than
+    overriding anything: on a trial that did write telemetry the two agree
+    exactly, so this is a no-op there and a recovery only where it is needed.
     """
     path = trial_dir / "agent" / "osa-events.jsonl"
     if not path.exists():
         return {}
     last: dict = {}
+    sums = {"input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    seen = False
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -216,10 +389,24 @@ def _last_frame_spend(trial_dir: Path) -> dict:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (ev.get("type") or ev.get("_event")) == "cost_update":
-                    last = ev
+                if (ev.get("type") or ev.get("_event")) != "cost_update":
+                    continue
+                last = ev
+                usage = ev.get("usage") or {}
+                if isinstance(usage, dict):
+                    for key in sums:
+                        v = usage.get(key)
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            sums[key] += v
+                            seen = True
     except OSError:
         return {}
+    if seen:
+        last = dict(last)
+        last["_sum_input_tokens"] = sums["input_tokens"]
+        last["_sum_output_tokens"] = sums["output_tokens"]
+        last["_sum_cache_read"] = sums["cache_read_input_tokens"]
+        last["_sum_cache_creation"] = sums["cache_creation_input_tokens"]
     return last
 
 
@@ -243,9 +430,15 @@ def _reconcile_spend(trial_dir: Path, agent_result: dict, meta: dict) -> dict:
     summed = meta.get("osa_usage_sum") or {}
     frame = _last_frame_spend(trial_dir)
 
-    cache_r = _max_num(spend.get("cache_read_tokens"), summed.get("cache_read_input_tokens"))
+    cache_r = _max_num(
+        spend.get("cache_read_tokens"),
+        summed.get("cache_read_input_tokens"),
+        frame.get("_sum_cache_read"),
+    )
     cache_w = _max_num(
-        spend.get("cache_creation_tokens"), summed.get("cache_creation_input_tokens")
+        spend.get("cache_creation_tokens"),
+        summed.get("cache_creation_input_tokens"),
+        frame.get("_sum_cache_creation"),
     )
     cache_total = (cache_r or 0) + (cache_w or 0)
 
@@ -254,11 +447,16 @@ def _reconcile_spend(trial_dir: Path, agent_result: dict, meta: dict) -> dict:
             agent_result.get("n_input_tokens"),
             spend.get("input_tokens"),
             summed.get("input_tokens"),
+            # Last resort, and the ONLY source on a trial Harbor killed before
+            # telemetry was written. Identical to the two above whenever they
+            # exist; the difference is that it exists when they do not.
+            frame.get("_sum_input_tokens"),
         ),
         "tokens_out": _max_num(
             agent_result.get("n_output_tokens"),
             spend.get("output_tokens"),
             summed.get("output_tokens"),
+            frame.get("_sum_output_tokens"),
         ),
         # Keep `None` rather than 0 when no source reported a cache counter at
         # all — "not measured" and "measured as zero" are different claims.
@@ -298,7 +496,8 @@ def collect(job_dir: Path) -> list[dict]:
         meta = agent_result.get("metadata") or {}
         exc = r.get("exception_info")
 
-        reason = _failure_reason(reward, exc, meta)
+        events = _scan_events(trial_dir)
+        reason = _failure_reason(reward, exc, meta, events)
         telemetry_path = trial_dir / "agent" / "osa-telemetry.json"
 
         spend_fix = _reconcile_spend(trial_dir, agent_result, meta)
@@ -335,6 +534,7 @@ def collect(job_dir: Path) -> list[dict]:
                 "osa_last_event_type": meta.get("osa_last_event_type"),
                 "self_inflicted": inflicted,
                 "self_inflicted_samples": inflicted_samples,
+                **events,
                 "exception": (exc or {}).get("exception_type") if exc else None,
                 "exception_message": (exc or {}).get("exception_message") if exc else None,
                 "telemetry_path": str(telemetry_path) if telemetry_path.exists() else None,
@@ -404,6 +604,34 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
             "ambiguous": len(ambiguous),
         },
         "harness_fault_rate": round(len(harness_faults) / n, 4) if n else None,
+        # --- workspace-denial instrumentation ---------------------------
+        # `Agent.Safety.PathPolicy` never consulted the session's working
+        # directory, so in a container with HOME=/root and a workspace of /app
+        # every file_write/file_read/dir_list on the workspace was denied. The
+        # agent routed around it with `cp` shuttles; one episode gave up and
+        # told a headless benchmark to run `/add-dir /app`. These four counters
+        # are the direct measure of whether that is gone, and they are reported
+        # whether or not the task passed -- a task can be obstructed and still
+        # scrape a pass, and that pass is not evidence the bug is fixed.
+        "osa_tool_faults_total": _total(r.get("osa_tool_faults") for r in rows),
+        "osa_tool_fault_tasks": sorted(
+            r["task_name"] for r in rows if r.get("osa_tool_faults")
+        ),
+        "denials_total": _total(r.get("denials") for r in rows),
+        "denial_tasks": sorted(r["task_name"] for r in rows if r.get("denials")),
+        "add_dir_mentions_total": _total(r.get("add_dir_mentions") for r in rows),
+        "add_dir_tasks": sorted(
+            r["task_name"] for r in rows if r.get("add_dir_mentions")
+        ),
+        "write_ops_total": _total(r.get("write_ops") for r in rows),
+        "write_ops_mean": _mean(r.get("write_ops") for r in rows),
+        "peak_context_tokens_max": (
+            max(
+                (r["peak_context_tokens"] for r in rows if r.get("peak_context_tokens")),
+                default=None,
+            )
+        ),
+        "peak_context_tokens_mean": _mean(r.get("peak_context_tokens") for r in rows),
         "wall_clock_total_s": _total(r["wall_clock_s"] for r in rows),
         "wall_clock_mean_s": _mean(r["wall_clock_s"] for r in rows),
         "agent_setup_mean_s": _mean(r["agent_setup_s"] for r in rows),
@@ -558,6 +786,40 @@ def summary_md(results: dict) -> str:
         f"Accuracy excluding harness faults: "
         f"{(a['accuracy_excluding_harness_faults'] or 0) * 100:.1f}%",
         "",
+        "## Workspace denials",
+        "",
+        "OSA's path policy did not consult the session's working directory, so "
+        "in a container with `HOME=/root` and a workspace of `/app` every "
+        "`file_write`/`file_read`/`dir_list` on the workspace was refused. "
+        "These are the counters that say whether that is actually gone. "
+        "`OSA-at-fault` is the narrow subset stamped `fault_owner: :osa` -- a "
+        "refusal of a path genuinely outside the workspace is the boundary "
+        "working and is counted under `all denials` only.",
+        "",
+        "| counter | value | tasks |",
+        "|---|---|---|",
+        f"| **OSA-at-fault tool denials** | {_fmt(a.get('osa_tool_faults_total'))} "
+        f"| {len(a.get('osa_tool_fault_tasks') or [])} |",
+        f"| all path denials seen by the model | {_fmt(a.get('denials_total'))} "
+        f"| {len(a.get('denial_tasks') or [])} |",
+        f"| `/add-dir` mentions (the give-up signature) | "
+        f"{_fmt(a.get('add_dir_mentions_total'))} "
+        f"| {len(a.get('add_dir_tasks') or [])} |",
+        f"| write ops (total / mean per task) | "
+        f"{_fmt(a.get('write_ops_total'))} / {_fmt(a.get('write_ops_mean'))} | — |",
+        f"| peak context tokens (max / mean) | "
+        f"{_fmt(a.get('peak_context_tokens_max'))} / "
+        f"{_fmt(a.get('peak_context_tokens_mean'))} | — |",
+        "",]
+    if a.get("osa_tool_faults_total"):
+        lines += [
+            "> ⚠ **OSA denied tool calls on paths inside its own workspace on "
+            f"{len(a.get('osa_tool_fault_tasks') or [])} task(s).** Any failure "
+            "among them is a harness fault, not a model failure, and the token "
+            "figures on those tasks include the cost of working around OSA.",
+            "",
+        ]
+    lines += [
         "## OSA self-inflicted markers",
         "",
         "Counted from OSA's own log inside each container. A marker is a "
@@ -616,12 +878,14 @@ def summary_md(results: dict) -> str:
         "",
         "## Per task",
         "",
-        "| task | reward | owner | reason | wall s | turns | tools | tok in | tok out |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| task | reward | owner | reason | wall s | turns | tools | tok in | tok out "
+        "| writes | peak ctx | denials | OSA-fault |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results["tasks"]:
         lines.append(
-            "| `{t}` | {rw} | {ow} | {rs} | {w} | {tu} | {tc} | {ti} | {to} |".format(
+            "| `{t}` | {rw} | {ow} | {rs} | {w} | {tu} | {tc} | {ti} | {to} "
+            "| {wr} | {pk} | {dn} | {of} |".format(
                 t=r["task_name"],
                 rw=_fmt(r["reward"]),
                 ow=r["fault_owner"],
@@ -631,6 +895,10 @@ def summary_md(results: dict) -> str:
                 tc=_fmt(r["tool_calls"]),
                 ti=_fmt(r["tokens_in"]),
                 to=_fmt(r["tokens_out"]),
+                wr=_fmt(r.get("write_ops")),
+                pk=_fmt(r.get("peak_context_tokens")),
+                dn=_fmt(r.get("denials")),
+                of=_fmt(r.get("osa_tool_faults")),
             )
         )
     lines += ["", "See `bench/terminalbench/README.md` for what these numbers can and cannot claim."]

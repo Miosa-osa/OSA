@@ -209,5 +209,111 @@ class TestCacheHitRate(unittest.TestCase):
         self.assertEqual(a["cache_creation_tokens_total"], 150)
 
 
+class TestWorkspaceDenialCounters(unittest.TestCase):
+    """The `fault_owner: :osa` stamp was written and never read.
+
+    `Permissions.denial_fault_owner/3` marks exactly the denials that are OSA's
+    own doing — a refusal of a path INSIDE the session workspace — and the mark
+    rides out on the `tool_call` phase-`end` and `tool_result` frames. Nothing
+    on the bench side looked at it, so the run in which OSA denied 142 workspace
+    operations and one episode told a headless benchmark to type `/add-dir /app`
+    published a harness fault rate of 0.0%.
+    """
+
+    def _trial(self, events: list[dict]) -> Path:
+        import tempfile
+
+        d = Path(tempfile.mkdtemp()) / "trial"
+        (d / "agent").mkdir(parents=True)
+        (d / "agent" / "osa-events.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in events) + "\n"
+        )
+        return d
+
+    def test_the_osa_stamp_is_read_off_both_frames_and_counted_once(self):
+        """One refused call emits two stamped frames. It is ONE fault."""
+        d = self._trial([
+            {"type": "tool_call", "phase": "end", "name": "file_write",
+             "tool_call_id": "c1", "success": False, "fault_owner": "osa"},
+            {"type": "tool_result", "name": "file_write", "tool_call_id": "c1",
+             "success": False, "fault_owner": "osa",
+             "result": "Error: Permission denied: /app/x is outside allowed write paths"},
+        ])
+        ev = report._scan_events(d)
+        self.assertEqual(ev["osa_tool_faults"], 1)
+        self.assertEqual(ev["osa_tool_fault_tools"], {"file_write": 1})
+
+    def test_an_elixir_atom_stamp_is_recognised(self):
+        """`:osa` may serialise with its leading colon; both must count."""
+        d = self._trial([
+            {"type": "tool_result", "name": "dir_list", "tool_call_id": "c9",
+             "fault_owner": ":osa", "result": "Error: Access denied"},
+        ])
+        self.assertEqual(report._scan_events(d)["osa_tool_faults"], 1)
+
+    def test_a_denial_outside_the_workspace_is_counted_but_not_blamed_on_osa(self):
+        """`/etc/shadow` refused is the boundary working. It carries no stamp."""
+        d = self._trial([
+            {"type": "tool_result", "name": "file_read", "tool_call_id": "c2",
+             "success": False, "fault_owner": None,
+             "result": "Error: Permission denied: /etc/shadow is outside allowed read paths"},
+        ])
+        ev = report._scan_events(d)
+        self.assertEqual(ev["denials"], 1)
+        self.assertEqual(ev["osa_tool_faults"], 0)
+
+    def test_a_failed_task_with_an_osa_stamp_becomes_a_harness_fault(self):
+        meta = {"osa_status": "ok", "osa_tool_calls": 40}
+        reason = report._failure_reason(0.0, None, meta, {"osa_tool_faults": 3})
+        self.assertEqual(reason, "osa_workspace_denied")
+        self.assertEqual(report._fault_owner(reason), "harness")
+
+    def test_the_same_task_without_the_stamp_is_still_the_model_s_failure(self):
+        meta = {"osa_status": "ok", "osa_tool_calls": 40}
+        reason = report._failure_reason(0.0, None, meta, {"osa_tool_faults": 0})
+        self.assertEqual(reason, "completed_but_wrong")
+        self.assertEqual(report._fault_owner(reason), "model")
+
+    def test_a_passing_task_is_never_relabelled_by_obstruction(self):
+        """The verifier is the authority on whether the work got done.
+
+        The obstruction is still reported in the row and the aggregate; it just
+        does not move a green result into the harness bucket.
+        """
+        meta = {"osa_status": "ok", "osa_tool_calls": 40}
+        self.assertEqual(report._failure_reason(1.0, None, meta, {"osa_tool_faults": 9}), "")
+
+    def test_add_dir_is_counted_wherever_it_appears(self):
+        """The give-up signature: a headless episode cannot type a slash command."""
+        d = self._trial([
+            {"type": "agent_response", "content":
+             "I cannot write to /app. Please run /add-dir /app and retry."},
+        ])
+        self.assertEqual(report._scan_events(d)["add_dir_mentions"], 1)
+
+    def test_write_ops_and_peak_context_are_extracted(self):
+        d = self._trial([
+            {"type": "tool_call", "phase": "start", "name": "file_write", "tool_call_id": "a"},
+            {"type": "tool_call", "phase": "end", "name": "file_write", "tool_call_id": "a"},
+            {"type": "tool_call", "phase": "start", "name": "file_edit", "tool_call_id": "b"},
+            {"type": "tool_call", "phase": "start", "name": "bash", "tool_call_id": "c"},
+            {"type": "context_pressure", "estimated_tokens": 94_000, "max_tokens": 1_000_000},
+            {"type": "context_pressure", "estimated_tokens": 201_000, "max_tokens": 1_000_000},
+            {"type": "context_pressure", "estimated_tokens": 12_000, "max_tokens": 1_000_000},
+        ])
+        ev = report._scan_events(d)
+        # phase `end` must not double-count the write, and `bash` is not a write
+        self.assertEqual(ev["write_ops"], 2)
+        self.assertEqual(ev["peak_context_tokens"], 201_000)
+        self.assertEqual(ev["context_window"], 1_000_000)
+
+    def test_a_trial_with_no_event_log_reports_absence_not_zero(self):
+        import tempfile
+
+        ev = report._scan_events(Path(tempfile.mkdtemp()))
+        self.assertIsNone(ev["osa_tool_faults"])
+        self.assertIsNone(ev["denials"])
+
+
 if __name__ == "__main__":
     unittest.main()

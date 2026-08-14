@@ -67,11 +67,28 @@ _TB_BASELINE = {
     "source_runs": ["osa-hard6", "osa-hard-long4"],
     "measured_on": "terminal-bench 2.0 task content",
     "n_tasks": 8,
-    "resolved": 4,
-    "input_tokens_total": 36_977_510,
+    # WAS RECORDED AS 4. It is 5, and it always was: re-deriving the union of
+    # the two source runs from disk gives cancel-async-tasks,
+    # feal-differential-cryptanalysis, fix-code-vulnerability,
+    # password-recovery and path-tracing passing. The independently-run
+    # `baseline-recheck-*` pair on 2.1 content solves the SAME five. A baseline
+    # solve count that is one low makes every later run look like it gained a
+    # task it did not gain, which is the direction of error that flatters us.
+    "resolved": 5,
+    "resolved_tasks": [
+        "cancel-async-tasks",
+        "feal-differential-cryptanalysis",
+        "fix-code-vulnerability",
+        "password-recovery",
+        "path-tracing",
+    ],
+    # Re-derived from the trial files rather than copied forward: the totals
+    # recorded here were 36_977_510 / 4_622_188.8, which is 4,960 tokens short
+    # of what the eight trials actually sum to.
+    "input_tokens_total": 36_982_470,
     "output_tokens_total": 250_806,
-    "input_tokens_per_task": 4_622_188.8,
-    "in_out_ratio": 147.4,
+    "input_tokens_per_task": 4_622_808.8,
+    "in_out_ratio": 147.5,
     "cache_hit_rate": None,  # OSA reported no cache counter at all
     "cost_usd_per_task": None,  # local Ollama; no price attached
     "wall_clock_total_s": 4988.5,
@@ -84,6 +101,82 @@ _TB_BASELINE = {
         "dna-assembly": 2_453_241,
         "make-mips-interpreter": 13_772_310,
         "path-tracing": 15_550_588,
+    },
+}
+
+#: The arms of the workspace-denial comparison, all eight tasks, all priced at
+#: the SAME rates ($0.60/M in, $2.20/M out for glm-5.2:cloud — `bench/report/
+#: honesty.py:MODEL_RATES`). The dollars in `_TB_BASELINE` above are `None`
+#: because those runs attached no price; these are re-priced from token counts,
+#: which is the only way a $ figure survives the 2026-08-14 pricing fix that
+#: removed a 2.487x overstatement. Do not mix a stored `cost_usd` from a
+#: pre-fix run into this table.
+#:
+#: Arm 1 and arm 2 differ ONLY in the OSA build. Arm 2 and arm 3 differ only in
+#: whether `3fe329e4` (the session workspace was not an allowed path anywhere)
+#: is in the artefact.
+_TB_ARMS = {
+    "pre_fix": {
+        "run": ["baseline-recheck-hard6", "baseline-recheck-long4"],
+        "note": "pre-workspace-fix build; 2.1 task content",
+        "resolved": 5,
+        "input_tokens_per_task": 4_654_997.4,
+        "in_out_ratio": 146.7,
+        "cost_usd_per_task": 2.8628,
+    },
+    "post_fix_containers_broken": {
+        "run": ["probe-postfix-20260814"],
+        "note": (
+            "pricing/telemetry fixes in, workspace fix NOT in: 22 path denials "
+            "still observed across all 8 tasks"
+        ),
+        "resolved": 5,
+        "input_tokens_per_task": 2_821_177.0,
+        "in_out_ratio": 162.3,
+        "cost_usd_per_task": 1.7310,
+    },
+    # ---- the verification-adequacy ablation, 2026-08-15 -------------------
+    #
+    # These two arms are the SAME artefact (sha256 8cb0e2b3...), the same
+    # pinned commit (a18732dd), the same eight tasks and the same
+    # `-n 2` schedule. They differ in ONE runtime flag,
+    # `OSA_VERIFICATION_ADEQUACY`, which disables clause 3 of
+    # `Agent.Loop.VerificationGate` (adequacy) and nothing else. Nothing was
+    # rebuilt between them -- rebuilding from a pre-gate commit would have
+    # moved the workspace fix, the doom-loop work and the tool-perf changes at
+    # the same time, which is how the earlier attempt to price this failed.
+    #
+    # Arrival was proved, not assumed: every trial's driver log carries
+    # `[ablation] OSA_VERIFICATION_ADEQUACY=0 (-> osagent serve)`, the `off`
+    # arm logged ZERO `inadequate_test` gate firings against nine in the `on`
+    # arm, and clause 2 (`unchecked_write`, deliberately NOT covered by the
+    # flag) still fired in the `off` arm -- so the gate was live and only the
+    # one clause was disabled.
+    "adequacy_on": {
+        "run": ["probe-workspacefix-a18732dd"],
+        "note": "the same run as `containers_fixed`, relabelled as the ON arm",
+        "resolved": 6,
+        "input_tokens_per_task": 5_814_330.0,
+        "in_out_ratio": 195.4,
+        "cost_usd_per_task": 3.5541,
+    },
+    "adequacy_off": {
+        "run": ["probe-adequacy-off-a18732dd"],
+        "note": (
+            "OSA_VERIFICATION_ADEQUACY=0. -6.4% input tokens over all eight "
+            "tasks but -22.7% over the six that finished inside their agent "
+            "timeout and -31.3% over the four short tasks where the clause "
+            "actually fired: the gate's cost is real and concentrated in the "
+            "cheap tail, which is ~14% of the bill. The 6/8 -> 5/8 is "
+            "make-mips-interpreter dying to AgentTimeoutError at 1838s "
+            "against an 1800s ceiling it cleared by 29s in the ON arm -- a "
+            "clock race, not a lost solve; both arms failed exactly the same "
+            "two tasks on the model."
+        ),
+        "resolved": 5,
+        "input_tokens_per_task": 5_441_540.0,
+        "in_out_ratio": 169.1,
+        "cost_usd_per_task": 3.3357,
     },
 }
 
@@ -310,6 +403,120 @@ def compare(a_path: Path, b_path: Path) -> str:
     return "\n".join(out)
 
 
+def _union_over_probe(run_dirs: list[Path], tasks: tuple[str, ...]) -> dict:
+    """Fold one or more runs into a single arm over exactly the probe tasks.
+
+    Several arms were run as two jobs (a `hard6` and a `long4`), so an arm is
+    the UNION of its source runs restricted to the probe list. Anything outside
+    the list is dropped; a task present in two source runs takes the later one.
+    """
+    rows: dict[str, dict] = {}
+    for d in run_dirs:
+        p = Path(d)
+        p = p if p.is_file() else p / "results.json"
+        for t in json.loads(p.read_text())["tasks"]:
+            name = t["task_name"].split("/")[-1]
+            if name in tasks:
+                rows[name] = t
+    return rows
+
+
+#: $/M input, $/M output. Kept here as well as in `bench/report/honesty.py` so
+#: a re-price is explicit at the point of comparison rather than inherited.
+GLM_RATES = (0.60, 2.20)
+
+
+def _price(tok_in: float, tok_out: float, rates=GLM_RATES) -> float:
+    return tok_in * rates[0] / 1e6 + tok_out * rates[1] / 1e6
+
+
+def arm_stats(rows: dict[str, dict]) -> dict:
+    """The four published columns for one arm, priced from tokens.
+
+    `input` is uncached + cache reads + cache writes — every token sent in, the
+    same definition `report.build` and `bench/report/loader.py` use. `$` is
+    RE-DERIVED from those token counts at `GLM_RATES` and never read from the
+    run's stored `cost_usd`, because runs on either side of the 2026-08-14
+    pricing fix stored dollars computed at rates up to 3x apart and averaging
+    those together is how a pricing bug becomes a published cost trend.
+    """
+    n = len(rows) or 1
+    tin = tout = 0
+    cread = cwrite = 0
+    have_cache = False
+    resolved = []
+    for name, t in rows.items():
+        r, w = t.get("tokens_cache_read"), t.get("tokens_cache_write")
+        if r is not None or w is not None:
+            have_cache = True
+        cread += r or 0
+        cwrite += w or 0
+        tin += (t.get("tokens_in") or 0) + (r or 0) + (w or 0)
+        tout += t.get("tokens_out") or 0
+        if t["resolved"]:
+            resolved.append(name)
+    return {
+        "n": len(rows),
+        "resolved": len(resolved),
+        "resolved_tasks": sorted(resolved),
+        "input_tokens_per_task": round(tin / n, 1),
+        "output_tokens_per_task": round(tout / n, 1),
+        "in_out_ratio": round(tin / tout, 1) if tout else None,
+        # `None` and 0.0 are different claims. Ollama's OpenAI-shaped response
+        # carries no cache counter at all on some builds (absence) and a literal
+        # zero on others (measured, and correctly zero: there is no cache to
+        # hit). Whichever it is, it is not a regression.
+        "cache_hit_rate": (round(cread / tin, 4) if have_cache and tin else None),
+        "cost_usd_per_task": round(_price(tin, tout) / n, 4),
+        "cost_basis": f"re-priced at ${GLM_RATES[0]}/M in, ${GLM_RATES[1]}/M out",
+    }
+
+
+def arms_table(arm_paths: dict[str, list[Path]], dataset_key: str = "tb2.1") -> str:
+    """The paired multi-arm table, every arm priced identically."""
+    ps = get(dataset_key)
+    stats = {
+        label: arm_stats(_union_over_probe(paths, ps.tasks))
+        for label, paths in arm_paths.items()
+    }
+    out = [
+        f"# `{ps.name}` — {len(stats)} arms, {len(ps.tasks)} fixed tasks",
+        "",
+        f"All arms priced at the SAME rates ({GLM_RATES[0]}/M in, "
+        f"{GLM_RATES[1]}/M out), re-derived from token counts. Stored "
+        "`cost_usd` is ignored: it straddles the 2026-08-14 pricing fix.",
+        "",
+        "| arm | n | solved | input tok/task | in:out | cache hit | $/task |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for label, s in stats.items():
+        hit = "n/a" if s["cache_hit_rate"] is None else f"{s['cache_hit_rate']:.1%}"
+        out.append(
+            f"| {label} | {s['n']} | {s['resolved']}/{s['n']} "
+            f"| {s['input_tokens_per_task']:,.0f} | {s['in_out_ratio']}:1 "
+            f"| {hit} | ${s['cost_usd_per_task']:.4f} |"
+        )
+    labels = list(stats)
+    if len(labels) >= 2:
+        a, b = stats[labels[0]], stats[labels[-1]]
+        d = (b["input_tokens_per_task"] - a["input_tokens_per_task"]) / a[
+            "input_tokens_per_task"
+        ]
+        out += [
+            "",
+            f"`{labels[0]}` -> `{labels[-1]}`: input tokens/task {d:+.1%}, "
+            f"solved {a['resolved']}/{a['n']} -> {b['resolved']}/{b['n']}.",
+        ]
+        if b["resolved"] < a["resolved"]:
+            out += [
+                "",
+                "> ⚠ **SOLVE RATE DROPPED.** Fewer tokens with fewer solves is "
+                "not a cost win; the arms are no longer paired on the tasks "
+                "that changed verdict.",
+            ]
+    return "\n".join(out)
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -322,6 +529,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("compare", help="two probe runs, paired")
     p.add_argument("run_a")
     p.add_argument("run_b")
+    p = sub.add_parser(
+        "arms", help="N arms, all priced at the same rates. label=run[,run] ..."
+    )
+    p.add_argument("arm", nargs="+", metavar="LABEL=RUN[,RUN]")
+    p.add_argument("--dataset-key", default="tb2.1")
 
     args = ap.parse_args(argv)
 
@@ -352,6 +564,16 @@ def main(argv=None) -> int:
 
     if args.cmd == "compare":
         print(compare(results(args.run_a), results(args.run_b)))
+        return 0
+
+    if args.cmd == "arms":
+        arms: dict[str, list[Path]] = {}
+        for spec in args.arm:
+            if "=" not in spec:
+                raise SystemExit(f"expected LABEL=RUN[,RUN], got {spec!r}")
+            label, runs = spec.split("=", 1)
+            arms[label] = [results(r) for r in runs.split(",")]
+        print(arms_table(arms, args.dataset_key))
         return 0
     return 0
 

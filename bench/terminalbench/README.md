@@ -99,12 +99,125 @@ discipline `bench/swebench` already applies with gold-apply and empty-patch.
 ./probeset.py show tb2.1
 ./run_bench.py --agent osa --probe
 ./probeset.py compare runs/<before> runs/<after>
+
+# N arms at once, every arm re-priced from tokens at the SAME rates
+./probeset.py arms "before=runs/a,runs/a2" "after=runs/b"
 ```
 
 Eight tasks that never change, so token and cost figures across optimisation
 attempts are **paired**. Reports `input_tokens/task`, `in:out ratio`,
 `cache_hit_rate` and `$/task` — the four columns the field publishes. It is not
 a pass-rate measurement and the reporter refuses to call it one.
+
+`arms` exists because `compare` reads each run's stored `cost_usd`, and runs on
+either side of the 2026-08-14 pricing fix stored dollars computed at rates up to
+3x apart. `arms` ignores the stored figure and re-derives every arm's `$` from
+its token counts at one rate table, so a dollar delta is a real dollar delta and
+not a pricing-bug artefact. It also folds multi-job arms (a `hard6` plus a
+`long4`) into one arm, and shouts if the solve rate dropped — fewer tokens with
+fewer solves is not a cost win.
+
+#### One-variable ablations: flip a switch, do not rebuild
+
+An arm built from an older commit is not an arm. Between `a18732dd` and the
+commit before the verification-adequacy gate there are also the workspace fix,
+the doom-loop work and the tool-perf changes, so "rebuild without the feature"
+moves four things and prices none of them. The way to price one feature is to
+run the **same artefact twice** and flip its runtime kill switch.
+
+`osa_agent.OSA_ABLATION_ENV_KEYS` is the list of switches forwarded from the
+host process into the container, on both seams that reach the agent
+(`~/.osa/.env`, and the `env=` of the run exec which becomes `osagent serve`'s
+OS environment). Whatever is set is recorded into the run's `config.json` as
+`ablation_env`, so an arm can state its own switches.
+
+```bash
+OSA_VERIFICATION_ADEQUACY=0 ./run_bench.py --agent osa --probe \
+  --model ollama/glm-5.2:cloud --run-id probe-adequacy-off-a18732dd
+```
+
+**Prove the flag arrived.** A flag that never left the host and a flag that
+arrived and did nothing produce the same null result, and nothing in the numbers
+distinguishes them. Three receipts, all cheap:
+
+1. `config.json` → `ablation_env` — the run asked for it.
+2. `grep '\[ablation\]' runs/<id>/harbor/*/*/agent/osa-driver.log` — one line
+   per trial, printed by the driver *inside the container* immediately before
+   `osagent serve` is spawned, from the env it is about to hand over.
+3. a behavioural difference in the logs. For this switch,
+   `grep -o 'verification-gate\] [a-z_]*'` over the agent dirs: the `off` arm
+   must show **zero** `inadequate_test`, and should still show
+   `unchecked_write`, because the flag covers clause 3 only. Both together
+   prove the gate was live *and* the one clause was off — a silent whole-gate
+   failure would show neither.
+
+Verified directly against the pinned artefact, which is the layer all three
+receipts assume works:
+
+```
+$ OSA_VERIFICATION_ADEQUACY=0 osagent/bin/osagent_release eval \
+    'IO.puts(inspect(System.get_env("OSA_VERIFICATION_ADEQUACY")))'
+"0"
+```
+
+**What the adequacy ablation measured** (2026-08-15, artefact `8cb0e2b3…`,
+8 tasks, `-n 2`, `probe-workspacefix-a18732dd` vs `probe-adequacy-off-a18732dd`):
+
+| slice | input tok/task, gate ON → OFF | turns |
+|---|---|---|
+| all 8 | 5,814,330 → 5,441,540 (**-6.4%**) | 415 → 291 |
+| the 6 that finished inside their agent timeout | 1,281,310 → 990,617 (**-22.7%**) | 229 → 168 |
+| the 4 short tasks where the clause actually fired | 1,201,248 → 824,897 (**-31.3%**) | 154 → 105 |
+| `dna-assembly` (control: clause never fired) | 1,846,598 → 1,939,261 (**+5.0%**) | 41 → 39 |
+
+The gate is expensive where it fires and it does not fire on the expensive
+tasks. `make-mips-interpreter` and `path-tracing` are **83.5%** of the bill and
+both run to the 1800 s ceiling either way; the clause fired once on the first
+and never on the second. So it is not the cause of the arm-2→arm-3 token
+doubling, and the run-level -6.4% badly understates its cost on ordinary work.
+
+The `6/8 → 5/8` is not a lost solve. `make-mips-interpreter` died to
+`AgentTimeoutError` at **1838 s** against an **1800 s** ceiling it cleared by
+29 s in the ON arm. Both arms failed exactly the same two tasks on the model
+(`dna-assembly`, `cancel-async-tasks`); excluding harness faults it is 6/8 vs
+5/7. **A verdict on a task sitting on its timeout is a coin flip, and neither
+arm's number for those two tasks should be read as a measurement.**
+
+**Scope: this switches clause 3 of the completion gate, not the whole feature.**
+`8afcfb36` also added `VerificationGate.first_write_nudge/1`, wired through
+`Agent.Reminders` collector 5, and that is **not** covered by
+`OSA_VERIFICATION_ADEQUACY` — it fires once per session in both arms. The
+ablation prices the end-of-turn pushback with the early test-first steer held
+constant.
+
+#### Workspace-denial counters
+
+`report.py` reads the `fault_owner: :osa` stamp that
+`Permissions.denial_fault_owner/3` puts on tool calls OSA refused for a path
+**inside the session's own workspace**, off both the `tool_call` phase-`end` and
+`tool_result` frames, de-duplicated per `tool_call_id`. A failed task carrying
+that stamp is reported as `osa_workspace_denied` and owned by the **harness**,
+not the model.
+
+That stamp existed and nothing read it. `Agent.Safety.PathPolicy` allowed writes
+only under `~` and `/tmp` and never consulted the working directory, so in a
+container with `HOME=/root` and a workspace of `/app` every workspace
+`file_write`/`file_read`/`dir_list` was denied — 142 denials on one task, `cp`
+shuttles as a workaround, one episode telling a headless benchmark to type
+`/add-dir /app`. The published harness fault rate for that run was 0.0%.
+
+Four counters travel with every run, per task and in the aggregate:
+
+| counter | what it means |
+|---|---|
+| `osa_tool_faults` | OSA refused a path **inside** the workspace. Any non-zero value is a harness bug. |
+| `denials` | every path refusal the model saw. A refused `/etc/shadow` belongs here and **not** above — that is the boundary working. |
+| `add_dir_mentions` | the give-up signature. A headless episode cannot type a slash command, so asking for one means the agent has concluded its workspace is unreachable. |
+| `write_ops` / `peak_context_tokens` | the shape of the workaround. The `cp` shuttle inflates both. |
+
+A task that **passed** is never relabelled by these counters — the verifier is
+the authority on whether the work got done — but its obstruction is still
+reported, because a scraped pass is not evidence the bug is gone.
 
 This exists as a **diagnostic instrument**, not a scoreboard. Terminal-Bench is
 long-horizon terminal work judged on the final state of a machine, which is

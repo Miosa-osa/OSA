@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,57 @@ def log(msg: str) -> None:
     print(f"[tbench {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def artifact_provenance() -> dict:
+    """Which OSA build this run actually measured.
+
+    The tarball under `dist/` is what goes into every container, and NOTHING
+    else about the run identifies it. That is how two arms of an ablation came
+    to be run on different code: an artefact built four hours before `lib/`
+    changed was reused, and the comparison was voided after the fact with no way
+    to tell from the results file which build each arm had.
+
+    So the artefact's mtime, size and sha256 are recorded, alongside the repo
+    HEAD and whether the tree was dirty at launch. `built_after_head_commit` is
+    the check that matters: false means the artefact predates the commit the
+    run claims to measure, and the run is measuring older code than its own
+    provenance says.
+    """
+    art = HERE / "dist" / "osa-release-linux-x86_64.tar.gz"
+    out: dict = {"artifact": str(art), "present": art.exists()}
+    if art.exists():
+        st = art.stat()
+        out["built_at"] = datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()
+        out["size_bytes"] = st.st_size
+        try:
+            import hashlib
+
+            h = hashlib.sha256()
+            with art.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            out["sha256"] = h.hexdigest()
+        except OSError:
+            pass
+
+    def _git(*a) -> str | None:
+        try:
+            r = subprocess.run(
+                ["git", *a], cwd=str(HERE), capture_output=True, text=True, timeout=30
+            )
+            return r.stdout.strip() or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    out["head_commit"] = _git("rev-parse", "HEAD")
+    out["head_committed_at"] = _git("log", "-1", "--format=%cI")
+    dirty = _git("status", "--porcelain", "--", "lib")
+    out["lib_dirty_at_launch"] = bool(dirty)
+    out["lib_dirty_files"] = len(dirty.splitlines()) if dirty else 0
+    if out.get("built_at") and out.get("head_committed_at"):
+        out["built_after_head_commit"] = out["built_at"] > out["head_committed_at"]
+    return out
+
+
 def harbor_bin() -> Path:
     venv = HERE / ".venv" / "bin" / "harbor"
     if not venv.exists():
@@ -80,6 +132,28 @@ def harbor_version() -> str:
         ).stdout.strip()
     except Exception:  # noqa: BLE001
         return "?"
+
+
+def ablation_env() -> dict[str, str]:
+    """Which OSA behaviour switches this run is flipping, read from our own env.
+
+    The key list is owned by ``osa_agent.OSA_ABLATION_ENV_KEYS`` — that is the
+    module that forwards them into the container — but ``osa_agent`` imports
+    ``harbor``, which lives in ``.venv`` and not in *this* interpreter. So the
+    names are lifted out of the source text rather than duplicated here: one
+    definition, and adding a switch there makes it recorded here automatically.
+
+    Recorded into ``config.json`` because an arm that cannot state its own
+    switches is not an arm. Two arms of a one-variable ablation are built from
+    the same artefact and are otherwise byte-identical on disk.
+    """
+    src = (HERE / "osa_agent.py").read_text()
+    # Terminated on a bare `)` at column 0, not the first `)` in the block:
+    # the entries are commented, the comments contain parentheses, and a
+    # non-greedy match stops inside the first one and silently returns no keys.
+    m = re.search(r"^OSA_ABLATION_ENV_KEYS = \(\n(.*?)^\)", src, re.S | re.M)
+    keys = re.findall(r'"([A-Z0-9_]+)"', m.group(1)) if m else []
+    return {k: os.environ[k] for k in keys if os.environ.get(k) not in (None, "")}
 
 
 def local_tasks_dir(ds: "datasets_mod.Dataset | None") -> Path | None:
@@ -228,6 +302,15 @@ def main() -> int:
         "n_concurrent": args.n_concurrent,
         "install_only": args.install_only,
         "harbor_version": harbor_version(),
+        # WHICH BUILD THIS MEASURED. Without it a results file cannot be
+        # attributed to any particular code, which has already voided one
+        # ablation. See `artifact_provenance`.
+        "artifact": artifact_provenance(),
+        # WHICH SWITCHES THIS RUN FLIPPED. Same reason as `artifact`: a results
+        # file that cannot say which behaviour flags were on cannot be one arm
+        # of an ablation, and two arms of the same artefact are otherwise
+        # indistinguishable on disk. `{}` means "stock defaults".
+        "ablation_env": ablation_env() if args.agent == "osa" else {},
         "started_at": datetime.now(timezone.utc).isoformat(),
         "host": {"platform": platform.platform(), "python": platform.python_version()},
     }

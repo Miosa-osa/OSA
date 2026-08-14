@@ -153,6 +153,16 @@ def boot() -> subprocess.Popen:
     # unset. Task images frequently ship neither.
     env.setdefault("USER", "root")
     env.setdefault("SHELL", "/bin/bash")
+    # Ablation-switch receipt, printed into the driver log BEFORE serve starts.
+    #
+    # This is the arrival proof for a one-variable ablation. Without it, a flag
+    # that never left the host and a flag that arrived and did nothing produce
+    # the same null result, and there is no way to tell them apart after the
+    # run. Printed for every key we forward, including the ones that are unset,
+    # so the "off" arm's log positively states what it asked for and the "on"
+    # arm's log positively states that it asked for nothing.
+    for k in ("OSA_VERIFICATION_ADEQUACY",):
+        print(f"[ablation] {k}={env.get(k, '<unset>')} (-> osagent serve)", flush=True)
     # A release boots from its own directory; RELEASE_COOKIE etc. are generated
     # into the release, nothing to set.
     proc = subprocess.Popen(

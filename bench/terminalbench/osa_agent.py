@@ -75,6 +75,50 @@ REMOTE_DRIVER = f"{REMOTE_ROOT}/osa_headless.py"
 REMOTE_BOOT_CHECK = f"{REMOTE_ROOT}/osa_boot_check.py"
 REMOTE_INSTRUCTION = f"{REMOTE_ROOT}/instruction.txt"
 
+# ---------------------------------------------------------------------------
+# Ablation switches: OSA behaviour flags forwarded from the host process into
+# the container.
+#
+# These exist so a one-variable ablation can be run against the SAME artefact.
+# Rebuilding from an older commit to turn a feature off changes everything that
+# landed between the two commits; a runtime kill switch changes one clause. An
+# ablation whose arms were built differently is not an ablation, and we have
+# already voided one that way.
+#
+# Each is forwarded on BOTH seams, because either alone has a silent-failure
+# mode and a flag that does not arrive is indistinguishable from a flag that
+# had no effect:
+#
+#   1. ``~/.osa/.env`` written by :meth:`_dotenv` -> ``Application.start``
+#      does ``System.put_env/2`` for anything not already in the OS env.
+#   2. the ``env=`` of the ``run()`` exec -> the driver process -> ``boot()``
+#      does ``os.environ.copy()`` -> the ``osagent serve`` OS environment,
+#      which is what ``System.get_env/1`` reads at the point of use.
+#
+# Verified against release 1.0.97 / artefact sha256 8cb0e2b3...:
+#   OSA_VERIFICATION_ADEQUACY=0 bin/osagent_release eval \
+#     'IO.puts(inspect(System.get_env("OSA_VERIFICATION_ADEQUACY")))'  ->  "0"
+# and the compiled-in default reads back as ``true``, i.e. ON unless switched.
+#
+# Unset on the host means "do not mention it at all", so the default arm is
+# byte-identical to a run made before this existed.
+OSA_ABLATION_ENV_KEYS = (
+    # Agent.Loop.VerificationGate clause 3 (adequacy: a persisted, re-runnable
+    # test that failed at least once and then passed across a source fix).
+    # "0"/"false"/"off"/"no" disables it. Clauses 1 and 2 are NOT affected,
+    # and neither is `VerificationGate.first_write_nudge/1`.
+    "OSA_VERIFICATION_ADEQUACY",
+)
+
+
+def ablation_env() -> dict[str, str]:
+    """The ablation switches actually set in the host process, if any."""
+    return {
+        k: os.environ[k]
+        for k in OSA_ABLATION_ENV_KEYS
+        if os.environ.get(k) not in (None, "")
+    }
+
 
 # Appended (idempotently) to every `releases/<vsn>/env.sh` in the injected
 # release. The marker comment is what makes a re-install a no-op.
@@ -175,6 +219,8 @@ class OsaAgent(BaseInstalledAgent):
             "OSA_REQUIRE_AUTH=false",
             f"OSA_HTTP_PORT={self._port}",
         ]
+        # Ablation switches (seam 1 of 2 -- see OSA_ABLATION_ENV_KEYS).
+        lines += [f"{k}={v}" for k, v in ablation_env().items()]
         return "\n".join(lines) + "\n"
 
     def _split_model(self, model_name: str) -> tuple[str, str]:
@@ -359,6 +405,10 @@ class OsaAgent(BaseInstalledAgent):
             "OSA_BENCH_PORT": str(self._port),
             "OSA_BENCH_BOOT_TIMEOUT": str(self._boot_timeout),
             "OSA_BENCH_SESSION": (self.session_id or "tbench").replace("/", "_"),
+            # Ablation switches (seam 2 of 2 -- see OSA_ABLATION_ENV_KEYS).
+            # This is the seam that reaches `osagent serve`'s real OS env,
+            # which is what `System.get_env/1` reads at the point of use.
+            **ablation_env(),
             **self.resolve_env_vars(),
         }
         if self._run_timeout:
