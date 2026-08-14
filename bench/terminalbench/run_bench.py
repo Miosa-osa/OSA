@@ -251,7 +251,21 @@ def main() -> int:
     run.add_argument("--n-concurrent", type=int, default=2,
                      help="trials in parallel. Each runs a whole OSA VM in a "
                           "container; do not raise this casually")
-    run.add_argument("--agent-timeout-multiplier", type=float, default=None)
+    # Harbor has FOUR timeout multipliers, and they are not interchangeable.
+    # `--timeout-multiplier` is the global one; the other three override it for
+    # one phase each. cline's published GLM-5.2 rows used the GLOBAL one at 2.0,
+    # so matching them means this flag and not `--agent-timeout-multiplier`,
+    # which leaves the verifier and setup budgets at 1.0.
+    #
+    # That distinction is not academic here. TB 2.1's oracle control lost
+    # `torch-pipeline-parallelism` to a VerifierTimeoutError -- it spent its
+    # whole 900s budget pulling ~2.5 GB of CUDA wheels without reaching a test.
+    # Doubling only the agent phase would not have moved that task at all.
+    run.add_argument("--timeout-multiplier", type=float, default=None,
+                     help="global task-timeout multiplier. cline ran 2.0; a run "
+                          "at 1.0 is not comparable to their numbers")
+    run.add_argument("--agent-timeout-multiplier", type=float, default=None,
+                     help="overrides --timeout-multiplier for the agent phase only")
     # Reasoning effort. Anthropic's Opus 4.6 system card measures the SAME model
     # under a FIXED harness moving 10.3 pp across effort tiers (55.1 low -> 65.4
     # max) -- a bigger lever than the 7.2 pp harness delta they measure on the
@@ -328,6 +342,7 @@ def main() -> int:
         # multiplier is part of the result and not part of the invocation.
         # cline's published GLM-5.2 rows ran at 2.0; a run at 1.0 is not
         # comparable to them and must not be presented as if it were.
+        "timeout_multiplier": args.timeout_multiplier,
         "agent_timeout_multiplier": args.agent_timeout_multiplier,
         # `None` means UNPINNED, deliberately. See the --effort help text: a
         # number whose reasoning tier is unrecorded is not reproducible, so the
@@ -372,6 +387,8 @@ def main() -> int:
 
         if args.model:
             cmd += ["-m", args.model]
+        if args.timeout_multiplier:
+            cmd += ["--timeout-multiplier", str(args.timeout_multiplier)]
         if args.agent_timeout_multiplier:
             cmd += ["--agent-timeout-multiplier", str(args.agent_timeout_multiplier)]
         if args.install_only:

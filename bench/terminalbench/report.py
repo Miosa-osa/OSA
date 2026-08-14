@@ -807,7 +807,15 @@ def summary_md(results: dict) -> str:
         # reads as "default" and it is not -- it is "unknown".
         f"- **Effort**: `{cfg.get('effort') or 'UNPINNED'}`   "
         f"**ollama think**: `{cfg.get('ollama_think') or 'UNPINNED'}`   "
-        f"**timeout multiplier**: `{cfg.get('agent_timeout_multiplier') or 1.0}`",
+        # The GLOBAL multiplier is the one cline published at 2.0; the agent-only
+        # override is printed beside it only when it differs, because a reader
+        # who sees one number will assume it governed every phase.
+        f"**timeout multiplier**: `{cfg.get('timeout_multiplier') or 1.0}`"
+        + (
+            f" (agent phase overridden to `{cfg['agent_timeout_multiplier']}`)"
+            if cfg.get("agent_timeout_multiplier")
+            else ""
+        ),
         f"- **Started**: {cfg.get('started_at')}",
         f"- **Graded by**: the task's own `tests/test.sh` inside the task container "
         f"(final container state, not a patch)",

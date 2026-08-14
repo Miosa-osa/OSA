@@ -206,7 +206,7 @@ def test_summary_prints_the_pins_it_was_given():
             "dataset_size": 89,
             "effort": "high",
             "ollama_think": "true",
-            "agent_timeout_multiplier": 2.0,
+            "timeout_multiplier": 2.0,
         },
         rows=rows,
     )
