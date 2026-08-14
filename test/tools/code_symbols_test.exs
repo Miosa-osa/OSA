@@ -24,8 +24,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert Tool.should_defer?() == true
     end
 
-    test "always_load? is true" do
-      assert Tool.always_load?() == true
+    # False while `should_defer?/0` is true. See `Tools.DeferFlagConsistencyTest`.
+    test "always_load? is false, because this tool defers" do
+      assert Tool.always_load?() == false
     end
 
     test "concurrency_safe? is true" do
@@ -63,8 +64,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert CodeSymbolsShim.safety() == Tool.safety()
     end
 
-    test "CodeSymbols.always_load?() is true" do
-      assert CodeSymbolsShim.always_load?() == true
+    test "CodeSymbols.always_load?() is false, matching the tool it shims" do
+      assert CodeSymbolsShim.always_load?() == false
     end
 
     test "CodeSymbols has execute/2 (structured)" do

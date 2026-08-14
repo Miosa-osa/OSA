@@ -29,8 +29,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessageTest do
       assert SendMessage.should_defer?() == true
     end
 
-    test "always_load? returns true" do
-      assert SendMessage.always_load?() == true
+    # False while `should_defer?/0` is true — the pair meant full prose in the
+    # prompt for a tool `Registry.list_active/0` excludes from the native tools
+    # array. See `Tools.DeferFlagConsistencyTest`.
+    test "always_load? returns false, because this tool defers" do
+      assert SendMessage.always_load?() == false
     end
 
     test "safety returns :write_safe" do

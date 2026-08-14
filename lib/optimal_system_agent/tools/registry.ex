@@ -73,7 +73,40 @@ defmodule OptimalSystemAgent.Tools.Registry do
     |> Enum.reject(&MapSet.member?(@model_hidden, &1.name))
   end
 
-  @doc "List only non-deferred tools (for system prompt injection). Reduces prompt size."
+  @doc """
+  List only non-deferred tools (for system prompt injection). Reduces prompt size.
+
+  ## This is also the native tools array, and that has a consequence
+
+  The name says "for system prompt injection", but this list is ALSO the sole
+  source of the provider's native `tools` array: `filter_applicable_tools/1`
+  wraps it, `Agent.Loop` stores that as `state.tools`, and `ReactLoop` passes it
+  as the `tools:` option after `ToolFilter.filter/2`, which can only shrink it.
+
+  So under a provider with `native_tool_schemas?/0 == true` (Anthropic), a
+  deferred tool is not merely undocumented — it is **uncallable**. The API can
+  only emit a `tool_use` block for a name in the array.
+
+  `should_defer?`'s doc comments across the builtins say deferred tools "stay
+  discoverable mid-turn through `tool_search`". That is not currently true for
+  native providers: `Builtins.ToolSearch.Handler` formats matching specs into a
+  **string tool result** and mutates no state, so the next request carries the
+  same array it did before. The promise holds only for text-parsing transports,
+  where the model can name the tool in prose and `execute_unguarded/2` resolves
+  it against the full `:builtin_tools` map rather than this list.
+
+  Closing that hole means letting a `tool_search` hit widen the next request's
+  tools array — a change in `Agent.Loop.ToolExecutor` and the loop state, which
+  is deliberately not made here. Until it is, treat "deferred" as "unavailable
+  on native providers" when deciding whether a tool may defer.
+
+  Note that `always_load?` is deliberately NOT consulted here, and must not be:
+  it governs prompt PROSE only. A tool that sets `always_load?` and
+  `should_defer?` together therefore ships full prose for something this list
+  excludes — paid for on every request, callable on none. See
+  `test/tools/defer_flag_consistency_test.exs`, which fails if any tool
+  reintroduces that pair.
+  """
   def list_active do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
     mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})

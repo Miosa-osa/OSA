@@ -53,8 +53,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStopTest do
   end
 
   describe "always_load?/0" do
-    test "returns true" do
-      assert TaskStop.always_load?()
+    # `false`, and it must stay false while `should_defer?/0` is true.
+    #
+    # The two flags are read by different consumers: `PromptAssembler` honours
+    # `always_load?` and emits full prose + schema, while `Registry.list_active/0`
+    # honours only `should_defer?` and is the sole source of the native tools
+    # array. Both true meant this tool was documented on every request and
+    # callable on none. See `Tools.DeferFlagConsistencyTest` for the invariant.
+    test "returns false, because this tool defers" do
+      refute TaskStop.always_load?()
     end
   end
 

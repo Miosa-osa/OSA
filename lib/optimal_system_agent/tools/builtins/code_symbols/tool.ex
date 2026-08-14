@@ -71,8 +71,40 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool do
   def should_defer?, do: true
 
   @impl true
-  # Always include in prompt — used for navigation alongside file_read.
-  def always_load?, do: true
+  # `false`, and the reason is a defect this contradiction was hiding.
+  #
+  # `should_defer?` above already says this tool is not worth its schema on
+  # every request. `always_load?` said the opposite, and the two are read by
+  # DIFFERENT consumers that never compared notes:
+  #
+  #   * `Tools.PromptAssembler.partition/2` honours `always_load?`, so the full
+  #     prose AND a re-encoded JSON schema went into the system prompt.
+  #   * `Tools.Registry.list_active/0` — which is the sole source of the native
+  #     `tools` array (`Registry.filter_applicable_tools/1` -> `Agent.Loop`
+  #     `state.tools` -> `ReactLoop`'s `tools:` option) — consults only
+  #     `should_defer?`, so the tool was dropped from it.
+  #
+  # The result was the worst of both: paid for on every request, and under a
+  # native-tool provider (`Anthropic.native_tool_schemas?/0` is true) not
+  # callable at all, because a name absent from the tools array is a name the
+  # API cannot emit. Nothing re-adds it later either — `tool_search` returns a
+  # formatted STRING and touches no state, so the "discoverable mid-turn"
+  # promise in `should_defer?`'s comment is not kept for native providers.
+  #
+  # Setting this to `false` makes the tool consistently deferred: out of the
+  # prompt prose, listed by name in the deferred `<system-reminder>` block, and
+  # exactly as callable as it was before — which under a native provider is the
+  # honest answer, and under a text-parsing provider still works via
+  # `tool_search`, since the executor resolves names against the FULL registry
+  # (`Registry.execute_unguarded/2`) rather than the advertised array.
+  #
+  # Measured cost of the contradiction across the five tools that had it:
+  # 3,561 bytes / ~890 estimated tokens of static prefix on every request of
+  # every session, buying zero callable capability.
+  #
+  # The reachability hole itself is NOT fixed here — see the note in
+  # `Tools.Registry.list_active/0`.
+  def always_load?, do: false
 
   # ── Execution semantics (per-input) ───────────────────────────────────
   @impl true
