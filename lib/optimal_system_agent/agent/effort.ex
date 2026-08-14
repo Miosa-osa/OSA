@@ -166,7 +166,23 @@ defmodule OptimalSystemAgent.Agent.Effort do
   @doc "Get the current tool budget based on effort level."
   def tool_budget, do: get(current()).tool_budget
 
-  @doc "Get the current temperature based on effort level."
+  @doc """
+  Temperature for the current effort level.
+
+  > #### Not on any request path {: .warning}
+  >
+  > **Nothing in `lib/` calls this.** `Agent.Loop.LLMClient.temperature/0` reads
+  > `:temperature` from app env instead, so the `:temperature` column of the
+  > ladder above reaches no provider. That is mostly correct by accident and
+  > should not be "fixed" by wiring it up: Anthropic's Claude 5 family and
+  > Opus/Sonnet 4.6+ **reject** `temperature`, `top_p`, and `top_k` outright,
+  > and OpenAI's reasoning models 400 on an explicit `temperature` too. The
+  > providers deliberately never send it.
+  >
+  > It is kept because non-reasoning models on Ollama and the OpenAI-compatible
+  > path still take a temperature, and because callers outside the tree may read
+  > it. Treat it as advisory, not as a description of what goes on the wire.
+  """
   def temperature, do: get(current()).temperature
 
   @doc "Check if fast mode is active (effort == :fast)."
