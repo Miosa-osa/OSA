@@ -1920,39 +1920,44 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
+  # Explore-first nudge.
+  #
+  # Two things this used to do, and no longer does.
+  #
+  # 1. It counted `shell_execute` as a file mutation. `write_without_read?/1`
+  #    still classifies it that way for its own callers, so the gate here is
+  #    the narrower `Guardrails.blind_file_write?/1`: a first-turn `ls -la /app`
+  #    is not a blind write, and telling the model it "modified existing files"
+  #    when it ran a read-only command is a false statement injected into its
+  #    context. Measured firing on seven bench runs whose first tool call was a
+  #    plain shell probe, including `cancel-async-tasks`, which OSA failed.
+  #
+  # 2. It closed with "read what you changed to verify it's correct" — a
+  #    re-read instruction that directly contradicts SYSTEM_LEAN §2.4 ("Never
+  #    re-read after a successful edit — the tool errors if it failed, so
+  #    success *is* the confirmation"). That sentence bought a whole extra
+  #    read turn per firing and taught the read→edit→read rhythm the context
+  #    cost is quadratic in.
+  #
+  # The 5+-tools "consider create_skill" nudge that used to live here is gone
+  # outright. It fired on exactly the batched turns we want more of and read as
+  # a correction; 5.6% of measured turns issue >1 tool call and none of them
+  # should be answered with a suggestion to stop and write a skill.
   defp inject_post_tool_nudges(state, tool_calls) do
-    has_edit_tools = Enum.any?(tool_calls, fn tc -> tc.name in ~w(file_edit shell_execute) end)
+    if state.iteration == 1 and
+         state.auto_continues < 2 and
+         Guardrails.blind_file_write?(tool_calls) do
+      Logger.info("[loop] Explore-first nudge: model edited files before reading (iteration 1)")
 
-    state =
-      if state.iteration == 1 and
-           state.auto_continues < 2 and
-           has_edit_tools and
-           Guardrails.write_without_read?(tool_calls) do
-        Logger.info("[loop] Explore-first nudge: model edited files before reading (iteration 1)")
-
-        nudge = %{
-          role: "user",
-          content:
-            "[System: You modified existing files without reading them first. " <>
-              "Always explore before you act: call dir_list and file_read to understand " <>
-              "the current state of relevant files before making changes. " <>
-              "On your next step, read what you changed to verify it's correct.]"
-        }
-
-        %{state | messages: state.messages ++ [nudge], auto_continues: state.auto_continues + 1}
-      else
-        state
-      end
-
-    if length(tool_calls) >= 5 and state.iteration == 1 do
-      nudge_msg = %{
+      nudge = %{
         role: "user",
         content:
-          "[System: You've used 5+ tools this turn. " <>
-            "If this is a reusable pattern, consider create_skill.]"
+          "[System: You edited files you have not read this session. " <>
+            "Explore before you act: read the relevant files so your changes match " <>
+            "the existing conventions and don't clobber code you haven't seen.]"
       }
 
-      %{state | messages: state.messages ++ [nudge_msg]}
+      %{state | messages: state.messages ++ [nudge], auto_continues: state.auto_continues + 1}
     else
       state
     end

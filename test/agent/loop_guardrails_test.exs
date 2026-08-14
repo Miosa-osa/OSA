@@ -945,6 +945,56 @@ defmodule OptimalSystemAgent.Agent.Loop.GuardrailsTest do
   end
 
   # ---------------------------------------------------------------------------
+  # blind_file_write?/1
+  #
+  # The narrower predicate behind the explore-first nudge. The nudge tells the
+  # model, in its own context, that it "edited files it has not read". That
+  # sentence has to be TRUE, which `write_without_read?/1` could not guarantee:
+  # it counts `shell_execute` as a write, so `ls -la /app` as a first command
+  # earned an accusation of editing files. These tests pin the difference.
+  # ---------------------------------------------------------------------------
+
+  describe "blind_file_write?/1 — only real file mutations count" do
+    test "empty tool calls returns false" do
+      refute Guardrails.blind_file_write?([])
+    end
+
+    test "file_write alone returns true" do
+      assert Guardrails.blind_file_write?([tool_call("file_write")])
+    end
+
+    test "file_edit alone returns true" do
+      assert Guardrails.blind_file_write?([tool_call("file_edit")])
+    end
+
+    test "multi_file_edit alone returns true" do
+      assert Guardrails.blind_file_write?([tool_call("multi_file_edit")])
+    end
+
+    test "a read in the same batch satisfies explore-first" do
+      refute Guardrails.blind_file_write?([tool_call("file_read"), tool_call("file_edit")])
+    end
+
+    test "shell_execute alone returns FALSE — a shell command is not a file edit" do
+      refute Guardrails.blind_file_write?([tool_call("shell_execute")])
+      # …and this is exactly where it diverges from the older predicate.
+      assert Guardrails.write_without_read?([tool_call("shell_execute")])
+    end
+
+    test "several shell commands are still not a blind edit" do
+      refute Guardrails.blind_file_write?([tool_call("shell_execute"), tool_call("shell_execute")])
+    end
+
+    test "file_transform alone returns false — it is designed to need no read" do
+      refute Guardrails.blind_file_write?([tool_call("file_transform")])
+    end
+
+    test "shell_execute alongside a real blind edit still trips it" do
+      assert Guardrails.blind_file_write?([tool_call("shell_execute"), tool_call("file_write")])
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # bug_report?/1
   # ---------------------------------------------------------------------------
 

@@ -306,6 +306,31 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
     has_write and not has_read
   end
 
+  # Tools that actually mutate a file's bytes. `shell_execute` is deliberately
+  # absent: it *can* mutate (`cat > f <<EOF`) but far more often it does not
+  # (`ls`, `python3 test.py`, `git status`), and `@write_tools` cannot tell the
+  # difference from the tool name alone. Treating it as a write is what made the
+  # explore-first nudge tell the model it had "modified existing files" after a
+  # read-only first command — measured on seven bench runs.
+  #
+  # `file_transform` is absent for a different reason: it is designed to need no
+  # prior read (its `expect` counts are the guard), so a blind `file_transform`
+  # is the intended usage, not a mistake. SYSTEM_LEAN §2.3 says so explicitly.
+  @blind_write_tools ~w(file_write file_edit multi_file_edit)
+
+  @doc """
+  Returns true when this tool batch edits files it has not read.
+
+  Narrower than `write_without_read?/1`: only actual file-mutating tools count
+  as a write, so a first-turn shell probe is not mistaken for a blind edit.
+  """
+  @spec blind_file_write?([map()]) :: boolean()
+  def blind_file_write?(tool_calls) do
+    names = Enum.map(tool_calls, & &1.name)
+    Enum.any?(names, &(&1 in @blind_write_tools)) and
+      not Enum.any?(names, &(&1 in @read_tools))
+  end
+
   # --- Private helpers ---
 
   defp has_task_context?(messages) do
