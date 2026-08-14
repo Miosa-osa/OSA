@@ -184,6 +184,34 @@ defmodule OptimalSystemAgent.Auth.AnthropicOAuthRemovedTest do
       end
     end
 
+    # The generic sign-in route that replaced them. It is reached with a
+    # provider NAME, so "anthropic" arrives here too — and until this test it
+    # answered 400 unsupported_provider, i.e. the same answer as a typo, from
+    # the same server that answers 410 + an explanation on the legacy paths.
+    test "POST /auth/login/start with provider=anthropic returns 410, not 400 unsupported" do
+      conn =
+        conn(:post, "/auth/login/start", Jason.encode!(%{"provider" => "anthropic"}))
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> HTTP.call(@http_opts)
+
+      assert conn.status == 410
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "anthropic_oauth_removed"
+      assert body["message"] =~ "has been removed"
+      assert body["message"] =~ "ANTHROPIC_API_KEY"
+      refute body["error"] == "unsupported_provider"
+    end
+
+    test "POST /auth/login/start still answers 400 for a provider that never existed" do
+      conn =
+        conn(:post, "/auth/login/start", Jason.encode!(%{"provider" => "pineapple"}))
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> HTTP.call(@http_opts)
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "unsupported_provider"
+    end
+
     test "GET /onboarding/oauth/callback returns a 410 HTML page, not a token exchange" do
       conn = conn(:get, "/onboarding/oauth/callback?code=x&state=y") |> HTTP.call(@http_opts)
 
@@ -201,19 +229,64 @@ defmodule OptimalSystemAgent.Auth.AnthropicOAuthRemovedTest do
   # `CLI.Auth` surface. What must NOT come back is any suggestion that OSA can
   # sign a user in to Anthropic.
   describe "REPL /login and /logout drive the real sign-in surface" do
-    test "/login anthropic says it has no account sign-in, and never offers to open a browser" do
+    test "/login anthropic explains the REMOVAL, and never offers to open a browser" do
       out =
         ExUnit.CaptureIO.capture_io(fn ->
           OptimalSystemAgent.Channels.CLI.Commands.cmd_login("anthropic", "sess")
         end)
 
-      assert out =~ "does not support account sign-in"
       refute out =~ "Opening your browser"
       refute out =~ "console.anthropic.com/oauth"
 
-      # The remaining Anthropic route is an API key, and the providers that DO
-      # support sign-in are named rather than left to be guessed at.
+      # It must say the sign-in was REMOVED — not merely that it is absent.
+      assert out =~ "has been removed"
+
+      # And it must hand over both routes that still work: a key, and the
+      # user's own Claude Code CLI.
+      assert out =~ "ANTHROPIC_API_KEY"
       assert out =~ "claude_cli"
+    end
+
+    # The regression this guards: for one release `/login anthropic` printed
+    # the generic unsupported-provider line, which is the SAME sentence a
+    # misspelled provider gets. A user whose Anthropic sign-in OSA removed was
+    # therefore told nothing distinguishable from "you made a typo".
+    test "/login anthropic is not answered like a misspelled provider name" do
+      capture = fn arg ->
+        ExUnit.CaptureIO.capture_io(fn ->
+          OptimalSystemAgent.Channels.CLI.Commands.cmd_login(arg, "sess")
+        end)
+      end
+
+      bogus = capture.("pineapple")
+      assert bogus =~ "does not support account sign-in"
+      refute bogus =~ "has been removed"
+
+      refute capture.("anthropic") == bogus
+      refute capture.("anthropic") =~ "does not support account sign-in"
+    end
+
+    test "every id the removed flow answered to gets the removal notice" do
+      for id <- ~w(anthropic Anthropic claude claude_pro claude_max) do
+        out =
+          ExUnit.CaptureIO.capture_io(fn ->
+            OptimalSystemAgent.Channels.CLI.Commands.cmd_login(id, "sess")
+          end)
+
+        assert out =~ "has been removed", "#{id} did not get the removal notice"
+      end
+    end
+
+    # The supported providers must NOT be swept up by the removal check — the
+    # legitimate way to use a Claude subscription is the user's own signed-in
+    # Claude Code CLI, and that is a different provider id.
+    test "claude_cli is untouched and still reaches the real sign-in surface" do
+      refute LegacyAnthropicOAuth.removed_provider?("claude_cli")
+
+      for id <- OptimalSystemAgent.Auth.Subscription.supported() do
+        refute LegacyAnthropicOAuth.removed_provider?(id),
+               "#{id} supports account sign-in and must not be treated as removed"
+      end
     end
 
     test "/logout anthropic reports honestly that there was nothing to clear" do

@@ -170,6 +170,18 @@ defmodule OptimalSystemAgent.CLI.Auth do
   @spec login(String.t()) :: :ok | {:error, term()}
   def login(provider) do
     cond do
+      # Checked BEFORE `supported?/1`. Anthropic is not in the implementation
+      # map, so without this clause `osa auth login anthropic` printed the
+      # generic "does not support account sign-in" — byte-identical to what a
+      # misspelled provider gets. That is precisely the wrong answer for the
+      # one provider whose sign-in OSA *removed*: the user who runs this
+      # command is, almost by definition, someone it used to work for.
+      OptimalSystemAgent.Auth.LegacyAnthropicOAuth.removed_provider?(provider) ->
+        IO.puts("")
+        IO.puts("  #{@yellow}#{OptimalSystemAgent.Auth.LegacyAnthropicOAuth.login_notice()}#{@reset}")
+        IO.puts("")
+        {:error, :anthropic_oauth_removed}
+
       not Subscription.supported?(provider) ->
         IO.puts("")
         IO.puts("  #{@yellow}#{provider} does not support account sign-in.#{@reset}")

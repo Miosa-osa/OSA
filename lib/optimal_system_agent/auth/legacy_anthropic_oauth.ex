@@ -39,6 +39,39 @@ defmodule OptimalSystemAgent.Auth.LegacyAnthropicOAuth do
   @spec notice() :: String.t()
   def notice, do: @notice
 
+  # The provider ids the removed flow answered to. `anthropic` is the id the
+  # onboarding catalog still uses (for the API-key path), and `claude` /
+  # `claude_pro` / `claude_max` are what users type when they mean the
+  # subscription. All of them used to start a sign-in; none of them may be
+  # allowed to fall through to the generic "does not support account sign-in",
+  # which is the SAME sentence a typo'd provider name gets and therefore tells
+  # a previously-signed-in user nothing about why the thing that worked
+  # yesterday is gone.
+  @removed_ids ~w(anthropic claude claude_pro claude_max claude.ai)
+
+  @doc """
+  True for a provider id whose account sign-in was the removed Anthropic flow.
+
+  Callers use this to answer with `notice/0` instead of the generic
+  unsupported-provider message.
+  """
+  @spec removed_provider?(String.t() | atom()) :: boolean()
+  def removed_provider?(provider_id) do
+    normalized = provider_id |> to_string() |> String.trim() |> String.downcase()
+    normalized in @removed_ids
+  end
+
+  @doc """
+  The full answer for someone trying to sign in to Anthropic: why it is gone,
+  plus the two routes that do work — an API key, or their own Claude Code CLI
+  (which Anthropic *does* permit them to point at a third-party tool).
+  """
+  @spec login_notice() :: String.t()
+  def login_notice do
+    @notice <>
+      " If you have Claude Code installed and signed in, `/login claude_cli` uses it."
+  end
+
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   @doc "Path of the credential file the removed flow wrote (`~/.osa/oauth.json`)."

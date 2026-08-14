@@ -116,6 +116,13 @@ defmodule OptimalSystemAgent.Auth.LoginBroker do
   @impl true
   def handle_call({:start, provider}, _from, state) do
     cond do
+      # Before `supported?/1`, for the reason spelled out in `CLI.Auth.login/1`:
+      # the removed Anthropic sign-in must be named as removed, not reported as
+      # an unknown provider. `POST /auth/login/start {"provider":"anthropic"}`
+      # is the network-side twin of that command.
+      OptimalSystemAgent.Auth.LegacyAnthropicOAuth.removed_provider?(provider) ->
+        {:reply, {:error, :anthropic_oauth_removed}, state}
+
       not Subscription.supported?(provider) ->
         {:reply, {:error, :unsupported_provider}, state}
 

@@ -67,8 +67,16 @@ defmodule OptimalSystemAgent.Auth.LoginBrokerTest do
     end
 
     test "refuses a provider that has no sign-in" do
-      assert {:error, :unsupported_provider} = LoginBroker.start_login("anthropic")
+      assert {:error, :unsupported_provider} = LoginBroker.start_login("openai")
       assert {:error, :unsupported_provider} = LoginBroker.start_login("not-a-provider")
+    end
+
+    # "anthropic" is deliberately NOT the example above: its sign-in was
+    # removed rather than never offered, and it gets its own reason so the
+    # HTTP surface can answer 410 + an explanation instead of 400 "unknown
+    # provider". See `Auth.LegacyAnthropicOAuth`.
+    test "the removed Anthropic sign-in is refused as removed, not as unknown" do
+      assert {:error, :anthropic_oauth_removed} = LoginBroker.start_login("anthropic")
     end
 
     test "reaches a terminal state on its own and carries an actionable message" do

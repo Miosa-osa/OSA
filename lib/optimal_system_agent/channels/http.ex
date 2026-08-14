@@ -440,6 +440,17 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         {:ok, session} ->
           json(conn, 200, session)
 
+        # 410, matching the four legacy `/onboarding/oauth/*` routes: this
+        # sign-in existed and was withdrawn, which is a different fact from
+        # "no such provider" and deserves the same status and the same
+        # explanation wherever it is asked for.
+        {:error, :anthropic_oauth_removed} ->
+          json(conn, 410, %{
+            error: "anthropic_oauth_removed",
+            connected: false,
+            message: OptimalSystemAgent.Auth.LegacyAnthropicOAuth.login_notice()
+          })
+
         {:error, :unsupported_provider} ->
           json(conn, 400, %{
             error: "unsupported_provider",
