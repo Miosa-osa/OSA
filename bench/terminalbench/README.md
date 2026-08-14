@@ -706,6 +706,43 @@ documented, model-specific tool-call defects (template tokens leaking into
 values, missing tool-call deltas — see `docs/research/benchmark-models.md` §7.4)
 whose incidence is a property of the serving path, not of the harness.
 
+### The timeout multiplier does not reach the agent, and our own driver is why
+
+Found mid-run, on `make-mips-interpreter`. Harbor was invoked with
+`--timeout-multiplier 2.0`, and `result.json` records `timeout_multiplier: 2.0`
+— but the trial was killed at **1800s**, not 3600s, and the killer was
+`osa_error: "agent exceeded 1800s"`, which is *our* string, not Harbor's.
+
+`driver/osa_headless.py:49`:
+
+```python
+RUN_TIMEOUT = int(os.environ.get("OSA_BENCH_RUN_TIMEOUT", "1800"))
+```
+
+A fixed 1800s deadline in the driver we upload into every container,
+independent of Harbor's multipliers. The effective agent budget is therefore
+`min(Harbor's 3600s, our 1800s)` = **1800s**, so this arm gives each task
+**half the agent time cline's tasks got** while recording a config that claims
+otherwise. Any task needing 1800–3600s is a guaranteed fail here and may be a
+solve there.
+
+This is the third timeout-shaped defect in this harness, after the
+agent-vs-global multiplier confusion and the timeout-token accounting hole. The
+pattern is worth naming: **timeouts are enforced in more places than anyone
+remembers, and each one silently truncates a measurement rather than failing
+loudly.**
+
+**Do not patch this while a run is in flight.** The driver is uploaded per
+trial during `install()`, so editing it mid-run gives later trials a different
+budget from earlier ones and makes the run internally inconsistent — a worse
+outcome than the bug.
+
+The remedy is a targeted re-run, not a restart. A task that finished inside
+1800s is bit-identical under either budget; only tasks that hit the wall are
+affected. So: let the run finish, fix the driver to scale with the multiplier,
+re-run only the timed-out tasks, and state in the results which tasks were
+re-run and why.
+
 ### And the arm is still one run
 
 89 tasks, pass@1. At 60% that is a 95% Wilson interval of roughly ±10 points —
