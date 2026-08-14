@@ -6,6 +6,7 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   """
 
   alias OptimalSystemAgent.Agent.Tasks.Tracker.Task
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.CLI.Width, as: W
 
   @reset IO.ANSI.reset()
@@ -76,7 +77,12 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
         # COLUMNS, not graphemes. Task titles are MODEL-AUTHORED and routinely
         # contain emoji, each of which is one grapheme but two columns — sized by
         # `String.length/1` every one of them tore the `│` border.
-        title = W.fit(task.title, title_space)
+        # Scrub BEFORE fitting. `W.fit/2` measures with `strip_ansi/1` but
+        # returns the ORIGINAL string, so an escape that fits within the column
+        # budget passes straight through it — width arithmetic is not a
+        # sanitizer. Scrubbing first also makes the measurement honest: the
+        # columns counted are the columns that will actually be printed.
+        title = W.fit(Sanitize.scrub_line(task.title), title_space)
 
         # Build the row content
         content = "#{icon_color}#{icon}#{@reset} #{title_color(task.status)}#{title}#{@reset}"
@@ -170,8 +176,11 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
     "#{color}#{icon}#{@reset}"
   end
 
+  # Task titles are MODEL-AUTHORED. `render_inline/1` has no width budget to
+  # clip them, so this was the one path that put a title on the terminal
+  # completely untouched. Scrub before the colour is wrapped around it.
   defp title_str(task) do
-    "#{title_color(task.status)}#{task.title}#{@reset}"
+    "#{title_color(task.status)}#{Sanitize.scrub_line(task.title)}#{@reset}"
   end
 
   defp tokens_str(%{tokens_used: n}) when n > 0 do

@@ -5,8 +5,19 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
   Used by the CLI channel when the agent loop returns `{:plan, text}`
   instead of executing immediately. The user can approve, reject, or provide
   feedback to refine the plan.
+
+  The plan text is MODEL-AUTHORED and this box is a CONSENT GATE — the operator
+  reads it and then approves. Cursor-addressing and erase sequences would let
+  the box be overdrawn so it describes something other than what approving it
+  authorises, exactly as on the permission dialog. The text is therefore
+  scrubbed (`OptimalSystemAgent.CLI.Sanitize`) on the way in.
+
+  `Markdown.render/1` scrubs its own input too, so on the current path this is
+  the second pass; the scrub is idempotent, so that costs nothing and the box
+  no longer depends on a renderer it merely happens to call today.
   """
 
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Channels.CLI.Markdown
   alias OptimalSystemAgent.Onboarding.Selector
 
@@ -33,13 +44,20 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
 
   # ── Plan Box Rendering ───────────────────────────────────────────
 
-  defp render_plan_box(plan_text) do
+  @doc false
+  @spec render_plan_box(String.t()) :: :ok
+  def render_plan_box(plan_text) do
     width = box_width()
     # 2 for border + 2 for padding
     inner = width - 4
 
-    # Render markdown then word-wrap
-    rendered = Markdown.render(plan_text)
+    # Scrub, then render markdown, then word-wrap. Order matters in both
+    # directions: scrubbing after `Markdown.render/1` would strip the colour
+    # OSA itself just added and leave literal `[1m` inside the box, and
+    # wrapping does not sanitize — `CLI.Width` measures with `strip_ansi/1` but
+    # returns the original string, so an escape narrower than the box would
+    # pass through untouched.
+    rendered = plan_text |> Sanitize.scrub_block() |> Markdown.render()
     lines = wrap_text(rendered, inner)
 
     # Top border

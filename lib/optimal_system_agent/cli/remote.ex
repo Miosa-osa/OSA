@@ -23,8 +23,18 @@ defmodule OptimalSystemAgent.CLI.Remote do
 
   Interactive PTY shell is NOT part of the #484 server contract, so `shell` is
   gated off with a clear message rather than sending frames the server rejects.
+
+  ## Untrusted output
+
+  Everything this module prints that did not come from the source below arrived
+  over the network: a remote command's stdout, an agent's answer, the host names
+  and OS strings in the broker's inventory, and the broker's own error strings.
+  A remote host is exactly the place an attacker would sit, and `osa remote exec`
+  is `cat`-with-extra-steps for whatever that host chooses to send. All of it
+  goes through `OptimalSystemAgent.CLI.Sanitize` before it reaches stdout.
   """
 
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Remote.{Auth, Client, Frames}
 
   # ── Dispatch ─────────────────────────────────────────────────────────────────
@@ -128,7 +138,9 @@ defmodule OptimalSystemAgent.CLI.Remote do
     with_client(fn pid ->
       with {:ok, sid} <- Client.open_session(pid, host, :exec, Frames.exec_params(cmd)),
            {:ok, text} <- Client.await_result(pid, sid) do
-        IO.puts(text)
+        # A remote command's stdout, verbatim off the wire. Block tier: the
+        # line structure of command output is the output.
+        IO.puts(Sanitize.scrub_block(text))
       else
         {:error, msg} -> fail(msg)
       end
@@ -139,7 +151,9 @@ defmodule OptimalSystemAgent.CLI.Remote do
     with_client(fn pid ->
       with {:ok, sid} <- Client.open_session(pid, host, :agent, Frames.agent_params(prompt, opts)),
            {:ok, text} <- Client.await_result(pid, sid) do
-        IO.puts(text)
+        # A remote agent's answer — model text that has additionally crossed a
+        # machine boundary. Same tier, same reason, as the local model sink.
+        IO.puts(Sanitize.scrub_block(text))
       else
         {:error, msg} -> fail(msg)
       end
@@ -149,7 +163,7 @@ defmodule OptimalSystemAgent.CLI.Remote do
   defp cmd_kill(%{session_id: session_id}) do
     with_client(fn pid ->
       case Client.close_session(pid, session_id) do
-        :ok -> IO.puts("Session #{session_id} closed.")
+        :ok -> IO.puts("Session #{Sanitize.scrub_line(session_id)} closed.")
         {:error, msg} -> fail(msg)
       end
     end)
@@ -192,14 +206,21 @@ defmodule OptimalSystemAgent.CLI.Remote do
     IO.puts("Your hosts")
     IO.puts("────────────────────────────────")
 
-    Enum.each(hosts, fn host ->
-      id = host[:name] || host[:id] || "(unknown)"
-      status = if host[:online], do: "online", else: "offline"
-      os = host[:os_kind] || ""
-      IO.puts("  #{id}  [#{status}]  #{os}")
-    end)
+    Enum.each(hosts, &IO.puts(host_line(&1)))
 
     IO.puts("")
+  end
+
+  @doc false
+  @spec host_line(map()) :: String.t()
+  def host_line(host) do
+    # Name and OS string are chosen by whoever claimed the host, and this is a
+    # table: the single-line tier keeps one host to one row, so a name cannot
+    # invent extra rows or a `\r` redraw another host's status as `online`.
+    id = Sanitize.scrub_line(to_string(host[:name] || host[:id] || "(unknown)"))
+    status = if host[:online], do: "online", else: "offline"
+    os = Sanitize.scrub_line(to_string(host[:os_kind] || ""))
+    "  #{id}  [#{status}]  #{os}"
   end
 
   # ── Plumbing ─────────────────────────────────────────────────────────────────
@@ -237,13 +258,19 @@ defmodule OptimalSystemAgent.CLI.Remote do
   defp print_usage, do: IO.puts(usage())
 
   defp unknown(verb) do
-    IO.puts(:stderr, "Unknown verb: #{verb}")
+    IO.puts(:stderr, error_line("Unknown verb: #{verb}"))
     IO.puts(usage())
     System.halt(1)
   end
 
   defp fail(message) do
-    IO.puts(:stderr, "Error: #{message}")
+    IO.puts(:stderr, error_line("Error: #{message}"))
     System.halt(1)
   end
+
+  # Broker- and server-supplied failure strings land here, so the diagnostic
+  # channel is a render site like any other. One error, one line.
+  @doc false
+  @spec error_line(term()) :: String.t()
+  def error_line(message), do: message |> to_string() |> Sanitize.scrub_line()
 end

@@ -2553,24 +2553,48 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   def cmd_copy(_args, session_id) do
     IO.puts("")
 
+    case session_id |> Loop.get_messages() |> copy_payload() do
+      {:ok, text} -> IO.puts(text)
+      :empty -> IO.puts("  #{@dim}No assistant reply to copy yet.#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  @doc """
+  The exact bytes `/copy` puts on stdout for a given message history.
+
+  Separated from `cmd_copy/2` so what lands on the clipboard can be asserted
+  on without standing up a live `Agent.Loop`.
+
+  This is the sharpest of the plain-CLI render sites. The reply is model-chosen
+  bytes, and the TUI copies captured stdout to the clipboard, so they go to the
+  terminal AND onward into the operator's clipboard: an `ESC ] 52 ; c ;
+  <base64> BEL` in a reply is a clipboard write the operator never authorised,
+  and their next paste — possibly into a shell — is attacker-chosen. The reply
+  is emitted rather than summarised, but never raw.
+
+  `scrub_block/1` and not the line tier: a reply is a multi-line body, and its
+  newlines are real content that must survive into the clipboard.
+  """
+  @spec copy_payload([map()]) :: {:ok, String.t()} | :empty
+  def copy_payload(messages) when is_list(messages) do
     last =
-      session_id
-      |> Loop.get_messages()
+      messages
       |> Enum.reverse()
       |> Enum.find(fn m -> (m[:role] || m["role"]) in ["assistant", :assistant] end)
 
     content = if last, do: extract_text(last[:content] || last["content"]), else: nil
 
     if is_binary(content) and String.trim(content) != "" do
-      # The TUI copies captured stdout to the clipboard, so emit the raw reply.
-      IO.puts(content)
+      {:ok, OptimalSystemAgent.CLI.Sanitize.scrub_block(content)}
     else
-      IO.puts("  #{@dim}No assistant reply to copy yet.#{@reset}")
+      :empty
     end
-
-    IO.puts("")
-    session_id
   end
+
+  def copy_payload(_), do: :empty
 
   defp extract_text(content) when is_binary(content), do: content
 

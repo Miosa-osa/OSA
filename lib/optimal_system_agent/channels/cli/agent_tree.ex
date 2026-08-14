@@ -14,7 +14,16 @@ defmodule OptimalSystemAgent.Channels.CLI.AgentTree do
           │   ├── ✓ test-writer (1 tool · 1.2k)
           │   └── ◉ code-reviewer
           └── ○ validator (waiting)
+
+  A node's `role`/`id` is a name chosen by whatever spawned the agent — in
+  practice the model, via the delegate/orchestrate tools. Those are scrubbed
+  (`OptimalSystemAgent.CLI.Sanitize`, single-line tier) before the connectors
+  and colour are wrapped around them: one row of this tree must stay one row,
+  or a role containing `\\n` could forge sibling agents that do not exist, and
+  a cursor-move could redraw a `✗ failed` node as `✓`.
   """
+
+  alias OptimalSystemAgent.CLI.Sanitize
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -87,7 +96,7 @@ defmodule OptimalSystemAgent.Channels.CLI.AgentTree do
   defp render_node(agent, prefix, is_last) do
     connector = if is_last, do: "└── ", else: "├── "
     icon = status_icon(agent[:status])
-    role = agent[:role] || agent[:id] || "unknown"
+    role = Sanitize.scrub_line(to_string(agent[:role] || agent[:id] || "unknown"))
     stats = format_stats(agent[:stats])
 
     IO.puts("#{prefix}#{connector}#{icon} #{role}#{stats}")

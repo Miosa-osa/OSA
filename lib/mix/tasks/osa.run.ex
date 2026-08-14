@@ -23,8 +23,26 @@ defmodule Mix.Tasks.Osa.Run do
   - `--max-budget` — Maximum spend in USD
   - `--effort` — Effort level: low, medium, high, max
   - `--resume` — Resume a previous session by ID
+
+  ## Terminal safety
+
+  `text` is a terminal render, so the response is scrubbed
+  (`OptimalSystemAgent.CLI.Sanitize`, block tier — a headless answer is a
+  multi-line body). Headless mode is the *most* exposed of the three CLI paths:
+  it is what CI and shell pipelines call, so nobody is watching the screen while
+  a model-chosen `ESC ] 52 ; c ; … BEL` writes the operator's clipboard.
+
+  The `json` and `stream-json` formats are deliberately NOT scrubbed. They are a
+  machine-readable contract and must round-trip the model's bytes exactly; JSON
+  string escaping already renders ESC, BEL and CR inert on the way to a terminal
+  (`\\u001b`), and `escape: :unicode_safe` extends that to the C1 range, which
+  the default escape mode emits literally. The result is ASCII-only output that
+  decodes back to precisely the original string — lossless for the consumer,
+  inert for the terminal.
   """
   use Mix.Task
+
+  alias OptimalSystemAgent.CLI.Sanitize
 
   @shortdoc "Run OSA in non-interactive headless mode"
 
@@ -100,10 +118,10 @@ defmodule Mix.Tasks.Osa.Run do
     # Output based on format
     case {format, result} do
       {"text", {:ok, response}} ->
-        IO.puts(response)
+        IO.puts(text_output(response))
 
       {"text", {:error, reason}} ->
-        IO.puts(:stderr, "Error: #{reason}")
+        IO.puts(:stderr, "Error: #{Sanitize.scrub_line(to_string(reason))}")
         System.halt(1)
 
       {"json", {:ok, response}} ->
@@ -115,19 +133,19 @@ defmodule Mix.Tasks.Osa.Run do
           cost: get_session_cost()
         }
 
-        IO.puts(Jason.encode!(output))
+        IO.puts(json_line(output))
 
       {"json", {:error, reason}} ->
         output = %{type: "error", session_id: session_id, error: to_string(reason)}
-        IO.puts(Jason.encode!(output))
+        IO.puts(json_line(output))
         System.halt(1)
 
       {"stream-json", {:ok, response}} ->
         # Final result event
-        IO.puts(Jason.encode!(%{type: "result", content: response}))
+        IO.puts(json_line(%{type: "result", content: response}))
 
       {"stream-json", {:error, reason}} ->
-        IO.puts(Jason.encode!(%{type: "error", error: to_string(reason)}))
+        IO.puts(json_line(%{type: "error", error: to_string(reason)}))
         System.halt(1)
 
       _ ->
@@ -135,6 +153,26 @@ defmodule Mix.Tasks.Osa.Run do
         System.halt(1)
     end
   end
+
+  @doc """
+  The bytes the `text` format puts on stdout — a terminal render, so scrubbed.
+  """
+  @spec text_output(term()) :: String.t()
+  def text_output(response), do: response |> to_string() |> Sanitize.scrub_block()
+
+  @doc """
+  One NDJSON line.
+
+  `escape: :unicode_safe` is the load-bearing part: the default escape mode
+  already emits ESC/BEL/CR as `\\u001b` and friends, but passes the C1 range
+  (U+0080..U+009F) through literally, and U+009B is a CSI introducer that some
+  terminals in UTF-8 mode will act on. Escaping all non-ASCII makes the line
+  inert on a terminal while decoding back to exactly the original string, so
+  the machine-readable contract is unchanged — which is why the *content* is
+  not scrubbed here the way `text_output/1` scrubs it.
+  """
+  @spec json_line(map()) :: String.t()
+  def json_line(map), do: Jason.encode!(map, escape: :unicode_safe)
 
   defp read_stdin do
     case IO.read(:stdio, :eof) do
@@ -168,10 +206,10 @@ defmodule Mix.Tasks.Osa.Run do
       if Map.get(envelope, :session_id) == session_id do
         case Map.get(payload, :event) do
           :streaming_token ->
-            IO.puts(Jason.encode!(%{type: "token", delta: Map.get(payload, :delta)}))
+            IO.puts(json_line(%{type: "token", delta: Map.get(payload, :delta)}))
 
           :thinking_delta ->
-            IO.puts(Jason.encode!(%{type: "thinking", delta: Map.get(payload, :delta)}))
+            IO.puts(json_line(%{type: "thinking", delta: Map.get(payload, :delta)}))
 
           _ ->
             :ok
@@ -190,7 +228,7 @@ defmodule Mix.Tasks.Osa.Run do
         # meant to be machine-read. `args_bytes` / `args_hash` (see
         # `Loop.ToolArgMetrics`) are the faithful quantities and ride along.
         IO.puts(
-          Jason.encode!(%{
+          json_line(%{
             type: "tool_use",
             name: Map.get(payload, :name),
             phase: to_string(Map.get(payload, :phase)),

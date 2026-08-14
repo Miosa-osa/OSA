@@ -9,12 +9,34 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
   Orchestrator sub-agent progress is NOT handled here: it travels on the
   `osa:session:<id>` PubSub topic (see `Orchestrator.emit_event/2`), which
   only the SSE/TUI path consumes.
+
+  ## Untrusted fields
+
+  Almost everything interpolated into the lines below arrives from somewhere
+  the operator does not control: a background agent's `role` and `result` are
+  sub-agent output, `error`/`reason` are failure strings that routinely carry
+  tool stderr, and `agent_id`/`swarm_id` are identifiers minted elsewhere. All
+  of it goes through `OptimalSystemAgent.CLI.Sanitize` before OSA's own colour
+  is wrapped around it — scrub first, colour second, so the only escapes that
+  reach the terminal are the ones this module put there.
+
+  The line builders are public (`@doc false`) rather than inlined in the
+  handler closure so the bytes they emit can be asserted on directly; a handler
+  registered on the global `Events.Bus` is not a testable unit.
   """
 
   alias OptimalSystemAgent.Agent.Tasks
   alias OptimalSystemAgent.Agent.Trajectory
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Channels.CLI.{Renderer, TaskDisplay}
   alias OptimalSystemAgent.Events.Bus
+
+  @reset IO.ANSI.reset()
+  @bold IO.ANSI.bright()
+  @dim IO.ANSI.faint()
+  @cyan IO.ANSI.cyan()
+  @yellow IO.ANSI.yellow()
+  @green IO.ANSI.green()
 
   # ── Orchestrator / System Event Handler ─────────────────────────────
 
@@ -25,11 +47,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
       ArgumentError -> :cli_signal_cache
     end
 
-    reset = IO.ANSI.reset()
-    bold = IO.ANSI.bright()
-    dim = IO.ANSI.faint()
-    cyan = IO.ANSI.cyan()
-    yellow = IO.ANSI.yellow()
+    reset = @reset
+    dim = @dim
+    yellow = @yellow
 
     Bus.register_handler(:system_event, fn payload ->
       data = payload[:data] || payload
@@ -46,7 +66,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         # (channels/http/api/orchestrate_routes.ex:361).
         %{event: :swarm_started, swarm_id: id} ->
           Renderer.clear_line()
-          IO.puts("#{bold}#{cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... launched#{reset}")
+          IO.puts(swarm_started_line(id))
 
         %{
           event: :context_pressure,
@@ -73,30 +93,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         # Background agent completion/failure notifications
         %{event: :background_agent_completed, role: role, result: result, duration_ms: dur} ->
           Renderer.clear_line()
-          duration = Renderer.format_elapsed(dur)
-          # Subagent result text is tool-derived and reaches the terminal
-          # verbatim — redact before slicing so a truncated key never shows.
-          preview = result |> to_string() |> Trajectory.redact() |> String.slice(0, 120)
-
-          IO.puts(
-            "\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}"
-          )
-
-          IO.puts("#{dim}    #{preview}#{reset}\n")
+          IO.puts(background_completed_lines(role, result, dur))
 
         %{event: :background_agent_failed, role: role, error: error, duration_ms: dur} ->
           Renderer.clear_line()
-          duration = Renderer.format_elapsed(dur)
-
-          IO.puts(
-            "\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}"
-          )
-
-          IO.puts("#{dim}    #{Trajectory.redact(to_string(error))}#{reset}\n")
+          IO.puts(background_failed_lines(role, error, dur))
 
         %{event: :background_agent_started, role: role, agent_id: aid} ->
           Renderer.clear_line()
-          IO.puts("#{dim}  ◉ Background agent \"#{role}\" started (#{aid})#{reset}")
+          IO.puts(background_started_line(role, aid))
 
         # Compaction. The CLI has no spinner row to hang a live indicator on, so
         # it gets the two facts that matter as plain lines: that the agent is
@@ -129,11 +134,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         # believing context was freed when nothing changed.
         %{event: :compaction_failed, reason: reason, duration_ms: dur} ->
           Renderer.clear_line()
-
-          IO.puts(
-            "#{yellow}  ✗ Compaction failed#{reset} #{dim}(#{reason} · " <>
-              "#{Renderer.format_elapsed(dur)}) — conversation unchanged#{reset}"
-          )
+          IO.puts(compaction_failed_line(reason, dur))
 
         %{event: :budget_limit_reached, current_cost: cost, limit: limit} ->
           Renderer.clear_line()
@@ -152,6 +153,75 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
     end)
   rescue
     _ -> :ok
+  end
+
+  # ── Line builders (untrusted text is scrubbed here) ──────────────────
+
+  # A swarm id is an identifier, never a paragraph, so it goes through the
+  # single-line tier: a `\n` in it would let the fake line below it be forged.
+  @doc false
+  @spec swarm_started_line(term()) :: String.t()
+  def swarm_started_line(id) do
+    short = id |> to_string() |> Sanitize.scrub_line() |> String.slice(0, 8)
+    "#{@bold}#{@cyan}  ◆ Swarm #{short}... launched#{@reset}"
+  end
+
+  # `role` and `result` are sub-agent output. `Trajectory.redact/1` removes
+  # secrets and does not touch control characters, so the scrub is a separate,
+  # additional step — and it runs BEFORE the slice, for the same reason redact
+  # does: a sequence must not be able to survive by being cut in half.
+  @doc false
+  @spec background_completed_lines(term(), term(), term()) :: String.t()
+  def background_completed_lines(role, result, dur) do
+    duration = Renderer.format_elapsed(dur)
+
+    preview =
+      result
+      |> to_string()
+      |> Trajectory.redact()
+      |> Sanitize.scrub_line()
+      |> String.slice(0, 120)
+
+    "\n#{@green}  ✓ Background agent \"#{safe_role(role)}\" completed#{@reset} " <>
+      "#{@dim}(#{duration})#{@reset}\n" <>
+      "#{@dim}    #{preview}#{@reset}\n"
+  end
+
+  @doc false
+  @spec background_failed_lines(term(), term(), term()) :: String.t()
+  def background_failed_lines(role, error, dur) do
+    duration = Renderer.format_elapsed(dur)
+
+    detail = error |> to_string() |> Trajectory.redact() |> Sanitize.scrub_line()
+
+    "\n#{@yellow}  ✗ Background agent \"#{safe_role(role)}\" failed#{@reset} " <>
+      "#{@dim}(#{duration})#{@reset}\n" <>
+      "#{@dim}    #{detail}#{@reset}\n"
+  end
+
+  @doc false
+  @spec background_started_line(term(), term()) :: String.t()
+  def background_started_line(role, agent_id) do
+    aid = agent_id |> to_string() |> Sanitize.scrub_line()
+    "#{@dim}  ◉ Background agent \"#{safe_role(role)}\" started (#{aid})#{@reset}"
+  end
+
+  # A compaction failure reason is frequently a formatted exception carrying
+  # whatever the failing tool wrote, so it is untrusted like any other.
+  @doc false
+  @spec compaction_failed_line(term(), term()) :: String.t()
+  def compaction_failed_line(reason, dur) do
+    detail = reason |> to_string() |> Sanitize.scrub_line()
+
+    "#{@yellow}  ✗ Compaction failed#{@reset} #{@dim}(#{detail} · " <>
+      "#{Renderer.format_elapsed(dur)}) — conversation unchanged#{@reset}"
+  end
+
+  # The role is printed inside quotes. Besides control characters, a literal
+  # `"` would let a role close the quote and continue the sentence in what
+  # looks like OSA's own voice, so it is dropped too.
+  defp safe_role(role) do
+    role |> to_string() |> Sanitize.scrub_line() |> String.replace("\"", "")
   end
 
   # ── Task Tracker Handler ─────────────────────────────────────────────
@@ -179,7 +249,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
               active = Enum.find(tasks, fn t -> t.status == :in_progress end)
 
               if active do
-                form = active.metadata[:active_form] || active.title
+                # This string is model-authored (it is the task's `activeForm`)
+                # and the spinner writes it into a live status line without
+                # further processing. Scrub on the way INTO the cache so every
+                # reader is covered, on the single-line tier because that is the
+                # only shape the spinner row can hold.
+                form = Sanitize.scrub_line(active.metadata[:active_form] || active.title)
                 :ets.insert(:cli_signal_cache, {:active_task_form, form})
               else
                 :ets.delete(:cli_signal_cache, :active_task_form)
