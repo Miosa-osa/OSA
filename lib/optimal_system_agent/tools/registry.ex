@@ -923,6 +923,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead.Tool,
       "file_write" => OptimalSystemAgent.Tools.Builtins.FileWrite.Tool,
       "file_edit" => OptimalSystemAgent.Tools.Builtins.FileEdit.Tool,
+      "file_transform" => OptimalSystemAgent.Tools.Builtins.FileTransform.Tool,
       "file_glob" => OptimalSystemAgent.Tools.Builtins.FileGlob.Tool,
       "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep.Tool,
       "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList.Tool,

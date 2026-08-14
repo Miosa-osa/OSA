@@ -92,6 +92,9 @@ defmodule OptimalSystemAgent.Tools.Registry.Search do
       "file_write" => "multi_file_edit",
       "multi_file_edit" => "file_write",
       "file_edit" => "multi_file_edit",
+      # A transform whose anchor did not match is a genuine dead end for this
+      # tool — the model needs the bytes, which means the tool that quotes them.
+      "file_transform" => "file_edit",
       "semantic_search" => "session_search",
       "session_search" => "memory_recall"
     }

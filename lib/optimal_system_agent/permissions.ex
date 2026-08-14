@@ -74,7 +74,13 @@ defmodule OptimalSystemAgent.Permissions do
   }
 
   # File tools whose primary argument is a path they mutate.
-  @file_mutating_tools ~w(file_write file_edit multi_file_edit file_create file_delete file_move)
+  # `file_transform` belongs here for the same reason the others do: its single
+  # `"path"` argument is the file it mutates, so `out_of_scope_write/2` and
+  # `bypass_immune_ask/2` must both see it. Omitting it would let a transform
+  # touch `.git/config` or a shell rc file without the bypass-immune prompt the
+  # other write tools raise.
+  @file_mutating_tools ~w(file_write file_edit file_transform multi_file_edit
+                          file_create file_delete file_move)
 
   # Shell startup files — writes here are bypass-immune safety asks.
   @shell_rc_files ~w(.bashrc .zshrc .profile .bash_profile .bash_login .bash_logout .zshenv .zprofile .zlogin)
