@@ -588,6 +588,26 @@ The cost is real and should be expected in the token columns: on the live daemon
 the same prompt costs **137 output tokens at `think: true` and 3 at
 `think: false`**.
 
+#### One paired observation, which points the other way on cost
+
+`regex-log` happens to have been run under both settings, and the direction is
+not the one the token arithmetic above predicts:
+
+| | turns | input tokens | output tokens |
+|---|---:|---:|---:|
+| think **false** (unpinned, `osa-full89-aborted`) | 25 | 759,548 | 13,957 |
+| think **true** (`pincheck-4fd9e135`) | **9** | **184,057** | 15,878 |
+
+Reasoning cost 14% more output and **4.1× less input**, because it converged in
+9 turns instead of 25. With no prompt cache and a 162:1 in:out ratio, turn count
+is what cost is made of — so on this task reasoning was both better *and*
+cheaper.
+
+**This is n=1 and confounded** (different artefacts, different code) and it is
+recorded here as a hypothesis to check against the full run, not as a result. It
+is stated because if it holds at scale it changes the OpenRouter estimate below
+by roughly 4×, and that is worth knowing.
+
 ### Two dials, because they are not one dial
 
 `--effort` and `--ollama-think` are two dials because they are not one dial.
@@ -614,14 +634,52 @@ rather than to imply they are absent.
 | trials | 1 (pass@1) | 1 (pass@1) |
 | date | 2026-06-24/25 | 7+ weeks later |
 
-There is no OpenRouter key on this machine, so the serving path is not a choice
-we are making — it is the only one available. **cline's 68.5% is therefore not a
-number we are entitled to expect**, in either direction: the quantisation and
-tool-call template differ, and GLM-5.2 has documented, model-specific tool-call
-defects (template tokens leaking into `function.name`, streamed argument
-corruption producing valid JSON with wrong values, missing tool-call deltas —
-see `docs/research/benchmark-models.md` §7.4) whose incidence is a property of
-the serving path, not of the harness.
+### The serving path is a choice, and it was made on cost
+
+An OpenRouter key does exist on this machine, so matching cline's serving path
+exactly is possible. It was priced and rejected. **The reason is OSA's own cost
+structure, and it is worth stating because it is a finding in itself.**
+
+Live OpenRouter pricing for `z-ai/glm-5.2`, retrieved from the models API rather
+than from a doc: **$1.19/M prompt, $3.74/M completion**, context 1,048,576.
+(`docs/research/benchmark-models.md` quotes $1.40/$4.40 — that is glm-**5.1**'s
+row.)
+
+Against every per-task token count this harness has actually measured (13
+distinct tasks with non-zero telemetry):
+
+| basis | input tok/task | $/task | **89 tasks** |
+|---|---:|---:|---:|
+| median task | 1,343,347 | $1.64 | **$146** |
+| mean task | 4,244,363 | $5.15 | **$458** |
+| most expensive task seen | 23,096,250 | $27.573 | — |
+
+The budget for this arm is $50. Every central estimate is 3–9× over it, so the
+run goes through the local Ollama daemon and the serving-path difference is
+documented rather than eliminated.
+
+**Why it is so expensive is the actual point.** `cache_hit_rate` is `None` on
+every run this harness has ever produced — OSA does no prompt caching — and the
+measured in:out ratio is **162:1**. The entire conversation prefix is re-sent,
+uncached, on every turn, so cost scales with turns × context rather than with
+work done. OpenRouter would bill that at the full uncached rate ($1.19/M) when
+the cache-read rate is $0.221/M — a 5.4× penalty that is ours, not the
+provider's. This is the same split `docs/research/what-harnesses-benchmark.md`
+§5 found between harbor-installed harnesses ($0.24–0.42/M effective) and goose's
+own adapter ($3.00/M), with OSA on the expensive side.
+
+**A cheap calibration exists and is the recommended follow-up:** run only the
+8-task fixed cost probe through OpenRouter (~$13–33 at the rates above) to
+measure how much the serving path is actually worth, then carry that as a stated
+offset on the Ollama number. That buys the comparison most of what a full
+OpenRouter run would, for under a fifth of the budget.
+
+So **cline's 68.5% is not a number we are entitled to expect**, in either
+direction: quantisation and tool-call template differ, and GLM-5.2 has
+documented, model-specific tool-call defects (template tokens leaking into
+`function.name`, streamed argument corruption producing valid JSON with wrong
+values, missing tool-call deltas — see `docs/research/benchmark-models.md` §7.4)
+whose incidence is a property of the serving path, not of the harness.
 
 ### And the arm is still one run
 
