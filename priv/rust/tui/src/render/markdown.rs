@@ -105,20 +105,27 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 let rest = raw_line.trim_start().trim_start_matches('`').trim();
                 code_lang = rest.split_whitespace().next().unwrap_or("").to_owned();
 
-                // §A.5 Modifier 3 — the ONLY blank row this renderer
-                // manufactures. The fence lines themselves are erased, so
-                // `1. Hello` would otherwise collapse straight onto the first
-                // row of code with no air at all. Conditional on the previous
-                // row being non-empty, so the model's own `\n\n` is never
-                // doubled, and on there BEING a previous row, so a fence at the
-                // start of a streamed tail renders identically to the same
-                // fence inside a one-shot render.
-                if lines
-                    .last()
-                    .is_some_and(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
-                {
-                    lines.push(Line::from(Span::raw("")));
-                }
+                // NO synthetic blank row here. §A.5's rule is uniform — k
+                // newlines produce k-1 blank rows, with no exceptions — and
+                // this was an exception.
+                //
+                // It manufactured one blank before an opening fence when the
+                // previous rendered row was non-empty. That condition cannot
+                // survive being split: OSA freezes a prefix into scrollback and
+                // re-renders the tail, and when the split lands on the newline
+                // immediately before a fence, the tail has no previous row and
+                // skips the blank. Measured on
+                // "Some prose about the fix.\n```rust\nfn main() {}\n```\nAfter." —
+                // one-shot renders 4 rows, split-at-the-fence renders 3, so
+                // every row below it moves by one when the block is re-rendered.
+                //
+                // That is the reported symptom: expanding or resizing shifts
+                // the transcript. A height that depends on WHERE a render was
+                // split is unusable in a surface that re-renders, and the air
+                // before a fence is not worth a moving transcript.
+                //
+                // A model that wants a blank line there can write one, and the
+                // uniform rule will honour it.
             }
             continue;
         }
@@ -3031,17 +3038,27 @@ mod part_a {
     /// It is not emitted before the *closing* fence, and not when the model
     /// already left a blank line.
     #[test]
-    fn one_synthetic_blank_row_before_an_opening_fence_only() {
+    fn no_blank_row_is_ever_manufactured_around_a_fence() {
+        // This used to assert the opposite — one synthetic blank before an
+        // opening fence when the previous row was non-empty. That exception was
+        // removed because it cannot survive a split render: OSA freezes a
+        // prefix into scrollback and re-renders the tail, and a split landing
+        // on the newline before a fence leaves the tail with no previous row,
+        // so it skips the blank and the whole block moves up one line.
+        //
+        // The reported symptom was exactly that — expanding or resizing shifted
+        // the transcript. §A.5's rule is uniform for a reason: a height that
+        // depends on WHERE a render was split is unusable in a surface that
+        // re-renders.
         assert_eq!(
             rows("1. Hello\n```\nx = 1\n```\nAfter", 40),
-            vec!["1. Hello", "", "x = 1", "After"],
+            vec!["1. Hello", "x = 1", "After"],
         );
-        // The model's own blank line is never doubled.
+        // The model's own blank line is still honoured, exactly once.
         assert_eq!(
             rows("Para\n\n```\nx = 1\n```\n\nAfter", 40),
             vec!["Para", "", "x = 1", "", "After"],
         );
-        // Nothing manufactured at the very start of a document.
         assert_eq!(rows("```\nx = 1\n```", 40), vec!["x = 1"]);
     }
 
@@ -3257,6 +3274,53 @@ mod part_a {
                     );
                 }
             }
+        }
+    }
+}
+
+// ── the synthetic blank must not depend on WHERE a render was split ─────────
+//
+// Reported symptom: expanding/resizing shifts the transcript and "adds spaces".
+// Modifier 3 manufactures one blank row before an opening fence, conditional on
+// the previous row being non-empty. If a prefix render ends just before a
+// fence, the tail render sees NO previous row and skips the blank — so
+// prefix ++ tail has one row fewer than the one-shot render of the same text,
+// and every row below it moves.
+#[cfg(test)]
+mod split_stability {
+    use super::*;
+
+    fn rows(s: &str, w: u16) -> usize {
+        render_markdown(s, w).lines.len()
+    }
+
+    fn split_rows(s: &str, at: usize, w: u16) -> usize {
+        let (a, b) = s.split_at(at);
+        render_markdown(a, w).lines.len() + render_markdown(b, w).lines.len()
+    }
+
+    #[test]
+    fn a_fence_renders_the_same_height_however_the_text_is_split() {
+        // Deliberately WITHOUT a blank line before the fence — that is the case
+        // Modifier 3 exists for, and the case where the condition can differ.
+        let doc = "Some prose about the fix.\n```rust\nfn main() {}\n```\nAfter.";
+        let whole = rows(doc, 80);
+
+        // Line boundaries only — that is where the streaming renderer actually
+        // freezes a prefix. A mid-word split is not a case OSA produces.
+        let mut at = 0usize;
+        for line in doc.split_inclusive('\n') {
+            at += line.len();
+            if at == 0 || at >= doc.len() {
+                continue;
+            }
+            let split = split_rows(doc, at, 80);
+            assert_eq!(
+                split, whole,
+                "splitting at byte {at} changes height {whole} -> {split}; \
+                 the transcript would shift by {} row(s) when re-rendered",
+                split as i64 - whole as i64
+            );
         }
     }
 }
