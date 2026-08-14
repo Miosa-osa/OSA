@@ -130,7 +130,7 @@ defmodule OptimalSystemAgent.MCP.Server.Dispatcher do
     prompt = arguments["prompt"] || arguments[:prompt]
 
     if is_binary(prompt) and prompt != "" do
-      session_id = "mcp_server_#{System.unique_integer([:positive])}"
+      session_id = OptimalSystemAgent.Agent.SessionId.generate("mcp_server")
 
       loop_opts = [session_id: session_id, channel: :headless]
 

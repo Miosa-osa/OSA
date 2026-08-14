@@ -37,7 +37,7 @@ defmodule OptimalSystemAgent.Agent.SkillBootstrap do
          :ok <- File.write(path, content) do
       Registry.reload_skills()
 
-      session_id = "skill-bootstrap:#{System.unique_integer([:positive])}"
+      session_id = OptimalSystemAgent.Agent.SessionId.generate("skill_bootstrap")
       trigger_message = "#{name}: execute skill"
 
       {:ok, %{skill_name: name, session_id: session_id, trigger_message: trigger_message}}

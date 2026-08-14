@@ -299,6 +299,38 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   end
 
+  @doc """
+  True when ANY artifact already exists on disk under this session id.
+
+  The question a fresh-id generator has to ask. It is deliberately wider than
+  "does the transcript exist": a session id is the key for the transcript, the
+  spend sidecar, the immutable event log, the metadata sidecar and the goal
+  record, and inheriting *any* of those from an unrelated earlier session is the
+  bug — the measured symptom was a contaminated `<id>.spend.json`, which a
+  transcript-only check would have walked straight past.
+
+  Best-effort and never raises: an unreadable sessions directory answers `false`
+  the same way an empty one does, because refusing to start a session over a
+  stat error would be a worse failure than the one being prevented.
+  """
+  @spec exists?(String.t()) :: boolean()
+  def exists?(session_id) when is_binary(session_id) do
+    Enum.any?(
+      [
+        session_path(session_id),
+        spend_path(session_id),
+        meta_path(session_id),
+        updates_path(session_id),
+        OptimalSystemAgent.Agent.Loop.GoalTracker.store_path(session_id)
+      ],
+      &File.exists?/1
+    )
+  rescue
+    _ -> false
+  end
+
+  def exists?(_), do: false
+
   @doc "Delete a saved session (mutable transcript + immutable event log sidecars)."
   def delete(session_id) do
     path = session_path(session_id)

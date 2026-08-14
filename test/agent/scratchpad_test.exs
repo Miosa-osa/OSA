@@ -18,9 +18,22 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
   # ---------------------------------------------------------------------------
 
   describe "inject?/1" do
-    test "returns true for :ollama" do
+    # A LOCALLY served, non-reasoning tag: `Ollama.reasoning_decision/2` answers
+    # `{nil, :unsupported}`, so nothing native is on the wire and the scaffold is
+    # this turn's only reasoning space.
+    test "returns true for :ollama on a model with no native reasoning" do
       Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
-      assert Scratchpad.inject?(:ollama)
+      assert Scratchpad.inject?(%{provider: :ollama, model: "llama3.1:8b"})
+    end
+
+    # The mirror-image defect. `glm-5.2:cloud` is a CLOUD tag, and Ollama drives
+    # cloud tags with `think: true` (`{true, :cloud_default}`) — so under the old
+    # `provider != :anthropic` gate this turn got a native reasoning channel AND
+    # was told to hand-roll `<think>` tags around its answer. Asking the real
+    # question removes the second copy.
+    test "returns false for :ollama on a cloud tag that already reasons natively" do
+      Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
+      refute Scratchpad.inject?(%{provider: :ollama, model: "glm-5.2:cloud"})
     end
 
     test "returns true for :openai" do
@@ -43,22 +56,68 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
       refute Scratchpad.inject?(:anthropic)
     end
 
+    # `anthropic/*` served through OpenRouter. Intuition says "it's a Claude, it
+    # has native thinking, don't scaffold it" — and that is wrong: OSA sends this
+    # route no `thinking` and no `reasoning_effort` (see
+    # `OpenAICompat.maybe_add_reasoning/3`, which excludes Anthropic ids), so
+    # suppressing the scaffold would leave the turn with nothing. Asserted so a
+    # future "just check the model name" shortcut fails loudly here.
+    test "returns true for anthropic/* via OpenRouter — it has no native thinking today" do
+      Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
+
+      assert Scratchpad.inject?(%{provider: :openrouter, model: "anthropic/claude-opus-5"})
+    end
+
+    # ...and it is not injected TWICE. One scaffold, one decision, one source.
+    test "the scaffold is a single decision, not a per-call accumulation" do
+      Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
+      state = %{provider: :openrouter, model: "anthropic/claude-opus-5"}
+
+      assert {true, :no_native_thinking} = Scratchpad.decision(state)
+      assert Scratchpad.decision(state) == Scratchpad.decision(state)
+
+      instruction = Scratchpad.instruction()
+      assert length(String.split(instruction, "## Private Reasoning")) == 2
+    end
+
+    # Prefix stability: the scaffold block feeds a CACHED system prompt, so for a
+    # fixed model + config the answer must not wobble between calls within a
+    # session. 92.8% cache hit rate depends on it.
+    test "the decision is constant for a fixed model and config" do
+      Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
+
+      for state <- [
+            %{provider: :anthropic, model: "claude-opus-5"},
+            %{provider: :ollama, model: "llama3.1:8b"},
+            %{provider: :openrouter, model: "anthropic/claude-opus-5"}
+          ] do
+        first = Scratchpad.decision(state)
+        assert Enum.all?(1..25, fn _ -> Scratchpad.decision(state) == first end)
+      end
+    end
+
     test "returns false when scratchpad_enabled is false" do
       Application.put_env(:optimal_system_agent, :scratchpad_enabled, false)
-      refute Scratchpad.inject?(:ollama)
+      refute Scratchpad.inject?(%{provider: :ollama, model: "llama3.1:8b"})
       refute Scratchpad.inject?(:openai)
       # Restore default
       Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
     end
 
-    test "returns true for nil provider (non-Anthropic fallback)" do
+    test "a nil provider falls back to the configured default" do
       Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
-      assert Scratchpad.inject?(nil)
+      # Same answer as naming that default explicitly — the fallback resolves the
+      # provider, it does not bypass the question.
+      assert Scratchpad.decision(nil) ==
+               Scratchpad.decision(
+                 Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+               )
     end
 
     test "defaults to enabled when config is not set" do
       Application.delete_env(:optimal_system_agent, :scratchpad_enabled)
-      assert Scratchpad.inject?(:ollama)
+      assert Scratchpad.inject?(%{provider: :ollama, model: "llama3.1:8b"})
+      Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
     end
   end
 
@@ -268,7 +327,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
     test "Ollama provider SHOULD get scratchpad instruction injected" do
       Application.put_env(:optimal_system_agent, :scratchpad_enabled, true)
 
-      assert Scratchpad.inject?(:ollama)
+      assert Scratchpad.inject?(%{provider: :ollama, model: "llama3.1:8b"})
       instruction = Scratchpad.instruction()
       assert String.contains?(instruction, "<think>")
     end

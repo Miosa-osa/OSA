@@ -56,8 +56,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         model: model,
         messages: format_messages(messages) |> maybe_strip_images(opts)
       }
-      |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:openai, model)
-      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :openai)
+      |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
+      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
       |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(model, opts)
@@ -202,8 +202,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # builds) fall back to the char/token estimate in finalize_sse_stream/4.
       stream_options: %{include_usage: true}
     }
-    |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:openai, model)
-    |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :openai)
+    |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
+    |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
     |> maybe_add_temperature(model, opts)
     |> maybe_add_tools(opts)
     |> maybe_add_max_tokens(model, opts)
@@ -602,6 +602,15 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       base
     end
   end
+
+  # The provider key the image gates should look the model up under.
+  #
+  # `OpenAICompatProvider` now puts the real one in `opts` for all ~20 providers
+  # it serves. `:openai` is kept as the fallback only for a DIRECT
+  # `OpenAICompat.chat/5` call that predates the key — never as a claim about who
+  # is serving. It is deliberately the same default the code had before, so a
+  # caller that has not been updated behaves exactly as it used to.
+  defp image_provider(opts), do: Keyword.get(opts, :provider) || :openai
 
   # Strip inline images from already-wire-formatted messages (413 recovery).
   # Replaces each `image_url` content part with an honest text placeholder so

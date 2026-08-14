@@ -11,7 +11,7 @@ defmodule OptimalSystemAgent.SDK do
   @doc "Send a message through the full agent pipeline."
   @spec query(String.t(), keyword()) :: {:ok, [map()]} | {:error, String.t()}
   def query(message, opts \\ []) when is_binary(message) do
-    session_id = Keyword.get(opts, :session_id, "sdk-#{System.unique_integer([:positive])}")
+    session_id = OptimalSystemAgent.Agent.SessionId.resolve(Keyword.get(opts, :session_id), "sdk")
 
     try do
       OptimalSystemAgent.Agent.Loop.process_message(session_id, message, opts)
@@ -31,7 +31,7 @@ defmodule OptimalSystemAgent.SDK do
   """
   @spec launch_swarm(String.t(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def launch_swarm(task, opts \\ []) when is_binary(task) do
-    session_id = Keyword.get(opts, :session_id, "sdk-#{System.unique_integer([:positive])}")
+    session_id = OptimalSystemAgent.Agent.SessionId.resolve(Keyword.get(opts, :session_id), "sdk")
     role = Keyword.get(opts, :role, "agent")
     tier = Keyword.get(opts, :tier, :specialist)
 
@@ -250,7 +250,9 @@ defmodule OptimalSystemAgent.SDK do
 
     @doc "Create a new agent session."
     def create(opts \\ []) do
-      session_id = Keyword.get(opts, :session_id, "sdk-#{System.unique_integer([:positive])}")
+      session_id =
+        OptimalSystemAgent.Agent.SessionId.resolve(Keyword.get(opts, :session_id), "sdk")
+
       {:ok, %{session_id: session_id, created_at: DateTime.utc_now()}}
     end
 

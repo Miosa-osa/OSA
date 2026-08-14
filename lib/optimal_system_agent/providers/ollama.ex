@@ -837,15 +837,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       %{role: "tool", content: content, tool_call_id: id} = msg ->
         name = Map.get(msg, :name, "")
 
-        %{
-          "role" => "tool",
-          "content" => to_string(content),
-          "tool_call_id" => to_string(id),
-          "name" => to_string(name)
-        }
+        # A tool result CAN be a content-block list — `ToolExecutor` builds
+        # exactly that when `Read` is pointed at an image file (a text part
+        # naming the path, then the image block). `to_string/1` on a list raised
+        # `Protocol.UndefinedError`, which is why the Registry used to flatten
+        # everything to a string before it got here.
+        Map.merge(
+          %{
+            "role" => "tool",
+            "tool_call_id" => to_string(id),
+            "name" => to_string(name)
+          },
+          encode_content(content)
+        )
 
       %{role: role, content: content} ->
-        %{"role" => to_string(role), "content" => to_string(content)}
+        Map.merge(%{"role" => to_string(role)}, encode_content(content))
 
       %{"role" => _} = msg ->
         msg
@@ -854,6 +861,84 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         msg
     end)
   end
+
+  # Ollama's native `/api/chat` carries images as a SIBLING field of `content`:
+  # `%{"role" => "user", "content" => "...", "images" => ["<base64>", ...]}` —
+  # not as OpenAI-style content parts. Nothing in this module knew that, so the
+  # Registry's transport gate (`transport_carries_images?/1`, which asks a
+  # provider module for `supports_image_content?/0`) got no answer from Ollama,
+  # answered `false`, and replaced every attached image with a placeholder
+  # sentence. The placeholder was honest — but it said "OSA's integration cannot
+  # send images", and the reason it could not was this function's absence.
+  #
+  # Whether the MODEL can see the image is a separate question and still asked
+  # separately, by `ImageBudget.vision_capable?/2` in the Registry, on the same
+  # fail-open terms as every other provider. This function only answers "can the
+  # wire format carry it".
+  @spec encode_content(term()) :: map()
+  defp encode_content(blocks) when is_list(blocks) do
+    {texts, images} =
+      Enum.reduce(blocks, {[], []}, fn block, {texts, images} ->
+        case image_data(block) do
+          nil -> {[block_text(block) | texts], images}
+          data -> {texts, [data | images]}
+        end
+      end)
+
+    text = texts |> Enum.reverse() |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
+
+    case Enum.reverse(images) do
+      [] -> %{"content" => text}
+      imgs -> %{"content" => text, "images" => imgs}
+    end
+  end
+
+  defp encode_content(content), do: %{"content" => to_string(content || "")}
+
+  # Bare base64 — Ollama takes the payload without a data: URI or a media type,
+  # so the media type carried alongside it is simply not needed on this wire.
+  defp image_data(%{type: t, source: %{data: data}})
+       when t in ["image", :image] and is_binary(data),
+       do: data
+
+  defp image_data(%{"type" => "image", "source" => %{"data" => data}}) when is_binary(data),
+    do: data
+
+  # OpenAI-shaped parts can reach here from a rehydrated session or an MCP
+  # result. Only `data:` URLs are usable: Ollama has no remote-fetch path, and
+  # silently sending it an http(s) URL as if it were base64 would be a lie in the
+  # request body.
+  defp image_data(%{type: t, image_url: %{url: url}}) when t in ["image_url", :image_url],
+    do: data_url_payload(url)
+
+  defp image_data(%{"type" => "image_url", "image_url" => %{"url" => url}}),
+    do: data_url_payload(url)
+
+  defp image_data(_), do: nil
+
+  defp data_url_payload("data:" <> rest) do
+    case String.split(rest, ";base64,", parts: 2) do
+      [_media_type, data] -> data
+      _ -> nil
+    end
+  end
+
+  defp data_url_payload(_), do: nil
+
+  defp block_text(%{type: t, text: text}) when t in ["text", :text] and is_binary(text), do: text
+  defp block_text(%{"type" => "text", "text" => text}) when is_binary(text), do: text
+  defp block_text(text) when is_binary(text), do: text
+  # A block of a shape we do not encode must not be silently deleted; rendering
+  # it is worse than dropping it, so it contributes nothing to the text and the
+  # Registry's image accounting stays the single place that reports a loss.
+  defp block_text(_), do: ""
+
+  @doc """
+  True — the native `/api/chat` message shape carries images, see
+  `encode_content/1`. Read by `Registry.transport_carries_images?/1`.
+  """
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
 
   defp maybe_add_tools(body, model, opts) do
     case Keyword.get(opts, :tools) do
@@ -1036,6 +1121,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Reasoning-model name heuristic used when the Catalog has no reasoning flag.
   # Broadened past kimi/'thinking' to the common local reasoning tags whose names
   # don't literally contain 'thinking' (deepseek-r1, qwq, qwen '-r1' variants).
+  # `reasoning_decision/2` advertises `String.t() | nil`, and every layer above
+  # honoured the `nil` right up to here, where `String.downcase/1` raised. A
+  # nameless model is not evidence of a reasoning phase — the honest answer is
+  # "no", not an exception out of a capability query.
+  defp heuristic_thinking_model?(nil), do: false
+
   defp heuristic_thinking_model?(model_name) do
     name = String.downcase(model_name)
 

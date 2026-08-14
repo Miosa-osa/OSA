@@ -718,7 +718,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     content = if is_nil(content) or String.trim(content) == "", do: "...", else: content
 
     content =
-      if Scratchpad.inject?(state.provider) do
+      if Scratchpad.inject?(state) do
         Scratchpad.process_response(content, state.session_id)
       else
         content
@@ -1159,7 +1159,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       |> Map.put(:just_compacted, false)
 
     content =
-      if Scratchpad.inject?(state.provider) do
+      if Scratchpad.inject?(state) do
         Scratchpad.process_response(content, state.session_id)
       else
         content

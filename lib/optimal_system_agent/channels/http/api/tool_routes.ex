@@ -195,7 +195,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # effects.
   defp handle_coordinator_command(conn, arg) do
     session_id =
-      conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+      OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
 
     verb = arg |> to_string() |> String.trim() |> String.downcase()
     current = coordinator_active?(session_id)
@@ -249,7 +249,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     tokens = command |> String.trim() |> String.downcase() |> String.split()
 
     session_id =
-      conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+      OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
 
     # A `set_permission_mode <mode>` naming one of the higher-level modes (the
     # Shift+Tab cycle: ask / accept-edits / plan / overdrive) sets permission_MODE.
@@ -377,7 +377,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       conn |> put_resp_content_type("application/json") |> send_resp(200, body)
     else
       session_id =
-        conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+        OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
 
       output =
         try do

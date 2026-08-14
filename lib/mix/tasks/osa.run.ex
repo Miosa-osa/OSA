@@ -112,8 +112,21 @@ defmodule Mix.Tasks.Osa.Run do
       end
     end
 
-    # Create session
-    session_id = opts[:resume] || "headless_#{System.unique_integer([:positive])}"
+    # Create session.
+    #
+    # This used to be `opts[:resume] || "headless_#{System.unique_integer/1}"`.
+    # `--resume` is still verbatim — reusing that session's artifacts is the whole
+    # point of resuming — but the generated arm was a collision. Every `osa`
+    # invocation is a fresh BEAM and `System.unique_integer/1` restarts near zero
+    # on every boot (measured across five boots on this machine: 2564, 2567, 2566,
+    # 390, 10), while the id is the key for `~/.osa/sessions/<id>.json`,
+    # `<id>.spend.json` and `<id>.goal.json`. A repeat therefore made a fresh
+    # headless run inherit an unrelated session's transcript AND its bill —
+    # observed on two of six benchmark runs, and `~/.osa/sessions` still holds
+    # `headless_4` / `headless_8` / `headless_67` waiting to be landed on again.
+    # `SessionId.generate/1` is time-prefixed, CSPRNG-tailed, and refuses an id
+    # that already has artifacts on disk.
+    session_id = OptimalSystemAgent.Agent.SessionId.resolve(opts[:resume], "headless")
 
     loop_opts =
       [
@@ -150,13 +163,15 @@ defmodule Mix.Tasks.Osa.Run do
         System.halt(1)
 
       {"json", {:ok, response}} ->
-        output = %{
-          type: "result",
-          session_id: session_id,
-          content: response,
-          model: opts[:model] || Application.get_env(:optimal_system_agent, :default_provider),
-          cost: get_session_cost()
-        }
+        output =
+          %{
+            type: "result",
+            session_id: session_id,
+            content: response,
+            model: opts[:model] || Application.get_env(:optimal_system_agent, :default_provider),
+            cost: get_session_cost()
+          }
+          |> Map.merge(session_usage(session_id))
 
         IO.puts(json_line(output))
 
@@ -166,8 +181,19 @@ defmodule Mix.Tasks.Osa.Run do
         System.halt(1)
 
       {"stream-json", {:ok, response}} ->
-        # Final result event
-        IO.puts(json_line(%{type: "result", content: response}))
+        # Final result event, now carrying the run's own bill. Without this the
+        # ONLY way to cost a headless run was to go behind the documented
+        # interface and read `~/.osa/sessions/<id>.spend.json` — which is how the
+        # colliding-id contamination got into a published measurement in the
+        # first place.
+        IO.puts(
+          json_line(
+            Map.merge(
+              %{type: "result", session_id: session_id, content: response},
+              session_usage(session_id)
+            )
+          )
+        )
 
       {"stream-json", {:error, reason}} ->
         IO.puts(json_line(%{type: "error", error: to_string(reason)}))
@@ -242,6 +268,37 @@ defmodule Mix.Tasks.Osa.Run do
       end
     end)
 
+    # Per-round-trip token usage.
+    #
+    # `stream-json` is documented as the machine-readable format, and it emitted
+    # tokens, thinking and (since 695cc38c) tool calls — but never a single usage
+    # figure, so it could not answer "what did this cost". The numbers were
+    # already on the bus: `ReactLoop` emits `:llm_response` with the provider's
+    # real `usage` map for EVERY completed round-trip. Nothing was missing but a
+    # subscriber. Same `event_payload/1` unwrapping as the handlers above — the
+    # Bus hands over a CloudEvent envelope, not the emitted payload.
+    OptimalSystemAgent.Events.Bus.register_handler(:llm_response, fn envelope ->
+      payload = event_payload(envelope)
+
+      if Map.get(envelope, :session_id) == session_id do
+        case Map.get(payload, :usage) do
+          usage when is_map(usage) and map_size(usage) > 0 ->
+            IO.puts(
+              json_line(%{
+                type: "usage",
+                model: to_string(Map.get(payload, :model)),
+                provider: to_string(Map.get(payload, :provider)),
+                duration_ms: Map.get(payload, :duration_ms),
+                usage: usage_fields(usage)
+              })
+            )
+
+          _ ->
+            :ok
+        end
+      end
+    end)
+
     OptimalSystemAgent.Events.Bus.register_handler(:tool_call, fn envelope ->
       payload = event_payload(envelope)
 
@@ -264,6 +321,44 @@ defmodule Mix.Tasks.Osa.Run do
         )
       end
     end)
+  end
+
+  # The provider's usage map, with the four counters that decide a bill always
+  # present. A missing key here reads as "this provider does not report cache
+  # tokens", which is indistinguishable from "there were none" — so they are
+  # defaulted to 0 and the raw map is not passed through verbatim.
+  defp usage_fields(usage) do
+    %{
+      input_tokens: Map.get(usage, :input_tokens, 0),
+      output_tokens: Map.get(usage, :output_tokens, 0),
+      cache_creation_tokens: Map.get(usage, :cache_creation_tokens, 0),
+      cache_read_tokens: Map.get(usage, :cache_read_tokens, 0)
+    }
+  end
+
+  # This run's OWN totals, read from the durable spend sidecar the loop just
+  # flushed. Distinct from `get_session_cost/0` below, which is the DAY's spend
+  # across every session — a number that cannot answer "what did this task cost".
+  #
+  # `complete: false` means no sidecar was found. The zeros in that case are a
+  # placeholder, not a measurement, so the flag rides along in the output rather
+  # than letting a reader publish "$0.00" for an unbilled run.
+  defp session_usage(session_id) do
+    spend = OptimalSystemAgent.Agent.SessionPersistence.load_spend(session_id)
+
+    %{
+      session_cost_usd: spend.cost_usd,
+      tree_cost_usd: spend.tree_cost_usd,
+      usage: %{
+        input_tokens: spend.input_tokens,
+        output_tokens: spend.output_tokens,
+        cache_creation_tokens: spend.cache_creation_tokens,
+        cache_read_tokens: spend.cache_read_tokens
+      },
+      usage_complete: spend.complete
+    }
+  rescue
+    _ -> %{usage_complete: false}
   end
 
   defp get_session_cost do

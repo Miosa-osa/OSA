@@ -1960,12 +1960,12 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
+  # The provider default is resolved inside `Scratchpad.decision/1` now, and the
+  # MODEL is what it actually needs: whether a request carries native thinking is
+  # a model-level fact (`claude-*` thinking mode, an Ollama cloud tag, a Bedrock
+  # Claude id), not a provider-level one. Passing the whole state hands it both.
   defp scratchpad_block(state) do
-    provider =
-      Map.get(state, :provider) ||
-        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-
-    if Scratchpad.inject?(provider) do
+    if Scratchpad.inject?(state) do
       Scratchpad.instruction()
     else
       nil

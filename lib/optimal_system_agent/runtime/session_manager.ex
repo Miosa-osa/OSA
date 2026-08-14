@@ -394,10 +394,10 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   # Collision-proof across restarts. System.unique_integer/1 resets to small ints
   # on every BEAM boot, so a fresh session could reuse an id (e.g. "session-1")
   # that already exists in the persistent transcript store and inherit its history.
-  # Millisecond prefix keeps ids roughly time-ordered; random tail guarantees
-  # uniqueness even within the same millisecond and across restarts.
-  defp default_session_id do
-    "session-#{System.system_time(:millisecond)}-" <>
-      Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
-  end
+  #
+  # This module got that right first and every other entry point got it wrong, so
+  # the reasoning now lives in `Agent.SessionId` and is shared rather than
+  # re-derived. Same shape as before, plus a disk check that turns "improbable"
+  # into "refused".
+  defp default_session_id, do: OptimalSystemAgent.Agent.SessionId.generate("session")
 end

@@ -698,13 +698,68 @@ defmodule OptimalSystemAgent.Providers.Registry do
       # OpenRouter forwards to Anthropic.
       keep_cache? = anthropic_prompt_cache?(target, resolved_model(target, opts))
 
-      Enum.map(messages, &flatten_message_content(&1, carry_images?, keep_cache?, reason))
+      flattened =
+        Enum.map(messages, &flatten_message_content(&1, carry_images?, keep_cache?, reason))
+
+      # A user attached an image and we destroyed it. Until now the ONLY trace of
+      # that was the replacement sentence sitting inside the prompt — visible to
+      # the model, invisible to the operator, and absent from every log and
+      # metric. `Ollama.apply_tools/3` already emits `[:osa, :ollama,
+      # :tools_stripped]` for exactly this reason ("a capability silently removed
+      # must never be a decision someone has to go looking for"); the image gate
+      # gets the same treatment. Counted from the INPUT, because by now the
+      # blocks are gone.
+      unless carry_images? do
+        report_dropped_images(count_image_blocks(messages), target, reason, opts)
+      end
+
+      flattened
     else
       messages
     end
   end
 
   def normalize_message_content(messages, _target, _opts), do: messages
+
+  # Zero is the ordinary case (structured content is usually cache markers or
+  # plain text parts, not images) and must stay silent — an "0 images dropped"
+  # line on every turn is noise, and noise is its own kind of invisible.
+  defp report_dropped_images(0, _target, _reason, _opts), do: :ok
+
+  defp report_dropped_images(n, target, reason, opts) do
+    provider = provider_key(target)
+    model = Keyword.get(opts, :model)
+
+    Logger.warning(
+      "[registry] #{n} image(s) not sent to #{provider}/#{model || "?"}: " <>
+        case reason do
+          :transport -> "OSA's integration for this provider cannot carry images"
+          :model -> "the model does not accept image input"
+          _ -> "images are not carried on this route"
+        end
+    )
+
+    :telemetry.execute(
+      [:osa, :images, :dropped],
+      %{count: n},
+      %{provider: provider, model: model, reason: reason}
+    )
+  rescue
+    _ -> :ok
+  end
+
+  defp count_image_blocks(messages) do
+    Enum.reduce(messages, 0, fn
+      %{content: blocks}, acc when is_list(blocks) ->
+        acc + Enum.count(blocks, &image_block?/1)
+
+      %{"content" => blocks}, acc when is_list(blocks) ->
+        acc + Enum.count(blocks, &image_block?/1)
+
+      _, acc ->
+        acc
+    end)
+  end
 
   # Can this dispatch target put an image on the wire at all, for this model?
   defp carry_images?(target, opts) do
@@ -1162,8 +1217,16 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # same-provider retry loop rather than dropping straight to sync).
   defp stream_capable?({:compat, _provider}), do: true
 
+  # `Code.ensure_loaded?/1` is load-bearing, and its absence here was a real (if
+  # narrow) bug: `function_exported?/3` answers `false` for a module that has not
+  # been loaded YET, which under interactive/lazy loading is any provider module
+  # on its first touch. The false negative sent a perfectly streaming provider
+  # down `fallback_sync_stream/4` — one blocking call pushed through the callback
+  # as a single delta, and the same-provider retry loop skipped — with nothing
+  # said. Its sibling `transport_carries_images?/1` above already guards this
+  # way; the two now agree.
   defp stream_capable?(module) when is_atom(module),
-    do: function_exported?(module, :chat_stream, 3)
+    do: Code.ensure_loaded?(module) and function_exported?(module, :chat_stream, 3)
 
   # A single native streaming attempt — NO sync fallback. Returns
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the

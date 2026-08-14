@@ -220,7 +220,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     end
   end
 
-
   @doc false
   # Demote every non-LEADING `system` message to `user`.
   #
@@ -315,6 +314,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
       opts =
         opts
         |> Keyword.delete(:model)
+        # Which of the ~20 compat providers is actually serving this request.
+        # `OpenAICompat` hardcoded `:openai` for both of its image gates, so
+        # `ImageBudget.vision_capable?/2` looked the model up under the wrong
+        # catalogue key for every provider except OpenAI itself and fell through
+        # to a model-only match — the same "a provider name standing in for a
+        # capability" shape as the scratchpad gate. The caller is the only place
+        # that knows the answer, so it says it.
+        |> Keyword.put(:provider, provider)
         |> maybe_add_headers(config)
         |> maybe_extend_timeout(model)
 
@@ -347,6 +354,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
       opts =
         opts
         |> Keyword.delete(:model)
+        # Which of the ~20 compat providers is actually serving this request.
+        # `OpenAICompat` hardcoded `:openai` for both of its image gates, so
+        # `ImageBudget.vision_capable?/2` looked the model up under the wrong
+        # catalogue key for every provider except OpenAI itself and fell through
+        # to a model-only match — the same "a provider name standing in for a
+        # capability" shape as the scratchpad gate. The caller is the only place
+        # that knows the answer, so it says it.
+        |> Keyword.put(:provider, provider)
         |> maybe_add_headers(config)
         |> maybe_extend_timeout(model)
 

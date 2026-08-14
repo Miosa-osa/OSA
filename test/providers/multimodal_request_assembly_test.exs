@@ -324,9 +324,26 @@ defmodule OptimalSystemAgent.Providers.MultimodalRequestAssemblyTest do
       end)
     end
 
-    test "a transport with no image encoder never sees the bytes, and is told why", %{port: port} do
+    test "Ollama receives the image in its native sibling field", %{port: port} do
+      # This case used to assert the opposite — that Ollama never saw the bytes
+      # and got the "cannot send images" placeholder instead. That was true, and
+      # it was the defect: Ollama's `/api/chat` carries images as an `"images"`
+      # sibling of `"content"`, and OSA had simply never learned the shape.
       with_env([ollama_url: "http://127.0.0.1:#{port}"], fn ->
-        raw = capture_body(:ollama, [user_turn()], model: "llama3")
+        raw = capture_body(:ollama, [user_turn()], model: "llava:7b")
+
+        assert raw, "the request never reached the wire"
+        refute raw =~ "cannot send images"
+
+        [user] = Jason.decode!(raw)["messages"]
+        assert user["images"] == [@data]
+        assert user["content"] =~ "what is in this screenshot?"
+      end)
+    end
+
+    test "a transport with no image encoder never sees the bytes, and is told why", %{port: port} do
+      with_env([cohere_url: "http://127.0.0.1:#{port}", cohere_api_key: "co-test"], fn ->
+        raw = capture_body(:cohere, [user_turn()], model: "command-r-plus")
 
         assert raw, "the request never reached the wire"
         refute raw =~ @data, "an image-incapable transport must not receive image bytes"

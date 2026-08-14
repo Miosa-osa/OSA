@@ -216,13 +216,26 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
     end
 
     test "a transport with no image encoder is flattened, and says THAT instead" do
-      # Ollama does not export `supports_image_content?/0`; it would raise on a
+      # Cohere does not export `supports_image_content?/0`; it would raise on a
       # list. The placeholder must name the transport, not blame the model.
-      [user] = Registry.normalize_message_content(image_messages(), Providers.Ollama)
+      #
+      # This used to be asserted against Ollama, which has since GROWN an image
+      # encoder (`Ollama.encode_content/1` emits the native `"images"` sibling
+      # field), so it is no longer an example of the thing being tested — the
+      # case below pins the new behaviour.
+      [user] = Registry.normalize_message_content(image_messages(), Providers.Cohere)
 
       assert is_binary(user.content)
       assert user.content =~ "cannot send images"
       refute user.content =~ "does not accept image input"
+    end
+
+    test "Ollama is no longer such a transport — its blocks survive" do
+      [user] =
+        Registry.normalize_message_content(image_messages(), Providers.Ollama, model: "llava:7b")
+
+      assert is_list(user.content)
+      assert Enum.any?(user.content, &match?(%{type: "image"}, &1))
     end
 
     test "a tool result carrying an image flattens instead of raising" do
@@ -239,7 +252,7 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
         }
       ]
 
-      [tool] = Registry.normalize_message_content(messages, Providers.Ollama)
+      [tool] = Registry.normalize_message_content(messages, Providers.Cohere)
 
       assert tool.content =~ "Image: /tmp/shot.png"
       assert tool.content =~ "cannot send images"

@@ -135,7 +135,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
 
   defp run_as_subagent(prompt, skill, task) do
     session_id =
-      Process.get(:osa_session_id, "use_skill:#{System.unique_integer([:positive])}")
+      Process.get(:osa_session_id) || OptimalSystemAgent.Agent.SessionId.generate("use_skill")
 
     tools_allowed =
       case Map.get(skill, :tools, []) do
