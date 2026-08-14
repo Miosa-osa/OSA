@@ -11,235 +11,202 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [1.0.98] — displays as `v1.0.098`
 
-The cost release. OSA was running at **12–35x** what competing harnesses pay per
-task, and none of the reasons were visible from inside OSA — every instrument
-that should have shown the problem was itself broken, and each one reported a
+The release where we found out what OSA had actually been doing.
+
+Almost nothing below is an optimisation. OSA was running with **reasoning
+disabled**, **59 of its 82 tools unreachable**, **no prompt caching**, **an
+effort ladder wired to nothing**, and **no ability to write inside a
+container** — and every instrument that should have shown it reported a
 plausible number instead of an error.
 
-The pattern in almost every defect below: **the OpenAI-compatible path silently
-diverging from the native path**, with nothing failing loudly enough to notice.
+### The pattern
 
-### The measured problem
+Eleven defects in this release share one shape: **a guard that is correct for a
+narrow case, applied one scope too wide, silently disabling a capability, with
+nothing reporting the loss.**
 
-Published figures from goose's model-pinned Harbor table, divided out per task:
+- `PathPolicy` allowed writes under `~` and `/tmp` only — so every container
+  deployment could not write to its own workspace. Broken since **v1.0.77**.
+- `Registry.list_active/0` consulted only `should_defer?` — **59 of 82 tools
+  could never be named** by a native-tool API, including `use_tool`, the
+  escape hatch.
+- `cache_control` was gated on `provider == :anthropic` — caching was **dead
+  code on the OpenRouter path** that real traffic uses.
+- The effort ladder produced **byte-identical requests at all five tiers** on
+  Anthropic, and was hardcoded to `medium` on the OpenAI-compatible path.
+- `think: false` was applied by model *capability* rather than by *serving
+  mode* — **reasoning disabled on every cloud model that supports it**.
+- `anthropic_prompt_cache?/2` required a binary model, which is `nil` on every
+  non-CLI entry point — so caching was **silently re-disabled for serve, HTTP
+  and every benchmark run**.
 
-| harness | input/task | in:out | effective $/M input |
-|---|---|---|---|
-| Claude Code | 1.15M | 85:1 | $0.24 |
-| opencode | 1.25M | 70:1 | $0.42 |
-| goose | 0.71–0.88M | 56–67:1 | $3.00 |
-| **OSA (before)** | **3–8M** | **~140:1** | **$3.00** |
+The correct pattern already existed in the codebase: `openai_compat` gates on
+**transport**, not capability, and defaults an unknown transport to `true`
+specifically so it cannot silently disable thinking. `silent_capability_loss_test.exs`
+now pins the class.
 
-$3.00/M is the full **uncached** rate. $0.24 implies ~96–100% cache hits. OSA had
-both multipliers stacked: 3–7x the field's token volume *and* zero caching.
+### What it cost, measured
 
-### The measured result
+`regex-log`, one task, three conditions:
 
-`tb-cost-probe-v1`, 8 Terminal-Bench tasks, same provider (`ollama/glm-5.2:cloud`),
-same limits, changing only the code:
+| | turns | input tokens | output |
+|---|---:|---:|---:|
+| reasoning off (what shipped before) | 25 | 759,548 | 13,957 |
+| reasoning on | 9 | 184,057 | 15,878 |
+| reasoning on + this release | **3** | **54,237** | 16,469 |
 
-| | before | after | change |
-|---|---|---|---|
-| input tokens / task | 4,654,997 | **2,821,177** | **−39.4%** |
-| $ / task | $2.8628 | **$1.7310** | **−39.5%** |
-| in:out ratio | 146.7:1 | 162.3:1 | +10.6% |
-| tasks solved | 5/8 | 5/8 | unchanged |
+**14x less input at constant output.** cline's published Terminal-Bench data
+measures the reasoning switch alone on this exact model at **68.5% vs 57.3% —
+11.2 points.**
 
-From 3.6–6.5x the field's input volume down to **2.2–3.9x**. Progress, not parity.
+### Fixed — caching
 
-Both arms are priced at the same correct rates — presenting a raw dollar delta
-across the pricing fix would have manufactured an improvement. **The caching win
-is not in this number**: the benchmark path runs on Ollama, which has no cache to
-hit, so −39.4% comes from compaction, accounting and loop fixes alone and caching
-is additive on top for Anthropic-routed traffic.
+Prompt caching went **0% to 92.8%**, measured inside a benchmark run and
+corroborated on a second code path. The streaming usage path dropped
+`cache_read_input_tokens`, and the whole compat path dropped
+`cache_creation_input_tokens`, so cache *writes* were free in our accounting and
+production telemetry would have shown 0% even with caching working.
 
-Solve rate is unchanged rather than improved, and its composition moved. The one
-task that regressed was re-run three times on the *identical pre-fix build* and
-flipped without any code change — 4 pass / 2 fail over 6 observations. It is
-variance. The verification gate was checked and correctly stood aside: the agent
-wrote and ran a 7-case suite to `ALL TESTS PASSED`. It verified thoroughly and
-verified the wrong thing — its harness cancelled in-process where the official
-test SIGINTs a subprocess. No gate catches that.
+`tools_payload_bytes/1` ignored `input_schema` — 40% under-count. Measured
+consequence: FastPath's `:team` intent scored 3,022 B against 6,973 B on the
+wire, so **every delegating turn re-billed its tool segment in full**.
 
-### Fixed — prompt caching was dead code on the path that runs
+### Fixed — cost accounting
 
-`Context.build_system_message/4` emitted `cache_control` blocks only when
-`provider == :anthropic`. Benchmarks and most real usage reach Claude through
-OpenRouter, which is `{:compat, :openrouter}` — so the entire caching
-implementation never executed. Captured on the wire with a logging proxy: **zero
-occurrences of `cache_control`** in every request.
+Spend was overstated **2.487x**: `Pricing.rates/1` keyed on literal model
+strings, so `anthropic/claude-opus-5` fell through a substring table to Claude
+**3** Opus's rate. Reconciled across every run artefact: $283.30 claimed against
+$113.92 true.
 
-Measured live on a real 6-turn session, identical content both arms:
+It also **under**-counted: `gpt-5.6-sol` billed **$0.00**, `deepseek-v4-pro` on
+a retired rate, every **Bedrock** turn accounted as 0 tokens, compaction's own
+LLM calls entirely unbilled, and a stream that died mid-flight discarded usage
+already paid for. `Pricing.confidence/1` now returns `:exact | :estimated |
+:unknown` — a cost we know we do not know beats one quietly 3x off.
 
-| | input/session | hit rate | cost | effective $/M |
-|---|---|---|---|---|
-| before | 176,230 | **0.0%** | $0.1767 | $1.00 |
-| after | 176,230 | **94.1%** | $0.0275 | **$0.16** |
+### Fixed — context
 
-The prior diagnosis — a per-request timestamp poisoning the cached prefix — was
-**refuted**. That was fixed in an earlier commit; the prefix was already stable,
-captured byte-identical across requests five minutes apart.
+`file_transform` applies anchored operations to a declared file **without the
+file entering context**. It executes no model-supplied code: the model sends
+data, and a fixed Elixir function is selected by atom, so no operation can name
+a second file. 12 edits to a 144 KB file:
 
-### Fixed — cache telemetry was invisible where it mattered
+| | file_transform | file_edit (read once) | file_edit (read each) |
+|---:|---:|---:|---:|
+| bytes into context | **3,162** | 147,788 | 1,739,664 |
 
-`openai_compat.ex`'s **streaming** usage path dropped `cached_tokens` entirely,
-while the non-streaming path read it correctly. The agent loop streams. So on the
-live path cache reads always reported 0 — the fix above would have looked like it
-never landed.
+A 16x larger file costs `file_transform` **1.03x** more. Verified in live
+sessions that the model routes to it, and does *not* over-reach to it where
+`file_edit` is correct.
 
-`cache_creation_input_tokens` was dropped on the compat path altogether, sync as
-well as streaming, so cache *writes* were free in our accounting and every cold
-prefix was under-reported.
+Compaction could never fire — `compact_at` was **967,000** on a 1M-token model.
+Now clamped to an operative 200k ceiling, and a no-op at or below 200k. The
+compactor was also *growing* context on **18 of 25 passes**.
 
-### Fixed — cost accounting overstated spend 2.487x
+The static prefix fell **30.9k to 14.4k tokens**.
 
-`Pricing.rates/1` looked models up by literal string. OpenRouter names models
-`vendor/id`, so `"anthropic/claude-opus-5"` matched no catalog, fell through to a
-coarse substring table, and was billed at `{15.00, 75.00}` — **Claude 3 Opus's**
-rate. Correct is `{5.00, 25.00}`. Exactly 3.000x.
+### Fixed — security
 
-Reconciled across every real run artifact: **$283.30 claimed vs $113.92 true**.
-The arithmetic at a single instance matches one application of the wrong rate
-with no remainder, which positively rules out double counting.
+- A cloned repository could set `permission_mode: overdrive`, allow arbitrary
+  commands, widen write roots to `/`, set `LD_PRELOAD`, fire hooks and launch
+  MCP subprocesses at boot. The trust gate keyed on layer *name*, so renaming to
+  `.osa/settings.local.json` bypassed it entirely. Trust is now pinned to a
+  content digest of security-relevant keys.
+- A repo's own agent definitions could grant themselves a bypass tier.
+- Escape sequences reached the terminal raw **through the permission dialog**,
+  and `/copy` put unsanitised model bytes on the clipboard — an OSC 52 was a
+  direct clipboard write. `strip_ansi/1` existed and its result was discarded.
+- `git check-ignore` honoured a hostile repo's `core.fsmonitor` during ordinary
+  directory scanning — no hook file, no write required.
 
-It also **under**-counted: `openai/gpt-5.6-sol` billed **$0.00**;
-`deepseek-v4-pro` on the retired V3 rate, 4.3x low; and every **Bedrock** turn
-accounted as 0 tokens and $0.00 because `extract_usage/1` emitted key names
-nothing read.
+### Fixed — verification
 
-`Pricing.confidence/1` now returns `:exact | :estimated | :unknown`, and a family
-fall-through logs loudly. A cost we know we do not know beats one that is quietly
-3x off.
+The completion gate checked that *something* exited 0 and touched the changed
+file. A model satisfied it with five throwaway inline probes and declared
+"Verified: concurrency cap respected" on a task it failed. It now requires a
+**persisted, re-runnable test that failed at least once and then passed across
+a source fix**.
 
-### Fixed — compaction could never fire
+Three bugs made the first version far more expensive than intended: relative
+paths resolved against the wrong directory (so it demanded work it had just
+watched succeed), `file_transform` was invisible to it, and the cheap first-edit
+nudge was structurally never delivered. The reprompt budget is now 1, not 3 —
+measured, the second and third pushbacks converted nothing at 37-41% of a
+task's tokens.
 
-Thresholds derived from `window − 33k`, so on a 1M-token model `compact_at` was
-**967,000**. A measured 15-turn session peaked at 37,750 — 3.9% of the trigger.
-The old `model: nil` and hardcoded-128k bugs were genuinely fixed; the
-*replacement* threshold was simply unreachable. Against a harness compacting near
-170k, the accumulation term was ~32x worse.
+**Removed outright:** the directive told the model to revert its own fix to
+obtain a red test. On a benchmark graded by final state, an interruption
+mid-cycle ships the broken version — and it was observed reverting a CRLF
+injection fix, twice. Red evidence must now come from a run that already
+happened.
 
-All thresholds now derive from `min(window, 200_000)`, putting `compact_at` at
-167,000 — inside the band competitors use, and a **no-op at or below 200k**, so
-it can only bind where the measurement showed a problem. Verified firing:
+### Fixed — the instruments
 
-```
-Compactor: 34519/67000 tokens (73.4% of usable window, clamped from 1000000)
-[proactive_compaction] folded 56 older messages into 1 summary (~8939 → ~2435)
-      request 36,563 → 30,182 tokens (−6,381)     messages 63 → 11
-```
+- `lib_dirty_at_launch` was **`false` unconditionally on every run ever
+  produced** — git resolved the pathspec against the wrong directory. The guard
+  against benchmarking a half-applied tree never once fired.
+- `built_after_head_commit` compared timestamps as strings across mismatched
+  UTC offsets.
+- `build_release.sh` staged from the live working tree, admitting uncommitted
+  code into artefacts. `--from-commit` makes that impossible.
+- The event log's `args` field was the TUI's display hint, clipped at 60
+  characters — which produced a **43.5% duplicate rate** that was really 9.4%,
+  and a "62-byte median tool call" that was an artifact of the clip.
+- `--format stream-json` emitted no tool events and no tokens at all.
+- Denied writes were recorded as **successes in four places at once**, including
+  the verification evidence ledger.
+- Four classes of OSA's own faults were emitted as `:llm_error` and scored
+  against the model. `osa-hard40-airgap` re-scores 17/0 to **16 model / 1
+  harness**; the README's "zero harness faults" was false and is corrected.
 
-An unknown context window now falls back to that ceiling instead of **disabling
-compaction outright** — `glm-4.7:cloud` resolved to `:unknown` and a `cw > 0`
-guard skipped compaction permanently.
+Four separate instruments were found comparing two different quantities. Three
+of the four failed in the same direction — making OSA look worse than it was,
+which is the direction least likely to be challenged and therefore the one to
+distrust most.
 
-### Fixed — the compactor was growing the context
+### Added — benchmarking that can be trusted
 
-Two defects visible only once compaction became reachable:
+Terminal-Bench 2.1 and 3 and **Harbor-Index** wired up (they live on Harbor Hub,
+not the registry the installed client reads). `oracle`/`nop` controls gate every
+dataset per-task, treating *unmeasured* as a block. On first use they found
+**TB 2.1's oracle scores 96.6% here, not 100%**, and TB 2.0's **92.1%** — an
+OSA failure on those tasks is not evidence about OSA. `nop` solved nothing
+across 55 observations.
 
-- It appended a restore block and a safety reminder based on `last_step` alone,
-  not on anything having been removed. Measured on consecutive turns: `saved -62,
-  -99, -337, -515, -726`. **18 of 25 passes were net-negative.**
-- It re-created the accumulation it exists to remove: 25 restore blocks in one
-  request, 2,592 redundant tokens.
+`mix osa.ablate` prices a feature by removing it: nine hostile files, one flag
+at a time, reporting tokens **and** whether the answer survived. It found that
+line-clamping permanently destroyed three facts — the tail of a clamped line was
+unreachable by any call. `file_read` now takes `byte_offset`/`byte_limit`, and
+the clamp still saves ~436k tokens while costing nothing.
 
-Net-negative passes 18 → **0**; restore blocks 25 → **1**; messages 118 → 72.
+`mini-swe-agent` is a standing control arm that cannot be silently dropped.
 
-Two further regressions were caught by the full suite before shipping: the
-stale-notice filter ran on the pipeline's *output* and deleted the truncation
-notice the same pass had just written, and the "reclaimed nothing" guard measured
-after the optional injections, so a genuine cold-zone summary — and the
-summarizer call already paid for — was discarded.
+### Changed — defaults
 
-### Fixed — non-UTF-8 tool output ended the turn
+Three defaults change behaviour for existing users:
 
-`file_grep` on a latin-1 file returned raw bytes; `Jason.encode_to_iodata!/1`
-**raised before any HTTP call**; the session ended with a 0-byte patch. Because
-it was emitted as `:llm_error`, benchmarks charged it to the **model**.
-
-Surveying every tool found three holes, not one: `file_grep` leaked, `file_read`
-(offset/limit) leaked with no validity check at all, and `file_read` (whole file)
-**crashed** with a `FunctionClauseError` — previously unreported.
-
-The fix is a central backstop in `normalize_outbound_messages/3` that walks the
-whole term rather than an allowlist of fields, because enumerating fields is
-precisely how a fix covers `file_grep` and misses `shell_execute`. It returns the
-identical term when input is clean.
-
-### Fixed — OSA's own faults were scored as the model's
-
-Four categories were stamped `:llm_error`: encoding faults, `:request_shape`
-(whose message already said "This is a bug in OSA"), and two kinds of corruption
-in OSA's own history. Turn errors now carry `owner: :osa | :provider`, and the
-benchmark drivers read it.
-
-Re-scored, `osa-hard40-airgap` goes from 17 model / 0 harness to **16 model / 1
-harness** — a harness-fault share of **5.9%, not the 0% the README claimed**. The
-README has been corrected.
-
-### Fixed — spend that was never counted
-
-Compaction's own LLM calls reached no ledger; they now bill through a
-stage/absorb side ledger, priced against the summarizer's own model. This
-mattered more after the threshold fix, since those calls went from never firing
-to firing routinely.
-
-Subagent spend was absent from the reported figure. `tree_cost_usd` and
-`tree_cost_complete` are now exposed alongside the node-local number — never
-silently redefining either, because `tree_spend/1` sums the sidecar's `cost_usd`
-across descendants and a tree total written there would make every ancestor
-double-count its grandchildren.
-
-### Added — benchmark instruments that can be trusted
-
-- **Terminal-Bench 2.1 and 3, and Harbor-Index** wired up. These live on Harbor
-  Hub, not the legacy registry the installed client reads — the datasets were
-  unreachable by the documented route.
-- **`oracle`/`nop` controls on every Harbor dataset**, with a per-task gate that
-  treats *unmeasured* as a block. On first use it found that **TB 2.1's oracle
-  scores 96.6% here, not 100%** — three tasks must be excluded from any
-  denominator. `nop` solved nothing across 55 observations: no free points.
-- **`mini-swe-agent` as a standing control arm** that cannot be silently dropped.
-  It is the field's accepted scaffold control, and it beat OSA in our own
-  head-to-head.
-- **`tb-cost-probe-v1`**, 8 tasks with recorded baselines, deliberately 4 pass /
-  4 fail so a cheaper run can be told apart from one that gave up sooner.
-- **Pre-fix run detection.** Every artifact predating today's pricing fix is
-  flagged, so the 2.487x correction cannot be mistaken for an optimization.
-
-### Fixed — the install gate verified a proxy, not the capability
-
-`osagent version` starts the VM but not the OTP application tree, so a
-boot-broken artifact passed and scored zeros attributed to the model.
-Demonstrated: on a deliberately corrupted NIF the old gate **exits 0**; the new
-one boots `serve`, waits for `/health`, and exits 3.
-
-`LD_LIBRARY_PATH` never included the release's `vendor/` dir, so the carefully
-vendored `libcrypto` was dead weight and boot succeeded only because task images
-happened to ship a compatible system copy.
-
-A bullseye-based artifact now boots on bullseye, bookworm and ubuntu alike,
-making all 89 Terminal-Bench tasks reachable. `EXQLITE_FORCE_BUILD=1` as an
-environment variable does nothing — measured — because the dep reads
-`Application.get_env`.
+- **Anthropic effort**: was effectively `high` (the ladder was inert and
+  Anthropic's own default applied); OSA's ladder middle is `medium`. `/effort
+  high` restores it.
+- **Ollama cloud models now reason by default.** Slower per turn, more output
+  tokens, and on current evidence fewer turns overall. `OLLAMA_THINK=false`
+  restores the old behaviour. Locally served models keep the stall guard.
+- **`OSA_THINKING_ENABLED` now defaults on.** The two reasons for off-by-default
+  did not hold: enabling thinking *raises* the timeout (120s to 600s), and the
+  Anthropic body carries no `temperature` field, so the documented 400 cannot
+  fire.
 
 ### Known — not fixed
 
-- **Failed streams discard their usage.** Anthropic sends prompt tokens at stream
-  start; a mid-stream error drops the accumulated usage, which on long-prompt
-  turns is most of the money.
-- **Bedrock and Google cache fields are unverified against a live call.** No
-  credentials on the build machine; implemented against documented shapes and
-  synthetic payloads only.
-- **No session has crossed the shipped 167,000 threshold on a real model.** The
-  200,000 ceiling is reasoned, not observed.
-- **The native Anthropic path still leaves its conversation segment uncached**
-  (~16pp). Deliberately not changed without a key to verify against.
-- **Tool schemas are 40% of every request**, 8,120 tokens of which were for tools
-  never called in a measured session. Per-turn selection is the wrong fix —
-  schemas sit at the front of the cached prefix, so varying them invalidates
-  everything behind, losing ~30x more than it saves. Session-pinned profiles are
-  designed, not built.
+- Session ids collide and are reused, contaminating spend records.
+- `Scratchpad.inject?/1` gates on `provider != :anthropic` as a proxy for "does
+  this turn have native thinking" — an Anthropic turn with thinking disabled
+  gets neither, and `anthropic/*` via OpenRouter gets the scaffold on top of
+  native thinking.
+- Bedrock and Google cache/reasoning fields are implemented against documented
+  shapes and **unverified against a live call**.
+- The native Anthropic path still leaves its conversation segment uncached.
+- Ollama has no image path at all.
 
 ---
 
