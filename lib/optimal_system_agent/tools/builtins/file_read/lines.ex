@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Lines do
   it is reasoning about is a fragment.
   """
 
+  alias OptimalSystemAgent.Tools.Ablation
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Constants
 
   @doc """
@@ -29,7 +30,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Lines do
   def clamp(content) when is_binary(content) do
     cap = Constants.max_line_chars()
 
-    if any_long_line?(content, cap) do
+    # The ablation harness turns the cap off entirely to price it against the
+    # transport blow-out it prevents. Production default is on; `Ablation.on?/1`
+    # answers `true` for every live caller. See `Tools.Ablation`.
+    if Ablation.on?(:read_line_clamp) and any_long_line?(content, cap) do
       content
       |> String.split("\n")
       |> Enum.with_index(1)

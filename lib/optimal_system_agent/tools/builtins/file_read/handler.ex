@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   import Bitwise, only: [band: 2]
 
   alias OptimalSystemAgent.Agent.Safety.PathCanon
+  alias OptimalSystemAgent.Tools.Ablation
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Constants
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Lines
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Magic
@@ -74,8 +75,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
 
     notice = Messages.unchanged_since_last_read(path)
 
-    case redundant_read(sid, target, range) do
-      {:unchanged, %{bytes: delivered}} when delivered > 0 and delivered > byte_size(notice) ->
+    # `Ablation.on?/1` answers the production default (`true`) for every caller
+    # that is not an ablation harness, so this reads as an unconditional
+    # `redundant_read/3` on every live path. See `Tools.Ablation`.
+    redundancy =
+      if Ablation.on?(:read_unchanged_suppression),
+        do: redundant_read(sid, target, range),
+        else: :ablated
+
+    case redundancy do
+      {:unchanged, %{bytes: delivered}}
+      when delivered > 0 and delivered > byte_size(notice) ->
         # Only substitute the notice when the bytes it replaces outnumber the
         # bytes it costs. The notice is ~245 bytes; a windowed read of a big file
         # can deliver less than that, and a "saving" that grows the transcript is
@@ -215,7 +225,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
           # the model cannot distinguish "this is all of it" from "this is what
           # the tool chose to give me", and the measured response to that
           # ambiguity is another read. See `Messages.eof_stamp/1`.
-          {:ok, Lines.clamp(content) <> Messages.eof_stamp(line_count(content))}
+          {:ok, Lines.clamp(content) <> whole_file_stamp(content)}
         else
           # `binary_verdict/1` only sniffs the head, so a file that turns to
           # binary further in still lands here. Identify it from what we now
@@ -410,10 +420,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   # NOT report a total — that would cost a full extra pass over the file on every
   # windowed read, and the decision it informs ("read again from here" vs "stop")
   # is already settled by the branch itself.
-  defp range_stamp(true, first_line, last_line),
+  #
+  # Both branches are behind `:read_stamps` so the ablation harness can price
+  # the stamps against the re-read behaviour they exist to prevent. Production
+  # default is on; see `Tools.Ablation`.
+  defp range_stamp(more?, first_line, last_line) do
+    if Ablation.on?(:read_stamps),
+      do: do_range_stamp(more?, first_line, last_line),
+      else: ""
+  end
+
+  defp do_range_stamp(true, first_line, last_line),
     do: Messages.continuation_stamp(first_line, last_line, last_line + 1)
 
-  defp range_stamp(_no_more, _first_line, last_line), do: Messages.eof_stamp(last_line)
+  defp do_range_stamp(_no_more, _first_line, last_line), do: Messages.eof_stamp(last_line)
+
+  # A whole-file read is by definition at EOF.
+  defp whole_file_stamp(content) do
+    if Ablation.on?(:read_stamps), do: Messages.eof_stamp(line_count(content)), else: ""
+  end
 
   # Line count of in-memory content, matching `File.stream!/1` semantics: one
   # line per newline, plus a trailing partial line when the file does not end in

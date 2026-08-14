@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   """
 
   alias OptimalSystemAgent.Agent.Safety.PathCanon
+  alias OptimalSystemAgent.Tools.Ablation
   alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
@@ -242,7 +243,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   defp edit_report(%{replace_all: true, occurrences: n} = r) when n > 1,
     do: "Replaced #{n} occurrences in #{r.display_path}#{r.fuzzy_note}"
 
-  defp edit_report(%{stage: :exact} = r), do: "Replaced in #{r.display_path}"
+  # Behind `:edit_diff_echo`, which is the one ablation flag whose ON state is
+  # NOT production — the echo was already removed. Enabling it restores the old
+  # behaviour so the harness can price a decision already taken, rather than
+  # taking the commit message's word for it.
+  defp edit_report(%{stage: :exact} = r) do
+    if Ablation.on?(:edit_diff_echo) do
+      "Replaced in #{r.display_path}\n" <> format_diff(r.old, r.new, r.content, r.display_path)
+    else
+      "Replaced in #{r.display_path}"
+    end
+  end
 
   defp edit_report(r) do
     "Replaced in #{r.display_path}#{r.fuzzy_note}\n" <>
