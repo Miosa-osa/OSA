@@ -57,11 +57,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGatePerTurnResetTest do
     state = loop_state(sid)
     unverified_write(sid, path)
 
-    # Turn 1: the model writes, ignores the gate up to its cap, and the gate
-    # steps aside. The cap is 3 (raised from 2 when the adequacy requirement
-    # landed — satisfying that is a write -> test -> fix loop, not one command).
+    # Turn 1: the model writes, the gate makes its case ONCE, and steps aside.
+    # The cap was 3; the A/B measured the second and third pushbacks converting
+    # nothing on the two tasks where they fired, at 37-41% of each task's tokens.
     state =
-      Enum.reduce(1..3, state, fn _i, acc ->
+      Enum.reduce(1..1, state, fn _i, acc ->
         assert VerificationGate.needs_verification?(acc)
         {_d, acc} = VerificationGate.build_directive(acc)
         acc
@@ -70,7 +70,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGatePerTurnResetTest do
     refute VerificationGate.needs_verification?(state),
            "the per-turn cap should have stepped the gate aside within this turn"
 
-    assert state.verification_gate_prompts == 3
+    assert state.verification_gate_prompts == 1
 
     # Turn 2 begins.
     state = TurnPipeline.reset_per_turn_fields(state)

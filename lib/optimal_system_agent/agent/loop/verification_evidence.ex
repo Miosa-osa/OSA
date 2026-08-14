@@ -294,13 +294,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     wrote = Map.get(entry, :written_paths, [])
     files = ran |> Enum.reject(&(&1 in wrote)) |> Enum.filter(&test_artifact_path?/1)
 
-    suite =
-      case suite_key(Map.get(entry, :command)) do
-        nil -> []
-        key -> [key]
-      end
-
-    files ++ suite
+    files ++ Enum.map(suite_identity(entry), fn {:suite, key} -> key end)
   end
 
   @doc """
@@ -928,20 +922,46 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
       |> Enum.filter(&persisted?(&1, written))
       |> Enum.map(&{:file, &1})
 
-    suite =
-      if files == [] and Map.get(entry, :test_command, false) do
-        case suite_key(Map.get(entry, :command)) do
-          nil -> []
-          key -> [{:suite, key}]
-        end
-      else
-        []
-      end
-
-    files ++ suite
+    files ++ suite_identity(entry)
   end
 
   defp test_identities(_entry, _written), do: []
+
+  # The suite identity is emitted ALONGSIDE any file identities, not only when
+  # there are none.
+  #
+  # It used to be `if files == []`, and that made the same test run two slightly
+  # different ways into two different recurring checks. The natural way to
+  # re-run one failing case is a node id — `pytest tests/test_x.py::test_case` —
+  # which carries no path token that survives `test_artifact_path?/1`, so that
+  # run yielded ONLY a suite identity, while the plain `pytest tests/test_x.py`
+  # run yielded ONLY a file identity. Red under one, green under the other, and
+  # they never paired: the agent produced exactly the red -> fix -> green
+  # sequence the gate asked for and the gate asked again. A gate that does not
+  # recognise the evidence it demanded is the worst failure mode available.
+  #
+  # An INLINE script is still not a suite, however loudly it mentions one.
+  # `python3 - << 'PY' … import pytest … PY` matches the `pytest` pattern, and
+  # under the old rule it produced a suite identity precisely because it had no
+  # path token — so two throwaway heredocs, one red and one green, formed a
+  # triple. That hole predates this change and is closed here.
+  defp suite_identity(entry) do
+    cmd = Map.get(entry, :command)
+
+    if Map.get(entry, :test_command, false) and not inline_script?(cmd) do
+      case suite_key(cmd) do
+        nil -> []
+        key -> [{:suite, key}]
+      end
+    else
+      []
+    end
+  end
+
+  @inline_script_re ~r/(<<-?\s*['"]?\w*|(^|\s)-c\s|(^|\s)-e\s)/
+
+  defp inline_script?(cmd) when is_binary(cmd), do: Regex.match?(@inline_script_re, cmd)
+  defp inline_script?(_), do: false
 
   # "Persisted" means the file is on disk now, OR the ledger itself watched it
   # being written. The second clause matters because the shell the agent drives
@@ -984,12 +1004,18 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
   defp written_paths(_, _, _), do: []
 
+  # `cp a b`, `mv a b`, `install a b` — the destination is a write. A restore
+  # from a backup copy is the commonest shape, and while the ledger could not
+  # see it the restore was not a "fix", so a red run before it and a green run
+  # after it did not bracket a source change and formed no evidence.
+  @copy_re ~r/(?:^|[\s;&|])(?:cp|mv|install|rsync)\s+(?:-\S+\s+)*(?:\S+\s+)+?(\S+)(?:\s*(?:;|&&|\|\||$))/
+
   # Files a shell command creates or overwrites: `> f`, `>> f`, `| tee f`.
   defp redirect_targets(args, base) when is_map(args) do
     case extract_command(args) do
       cmd when is_binary(cmd) ->
-        @redirect_re
-        |> Regex.scan(cmd)
+        [@redirect_re, @copy_re]
+        |> Enum.flat_map(&Regex.scan(&1, cmd))
         |> Enum.map(fn m -> List.last(m) end)
         |> Enum.filter(&plausible_path?/1)
         |> Enum.map(&normalize_path(&1, base))
@@ -1011,6 +1037,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
         @token_re
         |> Regex.scan(cmd)
         |> Enum.map(&hd/1)
+        |> Enum.map(&strip_node_id/1)
         |> Enum.filter(&plausible_path?/1)
         |> Enum.map(&normalize_path(&1, base))
         |> Enum.uniq()
@@ -1021,6 +1048,20 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   end
 
   defp ran_paths(_, _), do: []
+
+  # `pytest tests/test_x.py::test_case` and `go test ./pkg -run TestX` name the
+  # same FILE as the plain invocation does. Without this the node-id form is not
+  # a path at all, so re-running the one failing case — the most natural thing to
+  # do after a red run — produced a different recurring check from the run that
+  # went red.
+  defp strip_node_id(tok) when is_binary(tok) do
+    case String.split(tok, "::", parts: 2) do
+      [head | _] -> head
+      _ -> tok
+    end
+  end
+
+  defp strip_node_id(tok), do: tok
 
   defp plausible_path?(tok) when is_binary(tok) do
     byte_size(tok) > 1 and byte_size(tok) < 512 and

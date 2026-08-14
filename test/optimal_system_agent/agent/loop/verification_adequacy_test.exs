@@ -320,22 +320,25 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
              "declaring no test possible does not excuse never running anything"
     end
 
-    test "the re-prompt cap always releases the loop — 3 for a large change",
+    test "the gate asks ONCE and then steps aside, whatever the tier",
          %{session_id: sid} do
+      # Measured: on `fix-code-vulnerability` and `feal-differential` the counter
+      # ran 1 -> 2 -> 3, hit the cap, stepped aside unsatisfied, and both tasks
+      # passed anyway. The second and third pushbacks converted nothing and cost
+      # 37-41% of each task's tokens.
       authored(sid, "/tmp/app.py")
       sh(sid, "python3 -m py_compile /tmp/app.py", true)
 
-      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 2})
-      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 3})
+      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 0})
+      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 1})
     end
 
-    test "…and 2 for a small one: the extra room bought nothing there",
-         %{session_id: sid} do
+    test "…and the same for a small change", %{session_id: sid} do
       edit(sid, "/tmp/app.py")
       sh(sid, "python3 -m py_compile /tmp/app.py", true)
 
-      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 1})
-      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 2})
+      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 0})
+      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 1})
     end
   end
 
@@ -424,6 +427,118 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
       edit(sid, "/tmp/app.py")
       edit(sid, "/tmp/test_app.py")
       assert L.change_scale(sid) == :small
+    end
+  end
+
+  describe "the gate must never ask for the working tree to be damaged" do
+    test "no directive instructs reverting, stashing or un-fixing the source",
+         %{session_id: sid} do
+      # On `fix-code-vulnerability` the agent followed the old text literally,
+      # twice: it reverted a CRLF-injection fix, re-introduced the vulnerability
+      # into the file, ran the test red, then re-applied. It recovered both
+      # times. Terminal-Bench grades final machine state, so an agent killed
+      # mid-cycle on a timeout-bound task ships the vulnerable version.
+      for setup <- [&authored/2, &edit/2] do
+        s = "revert-#{System.unique_integer([:positive])}"
+        L.reset(s)
+        setup.(s, "/tmp/app.py")
+        sh(s, "python3 -m py_compile /tmp/app.py", true)
+
+        {d, _} = G.build_directive(%{session_id: s, verification_gate_prompts: 0})
+        text = String.downcase(d.content)
+
+        refute text =~ "revert the fix"
+        refute text =~ "restore the fix"
+        refute text =~ "git stash"
+        refute text =~ "undo your"
+        L.reset(s)
+      end
+    end
+
+    test "the large directive says so explicitly", %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert d.content =~ "NEVER un-fix working code"
+      assert d.content =~ "Do not manufacture a failure."
+    end
+  end
+
+  describe "the gate must recognise the evidence it demanded" do
+    test "a node-id re-run and a plain run are the SAME recurring check",
+         %{session_id: sid} do
+      # The natural way to re-run one failing case is a node id. It carried no
+      # path token that survived, so that run formed only a suite identity while
+      # the plain run formed only a file identity, and red under one never paired
+      # with green under the other: the agent produced exactly the sequence the
+      # gate asked for and the gate asked again.
+      ws = Path.join(System.tmp_dir!(), "osa-nodeid-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(ws, "tests"))
+      OptimalSystemAgent.Workspace.Cwd.put_session_dir(sid, ws)
+      on_exit(fn -> File.rm_rf(ws) end)
+
+      sh(sid, "cat > app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "cat > tests/test_app.py << 'EOF'\nimport app\nEOF", true)
+      sh(sid, "pytest tests/test_app.py::test_crlf", false)
+      sh(sid, "cat > app.py << 'EOF'\ny\nEOF", true)
+      sh(sid, "pytest tests/test_app.py", true)
+
+      assert L.discriminating_evidence(sid),
+             "red on the node id and green on the file is one test, run twice"
+
+      refute L.needs_discriminating_test?(sid)
+    end
+
+    test "a restore by `cp` is a source write, so it can bracket red and green",
+         %{session_id: sid} do
+      sh(sid, "cat > /tmp/app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "cat > /tmp/test_app.py << 'EOF'\nimport app\nEOF", true)
+      sh(sid, "python3 /tmp/test_app.py", false)
+      sh(sid, "cp /tmp/app_fixed.py /tmp/app.py", true)
+      sh(sid, "python3 /tmp/test_app.py", true)
+
+      assert "/tmp/app.py" in L.changed_source_files(sid)
+      assert %{artifact: {:file, "/tmp/test_app.py"}} = L.discriminating_evidence(sid)
+    end
+
+    test "two inline heredocs mentioning pytest still form NO suite identity",
+         %{session_id: sid} do
+      # Emitting the suite identity alongside file identities would otherwise
+      # let a throwaway heredoc that merely MENTIONS a runner pair red with
+      # green. This hole predates the change; it stays closed.
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 - << 'PY'\nimport pytest\nassert 0\nPY", false)
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 - << 'PY'\nimport pytest\nassert 1\nPY", true)
+
+      assert L.needs_discriminating_test?(sid)
+    end
+
+    test "`python3 -c 'import pytest'` forms no suite identity either",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -c \"import pytest; assert 0\"", false)
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -c \"import pytest; assert 1\"", true)
+
+      assert L.needs_discriminating_test?(sid)
+    end
+  end
+
+  describe "the kill switch covers the WHOLE feature" do
+    test "the early nudge is silenced by OSA_VERIFICATION_ADEQUACY=0",
+         %{session_id: sid} do
+      # It was not, and it fired in both arms of the ablation, so the measured
+      # cost priced the pushback and not the feature.
+      edit(sid, "/tmp/app.py")
+      assert G.first_write_nudge(sid)
+
+      System.put_env("OSA_VERIFICATION_ADEQUACY", "0")
+      on_exit(fn -> System.delete_env("OSA_VERIFICATION_ADEQUACY") end)
+
+      refute G.first_write_nudge(sid)
     end
   end
 

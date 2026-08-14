@@ -98,16 +98,20 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # Cap on how many times the gate may re-prompt within a single turn before
   # stepping aside. Keeps the completion path from looping forever.
   #
-  # Raised from 2 to 3 when the adequacy requirement landed: satisfying it is a
-  # write -> test -> fix loop, not a single command, so two pushbacks was not
-  # enough room to complete one. It is still a hard cap — the loop cannot be
-  # trapped — and it resets every turn (`TurnPipeline.reset_per_turn_fields/1`).
-  @max_reprompts 3
-
-  # …but a `:small` change is not a write -> test -> fix loop. It is one command
-  # (run the suite) or one sentence (`NO_RUNNABLE_TEST:`), so the extra room
-  # buys nothing there and the worst case stays at two.
-  @max_reprompts_small 2
+  # ONE. It was 3, on the theory that satisfying the adequacy clause is a
+  # write -> test -> fix loop and needs room to complete. The A/B says
+  # otherwise: on both `fix-code-vulnerability` and `feal-differential` the
+  # counter ran 1 -> 2 -> 3, hit the cap, and stepped aside UNSATISFIED — and
+  # both tasks passed anyway. Those two extra pushbacks converted nothing and
+  # cost 37-41% of each task's tokens. A model that has declined the ask twice
+  # is not about to accept it on the third try; it is spending budget that a
+  # timeout-bound task needs, and a timeout turns a possible solve into a
+  # guaranteed failure at full price.
+  #
+  # So the gate now makes its case once, cheaply, and gets out of the way. It
+  # resets every turn (`TurnPipeline.reset_per_turn_fields/1`), so a genuinely
+  # unverified session is still asked again on the next turn.
+  @max_reprompts 1
 
   # The explicit, auditable escape. A task can genuinely have no runnable test
   # (documentation, a config value, a change with no harness in the image). The
@@ -226,8 +230,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
 
   defp adequate_for_scale?(_large, _session_id), do: false
 
-  defp cap_for(:small), do: @max_reprompts_small
-  defp cap_for(_), do: @max_reprompts
+  defp cap_for(_scale), do: @max_reprompts
 
   # Kill switch for the adequacy requirement alone. This is the one clause that
   # deliberately BUYS turns (measured: +5 tool calls / +6 turns on a one-line
@@ -429,11 +432,18 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "that fails before the fix and passes after it demonstrably discriminates; one that " <>
       "was green on its first run proves only that it ran. Editing the test to make it " <>
       "pass does not count — the fix has to be in the code under test.\n\n" <>
-      "If the test is already green, that is not a reason to stop: make it red first. " <>
-      "Revert the fix, or point the test at the behaviour you have NOT implemented yet, " <>
-      "watch it fail, restore the fix, watch it pass.\n\n" <>
-      "Take the turns this needs. Finishing early with a shallow check is the failure " <>
-      "mode this is here to prevent, and it costs far more than the extra commands.\n\n" <>
+      "NEVER un-fix working code to produce a red run. Do not revert, stash, or " <>
+      "overwrite a corrected file so a test will fail — on a task graded by final " <>
+      "state, an interruption mid-cycle ships the broken version, and on a security " <>
+      "fix that means shipping the vulnerability. That is a worse outcome than any " <>
+      "amount of missing evidence.\n\n" <>
+      "Get the red run without damaging anything:\n" <>
+      "  * If a run earlier in this session already failed on this test or suite, you " <>
+      "are done — say which one and finish.\n" <>
+      "  * If you have not written the test yet and are still going to change the " <>
+      "source, write the test FIRST and run it now, while it still fails on its own.\n" <>
+      "  * If your fix has already landed and the test has only ever been green, say " <>
+      "so plainly and finish. Do not manufacture a failure.\n\n" <>
       "If this task genuinely admits no runnable test — pure documentation, a config " <>
       "value, no harness in the environment — say so explicitly on its own line, as " <>
       "`NO_RUNNABLE_TEST: <one-line reason>`, and finish. Do not use that to skip work " <>
@@ -456,7 +466,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     changed = VerificationEvidence.changed_source_files(session_id)
     known = VerificationEvidence.known_test_artifacts(session_id)
 
-    if changed != [] and known == [] do
+    # Under the same switch as the clause it exists to serve. It was not, and it
+    # fired in BOTH arms of the adequacy ablation — so the measured −31% priced
+    # the pushback and not the feature, and the feature costs more than that
+    # number says. `OSA_VERIFICATION_ADEQUACY=0` now silences the whole thing.
+    if adequacy_enabled?() and changed != [] and known == [] do
       "You just changed code (#{Enum.map_join(Enum.take(changed, 3), ", ", &Path.basename/1)}). " <>
         "Establish how this gets tested NOW, while it is cheap:\n" <>
         "  1. FIRST look for a suite this project already has — `run_tests.sh`, `mix test`, " <>

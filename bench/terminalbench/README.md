@@ -515,6 +515,86 @@ Cosmetic, but it is the line an operator reads when diagnosing a port problem.
 
 ---
 
+## The one externally comparable arm
+
+Every number this harness has produced so far is on a 6–8 task subset, single
+run, against a noise floor where a task flips 4-pass/2-fail with no code change.
+None of it is comparable to anything published. **There is exactly one external
+comparison available to us**, and it is worth stating its terms precisely
+because they are what the arm has to match.
+
+cline published a full Terminal-Bench 2.0 dataset — 89 tasks, pass@1,
+`openrouter:z-ai/glm-5.2`, reasoning medium, `--timeout-multiplier 2.0`, Modal,
+June 24–25 2026 (`cline/benchmark-results`,
+`terminal-bench/2026-06-open-weights`):
+
+| harness | GLM-5.2, same 89 tasks |
+|---|---:|
+| **cline CLI 3.0.29** | **68.5%** (61/89) |
+| opencode 1.17.9 | 59.6% (53/89) |
+| pi 0.73.1 | 57.3% (51/89) |
+| cline CLI, reasoning **off** | 57.3% (51/89) |
+
+That last row is the one to keep in view: **reasoning off costs the same model
+11.2 points under an unchanged harness** — larger than the 11.2-point spread
+across all three harnesses. Which is the same lesson Anthropic's Opus 4.6 system
+card teaches from the other direction (10.3 points across effort tiers, versus a
+7.2-point harness delta on the same 89 tasks). **Effort is the bigger lever, and
+it must be pinned before a harness number means anything.**
+
+### What the arm must set, and why each one
+
+```bash
+./run_bench.py --agent osa \
+  --dataset-key tb2.0 \          # cline ran 2.0. 2.1 corrects 26 tasks -> different denominator
+  --timeout-multiplier 2.0 \     # the GLOBAL one, as cline used. Not --agent-timeout-multiplier
+  --effort <tier> \              # recorded; see below for whether it reaches the wire
+  --ollama-think true            # the dial that DOES reach the wire on our path
+```
+
+`--effort` and `--ollama-think` are two dials because they are not one dial.
+`--effort` pins OSA's own ladder via `~/.osa/config.toml` `[model].effort`
+(toml-only; `ConfigFile.effort/0` has no json or env equivalent), which governs
+`max_iterations` and internal gating and reaches the wire on Anthropic
+(`output_config.effort`) and OpenAI-compat (`reasoning_effort`). **It does not
+reach the wire on Ollama at all** — `Providers.Ollama` has no effort→thinking
+wiring, only a boolean `think` field read from `OLLAMA_THINK`. Measured against
+the live daemon on `glm-5.2:cloud`: the same prompt costs 137 output tokens at
+`think: true` and 3 at `think: false`, and unset behaves as on.
+
+### Differences that will remain, and must be published with the number
+
+These cannot be closed on this machine, so the honest move is to name them
+rather than to imply they are absent.
+
+| | cline | us |
+|---|---|---|
+| serving path | OpenRouter `z-ai/glm-5.2` | **`ollama/glm-5.2:cloud`** |
+| advertised context | 1M | 976K |
+| quantisation / tool template | OpenRouter's | Ollama's, unknown |
+| reasoning control | `reasoning: medium` | boolean `think` — **no medium tier exists** |
+| trials | 1 (pass@1) | 1 (pass@1) |
+| date | 2026-06-24/25 | 7+ weeks later |
+
+There is no OpenRouter key on this machine, so the serving path is not a choice
+we are making — it is the only one available. **cline's 68.5% is therefore not a
+number we are entitled to expect**, in either direction: the quantisation and
+tool-call template differ, and GLM-5.2 has documented, model-specific tool-call
+defects (template tokens leaking into `function.name`, streamed argument
+corruption producing valid JSON with wrong values, missing tool-call deltas —
+see `docs/research/benchmark-models.md` §7.4) whose incidence is a property of
+the serving path, not of the harness.
+
+### And the arm is still one run
+
+89 tasks, pass@1. At 60% that is a 95% Wilson interval of roughly ±10 points —
+`summary.md` prints it. **cline's 68.5% sits inside the interval of anything we
+score from about 58% upward**, so a result in that band is not a gap and must
+not be reported as one. What n=89 buys is not precision; it is that one task
+flipping is no longer the whole result, which at n=6 it was.
+
+---
+
 ## Usage
 
 ```bash
@@ -539,12 +619,37 @@ python3 -m venv .venv && ./.venv/bin/pip install harbor
 # the standing cost probe (same 8 tasks every time)
 ./run_bench.py --agent osa --probe
 
+# a long run needs a witness for the provider. See "quota death", below
+./quota_watch.py watch --out runs/<run-id>/quota-watch.jsonl &
+
 # and then, before quoting anything
 ./controls.py gate runs/<run-id>
+./quota_watch.py report runs/<run-id>/quota-watch.jsonl
 ```
 
 Rebuild `dist/` with `./build_release.sh --force` whenever OSA changes —
 **the release is a snapshot, and a stale one silently benchmarks old code.**
+
+### Quota death
+
+A provider that stops serving mid-run does not announce itself. Every trial
+after the cutoff still gets scheduled, still writes a trial directory, and still
+scores zero — and in `results.json` those zeros are indistinguishable from a
+model that tried and failed. On a run that takes most of a day, an exhaustion at
+hour three converts the back half of the dataset into fabricated model failures,
+and the whole thing reads as a bad score rather than as a broken run.
+
+`quota_watch.py` samples the provider on a fixed interval and appends one
+timestamped line per sample; `report` folds the failures into outage windows.
+Any trial overlapping a window has a zero that is not attributable to the model.
+A 200 serving an empty completion counts as down — that is the shape quota
+exhaustion takes on some gateways, and treating it as healthy is how the failure
+gets missed.
+
+It deliberately does **not** abort the run. Killing hours of work on one failed
+probe is a judgement call, and probes fail for reasons a run survives; what this
+buys is the ability to make that judgement afterwards, which a run that merely
+died does not.
 
 ### Disk
 
