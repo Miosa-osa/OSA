@@ -88,17 +88,27 @@ defmodule OptimalSystemAgent.Tools.Registry do
   only emit a `tool_use` block for a name in the array.
 
   `should_defer?`'s doc comments across the builtins say deferred tools "stay
-  discoverable mid-turn through `tool_search`". That is not currently true for
-  native providers: `Builtins.ToolSearch.Handler` formats matching specs into a
-  **string tool result** and mutates no state, so the next request carries the
-  same array it did before. The promise holds only for text-parsing transports,
-  where the model can name the tool in prose and `execute_unguarded/2` resolves
-  it against the full `:builtin_tools` map rather than this list.
+  discoverable mid-turn through `tool_search`". That was NOT true for native
+  providers until `Agent.Loop.ToolDiscovery` existed:
+  `Builtins.ToolSearch.Handler` formatted matching specs into a **string tool
+  result** and mutated no state, so the next request carried the same array it
+  did before, and a deferred tool was uncallable rather than merely
+  undocumented. Measured at the time of the fix: 23 of 82 registered tools were
+  in the array, and the generic escape hatch `use_tool` was itself one of the 59
+  that were not.
 
-  Closing that hole means letting a `tool_search` hit widen the next request's
-  tools array — a change in `Agent.Loop.ToolExecutor` and the loop state, which
-  is deliberately not made here. Until it is, treat "deferred" as "unavailable
-  on native providers" when deciding whether a tool may defer.
+  That hole is now closed at the loop, not here. This function still answers
+  "what does a session START with" — the widening lives in
+  `Agent.Loop.ToolDiscovery.widen/2`, which appends the specs a successful
+  `tool_search` resolved to `state.tools` for every subsequent request, and in
+  `Agent.Loop.ToolFilter`, which re-pins them after its narrowing passes so the
+  array never shrinks back. `Providers.Anthropic` keeps the tools cache
+  breakpoint on the last non-discovered tool so a widening does not re-write the
+  cached tool prefix.
+
+  What this means for a `should_defer?` decision: a deferred tool costs one
+  `tool_search` round-trip and one prompt-cache invalidation before it can be
+  called. That is a real price, and it is a price rather than an impossibility.
 
   Note that `always_load?` is deliberately NOT consulted here, and must not be:
   it governs prompt PROSE only. A tool that sets `always_load?` and

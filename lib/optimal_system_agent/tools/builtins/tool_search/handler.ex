@@ -50,6 +50,40 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Handler do
     end
   end
 
+  @doc """
+  The tool SPECS a query resolves to — the same set `execute/2` formats into
+  prose, returned as data.
+
+  This exists because formatting them was all `tool_search` ever did. Under a
+  provider with native tool schemas the model cannot call a name that is not in
+  the request's `tools` array, so a search that only produced a nicely rendered
+  description of a deferred tool told the model about something it still had no
+  way to invoke. `Agent.Loop.ToolDiscovery` calls this to widen the array for
+  subsequent requests, which is what turns a search hit into a callable tool.
+
+  Pure: it reads `persistent_term` snapshots and writes nothing, so it is safe
+  to call a second time on the same arguments the handler already ran — and
+  that is exactly how the loop uses it, rather than threading a side channel
+  out of the tool result.
+
+  Names that do not resolve are simply absent; there is no error case, because
+  the caller's question is "what became callable", not "was the query good".
+  """
+  @spec resolve_tools(map()) :: [map()]
+  def resolve_tools(%{"query" => query} = params) when is_binary(query) do
+    max = coerce_max(Map.get(params, "max_results", Constants.default_max_results()))
+
+    case parse_query(query) do
+      {:select, names} -> select_specs(names)
+      {:server, server} -> server_specs(server)
+      {:keyword, _q} -> Registry.search(query, limit: max)
+    end
+  rescue
+    _ -> []
+  end
+
+  def resolve_tools(_), do: []
+
   # ── Private: query parsing ────────────────────────────────────────────
 
   # select:A,B,C — mirrors ToolSearchTool.ts selectMatch branch
@@ -83,15 +117,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Handler do
       [] ->
         {:ok, "No MCP server named '#{server}' is connected. " <> known_servers_sentence()}
 
-      entries ->
-        by_name =
-          Registry.list_tools_direct()
-          |> Map.new(fn tool -> {tool.name, tool} end)
-
-        tools = Enum.flat_map(entries, fn e -> List.wrap(Map.get(by_name, e.name)) end)
-
-        {:ok, format_results(tools, query)}
+      _entries ->
+        {:ok, format_results(server_specs(server), query)}
     end
+  end
+
+  # Shared by `execute_server/2` and `resolve_tools/1` so the set the model is
+  # TOLD about and the set that becomes callable can never diverge.
+  defp server_specs(server) do
+    by_name = Map.new(Registry.list_tools_direct(), fn tool -> {tool.name, tool} end)
+
+    server
+    |> Registry.mcp_tools_for_server()
+    |> Enum.flat_map(fn e -> List.wrap(Map.get(by_name, e.name)) end)
   end
 
   defp known_servers_sentence do
@@ -128,7 +166,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Handler do
          "Next step: run a keyword search (e.g. `tool_search` with a plain word) " <>
          "to discover tool names. " <> known_servers_sentence()}
     else
-      matched_tools = Enum.map(found, fn name -> Map.fetch!(all_tools, name) end)
+      matched_tools = select_specs(found)
 
       suffix =
         if missing != [],
@@ -137,6 +175,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Handler do
 
       {:ok, format_results(matched_tools, query) <> suffix}
     end
+  end
+
+  # Shared by `execute_select/2` and `resolve_tools/1`. Preserves the caller's
+  # order and silently drops unknown names — `execute_select/2` reports those
+  # separately, and a widening has nothing to say about a name that does not
+  # exist.
+  defp select_specs(names) do
+    by_name = Map.new(Registry.list_tools_direct(), fn tool -> {tool.name, tool} end)
+
+    Enum.flat_map(names, fn name -> List.wrap(Map.get(by_name, name)) end)
   end
 
   # ── Private: keyword path ─────────────────────────────────────────────

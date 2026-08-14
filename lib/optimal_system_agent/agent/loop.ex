@@ -147,6 +147,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # access (`tools = filter_for_coordinator(all_tools, coordinator)`) without
     # restarting the session / churning the session id.
     all_tools: [],
+    # Tools appended to the array mid-session because a `tool_search` hit
+    # surfaced them (`Loop.ToolDiscovery`). Kept separately from `tools` so
+    # `ToolFilter` can re-pin them after a narrowing pass: a tool the model was
+    # just told it can call must not stop being callable one iteration later.
+    # Append-only within a session, and never reordered — see the module doc for
+    # why that is what the prompt cache requires.
+    discovered_tools: [],
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
     max_turns: nil,

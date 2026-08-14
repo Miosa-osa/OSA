@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
+  alias OptimalSystemAgent.Agent.Loop.ToolDiscovery
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
@@ -1302,6 +1303,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp continue_after_tools(results, tool_calls, state, resample_snapshot) do
+    # A successful `tool_search` has to change the NEXT request's tools array,
+    # or the tools it just described stay uncallable on every native-tool
+    # provider. Done here, at the tool-result boundary, because this is the one
+    # join point every executed tool call passes through before the loop
+    # decides whether to generate again. See `Loop.ToolDiscovery` for the
+    # append-only/never-shrink rules that keep the cached prefix stable.
+    state = ToolDiscovery.widen(state, results)
+
     # A tool ran, so the assistant text before it and the text after it are two
     # different blocks on screen — the tool's own cell is drawn between them.
     # End the segment so the next generation mints a fresh `message_id`.

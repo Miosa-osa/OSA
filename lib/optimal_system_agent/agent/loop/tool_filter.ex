@@ -59,6 +59,41 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     |> apply_computer_use_focus(state)
     |> FastPath.select_tools(state)
     |> apply_small_window_budget(state)
+    |> repin_discovered(state)
+  end
+
+  # Every pass above can only SHRINK the list, which is what made a deferred
+  # tool permanently uncallable in the first place. A tool the model discovered
+  # mid-session and was told it may now call is the one thing that must survive
+  # them: `apply_small_window_budget/2` in particular trims by priority list, so
+  # a just-discovered MCP tool is exactly the kind of thing it drops.
+  #
+  # Re-appended at the END, in the order `state.discovered_tools` records, so
+  # the array a widening produced is the array every later turn sends —
+  # oscillating between two tool sets would invalidate the cached prefix in both
+  # directions, which is strictly worse than either set.
+  #
+  # Deliberately NOT applied to the spawning-tool guards: those are safety
+  # limits (fork-bomb depth, delegation policy), and a `tool_search` for
+  # "delegate" must not be a way around them. They run before this and their
+  # removals are re-applied here by construction, because a stripped spawning
+  # tool is not in `discovered_tools` unless discovery put it there — so filter
+  # the pin through the same guard.
+  defp repin_discovered(tools, state) do
+    pinned = Map.get(state, :discovered_tools, [])
+
+    if pinned == [] do
+      tools
+    else
+      present = MapSet.new(tools, &tool_name/1)
+
+      missing =
+        pinned
+        |> Enum.reject(fn t -> MapSet.member?(present, tool_name(t)) end)
+        |> Enum.reject(fn t -> tool_name(t) in @spawning_tools end)
+
+      tools ++ missing
+    end
   end
 
   @doc "Configured maximum delegation nesting depth."
