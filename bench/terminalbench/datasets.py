@@ -191,14 +191,33 @@ DATASETS: dict[str, Dataset] = {
             #    instructions in the README."
             #
             # Submissions are OPEN, by PR to that dataset repo.
-            "Submissions are OPEN: PR to "
-            "huggingface.co/datasets/alexgshaw/terminal-bench-2-leaderboard.",
-            # This one is ALSO unsourced and is being verified. Treat it as a
-            # claim, not a fact, until a primary source is attached -- the note
-            # above it was wrong for exactly this reason.
-            "UNVERIFIED: the board's protocol may be 5 trials per task. If so "
-            "a single-trial run is a different measurement and cannot be laid "
-            "beside a board row without saying so.",
+            # VERIFIED 2026-08-15 by fetching the repo tbench.ai's own 2.0 docs
+            # page links to. The link exists; the destination is shut:
+            # huggingface.co/datasets/alexgshaw/terminal-bench-2-leaderboard
+            # reads "SUBMISSIONS CLOSED -- All PRs opened before May 14th have
+            # been reviewed and merged if valid... We are working on a new
+            # submission process... Check back by end of June for an update."
+            # That note is itself stale as of mid-August, with no new process
+            # shipped. So the live docs link to a closed door, which is why
+            # reading the docs page alone gives the wrong answer.
+            "Submissions CLOSED (hf.co/datasets/alexgshaw/terminal-bench-2-"
+            "leaderboard README, checked 2026-08-15). Successor process "
+            "announced but not shipped.",
+            # NOW VERIFIED, from the same README. This was an unsourced claim
+            # here and it turned out to be correct.
+            "5 trials per task MINIMUM: 'Each task must be evaluated with a "
+            "minimum of five trials.' A single-trial run is a different "
+            "measurement and cannot be laid beside a board row.",
+            # The artefact contract, for whenever the successor process lands.
+            # Everything here is something Harbor already writes and this
+            # harness already retains -- the gap is trials, not engineering.
+            # Note there is no ATIF requirement on the 2.0 path; that is 2.1's
+            # CI, and conflating them would cost an adapter rewrite for nothing.
+            "Layout: submissions/terminal-bench/2.0/<agent>__<model>/"
+            "{metadata.yaml, <job>/config.json, <job>/<trial>/result.json}. "
+            "metadata.yaml needs agent_url, agent_display_name, "
+            "agent_org_display_name, and models[] with model_name, "
+            "model_provider, model_display_name, model_org_display_name.",
         ),
     ),
     "tb3": Dataset(
