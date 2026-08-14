@@ -36,7 +36,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
   def check_permissions(%{"pattern" => _} = input, _ctx) do
-    base = Path.expand(input["path"] || ".")
+    # Expand against the SESSION's directory, not the OS process cwd.
+    #
+    # `Path.expand/1` resolves a relative path against `File.cwd!()`, which is
+    # wherever the BACKEND booted — so a relative pattern was searched in the
+    # daemon's own tree rather than the user's workspace. Measured on a
+    # benchmark run AFTER the shell-side cwd fix: 29 tool results across three
+    # runs reported `No files matched pattern
+    # 'test/units/plugins/strategy/test_linear.py' under
+    # /home/miosa/projects/osa/OSA`, affecting 7 of 12 instances.
+    #
+    # That failure is quiet and expensive: the agent asks for the file it needs,
+    # is told it does not exist, and carries on without it.
+    #
+    # The earlier fix (786ac7b8) re-published the cwd across the Task boundary
+    # so `shell_execute` saw it. It did not help here, because these tools never
+    # consult the process dictionary at all — they call `Path.expand/1`, which
+    # reads the OS cwd directly.
+    base = Path.expand(input["path"] || ".", OptimalSystemAgent.Workspace.Cwd.get())
 
     cond do
       sensitive?(base) ->
@@ -54,7 +71,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"pattern" => pattern} = input, _ctx) do
-    base = Path.expand(input["path"] || ".")
+    # Expand against the SESSION's directory, not the OS process cwd.
+    #
+    # `Path.expand/1` resolves a relative path against `File.cwd!()`, which is
+    # wherever the BACKEND booted — so a relative pattern was searched in the
+    # daemon's own tree rather than the user's workspace. Measured on a
+    # benchmark run AFTER the shell-side cwd fix: 29 tool results across three
+    # runs reported `No files matched pattern
+    # 'test/units/plugins/strategy/test_linear.py' under
+    # /home/miosa/projects/osa/OSA`, affecting 7 of 12 instances.
+    #
+    # That failure is quiet and expensive: the agent asks for the file it needs,
+    # is told it does not exist, and carries on without it.
+    #
+    # The earlier fix (786ac7b8) re-published the cwd across the Task boundary
+    # so `shell_execute` saw it. It did not help here, because these tools never
+    # consult the process dictionary at all — they call `Path.expand/1`, which
+    # reads the OS cwd directly.
+    base = Path.expand(input["path"] || ".", OptimalSystemAgent.Workspace.Cwd.get())
 
     # Classify the base BEFORE globbing. `Path.wildcard` returns `[]` for a
     # nonexistent base, an unreadable base and a genuinely unmatched pattern

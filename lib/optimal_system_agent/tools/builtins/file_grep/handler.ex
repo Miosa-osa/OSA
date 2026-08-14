@@ -52,7 +52,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"pattern" => pattern} = params, _ctx) do
-    path = Path.expand(params["path"] || ".")
+    # Expand against the SESSION's directory, not the OS process cwd.
+    #
+    # `Path.expand/1` resolves a relative path against `File.cwd!()`, which is
+    # wherever the BACKEND booted — so a relative pattern was searched in the
+    # daemon's own tree rather than the user's workspace. Measured on a
+    # benchmark run AFTER the shell-side cwd fix: 29 tool results across three
+    # runs reported `No files matched pattern
+    # 'test/units/plugins/strategy/test_linear.py' under
+    # /home/miosa/projects/osa/OSA`, affecting 7 of 12 instances.
+    #
+    # That failure is quiet and expensive: the agent asks for the file it needs,
+    # is told it does not exist, and carries on without it.
+    #
+    # The earlier fix (786ac7b8) re-published the cwd across the Task boundary
+    # so `shell_execute` saw it. It did not help here, because these tools never
+    # consult the process dictionary at all — they call `Path.expand/1`, which
+    # reads the OS cwd directly.
+    path = Path.expand(params["path"] || ".", OptimalSystemAgent.Workspace.Cwd.get())
 
     if File.exists?(path) do
       do_search(pattern, path, params)

@@ -220,6 +220,53 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     end
   end
 
+
+  @doc false
+  # Demote every non-LEADING `system` message to `user`.
+  #
+  # Anthropic rejects a `system` message that follows assistant text:
+  #
+  #     messages.N: role 'system' must follow a 'user' message or an
+  #     assistant message ending in a server tool result
+  #
+  # `Providers.Anthropic.split_system/2` already does this for the native
+  # Anthropic path. This module had NO equivalent — so an Anthropic or Gemini
+  # model reached through OpenRouter (or any other OpenAI-compatible gateway)
+  # still received the invalid shape and returned a hard 400.
+  #
+  # Measured under real benchmark conditions after commit 8fdca274 fixed nine
+  # `react_loop` sites: `claude-opus-5` via OpenRouter still returned
+  # `messages.65: role 'system' must follow...`, with the role tail
+  # `[…assistant, tool, assistant, system]`. Fixing the emitters one at a time
+  # cannot close this — a single missed site anywhere in the codebase
+  # reintroduces it — so the guard belongs at the wire, where every message
+  # passes exactly once.
+  #
+  # The LEADING run is preserved: those are the real system prompt, and every
+  # OpenAI-compatible API expects them there.
+  def demote_non_leading_system(messages) when is_list(messages) do
+    {leading, rest} = Enum.split_while(messages, &system_role?/1)
+
+    rest =
+      Enum.map(rest, fn msg ->
+        if system_role?(msg), do: put_role(msg, "user"), else: msg
+      end)
+
+    leading ++ rest
+  end
+
+  def demote_non_leading_system(messages), do: messages
+
+  defp system_role?(%{"role" => "system"}), do: true
+  defp system_role?(%{role: "system"}), do: true
+  defp system_role?(%{"role" => :system}), do: true
+  defp system_role?(%{role: :system}), do: true
+  defp system_role?(_), do: false
+
+  defp put_role(%{"role" => _} = msg, role), do: Map.put(msg, "role", role)
+  defp put_role(%{role: _} = msg, role), do: Map.put(msg, :role, role)
+  defp put_role(msg, _role), do: msg
+
   @doc "Return available models for a given provider."
   def available_models(provider) do
     config = get_config!(provider)
@@ -270,6 +317,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         |> Keyword.delete(:model)
         |> maybe_add_headers(config)
         |> maybe_extend_timeout(model)
+
+      messages = demote_non_leading_system(messages)
 
       result =
         retry_once_on_rejected_account_token(provider, api_key, fn key ->
