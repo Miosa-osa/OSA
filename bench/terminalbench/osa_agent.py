@@ -117,6 +117,95 @@ OSA_ABLATION_ENV_KEYS = (
 #: the container and has never been told what Harbor was invoked with.
 DRIVER_RUN_TIMEOUT_BASE = 1800
 
+#: Seconds of headroom the driver keeps under Harbor's own agent deadline.
+#:
+#: ## Why the driver has to lose the race on purpose
+#:
+#: Harbor bounds `agent.run()` with `wait_for(agent_timeout)`. When that fires it
+#: cancels the coroutine and the container exec dies where it stands: no
+#: telemetry file, no `cancel` POST, so OSA never flushes its spend sidecar, and
+#: -- since 2026-08-15 -- the driver's exit-code table never runs either. The
+#: trial lands as `no_telemetry_written` and the whole fault-attribution record
+#: for it is lost.
+#:
+#: When the DRIVER's deadline fires first, it cancels the session, writes
+#: telemetry, and exits 0, and Harbor's verifier then grades whatever is on
+#: disk. That is not a technicality: on the full-89 run, 2 of the 5 trials that
+#: reached the driver's own timeout scored **reward 1.0** -- the work was
+#: finished and only the terminal frame was missing.
+#:
+#: ## What was actually happening
+#:
+#: The deadline was a fixed 1800s base, so which clock won was an accident of
+#: the task's declared budget. Measured across TB 2.0 at `--timeout-multiplier
+#: 2.0`: **Harbor pre-empted the driver on 56 of 89 tasks**, and the driver only
+#: won on the 33 whose own budget was >= 1800s. `gpt2-codegolf` (900s budget,
+#: so 1800s from Harbor against the driver's 3600s) is the worked example --
+#: `AgentTimeoutError`, `no_telemetry_written`, nothing recorded.
+DRIVER_TIMEOUT_GRACE_SEC = 60
+
+
+def task_declared_timeout(logs_dir: Path) -> float | None:
+    """The task's own `timeout_sec`, resolved host-side. None if not knowable.
+
+    Harbor hands `agent_timeout_sec` to the constructor **only for the oracle**
+    (`trial/trial.py:822-828`), and exports no `HARBOR_*_TIMEOUT` into the
+    container, so an adapter is simply never told its budget. It is recoverable
+    anyway, because this adapter runs on the HOST: the trial directory is named
+    `<task-name>__<suffix>`, and the dataset the run selected is on disk.
+
+    Returns the task's declared base timeout, unmultiplied -- the caller applies
+    the multiplier, exactly as Harbor does.
+    """
+    try:
+        trial_name = logs_dir.parent.name
+    except (AttributeError, IndexError):
+        return None
+    task_name = trial_name.rsplit("__", 1)[0]
+    if not task_name:
+        return None
+
+    tasks_dir = os.environ.get("OSA_TBENCH_TASKS_DIR") or os.environ.get(
+        "OSA_BENCH_TASKS_DIR"
+    )
+    if tasks_dir:
+        # The run told us exactly which task set it selected. Unambiguous.
+        roots = [Path(tasks_dir)]
+    elif (HERE / "tasks").is_dir():
+        # Nobody told us, so scan the dataset copies this repo manages. Task
+        # NAMES are not unique across them -- `gpt2-codegolf` exists in TB 2.0
+        # at 900s and elsewhere at 18000s -- so a first-match scan silently
+        # picks the wrong budget, and picking a budget that is 20x too large
+        # puts Harbor back in front of the driver, which is the exact failure
+        # this function exists to prevent. Ambiguity therefore resolves to
+        # "unknown", never to a guess.
+        roots = sorted((HERE / "tasks").glob("*"))
+    else:
+        return None
+
+    found: set[float] = set()
+    for root in roots:
+        toml_path = Path(root) / task_name / "task.toml"
+        if not toml_path.is_file():
+            continue
+        try:
+            import tomllib
+
+            data = tomllib.loads(toml_path.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        # `timeout_sec` lives under [agent] in schema 1.x; tolerate top level.
+        for section in (data.get("agent") or {}, data):
+            v = section.get("timeout_sec")
+            if isinstance(v, (int, float)) and v > 0:
+                found.add(float(v))
+                break
+
+    if len(found) == 1:
+        return found.pop()
+    # Zero matches, or several datasets that disagree: not knowable.
+    return None
+
 
 def driver_run_timeout() -> int | None:
     """The agent deadline the driver should enforce, scaled by the multiplier.
@@ -205,9 +294,10 @@ class OsaAgent(BaseInstalledAgent):
         self._provider = provider
         self._port = int(port)
         self._boot_timeout = int(boot_timeout_sec)
-        self._run_timeout = int(run_timeout_sec) if run_timeout_sec else None
-        if self._run_timeout is None:
-            self._run_timeout = driver_run_timeout()
+        # An explicit operator override only. The DEFAULT is resolved per-trial
+        # in `_effective_run_timeout()`, because it depends on the task's own
+        # declared budget and the trial does not exist yet at construction time.
+        self._run_timeout_override = int(run_timeout_sec) if run_timeout_sec else None
         super().__init__(*args, **kwargs)
         if not RELEASE_TARBALL.exists():
             raise FileNotFoundError(
@@ -466,6 +556,49 @@ class OsaAgent(BaseInstalledAgent):
 
     # ------------------------------------------------------------------- run
 
+    def _effective_run_timeout(self) -> int | None:
+        """The deadline handed to the driver, guaranteed to fire before Harbor's.
+
+        Three inputs, in precedence order:
+
+        1. an explicit `run_timeout_sec` kwarg — an operator override, honoured
+           as given and never second-guessed;
+        2. the task's own declared budget times the multiplier, minus
+           `DRIVER_TIMEOUT_GRACE_SEC`. This is the case that matters and the one
+           that used not to exist; see that constant for what it costs when
+           Harbor wins the race instead;
+        3. the old fixed base times the multiplier, when the task's budget is
+           not resolvable (a task set outside `tasks/`, or a `task.toml` we
+           cannot parse).
+
+        Never returns a value above Harbor's own deadline when that deadline is
+        knowable, and returns `None` rather than inventing one when nothing is
+        known — an unset multiplier must leave the driver's built-in default
+        alone rather than start writing an env var that was previously absent.
+        """
+        if self._run_timeout_override:
+            return self._run_timeout_override
+
+        raw = os.environ.get("OSA_BENCH_TIMEOUT_MULTIPLIER")
+        try:
+            mult = float(raw) if raw else 1.0
+        except ValueError:
+            mult = 1.0
+        if mult <= 0:
+            mult = 1.0
+
+        declared = task_declared_timeout(self.logs_dir)
+        if declared:
+            # Beat Harbor by the grace margin, but never go below a floor -- a
+            # task with a very short budget must not end up with a deadline so
+            # small that the driver cancels a run that was about to finish.
+            budget = declared * mult
+            return int(max(budget - DRIVER_TIMEOUT_GRACE_SEC, budget * 0.9))
+
+        # Nothing task-specific is knowable: fall back to the fixed base scaled
+        # by the multiplier, which is all this could ever do before.
+        return driver_run_timeout()
+
     @override
     async def run(
         self,
@@ -496,8 +629,9 @@ class OsaAgent(BaseInstalledAgent):
             **ablation_env(),
             **self.resolve_env_vars(),
         }
-        if self._run_timeout:
-            env["OSA_BENCH_RUN_TIMEOUT"] = str(self._run_timeout)
+        run_timeout = self._effective_run_timeout()
+        if run_timeout:
+            env["OSA_BENCH_RUN_TIMEOUT"] = str(run_timeout)
 
         await self.exec_as_root(
             environment,

@@ -316,3 +316,100 @@ def test_driver_base_matches_the_driver_itself():
     mod = _load_osa_agent()
     src = (HERE / "driver" / "osa_headless.py").read_text()
     assert f'"OSA_BENCH_RUN_TIMEOUT", "{mod.DRIVER_RUN_TIMEOUT_BASE}"' in src
+
+
+# ------------------------------------------- per-task deadline (grace margin)
+
+
+def _trial_logs_dir(tmp_path, task_name: str):
+    """A path shaped like Harbor's, i.e. `<job>/<task>__<suffix>/agent`."""
+    d = tmp_path / f"{task_name}__AbCdEfG" / "agent"
+    d.mkdir(parents=True)
+    return d
+
+
+def _write_task(root, name: str, timeout_sec: float):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "task.toml").write_text(
+        f'schema_version = "1.1"\n\n[agent]\ntimeout_sec = {timeout_sec}\n'
+    )
+    return d
+
+
+def test_task_timeout_is_resolved_from_the_trial_directory_name(tmp_path, monkeypatch):
+    """Harbor never tells an adapter its budget, but the path spells the task."""
+    mod = _load_osa_agent()
+    tasks = tmp_path / "tasks"
+    _write_task(tasks, "some-task", 900.0)
+    monkeypatch.setenv("OSA_TBENCH_TASKS_DIR", str(tasks))
+    assert mod.task_declared_timeout(_trial_logs_dir(tmp_path, "some-task")) == 900.0
+
+
+def test_unknown_task_resolves_to_none(tmp_path, monkeypatch):
+    mod = _load_osa_agent()
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    monkeypatch.setenv("OSA_TBENCH_TASKS_DIR", str(tasks))
+    assert mod.task_declared_timeout(_trial_logs_dir(tmp_path, "absent")) is None
+
+
+def test_driver_deadline_fires_before_harbors(tmp_path, monkeypatch):
+    """The whole point: the driver must lose the race, so it can write telemetry.
+
+    When Harbor's `wait_for` wins, the exec is cancelled where it stands -- no
+    telemetry, no session cancel, no exit code -- and the trial is recorded as
+    `no_telemetry_written` with its fault attribution lost. Measured before this
+    fix: Harbor pre-empted the driver on 56 of TB 2.0's 89 tasks.
+    """
+    mod = _load_osa_agent()
+    tasks = tmp_path / "tasks"
+    _write_task(tasks, "short-task", 900.0)
+    monkeypatch.setenv("OSA_TBENCH_TASKS_DIR", str(tasks))
+    monkeypatch.setenv("OSA_BENCH_TIMEOUT_MULTIPLIER", "2.0")
+
+    # Bound without Harbor's __init__, which needs a built release tarball.
+    obj = object.__new__(mod.OsaAgent)
+    obj._run_timeout_override = None
+    obj.logs_dir = _trial_logs_dir(tmp_path, "short-task")
+
+    harbor_deadline = 900.0 * 2.0
+    assert obj._effective_run_timeout() < harbor_deadline
+
+
+def test_explicit_override_is_honoured(tmp_path, monkeypatch):
+    """An operator who passes a deadline gets exactly that deadline."""
+    mod = _load_osa_agent()
+    obj = object.__new__(mod.OsaAgent)
+    obj._run_timeout_override = 123
+    obj.logs_dir = _trial_logs_dir(tmp_path, "whatever")
+    assert obj._effective_run_timeout() == 123
+
+
+def test_ambiguous_task_name_refuses_to_guess(tmp_path, monkeypatch):
+    """Two datasets disagreeing about a task's budget must resolve to unknown.
+
+    Task names are NOT unique across the dataset copies on disk -- real case:
+    `gpt2-codegolf` is 900s in TB 2.0 and 18000s elsewhere. Picking the larger
+    one puts Harbor back in front of the driver, which is worse than not
+    knowing, so disagreement resolves to None and the caller falls back.
+    """
+    mod = _load_osa_agent()
+    monkeypatch.delenv("OSA_TBENCH_TASKS_DIR", raising=False)
+    monkeypatch.delenv("OSA_BENCH_TASKS_DIR", raising=False)
+    root = tmp_path / "tasks"
+    _write_task(root / "ds-a", "clash", 900.0)
+    _write_task(root / "ds-b", "clash", 18000.0)
+    monkeypatch.setattr(mod, "HERE", tmp_path)
+    assert mod.task_declared_timeout(_trial_logs_dir(tmp_path, "clash")) is None
+
+
+def test_agreeing_datasets_still_resolve(tmp_path, monkeypatch):
+    mod = _load_osa_agent()
+    monkeypatch.delenv("OSA_TBENCH_TASKS_DIR", raising=False)
+    monkeypatch.delenv("OSA_BENCH_TASKS_DIR", raising=False)
+    root = tmp_path / "tasks"
+    _write_task(root / "ds-a", "agree", 900.0)
+    _write_task(root / "ds-b", "agree", 900.0)
+    monkeypatch.setattr(mod, "HERE", tmp_path)
+    assert mod.task_declared_timeout(_trial_logs_dir(tmp_path, "agree")) == 900.0

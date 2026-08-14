@@ -21,9 +21,13 @@ So this driver does, in order:
 Everything here is stdlib: the task images are arbitrary and may have no pip,
 no network egress to PyPI, and no `requests`.
 
-Exit code is 0 whenever the episode was *driven* -- a model that fails the task
-is a score of 0, not a driver error. Non-zero is reserved for "OSA never came
-up", which is a harness failure and must not be scored as a model failure.
+Exit code says WHO LOST THE TASK, and Harbor reads it (see `_EXIT_CODES`).
+An episode the model was fairly given and lost exits 0; an episode that never
+ran, ran crippled, or died on an infrastructure fault exits non-zero so that
+Harbor's own error classifier fires and its retry logic can see the trial at
+all. The previous contract -- "0 whenever the episode was driven" -- collapsed
+those two cases into one and is what made a provider outage indistinguishable
+from a model failure.
 """
 
 from __future__ import annotations
@@ -48,6 +52,29 @@ BASE = f"http://127.0.0.1:{PORT}"
 BOOT_TIMEOUT = int(os.environ.get("OSA_BENCH_BOOT_TIMEOUT", "180"))
 RUN_TIMEOUT = int(os.environ.get("OSA_BENCH_RUN_TIMEOUT", "1800"))
 SESSION = os.environ.get("OSA_BENCH_SESSION", "tbench")
+
+#: The five timeout sites in this driver, all now named and all overridable.
+#:
+#: They were audited against the table in `docs/research/harbor-framework.md` §7.
+#: Harbor scales four of its own timeouts by `--timeout-multiplier`; a driver
+#: constant that does not scale silently becomes the binding deadline the moment
+#: a run asks for more time, and the resulting failure is recorded against the
+#: model. `BOOT_TIMEOUT` and `RUN_TIMEOUT` above are already scaled host-side by
+#: `osa_agent.py` (which is the only process that knows the multiplier -- the
+#: driver runs inside the container and Harbor tells it nothing).
+#:
+#: `ORCHESTRATE_TIMEOUT` is the one that mattered: it bounds the POST that
+#: *starts* the run, so blowing it produced `orchestrate_rejected` -- a harness
+#: fault -- at a fixed 120s no matter what budget the run was given. On a cold
+#: session OSA loads config, resolves the provider and builds the system prompt
+#: before it answers, and 120s is not obviously enough for that on a loaded box.
+ORCHESTRATE_TIMEOUT = int(os.environ.get("OSA_BENCH_ORCHESTRATE_TIMEOUT", "120"))
+#: Bounds the `permission_mode overdrive` POST. Now load-bearing: its failure
+#: ends the episode rather than being logged and ignored.
+OVERDRIVE_TIMEOUT = int(os.environ.get("OSA_BENCH_OVERDRIVE_TIMEOUT", "30"))
+#: Bounds the cancel POST issued after a budget exhaustion. Best-effort by
+#: design -- the episode is already over and its result does not change.
+CANCEL_TIMEOUT = int(os.environ.get("OSA_BENCH_CANCEL_TIMEOUT", "30"))
 
 # Lines in the serve log that mean OSA got in its own way rather than the model
 # getting the task wrong. These are the whole point of running this benchmark,
@@ -95,6 +122,98 @@ _OWNER_STATUS = {
     "unknown": "turn_error_unattributed",
 }
 
+#: status -> process exit code. Harbor's `BaseInstalledAgent._exec` raises on any
+#: non-zero and runs `_classify_exec_error` over our stdout, so this table is the
+#: single place that decides whether a trial is charged to the model or to the
+#: infrastructure.
+#:
+#: ## Why `timeout` is 0 and not an error
+#:
+#: An agent that used its whole budget is the one failure mode Harbor grades
+#: ANYWAY: its own `AgentTimeoutError` is caught inside the phase
+#: (`single_step.py:82-84`) and the verifier still runs against whatever the
+#: agent left on disk. Measured on the full-89 run at
+#: `runs/osa-tb20-full89-f6981b61`: of 5 trials this driver ended with
+#: `status: timeout`, **2 scored reward 1.0** (`path-tracing`,
+#: `path-tracing-reverse`) -- the work was already finished, only the `done`
+#: frame was missing. Exiting non-zero here would have raised before the
+#: verifier and turned two passes into two errored trials. So a budget
+#: exhaustion stays 0 and is reported through telemetry, matching Harbor's own
+#: semantics for the same event.
+#:
+#: ## Why the rest are non-zero
+#:
+#: None of them is an episode the model was fairly given. `orchestrate_rejected`
+#: and `overdrive_rejected` mean the run never started or started crippled;
+#: `provider_error` is upstream; `osa_internal_error` is our own bug;
+#: `stream_closed_without_done` is a turn that died. Measured: the retry run at
+#: `runs/rerun-timeouts-f6981b61` recorded 4 trials as `provider_error` with
+#: `exception_info: null` and reward 0.0 -- four infrastructure failures billed
+#: to the model, on a run whose entire purpose was to retry.
+_EXIT_CODES = {
+    "ok": 0,
+    # Budget exhaustion. Graded, deliberately -- see above.
+    "timeout": 0,
+    "install_or_boot_failed": 3,
+    "orchestrate_rejected": 4,
+    "overdrive_rejected": 5,
+    "stream_closed_without_done": 6,
+    "provider_error": 7,
+    "osa_internal_error": 8,
+    "turn_error_unattributed": 9,
+    # The INITIAL sentinel. Reaching the exit with this still set means no
+    # terminal branch ever claimed the run, which is a driver fault and must not
+    # read as a model failure. Listed explicitly rather than left to the default
+    # so the intent is visible.
+    "runner_error": 10,
+}
+
+#: OSA's `ErrorCatalog` category -> a phrase from Harbor's `ERROR_PATTERNS`
+#: (`agents/installed/base.py:441-515`). Printing the phrase lets Harbor refine a
+#: bare `NonZeroAgentExitCodeError` into the specific error type, which is what
+#: drives `exclude_exceptions` and therefore what gets retried.
+#:
+#: Only categories we can map HONESTLY are listed. An unmapped category prints no
+#: phrase at all and stays a generic non-zero exit: inventing a "rate limit"
+#: string for an error we did not classify as one would corrupt the very
+#: attribution this table exists to protect. Categories are OSA's own, from
+#: `lib/optimal_system_agent/providers/error_catalog.ex`.
+_CATEGORY_PHRASE = {
+    "rate_limit": "rate limit",
+    # NOT "API Error: Overloaded", which is the phrase upstream adapters use:
+    # `_classify_exec_error` takes the LAST matching pattern, and the generic
+    # `API Error` catch-all sits after the overload rule, so that phrase
+    # downgrades to `UnknownApiError`. This one carries no "API Error"
+    # substring and therefore survives to `ApiOverloadedError`.
+    "server_overload": "Selected model is at capacity. Please try a different model.",
+    "connection_error": "Connection refused",
+    "timeout": "Connection timed out",
+    "model_not_found": "Cannot use this model",
+    "missing_api_key": "Not logged in",
+    "request_too_large": "input token count exceeds the maximum number of tokens",
+}
+
+
+def _classifier_line(telemetry: dict) -> str | None:
+    """A line Harbor's `ERROR_PATTERNS` can match, or None if we cannot honestly
+    produce one.
+
+    Read from the `turn_error.category` OSA already stamps. Never guessed from
+    free text: a substring search over an arbitrary error message is how a task
+    whose *output* mentions "rate limit" gets classified as a rate limit.
+    """
+    te = telemetry.get("turn_error")
+    if not isinstance(te, dict):
+        return None
+    category = te.get("category")
+    if not isinstance(category, str):
+        return None
+    phrase = _CATEGORY_PHRASE.get(category.lstrip(":"))
+    if not phrase:
+        return None
+    return f"[osa-driver] classified: {phrase} (osa category={category})"
+
+
 def _newer(a, b):
     """Reconcile two cumulative readings of one monotonic counter.
 
@@ -119,6 +238,15 @@ def _turn_error_owner(turn_error) -> str:
         if isinstance(owner, str) and owner.lstrip(":") in ("osa", "provider"):
             return owner.lstrip(":")
     return "unknown"
+
+
+def _shutdown(proc) -> None:
+    """Stop `osagent serve`, tolerating a process that is already gone."""
+    if proc and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:  # noqa: BLE001
+            proc.kill()
 
 
 def log(msg: str) -> None:
@@ -310,7 +438,7 @@ def main() -> int:
         telemetry["self_inflicted"] = scan_serve_log()
         (AGENT_DIR / "osa-telemetry.json").write_text(json.dumps(telemetry, indent=2))
         log(telemetry["error"])
-        return 3  # harness failure, NOT a model failure
+        return _EXIT_CODES["install_or_boot_failed"]  # harness, NOT the model
 
     events: Queue = Queue()
     stop = threading.Event()
@@ -319,19 +447,39 @@ def main() -> int:
     time.sleep(1.0)
 
     # Without overdrive a headless run either parks on an approval nobody can
-    # answer or fails closed on every mutating tool.
+    # answer or fails closed on every mutating tool. That is a task-wide zero
+    # that reads as model incompetence, so a non-200 here ends the episode as a
+    # harness fault instead of being logged and walked past.
+    #
+    # All 36 trials checked when this was audited returned 200, so this has not
+    # bitten yet -- which is exactly the condition under which it would go on
+    # not biting silently until the day it did.
     st, body = _req(
         "/api/v1/commands/execute",
         {"command": "permission_mode overdrive", "session_id": SESSION},
-        timeout=30,
+        timeout=OVERDRIVE_TIMEOUT,
     )
     log(f"overdrive -> HTTP {st} {body[:160]}")
+    if st != 200:
+        stop.set()
+        telemetry["status"] = "overdrive_rejected"
+        telemetry["error"] = (
+            f"permission_mode overdrive returned HTTP {st}: {body[:400]}. "
+            "The episode would have run fails-closed on every mutating tool; "
+            "refusing to score it as a model failure."
+        )
+        telemetry["run_s"] = 0.0
+        telemetry["self_inflicted"] = scan_serve_log()
+        (AGENT_DIR / "osa-telemetry.json").write_text(json.dumps(telemetry, indent=2))
+        log(telemetry["error"])
+        _shutdown(proc)
+        return _EXIT_CODES["overdrive_rejected"]
 
     t0 = time.monotonic()
     st, body = _req(
         "/api/v1/orchestrate",
         {"input": instruction, "session_id": SESSION, "working_dir": workdir},
-        timeout=120,
+        timeout=ORCHESTRATE_TIMEOUT,
     )
     if st not in (200, 202):
         stop.set()
@@ -346,7 +494,9 @@ def main() -> int:
                 if remaining <= 0:
                     telemetry["status"] = "timeout"
                     telemetry["error"] = f"agent exceeded {RUN_TIMEOUT}s"
-                    _req(f"/api/v1/sessions/{SESSION}/cancel", {}, timeout=30)
+                    _req(
+                        f"/api/v1/sessions/{SESSION}/cancel", {}, timeout=CANCEL_TIMEOUT
+                    )
                     break
                 try:
                     ev = events.get(timeout=min(remaining, 5.0))
@@ -494,12 +644,22 @@ def main() -> int:
         f"self_inflicted={telemetry['self_inflicted']['counts']}"
     )
 
-    if proc and proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:  # noqa: BLE001
-            proc.kill()
-    return 0
+    _shutdown(proc)
+
+    status = telemetry.get("status") or "turn_error_unattributed"
+    # An unknown status must not read as success. A new terminal branch added
+    # without a line in `_EXIT_CODES` should surface as an error, not silently
+    # become a model failure -- that default is the bug this whole table fixes.
+    code = _EXIT_CODES.get(status, _EXIT_CODES["turn_error_unattributed"])
+    if code:
+        line = _classifier_line(telemetry)
+        if line:
+            log(line)
+        log(
+            f"EXIT {code} ({status}): this trial was NOT a fair model attempt. "
+            f"{telemetry.get('error') or ''}".strip()
+        )
+    return code
 
 
 if __name__ == "__main__":

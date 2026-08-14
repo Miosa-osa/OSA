@@ -580,6 +580,99 @@ def collect(job_dir: Path) -> list[dict]:
     return rows
 
 
+def _trials_by_task(rows: list[dict]) -> dict[str, list[dict]]:
+    """Group trial rows by task name.
+
+    With `-k 1` every group has one member and this is the identity. With
+    `-k 5` Harbor writes five sibling trial directories per task, distinguished
+    only by the random suffix in `trial_name`, so the task name is the only
+    stable key.
+    """
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r["task_name"] or "?", []).append(r)
+    return groups
+
+
+def multi_trial(rows: list[dict], declared_k: int) -> dict[str, Any] | None:
+    """Per-task resolution across repeated trials, or None when k == 1.
+
+    ## Why both numbers are reported
+
+    `accuracy` over trial rows is a **per-trial** pass rate. At k=1 it is also
+    the per-task rate, which is why the distinction has never mattered here and
+    why nothing in this file drew it. At k>1 they are different quantities and
+    quoting one for the other is a real error in both directions:
+
+      * **pass@1** (mean per-task pass fraction) is the honest expected result
+        of running the benchmark once, and is what a leaderboard row means.
+      * **pass@k** (task solved in *at least one* trial) is strictly higher and
+        rises with k, so it is only comparable against the same k.
+
+    A single task in our own runs has been observed flipping 4-pass/2-fail with
+    no code change, so at k=1 the gap between these two is entirely noise we
+    have never measured. `flaky_tasks` names the tasks that did not agree with
+    themselves -- that list is the direct evidence for how much of any quoted
+    delta is real.
+    """
+    groups = _trials_by_task(rows)
+    observed = [len(v) for v in groups.values()]
+    if not observed or max(observed) <= 1:
+        return None
+
+    per_task = []
+    for task, trials in sorted(groups.items()):
+        # A trial that never got a verdict is not a failed attempt. It is
+        # excluded from the task's own denominator and counted separately,
+        # rather than being folded in as a 0 -- that is the same substitution
+        # the exit-code work exists to stop.
+        graded = [t for t in trials if t["reward"] is not None]
+        n_pass = sum(1 for t in graded if t["resolved"])
+        per_task.append(
+            {
+                "task_name": task,
+                "n_trials": len(trials),
+                "n_graded": len(graded),
+                "n_errored": len(trials) - len(graded),
+                "n_pass": n_pass,
+                "pass_fraction": (
+                    round(n_pass / len(graded), 4) if graded else None
+                ),
+                "solved_at_least_once": n_pass > 0,
+                # Disagreed with itself: the direct measure of how much of any
+                # quoted rate is a coin flip.
+                "flaky": 0 < n_pass < len(graded),
+            }
+        )
+
+    scored = [t for t in per_task if t["pass_fraction"] is not None]
+    return {
+        "n_tasks": len(per_task),
+        "n_attempts_declared": declared_k,
+        "trials_per_task_observed": sorted(set(observed)),
+        # The expected result of running the benchmark ONCE. This is the figure
+        # that is comparable to a published leaderboard row.
+        "pass_at_1": (
+            round(sum(t["pass_fraction"] for t in scored) / len(scored), 4)
+            if scored
+            else None
+        ),
+        # Solved in at least one trial out of k. Higher by construction and only
+        # comparable against the same k -- never quote it as "the" score.
+        "pass_at_k": (
+            round(
+                sum(1 for t in per_task if t["solved_at_least_once"]) / len(per_task), 4
+            )
+            if per_task
+            else None
+        ),
+        "k": max(observed),
+        "flaky_tasks": sorted(t["task_name"] for t in per_task if t["flaky"]),
+        "n_flaky": sum(1 for t in per_task if t["flaky"]),
+        "per_task": per_task,
+    }
+
+
 def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
     n = len(rows)
     resolved = [r for r in rows if r["resolved"]]
@@ -612,13 +705,34 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
     cost = _total(r["cost_usd"] for r in rows)
     n_scoreable = n - len(harness_faults)
     declared_size = config.get("dataset_size") or 0
+    multi = multi_trial(rows, config.get("n_attempts") or 1)
+    # DISTINCT TASKS, not trial rows. At k=1 these are the same number, which is
+    # why every field below could get away with using `n`. At k>1 `n` is
+    # `tasks x k`, and comparing it against `dataset_size` would make a 5-trial
+    # 89-task run look like 445 tasks and declare itself not a full run.
+    n_tasks = multi["n_tasks"] if multi else n
 
     aggregate = {
-        "tasks_attempted": n,
+        "tasks_attempted": n_tasks,
+        # Trial rows behind `tasks_attempted`. Equal to it at k=1.
+        "trials_attempted": n,
         "tasks_resolved": len(resolved),
         # Accuracy over everything attempted -- the number Terminal-Bench would
         # report. NOT a Terminal-Bench 2.0 score unless is_full_dataset_run.
+        #
+        # At k>1 this is the PER-TRIAL pass rate. The per-task figures live in
+        # `multi_trial` and `pass_at_1` there is the one comparable to a
+        # published row; see that function's docstring for why the two differ.
         "accuracy": round(len(resolved) / n, 4) if n else None,
+        # None at k=1. Populated the moment any task has more than one trial,
+        # and carries pass@1, pass@k and the list of tasks that disagreed with
+        # themselves.
+        "multi_trial": multi,
+        # Both leaderboards require >= 5 trials per task, verbatim. Recorded
+        # here so a results file states its own admissibility rather than
+        # leaving a reader to assume.
+        "n_attempts": config.get("n_attempts") or 1,
+        "meets_leaderboard_trial_minimum": (config.get("n_attempts") or 1) >= 5,
         # A solve rate without an interval invites the reader to compare it to
         # a published figure digit-for-digit, which at these denominators is
         # never warranted: at n=89 a 60% result carries roughly +/-10 pp at 95%
@@ -643,7 +757,7 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         # Full means "every task the selected dataset has", whatever that
         # dataset is. Compared against the size the runner recorded, which it
         # counted from disk.
-        "is_full_dataset_run": bool(declared_size) and n == declared_size,
+        "is_full_dataset_run": bool(declared_size) and n_tasks == declared_size,
         "dataset_size": config.get("dataset_size"),
         "dataset_key": config.get("dataset_key"),
         "dataset_label": config.get("dataset_label"),
@@ -822,10 +936,46 @@ def summary_md(results: dict) -> str:
         "",
         "## Headline",
         "",
-        f"**{a['tasks_resolved']} / {a['tasks_attempted']} solved "
+        f"**{a['tasks_resolved']} / {a['trials_attempted']} solved "
         f"({(a['accuracy'] or 0) * 100:.1f}%)**",
         "",
     ]
+    mt = a.get("multi_trial")
+    if mt:
+        # At k>1 the headline above is a per-TRIAL rate. Say so immediately and
+        # give the per-task figures, because pass@1 and pass@k are different
+        # quantities and only pass@1 is comparable to a leaderboard row.
+        lines += [
+            f"Run at **k={mt['k']}** trials/task over {mt['n_tasks']} tasks, so "
+            "the line above is a per-**trial** rate. The per-**task** figures:",
+            "",
+            f"- **pass@1 = {(mt['pass_at_1'] or 0) * 100:.1f}%** — the expected "
+            "result of running the benchmark once. This is the figure "
+            "comparable to a published leaderboard row.",
+            f"- **pass@{mt['k']} = {(mt['pass_at_k'] or 0) * 100:.1f}%** — solved "
+            f"in at least one of {mt['k']} trials. Higher by construction and "
+            f"only comparable against another k={mt['k']} figure. Never quote "
+            "it as \"the\" score.",
+            "",
+        ]
+        if mt["n_flaky"]:
+            lines += [
+                f"**{mt['n_flaky']} task(s) disagreed with themselves** across "
+                f"trials: {', '.join(mt['flaky_tasks'])}. That disagreement is "
+                "the measured noise floor of this run; a delta smaller than it "
+                "is not a result.",
+                "",
+            ]
+    elif not a.get("meets_leaderboard_trial_minimum"):
+        lines += [
+            "> Run at **k=1**. Both Terminal-Bench leaderboards require a "
+            "minimum of **five trials per task** (\"Each task must be evaluated "
+            "with a minimum of five trials\"), so this figure is **not "
+            "admissible** and is not comparable to a published row: the "
+            "per-task result is a single sample, and tasks in this suite have "
+            "been observed flipping between pass and fail with no code change.",
+            "",
+        ]
     ci = a.get("accuracy_ci95")
     if ci:
         lines += [

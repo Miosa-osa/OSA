@@ -143,15 +143,49 @@ DATASETS: dict[str, Dataset] = {
         #
         # Left as None deliberately rather than pointed at the Hub, because our
         # local copy is NOT byte-identical to it and switching the id silently
-        # would change what historical runs are compared against. The drift,
-        # measured:
+        # would change what historical runs are compared against.
+        #
+        # ## The drift, re-measured 2026-08-15 against a fresh
+        # ## `harbor download terminal-bench/terminal-bench-2`
+        #
+        # The two are different SNAPSHOTS OF THE SAME LINE, not two versions.
+        # Our copy comes from the legacy registry's git pin `69671fb`
+        # (2025-10-31); the Hub package was cut earlier, and the git repo went
+        # on receiving 2.1-era fixes afterwards. So our "2.0" already carries
+        # part of 2.1. Content:
+        #
         #   install-windows-3.11    -- named `install-windows-3-11` upstream
-        #   llm-inference-batching-scheduler -- tests differ
-        #   overfull-hbox           -- solution differs
-        #   rstan-to-pystan         -- solution differs, and ours carries what
-        #                              looks like a 2.1-era fix: upstream pins
-        #                              the apt versions of gfortran/liblapack/
-        #                              libblas, ours has them unpinned
+        #   overfull-hbox           -- solution differs; ours == our 2.1 copy
+        #   rstan-to-pystan         -- solution differs. HUB PINS the apt
+        #                              versions of build-essential/gfortran/
+        #                              libatlas; OURS HAS THEM UNPINNED. (An
+        #                              earlier note here and
+        #                              `docs/research/harbor-framework.md` §4
+        #                              both had this backwards and concluded
+        #                              that switching to the Hub would RECOVER
+        #                              this task. It would not: the Hub copy is
+        #                              the pinned one, and our unpinned copy
+        #                              still fails its oracle anyway, on
+        #                              `ModuleNotFoundError: pkg_resources` --
+        #                              nothing to do with apt at all.)
+        #
+        # ## And the part that changes a score
+        #
+        # THREE tasks differ in resources or agent budget, and our copy is the
+        # more generous one in every case:
+        #
+        #   crack-7z-hash        hub 900s / 2048MB   vs  ours 1800s / 4096MB
+        #   filter-js-from-html  hub      / 2048MB   vs  ours      / 4096MB
+        #   gpt2-codegolf        hub      / 4096MB   vs  ours      / 8192MB
+        #
+        # `crack-7z-hash` is the one that matters: it PASSED in the full-89 run
+        # with double the agent timeout the Hub package allows. Both leaderboard
+        # contracts forbid resource and timeout overrides, and running a task
+        # copy that carries larger values is the same thing arriving by a
+        # different route -- it just does not show up in `config.json` as an
+        # override. Any figure from this copy must not be compared against a
+        # published row without saying so.
+        #
         # Anything intended for SUBMISSION must be run against the canonical id
         # rather than this copy.
         hub_id=None,
@@ -340,6 +374,56 @@ def sync(ds: Dataset, *, overwrite: bool = True) -> None:
     subprocess.run(cmd, check=True)
 
 
+#: Artefacts that must never exist inside a task copy, because Harbor uploads
+#: the whole task directory into the grading container.
+_CONTAMINANTS = ("__pycache__", "*.pyc", "*.pyo", ".pytest_cache")
+
+
+def contamination(ds: Dataset) -> list[str]:
+    """Host-generated files sitting inside a task copy.
+
+    ## Why this is a gate and not a lint
+
+    `verifier/verifier.py:133-238` uploads the task's `tests/` directory into
+    the container that decides the reward. Anything we leave in there is shipped
+    into a grading environment. Stale bytecode whose source has since changed is
+    the bad case: Python prefers a `.pyc` whose embedded mtime still matches, so
+    a grading run can execute code that no longer exists on disk.
+
+    ## How it got there
+
+    The repo had no pytest configuration, so a bare `pytest` from `bench/`
+    collected `tasks/*/tests/test_*.py` -- the benchmark tasks' own tests --
+    compiled them, and left the bytecode behind. Measured 2026-08-15: 27
+    `__pycache__` directories and 38 `.pyc` files across the task copies, all
+    stamped that day, all named `cpython-312-pytest-9.1.1`. A fresh
+    `harbor download terminal-bench/terminal-bench-2` contains none, confirming
+    every one was ours. `bench/pytest.ini` now stops the collection; this
+    function is the check that the prevention actually held.
+    """
+    if not ds.present:
+        return []
+    found: list[str] = []
+    for pattern in _CONTAMINANTS:
+        for p in ds.path.rglob(pattern):
+            found.append(str(p.relative_to(ds.path)))
+    return sorted(found)
+
+
+def clean(ds: Dataset) -> list[str]:
+    """Remove every contaminant from a task copy. Returns what it deleted."""
+    import shutil
+
+    removed = contamination(ds)
+    for pattern in _CONTAMINANTS:
+        for p in list(ds.path.rglob(pattern)):
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink()
+    return removed
+
+
 def _diff(a: Dataset, b: Dataset) -> list[str]:
     """Task names whose content differs, ignoring dotfiles.
 
@@ -381,6 +465,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("diff", help="which tasks changed between two datasets")
     p.add_argument("a")
     p.add_argument("b")
+    p = sub.add_parser(
+        "check", help="fail if a task copy carries host-generated bytecode"
+    )
+    p.add_argument("key", nargs="*", default=None)
+    p.add_argument("--fix", action="store_true", help="delete what it finds")
 
     args = ap.parse_args(argv)
 
@@ -400,6 +489,24 @@ def main(argv: list[str] | None = None) -> int:
         for k in keys:
             sync(get(k))
         return 0
+
+    if args.cmd == "check":
+        keys = args.key or [k for k in ORDER if DATASETS[k].present]
+        dirty = 0
+        for k in keys:
+            ds = get(k)
+            found = clean(ds) if args.fix else contamination(ds)
+            if found:
+                dirty += 1
+                verb = "removed" if args.fix else "FOUND"
+                print(f"{verb} {len(found)} contaminant(s) in {ds.key}:")
+                for f in found[:20]:
+                    print(f"  {f}")
+                if len(found) > 20:
+                    print(f"  ... and {len(found) - 20} more")
+            else:
+                print(f"clean: {ds.key}")
+        return 1 if (dirty and not args.fix) else 0
 
     if args.cmd == "diff":
         a, b = get(args.a), get(args.b)
