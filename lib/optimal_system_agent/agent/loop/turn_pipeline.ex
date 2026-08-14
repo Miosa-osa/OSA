@@ -166,6 +166,15 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # Cwd resolution order — never the backend's boot dir.
     OptimalSystemAgent.Workspace.Cwd.put_process_override(Map.get(state, :working_dir))
 
+    # …and into the session→workspace table, which is NOT process-local. The
+    # process dictionary above only reaches code running in this process; the
+    # permission scope check runs inside a spawned tool Task. See
+    # `Workspace.Cwd`'s resolution order.
+    OptimalSystemAgent.Workspace.Cwd.put_session_dir(
+      Map.get(state, :session_id),
+      Map.get(state, :working_dir)
+    )
+
     # Same mechanism, for session identity: publish which session this process
     # is acting for so `Settings.current_session/0` can scope the session
     # settings layer (and so skill-touch / diagnostics lookups that already read

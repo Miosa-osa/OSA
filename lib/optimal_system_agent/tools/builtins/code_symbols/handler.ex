@@ -7,7 +7,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Handler do
     * `execute/2`           — extract symbols from source file
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.CodeSymbols.Constants
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -303,19 +302,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Handler do
     {:ok, "Symbols in #{path}:\n#{lines}"}
   end
 
-  defp allowed_paths do
-    configured =
-      Application.get_env(
-        :optimal_system_agent,
-        :allowed_read_paths,
-        Constants.default_allowed_paths()
-      )
-
-    Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
+  # Shared read allowlist — configured roots PLUS the session workspace. A
+  # private copy here was blind to the session's `working_dir`.
+  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
 
   defp path_allowed?(expanded_path) do
     check_path =

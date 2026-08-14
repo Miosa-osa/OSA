@@ -320,15 +320,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     Enum.any?(allowed_paths(), fn a -> String.starts_with?(check, a) end)
   end
 
-  defp allowed_paths do
-    Application.get_env(
-      :optimal_system_agent,
-      :allowed_read_paths,
-      Constants.default_allowed_paths()
-    )
-    |> Enum.map(fn p ->
-      e = Path.expand(p)
-      if String.ends_with?(e, "/"), do: e, else: e <> "/"
-    end)
-  end
+  # Shared read allowlist — configured roots PLUS the session workspace. A
+  # private copy here was blind to the session's `working_dir`.
+  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
 end

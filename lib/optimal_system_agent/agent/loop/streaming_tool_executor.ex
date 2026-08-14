@@ -52,12 +52,17 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
     # would default to the backend's boot directory rather than the session's
     # working_dir. Read on the caller, re-publish inside the Task.
     caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
+    # …and the session identity, so `Settings.current_session/0` resolves inside
+    # the Task and the session settings layer (`/add-dir`'s
+    # `permissions.additionalDirectories`) is visible to the permission check.
+    sid = Map.get(state, :session_id)
 
     task =
       Task.Supervisor.async_nolink(
         OptimalSystemAgent.TaskSupervisor,
         fn ->
           OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
+          if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
           executor.execute_tool_call(tool_call, state)
         end
       )
@@ -252,5 +257,4 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       ms -> "#{div(ms, 1000)}s"
     end
   end
-
 end

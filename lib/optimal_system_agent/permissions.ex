@@ -689,15 +689,27 @@ defmodule OptimalSystemAgent.Permissions do
     :ok
   end
 
-  @doc "True when `path` resolves under cwd, tmp, or an additional directory."
+  @doc """
+  The directories this session may operate in: its resolved working directory,
+  the temp dir, and any `/add-dir` / `additionalDirectories` grant.
+
+  `Workspace.Cwd.get/0` is the session-scoped resolution — a per-process
+  override when one was published, else the `working_dir` recorded for the
+  session this process is acting for, else the boot directory. It is NOT the OS
+  process cwd; `Path.expand/1` below is, which is why the candidate path is
+  expanded against `Cwd.get/0` rather than left to default.
+  """
+  @spec scope_roots() :: [String.t()]
+  def scope_roots do
+    [OptimalSystemAgent.Workspace.Cwd.get(), System.tmp_dir()] ++
+      Enum.map(additional_directories(), &Path.expand/1)
+  end
+
+  @doc "True when `path` resolves under the session workspace, tmp, or an additional directory."
   def path_in_scope?(path) when is_binary(path) do
-    expanded = Path.expand(path)
+    expanded = Path.expand(path, OptimalSystemAgent.Workspace.Cwd.get())
 
-    roots =
-      [OptimalSystemAgent.Workspace.Cwd.get(), System.tmp_dir()] ++
-        Enum.map(additional_directories(), &Path.expand/1)
-
-    Enum.any?(roots, fn root ->
+    Enum.any?(scope_roots(), fn root ->
       is_binary(root) and (expanded == root or String.starts_with?(expanded, root <> "/"))
     end)
   rescue
@@ -718,6 +730,60 @@ defmodule OptimalSystemAgent.Permissions do
     if tool_name in @file_mutating_tools do
       Enum.find(file_paths_of(args), fn path -> not path_in_scope?(path) end)
     end
+  end
+
+  # ── Fault attribution for refusals ───────────────────────────────────
+
+  # The wordings every path-scope refusal in the codebase produces. They all
+  # mean the same thing — "this path is not under a root I will operate in" —
+  # and are emitted by `Agent.Safety.PathPolicy` and by the loop's own
+  # out-of-scope guard.
+  @scope_denial_markers [
+    "is outside allowed paths",
+    "is outside allowed read paths",
+    "is outside allowed write paths",
+    "outside the workspace and allowed directories"
+  ]
+
+  @doc """
+  `:osa` when a tool refusal is OSA's OWN fault, else nil.
+
+  There is exactly one case, and it is decidable: OSA refused a path *for being
+  out of scope* that IS inside the session's declared workspace. That can only
+  mean the scope resolution disagreed with itself — the session was told to work
+  in a directory and then refused to work in it. Nothing the model did could
+  have avoided it, and no different prompt would have helped.
+
+  This is deliberately narrow. A refusal of `/etc/shadow`, of a `.git`
+  directory, or of a path genuinely outside the workspace is the security
+  boundary doing its job and is NOT stamped — attributing those to the harness
+  would inflate the fault rate exactly as failing to attribute the real ones
+  deflated it.
+
+  ## Why this exists
+
+  `Providers.ErrorCatalog.fault_owner/1` already splits turn errors between OSA
+  and the provider, but a permission denial is not a turn error: it is a tool
+  RESULT the model reads and works around. So an OSA-caused denial was invisible
+  to every instrument, and a benchmark run in which three of three tasks were
+  crippled by one reported a harness fault rate of 0.0%.
+  """
+  @spec denial_fault_owner(String.t(), map(), String.t() | nil) :: :osa | nil
+  def denial_fault_owner(_tool_name, args, result_text)
+      when is_map(args) and is_binary(result_text) do
+    paths = file_paths_of(args)
+
+    if scope_denial?(result_text) and paths != [] and Enum.all?(paths, &path_in_scope?/1) do
+      :osa
+    end
+  rescue
+    _ -> nil
+  end
+
+  def denial_fault_owner(_tool_name, _args, _result_text), do: nil
+
+  defp scope_denial?(text) do
+    Enum.any?(@scope_denial_markers, &String.contains?(text, &1))
   end
 
   # ── Bypass-immune safety asks ────────────────────────────────────────

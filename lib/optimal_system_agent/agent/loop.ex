@@ -1018,6 +1018,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       end
     end
 
+    # Publish the session's workspace before ANY turn runs, so a tool dispatched
+    # by a session created over HTTP (`working_dir` in the create body) resolves
+    # the right permission scope even on its very first call.
+    OptimalSystemAgent.Workspace.Cwd.put_session_dir(session_id, state.working_dir)
+
     # SessionStart hook — fire-and-forget; announces the new session.
     fire_session_hook(:session_start, %{
       session_id: session_id,
@@ -1258,6 +1263,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @impl true
   def handle_call({:set_working_dir, dir}, _from, state) when is_binary(dir) and dir != "" do
     OptimalSystemAgent.Workspace.Cwd.put_process_override(dir)
+    OptimalSystemAgent.Workspace.Cwd.put_session_dir(state.session_id, dir)
     {:reply, :ok, %{state | working_dir: dir}}
   end
 

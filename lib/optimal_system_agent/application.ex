@@ -39,6 +39,12 @@ defmodule OptimalSystemAgent.Application do
     # OSA source tree, not the user's project.
     OptimalSystemAgent.Workspace.Cwd.set_original_cwd()
 
+    # Session → working_dir table. Owned by the app master (lives as long as the
+    # node) for the same reason as every other table created below, and created
+    # HERE rather than beside them because permission scope resolution reads it
+    # and must not depend on boot ordering.
+    OptimalSystemAgent.Workspace.Cwd.init_session_table()
+
     warn_if_root()
 
     # ── Phase 0: Environment & Configuration ──────────────────────────

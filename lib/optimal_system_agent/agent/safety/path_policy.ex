@@ -153,20 +153,72 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
 
   # ── Allowlist roots ───────────────────────────────────────────────────
 
-  @doc "Configured read roots, canonicalised and slash-terminated."
-  @spec read_roots() :: [String.t()]
-  def read_roots do
-    :optimal_system_agent
-    |> Application.get_env(:allowed_read_paths, @default_read_roots)
+  @doc """
+  The roots contributed by the CURRENT SESSION's workspace: its resolved
+  working directory plus any directory the operator added with `/add-dir`.
+
+  ## Why this is not optional
+
+  The configured roots below are a static, node-wide allowlist that defaults to
+  `["~", "/tmp"]`. It has never known anything about the directory a session
+  was actually told to work in. On a developer machine that is invisible,
+  because the project lives under `$HOME` and so is covered by `~` for the
+  wrong reason. In a container it is fatal: with `HOME=/root` and a workspace of
+  `/app`, `within_roots?/2` rejects every path in the workspace and the agent is
+  told `Access denied: /app/… is outside allowed paths` for the files it was
+  given the job of editing. Measured in a Terminal-Bench run: three of three
+  tasks hit it, one abandoned the task, one fell back to heredocs through the
+  shell, and all three asked for `/add-dir /app` — which could not have helped,
+  because nothing on this path consulted `additionalDirectories` either.
+
+  This does not widen the boundary to arbitrary paths: it adds exactly the
+  directory the session declared, and the directories the operator explicitly
+  granted. Everything outside them is denied as before. `blocked_write?/1`
+  (`/etc`, `/usr`, `.git`, credential stores) is applied FIRST in
+  `check_write/2` and is unaffected — a workspace root cannot unblock those.
+
+  Fails closed: any error resolving the session scope yields no extra roots.
+  """
+  @spec workspace_roots() :: [String.t()]
+  def workspace_roots do
+    extra =
+      try do
+        OptimalSystemAgent.Permissions.additional_directories()
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    [OptimalSystemAgent.Workspace.Cwd.get() | extra]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> normalize_roots()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
-  @doc "Configured write roots, canonicalised and slash-terminated."
+  @doc "Configured read roots plus the session workspace, canonicalised and slash-terminated."
+  @spec read_roots() :: [String.t()]
+  def read_roots do
+    configured =
+      :optimal_system_agent
+      |> Application.get_env(:allowed_read_paths, @default_read_roots)
+      |> normalize_roots()
+
+    Enum.uniq(configured ++ workspace_roots())
+  end
+
+  @doc "Configured write roots plus the session workspace, canonicalised and slash-terminated."
   @spec write_roots() :: [String.t()]
   def write_roots do
-    :optimal_system_agent
-    |> Application.get_env(:allowed_write_paths, default_write_roots())
-    |> normalize_roots()
+    configured =
+      :optimal_system_agent
+      |> Application.get_env(:allowed_write_paths, default_write_roots())
+      |> normalize_roots()
+
+    Enum.uniq(configured ++ workspace_roots())
   end
 
   @doc "Default write roots including this platform's temp directory."

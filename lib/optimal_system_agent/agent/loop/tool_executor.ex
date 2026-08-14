@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
+  alias OptimalSystemAgent.Agent.Loop.ToolArgMetrics
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolHint
@@ -180,7 +181,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp approve_and_run(tool_call, state) do
     case approve_tool_call(tool_call, state) do
       {:blocked, message} ->
-        message
+        # Belt and braces for the contract described on `handler_hard_deny/1`:
+        # a refusal MUST be recognisable as one downstream, and the only signal
+        # `finalize_result/5` has is this prefix. Normalising here means a new
+        # `{:blocked, _}` producer cannot silently re-open the hole.
+        prefix_blocked(message)
 
       :allow ->
         run_tool(tool_call, state)
@@ -271,6 +276,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # orchestrator before approval/execution, so it always precedes the paired
   # :end / :tool_result events emitted from finalize_result/5.
   defp emit_tool_call_start(tool_call, arg_hint, state) do
+    arg_bytes = tool_call_arg_bytes(tool_call.arguments)
+    arg_hash = tool_call_arg_hash(tool_call.arguments)
+
     Bus.emit(
       :tool_call,
       %{
@@ -282,6 +290,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         tool_call_id: tool_call.id,
         phase: :start,
         args: arg_hint,
+        args_bytes: arg_bytes,
+        args_hash: arg_hash,
         session_id: state.session_id,
         agent: state.session_id
       },
@@ -301,6 +311,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          tool_call_id: tool_call.id,
          phase: "start",
          args: arg_hint,
+         args_bytes: arg_bytes,
+         args_hash: arg_hash,
          session_id: state.session_id
        }}
     )
@@ -543,6 +555,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp enforce_circuit_breaker(_no_match, _mode, _tool_call, _state), do: :ok
 
+  # The failure marker `finalize_result/5` reads. Idempotent: a message that
+  # already declares itself is left alone, so no message is ever double-tagged.
+  defp prefix_blocked(message) when is_binary(message) do
+    if String.starts_with?(message, "Blocked:") or String.starts_with?(message, "Error:") do
+      message
+    else
+      "Blocked: " <> message
+    end
+  end
+
+  defp prefix_blocked(message), do: message
+
   defp handler_hard_deny(tool_call) do
     if tool_call.name in @path_guarded_writes do
       args = Map.get(tool_call, :arguments) || %{}
@@ -550,7 +574,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       with mod when is_atom(mod) and not is_nil(mod) <- Tools.module_for(tool_call.name),
            true <- function_exported?(mod, :check_permissions, 2),
            {:deny, msg} <- safe_check_permissions(mod, args) do
-        {:blocked, msg}
+        # The handler's message is raw ("Access denied: … is outside allowed
+        # paths"). Every other `{:blocked, _}` in this module carries a
+        # "Blocked: " prefix, and that prefix is not cosmetic: `finalize_result/5`
+        # decides `tool_failed` — and therefore the `success` field on the
+        # `tool_call` end and `tool_result` events, the `post_tool_use_failure`
+        # hook, and the grounded-verification evidence ledger — by testing for
+        # exactly `"Error:"` or `"Blocked:"` at the start of the result text.
+        #
+        # Without it a denied write was recorded as a SUCCESSFUL tool call,
+        # everywhere at once. Measured in a container: `file_write` to a path
+        # outside the allowed roots returned the bare `Access denied: …` string
+        # and the end event said `success: true`. That is why an entire
+        # benchmark route could be crippled by permission denials while every
+        # instrument reported a clean run.
+        {:blocked, prefix_blocked(msg)}
       else
         _ -> :ok
       end
@@ -1300,6 +1338,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :exit, _ -> :ok
     end
 
+    # Who is at fault when this call failed. `:osa` ONLY when OSA refused a path
+    # that is inside the session's own workspace — see
+    # `Permissions.denial_fault_owner/3`. nil otherwise (including on success).
+    #
+    # Without this a tool-level denial was attributable to nobody: the existing
+    # `owner` split lives on TURN errors (`Providers.ErrorCatalog.fault_owner/1`)
+    # and a denial is not a turn error, it is a result the model reads. A
+    # benchmark run where OSA's own scope resolution broke three of three tasks
+    # therefore reported a 0.0% harness fault rate.
+    fault_owner =
+      if tool_failed do
+        Permissions.denial_fault_owner(
+          tool_call.name,
+          Map.get(tool_call, :arguments) || %{},
+          result_str
+        )
+      end
+
+    if fault_owner == :osa do
+      Logger.error(
+        "[loop] HARNESS FAULT — #{tool_call.name} was denied for a path INSIDE the session " <>
+          "workspace (#{OptimalSystemAgent.Workspace.Cwd.get()}). This is OSA's own scope " <>
+          "resolution disagreeing with itself, not a model error: #{String.slice(result_str, 0, 300)}"
+      )
+    end
+
     Bus.emit(
       :tool_call,
       %{
@@ -1309,6 +1373,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         duration_ms: tool_duration_ms,
         result_bytes: byte_size(result_str),
         success: not tool_failed,
+        fault_owner: fault_owner,
         args: arg_hint,
         session_id: state.session_id,
         agent: state.session_id
@@ -1331,11 +1396,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          # a hard-coded `true` labelled every failed tool call a success on
          # screen — the sibling Bus.emit above already computed the real value.
          success: not tool_failed,
+         fault_owner: fault_owner,
          session_id: state.session_id
        }}
     )
 
-    tool_success = !match?({:error, _}, tool_result)
+    # The :tool_result pair MUST agree with the :tool_call pair above. It did
+    # not: `!match?({:error, _}, tool_result)` tested a shape that cannot reach
+    # here. Every error is normalised to an `"Error: "` / `"Blocked: "` STRING
+    # by `handle_execute_result/3` (or by the `{:blocked, msg}` approval branch)
+    # long before `finalize_result/5` is called, so the match never succeeded
+    # and `success` was a constant `true` — for every failed tool call, denials
+    # included. Two events, computed two ways, disagreeing on every failure, and
+    # the one that was always-true is the one a permission denial surfaced on.
+    tool_success = not tool_failed
     result_preview = String.slice(result_str, 0, 2000)
 
     # Retrieve tool metadata (diff data, etc.) if the tool stored any
@@ -1348,6 +1422,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         result: result_preview,
         result_bytes: byte_size(result_str),
         success: tool_success,
+        fault_owner: fault_owner,
         session_id: state.session_id,
         agent: state.session_id
       }
@@ -1370,6 +1445,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
            tool_call_id: tool_call.id,
            result: result_preview,
            success: tool_success,
+           fault_owner: fault_owner,
            session_id: state.session_id
          },
          tool_metadata
@@ -1624,6 +1700,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # clauses in test/agent/loop_injection_test.exs, which could not catch the
   # schema-parameter-name and raw-JSON regressions this replaces.
   defp tool_call_hint(args), do: ToolHint.summarize(args)
+
+  # The `args` field on the :tool_call event is a DISPLAY hint (clipped at 60
+  # chars for shell, path-only for file tools), which made our own event log
+  # unfit for behavioural analysis — see `Loop.ToolArgMetrics` for the two
+  # published comparisons that turned out to be measuring the clip. These two
+  # fields ride alongside it and carry the real quantities.
+  defp tool_call_arg_bytes(args), do: ToolArgMetrics.arg_bytes(args)
+  defp tool_call_arg_hash(args), do: ToolArgMetrics.arg_hash(args)
 
   defp file_was_read?(session_id, path) do
     try do

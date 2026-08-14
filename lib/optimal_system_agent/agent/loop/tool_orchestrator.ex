@@ -244,11 +244,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
         # mid-batch — `apply_overrides/2` publishes it once at turn start.
         caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
 
+        # Carry the SESSION IDENTITY across the same boundary, for the same
+        # reason. `Settings.current_session/0` reads `:osa_session_id` from the
+        # process dictionary; without this every tool Task resolved `:global`,
+        # so the session settings layer — which is where `/add-dir`'s
+        # `permissions.additionalDirectories` are stored — was invisible to the
+        # permission check that runs inside the Task. `/add-dir` therefore could
+        # not widen scope for the tool it was granted for.
         tasks =
           Enum.map(chunk, fn tc ->
             {tc,
              Task.Supervisor.async_nolink(supervisor, fn ->
                OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
+               if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
                executor.execute_tool_call(tc, state)
              end)}
           end)

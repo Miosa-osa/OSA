@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
   validate / check_permissions / execute three-stage split.
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.DirList.{Constants, Messages}
+  alias OptimalSystemAgent.Tools.Builtins.DirList.Messages
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -110,17 +110,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
   defp format_size(n) when n < 1_048_576, do: "#{Float.round(n / 1_024, 1)}K"
   defp format_size(n), do: "#{Float.round(n / 1_048_576, 1)}M"
 
-  defp allowed_paths do
-    Application.get_env(
-      :optimal_system_agent,
-      :allowed_read_paths,
-      Constants.default_allowed_paths()
-    )
-    |> Enum.map(fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
+  # Shared read allowlist — configured roots PLUS the session workspace. A
+  # private copy here was blind to the session's `working_dir`.
+  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
 
   # The shared structural predicate, not a substring scan over
   # `Constants.sensitive_paths/0` — that accessor now returns human-readable

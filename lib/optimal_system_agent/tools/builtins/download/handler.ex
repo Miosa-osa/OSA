@@ -163,19 +163,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Download.Handler do
     end
   end
 
-  defp allowed_write_paths do
-    configured =
-      Application.get_env(
-        :optimal_system_agent,
-        :allowed_write_paths,
-        Constants.default_allowed_write_paths()
-      )
-
-    Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
+  # Shared write allowlist — configured roots PLUS the session workspace. A
+  # private copy here was blind to the session's `working_dir`, so a download
+  # into the workspace was refused in any container whose workspace is not
+  # under `$HOME`.
+  defp allowed_write_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.write_roots()
 
   defp osa_path, do: Path.expand("~/.osa") <> "/"
 
