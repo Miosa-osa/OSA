@@ -21,7 +21,10 @@ defmodule Mix.Tasks.Osa.Run do
   - `--provider` / `-p` — Provider override
   - `--max-turns` — Maximum conversation turns
   - `--max-budget` — Maximum spend in USD
-  - `--effort` — Effort level: low, medium, high, max
+  - `--effort` — Effort level: fast, medium, high, xhigh, ultra
+    (`low` and `max` are accepted as legacy aliases for `fast` and `xhigh`).
+    An unrecognised level is a hard error, not a silent fallback — a benchmark
+    run that meant to pin effort must not quietly produce an unpinned number.
   - `--resume` — Resume a previous session by ID
 
   ## Terminal safety
@@ -82,9 +85,31 @@ defmodule Mix.Tasks.Osa.Run do
       System.halt(1)
     end
 
-    # Set effort level if specified
+    # Set effort level if specified.
+    #
+    # This used to be `Effort.set(String.to_atom(effort))` with the result
+    # thrown away, which had two defects. `String.to_atom/1` on unvalidated CLI
+    # input grows the atom table, and — worse — `set/1` returns
+    # `{:error, :invalid_level}` for anything off the ladder, so `--effort xhgih`
+    # silently ran at the ambient level. A run that asked to be pinned and was
+    # not is exactly the condition that makes its number unquotable, so this
+    # fails loudly instead. `set/1` normalizes legacy names itself; passing the
+    # string through avoids minting atoms for typos.
     if effort = opts[:effort] do
-      OptimalSystemAgent.Agent.Effort.set(String.to_atom(effort))
+      case OptimalSystemAgent.Agent.Effort.set(effort) do
+        :ok ->
+          :ok
+
+        {:error, :invalid_level} ->
+          IO.puts(
+            :stderr,
+            "Error: unknown --effort #{inspect(effort)}. " <>
+              "Valid levels: fast, medium, high, xhigh, ultra " <>
+              "(legacy aliases: low, max)."
+          )
+
+          System.halt(1)
+      end
     end
 
     # Create session
