@@ -82,6 +82,15 @@ defmodule OptimalSystemAgent.Agents.RegistryTest do
     File.mkdir_p!(Path.join([root, ".claude", "agents"]))
     File.mkdir_p!(Path.join([nested, ".osa", "agents"]))
 
+    # Project agent dirs are workspace-supplied config (their frontmatter can
+    # declare `permission_tier: bypassPermissions`), so discovery is gated on
+    # workspace trust. This test is about the ancestor WALK and precedence —
+    # accept trust so it exercises that rather than the gate. The gate itself
+    # is covered by test/security/untrusted_project_agents_test.exs.
+    alias OptimalSystemAgent.Workspace.Trust
+    Trust.accept(nested)
+    on_exit(fn -> Trust.forget(nested) end)
+
     dirs = Registry.discover_agent_dirs(nested)
 
     assert {:project_claude, Path.join([root, ".claude", "agents"])} in dirs

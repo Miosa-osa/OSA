@@ -123,10 +123,25 @@ defmodule OptimalSystemAgent.Agents.Registry do
   Precedence is built-in < project `.claude/agents` < project `.osa/agents` <
   user `~/.osa/agents`. Project directories are walked from repo root down to
   cwd so nearer files override broader files.
+
+  ## Trust gate
+
+  An agent definition's frontmatter declares `permission_tier` and
+  `tools_allowed` — `permission_tier: bypassPermissions` resolves to `:full`,
+  a subagent that prompts for nothing. That is a permission GRANT authored by
+  whatever repository happens to be the cwd, so the project directories are
+  withheld until the workspace is trusted, exactly as project settings, hooks
+  and MCP servers are. Built-in and user (`~/.osa/agents`) directories are
+  authored outside any workspace and always load.
   """
   @spec discover_agent_dirs(String.t()) :: [{atom(), String.t()}]
   def discover_agent_dirs(cwd \\ OptimalSystemAgent.Workspace.Cwd.get()) do
-    project_dirs =
+    [{:built_in, priv_agents_path()}] ++
+      project_agent_dirs(cwd) ++ [{:user, user_agents_path()}]
+  end
+
+  defp project_agent_dirs(cwd) do
+    dirs =
       cwd
       |> ancestor_dirs()
       |> Enum.flat_map(fn dir ->
@@ -137,7 +152,33 @@ defmodule OptimalSystemAgent.Agents.Registry do
       end)
       |> Enum.filter(fn {_source, dir} -> File.dir?(dir) end)
 
-    [{:built_in, priv_agents_path()}] ++ project_dirs ++ [{:user, user_agents_path()}]
+    cond do
+      dirs == [] -> []
+      workspace_trusted?(cwd) -> dirs
+      true -> warn_agents_withheld(dirs)
+    end
+  end
+
+  defp workspace_trusted?(cwd) do
+    OptimalSystemAgent.Workspace.Trust.trusted?(cwd)
+  rescue
+    # Fail CLOSED: a Trust error must never widen the set of agents that load.
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # A silently dropped agent is its own bug — say that they are WITHHELD
+  # pending trust, not that they are missing or broken.
+  defp warn_agents_withheld(dirs) do
+    Logger.warning(
+      "[AgentRegistry] WITHHOLDING #{length(dirs)} project agent director(ies) " <>
+        "(#{Enum.map_join(dirs, ", ", &elem(&1, 1))}) — this workspace has not been trusted " <>
+        "yet. Agent definitions can grant themselves tools and `permission_tier: " <>
+        "bypassPermissions`, so they stay inert until you run `/trust accept`."
+    )
+
+    []
   end
 
   # ---------------------------------------------------------------------------

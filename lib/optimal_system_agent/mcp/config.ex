@@ -115,16 +115,28 @@ defmodule OptimalSystemAgent.MCP.Config do
   @doc """
   Servers eligible to start at boot.
 
-  User and local servers are trusted and always included. Project (`.mcp.json`)
-  servers are only included once the operator has approved them via
-  `MCP.ProjectApproval`, so repo-supplied commands never auto-execute.
+  An MCP server definition is a command line — starting one is arbitrary
+  process execution — so every WORKSPACE-SUPPLIED definition is gated:
+
+    * `:user`    — `~/.osa/mcp.json`        — authored on this machine, always included
+    * `:project` — `<cwd>/.mcp.json`        — requires `MCP.ProjectApproval`
+    * `:local`   — `<cwd>/.osa/mcp.local.json` — requires workspace trust
+
+  `:local` was previously treated as "not committed, therefore trusted". It is
+  read out of the cwd like every other workspace file, and `.gitignore` does
+  not stop a hostile repository from shipping one, so an untrusted clone could
+  auto-execute an arbitrary command at boot with no prompt at all. It is now
+  gated on the same workspace trust as `.osa/settings.local.json`.
   """
   @spec load_startup() :: [Server.t()]
   def load_startup do
+    workspace_trusted = OptimalSystemAgent.Settings.project_trusted?()
+
     native =
       load_all()
       |> Enum.filter(fn
         %Server{scope: :project} = s -> OptimalSystemAgent.MCP.ProjectApproval.approved?(s.name)
+        %Server{scope: :local} -> workspace_trusted
         _ -> true
       end)
       |> Enum.reject(&excluded?(&1.name))

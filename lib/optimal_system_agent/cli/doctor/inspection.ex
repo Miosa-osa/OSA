@@ -768,7 +768,9 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     issues = safe_validate(path)
     errors = Enum.filter(issues, &(&1.severity == :error))
 
-    withheld? = layer == :project and map_size(data) > 0 and not trusted?()
+    # BOTH workspace-supplied layers are withheld until trust is accepted:
+    # `.osa/settings.json` (:project) and `.osa/settings.local.json` (:local).
+    withheld? = layer in [:project, :local] and map_size(data) > 0 and not trusted?()
 
     cond do
       errors != [] ->
@@ -872,12 +874,12 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       # section three lines above, and the contradiction is the interesting part:
       # the key applies to ordinary reads and is inert for permissions, hooks
       # and env until the workspace is trusted.
-      winner == :project and not trusted?() ->
+      winner in [:project, :local] and not trusted?() ->
         row(
           :inert,
           key,
           where,
-          "project (untrusted)",
+          "#{winner} (untrusted)",
           "#{truncate(inspect(value), 70)}#{shadow_note} — visible to Settings.get/2 but " <>
             "WITHHELD from Settings.get_trusted/2, so it does not apply to permission " <>
             "rules, permission_mode, hooks or env. Run `/trust accept` to make it effective."

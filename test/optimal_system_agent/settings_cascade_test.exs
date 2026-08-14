@@ -70,8 +70,6 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
         else: System.delete_env("OSA_HOME")
     end)
 
-    Trust.accept(cwd)
-
     project_hook = %{"type" => "shell", "command" => "echo project"}
     local_hook = %{"type" => "shell", "command" => "echo local"}
 
@@ -85,12 +83,17 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
       Jason.encode!(%{"hooks" => %{"post_tool_use" => [local_hook]}})
     )
 
+    # Trust is accepted AFTER the config exists: the grant is pinned to the
+    # config the user is looking at when they accept it, so accepting first and
+    # adding hooks afterwards would (correctly) re-prompt.
+    Trust.accept(cwd)
+
     hooks = Settings.get_merged_hooks() |> Map.get("post_tool_use", [])
     assert project_hook in hooks
     assert local_hook in hooks
   end
 
-  test "get_merged_hooks keeps project hooks inert in an UNTRUSTED workspace" do
+  test "get_merged_hooks keeps ALL workspace hooks inert in an UNTRUSTED workspace" do
     alias OptimalSystemAgent.Workspace.Trust
     cwd = File.cwd!()
     old_home = System.get_env("OSA_HOME")
@@ -120,6 +123,12 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
 
     hooks = Settings.get_merged_hooks() |> Map.get("post_tool_use", [])
     refute project_hook in hooks
-    assert local_hook in hooks
+
+    # `.osa/settings.local.json` lives in the workspace exactly like
+    # `.osa/settings.json` does. This assertion used to be `assert` — it
+    # codified the bypass: a hostile repo only had to put its hook in the
+    # `.local` file to have it fire in an untrusted workspace. `.gitignore`
+    # is advisory and the attacker authors the repo.
+    refute local_hook in hooks
   end
 end

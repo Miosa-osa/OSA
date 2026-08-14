@@ -6,9 +6,21 @@ defmodule OptimalSystemAgent.Settings do
 
   1. **User** — `~/.osa/settings.json` (global user preferences)
   2. **Project** — `.osa/settings.json` (checked into repo, shared with team)
-  3. **Local** — `.osa/settings.local.json` (gitignored, per-developer overrides)
+  3. **Local** — `.osa/settings.local.json` (conventionally gitignored, per-developer)
   4. **Flag** — file named by `--settings <file>` / `OSA_SETTINGS` (optional)
   5. **Session** — in-memory only, set via API or CLI commands
+
+  ## Which layers are workspace-supplied
+
+  Layers 2 and 3 both resolve against `Workspace.Cwd.get/0`, so both ship
+  inside whatever repository happens to be the cwd. Security-relevant keys
+  from either are gated behind workspace trust — see `trusted_layer/1`.
+  "Conventionally gitignored" is not a security property: `.gitignore` is
+  advisory, and the author of a hostile repo can commit the file regardless.
+
+  Layers 1, 4 and 5 are authored on this machine by the operator and always
+  apply. Layer 4 (`OSA_SETTINGS`) is therefore the supported way for headless
+  and benchmark runs to impose policy without any workspace trust.
 
   Layers are DEEP-merged: nested maps merge recursively, arrays concatenate
   and dedupe, higher-priority scalars win (explicit `false`/`null` included —
@@ -63,6 +75,12 @@ defmodule OptimalSystemAgent.Settings do
   defp user_settings, do: Path.join(ConfigFile.config_dir(), "settings.json")
 
   @cache_table :osa_settings_cache
+
+  # Marker key injected by `parse_json_file/1` for a file that exists but
+  # cannot be parsed. Declared here (not next to its writer) because
+  # `trusted_layer/1` above must reference it, and attributes resolve in
+  # source order. See `harden_if_unparseable/1` for the fail-closed behaviour.
+  @unparseable_key "__unparseable_settings__"
 
   @doc """
   Get a setting by key, resolved through the deep-merged cascade.
@@ -257,26 +275,50 @@ defmodule OptimalSystemAgent.Settings do
   def all, do: merged()
 
   @doc """
-  Like `layer/1`, but the PROJECT layer is gated behind workspace trust.
+  Like `layer/1`, but every WORKSPACE-SUPPLIED layer is gated behind trust.
 
-  `.osa/settings.json` is checked into the repo, so it is workspace-supplied
-  config: cloning a hostile repository must not hand it permission rules or a
-  `permission_mode` before the user has been asked whether they trust the
-  workspace. Every security-relevant read of the cascade goes through here
-  (and `get_trusted/2` / `merged_trusted/0`) rather than `layer/1`.
+  The gate keys on **where the file lives**, not on what the layer is called:
 
-  This is the SAME `project_trusted?/0` gate `get_merged_hooks/0` already
-  applies to project hooks — one trust concept, two consumers. User, local,
-  flag and session layers are authored on this machine and always apply.
+    * `:project` — `<cwd>/.osa/settings.json`       — gated
+    * `:local`   — `<cwd>/.osa/settings.local.json` — gated
+    * `:user` / `:flag` / `:session`                — always apply
+
+  Both gated files resolve through `Workspace.Cwd.get/0`, so they ship inside
+  the repository. `:local` was originally exempt on the grounds that it is
+  "gitignored, per-developer" — but `.gitignore` is advisory and the attacker
+  authors the repo: `git add -f .osa/settings.local.json` commits it and a
+  clone delivers it. That made the `:project` gate bypassable by renaming the
+  hostile file, so `:local` is gated on exactly the same terms.
+
+  `:user` (`~/.osa/settings.json`), `:flag` (`--settings` / `OSA_SETTINGS`) and
+  `:session` are authored on this machine by the operator, never by the
+  workspace, so they always apply. That is deliberately the automation path:
+  headless and benchmark runs express policy through `OSA_SETTINGS`, which
+  needs no workspace trust — the safe path is the default one, not the one that
+  requires remembering a flag.
+
+  Every security-relevant read of the cascade goes through here (and
+  `get_trusted/2` / `merged_trusted/0`) rather than `layer/1`.
   """
   @spec trusted_layer(atom()) :: map()
-  def trusted_layer(:project) do
+  def trusted_layer(source) when source in [:project, :local] do
     if project_trusted?() do
-      layer(:project)
+      layer(source)
     else
-      case layer(:project) do
-        empty when empty == %{} -> %{}
-        _ -> warn_project_withheld()
+      case layer(source) do
+        empty when empty == %{} ->
+          %{}
+
+        # An unparseable workspace file is withheld like any other, but its
+        # MARKER still propagates: `merged_trusted/0` must keep failing CLOSED
+        # (permission_mode pinned to "ask") rather than reading a file it
+        # cannot parse as "no restrictions" merely because the workspace is
+        # untrusted. Withholding is not the same as absence.
+        %{@unparseable_key => _} = marker ->
+          Map.take(marker, [@unparseable_key])
+
+        _ ->
+          warn_workspace_withheld(source)
       end
     end
   end
@@ -288,7 +330,7 @@ defmodule OptimalSystemAgent.Settings do
   Use for any security-relevant setting; `merged/0` stays as-is for display.
   """
   def merged_trusted do
-    [layer(:user), trusted_layer(:project), layer(:local), layer(:flag)]
+    [layer(:user), trusted_layer(:project), trusted_layer(:local), layer(:flag)]
     |> Enum.reduce(%{}, &deep_merge(&2, &1))
     |> deep_merge(get_all_session())
     |> harden_if_unparseable()
@@ -320,15 +362,16 @@ defmodule OptimalSystemAgent.Settings do
   # A silently ignored config file is its own bug: say plainly that the rules
   # exist and are being WITHHELD pending trust, not that they are broken.
   # Once per {cwd, mtime} so it is visible without spamming every tool call.
-  defp warn_project_withheld do
-    path = project_settings_path()
+  defp warn_workspace_withheld(source) do
+    path = if source == :local, do: local_settings_path(), else: project_settings_path()
     key = {:project_settings_withheld, path, file_sig(path)}
 
     if :ets.insert_new(@cache_table, {key, :withheld, true}) do
       Logger.warning(
-        "[settings] WITHHOLDING project settings in #{path} (permission rules, permission_mode, " <>
-          "env) — this workspace has not been trusted yet. They are ignored, not broken: run " <>
-          "`/trust accept` (or accept the trust dialog) to apply them."
+        "[settings] WITHHOLDING workspace settings in #{path} (permission rules, permission_mode, " <>
+          "env, hooks) — this workspace has not been trusted yet. They are ignored, not broken: " <>
+          "run `/trust accept` (or accept the trust dialog) to apply them. Automation should " <>
+          "express policy through OSA_SETTINGS / --settings, which needs no workspace trust."
       )
     end
 
@@ -359,14 +402,14 @@ defmodule OptimalSystemAgent.Settings do
   files all fire. Duplicate hook entries are removed.
   """
   def get_merged_hooks do
-    # Workspace trust (CC parity, WS15 enforcement): checked-in project
-    # settings are workspace-supplied executable config — their hooks stay
-    # inert until the user accepts trust for the cwd (/trust accept or the
-    # trust dialog). User/local/flag/session layers are authored on this
-    # machine and always apply.
-    project_layers = if project_trusted?(), do: [layer(:project)], else: []
+    # Workspace trust (CC parity, WS15 enforcement): BOTH checked-in project
+    # settings AND `.osa/settings.local.json` are workspace-supplied executable
+    # config — a hook is a shell command. They stay inert until the user
+    # accepts trust for the cwd (/trust accept or the trust dialog).
+    # User/flag/session layers are authored on this machine and always apply.
+    workspace_layers = if project_trusted?(), do: [layer(:project), layer(:local)], else: []
 
-    ([layer(:user)] ++ project_layers ++ [layer(:local), layer(:flag), layer(:session)])
+    ([layer(:user)] ++ workspace_layers ++ [layer(:flag), layer(:session)])
     |> Enum.map(&layer_hooks/1)
     |> Enum.reduce(%{}, fn hooks, acc ->
       Map.merge(acc, hooks, fn _event, a, b -> a ++ b end)
@@ -508,7 +551,9 @@ defmodule OptimalSystemAgent.Settings do
   #      marker key. `merged/0` and `merged_trusted/0` see the marker and pin
   #      `permission_mode` to "ask" — the deny rules cannot be recovered, but
   #      nothing runs unprompted while they are missing. And it is LOUD.
-  @unparseable_key "__unparseable_settings__"
+  #
+  # (`@unparseable_key` itself is declared near the top of the module, because
+  # `trusted_layer/1` references it and attributes resolve in source order.)
 
   defp parse_json_file(path) do
     case File.read(path) do
