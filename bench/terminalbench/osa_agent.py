@@ -195,6 +195,14 @@ class OsaAgent(BaseInstalledAgent):
             "OLLAMA_URL",
             "OLLAMA_MODEL",
             "OLLAMA_API_KEY",
+            # The reasoning dial that actually reaches the wire on our serving
+            # path. `Providers.Ollama.maybe_add_think/3` reads
+            # `:ollama_think` (set from this key) FIRST, ahead of the
+            # `thinking_model?/1` default -- and Ollama has no effort->thinking
+            # wiring at all, so OSA's effort ladder never changes an Ollama
+            # request body. Unset means "whatever the capability probe decides",
+            # which is exactly the unpinned condition that voids a comparison.
+            "OLLAMA_THINK",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
@@ -238,6 +246,26 @@ class OsaAgent(BaseInstalledAgent):
                   os.environ.get("OLLAMA_MODEL") or "")
         )
         return json.dumps({"provider": provider, "model": model}, indent=2)
+
+    def _config_toml(self) -> str | None:
+        """``~/.osa/config.toml``, written ONLY to pin reasoning effort.
+
+        Returns ``None`` when ``OSA_BENCH_EFFORT`` is unset, and nothing is
+        uploaded in that case. That is not laziness: an unpinned run must be
+        distinguishable on disk from a run pinned to OSA's default, because the
+        two are the same request bytes and different claims. `run_bench.py`
+        records the same absence as ``"effort": null``.
+
+        Only ``[model].effort`` is written. A ``[model].provider`` here would
+        take TOP precedence in `Application.resolve_model/0` -- ahead of the
+        `OSA_DEFAULT_PROVIDER` env the rest of this adapter sets -- so the table
+        is kept to the one key that has no other seam. `ConfigFile.effort/0` is
+        toml-only; there is no config.json or env equivalent.
+        """
+        effort = os.environ.get("OSA_BENCH_EFFORT")
+        if not effort:
+            return None
+        return f'[model]\neffort = "{effort}"\n'
 
     # --------------------------------------------------------------- install
 
@@ -335,10 +363,14 @@ class OsaAgent(BaseInstalledAgent):
             environment,
             command='mkdir -p "$HOME/.osa"',
         )
-        for content, dest, fname in (
+        uploads = [
             (self._dotenv(), "/tmp/osa-dotenv", ".env"),
             (self._config_json(), "/tmp/osa-config", "config.json"),
-        ):
+        ]
+        toml = self._config_toml()
+        if toml is not None:
+            uploads.append((toml, "/tmp/osa-config-toml", "config.toml"))
+        for content, dest, fname in uploads:
             await self._upload_config_text(
                 environment, content=content, remote_path=dest, filename=fname
             )

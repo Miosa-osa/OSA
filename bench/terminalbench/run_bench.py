@@ -252,6 +252,30 @@ def main() -> int:
                      help="trials in parallel. Each runs a whole OSA VM in a "
                           "container; do not raise this casually")
     run.add_argument("--agent-timeout-multiplier", type=float, default=None)
+    # Reasoning effort. Anthropic's Opus 4.6 system card measures the SAME model
+    # under a FIXED harness moving 10.3 pp across effort tiers (55.1 low -> 65.4
+    # max) -- a bigger lever than the 7.2 pp harness delta they measure on the
+    # same task set. cline measured the same thing on GLM-5.2: reasoning off
+    # costs it 11.2 pp (68.5% -> 57.3%). Every published figure names its tier
+    # ("Fable 5 (xhigh)", "Opus 5 (max)"). An unpinned effort makes a number
+    # unquotable, so both dials are explicit flags and both land in config.json.
+    #
+    # There are TWO dials because they are not the same dial:
+    #   --effort       OSA's own ladder (Agent.Effort): max_iterations, thinking
+    #                  budget, internal gating. Reaches the wire on Anthropic
+    #                  (output_config.effort) and OpenAI-compat (reasoning_effort).
+    #   --ollama-think Ollama's `think` field. Ollama has NO effort->thinking
+    #                  wiring (see providers/ollama.ex `apply_think/3`), so on
+    #                  our serving path --effort never reaches the wire and THIS
+    #                  is the only knob that changes what the model does. It is
+    #                  the analogue of cline's "reasoning: medium" vs "off".
+    run.add_argument("--effort", default=None,
+                     choices=["fast", "medium", "high", "xhigh", "ultra"],
+                     help="pin OSA's effort ladder. Unset means UNPINNED, which "
+                          "is recorded as such and makes the run unquotable")
+    run.add_argument("--ollama-think", default=None, choices=["true", "false"],
+                     help="pin Ollama's `think` field. On glm-5.2:cloud this is "
+                          "the only reasoning dial that reaches the wire")
     run.add_argument("--host-provider", action="store_true", default=True,
                      help="let the container reach a model provider on the host "
                           "(local Ollama). On by default")
@@ -300,6 +324,16 @@ def main() -> int:
         "tasks_requested": chosen,
         "difficulty_filter": args.difficulty,
         "n_concurrent": args.n_concurrent,
+        # Timeouts convert possible solves into guaranteed fails, so the
+        # multiplier is part of the result and not part of the invocation.
+        # cline's published GLM-5.2 rows ran at 2.0; a run at 1.0 is not
+        # comparable to them and must not be presented as if it were.
+        "agent_timeout_multiplier": args.agent_timeout_multiplier,
+        # `None` means UNPINNED, deliberately. See the --effort help text: a
+        # number whose reasoning tier is unrecorded is not reproducible, so the
+        # absence has to stay legible instead of being filled with a default.
+        "effort": args.effort,
+        "ollama_think": args.ollama_think,
         "install_only": args.install_only,
         "harbor_version": harbor_version(),
         # WHICH BUILD THIS MEASURED. Without it a results file cannot be
@@ -347,6 +381,14 @@ def main() -> int:
 
         env = os.environ.copy()
         env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
+        # The adapter runs inside the harbor subprocess, so the only channel
+        # from this flag to `~/.osa/config.toml` and `~/.osa/.env` is the
+        # environment. Set only when pinned -- an unset key must leave OSA's own
+        # resolution order untouched rather than silently defaulting the tier.
+        if args.effort:
+            env["OSA_BENCH_EFFORT"] = args.effort
+        if args.ollama_think:
+            env["OLLAMA_THINK"] = args.ollama_think
 
         log(f"run_id={run_id}  {len(chosen) or args.limit or 'all'} task(s)")
         log(" ".join(cmd))

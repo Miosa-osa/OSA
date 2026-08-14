@@ -26,6 +26,41 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
+# The interval implementation lives in `bench/report/stats.py`, which has tests.
+# Duplicating the arithmetic here to avoid the import would duplicate the one
+# part of this file that is genuinely easy to get subtly wrong, so the import is
+# made to work rather than avoided.
+#
+# It has to be loaded BY PATH. `bench/report/` is a package and THIS module is
+# also named `report`; whichever of the two `sys.path` reaches first shadows the
+# other, and from inside `bench/terminalbench/` that is always this file. A
+# plain `from report.stats import wilson` therefore fails with "'report' is not
+# a package" -- which it did, silently falling back to no interval at all.
+def _load_wilson():
+    import importlib.util
+
+    src = Path(__file__).resolve().parents[1] / "report" / "stats.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("_bench_report_stats", src)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        # Registered BEFORE exec_module: `stats.py` declares a frozen
+        # `@dataclass`, and dataclasses resolves a field's type by looking its
+        # defining module up in `sys.modules`. On an unregistered module that
+        # lookup returns None and construction dies inside `_is_type` with an
+        # AttributeError that names neither this file nor the real cause.
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod.wilson
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_wilson = _load_wilson()
+
 # Terminal-Bench 2.0 and 2.1 are both 89 tasks. Kept as a constant only for
 # callers that predate `datasets.py`; the size that actually governs
 # `is_full_dataset_run` now comes from the run config, because the runner can
@@ -584,6 +619,22 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         # Accuracy over everything attempted -- the number Terminal-Bench would
         # report. NOT a Terminal-Bench 2.0 score unless is_full_dataset_run.
         "accuracy": round(len(resolved) / n, 4) if n else None,
+        # A solve rate without an interval invites the reader to compare it to
+        # a published figure digit-for-digit, which at these denominators is
+        # never warranted: at n=89 a 60% result carries roughly +/-10 pp at 95%
+        # confidence, so a 5-point gap to another single-run figure is not a
+        # gap. Wilson rather than normal-approximation because it stays sane at
+        # k=0 and k=n, which the probe sets reach.
+        "accuracy_ci95": (
+            {
+                "low": round(_wilson(len(resolved), n).low, 4),
+                "high": round(_wilson(len(resolved), n).high, 4),
+                "method": "wilson",
+                "confidence": 0.95,
+            }
+            if _wilson is not None and n
+            else None
+        ),
         # Accuracy with harness faults removed from the denominator. Higher by
         # construction; only meaningful next to harness_fault_rate.
         "accuracy_excluding_harness_faults": (
@@ -748,6 +799,15 @@ def summary_md(results: dict) -> str:
         ]
     lines += [
         f"- **Agent**: `{cfg.get('agent')}`   **Model**: `{cfg.get('model') or 'from OSA config'}`",
+        # Effort and the timeout multiplier are conditions of the measurement,
+        # not of the invocation. Anthropic measures 10.3 pp of movement on
+        # effort alone and cline measures 11.2 pp on this exact model; a
+        # timeout multiplier converts possible solves into guaranteed fails.
+        # `UNPINNED` is printed in full rather than left blank because a blank
+        # reads as "default" and it is not -- it is "unknown".
+        f"- **Effort**: `{cfg.get('effort') or 'UNPINNED'}`   "
+        f"**ollama think**: `{cfg.get('ollama_think') or 'UNPINNED'}`   "
+        f"**timeout multiplier**: `{cfg.get('agent_timeout_multiplier') or 1.0}`",
         f"- **Started**: {cfg.get('started_at')}",
         f"- **Graded by**: the task's own `tests/test.sh` inside the task container "
         f"(final container state, not a patch)",
@@ -758,6 +818,14 @@ def summary_md(results: dict) -> str:
         f"({(a['accuracy'] or 0) * 100:.1f}%)**",
         "",
     ]
+    ci = a.get("accuracy_ci95")
+    if ci:
+        lines += [
+            f"95% CI (Wilson): **{ci['low'] * 100:.1f}% – {ci['high'] * 100:.1f}%**. "
+            "Any published figure inside this band is not distinguishable from "
+            "this one on this evidence.",
+            "",
+        ]
     if not a["is_full_dataset_run"]:
         lines += [
             "> This is a **subset** run over "
