@@ -10,6 +10,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     ⠹ Reasoning… (8s · 2 tools · ↓ 4.2k)
   """
 
+  alias OptimalSystemAgent.CLI.Sanitize
+
   @spinner_frames ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
   @frame_interval 80
   @rotate_interval 4_000
@@ -159,13 +161,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         # Immediate feedback: print computer_use result as a permanent line.
         # This is raw TOOL OUTPUT going straight to the terminal — redact it.
         clear_line()
-        preview = truncate(redact(result), 70)
+        # `redact/1` removes secrets; it does not touch control characters.
+        # Tool output is whatever a subprocess wrote to stdout, so it is
+        # scrubbed for terminal escapes too — on one line, since this is a
+        # single status line and a `\r` in it would overwrite the line above.
+        preview = truncate(Sanitize.scrub_line(redact(result)), 70)
         safe_io_puts("  #{IO.ANSI.green()}✓ #{preview}#{@reset}")
         spinner_loop(rest, state)
 
       {:computer_use_error, result} ->
         clear_line()
-        preview = truncate(redact(result), 70)
+        preview = truncate(Sanitize.scrub_line(redact(result)), 70)
         safe_io_puts("  #{IO.ANSI.red()}✗ #{preview}#{@reset}")
         spinner_loop(rest, state)
 
@@ -174,7 +180,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         clear_line()
         hint = tool_hint(state.active_tool)
         duration = format_duration(ms)
-        safe_io_puts("#{@cyan}  ⏺ #{name}#{hint} #{@dim}(#{duration})#{@reset}")
+        safe_io_puts(
+          "#{@cyan}  ⏺ #{Sanitize.scrub_line(name)}#{hint} #{@dim}(#{duration})#{@reset}"
+        )
 
         spinner_loop(rest, %{
           state
@@ -216,7 +224,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
       case state.phase do
         :tool_running ->
           {name, args, _start} = state.active_tool
-          if args != "", do: "#{name} — #{truncate(args, 50)}", else: "#{name}…"
+          if args != "",
+            do: "#{Sanitize.scrub_line(name)} — #{truncate(Sanitize.scrub_line(args), 50)}",
+            else: "#{Sanitize.scrub_line(name)}…"
 
         :thinking ->
           # Show active task's activeForm if available
@@ -248,7 +258,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     # would otherwise print the credential to the terminal (and into whatever
     # scrollback/recording captures it). Redact BEFORE truncating so a
     # half-shown key is not what reaches the screen.
-    " — #{truncate(redact(args), 45)}"
+    " — #{truncate(Sanitize.scrub_line(redact(args)), 45)}"
   end
 
   defp tool_hint(_), do: ""

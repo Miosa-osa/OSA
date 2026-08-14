@@ -10,10 +10,19 @@ defmodule OptimalSystemAgent.Channels.CLI.Markdown do
   @underline IO.ANSI.underline()
   @reset IO.ANSI.reset()
 
-  @doc "Render markdown text with ANSI escape codes."
+  @doc """
+  Render markdown text with ANSI escape codes.
+
+  The input is model-authored, so it is scrubbed of control characters *before*
+  any styling is added (see `OptimalSystemAgent.CLI.Sanitize`). Scrubbing first
+  and colouring second is what lets OSA's own SGR survive while the model's
+  cannot: everything escape-shaped that reaches the terminal from here was put
+  there by this module.
+  """
   @spec render(String.t()) :: String.t()
   def render(text) do
     text
+    |> OptimalSystemAgent.CLI.Sanitize.scrub_block()
     |> String.split("\n")
     |> render_lines(false, [])
     |> Enum.reverse()

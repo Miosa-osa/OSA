@@ -38,9 +38,18 @@ defmodule OptimalSystemAgent.Channels.CLI.DiffRenderer do
   @doc "Print a diff with indentation suitable for the spinner tool tree."
   @spec print_indented(String.t(), map() | nil) :: :ok
   def print_indented(diff_text, stats \\ nil) do
-    rendered = render(diff_text)
-
-    rendered
+    # A diff body is file *content*, so every line of it is untrusted. Scrub
+    # BEFORE `render/1`, never after: `render/1` adds OSA's own colour codes,
+    # and scrubbing the rendered string would strip those too, leaving the
+    # operator staring at literal `[32m` residue. Scrubbing first means the only
+    # escapes reaching the terminal are the ones this module put there.
+    #
+    # Dropping `\r` matters as much as dropping ESC here — a carriage return in
+    # content re-draws over the line already printed, which is how a removed
+    # line is made to look like a kept one.
+    diff_text
+    |> OptimalSystemAgent.CLI.Sanitize.scrub_block()
+    |> render()
     |> String.split("\n")
     |> Enum.each(fn line ->
       IO.puts("    #{line}")

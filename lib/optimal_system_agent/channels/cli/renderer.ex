@@ -6,6 +6,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   separators, and terminal geometry queries.
   """
 
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Channels.CLI.Markdown
 
   @reset IO.ANSI.reset()
@@ -205,9 +206,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     IO.puts("#{@bold}#{@cyan}  ❯  You#{@reset}")
 
     text
+    |> Sanitize.scrub_block()
     |> String.split("\n")
     |> Enum.each(fn line ->
-      IO.puts("#{@dim}  │  #{@reset}#{@white}#{line}#{@reset}")
+      IO.puts("#{@dim}  │  #{@reset}#{@white}#{Sanitize.scrub_line(line)}#{@reset}")
     end)
 
     IO.puts("")

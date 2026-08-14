@@ -4,7 +4,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
 
   When a tool execution requires user approval, renders an inline
   permission dialog with single-keypress response capture.
+
+  Everything shown in the box — the tool name, the description, the affected
+  paths — is model-chosen, and this is the one surface where believing it has a
+  direct consequence. Cursor-movement and erase sequences would let the box be
+  overdrawn so it describes something other than what pressing `Y` approves, so
+  every interpolated field goes through `OptimalSystemAgent.CLI.Sanitize` first.
+  The Rust TUI's `dialogs/permissions.rs` does the same at the same points.
   """
+
+  alias OptimalSystemAgent.CLI.Sanitize
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -31,14 +40,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
     )
 
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
-    IO.puts("  #{@dim}│#{@reset}  #{@yellow}⚠#{@reset}  #{@bold}#{tool_name}#{@reset} wants to:")
+    IO.puts(
+      "  #{@dim}│#{@reset}  #{@yellow}⚠#{@reset}  #{@bold}#{Sanitize.scrub_line(tool_name)}#{@reset} wants to:"
+    )
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
 
     # Word-wrap the description inside the box
     desc
+    |> Sanitize.scrub_block()
     |> String.split("\n")
     |> Enum.each(fn line ->
-      padded = String.pad_trailing("     #{line}", width)
+      padded = String.pad_trailing("     #{Sanitize.scrub_line(line)}", width)
       IO.puts("  #{@dim}│#{@reset}#{padded}#{@dim}│#{@reset}")
     end)
 
@@ -51,7 +63,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
       Enum.each(paths, fn path ->
         padded =
           String.pad_trailing(
-            "     #{@cyan}#{path}#{@reset}",
+            "     #{@cyan}#{Sanitize.scrub_line(path)}#{@reset}",
             width + String.length(@cyan) + String.length(@reset)
           )
 

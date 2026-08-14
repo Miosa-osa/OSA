@@ -445,7 +445,16 @@ defmodule OptimalSystemAgent.Workspace.Topology do
     # stderr is folded into the capture purely to keep git's "not a git
     # repository" chatter off the operator's terminal; it is never parsed,
     # because only exit 0 (= something matched) reads the output at all.
-    case System.cmd("git", ["check-ignore", "--"] ++ names, cd: dir, stderr_to_stdout: true) do
+    # Hardened wrapper, not `System.cmd/3`: `check-ignore` honours the target
+    # repository's `core.fsmonitor`, so scanning a directory somebody else
+    # authored was enough to execute their command — with no hook file, no
+    # write, and no operator approval anywhere in the flow. Workspace discovery
+    # runs against whatever directory OSA is pointed at, which makes this the
+    # earliest attacker-reachable git call in the process.
+    case OptimalSystemAgent.Git.cmd(["check-ignore", "--"] ++ names,
+           cd: dir,
+           stderr_to_stdout: true
+         ) do
       {out, 0} ->
         ignored =
           out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1) |> MapSet.new()

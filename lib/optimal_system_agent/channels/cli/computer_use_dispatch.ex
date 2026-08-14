@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   Ollama). Falls back to the full agent loop when the intent doesn't match.
   """
 
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Security.TypedText
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{AppAllowlist, Executor}
 
@@ -49,10 +50,15 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
       {:ok, tool_calls} when tool_calls != [] ->
         Enum.each(tool_calls, fn {tool_name, params} ->
           clear_line()
-          IO.write("#{@dim}  ⚡ #{tool_name}#{format_multi_params(tool_name, params)}#{@reset}")
+          IO.write(
+            "#{@dim}  ⚡ #{Sanitize.scrub_line(tool_name)}" <>
+              "#{Sanitize.scrub_line(format_multi_params(tool_name, params))}#{@reset}"
+          )
           result = execute_multi_tool(tool_name, params)
           clear_line()
-          IO.puts("#{IO.ANSI.green()}  ✓ #{result}#{@reset}")
+          # Tool result straight from the tool — this line was not even
+          # redacted before, let alone scrubbed of control characters.
+          IO.puts("#{IO.ANSI.green()}  ✓ #{Sanitize.scrub_line(result)}#{@reset}")
         end)
 
       {:ok, []} ->

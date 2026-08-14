@@ -324,8 +324,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
       {_, 0} = OptimalSystemAgent.Git.cmd(["init"], cd: repo_path, stderr_to_stdout: true)
 
       {_, 0} =
-        System.cmd(
-          "git",
+        OptimalSystemAgent.Git.cmd(
           [
             "-c",
             "user.name=OSA Checkpoint",
@@ -395,8 +394,12 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     # from a good one. The files are copied into the worktree either way, but
     # without a commit there is no checkpoint to restore FROM. `git add` two
     # lines up already asserted `{_, 0}`; this one now does too.
-    case System.cmd(
-           "git",
+    # The shadow repo is OSA's own, but the *files copied into it* are the
+    # user's — including any `.gitattributes` a tool just wrote. Going through
+    # the hardened wrapper keeps a checkpointed attributes file from selecting
+    # a filter driver during `commit`, and keeps hooks off a repo that should
+    # never have any.
+    case OptimalSystemAgent.Git.cmd(
            [
              "-c",
              "user.name=OSA Checkpoint",
@@ -508,8 +511,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   end
 
   defp restore_files_from_commit(repo_path, full_hash) do
-    case System.cmd(
-           "git",
+    case OptimalSystemAgent.Git.cmd(
            ["diff-tree", "--no-commit-id", "-r", "-z", "--name-only", full_hash],
            cd: repo_path,
            stderr_to_stdout: true

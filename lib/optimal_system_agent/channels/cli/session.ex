@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   require Logger
 
   alias OptimalSystemAgent.Agent.{Budget, Loop}
+  alias OptimalSystemAgent.CLI.Sanitize
   alias OptimalSystemAgent.Channels.CLI.{PlanReview, Renderer, Spinner}
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.SDK.{Hook, Permission}
@@ -511,11 +512,19 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
                 Spinner.update(spinner, {:streaming_mode, :start})
               end
 
-              IO.write(delta)
+              # The primary model-text sink. Deltas are model-chosen bytes going
+              # straight to the terminal, so they are scrubbed of control
+              # characters here. The scrub drops characters rather than parsing
+              # sequences, which is what makes it safe per-chunk: an escape split
+              # across two deltas still loses its ESC in whichever chunk holds it.
+              IO.write(Sanitize.scrub_block(delta))
 
             :thinking_delta ->
               delta = Map.get(payload, :delta, "")
-              IO.write(IO.ANSI.light_magenta() <> delta <> IO.ANSI.reset())
+
+              # Same, and note the wrapping SGR: an unscrubbed ESC in `delta`
+              # would escape the colour OSA is applying here, not just the line.
+              IO.write(IO.ANSI.light_magenta() <> Sanitize.scrub_block(delta) <> IO.ANSI.reset())
 
             _ ->
               :ok

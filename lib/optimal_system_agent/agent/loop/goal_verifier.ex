@@ -1754,7 +1754,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     cwd = Map.get(state, :working_dir) || File.cwd!()
 
     diff =
-      case System.cmd("git", ["diff", "HEAD"], cd: cwd, stderr_to_stdout: true) do
+      case OptimalSystemAgent.Git.cmd(["diff", "HEAD"], cd: cwd, stderr_to_stdout: true) do
         {output, 0} -> output
         _ -> git_diff_fallback(cwd)
       end
@@ -1776,7 +1776,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   defp git_diff_fallback(cwd) do
-    case System.cmd("git", ["diff"], cd: cwd, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["diff"], cd: cwd, stderr_to_stdout: true) do
       {output, 0} -> output
       {err, _} -> "(git diff unavailable: #{String.slice(err, 0, 200)})"
     end

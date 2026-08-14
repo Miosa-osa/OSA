@@ -128,8 +128,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
       )
     end
 
-    case System.cmd(
-           "git",
+    # `merge` fires `pre-merge-commit`, `commit-msg` and `post-merge` from
+    # `repo_dir`. The three calls above already go through the hardened wrapper
+    # with hooks disabled; this one was the odd raw call out, so the same flow
+    # was half-protected. Note this is NOT `--no-verify`: the repo's hooks are
+    # neutralized by config override for OSA's own bookkeeping merge, while a
+    # user-initiated `git commit`/`git merge` through the `git` tool still runs
+    # their hooks normally.
+    case OptimalSystemAgent.Git.cmd(
            ["merge", "--no-ff", branch, "-m", "Merge worktree branch #{branch}"],
            cd: repo_dir,
            stderr_to_stdout: true

@@ -91,8 +91,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterWorktree.Handler do
   # ── Private ───────────────────────────────────────────────────────────
 
   defp do_create(path, branch, repo_dir) do
-    case System.cmd(
-           "git",
+    # `worktree add` performs a checkout, so it fires the *target repo's*
+    # `post-checkout` hook — and `repo_dir` is whatever the agent was pointed
+    # at, which for a benchmark checkout or a repo delivered as a tarball is
+    # attacker-authored. Hooks stay disabled here: this worktree is OSA's own
+    # scratch branch, so the repo's checkout hooks have no legitimate claim on
+    # it. The user-facing `git` tool is the surface that runs hooks (it passes
+    # `hooks: :enabled`), and that distinction is deliberate.
+    case OptimalSystemAgent.Git.cmd(
            ["worktree", "add", path, "-b", branch],
            cd: repo_dir,
            stderr_to_stdout: true
