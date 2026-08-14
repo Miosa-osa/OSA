@@ -1894,7 +1894,14 @@ impl App {
                 } else {
                     format!("\u{23fa} Teammate @{} finished \u{00b7} {} \u{2014} {}", label, elapsed, preview)
                 };
-                self.chat.add_system_message(&note, "info");
+                // One terminal row per teammate. `AgentFinished` announces the
+                // same agent from the orchestrator's side with its own clock,
+                // so without this a single teammate printed `finished · 6m` and
+                // then `ended · 14m`. Scrollback is print-once — the duplicate
+                // cannot be taken back once committed.
+                if self.announced_agent_endings.insert(label.to_string()) {
+                    self.chat.add_system_message(&note, "info");
+                }
                 self.toasts.push(
                     format!("Background agent \"{}\" completed", label),
                     crate::components::toast::ToastLevel::Success,
@@ -1960,10 +1967,19 @@ impl App {
                     // asserting an outcome nobody sent.
                     _ => ("ended", "info"),
                 };
-                self.chat.add_system_message(
-                    &format!("\u{23fa} Teammate @{} {} \u{00b7} {}", name, verb, elapsed),
-                    severity,
-                );
+                // Suppress a duplicate ending, but never suppress a FAILURE:
+                // if the other event already reported this teammate neutrally,
+                // the fact that it actually crashed still has to reach the
+                // screen.
+                let first = self.announced_agent_endings.insert(name.clone());
+
+                if first || verb == "failed" {
+                    self.chat.add_system_message(
+                        &format!("\u{23fa} Teammate @{} {} \u{00b7} {}", name, verb, elapsed),
+                        severity,
+                    );
+                }
+
                 self.recompute_layout();
             }
 

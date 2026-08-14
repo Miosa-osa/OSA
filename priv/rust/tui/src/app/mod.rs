@@ -260,6 +260,15 @@ pub struct App {
     /// (CC auto-restore on user-cancel).
     pub last_submitted_prompt: Option<String>,
     pub cancelled: bool,
+    /// Teammates whose terminal row has already been printed this turn.
+    ///
+    /// Two independent events announce the same agent ending —
+    /// `BackgroundAgentCompleted` and `AgentFinished` — and they carry
+    /// different clocks, so one teammate produced two rows reading
+    /// `finished · 6m` and `ended · 14m`. Print-once is not recoverable after
+    /// the fact: a committed row cannot be withdrawn.
+    pub announced_agent_endings: std::collections::HashSet<String>,
+
     /// Whether the turn in flight has reached a genuine end.
     ///
     /// `AppState::Idle` cannot answer this: `handle_agent_response` runs full
@@ -722,6 +731,7 @@ impl App {
             last_turn_client_elapsed_secs: None,
             last_submitted_prompt: None,
             cancelled: false,
+            announced_agent_endings: std::collections::HashSet::new(),
             // No turn in flight yet, so nothing is waiting on a turn end.
             turn_done: true,
             sse_reconnecting: false,

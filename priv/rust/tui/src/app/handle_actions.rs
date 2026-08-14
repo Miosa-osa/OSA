@@ -624,6 +624,8 @@ impl App {
         }
         // A turn opens here and is not done until the backend says so.
         self.turn_done = false;
+        // Fresh turn: this turn's teammates have not been announced yet.
+        self.announced_agent_endings.clear();
         self.activity.start();
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);

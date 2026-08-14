@@ -206,9 +206,16 @@ fn watcher_label(monitors: usize, loops: usize) -> Option<String> {
 /// number only matters on the rare session where it is not zero.
 fn hooks_label(ok: u32, failed: u32) -> Option<String> {
     match (ok, failed) {
-        (0, 0) => None,
-        (_, 0) => Some(format!("hooks {} ok", ok)),
-        _ => Some(format!("hooks {} ok, {} failed", ok, failed)),
+        // A running count of SUCCESSFUL hooks is not information. It only ever
+        // goes up, nobody acts on "691 ok", and it sat permanently in the
+        // status bar next to numbers that do change. Reported as noise, and it
+        // was.
+        //
+        // Failures still surface, because those are the case worth a glance —
+        // and the per-row `[hooks: …]` bracket on tool summaries still carries
+        // the per-call detail where it is actually attributable.
+        (_, 0) => None,
+        _ => Some(format!("hooks {} failed", failed)),
     }
 }
 
@@ -2220,14 +2227,17 @@ mod hook_counter_tests {
     }
 
     #[test]
-    fn a_standing_zero_is_not_printed() {
-        // `hooks 54 ok, 0 failed` trains the eye to skip the segment, and the
-        // failure count only earns its width on the session where it is not zero.
-        assert_eq!(hooks_label(54, 0).as_deref(), Some("hooks 54 ok"));
-        assert_eq!(
-            hooks_label(54, 19).as_deref(),
-            Some("hooks 54 ok, 19 failed")
-        );
+    fn only_failures_earn_a_chip() {
+        // A running count of SUCCESSFUL hooks is not information: it only goes
+        // up, nobody acts on "691 ok", and it sat permanently beside numbers
+        // that do change. Reported as noise by the user, and it was.
+        //
+        // Failures still surface — that is the case worth a glance — and the
+        // per-row `[hooks: …]` bracket keeps the detail where it is
+        // attributable to a specific call.
+        assert_eq!(hooks_label(54, 0), None);
+        assert_eq!(hooks_label(691, 0), None);
+        assert_eq!(hooks_label(54, 19).as_deref(), Some("hooks 19 failed"));
     }
 
     #[test]
@@ -2238,7 +2248,10 @@ mod hook_counter_tests {
         let mut bar = StatusBar::new();
         bar.note_hook_run("blocked");
         bar.note_hook_run("ok");
-        assert_eq!(hooks_label(bar.hooks_ok, bar.hooks_failed).as_deref(), Some("hooks 2 ok"));
+        // Both counted as successes, so no chip at all — and crucially, not a
+        // failure chip, which is the lie this test guards against.
+        assert_eq!(bar.hooks_failed, 0);
+        assert_eq!(hooks_label(bar.hooks_ok, bar.hooks_failed), None);
     }
 
     #[test]
