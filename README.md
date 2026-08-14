@@ -1017,6 +1017,107 @@ mix test test/swarm/        # Swarm pattern tests
 
 ---
 
+## Benchmarks
+
+OSA is benchmarked against the standard agentic-coding evaluations, and against
+competing harnesses run **on this machine with the model held fixed**.
+
+We do not quote a leaderboard-comparable score, and the reason matters more than
+the number would. Published SWE-bench figures are not comparable to each other:
+scaffold alone moves the same model by **11–20 points**, labs report against
+denominators of 477, 484 and 500, and the official checklist forbids pass@k as a
+headline while permitting best-of-k reported as pass@1. UTBoost (ACL 2025) found
+**345 patches mis-graded as passing**, changing 24.4% of Verified leaderboard
+entries — and the leaderboard was never re-issued.
+
+So the only comparison we consider meaningful is one we run ourselves, with one
+model, one task set, and one set of limits.
+
+### Head-to-head, model held fixed
+
+Terminal-Bench 2.0 tasks, all arms on `glm-5.2:cloud` through one local daemon,
+wire-verified per arm that no arm silently substituted a model.
+
+| harness | solved | harness faults |
+|---|---|---|
+| codex | 6/6 | 0 |
+| mini-swe-agent | 6/6 | 0 |
+| **OSA** | **4/6** | **0** |
+| opencode | 3/6 | 0 |
+| goose | 3/6 | 0 |
+
+**This is not a ranking.** n=6 yields 4 discordant tasks against the ≥6 needed
+for p<0.05, and every pairwise exact-McNemar test returned "not
+distinguishable". It is published because it is what we measured, not because it
+settles anything.
+
+The result we consider most instructive is not ours: **mini-swe-agent — a
+deliberately minimal loop around one bash tool, with a 243-byte tool schema —
+matched codex and beat OSA.** On the longest task, codex solved it on 3.66M
+input tokens while OSA burned 32.5M and timed out.
+
+### SWE-bench Verified and SWE-bench Pro
+
+| benchmark | arm | resolved | 95% CI |
+|---|---|---|---|
+| Verified (hard subset, airgapped) | OSA | 23/40 | 42.2–71.5% |
+| Pro (hard subset) | OSA | 9/12 | 46.8–91.1% |
+| Pro (same 12, OpenRouter path) | OSA | 6/12 | 25.4–74.6% |
+
+Controls on the same sets: gold-apply 40/40 and 12/12, empty 0/40 and 0/12, so
+the pipelines are sound. **None of these is a dataset score** — every run carries
+`is_full_dataset_run: false`, and `bench/report/cli.py gate` refuses to print any
+of them as a rate. That refusal is the design working, not a limitation.
+
+At n=100 on Verified, gold-apply scores **98/100** — two instances are broken in
+the dataset itself, so the achievable ceiling on that prefix is 98%, not 100%.
+
+### What the benchmarks were actually for
+
+Finding our own bugs. When we started, **a quarter of failures were OSA's
+fault** rather than the model's. Two benchmarks now independently report **zero
+harness faults**. Fixed along the way:
+
+- A nil model silently disabled compaction on 37 of 40 sessions and budgeted a
+  1M-token window as 32k
+- The prompt-injection guard refused any pasted log containing `System:` — 15 of
+  500 instances
+- A missing `git` took down the whole application at boot
+- OSA could not boot as root, breaking every containerised deployment
+- Tools ran in the backend's directory rather than the session's
+- Anthropic and Gemini rejected OSA's message shape with a 400, so the
+  self-correction loop never ran once on those families
+
+### Honest limits
+
+- **Every number is a single run.** 9 of 40 instances flipped between two runs of
+  the same set, so differences smaller than that are noise.
+- **No full-dataset run.** 40 of 500 and 12 of 731.
+- **Shell egress is a filter, not a boundary.** Web tools are denied and
+  probe-verified, but this host refuses unprivileged network namespaces, so
+  toolchain fetches (`go: downloading`) are detected post-hoc rather than
+  prevented.
+- **Every published SWE-bench Pro image ships the answer** in `/app/.git`;
+  `git show <fix_commit>` returns the gold patch with the network off. We strip
+  it and refuse a workspace where it is still reachable. Any Pro result produced
+  without that — including published ones — is an upper bound of unknown
+  tightness.
+
+### Reproducing
+
+```bash
+bench/run-all.sh smoke        # controls only — prove the pipeline first
+bench/run-all.sh swebench     # then a real arm
+bench/report/cli.py gate --run <dir>
+```
+
+Controls run first and the OSA arm is refused if they fail. Methodology, with
+citations, is in [`bench/report/METHODOLOGY.md`](bench/report/METHODOLOGY.md);
+open findings are tracked in [`bench/FINDINGS.md`](bench/FINDINGS.md).
+
+
+---
+
 ## Theoretical Foundation
 
 OSA is grounded in four principles from information and systems theory:

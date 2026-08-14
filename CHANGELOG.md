@@ -9,6 +9,126 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.97] — displays as `v1.0.097`
+
+The benchmark release. Two harnesses were built, competitors were run
+head-to-head with the model held fixed, and almost everything below was found by
+that work rather than by reading the code.
+
+### Fixed — the verification gate was satisfiable without evidence
+
+Two independent research passes — one reading competitor harness source, one
+replaying our own transcripts — converged on a diagnosis that corrected the
+working hypothesis.
+
+It is **not** "the test fails and the agent submits anyway". In 12 of 15 failed
+instances **no check of any kind ran after the final source edit**, and every
+check that did run after one passed. Nobody ends on a red test; they end on an
+untested edit. Every failure also stopped **voluntarily with budget remaining** —
+13–61 of 60 turns, no blocking limit hit.
+
+Four defects in the ledger the gate reads:
+
+- **A read counted as a check.** `file_read` and friends were classified as
+  verification, so re-reading a file discharged the pending write to it — and
+  the gate's own directive *advertises* re-reading as a way to satisfy it, while
+  `file_edit`'s prompt says "do NOT re-read the file to verify an edit that
+  succeeded". The gate was teaching the model how to defeat it, contradicting
+  another prompt to do so.
+- **A build counted as a test.** One predicate covered both, so `go build`
+  passing discharged an edit whose test was red.
+- **`run_tests.sh` matched nothing.** The canonical test command in a script —
+  the most authoritative check available — registered as zero.
+- **A failing check was recorded and discarded.** Every harness examined, ours
+  included, gates on the *absence* of verification and none on the *presence* of
+  a failure.
+
+### Fixed — tools ran in the wrong directory
+
+`Workspace.Cwd.get/0` reads the process dictionary, which does not propagate to a
+spawned Task — and every tool runs in one. So `shell_execute` defaulted to
+wherever the *backend* booted. On a shared daemon that is one session's tool
+running in another session's directory, and it fails silently, because a command
+in the wrong directory still succeeds.
+
+The first fix covered the shell paths only. `file_glob`, `file_grep` and
+`codebase_explore` never consult the process dictionary at all — they call
+`Path.expand/1`, which resolves against the OS cwd directly. Measured after the
+first fix landed: 29 tool results reporting `No files matched pattern ... under
+/home/miosa/projects/osa/OSA`, affecting **7 of 12 instances**. The agent asks
+for the file it needs, is told it does not exist, and proceeds without it.
+
+### Fixed — Anthropic and Gemini rejected OSA's message shape
+
+Nine sites appended `[assistant(text), system(...)]`, which Anthropic answers
+with `role 'system' must follow a 'user' message or an assistant message ending
+in a server tool result`. Those nine are the auto-continue nudges, the zero-tool
+gate and the verification gate — so on those model families **OSA's entire
+self-correction loop never ran once**. The harness had been developed against a
+family that tolerates an invalid shape.
+
+Fixing the emitters was not enough: a model reached through OpenRouter still got
+the bad shape, because `OpenAICompatProvider` had no message reshaping at all.
+The guard now sits at the wire, where every message passes exactly once.
+
+### Fixed — you could not choose a model
+
+`OpenAICompatProvider.default_model/1` returned a compile-time constant and never
+read config, and `Agent.Tier` hardcoded a per-provider table for subagents. A
+logging proxy showed the wire: with a model named in two config files and
+confirmed by `/health`, six requests went to `anthropic/claude-opus-5` and zero
+to the configured model. A per-model comparison would have produced a clean table
+in which every row was secretly the same model. Verified fixed — 1,795 requests,
+zero rewrites needed.
+
+### Fixed — `osa doctor` never returned
+
+`Inspection.report/0` globbed the whole tree with `match_dot: true` and filtered
+vendored paths afterwards. 604,157 files here; it did not complete in 300
+seconds. Now a pruned descent bounded at four levels: **300+ seconds to 50ms**,
+and the test suite goes from timing out to green.
+
+### Fixed — the TUI
+
+The transcript no longer shifts when a block is re-rendered: a synthetic blank
+row before code fences depended on the previous rendered row, which cannot
+survive a split render, so re-rendering moved every row below it.
+
+`↓ to manage` and `← for agents` now work while agents are running. Both hints
+are shown during `Processing`, and both key arms lived only in the Idle handler,
+so they were advertised in the one state where they could never fire.
+
+A teammate announces itself once rather than twice with two different clocks. A
+queued message says when it will run. The standing `hooks N ok` chip is gone —
+failures still show.
+
+### Fixed — smaller things
+
+Cached input tokens were collected under a key nothing read, across five
+providers. `mix osa.run --format json` always reported `"cost": 0`. `serve`
+printed `:9089` while bound elsewhere. `permission_mode.json` grew without bound.
+A tool declaring itself deferred is now actually deferred — which revealed a
+pre-existing dead declaration — taking the default toolbox from 34 tools /
+14,398 tokens to 22 / 10,843.
+
+### Added — benchmark harnesses
+
+`bench/swebench`, `bench/swebenchpro`, `bench/terminalbench`, `bench/recoverybench`,
+`bench/headtohead`, and `bench/report` — a gate that refuses to print a rate for
+an unquotable run, and currently refuses every run we have.
+
+Results are in the README. The short version: two benchmarks now report **zero
+harness faults**, where a quarter of failures used to be OSA's own fault. And in
+a head-to-head with the model held fixed, `mini-swe-agent` — one bash tool, a
+243-byte schema — matched codex and beat OSA.
+
+### Known — not fixed
+
+Non-UTF-8 tool output ends the turn with a 0-byte patch and is charged to the
+model. OSA's own cost accounting overstates spend ~2.5x, so `cost_usd` must not
+be quoted. Both are recorded in `bench/FINDINGS.md`.
+
+
 ## [1.0.96] — displays as `v1.0.096`
 
 Two benchmark harnesses were built and run against OSA for the first time.
