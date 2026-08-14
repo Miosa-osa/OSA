@@ -135,11 +135,22 @@ def test_mid_stream_disconnect_is_not_excused_as_an_outage():
     check("connection closed -> harness", owner, "harness")
 
 
-def test_zero_tokens_is_harness_when_provider_is_fine():
+def test_zero_tokens_is_ambiguous_not_an_accusation():
+    # This asserted `harness`, and that was a real bias in OUR favour.
+    #
+    # A literal 0 from a Harbor adapter means NOT MEASURED, not "zero tokens
+    # were used". goose reports 0/0 on every trial including the three it
+    # SOLVED, so this rule filed all three of its losses as our
+    # misconfiguration — while OSA was exempt, because its adapter refines real
+    # counts out of its own telemetry. The comparison flattered OSA by
+    # construction.
+    #
+    # 0/0 is undecidable from outside: "measured as zero" and "not measured"
+    # are the same two integers. Ambiguous is the only honest verdict.
     d = trial_dir_with_log("everything looks normal here")
     reason, owner, _ = attribution.classify(make_result(tin=0, tout=0), d)
-    check("0 tokens, healthy provider -> harness",
-          (reason, owner), ("agent_never_reached_model", "harness"))
+    check("0 tokens -> ambiguous, never accused",
+          (reason, owner), ("tokens_not_measured", "ambiguous"))
 
 
 def test_install_failure_is_harness():

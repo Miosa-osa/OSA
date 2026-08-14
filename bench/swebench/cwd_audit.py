@@ -197,6 +197,14 @@ def main() -> int:
     for root in roots:
         if not root.is_absolute():
             root = HERE / root
+        # `.resolve()` is load-bearing, not tidiness. `in_workspace` is a
+        # `str.startswith` against this path, and a run passed as
+        # `../swebenchpro/runs/<id>` keeps the `..` segment, so the workspace
+        # prefix never matches the absolute path `pwd` prints. Measured: the
+        # same run scored "2 flagged, cwd_outside_workspace x2" relative and
+        # "0 flagged, pwd_in_workspace x2" absolute -- the audit reported a
+        # correct cwd as the exact defect it exists to detect.
+        root = root.resolve()
         for log in sorted((root / "logs").glob("*.jsonl")):
             iid = log.name.split(".")[0]
             per_instance[iid] = audit_log(log, root / "workspaces" / iid)

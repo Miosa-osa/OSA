@@ -314,9 +314,28 @@ def main() -> int:
                     telemetry["cost_usd"] = ev.get("session_cost_usd", telemetry["cost_usd"])
                     telemetry["model"] = ev.get("model") or telemetry["model"]
                     telemetry["turns"] += 1
+                    # Additive field: absent on a normal turn, present when the
+                    # turn ended because every provider call failed rather than
+                    # because the model answered.
+                    if ev.get("turn_error"):
+                        telemetry["turn_error"] = ev["turn_error"]
                 elif etype == "done":
                     telemetry["saw_done"] = True
-                    telemetry["status"] = "ok"
+                    # A `done` frame means the turn ENDED, not that it
+                    # SUCCEEDED. Setting status unconditionally here is how OSA
+                    # reported `status: ok` on a turn where every provider call
+                    # failed — 11 retries, fallback chain exhausted, zero tokens
+                    # — and how a 1800s timeout with 277 turns and 32.5M input
+                    # tokens was handed to the grader as a clean exit it could
+                    # not see. Both times the model was charged for a harness
+                    # failure.
+                    #
+                    # `turn_error` is now carried on the agent_response event
+                    # for exactly this. Read it.
+                    if telemetry.get("turn_error"):
+                        telemetry["status"] = "provider_error"
+                    elif telemetry.get("status") in (None, "", "running"):
+                        telemetry["status"] = "ok"
                     break
         finally:
             raw.close()

@@ -340,9 +340,39 @@ def classify(result: dict, trial_dir: Path) -> tuple[str, str, str]:
     # provider call never succeeded: wrong base URL, rejected key, unknown
     # model. That is configuration, i.e. this harness's fault, and calling it
     # a model failure would silently credit OSA for a competitor we misconfigured.
+    #
+    # THE GUARD IS `> 0`, NOT `is not None`, AND THAT DISTINCTION IS THE WHOLE
+    # RULE. A literal `0` from a Harbor adapter means NOT MEASURED, not "zero
+    # tokens were used". goose reports `0/0` on every trial — including the
+    # three it SOLVED — so with `is not None` this rule fired on all three of
+    # its losses and filed them as our misconfiguration. It was invisible on
+    # the wins only because the `resolved` rule short-circuits first.
+    #
+    # Worse, the bias ran one way. OSA's adapter refines real token counts out
+    # of `osa-telemetry.json`, so OSA was exempt while competitors were
+    # penalised for telemetry poverty — a comparison that flattered OSA by
+    # construction, which is exactly what this file's design was supposed to
+    # prevent. Goose demonstrably reached the model on all six: 4-10
+    # `llm_request.*.jsonl` bodies per task, thousands of model references,
+    # including on the very task filed as "never reached the model".
+    #
+    # An arm that does not report tokens must be UNKNOWN, never accused. And
+    # 0/0 is genuinely undecidable from the outside: "measured as zero" and
+    # "not measured" are the same two integers. So it is AMBIGUOUS — a missing
+    # measurement is not evidence of a missing model call, and filing it as
+    # either fault would be inventing a fact.
     tin = agent_result.get("n_input_tokens")
     tout = agent_result.get("n_output_tokens")
     if tin is not None and tout is not None and tin == 0 and tout == 0:
+        return (
+            "tokens_not_measured",
+            "ambiguous",
+            "the arm reported 0 input and 0 output tokens. That cannot be told "
+            "apart from an adapter that does not measure tokens at all, so no "
+            "fault is assigned. Confirm against the arm's own logs.",
+        )
+
+    if False:
         return ("agent_never_reached_model", "harness",
                 f"0 input and 0 output tokens after {exec_s}s of agent execution")
 

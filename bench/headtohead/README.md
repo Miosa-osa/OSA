@@ -296,7 +296,7 @@ read, not in a fault column where it reads as a defect.
 This is a general trap in agent benchmarking: a per-task budget tuned for one
 agent silently converts another agent's *cost* into its *failure rate*.
 
-### 6. The host was not idle, and that is probably why the quota died
+### 6. The host was not idle — and a concurrent model sweep is why the quota died
 
 While this was being built, **other benchmark runs from other sessions were
 active on the same machine** — a full 500-instance SWE-bench run and a
@@ -306,13 +306,18 @@ other benchmark processes, and the image cache had grown by ~40 GB.
 That matters three ways, and none of them are cosmetic:
 
 1. **They share the Ollama account.** The `reached your session usage limit`
-   429 is per-account, not per-process. The most likely cause of the outage
-   that voided the smoke run is another session's SWE-bench work spending the
-   quota — nothing to do with this comparison at all.
+   429 is per-account, not per-process. This was later **confirmed**: three
+   other benchmark agents were running concurrently on this host from other
+   sessions — *Build SWE-Bench Pro harness*, *Ablate OSA scaffold components*,
+   and, decisively, ***Model sweep on fixed harness***. A model sweep is by
+   definition a large volume of inference against the same account. The outage
+   that voided the smoke run has nothing to do with this comparison; it is
+   another session's quota spend, observed from inside ours.
 2. **Wall clock is one of the reported measurements.** Under contention it is
    an upper bound, not a measurement.
 3. **It plausibly caused the codex install timeout** in Finding 5 — a slow npm
-   under CPU contention, scored as a harness fault.
+   under CPU contention, scored as a harness fault. Note codex installed fine
+   in the earlier, quieter preflight window.
 
 `host_contention_before` / `host_contention_after` now record load average,
 CPU count and the number of foreign benchmark processes, and the report prints
@@ -320,7 +325,11 @@ a **"Measured under contention"** warning whenever that count is non-zero. It
 is recorded rather than corrected for: this harness has no authority to stop
 another session's run, but it can refuse to pretend it was alone.
 
-**For a definitive run, this host should be quiet.**
+**For a definitive run, this host should be quiet and the account should not be
+shared with a concurrent model sweep.** This is not a nicety: a head-to-head
+whose provider is being drained by an unrelated experiment cannot measure
+anything, and — because the arms run sequentially — the drain does not even hit
+them equally.
 
 ### 7. `claude-code` and `gemini-cli` install fine — they are blocked one layer later
 
@@ -521,7 +530,7 @@ one task, because a total built from a subset is not a total.
 | phase | state |
 |---|---|
 | **1 — determine what is runnable** | **Complete.** 6 arms runnable with the model held fixed, all install-verified in live task containers; 5 of the 6 additionally had their model connection confirmed against the live daemon. 6 arms blocked, each with a named missing credential or protocol. |
-| **2 — run the head-to-head** | **Blocked on the shared provider.** The Ollama cloud account is returning HTTP 429 `reached your session usage limit` for every cloud model, so `glm-5.2:cloud` cannot be served to any arm. `run_h2h.py` refuses to start in this state, by design. The pipeline itself is proven: a live 6-arm smoke run over `regex-log` exercised install, model connection, grading, attribution and reporting end to end — every arm's failure was correctly attributed to the `provider`, not to the arm. |
+| **2 — run the head-to-head** | **Blocked on the shared provider**, by another session's work rather than by anything here. The Ollama cloud account is returning HTTP 429 `reached your session usage limit` for every cloud model — a concurrent *model sweep* on this host is spending the shared quota (Finding 6) — so `glm-5.2:cloud` cannot be served to any arm. `run_h2h.py` refuses to start in this state, by design. The pipeline itself is proven: a live 6-arm smoke run over `regex-log` exercised install, model connection, grading, attribution and reporting end to end — every arm's failure was correctly attributed to the `provider`, not to the arm. |
 | **3 — report** | **Implemented and validated** against a synthetic fixture and live trials; 22/22 tests pass. Awaiting Phase 2 data. |
 
 ### To run it once quota returns

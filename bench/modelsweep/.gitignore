@@ -1,0 +1,4 @@
+homes/
+runs/
+__pycache__/
+*.log
