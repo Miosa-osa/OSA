@@ -7,8 +7,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Prompt do
   `file_read` is renamed, this prompt updates automatically through the
   `safe_ref/3` helper.
 
-  The word "surgical" appears in the first line to satisfy the the contract
-  (the test suite asserts `description() =~ "surgical"`).
+  The first bullet names `file_transform` deliberately. `file_edit` is the tool
+  that must lose share to it (see `docs/design/context-free-edits.md` §5), and
+  the instruction only works if it sits at the affordance being competed with,
+  not only in SYSTEM.md. It is written to route, not to sell: `file_edit`
+  remains correct whenever the change needs the surrounding bytes.
   """
 
   @doc """
@@ -26,16 +29,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Prompt do
         "file_read"
       )
 
-    """
-    Performs surgical exact-string replacements in files.
+    transform_name =
+      safe_ref(
+        OptimalSystemAgent.Tools.Builtins.FileTransform.Constants,
+        :tool_name,
+        "file_transform"
+      )
 
-    Usage:
-    - You must use `#{read_name}` at least once before editing. This tool will error if you attempt an edit without reading the file.
-    - When editing text, ensure you preserve the exact indentation (tabs/spaces) as it appears in the file.
-    - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
-    - The edit will FAIL if `old_string` is not unique in the file. Provide a larger string with more surrounding context to make it unique, or use `replace_all` to change every instance.
-    - Use `replace_all` for renaming strings across the file (e.g., renaming a variable). `replace_all` requires `old_string` to appear in the file EXACTLY; it is refused when only a fuzzy/approximate match is found, because rewriting every region that merely resembles `old_string` corrupts unrelated code. If it is refused, edit each site individually with its own exact `old_string`.
-    - Do NOT re-read the file to verify an edit that succeeded. This tool errors when the edit does not apply (`old_string` not found, or ambiguous), so a successful result already means the file changed.
+    """
+    Replaces an exact string in a file.
+
+    - If you can name the change by an ANCHOR instead of exact bytes — a pattern, a matching line, the end of the file — use `#{transform_name}`: it needs no `#{read_name}` and never quotes the file, so its cost does not grow with file size. Use this tool when the change needs the surrounding bytes to be unambiguous.
+    - Read the file with `#{read_name}` first; this tool errors otherwise.
+    - Preserve the exact existing indentation (tabs/spaces).
+    - The edit FAILS if `old_string` is not unique — add surrounding context, or set `replace_all` to change every instance.
+    - `replace_all` requires an EXACT match and is refused on a fuzzy one.
+    - Do NOT re-read to verify a successful edit — this tool errors when the edit does not apply.
     - Only use emojis if the user explicitly requests it.
     """
   end

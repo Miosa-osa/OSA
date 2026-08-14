@@ -207,8 +207,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
       assert Map.has_key?(params["properties"], "new_string")
     end
 
-    test "description mentions surgical replacement" do
-      assert FileEdit.description() =~ "surgical"
+    # The pinned word "surgical" was retired (competitor-techniques.md §7.3):
+    # it was decorative, and pinning a decorative word froze the first line of
+    # the description against the routing rewrite that had to happen there.
+    # What is pinned now is the ROUTING, which is the part with a consequence.
+    test "description routes anchor-shaped changes to file_transform" do
+      desc = FileEdit.description()
+      assert desc =~ "file_transform"
+      assert desc =~ ~r/anchor/i
+      refute desc =~ "surgical"
     end
   end
 end

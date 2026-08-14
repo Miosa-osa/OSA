@@ -336,6 +336,46 @@ call; they are not blocking anything here.
   Deliberate — the two lists mirror each other by hand and a small local model is
   the least likely to drive an operation DSL correctly — but it is a decision
   worth revisiting with evidence rather than by default.
-* **Adoption.** A tool nobody calls is worth nothing, and nothing here
-  demonstrates that a model calls it. That needs the §5 prompt items plus a
-  probe-set run.
+* ~~**Adoption.**~~ **Closed — see §7.** The §5 items are applied and adoption is
+  now measured against a live model rather than asserted.
+
+---
+
+## 7. Adoption, measured
+
+The §5 hand-over items are applied: `file_edit/prompt.ex` names the alternative
+in its FIRST bullet, `file_read/prompt.ex` carries the probe routing, and the
+routing rule in `SYSTEM.md` / `SYSTEM_LEAN.md` became **TRANSFORM over EDIT over
+WRITE** (step 4 of Order of Operations, plus §5's routing table in `SYSTEM.md`).
+Step 3, "READ before you EDIT", now carves `file_transform` out explicitly —
+otherwise the read-before-edit rule contradicts the tool's whole premise.
+
+Four headless sessions, `glm-5.2:cloud` via Ollama, `permission_mode: :overdrive`,
+tool names read off the session's own message history *[measured]*:
+
+| session | task | tools called |
+|---|---|---|
+| 1 | delete `deprecated_legacy_shim` from a 55 KB / 2,806-line file, then confirm parens balance | `file_read`, `file_grep`, `file_read`, **`file_transform`**, **`file_transform`** |
+| 2 | rename `get_user_by_id` → `fetch_user` throughout the same file | `file_read`, **`file_transform`** ×3 |
+| 3 | *control* — fix only `subtract()` in a file where five function bodies are byte-identical | `file_read`, **`file_edit`** (correct; `file_transform` NOT used) |
+| 4 | *probe only* — "do the parens balance, and how many `helper_042`?" | **`file_transform`** ×1, and nothing else |
+
+Every mutation was verified correct against the fixture afterwards: session 1
+removed exactly the three intended lines, session 2 changed exactly 200 sites,
+session 3 changed exactly one line and left the four identical bodies alone.
+
+Session 4 is the sharpest result. Before the `file_read` change, a question
+*about* a 55 KB file cost the 55 KB; the model now answers both halves of it in
+one `file_transform` call and never opens the file.
+
+Session 3 is the guard against the opposite failure. The tool description is
+written to route, not to sell, and the model correctly declined `file_transform`
+where the anchor is ambiguous and the surrounding bytes are what disambiguate.
+
+**What this does not show.** One model, one provider, four sessions. It
+demonstrates that the routing text is *reachable and followed*, not that
+adoption holds across models — and it says nothing about a long agentic run,
+which is where the O(1)-vs-O(N × filesize) curve in §4 actually pays. The
+`file_read` calls in sessions 1 and 2 are reconnaissance (locating the target),
+not read-before-edit; whether they are avoidable is a separate question from
+whether the mutation route is right.

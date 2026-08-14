@@ -183,8 +183,11 @@ defmodule OptimalSystemAgent.Soul.ToolsSectionTest do
       # FileEdit.Prompt.render/1 resolves FileRead.Constants.tool_name() via
       # safe_ref — the literal "file_read" must appear in the assembled section.
       assert section =~ "file_read"
-      # Confirms the dynamic (surgical) prompt body is used, not a static stub.
-      assert section =~ "surgical"
+      # Confirms the dynamic prompt body is used, not a static stub. This used
+      # to pin the word "surgical"; that word was retired with the routing
+      # rewrite, so the marker is now the routing sentence — which is both
+      # dynamic (it resolves `file_transform` through safe_ref) and load-bearing.
+      assert section =~ "file_transform"
     end
   end
 end

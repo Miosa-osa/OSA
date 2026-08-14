@@ -102,14 +102,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebSearchTest do
       assert Prompt.render([]) =~ "web_fetch"
     end
 
-    test "includes current date when not overridden" do
-      current_year = Date.utc_today().year |> Integer.to_string()
-      assert Prompt.render([]) =~ current_year
-    end
+    # This description used to interpolate the current month and year, which
+    # made a STATIC prompt-prefix span change once a month and guaranteed a
+    # provider prompt-cache miss for a fact the session environment block
+    # already carries to the day. The prompt now points AT that block instead.
+    test "is byte-identical across renders and carries no interpolated date" do
+      prompt = Prompt.render([])
 
-    test "accepts custom current_date override" do
-      prompt = Prompt.render(current_date: "January 2030")
-      assert prompt =~ "January 2030"
+      assert prompt == Prompt.render([])
+      assert prompt == Prompt.render(current_date: "January 2030")
+      refute prompt =~ Integer.to_string(Date.utc_today().year)
+      assert prompt =~ "Today's date"
     end
   end
 

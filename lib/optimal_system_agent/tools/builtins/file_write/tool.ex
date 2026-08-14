@@ -39,12 +39,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Tool do
       "properties" => %{
         "path" => %{
           "type" => "string",
-          "description" =>
-            "Path to write to. Relative paths are rooted at ~/.osa/workspace/ automatically. Example: 'todo-app/server.js' writes to ~/.osa/workspace/todo-app/server.js"
+          "description" => "Path to write. Relative paths root at ~/.osa/workspace/."
         },
         "content" => %{
           "type" => "string",
-          "description" => "Content to write"
+          # "Content to write" produced small, timid calls: the model would
+          # emit a stub and then patch it up over several turns. Naming the
+          # completeness requirement is what makes the whole-file write happen
+          # in one call (competitor-techniques.md §7.2).
+          "description" =>
+            "The COMPLETE final contents of the file, written out in full — " <>
+              "not a fragment, a diff, or a placeholder like \"... rest unchanged\". " <>
+              "Whatever is not here is gone."
         }
       },
       "required" => ["path", "content"]
