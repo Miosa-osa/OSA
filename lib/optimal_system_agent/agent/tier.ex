@@ -218,11 +218,37 @@ defmodule OptimalSystemAgent.Agent.Tier do
   end
 
   def model_for(tier, provider) do
-    case get_in(@tier_models, [provider, tier]) do
-      :auto -> auto_model(provider)
-      nil -> auto_model(provider)
-      model -> model
+    # An EXPLICITLY configured model beats the built-in tier map.
+    #
+    # `@tier_models` is a table of sensible defaults per provider, but it is
+    # compiled in, so a user who set `:openrouter_model` still got
+    # `anthropic/claude-opus-5` on every subagent — their choice silently
+    # discarded on the delegate path while the main loop honoured it. That is
+    # the same defect just fixed in `OpenAICompatProvider.default_model/1`,
+    # one layer down: a hardcoded default outranking a real configuration.
+    #
+    # It also makes a per-model benchmark impossible to trust, because the
+    # subagent arm would run a different model from the arm it is labelled as.
+    #
+    # A configured model applies to every tier deliberately: the tiers exist to
+    # pick sensible defaults, and someone who named a model has already made
+    # that choice. Per-tier overrides remain available through the settings
+    # `agent_overrides` path, which still takes precedence over this.
+    case configured_model(provider) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        case get_in(@tier_models, [provider, tier]) do
+          :auto -> auto_model(provider)
+          nil -> auto_model(provider)
+          model -> model
+        end
     end
+  end
+
+  defp configured_model(provider) do
+    Application.get_env(:optimal_system_agent, :"#{provider}_model")
   end
 
   @doc """

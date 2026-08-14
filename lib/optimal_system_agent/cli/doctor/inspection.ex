@@ -552,11 +552,25 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
           File.regular?(path),
           do: path
 
+    # PRUNE while walking, do not filter afterwards.
+    #
+    # This was `Path.wildcard("**/{AGENTS.md,...}", match_dot: true)` followed
+    # by `reject(&vendored?/1)`. `Path.wildcard` has no exclusions, so it
+    # enumerated the ENTIRE tree first — `.git` included, because of
+    # `match_dot: true` — and only then discarded the vendored hits.
+    #
+    # Measured in this repository: 604,157 files. `Inspection.report/0` did not
+    # complete in 300 seconds, so `osa doctor` was effectively broken, and the
+    # doctor test suite was burning six and a half minutes at 213% CPU. It grew
+    # unbounded with the checkout, so any repo with a large `_build`, `deps`,
+    # `node_modules` or a directory of build artefacts hit it.
+    #
+    # Pruned descent visits only directories that can contain a hit, and stops
+    # at a bounded depth: these files live near the root by convention, and an
+    # unbounded search for them was never buying anything.
     nested =
       root
-      |> Path.join("**/{AGENTS.md,CLAUDE.md,GROK.md}")
-      |> Path.wildcard(match_dot: true)
-      |> Enum.reject(&vendored?/1)
+      |> find_agent_docs(@agent_doc_max_depth)
       |> Enum.reject(fn p -> Path.dirname(p) == root end)
       |> Enum.sort()
       |> Enum.take(20)
@@ -1035,6 +1049,52 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   end
 
   @vendored ~w(node_modules .git _build deps vendor target dist build .elixir_ls .venv)
+
+  # How deep to look for AGENTS.md / CLAUDE.md / GROK.md. They are a
+  # project-root convention; a handful of levels covers every real layout and
+  # keeps the walk bounded regardless of checkout size.
+  @agent_doc_max_depth 4
+
+  @agent_doc_names ~w(AGENTS.md CLAUDE.md GROK.md)
+
+  # Directories never worth descending into. Pruned BEFORE recursing, which is
+  # the whole point — `vendored?/1` filtering results still pays for the walk.
+  @never_descend ~w(.git _build deps node_modules .elixir_ls target
+                    .venv venv __pycache__ dist .next .cache runs)
+
+  defp find_agent_docs(_dir, depth) when depth < 0, do: []
+
+  defp find_agent_docs(dir, depth) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, fn entry ->
+          path = Path.join(dir, entry)
+
+          cond do
+            entry in @agent_doc_names and File.regular?(path) ->
+              [path]
+
+            entry in @never_descend ->
+              []
+
+            String.starts_with?(entry, ".") ->
+              # Dotfile directories are not where a project puts its agent doc,
+              # and `.git` alone can be tens of thousands of files.
+              []
+
+            File.dir?(path) ->
+              find_agent_docs(path, depth - 1)
+
+            true ->
+              []
+          end
+        end)
+
+      _ ->
+        []
+    end
+  end
+
   defp vendored?(path) do
     parts = Path.split(path)
     Enum.any?(@vendored, &(&1 in parts))
