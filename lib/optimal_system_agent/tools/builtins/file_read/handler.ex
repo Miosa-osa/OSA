@@ -68,17 +68,75 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t()} | {:ok, {:image, map()}} | {:error, String.t()}
   def execute(%{"path" => path} = input, ctx) do
-    result = do_read(input)
+    sid = session_id(ctx)
+    target = resolve_target(path)
+    range = FileState.range_key(input["offset"], input["limit"])
 
-    # Record read-state for read-before-edit / stale-write enforcement (P0-1).
-    # Only successful reads of an actual file are recorded; canonical() inside
-    # FileState re-stats the path, so a directory/enoent that slipped through is
-    # a harmless no-op.
-    if match?({:ok, _}, result) do
-      FileState.record_read(session_id(ctx), resolve_target(path))
+    notice = Messages.unchanged_since_last_read(path)
+
+    case redundant_read(sid, target, range) do
+      {:unchanged, %{bytes: delivered}} when delivered > 0 and delivered > byte_size(notice) ->
+        # Only substitute the notice when the bytes it replaces outnumber the
+        # bytes it costs. The notice is ~245 bytes; a windowed read of a big file
+        # can deliver less than that, and a "saving" that grows the transcript is
+        # not a saving. Compared against what the earlier read ACTUALLY delivered,
+        # recorded at the time, rather than against the file's size — for an
+        # `offset`/`limit` read those differ by orders of magnitude.
+        {:ok, notice}
+
+      _ ->
+        result = do_read(input)
+
+        # Record read-state for read-before-edit / stale-write enforcement
+        # (P0-1) and for redundant-read suppression above. Only successful reads
+        # of an actual file are recorded; canonical() inside FileState re-stats
+        # the path, so a directory/enoent that slipped through is a harmless
+        # no-op.
+        case result do
+          {:ok, body} when is_binary(body) ->
+            FileState.record_read(sid, target, range: range, bytes: byte_size(body))
+
+          {:ok, _other} ->
+            # An image payload — recorded for read-before-edit, never suppressed.
+            FileState.record_read(sid, target, range: range, bytes: 0)
+
+          _ ->
+            :ok
+        end
+
+        result
     end
+  end
 
-    result
+  # Should this read be answered with a marker instead of the bytes?
+  #
+  # Measured motivation: 59 `file_read` calls against one path with
+  # byte-identical arguments in a single `schemelike-metacircular-eval` run,
+  # each re-injecting the whole of a growing file. See `FileState` for the
+  # three conservatism rules; this function adds the two the *tool* owns:
+  #
+  #   * **Images never suppress.** An image read returns an
+  #     `{:image, ...}` payload, not text; substituting a string would change
+  #     the shape of the result, and image re-reads were never the loop.
+  #   * **Only an otherwise-successful whole-file/range read suppresses.** If
+  #     the path has become a directory, vanished, or turned binary since the
+  #     recorded read, `FileState` reports `:changed`/`:unknown` (the stat or
+  #     hash disagrees) and the real error path runs, so the model still gets
+  #     the diagnostic it needs.
+  #
+  # Any failure to decide returns `:unknown`, which reads real content. The
+  # asymmetry is deliberate: a redundant read costs tokens, a wrongly-suppressed
+  # read costs the model its working context.
+  defp redundant_read(sid, target, range) do
+    ext = target |> Path.extname() |> String.downcase()
+
+    if ext in Constants.image_extensions() do
+      :unknown
+    else
+      FileState.read_status(sid, target, range)
+    end
+  rescue
+    _ -> :unknown
   end
 
   # Single source of truth for "which path on disk does this input name?".
@@ -399,23 +457,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   defp image_media_type(".tiff"), do: "image/tiff"
   defp image_media_type(_), do: "application/octet-stream"
 
-  defp allowed_paths do
-    configured =
-      Application.get_env(
-        :optimal_system_agent,
-        :allowed_read_paths,
-        Constants.default_allowed_paths()
-      )
-
-    # The candidate path is canonicalised before it is compared, so the roots
-    # must be canonicalised too — otherwise an allowlist entry that is itself a
-    # symlink (`/tmp` on macOS, a symlinked `$HOME`) never matches anything and
-    # the tool silently denies every read.
-    Enum.map(configured, fn p ->
-      expanded = PathCanon.canonicalize(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
+  # The one read allowlist — configured roots PLUS the session's workspace (see
+  # `PathPolicy.workspace_roots/0`). This module used to compute its own copy
+  # from `:allowed_read_paths`, as four sibling tools still did; every copy was
+  # blind to the session's `working_dir`, so in a container the agent could not
+  # read the very tree it was pointed at. Roots are canonicalised there, which
+  # is what a canonicalised candidate path has to be compared against.
+  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
 
   # Resolve symlinks before security checks to prevent symlink traversal.
   # EVERY component is resolved, not just the last one — see `PathCanon`.

@@ -127,6 +127,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   end
 
   @doc """
+  The exact bytes being asked for were already delivered to this session and
+  have not changed since.
+
+  Written to close the loop rather than to scold: it states the fact, says where
+  the content already is, and says that retrying will not change the answer — a
+  message that only said "unchanged" would invite the model to call again to find
+  out what happened, which is the loop this exists to end.
+
+  It is also kept **short on purpose**. The notice replaces the file's bytes, so
+  every byte it spends is spent against the saving it exists to make; a verbose
+  version measured 607 bytes, which is larger than many of the files it would
+  replace. The handler additionally declines to substitute it for a file smaller
+  than the notice itself — see `Handler.redundant_read/3`.
+  """
+  @spec unchanged_since_last_read(String.t()) :: String.t()
+  def unchanged_since_last_read(display_path) do
+    "<file_read notice: #{display_path} is UNCHANGED since you last read it this session; " <>
+      "its content is already in your context above and is current. Re-reading returns this " <>
+      "notice, not bytes, until the file changes. The file counts as read — you may edit it.>"
+  end
+
+  @doc """
+  Byte size of the shortest possible `unchanged_since_last_read/1` notice, used
+  to decide whether substituting it would actually save anything.
+  """
+  @spec unchanged_notice_overhead() :: pos_integer()
+  def unchanged_notice_overhead, do: byte_size(unchanged_since_last_read(""))
+
+  @doc """
   The requested `offset` starts after the last line of the file.
 
   Distinct from an empty file, and the distinction is the whole point: one means

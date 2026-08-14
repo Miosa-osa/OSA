@@ -111,16 +111,121 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
 
             {:halt, msg, state}
           else
-            # Autonomous mode (stall_hard_halt: false, or :overdrive/:auto): keep
-            # the graded nudges but never kill a long unattended run on a stall —
-            # the operator-set max_budget_usd + absolute call cap are the real stops.
-            Logger.warning("[doom] Stall detected — escalate-only (autonomous mode), continuing")
-            {:ok, state}
+            # Autonomous mode (stall_hard_halt: false, or :overdrive/:auto): never
+            # kill a long unattended run on a stall — the operator-set
+            # max_budget_usd + absolute call cap are the real stops, and
+            # `path-tracing` was *solved* at 175 turns, so stopping early is the
+            # expensive mistake here, not continuing.
+            #
+            # But this branch used to be a bare log-and-continue, and that is
+            # worse than having no detector: measured, it logged "Stall detected"
+            # **247 times in one run and 81 in another with zero effect**, because
+            # `Escalation` caps at 3 nudges and everything after that fell through
+            # to this line. A detector that fires 247 times and changes nothing is
+            # a false assurance — the logs say the system noticed while the system
+            # did not act.
+            #
+            # So an exhausted stall now *checkpoints*: it records the state and
+            # surfaces it, and periodically forces a written re-plan. It still
+            # never halts.
+            checkpoint(state)
           end
       end
     else
       {:ok, state}
     end
+  end
+
+  # ── Exhausted-stall checkpoint ────────────────────────────────────────
+
+  # How many exhausted-stall detections pass between forced re-plans. The first
+  # one always checkpoints; after that, every `@checkpoint_interval`-th.
+  #
+  # Sized from the measured detection volume: 247 detections in the worst run.
+  # At 1-in-25 that is ~10 re-plans across a 305-turn run — frequent enough that
+  # a genuinely stuck agent is asked to reconsider roughly every 30 turns, rare
+  # enough that it cannot itself become the loop. Injecting on all 247 would
+  # add 247 system messages to a transcript whose growth is already the dominant
+  # cost term.
+  @checkpoint_interval 25
+
+  # Record the stall and surface it; periodically force a written re-plan.
+  # Always returns `{:ok, state}` — this path must never halt.
+  defp checkpoint(state) do
+    n = Map.get(state, :stall_checkpoint_count, 0) + 1
+    state = Map.put(state, :stall_checkpoint_count, n)
+
+    # Surface it as a measured event on every detection, even when no directive
+    # is injected. The count is the point: "the stall detector fired 247 times"
+    # is only knowable if each firing is recorded somewhere structured.
+    Bus.emit(:system_event, %{
+      event: :stall_checkpoint,
+      session_id: state.session_id,
+      detection: n,
+      window: @stall_window_size,
+      recent_tools: state |> Map.get(:recent_tool_names, []) |> Enum.uniq(),
+      total_tool_calls: Map.get(state, :total_tool_calls, 0),
+      replan_injected: replan?(n)
+    })
+
+    if replan?(n) do
+      Logger.warning(
+        "[doom] Stall checkpoint ##{n} — graded escalation exhausted, forcing a written re-plan " <>
+          "(session: #{state.session_id})"
+      )
+
+      {:ok, inject_replan(state, n)}
+    else
+      Logger.info(
+        "[doom] Stall checkpoint ##{n} — recorded, next re-plan at " <>
+          "##{next_replan_at(n)} (session: #{state.session_id})"
+      )
+
+      {:ok, state}
+    end
+  end
+
+  defp replan?(1), do: true
+  defp replan?(n), do: rem(n, @checkpoint_interval) == 0
+
+  defp next_replan_at(n), do: (div(n, @checkpoint_interval) + 1) * @checkpoint_interval
+
+  # The directive asks for *writing*, not stopping.
+  #
+  # Deliberately not "you are stuck, give up": the diagnosis is explicit that a
+  # hard halt here is the "give up earlier" trap, and that fewer turns with
+  # fewer solves is not a win. It asks the agent to externalise the plan, which
+  # is the behaviour that distinguished the harnesses that solved these tasks —
+  # they built durable artefacts and iterated against them, rather than probing
+  # inline and self-certifying.
+  defp inject_replan(state, n) do
+    tried =
+      state
+      |> Map.get(:recent_tool_names, [])
+      |> Enum.uniq()
+      |> Enum.join(", ")
+
+    directive = %{
+      role: "system",
+      content:
+        "[STALL CHECKPOINT #{n} — no forward progress for #{@stall_window_size}+ tool calls, " <>
+          "and the graded nudges are exhausted] " <>
+          "Stop acting and write out, explicitly, in your next message: " <>
+          "(1) the goal, restated in one sentence; " <>
+          "(2) what you have already tried" <>
+          if(tried == "", do: "", else: " (recent tools: #{tried})") <>
+          " and what each attempt actually showed; " <>
+          "(3) the specific thing that is blocking you, and the assumption behind it that " <>
+          "might be wrong; " <>
+          "(4) one concrete next step that is DIFFERENT in kind from what you have been doing. " <>
+          "Then do only that step. If you are repeatedly inspecting the same thing, the " <>
+          "information you need is not there — change where you are looking. If you are " <>
+          "repeatedly running the same check, write the check to a file so you can see it " <>
+          "fail and then see it pass. You are not being stopped; keep working after you have " <>
+          "written this."
+    }
+
+    Map.put(state, :messages, Map.get(state, :messages, []) ++ [directive])
   end
 
   # Whether an exhausted stall should hard-halt the run. Autonomous runs

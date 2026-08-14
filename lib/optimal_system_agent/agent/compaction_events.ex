@@ -88,6 +88,12 @@ defmodule OptimalSystemAgent.Agent.CompactionEvents do
   """
   @spec completed(String.t() | nil, keyword()) :: :ok
   def completed(session_id, fields) do
+    # Invalidate every redundant-read suppression recorded before this point:
+    # `file_read` answers "unchanged since your last read" only while the earlier
+    # read is still verbatim in the transcript, and a compaction is exactly the
+    # event that can remove it. Best-effort — never allowed to fail a compaction.
+    _ = OptimalSystemAgent.Tools.FileState.bump_epoch(session_id)
+
     emit(session_id, :compaction_completed, %{
       tokens_before: Keyword.get(fields, :tokens_before, 0),
       tokens_after: Keyword.get(fields, :tokens_after, 0),

@@ -39,6 +39,48 @@ defmodule OptimalSystemAgent.Tools.FileState do
   the flat backwards-compat shims and unit tests run under — are **exempt**, so
   context-free direct tool calls keep working. Real `ReactLoop` sessions always
   carry a concrete session id and are enforced.
+
+  ## Second role: "does the model already hold this content?" (redundant-read
+  suppression)
+
+  The same ledger answers a *different* question the agent loop needs, and it is
+  the reason this module grew a content hash. Measured on the
+  `schemelike-metacircular-eval` head-to-head run: **59 `file_read` calls against
+  one path with byte-identical arguments**, each pulling the whole of a growing
+  file back into context, in a `read -> edit -> read -> edit` cycle. Input cost
+  is quadratic in turns once the transcript dominates the static prefix, so
+  re-injecting a growing file is the single largest cost driver measured.
+
+  `read_status/3` distinguishes three cases, and the distinction is the whole
+  design:
+
+    * `:unchanged` — this session already read *this exact range* of this path,
+      and the bytes on disk are identical (mtime **and** size **and** content
+      hash). The content is verbatim in context. `file_read` answers with a
+      short marker instead of the bytes.
+    * `:changed` — the path was read but the bytes differ now. This is the
+      `read -> edit -> verify` pattern *working correctly* and it must never be
+      suppressed; the real content is returned.
+    * `:never_read` / `:unknown` — no basis to suppress. Real content.
+
+  Three deliberate conservatism rules, because returning real content is always
+  safe and returning "unchanged" wrongly is not:
+
+    1. **Ranges are tracked individually.** An entry carries the set of
+       `offset/limit` windows actually read. A re-read with a *different*
+       window — even one wholly contained in a window already read — is
+       `:changed`-equivalent and returns real content. Only a byte-identical
+       repeat of a window already delivered is suppressed.
+    2. **Any write clears the range set.** `record_write/2` refreshes
+       `{mtime, size, hash}` (so staleness enforcement keeps working) but drops
+       every recorded range, because after an edit the model holds a *delta*,
+       not the file. The verify-read after an edit therefore always returns
+       real content.
+    3. **Compaction invalidates everything.** Each entry stamps the session's
+       compaction epoch. If a compaction has run since the read, the content
+       may have been summarised out of the transcript, so the entry no longer
+       proves the model holds it. `bump_epoch/1` is called from
+       `Agent.CompactionEvents.completed/2`.
   """
 
   use GenServer
@@ -68,17 +110,55 @@ defmodule OptimalSystemAgent.Tools.FileState do
   @doc """
   Record a successful read of `path` for `session_id`.
 
+  `opts` accepts:
+
+    * `:range` — the `offset`/`limit` window actually delivered to the model, as
+      returned by `range_key/2`. Defaults to `:whole`. The range is *added* to
+      the entry's range map when the bytes are unchanged, and *replaces* it when
+      they are not, so the map only ever describes windows of the current
+      content.
+    * `:bytes` — how many bytes that window actually delivered. Recorded so a
+      caller can tell whether replacing the window with a short notice would
+      save anything; a windowed read of a large file can deliver very few bytes.
+
   Idempotent and best-effort — a stat failure (file vanished between read and
   record) is silently ignored rather than raised.
   """
-  @spec record_read(term(), String.t()) :: :ok
-  def record_read(session_id, path) do
+  @spec record_read(term(), String.t(), keyword()) :: :ok
+  def record_read(session_id, path, opts \\ []) do
     ensure_table()
-    key = {skey(session_id), canonical(path)}
+    cpath = canonical(path)
+    key = {skey(session_id), cpath}
+    range = Keyword.get(opts, :range, :whole)
+    delivered = Keyword.get(opts, :bytes, 0)
 
-    case stat(canonical(path)) do
+    case stat(cpath) do
       {:ok, mtime, size} ->
-        entry = %{mtime: mtime, size: size, read_at: System.system_time(:second)}
+        hash = content_hash(cpath, size)
+        epoch = epoch(session_id)
+
+        # Carry forward previously-read ranges only when the bytes are provably
+        # the same content the model already holds. Any difference in
+        # hash/mtime/size — or an intervening compaction — starts a fresh set.
+        prior_ranges =
+          case safe_lookup(key) do
+            [{^key, %{hash: ^hash, mtime: ^mtime, size: ^size, epoch: ^epoch, ranges: rs}}]
+            when is_map(rs) ->
+              rs
+
+            _ ->
+              %{}
+          end
+
+        entry = %{
+          mtime: mtime,
+          size: size,
+          hash: hash,
+          epoch: epoch,
+          ranges: Map.put(prior_ranges, range, delivered),
+          read_at: System.system_time(:second)
+        }
+
         safe_insert(key, entry)
 
       :error ->
@@ -88,11 +168,159 @@ defmodule OptimalSystemAgent.Tools.FileState do
 
   @doc """
   Refresh the read-state entry after a successful write, so a subsequent edit
-  to the same file in the same turn is not flagged stale. Equivalent to
-  re-recording the current on-disk state as "read".
+  to the same file in the same turn is not flagged stale.
+
+  Deliberately **not** an alias for `record_read/3`: the write refreshes
+  `{mtime, size, hash}` so staleness enforcement keeps passing, but drops every
+  recorded range. After an edit the model holds the delta it authored, not the
+  resulting file — so the next `file_read` of that path must return real
+  content. This is the `read -> edit -> verify` exemption, and it lives here
+  rather than in the detector so every caller gets it for free.
   """
   @spec record_write(term(), String.t()) :: :ok
-  def record_write(session_id, path), do: record_read(session_id, path)
+  def record_write(session_id, path) do
+    ensure_table()
+    cpath = canonical(path)
+    key = {skey(session_id), cpath}
+
+    case stat(cpath) do
+      {:ok, mtime, size} ->
+        entry = %{
+          mtime: mtime,
+          size: size,
+          hash: content_hash(cpath, size),
+          epoch: epoch(session_id),
+          ranges: %{},
+          read_at: System.system_time(:second)
+        }
+
+        safe_insert(key, entry)
+
+      :error ->
+        :ok
+    end
+  end
+
+  @doc """
+  Canonical key for an `offset`/`limit` window, as passed to `file_read`.
+
+  `nil`/absent offset *and* limit means the whole file. Anything else is keyed
+  by the literal pair, so `{offset: 1, limit: 50}` and `{offset: nil, limit: 50}`
+  are distinct windows even if they happen to deliver the same lines — a
+  deliberate over-approximation, since the cost of being wrong in this direction
+  is one redundant read and the cost of being wrong in the other is lost content.
+  """
+  @spec range_key(term(), term()) :: :whole | {term(), term()}
+  def range_key(nil, nil), do: :whole
+  def range_key(offset, limit), do: {offset, limit}
+
+  @doc """
+  Has `session_id` already been handed this exact `range` of `path`, with the
+  bytes unchanged since?
+
+  Returns:
+    * `{:unchanged, %{bytes: n}}` — safe to answer with a marker instead of the
+      bytes; `n` is how many bytes the earlier read of this window delivered, so
+      the caller can decline when a notice would not be smaller.
+    * `:changed` — read before, but the content differs now (or a different
+      window is being asked for, or a write intervened). Return real content.
+    * `:never_read` — no entry for this `{session, path}`.
+    * `:unknown` — cannot stat / cannot hash / session exempt. Return real
+      content.
+
+  Every non-`{:unchanged, _}` answer means "return the real content", so a
+  caller may treat this as a two-way decision and still be correct.
+  """
+  @spec read_status(term(), String.t(), :whole | {term(), term()}) ::
+          {:unchanged, map()} | :changed | :never_read | :unknown
+  def read_status(session_id, path, range \\ :whole) do
+    if enforce?(session_id) do
+      ensure_table()
+      cpath = canonical(path)
+      key = {skey(session_id), cpath}
+
+      case safe_lookup(key) do
+        [{^key, %{mtime: rmtime, size: rsize, hash: rhash, epoch: repoch, ranges: ranges}}]
+        when is_map(ranges) ->
+          cond do
+            # A compaction ran since the read: the content may have been
+            # summarised out of the transcript, so the entry no longer proves
+            # the model still holds it. Never suppress across an epoch bump.
+            repoch != epoch(session_id) ->
+              :changed
+
+            not Map.has_key?(ranges, range) ->
+              :changed
+
+            true ->
+              case stat(cpath) do
+                {:ok, ^rmtime, ^rsize} ->
+                  # mtime+size agree; the hash is the tiebreak for an in-place
+                  # same-length edit inside one mtime granule.
+                  case content_hash(cpath, rsize) do
+                    ^rhash when not is_nil(rhash) ->
+                      {:unchanged, %{bytes: Map.get(ranges, range, 0)}}
+
+                    nil ->
+                      :unknown
+
+                    _other ->
+                      :changed
+                  end
+
+                {:ok, _mtime, _size} ->
+                  :changed
+
+                :error ->
+                  :unknown
+              end
+          end
+
+        _ ->
+          :never_read
+      end
+    else
+      :unknown
+    end
+  end
+
+  @doc """
+  The session's compaction epoch. Bumped by `bump_epoch/1` on every completed
+  compaction; stamped into every entry so a read recorded before a compaction
+  can never suppress a read after it.
+  """
+  @spec epoch(term()) :: non_neg_integer()
+  def epoch(session_id) do
+    ensure_table()
+
+    case safe_lookup(epoch_key(session_id)) do
+      [{_key, n}] when is_integer(n) -> n
+      _ -> 0
+    end
+  end
+
+  @doc """
+  Record that a compaction completed for `session_id`, invalidating every
+  redundant-read suppression recorded before it.
+
+  Best-effort and never raises: losing an epoch bump costs at worst one
+  suppressed read the model may have to ask for again, so this must not be able
+  to fail a compaction.
+  """
+  @spec bump_epoch(term()) :: :ok
+  def bump_epoch(session_id) do
+    ensure_table()
+    key = epoch_key(session_id)
+
+    try do
+      :ets.update_counter(@table, key, {2, 1}, {key, 0})
+      :ok
+    rescue
+      ArgumentError -> :ok
+    end
+
+    :ok
+  end
 
   @doc """
   Verify `path` may be edited/overwritten by `session_id`.
@@ -195,6 +423,27 @@ defmodule OptimalSystemAgent.Tools.FileState do
       {:ok, %{mtime: mtime, size: size}} -> {:ok, mtime, size}
       _ -> :error
     end
+  end
+
+  defp epoch_key(session_id), do: {:__compaction_epoch__, skey(session_id)}
+
+  # Above this, hashing costs more than the redundant read saves, and `file_read`
+  # refuses a whole-file read of that size anyway. `nil` means "no basis to
+  # suppress", which `read_status/3` turns into real content.
+  @max_hash_bytes 8 * 1024 * 1024
+
+  # Content hash of the file, or `nil` when it cannot be taken. `nil` is a
+  # deliberate one-way value: it can only ever cause a real read, never a
+  # suppression, because `read_status/3` matches `^rhash when not is_nil(rhash)`.
+  defp content_hash(_path, size) when size > @max_hash_bytes, do: nil
+
+  defp content_hash(path, _size) do
+    case File.read(path) do
+      {:ok, bytes} -> :crypto.hash(:sha256, bytes)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp safe_insert(key, entry) do

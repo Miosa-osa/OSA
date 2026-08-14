@@ -82,7 +82,12 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     # Catches the model spamming the same tool+args back-to-back even when the
     # calls succeed. The signature-based check below only catches repeated
     # FAILURES; this catches repeated USELESS SUCCESSES.
-    with {:ok, state} <- IdenticalCall.check(tool_calls, state),
+    # `results` is threaded in because the windowed-repeat rule keys on the
+    # RESULT bytes, not just the arguments: a repeat that returns something
+    # different is progress (read->edit->read, test->fix->test) and must not
+    # count toward a halt. Without the results it can only fall back to the
+    # consecutive-streak rule.
+    with {:ok, state} <- IdenticalCall.check(results, tool_calls, state),
          # --- Stall detection ---
          # No newly-distinct tool and no file write/edit over the last N calls.
          {:ok, state} <- Stall.check(tool_calls, state),
