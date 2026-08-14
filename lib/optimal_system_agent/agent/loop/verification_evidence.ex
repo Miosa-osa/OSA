@@ -43,9 +43,20 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
                        file_create)
 
   # Tools that produce a grounded external signal about the workspace.
-  @check_tools ~w(shell_execute file_read file_grep file_glob dir_list
-                  code_symbols semantic_search codebase_explore repl
-                  read_file grep_search list_dir)
+  # Tools that EXECUTE and can therefore FAIL. A grounded check is one the
+  # workspace can refuse.
+  @check_tools ~w(shell_execute repl code_sandbox)
+
+  # Tools that only LOOK. These used to be `@check_tools`, so re-reading a file
+  # counted as having verified the edit to it — and the gate's own directive
+  # advertises re-reading as a way to satisfy it, while `file_edit`'s prompt
+  # simultaneously tells the model "do NOT re-read the file to verify an edit
+  # that succeeded". The gate taught the model how to discharge a pending write
+  # without running anything. A read reports what a file SAYS, not whether it
+  # WORKS.
+  @read_tools ~w(file_read file_grep file_glob dir_list code_symbols
+                 semantic_search codebase_explore read_file grep_search
+                 list_dir)
 
   @doc "Record a tool call as evidence. `success` is the exit-0 / no-error signal."
   @spec record(term(), map()) :: :ok
@@ -58,6 +69,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
       paths: extract_paths(Map.get(call, :args) || %{}),
       command: extract_command(Map.get(call, :args) || %{}),
       build_or_test: build_or_test_command?(Map.get(call, :args) || %{}),
+      # Recorded separately so a gate can require a TEST — which asserts
+      # behaviour — rather than accepting a build, which only asserts it
+      # compiles. They were one predicate, so `go build` passing covered a red
+      # test.
+      test_command: test_command?(Map.get(call, :args) || %{}),
       success: Map.get(call, :success, false) == true,
       ts: System.monotonic_time()
     }
@@ -147,6 +163,85 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
   defp basename_referenced?(_entry, _path, _base), do: false
 
+  @doc """
+  The most recent check that RAN and FAILED since the last source write, if any.
+
+  Two independent studies of our own transcripts converged here. Every harness
+  examined — ours included — gates on the ABSENCE of verification and none on
+  the PRESENCE of a failure: `tool_executor` records `success: false` for a
+  failing test and the loop then discards it. Meanwhile, in 12 of 15 failed
+  benchmark instances no check ran after the final source edit at all, and
+  every check that DID run after one passed. Nobody ends on a red test; they
+  end on an untested edit.
+
+  So the two signals are different and both are needed. `pending_files/1`
+  answers "was this edit ever checked". This answers "was it checked and did
+  the check fail", which is the signal that was being thrown away.
+  """
+  @spec failing_check_since_write(String.t()) :: map() | nil
+  def failing_check_since_write(session_id) do
+    indexed = session_id |> get() |> Enum.take(-@window) |> Enum.with_index()
+
+    last_write_idx =
+      indexed
+      |> Enum.filter(fn {e, _} -> e.kind == :write end)
+      |> List.last()
+      |> case do
+        {_e, idx} -> idx
+        nil -> nil
+      end
+
+    case last_write_idx do
+      nil ->
+        nil
+
+      widx ->
+        indexed
+        |> Enum.filter(fn {e, idx} -> idx > widx and e.kind == :check and not e.success end)
+        |> List.last()
+        |> case do
+          {entry, _} -> entry
+          nil -> nil
+        end
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  Whether a TEST (not merely a build) has passed since the last source write.
+
+  `pending_files/1` accepts any successful build-or-test, so `go build`
+  succeeding discharged an edit whose test was red. This is the stricter claim
+  a completion gate should want.
+  """
+  @spec tested_since_write?(String.t()) :: boolean()
+  def tested_since_write?(session_id) do
+    indexed = session_id |> get() |> Enum.take(-@window) |> Enum.with_index()
+
+    last_write_idx =
+      indexed
+      |> Enum.filter(fn {e, _} -> e.kind == :write end)
+      |> List.last()
+      |> case do
+        {_e, idx} -> idx
+        nil -> nil
+      end
+
+    case last_write_idx do
+      # No write at all: nothing to test, so nothing is outstanding.
+      nil ->
+        true
+
+      widx ->
+        Enum.any?(indexed, fn {e, idx} ->
+          idx > widx and e.kind == :check and e.success and Map.get(e, :test_command, false)
+        end)
+    end
+  rescue
+    _ -> true
+  end
+
   # --- Classification ---
 
   defp classify(tool) do
@@ -156,6 +251,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
       name in @write_edit_tools -> :write
       write_like?(name) -> :write
       name in @check_tools -> :check
+      # A read is NOT a check. It reports what a file says, not whether the
+      # change works — and the gate's own directive advertises re-reading as a
+      # way to satisfy it, so classifying reads as checks taught the model how
+      # to discharge a pending write without running anything.
+      name in @read_tools -> :read
       check_like?(name) -> :check
       true -> :other
     end
@@ -217,20 +317,54 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
   defp extract_command(_), do: nil
 
-  @build_test_patterns [
-    ~r/\bmix\s+(compile|test|format|dialyzer|credo)\b/,
-    ~r/\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|build|lint|typecheck|tsc)\b/,
-    ~r/\bgo\s+(build|test|vet)\b/,
-    ~r/\bcargo\s+(build|test|check|clippy)\b/,
-    ~r/\b(pytest|py\.test|unittest|tox)\b/,
+  # A TEST asserts behaviour. A build only asserts it compiles.
+  #
+  # These were one list, so `go build` succeeding discharged an edit whose test
+  # was red. They are separated because they are different claims, and only the
+  # first is what a completion gate should require.
+  #
+  # `run_tests.sh` matters specifically: a benchmark harness — and plenty of
+  # real repos — put the canonical test command in a script, and the old
+  # patterns matched none of them, so the single most authoritative check
+  # available registered as nothing at all.
+  @test_patterns [
+    ~r/\bmix\s+test\b/,
+    ~r/\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b/,
+    ~r/\bgo\s+test\b/,
+    ~r/\bcargo\s+(test|nextest)\b/,
+    ~r/\b(pytest|py\.test|unittest|tox|nose2)\b/,
+    ~r/\bpython[0-9.]*\s+-m\s+(pytest|unittest)\b/,
+    ~r/\b(rspec|jest|vitest|mocha|phpunit|ctest)\b/,
+    ~r/\bruntests\.py\b/,
+    ~r/(^|[\s;&|])\.?\/?run_tests\.sh\b/,
+    ~r/(^|[\s;&|])(bash|sh)\s+\S*run_tests\.sh\b/,
+    ~r/\bmake\s+(test|check)\b/
+  ]
+
+  @build_patterns [
+    ~r/\bmix\s+(compile|format|dialyzer|credo)\b/,
+    ~r/\b(npm|pnpm|yarn|bun)\s+(run\s+)?(build|lint|typecheck|tsc)\b/,
+    ~r/\bgo\s+(build|vet)\b/,
+    ~r/\bcargo\s+(build|check|clippy)\b/,
     ~r/\b(make|cmake|gradle|mvn)\b/,
     ~r/\btsc\b/,
     ~r/\b(eslint|prettier|ruff|flake8|mypy|black)\b/
   ]
 
+  @build_test_patterns @test_patterns ++ @build_patterns
+
   defp build_or_test_command?(args) do
     case extract_command(args) do
       cmd when is_binary(cmd) -> Enum.any?(@build_test_patterns, &Regex.match?(&1, cmd))
+      _ -> false
+    end
+  end
+
+  @doc "True when the command runs TESTS, as opposed to merely building."
+  @spec test_command?(map()) :: boolean()
+  def test_command?(args) do
+    case extract_command(args) do
+      cmd when is_binary(cmd) -> Enum.any?(@test_patterns, &Regex.match?(&1, cmd))
       _ -> false
     end
   end

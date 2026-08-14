@@ -38,11 +38,55 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
       assert Ledger.pending_files(sid) == []
     end
 
-    test "a passing re-read of the changed file itself verifies it",
+    test "a re-read does NOT verify the edit — it only reports what the file says",
          %{session_id: sid, path: path} do
+      # This asserted the opposite, and that was the defect.
+      #
+      # Reads were classified as checks, so re-reading a file discharged the
+      # pending write to it. Worse, the gate's own directive ADVERTISES
+      # re-reading as a way to satisfy it, while `file_edit`'s prompt
+      # simultaneously says "do NOT re-read the file to verify an edit that
+      # succeeded" — so the gate was teaching the model how to defeat it, in
+      # direct contradiction of another prompt.
+      #
+      # A read reports what a file SAYS. Verification is about whether it
+      # WORKS, which requires running something that can fail.
       write(sid, path)
       read(sid, path, true)
-      assert Ledger.verified?(sid)
+      refute Ledger.verified?(sid)
+      assert Ledger.pending_files(sid) == [path]
+    end
+
+    test "a failing check since the last write is its own signal" do
+      # The other half, and the one every harness studied was missing: this
+      # ledger recorded `success: false` for a red test and the loop discarded
+      # it. Gating only on the ABSENCE of verification means a failure answers
+      # "was it checked?" with yes.
+      sid = "verif-fail-#{System.unique_integer([:positive])}"
+      Ledger.record(sid, %{tool: "file_edit", args: %{"path" => "/tmp/x.ex"}, success: true})
+      assert Ledger.failing_check_since_write(sid) == nil
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "pytest t.py"}, success: false})
+      assert %{} = Ledger.failing_check_since_write(sid)
+    end
+
+    test "a build passing is not a test passing" do
+      # `go build` succeeding used to discharge an edit whose test was red,
+      # because build and test were one predicate.
+      sid = "verif-build-#{System.unique_integer([:positive])}"
+      Ledger.record(sid, %{tool: "file_edit", args: %{"path" => "/tmp/x.go"}, success: true})
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "go build ./..."}, success: true})
+      refute Ledger.tested_since_write?(sid)
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "go test ./..."}, success: true})
+      assert Ledger.tested_since_write?(sid)
+    end
+
+    test "the harness's own run_tests.sh registers as a test" do
+      # It matched none of the eight original patterns, so the single most
+      # authoritative check available counted as nothing.
+      assert Ledger.test_command?(%{"command" => "./run_tests.sh"})
+      assert Ledger.test_command?(%{"command" => "bash /testbed/run_tests.sh"})
     end
 
     test "a shell command that references the changed file's basename verifies it",

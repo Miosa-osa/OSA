@@ -60,13 +60,26 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   **referenced that file** (or ran a project build/test). An unrelated
   `file_read` or a non-zero `shell_execute` no longer satisfies the gate.
   """
+  # A FAILING check is also a reason to continue, not only a missing one.
+  #
+  # This gate asked one question — "was the edit ever checked" — and a failing
+  # check answered it in the affirmative, because the ledger recorded that a
+  # check happened. `tool_executor` stores `success: false` for a red test and
+  # the loop then discarded it. Two independent studies of our own transcripts
+  # found the same thing: every harness examined gates on the ABSENCE of
+  # verification and none on the PRESENCE of a failure.
+  #
+  # The two signals are different questions and both matter:
+  #   pending_files/1               -> "this edit was never checked"
+  #   failing_check_since_write/1   -> "this edit was checked and it failed"
   @spec needs_verification?(map()) :: boolean()
   def needs_verification?(state) when is_map(state) do
     reprompts = Map.get(state, :verification_gate_prompts, 0)
     session_id = Map.get(state, :session_id)
 
     reprompts < @max_reprompts and session_id != nil and
-      VerificationEvidence.pending_files(session_id) != []
+      (VerificationEvidence.pending_files(session_id) != [] or
+         VerificationEvidence.failing_check_since_write(session_id) != nil)
   end
 
   def needs_verification?(_), do: false
