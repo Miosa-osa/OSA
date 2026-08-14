@@ -97,6 +97,30 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.StallCheckpointTest do
     setup do
       # `Bus` has no subscribe/1 — handlers are functions, and `emit/3`
       # dispatches to them. Forward the ones we care about to the test process.
+      #
+      # `dispatch_event/1` (lib/optimal_system_agent/events/bus.ex) looks up
+      # registered handlers in its ETS table at *dispatch* time, inside an
+      # async `Task` several hops removed from the original `emit/3` call —
+      # not at emit time. `async: false` only serializes test *bodies*; it
+      # does not wait for a finished test's in-flight dispatch tasks to
+      # drain before the next test's `setup` runs. So a still-inflight event
+      # emitted by an *earlier* test in this file (e.g. the 24- or
+      # 300-detection drives in the sibling `describe` blocks, all of which
+      # emit through this exact bus) can be looked up and delivered to
+      # *this* test's freshly-registered handler once it lands. Every test
+      # in this module shares the literal session id
+      # `"stall-checkpoint-test"`, so filtering on session id alone can't
+      # tell the two apart — the 24th detection of an unrelated test looks
+      # identical to a real detection 24 in this test's own run. Root cause
+      # confirmed by observation: a handler that collected exactly 3
+      # messages returned `[2, 3, 24]` — a spurious 24 from another test's
+      # stream mixed in with 2 genuine detections while detection 1 was
+      # still in flight.
+      #
+      # Give each test in this block its own session id so the handler can
+      # filter out any event that did not originate from it, no matter when
+      # it happens to arrive.
+      session_id = "stall-checkpoint-test-#{System.unique_integer([:positive])}"
       test_pid = self()
 
       # `Bus.emit/3` wraps the caller's payload in a CloudEvents-shaped envelope
@@ -105,25 +129,24 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.StallCheckpointTest do
         Bus.register_handler(:system_event, fn envelope ->
           data = Map.get(envelope, :data, %{})
 
-          if is_map(data) and Map.get(data, :event) == :stall_checkpoint do
+          if is_map(data) and Map.get(data, :event) == :stall_checkpoint and
+               Map.get(data, :session_id) == session_id do
             send(test_pid, {:checkpoint, data})
           end
 
           :ok
         end)
 
-      # Handler registration is a GenServer call but dispatch is a supervised
-      # task; give the table a beat before the first emit.
-      Process.sleep(50)
-
       on_exit(fn -> Bus.unregister_handler(:system_event, ref) end)
-      :ok
+      {:ok, session_id: session_id}
     end
 
-    test "each exhausted stall emits a stall_checkpoint carrying its count" do
-      tick_n(base_state(), 3)
+    test "each exhausted stall emits a stall_checkpoint carrying its count", %{
+      session_id: session_id
+    } do
+      tick_n(base_state(%{session_id: session_id}), 3)
 
-      events = drain_checkpoints()
+      events = drain_checkpoints(3)
 
       assert length(events) == 3,
              "every detection must be recorded, or '95 detections' stays unknowable"
@@ -131,13 +154,13 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.StallCheckpointTest do
       # Sorted: `Bus.emit/3` dispatches each handler in its own supervised task,
       # so delivery order is not guaranteed (observed: 2, 1, 3).
       assert events |> Enum.map(& &1.detection) |> Enum.sort() == [1, 2, 3]
-      assert Enum.all?(events, &(&1.session_id == "stall-checkpoint-test"))
+      assert Enum.all?(events, &(&1.session_id == session_id))
       assert Enum.all?(events, &is_integer(&1.window))
     end
 
-    test "the event says whether a re-plan was injected" do
-      tick_n(base_state(), 2)
-      events = drain_checkpoints()
+    test "the event says whether a re-plan was injected", %{session_id: session_id} do
+      tick_n(base_state(%{session_id: session_id}), 2)
+      events = drain_checkpoints(2)
 
       by_detection =
         events
@@ -147,11 +170,28 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.StallCheckpointTest do
       assert by_detection == [{1, true}, {2, false}]
     end
 
-    defp drain_checkpoints(acc \\ []) do
-      receive do
-        {:checkpoint, payload} -> drain_checkpoints([payload | acc])
-      after
-        500 -> Enum.reverse(acc)
+    # Collects exactly `n` checkpoint events, blocking until each one arrives.
+    #
+    # `Bus.emit/3` dispatches through three nested `Task.Supervisor.start_child`
+    # hops (do_emit -> goldrush router -> handler) before this process's mailbox
+    # sees a message (see `lib/optimal_system_agent/events/bus.ex`). The previous
+    # implementation waited for a 500ms *quiet gap* after the last message and
+    # then assumed delivery was complete — under scheduler load (e.g. this exact
+    # file run back-to-back) the 3rd hop can legitimately take longer than
+    # 500ms end-to-end, so that gap-based heuristic under-collected and the test
+    # failed on a correct system (measured: 1-3 failures per 10-20 runs, always
+    # asserting the collected length was short). Waiting for exactly `n`
+    # messages removes that guess entirely: correctness no longer depends on
+    # inter-arrival timing, only on eventual delivery within a generous
+    # per-message bound that only fires on a genuine hang.
+    defp drain_checkpoints(n, timeout \\ 5_000) do
+      for i <- 1..n do
+        receive do
+          {:checkpoint, payload} -> payload
+        after
+          timeout ->
+            flunk("timed out waiting for stall_checkpoint ##{i} of #{n} (bus dispatch hung?)")
+        end
       end
     end
   end
