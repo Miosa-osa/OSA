@@ -622,7 +622,69 @@ Verification: `mix test test/agent/loop/tool_arg_metrics_test.exs` → 9 tests, 
 Nothing else was shipped. Every other item either changes what the model sees, changes a
 security boundary, or adds a tool — none is unambiguously safe.
 
----
+### 8.1 Follow-up — the pair reached only one of three emission sites
+
+`ToolArgMetrics` was wired to the `:tool_call` **`:start`** event only. Carrying it there
+is necessary and not sufficient, and the gap was total on the path that matters most.
+
+**Three sites, two of them still lossy:**
+
+1. **`:end` phase** (`tool_executor.ex`, both the `Bus.emit` and the session-topic
+   broadcast) carried only the display hint. `:end` is the *only* phase with `success`
+   and `duration_ms`, so any analysis of **completed** calls reads it — and was pushed
+   straight back onto the clipped field. Now carries the pair.
+2. **`mix osa.run --format stream-json`** — the one output format documented as
+   machine-readable — hand-picks its fields and dropped the pair. Now passes it through.
+3. **The SSE broadcast** (which the bench driver writes out as `osa-events.jsonl`) is a
+   whole-map encode, so it inherits the pair automatically.
+
+**And a defect found while verifying (2): `--format stream-json` emitted no tool events
+at all.** `Events.Bus.dispatch_event/1` hands a handler the CloudEvent **envelope**
+(`%{type:, id:, time:, source:, session_id:, data: %{…}}`), not the payload passed to
+`Bus.emit/3`. `session_id` is promoted to the envelope so the handler's session guard
+passed; every other field lives under `:data`. `payload.name` therefore raised
+`key :name not found`, the Bus logged `Handler crash for tool_call`, and the event went
+to the DLQ. Both handlers in `osa.run` had it — the `:system_event` one identically, so
+token and thinking deltas were dropped too.
+
+Confirmed on a live `glm-5.2:cloud` run that made 5 tool calls and streamed **0** of
+them, emitting only the closing `result` line. Both handlers now unwrap `:data`.
+
+**Verification — real session, faithful field, `osa.run --format stream-json`:**
+
+```
+start events: 5
+dupes via clipped args : 2 (40.0%)
+dupes via args_hash    : 1 (20.0%)
+  file_read      hint= 104B real= 136B 10132f176195   .../prunelab/sample.txt
+  file_read      hint= 104B real= 136B 33cb98c5d064   .../prunelab/sample.txt
+  file_read      hint= 101B real= 112B c7ddc77b9a34   .../prunelab/calc.py
+  shell_execute  hint=  16B real= 132B 640585c6cbf2   wc -l sample.txt
+  shell_execute  hint=  16B real= 132B 640585c6cbf2   wc -l sample.txt
+```
+
+The run was built to contain one of each case, and the two fields disagree in **both**
+directions:
+
+- The first two `file_read`s are different offset windows of one file. The hint renders
+  both as the bare path, so the clipped field invents a duplicate that is not there —
+  this is the `schemelike` 49-offset-window collapse in miniature.
+- The two `shell_execute`s are genuinely the same call, repeated. Both fields agree.
+
+So the clipped field reports 40% and the faithful field reports 20%: it rejected the
+fake duplicate and kept the real one. The same discrimination, at scale, is the whole
+difference between the withdrawn 43.5% and the corrected 9.4%.
+
+`shell_execute`'s hint is 16 bytes against 132 real — the hint is not merely clipped at
+60, it drops every argument but one.
+
+**Secrets:** the pair is a digest — a byte count and a truncated SHA-256, never argument
+text. Tool arguments routinely carry file contents and can carry credentials, so full
+args were deliberately **not** logged; `arg_bytes` + `arg_hash` answer "how big" and "is
+this the same call" without persisting anything sensitive. Pinned by a test that puts a
+fake key in a command and asserts it appears nowhere in the event.
+
+Tests: `test/optimal_system_agent/agent/loop/tool_event_faithful_args_test.exs` (7).
 
 ## 9. Caveats
 

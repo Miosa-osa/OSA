@@ -146,15 +146,32 @@ defmodule Mix.Tasks.Osa.Run do
     _ -> nil
   end
 
+  # `Events.Bus.dispatch_event/1` hands a handler the whole CloudEvent
+  # ENVELOPE — `%{type:, id:, time:, source:, session_id:, data: %{...}}` —
+  # not the payload that was passed to `Bus.emit/3`. `session_id` is promoted
+  # to the envelope, so the `== session_id` guard below passed; every other
+  # field the handlers wanted lives one level down under `:data`.
+  #
+  # The consequence was total and silent: `payload.name` raised `key :name not
+  # found`, the Bus logged "Handler crash for tool_call", the event went to
+  # the DLQ, and `mix osa.run --format stream-json` — the one output format
+  # documented as machine-readable — emitted **no token and no tool event at
+  # all**, only the closing `result` line. Confirmed on a live glm-5.2 run
+  # that made 5 tool calls and streamed 0 of them.
+  defp event_payload(%{data: data}) when is_map(data), do: data
+  defp event_payload(payload), do: payload
+
   defp register_stream_handler(session_id) do
-    OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
-      if Map.get(payload, :session_id) == session_id do
+    OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn envelope ->
+      payload = event_payload(envelope)
+
+      if Map.get(envelope, :session_id) == session_id do
         case Map.get(payload, :event) do
           :streaming_token ->
-            IO.puts(Jason.encode!(%{type: "token", delta: payload.delta}))
+            IO.puts(Jason.encode!(%{type: "token", delta: Map.get(payload, :delta)}))
 
           :thinking_delta ->
-            IO.puts(Jason.encode!(%{type: "thinking", delta: payload.delta}))
+            IO.puts(Jason.encode!(%{type: "thinking", delta: Map.get(payload, :delta)}))
 
           _ ->
             :ok
@@ -162,14 +179,24 @@ defmodule Mix.Tasks.Osa.Run do
       end
     end)
 
-    OptimalSystemAgent.Events.Bus.register_handler(:tool_call, fn payload ->
-      if Map.get(payload, :session_id) == session_id do
+    OptimalSystemAgent.Events.Bus.register_handler(:tool_call, fn envelope ->
+      payload = event_payload(envelope)
+
+      if Map.get(envelope, :session_id) == session_id do
+        # `args` here is `Loop.ToolHint.summarize/1` — a DISPLAY string that
+        # clips a shell command at 60 characters and reduces every file tool
+        # to its bare path. This handler hand-picks its fields, so it was
+        # silently re-introducing that lossiness into the one output format
+        # meant to be machine-read. `args_bytes` / `args_hash` (see
+        # `Loop.ToolArgMetrics`) are the faithful quantities and ride along.
         IO.puts(
           Jason.encode!(%{
             type: "tool_use",
-            name: payload.name,
-            phase: to_string(payload.phase),
-            args: Map.get(payload, :args)
+            name: Map.get(payload, :name),
+            phase: to_string(Map.get(payload, :phase)),
+            args: Map.get(payload, :args),
+            args_bytes: Map.get(payload, :args_bytes),
+            args_hash: Map.get(payload, :args_hash)
           })
         )
       end
