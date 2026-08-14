@@ -212,6 +212,22 @@ def set_claude_cli_state(**fields) -> None:
     CLAUDE_CLI_STATE.update(fields)
 
 
+#: Every POST the stub received, as `(path, body)`, oldest first.
+#: Appended by `_Handler.do_POST`; read by the tests through `posts_since`.
+POSTS: list[tuple[str, str]] = []
+
+
+def post_mark() -> int:
+    """Current length of `POSTS`, to bracket a later `posts_since`."""
+    return len(POSTS)
+
+
+def posts_since(mark: int, path: str | None = None) -> list[tuple[str, str]]:
+    """POSTs recorded after `mark`, optionally filtered to one path."""
+    tail = POSTS[mark:]
+    return [p for p in tail if path is None or p[0] == path]
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Silence the default per-request stderr logging: the harness's own output
     # is the signal, and a boot storms this with a dozen lines.
@@ -286,8 +302,13 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b""
+        # Record what actually arrived. A layout harness can only ever prove
+        # that the screen looks right; the reported bug ("I send a prompt and
+        # nothing happens") needs the other half — whether the keystroke turned
+        # into a REQUEST. Without this, a build that renders a perfect composer
+        # and dispatches nothing passes every test here.
+        POSTS.append((path, raw.decode("utf-8", "replace")))
         if path == "/api/v1/auth/login" or path == "/api/v1/auth/refresh":
             return self._json(_LOGIN)
         if path == "/api/v1/sessions":

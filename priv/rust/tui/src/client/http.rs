@@ -14,6 +14,36 @@ use super::types::*;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Ceiling for the endpoints that hold a connection open for a WHOLE TURN.
+///
+/// `POST /api/v1/orchestrate` is not a request/response call; it is a long-poll
+/// the backend answers only once the turn is finished. `DEFAULT_TIMEOUT` (300s)
+/// therefore was not a network-health guard on that path — it was a hidden,
+/// undocumented ceiling on how long ANY turn was allowed to take, and it sat
+/// BELOW every ceiling the backend enforces:
+///
+/// | ceiling                                                  | value |
+/// |----------------------------------------------------------|-------|
+/// | this client's `DEFAULT_TIMEOUT`                           | 300s  |
+/// | `ClaudeCli.@default_timeout_ms` (one provider call)       | 600s  |
+/// | `Anthropic` receive_timeout with thinking on              | 600s  |
+/// | `LLMClient` absolute safety net (one provider call)       | 3600s |
+///
+/// So a turn between 5 and 10 minutes died HERE, as
+/// `Orchestrate failed: error decoding response body` — a message that names
+/// neither the timeout nor the turn — while the backend went on running it to
+/// its own limit, holding the session busy and billing for work whose answer
+/// could no longer be delivered. A turn is also not one provider call: it is a
+/// loop of them plus tool execution, so 600s is not its ceiling either.
+///
+/// The turn's ceiling belongs to the backend, which owns the cancel flag, the
+/// idle watchdog and the absolute net — and to the user, who can interrupt.
+/// This value exists only so a genuinely wedged socket cannot hang the TUI
+/// forever; it is deliberately ABOVE the backend's own absolute net so the
+/// backend's diagnosis always arrives first and the user is told what happened
+/// instead of being handed a decode error.
+const TURN_TIMEOUT: Duration = Duration::from_secs(3900);
+
 /// Pull the backend's human-readable `details` out of an API error string.
 ///
 /// `ApiClient::get` formats non-2xx as `HTTP 404 Not Found from /path: {json}`,
@@ -230,7 +260,7 @@ impl ApiClient {
 
     /// POST /api/v1/orchestrate
     pub async fn orchestrate(&self, req: &OrchestrateRequest) -> Result<OrchestrateResponse> {
-        let resp = self.post("/api/v1/orchestrate", req).await?;
+        let resp = self.post_turn("/api/v1/orchestrate", req).await?;
         Ok(resp.json().await?)
     }
 
@@ -584,7 +614,7 @@ impl ApiClient {
 
     /// POST /api/v1/orchestrate/complex
     pub async fn complex_task(&self, req: &ComplexTaskRequest) -> Result<ComplexTaskResponse> {
-        let resp = self.post("/api/v1/orchestrate/complex", req).await?;
+        let resp = self.post_turn("/api/v1/orchestrate/complex", req).await?;
         Ok(resp.json().await?)
     }
 
@@ -1352,8 +1382,30 @@ impl ApiClient {
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
+        self.post_with_timeout(path, body, None).await
+    }
+
+    /// POST JSON with auth header, for an endpoint that holds the connection
+    /// open for a whole turn. See `TURN_TIMEOUT`.
+    async fn post_turn<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        self.post_with_timeout(path, body, Some(TURN_TIMEOUT)).await
+    }
+
+    async fn post_with_timeout<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.post(&url).json(body);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         if let Ok(token) = self.auth.read().await.require_token() {
             req = req.header("Authorization", format!("Bearer {}", token));
         }

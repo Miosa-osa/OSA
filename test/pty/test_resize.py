@@ -24,7 +24,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from osa_pty import COMPOSER_TOP, SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
-from stub_backend import StubBackend, set_claude_cli_state  # noqa: E402
+from stub_backend import (  # noqa: E402
+    StubBackend,
+    post_mark,
+    posts_since,
+    set_claude_cli_state,
+)
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
 STUB_PORT = 12787
@@ -243,6 +248,111 @@ def test_small_viewport(backend: StubBackend) -> None:
         s.resize(80, 24)
         s.pump(SETTLE * 2)
         assert_single_live_region(s, "after growing back to 80x24")
+
+
+#: Widths a narrow-terminal user actually has. 54 is the one from the report
+#: (a half-screen split on a laptop); 40 is a phone-sized SSH pane; 60 is the
+#: width at which the status bar starts truncating its right-hand chips.
+NARROW_WIDTHS = (40, 54, 60)
+
+#: The subset of `SINGLETON_BANDS` whose MARKER is width-stable.
+#:
+#: `assert_single_live_region` cannot be used below ~60 columns, and the reason
+#: is the markers, not the product: `COMPOSER_HINTS` matches the literal
+#: "/ commands · @ files", which the bottom divider correctly drops when there
+#: is no room for it, and `COMPOSER_TOP` (`^─{20,}$`) starts matching the BOTTOM
+#: divider too once that divider has shed its hint text and become a bare rule.
+#: So a perfectly healthy 40-column screen reads as `composer_hints: 0,
+#: composer_top: 2`. Counting the prompt glyph and the status chip instead keeps
+#: the "exactly one live region" assertion honest at every width.
+NARROW_SINGLETONS = {
+    "composer": SINGLETON_BANDS["composer"],
+    "status": SINGLETON_BANDS["status"],
+}
+
+
+def assert_single_live_region_narrow(session: PtySession, context: str) -> None:
+    counts = {name: session.count(pat) for name, pat in NARROW_SINGLETONS.items()}
+    wrong = {name: n for name, n in counts.items() if n != 1}
+    if wrong:
+        raise AssertionError(
+            f"{context}: expected exactly one of each width-stable live-region "
+            f"band, got {counts} (offending: {wrong}).\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+
+
+def test_narrow_terminal_still_dispatches(backend: StubBackend) -> None:
+    """A prompt typed in a NARROW terminal still reaches the backend.
+
+    Reported as "in a small terminal I send requests and nothing happens at
+    all". The composer renders, the message echoes, and then the screen sits
+    there — which is consistent with two completely different faults, and the
+    whole cost of that report was not knowing which:
+
+      * the keystroke never became a request (an input/dispatch fault, ours), or
+      * the request went out and the answer never came (a provider fault).
+
+    Nothing in the suite could tell those apart, because every existing test
+    here asserts on the SCREEN and both faults look identical on the screen.
+    So this one asserts on the WIRE: after Enter, `POST /api/v1/orchestrate`
+    must have been received, carrying the typed text.
+
+    Booted narrow rather than resized narrow on purpose. A resize takes the
+    SIGWINCH path and re-runs the arbiter; a user who opens a 54-column window
+    and types into it never touches that path, and it is the untouched path
+    that was suspected.
+
+    (The answer for the reported build turned out to be the second fault — the
+    request was dispatched at every width measured. This test exists so that
+    stays true, and so the next report of this shape is one bisection instead
+    of an investigation.)
+    """
+    for cols in NARROW_WIDTHS:
+        with PtySession(backend.base_url, cols=cols, rows=15) as s:
+            s.boot()
+            assert_single_live_region_narrow(s, f"after boot at {cols}x15")
+
+            mark = post_mark()
+            s.write(b"HELLO")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            s.pump(SETTLE * 3)
+
+            sent = posts_since(mark, "/api/v1/orchestrate")
+            if not sent:
+                raise AssertionError(
+                    f"at {cols}x15 the prompt was typed and submitted but no "
+                    f"POST /api/v1/orchestrate arrived — the keystroke never "
+                    f"became a request.\n"
+                    f"POSTs seen after Enter: "
+                    f"{[p for p, _ in posts_since(mark)] or 'none'}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "HELLO" not in sent[0][1]:
+                raise AssertionError(
+                    f"at {cols}x15 the orchestrate request did not carry the "
+                    f"typed text. Body was: {sent[0][1][:400]}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # The live region must also still be intact after the submit —
+            # narrow widths are where the composer band has least room to
+            # absorb the echoed message.
+            #
+            # Only the status bar is counted here. The composer's prompt glyph
+            # cannot be: a committed user message renders its own `❯ You` header
+            # into the transcript, so `COMPOSER` legitimately matches twice once
+            # anything has been said, and asserting one would fail a correct
+            # build. The status bar is the band that stays a singleton for the
+            # whole session.
+            status_rows = s.count(NARROW_SINGLETONS["status"])
+            if status_rows != 1:
+                raise AssertionError(
+                    f"after submit at {cols}x15: expected exactly one status "
+                    f"bar, got {status_rows}.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
 
 
 def test_provider_surface(backend: StubBackend) -> None:
@@ -894,6 +1004,7 @@ TESTS = [
     test_resize_emits_nothing_that_deposits_into_scrollback,
     test_height_resize,
     test_small_viewport,
+    test_narrow_terminal_still_dispatches,
     test_provider_surface,
     test_one_lone_escape_closes_a_dialog,
     test_provider_picker_shows_account_plan_and_a_limit_meter,
