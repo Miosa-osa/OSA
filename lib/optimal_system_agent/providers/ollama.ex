@@ -237,10 +237,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       }
 
       body_map =
-        if tools != [] and model_supports_tools?(model) do
-          Map.put(body_map, :tools, format_tools(tools))
-        else
-          body_map
+        case {tools, tools_decision(model, opts)} do
+          {[], _} ->
+            body_map
+
+          {_, {true, _source}} ->
+            Map.put(body_map, :tools, format_tools(tools))
+
+          {_, {false, source}} ->
+            report_tools_stripped(model, length(tools), source)
+            body_map
         end
 
       body = Jason.encode!(body_map)
@@ -577,33 +583,94 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec model_supports_tools?(String.t()) :: boolean()
   def model_supports_tools?(model_name) do
-    # OllamaCloud first: its flags were read from the daemon's own /api/show
-    # `capabilities`, so a hosted model is never gated off tools just because
-    # its NAME lacks a known prefix (e.g. "gpt-oss:120b-cloud").
-    case OptimalSystemAgent.Providers.OllamaCloud.capability(model_name, :tools) do
+    {supported?, _source} = tools_decision(model_name, [])
+    supported?
+  end
+
+  @doc """
+  Whether to send tool schemas for `model`, and the rule that decided it.
+
+  `{boolean, source}` where source is `:opt`, `:config`, `:cloud_capability`,
+  `:catalog`, `:name_prefix`, `:tiny_model_guard` or `:unknown_model_default`.
+
+  Same shape as `reasoning_decision/2`, and for the same reason. Stripping tools
+  turns an agent into a chatbot — it cannot read a file, run a command, or
+  finish a task — and this decision used to be made by a bare capability
+  predicate with no override and a `Logger.debug`, so the most total capability
+  loss in the provider was also its quietest.
+
+  The change is confined to the UNKNOWN case. Authoritative answers are
+  unchanged: `OllamaCloud.capability/2` reads the daemon's own `/api/show`
+  `capabilities`, and `ModelLimits.tool_call/2` is the catalog; both are
+  believed in either direction. The size guard is unchanged too — a 1B/3B model
+  handed 23 tool schemas emits malformed calls rather than none, which is a real
+  failure and a real guard.
+
+  What flipped is a model whose NAME merely lacks a known prefix. That is not
+  evidence of anything: `@tool_capable_prefixes` is a fixed list of families,
+  and every model released after it was written fails it. Defaulting that to
+  "no tools" meant an unrecognised name silently produced a crippled agent.
+  It now defaults to sending them, so an actually tool-less model fails loudly
+  at the provider — recoverable, visible, and correct far more often. Identical
+  reasoning to `openai_compat.deepseek_endpoint?(nil) -> true`.
+
+  `OLLAMA_TOOLS=false` / `opts[:tools_enabled]` override both directions.
+  """
+  @spec tools_decision(String.t() | nil, keyword()) :: {boolean(), atom()}
+  def tools_decision(model_name, opts \\ []) do
+    cond do
+      is_boolean(val = Keyword.get(opts, :tools_enabled)) ->
+        {val, :opt}
+
+      is_boolean(cfg = Application.get_env(:optimal_system_agent, :ollama_tools)) ->
+        {cfg, :config}
+
       true ->
-        true
+        case OptimalSystemAgent.Providers.OllamaCloud.capability(model_name, :tools) do
+          true ->
+            {true, :cloud_capability}
 
-      false ->
-        false
+          false ->
+            {false, :cloud_capability}
 
-      nil ->
-        case OptimalSystemAgent.Providers.ModelLimits.tool_call(:ollama, model_name) do
-          true -> true
-          false -> false
-          _ -> heuristic_supports_tools?(model_name)
+          nil ->
+            case OptimalSystemAgent.Providers.ModelLimits.tool_call(:ollama, model_name) do
+              true -> {true, :catalog}
+              false -> {false, :catalog}
+              _ -> heuristic_tools_decision(model_name)
+            end
         end
     end
   end
 
-  # Name+size heuristic used only when the Catalog has no authoritative
-  # tool_call flag for the model.
-  defp heuristic_supports_tools?(model_name) do
-    name = String.downcase(model_name)
+  # Name+size heuristic, used only when neither the daemon nor the catalog has
+  # an authoritative answer.
+  defp heuristic_tools_decision(model_name) do
+    name = String.downcase(to_string(model_name))
 
-    Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1)) and
-      not String.contains?(name, ":1.") and
-      not String.contains?(name, ":3b")
+    cond do
+      # No model named. Not "unknown family" — no request at all.
+      name == "" ->
+        {false, :no_model}
+
+      # An embedding model has no chat completion endpoint, let alone tool
+      # calling. Unlike the prefix list this is a real capability fact and not a
+      # guess about an unfamiliar name, so it stays a hard no.
+      String.contains?(name, "embed") or String.contains?(name, "minilm") ->
+        {false, :embedding_model}
+
+      # A model this small cannot hold the schemas AND the task. Kept.
+      String.contains?(name, ":1.") or String.contains?(name, ":3b") or
+          String.contains?(name, ":1b") ->
+        {false, :tiny_model_guard}
+
+      Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1)) ->
+        {true, :name_prefix}
+
+      # Unknown family. Not evidence of anything — send the tools.
+      true ->
+        {true, :unknown_model_default}
+    end
   end
 
   # Build the Ollama `options` map with a right-sized context window.
@@ -797,12 +864,37 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         body
 
       tools ->
-        if model_supports_tools?(model) do
-          Map.put(body, :tools, format_tools(tools))
-        else
-          Logger.debug("[Ollama] Skipping tools for #{model} (too small / not tool-capable)")
-          body
+        case tools_decision(model, opts) do
+          {true, _source} ->
+            Map.put(body, :tools, format_tools(tools))
+
+          {false, source} ->
+            report_tools_stripped(model, length(tools), source)
+            body
         end
+    end
+  end
+
+  # An agent with no tools cannot do anything, so this must never be a decision
+  # someone has to go looking for. `:warning`, not `:debug` — and deduped per
+  # process on {model, source} so a long session says it once rather than once
+  # per turn.
+  defp report_tools_stripped(model, count, source) do
+    :telemetry.execute(
+      [:osa, :ollama, :tools_stripped],
+      %{tool_count: count},
+      %{model: model, reason: source}
+    )
+
+    key = {model, source}
+
+    if Process.get(:osa_ollama_tools_stripped) != key do
+      Process.put(:osa_ollama_tools_stripped, key)
+
+      Logger.warning(
+        "[Ollama] #{count} tool schemas withheld from #{model} (#{source}) — this turn " <>
+          "cannot call any tool. Override with OLLAMA_TOOLS=true."
+      )
     end
   end
 
@@ -814,6 +906,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   (W4: "no thinking → clean no-op, never crash").
   """
   def apply_think(body, model, opts), do: maybe_add_think(body, model, opts)
+
+  @doc """
+  Test seam: apply the tool-schema decision to a request body, without a live
+  HTTP call. Withholding tools is the largest capability loss this provider can
+  inflict — the agent keeps talking and stops being able to act — so it needs a
+  seam that can be asserted on directly rather than only through a live turn.
+  """
+  def apply_tools(body, model, opts), do: maybe_add_tools(body, model, opts)
 
   # Controls the `think` field for Ollama reasoning models (kimi, qwen3 thinking, etc.)
   # See `reasoning_decision/2` for the rule and why it keys off SERVING MODE.

@@ -356,6 +356,18 @@ config :optimal_system_agent,
        "false" -> false
        _ -> nil
      end),
+  # OLLAMA_TOOLS: force tool schemas to be sent ("true") or withheld ("false")
+  # for ALL Ollama models, overriding `Ollama.tools_decision/2` in both
+  # directions. Default nil → the daemon's /api/show capabilities and the model
+  # catalog decide; a model too small to hold the schemas is still withheld, and
+  # a model of an unrecognised family now gets them (an unknown name is not
+  # evidence that a model lacks tool calling).
+  ollama_tools:
+    (case System.get_env("OLLAMA_TOOLS") do
+       "true" -> true
+       "false" -> false
+       _ -> nil
+     end),
 
   # MIOSA / Optimal — routes through openai_compat with optimal.miosa.ai base URL
   miosa_api_key: System.get_env("MIOSA_API_KEY"),
@@ -594,8 +606,22 @@ config :optimal_system_agent,
   # Plan mode (opt-in via OSA_PLAN_MODE=true)
   plan_mode_enabled: System.get_env("OSA_PLAN_MODE") == "true",
 
-  # Extended thinking
-  thinking_enabled: System.get_env("OSA_THINKING_ENABLED") == "true",
+  # Extended thinking (Anthropic). Default ON.
+  #
+  # This used to default OFF, which meant every OSA user on Claude ran with
+  # extended thinking disabled unless they knew to set an env var — on the
+  # provider whose models are built around it. Reasoning is worth more than any
+  # harness change we make (cline measured 68.5% vs 57.3% on Terminal-Bench 2.0
+  # for glm-5.2 with and without it).
+  #
+  # The usual reason to default a capability off is that it can hurt. Checked,
+  # and it does not here: enabling thinking RAISES the HTTP timeout (120s -> 600s,
+  # anthropic.ex:101/271) rather than lowering it, and the Anthropic body carries
+  # no `temperature` field, so the "temperature must be 1 with extended thinking"
+  # 400 cannot fire. `Effort.fast_mode?/0` still suppresses it per turn.
+  #
+  # Set OSA_THINKING_ENABLED=false to restore the old behaviour.
+  thinking_enabled: System.get_env("OSA_THINKING_ENABLED") != "false",
 
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.

@@ -308,6 +308,50 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
     end
   end
 
+  @doc """
+  Map an OSA effort level onto a Gemini 2.5 `thinkingBudget` token count.
+
+  Returns `nil` for a model that does not take a raw budget.
+
+  The 2.5 family is the sibling of `thinking_level/2`, and it had no such
+  mapping: `Google.put_thinking_budget/2` hardcoded 8192 and never consulted
+  effort, so the whole `Agent.Effort` ladder was inert on that path — five
+  tiers, one byte-identical request. This is the same defect
+  `put_effort_config/2` fixed for Anthropic adaptive thinking.
+
+  The ladder is clamped into the range every 2.5 variant accepts:
+  2.5 Pro takes 128–32,768 and CANNOT be disabled; Flash takes 0–24,576;
+  Flash-Lite takes 0 or 512–24,576. 24,576 is therefore the common ceiling and
+  128 the common floor. Nothing maps to 0 — on Flash that would disable
+  thinking outright, which is exactly the silent capability loss this exists to
+  prevent. As with `thinking_level/2`, "off" means the model's floor, not
+  omission.
+  """
+  @spec thinking_budget(String.t() | nil, term()) :: pos_integer() | nil
+  def thinking_budget(id, effort) do
+    if thinking_mode(id) == :budget, do: effort_to_budget(effort), else: nil
+  end
+
+  # Floor is Pro's minimum, ceiling is Flash/Flash-Lite's maximum, so every
+  # rung is legal on every 2.5 variant.
+  defp effort_to_budget(effort) do
+    case effort |> to_string() |> String.trim() |> String.downcase() do
+      "off" -> 128
+      "none" -> 128
+      "fast" -> 128
+      "low" -> 2_048
+      "medium" -> 8_192
+      "high" -> 16_384
+      "xhigh" -> 24_576
+      "max" -> 24_576
+      "ultra" -> 24_576
+      # Same rule as `effort_to_level/1`: a corrupt persisted effort lands mid
+      # ladder — 8,192, the value this path used unconditionally before — rather
+      # than de-escalating to the floor.
+      _ -> 8_192
+    end
+  end
+
   defp effort_to_level(effort) do
     case effort |> to_string() |> String.trim() |> String.downcase() do
       "off" -> "minimal"

@@ -156,6 +156,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
     |> put_inference_config(opts)
     |> put_tool_config(opts)
+    |> put_reasoning_config(model, opts)
     # Every provider gets the image byte-budget, not just Anthropic. Without it
     # an oversized image body is a hard provider error instead of a
     # degraded-but-honest request.
@@ -476,6 +477,159 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
       |> maybe_put("topP", Keyword.get(opts, :top_p))
 
     if config == %{}, do: body, else: Map.put(body, "inferenceConfig", config)
+  end
+
+  @doc """
+  Whether this turn asks Bedrock for extended reasoning, and why.
+
+  `{budget_tokens | nil, source}` — source is `:opt`, `:effort`,
+  `:disabled_by_config`, `:fast_mode`, `:effort_off` or `:model_unsupported`.
+
+  ## Why this exists
+
+  Bedrock had **no reasoning path at all**. The whole `Agent.Effort` ladder was
+  a silent no-op here: five tiers produced five byte-identical requests, on a
+  provider whose default model is `us.anthropic.claude-sonnet-4-5` — a model
+  built around extended thinking. Same defect class as the Google `:budget`
+  branch and the Anthropic-native gate, and the same cost: reasoning is worth
+  roughly 10-11 points (cline's published Terminal-Bench 2.0 run on glm-5.2:
+  68.5% with, 57.3% without).
+
+  ## Wire shape
+
+  Converse carries model-specific parameters in `additionalModelRequestFields`,
+  and Anthropic models on Bedrock take:
+
+      "additionalModelRequestFields": {
+        "reasoning_config": {"type": "enabled", "budget_tokens": N}
+      }
+
+  Two constraints come with it, both enforced in `put_reasoning_config/3`:
+  `budget_tokens` must be >= 1024 and strictly less than
+  `inferenceConfig.maxTokens`, and `temperature` / `topP` must not be sent —
+  Bedrock rejects the request otherwise. That is why this runs AFTER
+  `put_inference_config/2`: it has to be able to take those keys back out.
+
+  > #### Unverified against a live call {: .warning}
+  >
+  > There are no Bedrock credentials on this machine. This is implemented
+  > against AWS's documented Converse request shape and tested against
+  > synthetic payloads through `build_request_body/3` only. **No request built
+  > by this code has been sent to Bedrock.** Treat the wire shape as inferred,
+  > not confirmed.
+  """
+  @spec reasoning_decision(String.t() | nil, keyword()) :: {pos_integer() | nil, atom()}
+  # Anthropic's minimum. Below it Bedrock refuses the request.
+  @min_reasoning_budget 1_024
+
+  def reasoning_decision(model, opts \\ []) do
+    alias OptimalSystemAgent.Agent.Effort
+
+    cond do
+      not reasoning_model?(model) ->
+        {nil, :model_unsupported}
+
+      is_integer(explicit = Keyword.get(opts, :thinking_budget)) and explicit > 0 ->
+        {max(explicit, @min_reasoning_budget), :opt}
+
+      not Application.get_env(:optimal_system_agent, :thinking_enabled, true) ->
+        {nil, :disabled_by_config}
+
+      Effort.fast_mode?() ->
+        {nil, :fast_mode}
+
+      true ->
+        case Effort.thinking_budget() do
+          n when is_integer(n) and n > 0 -> {max(n, @min_reasoning_budget), :effort}
+          # The `:off` rung is thinking_budget: 0 — an explicit "no thinking",
+          # not an accident, so it is honoured rather than floored up.
+          _ -> {nil, :effort_off}
+        end
+    end
+  end
+
+  # Only Anthropic models on Bedrock take `reasoning_config`. Nova and Titan use
+  # different fields, and DeepSeek-R1 reasons with no request field at all —
+  # sending them an Anthropic-shaped one is a ValidationException, so an
+  # unrecognised model gets nothing. This is the narrow case where an unknown
+  # must NOT default the capability on: the field is provider-proprietary and
+  # the failure is a hard 400 rather than a degraded answer, which is exactly
+  # the distinction `openai_compat.maybe_add_provider_thinking/4` draws.
+  defp reasoning_model?(model) when is_binary(model) do
+    name = String.downcase(model)
+    String.contains?(name, "anthropic.") or String.contains?(name, "claude")
+  end
+
+  defp reasoning_model?(_), do: false
+
+  defp put_reasoning_config(body, model, opts) do
+    case reasoning_decision(model, opts) do
+      {nil, _source} ->
+        body
+
+      {budget, source} ->
+        max_tokens = get_in(body, ["inferenceConfig", "maxTokens"])
+
+        # `budget_tokens` must be strictly less than `maxTokens`. When the caller
+        # asked for fewer output tokens than the reasoning budget, the budget
+        # yields — a clamped-but-thinking request beats a rejected one.
+        budget =
+          if is_integer(max_tokens),
+            do: min(budget, max_tokens - 1),
+            else: budget
+
+        if budget < @min_reasoning_budget do
+          report_reasoning(model, nil, :max_tokens_too_small)
+          body
+        else
+          report_reasoning(model, budget, source)
+
+          body
+          # Bedrock refuses `temperature`/`topP` alongside reasoning.
+          |> update_in_inference_config(&Map.drop(&1, ["temperature", "topP"]))
+          |> Map.put("additionalModelRequestFields", %{
+            "reasoning_config" => %{"type" => "enabled", "budget_tokens" => budget}
+          })
+        end
+    end
+  end
+
+  defp update_in_inference_config(body, fun) do
+    case Map.get(body, "inferenceConfig") do
+      config when is_map(config) ->
+        case fun.(config) do
+          empty when map_size(empty) == 0 -> Map.delete(body, "inferenceConfig")
+          kept -> Map.put(body, "inferenceConfig", kept)
+        end
+
+      _ ->
+        body
+    end
+  end
+
+  # Reasoning was absent here for the whole life of the provider and nothing
+  # said so. Telemetry on every decision, and a one-off :info per {model,
+  # source} so the state is legible in a log rather than only in a request dump.
+  defp report_reasoning(model, budget, source) do
+    :telemetry.execute(
+      [:osa, :bedrock, :reasoning],
+      %{budget_tokens: budget || 0},
+      %{model: model, reason: source, enabled: not is_nil(budget)}
+    )
+
+    key = {model, source, budget}
+
+    if Process.get(:osa_bedrock_reasoning) != key do
+      Process.put(:osa_bedrock_reasoning, key)
+
+      case budget do
+        nil ->
+          Logger.info("[Bedrock] reasoning off for #{model} (#{source})")
+
+        n ->
+          Logger.info("[Bedrock] reasoning on for #{model}: budget_tokens=#{n} (#{source})")
+      end
+    end
   end
 
   defp put_tool_config(body, opts) do

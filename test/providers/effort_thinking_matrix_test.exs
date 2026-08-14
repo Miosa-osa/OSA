@@ -253,8 +253,30 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       assert Google.build_thinking_config(@gemini_flat, thinking_budget: 64_000) == %{}
     end
 
-    test "non-integer budget is a no-op (never emits thinkingBudget: nil)" do
-      assert Google.build_thinking_config(@gemini_thinking, thinking_budget: nil) == %{}
+    # `thinking_budget: nil` means the caller did not name one, so it falls
+    # through to the effort ladder — which is the fix: this path used to
+    # hardcode 8192 and never consult effort at all, so all five tiers produced
+    # one request. The invariant being pinned is unchanged: whatever happens, a
+    # literal `thinkingBudget: nil` never reaches the wire (Elixir term ordering
+    # makes `nil > 0` true, so an unguarded comparison would send one).
+    test "a nil budget falls back to the effort ladder and never emits thinkingBudget: nil" do
+      cfg = Google.build_thinking_config(@gemini_thinking, thinking_budget: nil)
+
+      case cfg do
+        %{thinkingConfig: %{thinkingBudget: n}} -> assert is_integer(n) and n > 0
+        %{} -> assert cfg == %{}
+      end
+    end
+
+    test "with no budget named, each effort tier reaches the request" do
+      budgets =
+        for effort <- [:fast, :medium, :high, :ultra] do
+          Google.build_thinking_config(@gemini_thinking, effort: effort)
+        end
+
+      assert length(Enum.uniq(budgets)) > 1,
+             "the ladder was inert on this path — every tier produced " <>
+               "thinkingBudget: 8192. got #{inspect(budgets)}"
     end
   end
 

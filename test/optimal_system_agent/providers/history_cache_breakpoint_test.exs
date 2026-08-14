@@ -163,4 +163,83 @@ defmodule OptimalSystemAgent.Providers.HistoryCacheBreakpointTest do
                "pruning it in place discards the segment"
     end
   end
+
+  describe "the route is recognised even when the caller names no model" do
+    # `anthropic_prompt_cache?/2` requires `is_binary(model)`, which is a
+    # correct guard and the wrong question: `LLMClient` only puts `:model` into
+    # `opts` when `state.model` is set, and `state.model` is nil on every
+    # non-CLI entry point — `serve`, HTTP, and the benchmark harness.
+    # `Agent.Context` documents the same nil and resolves around it.
+    #
+    # So the request went to Claude via OpenRouter, the predicate said "not an
+    # Anthropic route", and `flatten_message_content/4` deleted every
+    # breakpoint. MEASURED on this tree: 1 surviving breakpoint with `:model`
+    # in opts, 0 without. That is the 0%-hit-rate defect this whole module
+    # exists to close, re-opened for every headless session.
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :openrouter_model)
+
+      Application.put_env(:optimal_system_agent, :openrouter_model, "anthropic/" <> @model)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :openrouter_model, prev),
+          else: Application.delete_env(:optimal_system_agent, :openrouter_model)
+      end)
+
+      :ok
+    end
+
+    test "the configured provider model resolves the route" do
+      assert Registry.resolved_model({:compat, :openrouter}, []) == "anthropic/" <> @model
+
+      assert Registry.anthropic_prompt_cache?(
+               {:compat, :openrouter},
+               Registry.resolved_model({:compat, :openrouter}, [])
+             )
+    end
+
+    test "breakpoints survive normalization with no :model in opts" do
+      marked = [
+        %{
+          role: "system",
+          content: [
+            %{
+              type: "text",
+              text: String.duplicate("stable prefix ", 800),
+              cache_control: %{type: "ephemeral"}
+            }
+          ]
+        },
+        %{role: "user", content: "hi"}
+      ]
+
+      out = Registry.normalize_message_content(marked, {:compat, :openrouter}, [])
+
+      surviving =
+        Enum.reduce(out, 0, fn msg, acc ->
+          case Map.get(msg, :content) do
+            blocks when is_list(blocks) ->
+              acc +
+                Enum.count(blocks, fn b ->
+                  Map.has_key?(b, :cache_control) or Map.has_key?(b, "cache_control")
+                end)
+
+            _ ->
+              acc
+          end
+        end)
+
+      assert surviving == 1,
+             "the caller naming no model does not make the route non-Anthropic; " <>
+               "flattening here deletes the breakpoint and pins the hit rate at 0%"
+    end
+
+    test "an explicitly named model still wins over the configured default" do
+      assert Registry.resolved_model({:compat, :openrouter}, model: "openai/gpt-4o") ==
+               "openai/gpt-4o"
+
+      refute Registry.anthropic_prompt_cache?({:compat, :openrouter}, "openai/gpt-4o")
+    end
+  end
 end

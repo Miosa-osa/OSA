@@ -6,7 +6,14 @@ defmodule OptimalSystemAgent.Providers.OllamaCatalogGatingTest do
   describe "model_supports_tools?/1" do
     test "keeps the name heuristic when the catalog has no entry" do
       assert Ollama.model_supports_tools?("qwen3:8b")
-      refute Ollama.model_supports_tools?("some-unknown-model")
+
+      # An unrecognised NAME is no longer grounds for withholding the toolbox —
+      # the prefix list is fixed, so every model released after it was written
+      # failed it, and the result was an agent that could not act. Refusal now
+      # needs evidence: an embedding model, or one too small to hold the
+      # schemas. See `tools_decision/2` and `silent_capability_loss_test.exs`.
+      assert {true, :unknown_model_default} = Ollama.tools_decision("some-unknown-model", [])
+      refute Ollama.model_supports_tools?("nomic-embed-text:latest")
     end
 
     test "prefers the catalog tool_call flag over the name heuristic" do

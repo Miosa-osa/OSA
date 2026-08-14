@@ -66,15 +66,22 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
       assert Registry.normalize_message_content(messages, Providers.Anthropic) === messages
     end
 
-    test "every other dispatch target is flattened to a plain string" do
+    test "every target that cannot honour cache_control is flattened to a plain string" do
+      # `{:compat, :openrouter}` is deliberately NOT in this list. It used to be,
+      # and it passed for the wrong reason: this arity supplies no `:model`, and
+      # `anthropic_prompt_cache?/2` read `opts[:model]` raw, so a nil model made
+      # the Anthropic-via-OpenRouter route look like any other OpenAI-compatible
+      # one and its breakpoints were flattened away. That nil is the normal case
+      # — `LLMClient` only sets `:model` when `state.model` is set, and it is nil
+      # on every non-CLI entry point. See the route-specific test below and
+      # `history_cache_breakpoint_test.exs`.
       targets = [
         Providers.Ollama,
         Providers.Google,
         Providers.Cohere,
         Providers.Replicate,
         {:compat, :openai},
-        {:compat, :groq},
-        {:compat, :openrouter}
+        {:compat, :groq}
       ]
 
       for target <- targets do
@@ -86,6 +93,29 @@ defmodule OptimalSystemAgent.Providers.StructuredContentNormalizationTest do
         assert system.content == flat_system(),
                "#{inspect(target)} received a prompt that differs from the pre-cache-fix string"
       end
+    end
+
+    test "OpenRouter keeps its blocks for a Claude model and flattens for anything else" do
+      # The route is decided by what is being SERVED, not by whether the caller
+      # bothered to name it: the configured `:openrouter_model` is
+      # `anthropic/claude-opus-5`, so an unqualified call is an Anthropic route.
+      [system | _] = Registry.normalize_message_content(block_messages(), {:compat, :openrouter})
+
+      assert is_list(system.content),
+             "flattening here deletes every breakpoint and pins the cache hit rate at 0% " <>
+               "on the route the benchmarks actually run"
+
+      # A non-Claude model through the same gateway keeps the exact bytes it has
+      # today — the carve-out must not widen past what was measured.
+      [system | _] =
+        Registry.normalize_message_content(
+          block_messages(),
+          {:compat, :openrouter},
+          model: "openai/gpt-4o"
+        )
+
+      assert is_binary(system.content)
+      assert system.content == flat_system()
     end
 
     test "flattening drops cache_control entirely — it is an Anthropic-only field" do

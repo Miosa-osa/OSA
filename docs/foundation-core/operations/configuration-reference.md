@@ -60,6 +60,7 @@ Examples: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL`, `OLLAMA_MODEL`, `GOOG
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model to use with Ollama |
 | `OLLAMA_API_KEY` | — | Required for Ollama cloud instances |
+| `OLLAMA_TOOLS` | `nil` | Forces tool schemas on (`true`) or off (`false`) for every Ollama model. Default `nil` = sent, unless `/api/show` or the catalog reports no tool support, or the model is an embedding model or too small (`:1b`/`:3b`) to hold the schemas. An unrecognised model NAME is not grounds for withholding them. |
 | `OLLAMA_THINK` | `nil` | Forces reasoning on (`true`) or off (`false`) for every Ollama model, overriding the serving-mode default in both directions. Default `nil` = reasoning **on** for cloud-served tags (`:cloud` / `-cloud`), **off** for locally served reasoning models, where an unbounded thinking phase can stall a turn for 10+ minutes. |
 
 ## Agent Behaviour
@@ -83,7 +84,7 @@ These keys live under `:optimal_system_agent` application config. Set them in `c
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `OSA_THINKING_ENABLED` | `false` | Enable extended reasoning tokens (Anthropic Claude 3.7+ only). |
+| `OSA_THINKING_ENABLED` | `true` | Extended reasoning tokens (Anthropic only). Defaults ON: reasoning is worth ~10-11 points, enabling it raises the HTTP timeout rather than lowering it, and the Anthropic body sends no `temperature`, so nothing about it is risky enough to justify an off-by-default. Set `false` to disable. |
 | `OSA_THINKING_BUDGET` | `5000` | Maximum thinking tokens per LLM call when thinking is enabled. |
 
 ## HTTP Channel

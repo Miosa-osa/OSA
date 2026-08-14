@@ -175,7 +175,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       Map.get(state, :session_id, "session"),
       messages,
       opts,
-      mode: "sync", iteration: Map.get(state, :iteration)
+      mode: "sync",
+      iteration: Map.get(state, :iteration)
     )
 
     Providers.chat(messages, opts)
@@ -704,13 +705,45 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   end
 
   @doc "Resolve thinking config based on provider, model, effort level, and application config."
-  def thinking_config(%{provider: provider} = state) do
+  def thinking_config(state) do
+    {config, _source} = thinking_decision(state)
+    config
+  end
+
+  @doc """
+  The thinking config for this turn AND the rule that produced it.
+
+  `{config_or_nil, source}` where source is one of `:adaptive`, `:budget`,
+  `:model_has_none`, `:disabled_by_config`, `:fast_mode`, `:not_anthropic`.
+
+  Split out from `thinking_config/1` for the same reason
+  `Ollama.reasoning_decision/2` was: a capability that can be silently off needs
+  something able to state what it is and why. `Observability.current_reasoning/1`
+  reads this so `turn_start` / `turn_end` carry it next to `effort`.
+  """
+  @spec thinking_decision(map()) :: {map() | nil, atom()}
+  def thinking_decision(%{provider: provider} = state) do
     alias OptimalSystemAgent.Agent.Effort
 
-    enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
+    enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, true)
 
-    if enabled and not Effort.fast_mode?() and provider in [:anthropic, nil] and
-         is_anthropic_provider?() do
+    # Resolve the provider OF THIS REQUEST, then decide.
+    #
+    # This used to read `provider in [:anthropic, nil] and is_anthropic_provider?()`,
+    # and the second conjunct is a global-state read inside a per-request
+    # decision: `is_anthropic_provider?/0` asks what the DEFAULT provider is.
+    # A user whose default is `:ollama` but who routes a turn to `:anthropic`
+    # — a `/model` switch, a fallback-chain hop, a delegate with its own
+    # provider — passed the correct `state.provider` check and was still denied
+    # thinking, silently, for the whole session.
+    #
+    # `nil` still consults the default, and must: nil means the caller did not
+    # say, so the default provider IS the answer to "which provider is this?".
+    # Same rule as `openai_compat.deepseek_endpoint?(nil)` — an unknown does not
+    # silently disable a capability, it falls back to what is actually configured.
+    resolved_provider = provider || default_provider()
+
+    if enabled and not Effort.fast_mode?() and resolved_provider == :anthropic do
       alias OptimalSystemAgent.Providers.AnthropicModels
 
       model =
@@ -731,19 +764,32 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       # Depth on adaptive models is steered by `output_config.effort`
       # (Agent.Effort), not by a token count.
       case AnthropicModels.thinking_mode(model) do
-        :adaptive -> %{type: "adaptive"}
-        :budget -> %{type: "enabled", budget_tokens: Effort.thinking_budget()}
-        :none -> nil
+        :adaptive -> {%{type: "adaptive"}, :adaptive}
+        :budget -> {%{type: "enabled", budget_tokens: Effort.thinking_budget()}, :budget}
+        :none -> {nil, :model_has_none}
       end
     else
-      nil
+      cond do
+        resolved_provider != :anthropic -> {nil, :not_anthropic}
+        not enabled -> {nil, :disabled_by_config}
+        true -> {nil, :fast_mode}
+      end
     end
   end
 
-  @doc "Returns true when the configured default provider is Anthropic."
+  @doc "The configured default provider — the answer for a request that names none."
+  def default_provider do
+    Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+  end
+
+  @doc """
+  Returns true when the configured DEFAULT provider is Anthropic.
+
+  Note this is a question about configuration, not about a request. It must not
+  gate a per-request decision — see `thinking_config/1`, where it did.
+  """
   def is_anthropic_provider? do
-    default = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-    default == :anthropic
+    default_provider() == :anthropic
   end
 
   @doc "Returns the configured LLM temperature."

@@ -223,6 +223,89 @@ defmodule OptimalSystemAgent.Providers.AnthropicToolPrefixCacheTest do
     end
   end
 
+  # ── The size measurement that decides placement ───────────────────────────
+
+  describe "the cacheable-size test measures what is actually sent" do
+    # `tools_payload_bytes/1` summed `name` + `description` and ignored
+    # `input_schema`, which is the larger half. On the full default toolbox the
+    # under-count did not change the outcome — measured, 20,271 B by the old
+    # count against 33,897 B on the wire, and both clear the threshold. It
+    # changed it on every TRIMMED array, and `Agent.Loop.ToolFilter` trims
+    # constantly: small-window budget, coordinator mode, `FastPath` intent sets.
+    test "input_schema counts toward the cacheable size" do
+      # A tool with a trivial name and description and a large schema: measured
+      # by the old rule this is ~40 bytes, so it could never earn a breakpoint
+      # no matter how many tokens it actually costs.
+      schema_heavy = %{
+        "name" => "t",
+        "description" => "d",
+        "input_schema" => %{
+          "type" => "object",
+          "properties" =>
+            Map.new(1..80, fn i ->
+              {"field_#{i}", %{"type" => "string", "description" => String.duplicate("x", 60)}}
+            end)
+        }
+      }
+
+      name_desc_only = byte_size("t") + byte_size("d")
+      measured = Anthropic.tools_payload_bytes([schema_heavy])
+
+      assert measured > 4_500,
+             "a tool whose schema is kilobytes must measure as kilobytes; got #{measured}"
+
+      assert measured > name_desc_only * 100,
+             "the schema is the payload — measuring name+description alone under-counts " <>
+               "the segment by more than two orders of magnitude here"
+    end
+
+    test "the measurement equals the serialized wire size" do
+      tools =
+        Enum.map(sample_tools(), fn t ->
+          %{"name" => t.name, "description" => t.description, "input_schema" => t.parameters}
+        end)
+
+      assert Anthropic.tools_payload_bytes(tools) == byte_size(Jason.encode!(tools)),
+             "the threshold is a claim about the bytes Anthropic bills, so it must be " <>
+               "measured on the bytes Anthropic receives"
+    end
+
+    # The concrete live miss. `FastPath`'s `:team` intent trims the array to
+    # `delegate` + `task_write`: 3,022 B by the old count — under the 4,000 B
+    # threshold, so no breakpoint — against 6,973 B on the wire, roughly 1,700
+    # tokens and comfortably above Anthropic's 1,024-token cacheable minimum.
+    # Every delegating turn re-billed that segment in full.
+    test "a schema-heavy trimmed tool array now earns its breakpoint" do
+      trimmed = Enum.filter(sample_tools(), &(&1.name in ~w(delegate task_write)))
+
+      # If the registry ever stops carrying these, the test is vacuous — say so
+      # rather than passing.
+      assert length(trimmed) == 2,
+             "expected delegate + task_write in the active registry; got " <>
+               inspect(Enum.map(trimmed, & &1.name))
+
+      formatted =
+        Enum.map(trimmed, fn t ->
+          %{"name" => t.name, "description" => t.description, "input_schema" => t.parameters}
+        end)
+
+      old_count =
+        Enum.reduce(formatted, 0, fn t, acc ->
+          acc + byte_size(t["name"]) + byte_size(t["description"])
+        end)
+
+      assert old_count < 4_000,
+             "this array is only interesting because the OLD measurement put it under " <>
+               "the threshold; got #{old_count}"
+
+      body = capture_body_with_tools(trimmed)
+
+      assert Enum.count(body["tools"], &Map.has_key?(&1, "cache_control")) == 1,
+             "a ~7 KB tool array is well above Anthropic's minimum cacheable prefix and " <>
+               "must get a breakpoint"
+    end
+  end
+
   # ── Byte identity ─────────────────────────────────────────────────────────
 
   describe "the tools segment is byte-identical across requests" do

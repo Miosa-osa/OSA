@@ -143,13 +143,25 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
       assert Observability.current_reasoning(state) == "on:config"
     end
 
-    test "non-ollama providers and unknown state record nil, not a fabricated value" do
-      assert Observability.current_reasoning(%{provider: :anthropic, model: "claude-opus-4-6"}) ==
-               nil
-
+    test "unknown state records nil, not a fabricated value" do
+      # Anthropic and Bedrock now report too — they have a real reasoning
+      # decision to state, and both were silently off for exactly as long as
+      # nothing asked. What must stay nil is a provider with no such setting and
+      # a state that names nothing.
       assert Observability.current_reasoning(%{}) == nil
       assert Observability.current_reasoning(%{provider: :ollama, model: @flat}) == nil
       assert Observability.current_reasoning(%{provider: "no_such_provider_atom_xyz"}) == nil
+    end
+
+    test "a provider that DOES have a reasoning decision states it" do
+      # The point of the field is that a run which does not record the condition
+      # cannot be set beside a published figure. A provider answering nil when
+      # it has a real answer is the same silence this whole change is about.
+      assert "on:" <> _ =
+               Observability.current_reasoning(%{
+                 provider: :anthropic,
+                 model: "claude-opus-4-6"
+               })
     end
   end
 end

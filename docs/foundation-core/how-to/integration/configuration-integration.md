@@ -103,7 +103,7 @@ OSA_SHARED_SECRET=a-very-long-random-secret
 
 ```sh
 OSA_PLAN_MODE=true           # Single LLM call per message — no tool loop
-OSA_THINKING_ENABLED=true    # Extended reasoning (Anthropic only)
+OSA_THINKING_ENABLED=false   # Extended reasoning (Anthropic only); ON by default
 OSA_THINKING_BUDGET=10000    # Max tokens for extended reasoning
 OSA_WORKING_DIR=~/projects/myapp  # Default working directory
 OSA_QUIET_HOURS=22-08        # Suppress heartbeat during these hours

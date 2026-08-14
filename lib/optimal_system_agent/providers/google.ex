@@ -453,7 +453,7 @@ defmodule OptimalSystemAgent.Providers.Google do
   defp maybe_add_thinking_config(config, model, opts) do
     case GoogleModels.thinking_mode(model) do
       :level -> put_thinking_level(config, model, opts)
-      :budget -> put_thinking_budget(config, opts)
+      :budget -> put_thinking_budget(config, model, opts)
       :none -> config
     end
   end
@@ -475,12 +475,30 @@ defmodule OptimalSystemAgent.Providers.Google do
 
   # Gemini 2.5 — the legacy raw token budget.
   #
+  # This used to read `Keyword.get(opts, :thinking_budget, 8192)` and stop
+  # there. Nothing in the agent loop passes `:thinking_budget`, so the default
+  # was the value: every effort tier produced `thinkingBudget: 8192`, and the
+  # ladder was inert on this path exactly the way it was inert on the `:level`
+  # path before the sibling fix above. An explicit `:thinking_budget` still
+  # wins — a caller who names a budget means it — but the fallback is now the
+  # effort ladder, not a constant.
+  #
   # `is_integer` guard: a caller passing `thinking_budget: nil` (or any
   # non-integer) must NOT emit `thinkingBudget: nil` — Elixir term ordering
   # makes `nil > 0` true (atom > number), so an unguarded `budget > 0` would
   # send a bogus null budget. Fall through to the no-op instead (W4 harden).
-  defp put_thinking_budget(config, opts) do
-    budget = Keyword.get(opts, :thinking_budget, 8192)
+  defp put_thinking_budget(config, model, opts) do
+    effort =
+      Keyword.get(opts, :reasoning_effort) ||
+        Keyword.get(opts, :effort) ||
+        current_effort()
+
+    budget =
+      case Keyword.get(opts, :thinking_budget) do
+        explicit when is_integer(explicit) -> explicit
+        nil -> GoogleModels.thinking_budget(model, effort)
+        other -> other
+      end
 
     if is_integer(budget) and budget > 0 do
       Map.put(config, :thinkingConfig, %{thinkingBudget: budget})

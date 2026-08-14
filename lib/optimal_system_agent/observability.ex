@@ -172,12 +172,31 @@ defmodule OptimalSystemAgent.Observability do
   def current_reasoning(state) do
     model = Map.get(state, :model)
 
-    if normalize_provider(Map.get(state, :provider)) == :ollama and is_binary(model) do
-      case OptimalSystemAgent.Providers.Ollama.reasoning_decision(model, []) do
-        {nil, _} -> nil
-        {true, source} -> "on:#{source}"
-        {false, source} -> "off:#{source}"
-      end
+    case normalize_provider(Map.get(state, :provider)) do
+      :ollama when is_binary(model) ->
+        case OptimalSystemAgent.Providers.Ollama.reasoning_decision(model, []) do
+          {nil, _} -> nil
+          {true, source} -> "on:#{source}"
+          {false, source} -> "off:#{source}"
+        end
+
+      # Anthropic-native. `thinking_decision/1` is the same request-scoped
+      # decision the request path makes, so what is recorded here is what was
+      # sent — not a re-derivation that could disagree with it.
+      :anthropic ->
+        case OptimalSystemAgent.Agent.Loop.LLMClient.thinking_decision(state) do
+          {nil, source} -> "off:#{source}"
+          {_config, source} -> "on:#{source}"
+        end
+
+      :bedrock when is_binary(model) ->
+        case OptimalSystemAgent.Providers.Bedrock.reasoning_decision(model, []) do
+          {nil, source} -> "off:#{source}"
+          {budget, source} -> "on:#{source}:#{budget}"
+        end
+
+      _ ->
+        nil
     end
   rescue
     _ -> nil

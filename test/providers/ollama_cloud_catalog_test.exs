@@ -224,8 +224,13 @@ defmodule OptimalSystemAgent.Providers.OllamaCloudCatalogTest do
 
     test "models outside the catalog still fall back to the heuristics" do
       assert Ollama.model_supports_tools?("qwen3:8b")
-      refute Ollama.model_supports_tools?("some-unknown-model")
       refute Ollama.thinking_model?("llama3.3:70b")
+
+      # Unknown NAME, unknown catalog: tools are sent. An unfamiliar name is not
+      # evidence a model lacks tool calling, and withholding them turns the
+      # agent into a chatbot. A genuinely tool-less model now fails loudly at
+      # the provider instead of quietly here.
+      assert {true, :unknown_model_default} = Ollama.tools_decision("some-unknown-model", [])
     end
   end
 end

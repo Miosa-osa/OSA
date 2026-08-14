@@ -696,7 +696,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
       # OpenRouter path and pinned the hit rate at 0%. `OpenAICompat` encodes
       # these as OpenAI text content-parts with the marker preserved, which
       # OpenRouter forwards to Anthropic.
-      keep_cache? = anthropic_prompt_cache?(target, Keyword.get(opts, :model))
+      keep_cache? = anthropic_prompt_cache?(target, resolved_model(target, opts))
 
       Enum.map(messages, &flatten_message_content(&1, carry_images?, keep_cache?, reason))
     else
@@ -745,6 +745,48 @@ defmodule OptimalSystemAgent.Providers.Registry do
       do: String.starts_with?(model, "anthropic/")
 
   def anthropic_prompt_cache?(_target, _model), do: false
+
+  @doc """
+  The model this request will actually be served by — never the raw `opts` value.
+
+  `is_binary(model)` in `anthropic_prompt_cache?/2` is correct as a guard and
+  wrong as a question, because `opts[:model]` is `nil` on every non-CLI entry
+  point: `Agent.Loop.LLMClient` only puts `:model` into `opts` when
+  `state.model` is set, and `state.model` is nil under `serve`/HTTP and in the
+  benchmark harness (`Agent.Context` says so at its own `model` resolution and
+  resolves around it for exactly this reason).
+
+  MEASURED on this tree, `{:compat, :openrouter}` with an
+  `anthropic/claude-sonnet-4.5` default: with `:model` in opts, 1 `cache_control`
+  breakpoint survives `flatten_message_content/4`; without it, 0. The request
+  still goes to a Claude model — `OpenAICompat` fills the model in from the
+  provider default further down — so the predicate was answering "what did the
+  caller name?" when the question is "what is being served?". By the numbers in
+  the doc above that is the difference between a 93.5% and a 0% hit rate, i.e.
+  it silently re-opened the defect that doc was written about, for every
+  headless session.
+
+  Resolution is the same cascade `Agent.Context` uses: the named model, else the
+  provider's configured model. Deliberately scoped to the cache decision — the
+  sibling image gate on the line above reads `opts[:model]` too, but it already
+  fails OPEN on nil, so widening it there is a behaviour change with no defect
+  behind it.
+  """
+  @spec resolved_model(atom() | {:compat, atom()}, keyword()) :: String.t() | nil
+  def resolved_model(target, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        key = :"#{provider_key(target)}_model"
+
+        case Application.get_env(:optimal_system_agent, key) do
+          model when is_binary(model) and model != "" -> model
+          _ -> nil
+        end
+    end
+  end
 
   # `{:compat, _}` is served by `OpenAICompat`, whose `encode_content/1` emits
   # OpenAI `image_url` parts. Every other target is asked directly; a module

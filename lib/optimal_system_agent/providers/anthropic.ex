@@ -1544,10 +1544,22 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   # Anthropic's minimum cacheable prefix is 1024 tokens on most models (512 on
   # Opus 5, 2048-4096 on others). Below it a breakpoint silently does nothing —
-  # no error, just no cache entry — so spending one of four on a small tool list
-  # would be pure waste. ~4 KB is the conservative 1024-token equivalent, the
-  # same threshold the string-system path uses.
-  @min_cacheable_tools_bytes 4_000
+  # no error, just no cache entry — and a wasted marker is not free: there are
+  # four per request, and `enforce_breakpoint_budget/1` pays for a tools marker
+  # by dropping one out of the SYSTEM array. So the threshold has to be a real
+  # estimate of the segment, not an under-count.
+  #
+  # 4,500 bytes, measured: the default 23-tool array serializes to 33,897 bytes
+  # and Anthropic counts it as ~8,267 tokens — 4.1 bytes/token. 4,500 bytes is
+  # therefore ~1,100 tokens, just clear of the 1024 floor. (The old 4,000 was
+  # calibrated against a count that omitted `input_schema`, so it was neither a
+  # byte figure nor a token figure.)
+  @min_cacheable_tools_bytes 4_500
+
+  # Bytes/token on this payload shape, measured on the default tool array
+  # (33,897 bytes / 8,267 tokens). Used only to report an estimate alongside the
+  # decision, never to make it.
+  @tools_bytes_per_token 4.1
 
   defp mark_tools_cache_boundary(%{tools: tools} = body, stable_count)
        when is_list(tools) and tools != [] do
@@ -1556,8 +1568,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     # so a pathological all-discovered array still gets a usable marker.
     boundary = tools |> length() |> min(max(stable_count, 1))
     cacheable = Enum.take(tools, boundary)
+    bytes = tools_payload_bytes(cacheable)
+    caching? = prompt_caching_enabled?()
+    place? = caching? and bytes >= @min_cacheable_tools_bytes
 
-    if prompt_caching_enabled?() and tools_payload_bytes(cacheable) >= @min_cacheable_tools_bytes do
+    report_tools_cache_decision(place?, caching?, bytes, length(cacheable))
+
+    if place? do
       {leading, [last | trailing]} = Enum.split(tools, boundary - 1)
       marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})] ++ trailing
 
@@ -1571,10 +1588,88 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp mark_tools_cache_boundary(body, _stable_count), do: body
 
-  defp tools_payload_bytes(tools) do
-    Enum.reduce(tools, 0, fn tool, acc ->
-      acc + byte_size(to_string(tool["name"])) + byte_size(to_string(tool["description"]))
-    end)
+  @doc """
+  Bytes the tool array actually contributes to the request.
+
+  This is what decides whether the tools cache breakpoint is placed, so it has
+  to measure what is sent. It used to sum `name` + `description` only and ignore
+  `input_schema`, which is the larger half: the default 23-tool array measures
+  20,271 bytes that way against 33,897 on the wire — a 40% under-count, i.e. the
+  threshold was effectively 1.7x higher than the constant said.
+
+  On the full default toolbox the gap did not change the outcome (20,271 clears
+  4,000 either way). It changed it on every TRIMMED array, and `ToolFilter`
+  trims constantly — small-window budget, coordinator mode, `FastPath` intent
+  sets. Measured, the `:team` intent set (`delegate` + `task_write`) came to
+  3,022 by the old count and 6,973 on the wire: ~1,700 tokens, comfortably
+  cacheable, and it got no breakpoint. `delegate` alone is 1,357 vs 4,115.
+
+  Serialized rather than summed per field so it stays correct as the tool shape
+  changes: JSON punctuation and key names are bytes Anthropic bills too.
+  """
+  @spec tools_payload_bytes([map()]) :: non_neg_integer()
+  def tools_payload_bytes(tools) when is_list(tools) do
+    case Jason.encode(tools) do
+      {:ok, json} ->
+        byte_size(json)
+
+      # A tool whose schema will not serialize is a request that is about to
+      # fail anyway; fall back to a field sum so the measurement cannot be the
+      # thing that raises. Deliberately still counts the schema.
+      _ ->
+        Enum.reduce(tools, 0, fn tool, acc ->
+          acc + byte_size(to_string(tool["name"])) + byte_size(to_string(tool["description"])) +
+            byte_size(inspect(tool["input_schema"]))
+        end)
+    end
+  end
+
+  # The loss this whole function guards against was silent for as long as it
+  # existed: no breakpoint, no error, no log — just a tools segment re-billed at
+  # full rate every turn. A skip is therefore reported at :info, with the numbers
+  # that produced it, and a placement at :debug. Deduped on the decision shape so
+  # a steady-state session logs once, not once per turn — a line per turn would
+  # be noise, and noise is how the next one of these gets missed.
+  defp report_tools_cache_decision(placed?, caching?, bytes, count) do
+    reason =
+      cond do
+        placed? -> :placed
+        not caching? -> :caching_disabled
+        true -> :below_min_cacheable
+      end
+
+    :telemetry.execute(
+      [:osa, :anthropic, :tools_cache],
+      %{bytes: bytes, tool_count: count, threshold: @min_cacheable_tools_bytes},
+      %{placed: placed?, reason: reason}
+    )
+
+    signature = {reason, count, div(bytes, 1_000)}
+
+    if Process.get(:osa_tools_cache_decision) != signature do
+      Process.put(:osa_tools_cache_decision, signature)
+      tokens = round(bytes / @tools_bytes_per_token)
+
+      case reason do
+        :placed ->
+          Logger.debug(
+            "[Anthropic] tools cache breakpoint placed: #{count} tools, #{bytes} B (~#{tokens} tok)"
+          )
+
+        :caching_disabled ->
+          Logger.debug(
+            "[Anthropic] tools cache breakpoint skipped: prompt caching disabled " <>
+              "(#{count} tools, #{bytes} B)"
+          )
+
+        :below_min_cacheable ->
+          Logger.info(
+            "[Anthropic] tools cache breakpoint NOT placed: #{count} tools, #{bytes} B " <>
+              "(~#{tokens} tok) is below the #{@min_cacheable_tools_bytes} B minimum — " <>
+              "this tool segment is re-billed in full every turn."
+          )
+      end
+    end
   end
 
   # Global cap across the whole body. `maybe_add_system/2` caps the SYSTEM array

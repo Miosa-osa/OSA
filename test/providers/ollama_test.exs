@@ -42,7 +42,11 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       assert Ollama.model_supports_tools?("gemma3:27b") == true
     end
 
-    test "returns false for unrecognized model" do
+    # These are refused on EVIDENCE, not on unfamiliarity: an embedding model
+    # has no chat endpoint at all, and a 1B model cannot hold 23 tool schemas
+    # plus a task. An unrecognised name on its own is no longer grounds — see
+    # `silent_capability_loss_test.exs`, and `tools_decision/2` for why.
+    test "returns false for models that genuinely cannot call tools" do
       assert Ollama.model_supports_tools?("nomic-embed-text:latest") == false
       assert Ollama.model_supports_tools?("all-minilm:latest") == false
       assert Ollama.model_supports_tools?("tinyllama:1b") == false

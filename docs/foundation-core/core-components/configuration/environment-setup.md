@@ -80,7 +80,7 @@ Per-provider model overrides: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL`, `
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OSA_PLAN_MODE` | `false` | When `true`, agent makes a single LLM call with no tool calls |
-| `OSA_THINKING_ENABLED` | `false` | Enable extended thinking for supported models |
+| `OSA_THINKING_ENABLED` | `true` | Extended thinking on Anthropic models. Set `false` to disable |
 | `OSA_THINKING_BUDGET` | `5000` | Token budget for thinking blocks |
 | `OSA_WORKING_DIR` | none | Default working directory for file operations (e.g. `~/Desktop/MyProject`) |
 | `OSA_QUIET_HOURS` | none | Suppress heartbeat during hours (format: `"22:00-08:00"`) |

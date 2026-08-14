@@ -72,6 +72,7 @@ precedence over `OSA_MODEL` for their specific provider.
 |----------|---------|-------------|
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL; override for cloud Ollama instances |
 | `OLLAMA_API_KEY` | — | Required for authenticated cloud Ollama instances |
+| `OLLAMA_TOOLS` | — | `true` / `false` to force tool schemas to be sent or withheld for all Ollama models. Omit for the default: sent unless the daemon or catalog says the model cannot call tools, or it is an embedding model or too small to hold the schemas |
 | `OLLAMA_THINK` | — | `true` / `false` to force extended reasoning on or off for all Ollama models. Omit for the serving-mode default: on for cloud tags (`:cloud` / `-cloud`), off for locally served reasoning models (stall guard) |
 
 ## HTTP Server
@@ -102,7 +103,7 @@ precedence over `OSA_MODEL` for their specific provider.
 | `OSA_WALLET_ENABLED` | `false` | Enable crypto wallet connectivity |
 | `OSA_UPDATE_ENABLED` | `false` | Enable OTA updater with TUF verification |
 | `OSA_PLAN_MODE` | `false` | Start sessions in plan mode (single LLM call, no tool iterations) |
-| `OSA_THINKING_ENABLED` | `false` | Enable extended thinking budget for supported providers |
+| `OSA_THINKING_ENABLED` | `true` | Extended thinking on Anthropic. Set to `false` to disable; any other value (including unset) leaves it on |
 
 ## Treasury Settings
 

@@ -20,7 +20,7 @@ boot by `Supervisors.Extensions`.
 | Go Sysmon | config only | `go_sysmon_enabled` | `false` |
 | WhatsApp Web | config only | `whatsapp_web_enabled` | `false` |
 | Plan Mode | `OSA_PLAN_MODE=true` | `plan_mode_enabled` | `false` |
-| Extended Thinking | `OSA_THINKING_ENABLED=true` | `thinking_enabled` | `false` |
+| Extended Thinking | `OSA_THINKING_ENABLED=false` disables | `thinking_enabled` | `true` |
 
 Always-on extensions (started unconditionally, dormant until wired):
 
@@ -226,7 +226,7 @@ Enables extended thinking budget for LLM providers that support it (Anthropic
 Claude). The model receives additional tokens to reason internally before
 producing a response.
 
-**Enable:** `OSA_THINKING_ENABLED=true`
+**Disable:** `OSA_THINKING_ENABLED=false` (on by default)
 
 **Settings:**
 
