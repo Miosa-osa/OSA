@@ -170,6 +170,16 @@ config :optimal_system_agent,
   # closes the gap where the same long run died only because it was started
   # from a normal interactive prompt.
   stall_hard_halt: false,
+
+  # Completion gate: require a PERSISTED, RE-RUNNABLE test that FAILED AT LEAST
+  # ONCE before the agent may declare code work done. See
+  # `Agent.Loop.VerificationGate`. This deliberately costs turns (measured +6
+  # on a one-line bug fix, expected +10..40 on a real task) and buys the thing
+  # measured to be missing: `docs/research/turn-count-diagnosis.md` §5.2 shows
+  # OSA self-certifying a wrong answer in 13 turns off five inline probes while
+  # the harness that solved the task built four test files and iterated.
+  # Set false to fall back to the liveness-only gate.
+  verification_adequacy: true,
   temperature: 0.7,
   max_tokens: 4096,
 

@@ -74,6 +74,18 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
       # compiles. They were one predicate, so `go build` passing covered a red
       # test.
       test_command: test_command?(Map.get(call, :args) || %{}),
+      # Paths this call CREATED OR OVERWROTE. For a write tool that is its
+      # `path` argument; for a shell command it is every redirection / `tee`
+      # target. Without the shell half the ledger is blind to the single most
+      # common way a model writes a file — `cat > f << 'EOF'` — which is
+      # exactly how the `cancel-async-tasks` run produced its deliverable, so
+      # the gate saw a session with NO writes at all and never fired.
+      written_paths: written_paths(Map.get(call, :args) || %{}, tool),
+      # Paths this call RAN or READ (path-like tokens in the command that are
+      # not redirection targets). A test invocation names its test file here;
+      # an inline `python3 - << PY` heredoc names nothing, which is the whole
+      # point — see `discriminating_evidence/1`.
+      ran_paths: ran_paths(Map.get(call, :args) || %{}),
       success: Map.get(call, :success, false) == true,
       ts: System.monotonic_time()
     }
@@ -196,16 +208,70 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
         nil
 
       widx ->
-        indexed
-        |> Enum.filter(fn {e, idx} -> idx > widx and e.kind == :check and not e.success end)
+        after_write = Enum.filter(indexed, fn {_e, idx} -> idx > widx end)
+
+        after_write
+        |> Enum.filter(fn {e, _} -> e.kind == :check and not e.success end)
         |> List.last()
         |> case do
-          {entry, _} -> entry
+          {entry, idx} -> unless resolved?(entry, idx, after_write), do: entry
           nil -> nil
         end
     end
   rescue
     _ -> nil
+  end
+
+  # A red result stops being a reason to keep working once it has been
+  # SUPERSEDED. Without this the flag is sticky until the next write, which is
+  # a measured waste: in a live session an ad-hoc probe failed once, the two
+  # commands after it passed, and the gate still spent its whole re-prompt
+  # budget demanding a fix for something already fixed.
+  #
+  # Two ways to supersede, and the asymmetry is the point:
+  #
+  #   * the SAME check ran again and passed (same test file / same suite) — the
+  #     only thing that clears a red BUILD OR TEST, which is the case the
+  #     "nobody ends on a red test" finding was actually about; or
+  #   * the red thing was an ad-hoc probe (not a build, not a test) and
+  #     something later ran green. A throwaway probe erroring is weak evidence
+  #     and must not hold the turn hostage — and it no longer needs to, because
+  #     a probe-only session is now stopped by the adequacy requirement instead.
+  defp resolved?(entry, idx, after_write) do
+    later_success = for {e, i} <- after_write, i > idx, e.kind == :check, e.success, do: e
+
+    cond do
+      later_success == [] ->
+        false
+
+      not Map.get(entry, :build_or_test, false) ->
+        true
+
+      true ->
+        ids = check_identity_keys(entry)
+
+        ids != [] and
+          Enum.any?(later_success, fn e ->
+            not MapSet.disjoint?(MapSet.new(ids), MapSet.new(check_identity_keys(e)))
+          end)
+    end
+  end
+
+  # "Which recurring check is this" — the same notion `test_identities/2` uses,
+  # minus the persistence requirement, because comparing a red run to a green
+  # run of the same command does not depend on the file still being on disk.
+  defp check_identity_keys(entry) do
+    ran = Map.get(entry, :ran_paths, [])
+    wrote = Map.get(entry, :written_paths, [])
+    files = ran |> Enum.reject(&(&1 in wrote)) |> Enum.filter(&test_artifact_path?/1)
+
+    suite =
+      case suite_key(Map.get(entry, :command)) do
+        nil -> []
+        key -> [key]
+      end
+
+    files ++ suite
   end
 
   @doc """
@@ -368,6 +434,331 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
       _ -> false
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Adequacy: a PERSISTED, RE-RUNNABLE test that FAILED AT LEAST ONCE
+  # ---------------------------------------------------------------------------
+  #
+  # `pending_files/1` is a LIVENESS check: "something exited 0 and touched the
+  # changed file". It is satisfiable by a probe the model writes in order to
+  # satisfy it, and on `cancel-async-tasks` that is exactly what happened —
+  # five throwaway `python3 - << 'PYEOF'` heredocs, zero persisted test files,
+  # a "**Verified:** concurrency cap respected" claim, and a wrong answer in 13
+  # turns. The harness that solved the same task took 56 turns, wrote four
+  # named test files, and iterated write -> test -> fix four times.
+  #
+  # This section asks the ADEQUACY question instead, in three parts, each of
+  # which closes a specific cheap path:
+  #
+  #   * **Persisted** — the evidence must be a named file on disk (or a project
+  #     test-suite invocation). An inline heredoc vanishes; it cannot be
+  #     re-run, reviewed, or shipped. It is also the single cheapest thing a
+  #     model can emit, which is why it was the observed behaviour.
+  #
+  #   * **Re-runnable** — the check must invoke that file by path, so invoking
+  #     it again is possible and exercises the change.
+  #
+  #   * **Failed at least once, with a source fix in between** — a test that
+  #     has only ever passed may be testing nothing. A test that failed, then a
+  #     SOURCE file changed, then it passed, demonstrably discriminates. The
+  #     "source fix in between" clause is what stops the obvious counter-play
+  #     of writing `assert False`, watching it fail, and editing the assertion.
+
+  # File extensions that make a change "code", i.e. something a test could
+  # exercise. A docs- or config-only change has no runnable test and must not
+  # be blocked — that is the automatic half of the escape hatch.
+  @code_extensions ~w(.py .ex .exs .go .rs .ts .tsx .js .jsx .mjs .cjs .rb
+                      .java .kt .scala .c .h .cpp .cc .hpp .cs .php .swift
+                      .lua .pl .pm .m .mm .erl .hrl .clj .sh .bash .zsh .sql)
+
+  @doc """
+  True when `path` names something a test could exercise. Docs, config and
+  data files answer `false`, which is what lets a documentation-only task
+  finish without a test.
+  """
+  @spec code_file?(String.t()) :: boolean()
+  def code_file?(path) when is_binary(path) do
+    String.downcase(Path.extname(path)) in @code_extensions
+  end
+
+  def code_file?(_), do: false
+
+  @test_basename_patterns [
+    ~r/^test_.+\.(py|rb|js|ts|tsx|jsx|mjs|sh|bash|lua|pl)$/i,
+    ~r/_test\.(py|go|exs|ex|rb|ts|js|rs|java|kt|c|cc|cpp)$/i,
+    ~r/\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$/i,
+    ~r/_spec\.(rb|ex|exs|js|ts)$/i,
+    ~r/^(run_tests|runtests|run_test)\.(sh|bash|py)$/i,
+    ~r/^tests?\.(py|sh|bash|js|ts|exs|rb)$/i
+  ]
+
+  @test_dir_segments ~w(test tests spec specs __tests__ testing)
+
+  @doc """
+  True when `path` is a test artefact by convention — `test_*.py`, `*_test.go`,
+  `*.spec.ts`, `run_tests.sh`, anything under a `test/`, `tests/`, `spec/` or
+  `__tests__/` directory.
+
+  Convention, not content analysis, on purpose: the gate's directive tells the
+  model exactly this rule, so satisfying it honestly is cheap and unambiguous.
+  Naming a file `test_x.py` is not the part we are trying to make expensive —
+  making it *discriminate* is.
+  """
+  @spec test_artifact_path?(String.t()) :: boolean()
+  def test_artifact_path?(path) when is_binary(path) do
+    base = Path.basename(path)
+
+    Enum.any?(@test_basename_patterns, &Regex.match?(&1, base)) or
+      Enum.any?(Path.split(Path.dirname(path)), &(String.downcase(&1) in @test_dir_segments))
+  end
+
+  def test_artifact_path?(_), do: false
+
+  @doc """
+  True when the session has changed code but has produced **no** discriminating
+  test evidence for it.
+
+  This is the gate's adequacy trigger. It is deliberately silent when:
+
+    * nothing was written, or
+    * only non-code files were written (docs / config — nothing to test), or
+    * discriminating evidence already exists.
+  """
+  @spec needs_discriminating_test?(term()) :: boolean()
+  def needs_discriminating_test?(session_id) do
+    entries = get(session_id)
+
+    source_changed? =
+      entries
+      |> source_write_indices()
+      |> Enum.any?()
+
+    source_changed? and discriminating_evidence(entries) == nil
+  rescue
+    _ -> false
+  end
+
+  @doc """
+  The discriminating test evidence for this session, or `nil`.
+
+  Returns `%{artifact: id, failed_at: i, fixed_at: j, passed_at: k}` where `id`
+  is `{:file, path}` for a named test file or `{:suite, key}` for a project
+  test-runner invocation, and `i < j < k` are ledger indices satisfying:
+
+      the test RAN and FAILED   ->   a SOURCE file was written   ->   the same
+      test RAN and PASSED
+
+  That triple is the write -> test -> fix loop, stated as a property of the
+  transcript. Nothing weaker is accepted.
+  """
+  @spec discriminating_evidence(term() | [map()]) :: map() | nil
+  def discriminating_evidence(session_id) when not is_list(session_id) do
+    discriminating_evidence(get(session_id))
+  end
+
+  def discriminating_evidence(entries) when is_list(entries) do
+    indexed = Enum.with_index(entries)
+    written = written_path_set(entries)
+    fixes = source_write_indices(entries)
+
+    if fixes == [] do
+      nil
+    else
+      indexed
+      |> Enum.flat_map(fn {entry, idx} ->
+        for id <- test_identities(entry, written), do: {id, idx, entry.success}
+      end)
+      |> Enum.group_by(fn {id, _, _} -> id end)
+      |> Enum.find_value(fn {id, runs} ->
+        fails = for {_, idx, false} <- runs, do: idx
+        passes = for {_, idx, true} <- runs, do: idx
+
+        with i when is_integer(i) <- Enum.min(fails, fn -> nil end),
+             j when is_integer(j) <- Enum.find(fixes, &(&1 > i)),
+             k when is_integer(k) <- Enum.find(passes, &(&1 > j)) do
+          %{artifact: id, failed_at: i, fixed_at: j, passed_at: k}
+        else
+          _ -> nil
+        end
+      end)
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  Test artefacts the session has produced or run, for directive messaging.
+  """
+  @spec known_test_artifacts(term()) :: [String.t()]
+  def known_test_artifacts(session_id) do
+    entries = get(session_id)
+    written = written_path_set(entries)
+
+    entries
+    |> Enum.flat_map(fn e ->
+      for {:file, p} <- test_identities(e, written), do: p
+    end)
+    |> Enum.uniq()
+  rescue
+    _ -> []
+  end
+
+  @doc "Code files the session successfully wrote (the change under test)."
+  @spec changed_source_files(term()) :: [String.t()]
+  def changed_source_files(session_id) do
+    session_id
+    |> get()
+    |> Enum.filter(&(&1.success and not test_entry?(&1)))
+    |> Enum.flat_map(&Map.get(&1, :written_paths, []))
+    |> Enum.filter(&code_file?/1)
+    |> Enum.reject(&test_artifact_path?/1)
+    |> Enum.uniq()
+  rescue
+    _ -> []
+  end
+
+  # Indices of successful writes to a NON-test code file. These are the "fix"
+  # events: the thing that must happen between a red run and a green one for
+  # the green to mean anything. A write to the test file itself is excluded,
+  # which is what closes the `assert False` -> edit-the-assertion play.
+  defp source_write_indices(entries) do
+    entries
+    |> Enum.with_index()
+    |> Enum.filter(fn {e, _idx} ->
+      e.success and
+        Enum.any?(Map.get(e, :written_paths, []), fn p ->
+          code_file?(p) and not test_artifact_path?(p)
+        end)
+    end)
+    |> Enum.map(fn {_e, idx} -> idx end)
+  end
+
+  defp test_entry?(e), do: Enum.all?(Map.get(e, :written_paths, []), &test_artifact_path?/1)
+
+  defp written_path_set(entries) do
+    for e <- entries, p <- Map.get(e, :written_paths, []), into: MapSet.new(), do: p
+  end
+
+  # What re-runnable test this call invoked, if any.
+  #
+  # An entry yields an identity ONLY when it names a persisted test artefact it
+  # did not itself write, or when it invokes a project test runner. Every
+  # cheaper shape yields `[]`:
+  #
+  #   python3 - << 'PY' ...     -> no path token       -> []
+  #   python3 -c "import run"   -> no path token       -> []
+  #   cat > /tmp/test_x.py <<EOF -> path is a WRITE     -> []
+  #   python3 /tmp/test_x.py    -> persisted + re-runnable -> [{:file, ...}]
+  #   mix test / pytest         -> project suite       -> [{:suite, key}]
+  defp test_identities(%{kind: :check} = entry, written) do
+    ran = Map.get(entry, :ran_paths, [])
+    wrote = Map.get(entry, :written_paths, [])
+
+    files =
+      ran
+      |> Enum.reject(&(&1 in wrote))
+      |> Enum.filter(&test_artifact_path?/1)
+      |> Enum.filter(&persisted?(&1, written))
+      |> Enum.map(&{:file, &1})
+
+    suite =
+      if files == [] and Map.get(entry, :test_command, false) do
+        case suite_key(Map.get(entry, :command)) do
+          nil -> []
+          key -> [{:suite, key}]
+        end
+      else
+        []
+      end
+
+    files ++ suite
+  end
+
+  defp test_identities(_entry, _written), do: []
+
+  # "Persisted" means the file is on disk now, OR the ledger itself watched it
+  # being written. The second clause matters because the shell the agent drives
+  # is not always the filesystem this process can stat (benchmark containers,
+  # remote sessions) — without it the gate would silently never pass there.
+  defp persisted?(path, written) do
+    MapSet.member?(written, path) or File.exists?(path)
+  rescue
+    _ -> MapSet.member?(written, path)
+  end
+
+  # Suite identity is the *runner*, not the exact command line, so
+  # `mix test a_test.exs` and `mix test` are the same recurring check.
+  defp suite_key(cmd) when is_binary(cmd) do
+    @test_patterns
+    |> Enum.find_index(&Regex.match?(&1, cmd))
+    |> case do
+      nil -> nil
+      i -> "test_pattern_#{i}"
+    end
+  end
+
+  defp suite_key(_), do: nil
+
+  # --- Shell argument parsing ---
+
+  # `> f`, `>> f`, `2> f`, `| tee f`, `| tee -a f`.
+  @redirect_re ~r/(?:^|[\s;&|])(?:\d?>>?\s*|\|\s*tee\s+(?:-a\s+)?)(['"]?)([^\s'"<>|;&]+)\1/
+
+  defp written_paths(args, tool) when is_map(args) do
+    from_tool =
+      if classify(tool) == :write do
+        extract_paths(args)
+      else
+        []
+      end
+
+    from_shell =
+      case extract_command(args) do
+        cmd when is_binary(cmd) ->
+          @redirect_re
+          |> Regex.scan(cmd)
+          |> Enum.map(fn m -> List.last(m) end)
+          |> Enum.filter(&plausible_path?/1)
+          |> Enum.map(&normalize_path/1)
+
+        _ ->
+          []
+      end
+
+    Enum.uniq(from_tool ++ from_shell)
+  end
+
+  defp written_paths(_, _), do: []
+
+  # Path-like tokens in a command. Deliberately conservative: a token must look
+  # like a filename (has an extension) or contain a `/`.
+  @token_re ~r/[A-Za-z0-9_@%+=:,.\/~^-]+/
+
+  defp ran_paths(args) when is_map(args) do
+    case extract_command(args) do
+      cmd when is_binary(cmd) ->
+        @token_re
+        |> Regex.scan(cmd)
+        |> Enum.map(&hd/1)
+        |> Enum.filter(&plausible_path?/1)
+        |> Enum.map(&normalize_path/1)
+        |> Enum.uniq()
+
+      _ ->
+        []
+    end
+  end
+
+  defp ran_paths(_), do: []
+
+  defp plausible_path?(tok) when is_binary(tok) do
+    byte_size(tok) > 1 and byte_size(tok) < 512 and
+      not String.starts_with?(tok, "-") and
+      (String.contains?(tok, "/") or Path.extname(tok) != "") and
+      not String.ends_with?(tok, "/")
+  end
+
+  defp plausible_path?(_), do: false
 
   # --- ETS backing ---
 

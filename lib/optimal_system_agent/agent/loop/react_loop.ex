@@ -794,8 +794,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         run(state)
 
-      VerificationGate.needs_verification?(state) ->
-        {directive, state} = VerificationGate.build_directive(state)
+      # `content` is passed so the gate can read the explicit
+      # `NO_RUNNABLE_TEST:` escape out of the answer the turn would end on.
+      VerificationGate.needs_verification?(state, content) ->
+        {directive, state} = VerificationGate.build_directive(state, content)
 
         state = %{
           state

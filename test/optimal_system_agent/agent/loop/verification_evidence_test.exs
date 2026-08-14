@@ -66,7 +66,12 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
       Ledger.record(sid, %{tool: "file_edit", args: %{"path" => "/tmp/x.ex"}, success: true})
       assert Ledger.failing_check_since_write(sid) == nil
 
-      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "pytest t.py"}, success: false})
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "pytest t.py"},
+        success: false
+      })
+
       assert %{} = Ledger.failing_check_since_write(sid)
     end
 
@@ -75,10 +80,21 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
       # because build and test were one predicate.
       sid = "verif-build-#{System.unique_integer([:positive])}"
       Ledger.record(sid, %{tool: "file_edit", args: %{"path" => "/tmp/x.go"}, success: true})
-      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "go build ./..."}, success: true})
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "go build ./..."},
+        success: true
+      })
+
       refute Ledger.tested_since_write?(sid)
 
-      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "go test ./..."}, success: true})
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "go test ./..."},
+        success: true
+      })
+
       assert Ledger.tested_since_write?(sid)
     end
 
@@ -148,6 +164,17 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
       write(sid, path)
       assert VerificationGate.needs_verification?(state)
 
+      # A passing suite run discharges the LIVENESS question…
+      shell(sid, "mix test", true)
+      assert Ledger.verified?(sid)
+
+      # …but not the ADEQUACY one: a suite that has only ever been green proves
+      # only that it ran. See `VerificationAdequacyTest` for the full account.
+      assert VerificationGate.trigger(sid, 0, nil) == :inadequate_test
+
+      # Red -> source fix -> green is what discharges it.
+      shell(sid, "mix test", false)
+      write(sid, path)
       shell(sid, "mix test", true)
       refute VerificationGate.needs_verification?(state)
     end
@@ -155,7 +182,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
     test "gate steps aside after the re-prompt cap even with pending evidence",
          %{session_id: sid, path: path} do
       write(sid, path)
-      capped = %{session_id: sid, verification_gate_prompts: 2}
+      capped = %{session_id: sid, verification_gate_prompts: 3}
       refute VerificationGate.needs_verification?(capped)
     end
 

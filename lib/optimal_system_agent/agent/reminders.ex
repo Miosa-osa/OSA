@@ -107,7 +107,8 @@ defmodule OptimalSystemAgent.Agent.Reminders do
       collect_task_completions(session_id) ++
         collect_skill_discovery(session_id, tool_call, state) ++
         collect_diagnostics(tool_call, state) ++
-        collect_self_correction(session_id, tool_call, result_str)
+        collect_self_correction(session_id, tool_call, result_str) ++
+        collect_test_first_nudge(session_id)
 
     format_with_reminders(result_str, reminders)
   rescue
@@ -567,6 +568,22 @@ defmodule OptimalSystemAgent.Agent.Reminders do
       "Before retrying, reconsider your approach — re-check your assumptions (e.g. re-read the " <>
       "target file/state if relevant) rather than reissuing the same call with the same " <>
       "arguments. This is a one-time nudge for this failure; it will not repeat."
+  end
+
+  # ── Collector 5: test-first nudge ────────────────────────────────────────
+  #
+  # Fires ONCE per session, on the first tool call after the session's first
+  # successful edit to a non-test code file, while no persisted test artefact
+  # exists yet. The completion gate demands a test that failed at least once;
+  # this says so at the point where setting one up is still cheap, instead of
+  # only at the finish line. Text lives in `VerificationGate`.
+  defp collect_test_first_nudge(session_id) do
+    case OptimalSystemAgent.Agent.Loop.VerificationGate.first_write_nudge(session_id) do
+      nil -> []
+      msg -> if claim(session_id, :test_first_nudge), do: [msg], else: []
+    end
+  rescue
+    _ -> []
   end
 
   defp run_diagnostics_provider(fun, path, state) when is_function(fun, 2),
