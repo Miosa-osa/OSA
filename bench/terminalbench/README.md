@@ -552,6 +552,44 @@ it must be pinned before a harness number means anything.**
   --ollama-think true            # the dial that DOES reach the wire on our path
 ```
 
+### Every OSA number on this model has been run with reasoning OFF
+
+This was found while wiring the pin, and it reframes every figure this harness
+has produced.
+
+`Providers.Ollama.maybe_add_think/3` disables extended reasoning **by default on
+exactly the models that have it** — the branch is `thinking_model?(model) ->
+Map.put(body, "think", false)`, added to stop unbounded 10-minute stalls on
+local reasoning models. `thinking_model?/1` resolves `glm-5.2:cloud` through
+`OllamaCloud.capability/2`, which reports the daemon's own `thinking` flag.
+Measured against the release artefact:
+
+```
+thinking_model?("glm-5.2:cloud") = true
+UNPINNED   body = %{"think" => false}      # <- what every run so far sent
+THINK=true body = %{"think" => true}
+THINK=false body = %{"think" => false}
+```
+
+So the default is not "the model's default". It is **reasoning explicitly turned
+off**, on the one model we benchmark, on every run this harness has ever done.
+
+cline measured that exact switch on that exact model over the same 89 tasks:
+**68.5% with reasoning, 57.3% without — 11.2 points.** Which means our numbers
+were never in the neighbourhood of cline's 68.5% row; at best they were
+comparable to their 57.3% one, and nothing recorded the difference. The gap we
+have spent this effort attributing to the harness has had an 11-point
+self-inflicted handicap sitting underneath it the whole time.
+
+`--ollama-think true` is therefore not a refinement. It is the difference
+between measuring the harness and measuring a misconfiguration.
+
+The cost is real and should be expected in the token columns: on the live daemon
+the same prompt costs **137 output tokens at `think: true` and 3 at
+`think: false`**.
+
+### Two dials, because they are not one dial
+
 `--effort` and `--ollama-think` are two dials because they are not one dial.
 `--effort` pins OSA's own ladder via `~/.osa/config.toml` `[model].effort`
 (toml-only; `ConfigFile.effort/0` has no json or env equivalent), which governs
