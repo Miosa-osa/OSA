@@ -2694,10 +2694,40 @@ impl Component for InputComponent {
             let shown = self.queued_items.len().min(max_items);
             for (i, item) in self.queued_items.iter().take(shown).enumerate() {
                 let one_line = item.replace('\n', " ");
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled("\u{29d6} ", theme.hint()),
-                    Span::styled(one_line, theme.hint()),
-                ]);
+                    Span::styled(one_line.clone(), theme.hint()),
+                ];
+
+                // Say WHEN it runs, on the first row only.
+                //
+                // A queued message rendered as a dim line and nothing else,
+                // which during a long turn is indistinguishable from the app
+                // ignoring the keystroke. Reported after a 14-minute fan-out:
+                // typing appeared to do nothing, and the user interrupted to
+                // force it — which worked, but only by accident of the queue
+                // draining on interrupt.
+                //
+                // Naming the trigger turns "nothing happened" into "I know what
+                // happens next, and what to do if I want it sooner". The
+                // interrupt half is accurate: `turn_done` is set on the
+                // interrupt path, so a queued message fires promptly rather
+                // than waiting out the cancel timeout.
+                //
+                // Only when it fits: this must never push the composer down or
+                // wrap, so it is dropped on a narrow terminal rather than
+                // costing a row.
+                if i == 0 {
+                    let hint = "  \u{2014} sends when this turn ends \u{00b7} esc to send now";
+                    let used = unicode_width::UnicodeWidthStr::width(one_line.as_str()) + 2;
+                    let need = unicode_width::UnicodeWidthStr::width(hint);
+
+                    if used + need <= area.width as usize {
+                        spans.push(Span::styled(hint.to_string(), theme.recede()));
+                    }
+                }
+
+                let line = Line::from(spans);
                 frame.render_widget(
                     Paragraph::new(line),
                     Rect::new(area.x, area.y + i as u16, area.width, 1),
@@ -4869,5 +4899,65 @@ mod paste_burst_composer_tests {
     #[test]
     fn char_interval_constant_matches_codex() {
         assert_eq!(PASTE_BURST_CHAR_INTERVAL, Duration::from_millis(8));
+    }
+}
+
+// ── a queued message must say when it runs ─────────────────────────────────
+//
+// Reported after a 14-minute fan-out: typing appeared to do nothing, and the
+// user interrupted to force it. The message WAS queued and rendered — as a dim
+// line with no indication of when it would fire, which during a long turn is
+// indistinguishable from a dropped keystroke.
+#[cfg(test)]
+mod queued_affordance {
+    use super::*;
+
+    fn queued_row_text(items: Vec<&str>, width: u16) -> String {
+        let mut input = InputComponent::new();
+        input.set_queued_items(items.into_iter().map(String::from).collect());
+        let backend = ratatui::backend::TestBackend::new(width, 10);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = ratatui::layout::Rect::new(0, 0, width, 10);
+            input.draw(f, area);
+        })
+        .expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn the_first_queued_row_names_its_trigger() {
+        let row = queued_row_text(vec!["check the god files"], 100);
+        assert!(row.contains("check the god files"), "{row:?}");
+        assert!(
+            row.contains("sends when this turn ends"),
+            "a queued message must say WHEN it runs: {row:?}"
+        );
+        assert!(
+            row.contains("esc to send now"),
+            "and how to send it sooner: {row:?}"
+        );
+    }
+
+    #[test]
+    fn the_hint_is_dropped_rather_than_wrapping_on_a_narrow_terminal() {
+        // It must never push the composer down or cost a row — the queued
+        // display's height is computed from the item count alone.
+        let row = queued_row_text(vec!["a message that is quite long indeed"], 44);
+        assert!(
+            !row.contains("sends when this turn ends"),
+            "the hint should be dropped at narrow widths, not wrapped: {row:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_first_row_carries_the_hint() {
+        let mut input = InputComponent::new();
+        input.set_queued_items(vec!["one".into(), "two".into()]);
+        // Height must not change with the hint — it is drawn inside row 0.
+        assert_eq!(input.queued_lines(), 2);
     }
 }
