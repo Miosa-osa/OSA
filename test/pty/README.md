@@ -105,6 +105,37 @@ Two further scope notes:
 - **`test_small_viewport`** — at 80x10 and squeezed to 80x8, the composer must
   still survive; `fit_bands` must degrade rather than overflow.
 
+### Input tests — a different question from layout
+
+Some tests here assert on **input** rather than on bands. They need a state the
+stub normally blows through, so `stub_backend.py` can GATE the two requests that
+define one: `hold_health()` keeps the TUI on the connect splash, `hold_turn()`
+keeps `POST /api/v1/orchestrate` (a long poll for a whole turn) outstanding so
+the TUI stays in `Processing`. Both release on demand and both carry a ceiling.
+
+- **`test_connecting_splash_does_not_trap_the_user`** — while connecting, the
+  splash names a quit key, typed characters are buffered and echoed, Enter can
+  NOT submit them, and Ctrl+C actually exits. `App::handle_key` had no
+  `Connecting` arm at all, so every key was dropped for the whole of connect
+  (twelve health retries against a dead backend).
+- **`test_a_draft_typed_while_connecting_survives_into_the_composer`** — the
+  buffered text really lands in the composer, rather than being echoed on the
+  splash and thrown away.
+- **`test_a_slow_second_escape_still_interrupts`** — Esc, a 2.5s pause, Esc
+  interrupts the running turn. The in-turn window used to be 800ms and dropped
+  a slower second press silently *while the spinner still said "esc again to
+  interrupt"*. Asserted on the WIRE (`POST /api/v1/sessions/<id>/cancel`), not
+  the screen: `cancel_processing` toasts "Interrupting…" unconditionally, so a
+  screen check passes on a build that never sends the request.
+- **`test_one_stray_escape_still_does_not_kill_a_turn`** — the other side of
+  that change: one Esc must not cancel, and an intervening keystroke must still
+  withdraw the arm, which is now the only thing that can.
+
+Measured against a binary with both defects restored: the three new
+behaviour tests fail (`Ctrl+C` on the splash did not exit within 5s; the typed
+text never appeared; no cancel POST after the slow Esc) and the fourth passes,
+as it should.
+
 ## Proving it still works
 
 A test that cannot fail is not a test. To re-verify that this harness genuinely

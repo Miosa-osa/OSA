@@ -26,8 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from osa_pty import COMPOSER_TOP, SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
 from stub_backend import (  # noqa: E402
     StubBackend,
+    hold_health,
+    hold_turn,
     post_mark,
     posts_since,
+    release_health,
+    release_turn,
     set_claude_cli_state,
 )
 
@@ -998,6 +1002,297 @@ def test_resize_emits_nothing_that_deposits_into_scrollback(
         assert_single_live_region(s, "after the emission-checked drag")
 
 
+def test_connecting_splash_does_not_trap_the_user(backend: StubBackend) -> None:
+    """Keys pressed while OSA is connecting are honoured, not discarded.
+
+    `App::handle_key` matched on `self.state` and ended in `_ => false`, and
+    `AppState::Connecting` was the one variant with no arm — so for the whole
+    duration of connect **every** key was silently dropped, Ctrl+C and Ctrl+D
+    included. That window is not short: `handle_health_result` retries a
+    backend that will not answer twelve times before giving up, so a user whose
+    backend is slow or dead sat on a spinner with no working key at all. Typing
+    into a slow start is exactly what people do, and all of it vanished.
+
+    Held open here by gating `/health` at the stub, which is the same shape as
+    the real cause. Four things are asserted, in the order a user meets them:
+
+      1. the splash names an escape hatch (`Ctrl+C to quit`);
+      2. typed characters are KEPT and echoed, so "my keystrokes disappeared"
+         is not a reading the screen supports;
+      3. Enter does NOT submit them — the buffered draft cannot become a
+         request, nor a `/command`, before the session exists;
+      4. Ctrl+C actually exits the process.
+
+    (4) is the one that cannot be asserted on the screen at all: an app that
+    ignores Ctrl+C and one that handles it look identical until the process is
+    gone, which is why `wait_exit` exists.
+
+    A binary with the shipped defect fails at (1) — there is nothing on the
+    splash to find — and, with that hint removed, at (2), (3) is vacuous and
+    (4) hangs to its deadline.
+    """
+    hold_health()
+    try:
+        with PtySession(backend.base_url, cols=100, rows=30) as s:
+            if not s.wait_for_text("Connecting", 10.0):
+                raise AssertionError(
+                    "the connect splash never appeared, so there was no "
+                    f"connecting state to press keys in.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if s.count(SINGLETON_BANDS["composer"]) != 0:
+                raise AssertionError(
+                    "the composer is already on screen, so the app is past "
+                    "Connecting and this test would prove nothing.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # 1. The escape hatch is printed. Without it, a user has no way to
+            #    learn that any key works.
+            if "Ctrl+C to quit" not in "\n".join(s.lines()):
+                raise AssertionError(
+                    "the connect splash does not say how to get out of it.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # 2. Typing is kept and shown.
+            mark = post_mark()
+            s.write(b"KEPT-WHILE-CONNECTING")
+            if not s.wait_for_text("KEPT-WHILE-CONNECTING", 3.0):
+                raise AssertionError(
+                    "text typed during connect was neither buffered nor shown "
+                    "— every keystroke went nowhere, which is the reported "
+                    f"defect.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # 3. …but Enter cannot send it. The draft is held, not armed.
+            s.write(b"\r")
+            s.pump(SETTLE)
+            premature = posts_since(mark, "/api/v1/orchestrate")
+            if premature:
+                raise AssertionError(
+                    "Enter submitted the buffered draft while the session was "
+                    "still connecting. Buffering typed text is only safe if it "
+                    f"cannot be sent yet. Body: {premature[0][1][:200]}"
+                )
+
+            # 4. Ctrl+C gets out. This is the whole complaint class.
+            s.write(b"\x03")
+            if not s.wait_exit(5.0):
+                raise AssertionError(
+                    "Ctrl+C did not quit the connect splash — the user is "
+                    "trapped on it for as long as the backend takes to answer "
+                    "(up to twelve health retries), with no working key.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_health()
+
+
+def test_a_draft_typed_while_connecting_survives_into_the_composer(
+    backend: StubBackend,
+) -> None:
+    """The buffered text is really in the composer, not just painted on a splash.
+
+    The companion to the assertion above, and the one that decides whether
+    "buffered" was honest. Echoing the characters back on the splash and then
+    throwing them away when the state changes would pass every screen check in
+    the other test and still lose the user's first prompt.
+    """
+    hold_health()
+    try:
+        with PtySession(backend.base_url, cols=100, rows=30) as s:
+            if not s.wait_for_text("Connecting", 10.0):
+                raise AssertionError(
+                    f"no connect splash.\n--- rendered screen ---\n{s.dump()}"
+                )
+            s.write(b"SURVIVES-CONNECT")
+            if not s.wait_for_text("SURVIVES-CONNECT", 3.0):
+                raise AssertionError(
+                    f"the draft was not buffered.\n--- rendered screen ---\n{s.dump()}"
+                )
+            release_health()
+            s.boot()
+
+            # The composer row itself must carry it — matched against the
+            # prompt glyph so a leftover splash row cannot satisfy this.
+            rows = [line for line in s.lines() if "SURVIVES-CONNECT" in line]
+            if not any(SINGLETON_BANDS["composer"].search(line) for line in rows):
+                raise AssertionError(
+                    "the draft typed during connect did not arrive in the "
+                    "composer — it was echoed and then dropped, which loses "
+                    "the user's first prompt just as surely as never taking "
+                    f"the keystrokes at all.\nrows holding it: {rows}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_health()
+
+
+#: How long the test below waits between the two Escs.
+#:
+#: The old in-turn interrupt window was 800ms. This has to be comfortably past
+#: it — far enough that no amount of scheduler jitter on a loaded box could put
+#: the second press back inside — while still being a pause a real user makes
+#: without thinking about it. 2.5s is ~3x the old window.
+SLOW_ESC_GAP = 2.5
+
+
+def test_a_slow_second_escape_still_interrupts(backend: StubBackend) -> None:
+    """Esc … pause … Esc interrupts the turn. The window is not timed.
+
+    Reported as a session that appeared to hang and could not be escaped; the
+    user ended up queueing `/exit`. The interrupt machinery underneath was
+    working the whole time — the backend cancel is a cooperative ETS flag and a
+    watcher brutal-kills the provider task — and the failure was entirely in
+    the input window: `EscTracker` paired two Escs only within 800ms, and a
+    slower second press was silently swallowed and re-armed.
+
+    Silently is the operative word, and it is why widening the window would
+    have been the wrong fix. The first Esc flips the spinner's affordance to
+    "esc again to interrupt" and **nothing un-paints it when the window
+    lapses**, so past 800ms the screen went on promising a second Esc would
+    work while the tracker had already forgotten the first. Any fixed window
+    has that same lying interval; only removing the timer removes it. So the
+    assertion here is deliberately in two parts: the screen still says the
+    interrupt is armed after the pause, AND the press it promises lands.
+
+    Asserted on the WIRE, not the screen. `cancel_processing` toasts
+    "Interrupting…" immediately and unconditionally, so a screen check would
+    pass on a build where the request was never sent. The fact that decides it
+    is `POST /api/v1/sessions/<id>/cancel` arriving.
+
+    Requires a turn that is genuinely in flight: `POST /api/v1/orchestrate` is
+    a long poll for a whole turn, so the stub holds it open. Without that the
+    TUI is back at Idle within milliseconds and Esc means something else
+    entirely (clear the draft / open the rewind picker) — a test that pressed
+    Esc twice there would pass while proving nothing about interrupts.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+
+            mark = post_mark()
+            s.write(b"HANG FOR A WHILE")
+            s.pump(SETTLE)
+            s.write(b"\r")
+
+            # Wait for the turn to be genuinely outstanding.
+            waited = 0.0
+            while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+                s.pump(0.25)
+                waited += 0.25
+            if not posts_since(mark, "/api/v1/orchestrate"):
+                raise AssertionError(
+                    "the prompt never reached the backend, so there was no "
+                    f"turn to interrupt.\n--- rendered screen ---\n{s.dump()}"
+                )
+            if not s.wait_for_text("esc to interrupt", 5.0):
+                raise AssertionError(
+                    "the TUI is not showing a running turn, so Esc does not "
+                    f"mean interrupt here.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # First Esc — arms, does not cancel.
+            cancel_mark = post_mark()
+            s.write(b"\x1b")
+            if not s.wait_for_text("esc again to interrupt", 3.0):
+                raise AssertionError(
+                    "the first Esc did not arm the interrupt affordance.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if posts_since(cancel_mark, "/api/v1/sessions/pty-stub-session/cancel"):
+                raise AssertionError(
+                    "a SINGLE Esc cancelled the turn. The confirm step is not "
+                    "decoration — one stray Esc must not kill a long turn."
+                )
+
+            # The pause. This is the entire test.
+            s.pump(SLOW_ESC_GAP)
+
+            # The screen is still promising the interrupt after the old window
+            # would have lapsed. If this ever stops being true the promise has
+            # been withdrawn honestly, and the test below is a different (also
+            # acceptable) contract — but it must not be silent, so fail here
+            # rather than quietly changing meaning.
+            if "esc again to interrupt" not in "\n".join(s.lines()):
+                raise AssertionError(
+                    f"after {SLOW_ESC_GAP}s the armed affordance is gone from "
+                    "the screen. That is not necessarily wrong, but this test "
+                    "no longer asserts what it says it does — see the "
+                    f"docstring.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # Second Esc, late. It must interrupt.
+            s.write(b"\x1b")
+            waited = 0.0
+            while waited < 5.0:
+                s.pump(0.25)
+                waited += 0.25
+                if posts_since(cancel_mark, "/api/v1/sessions/pty-stub-session/cancel"):
+                    break
+            else:
+                raise AssertionError(
+                    f"an Esc pressed {SLOW_ESC_GAP}s after the first did not "
+                    "interrupt the turn: no POST to "
+                    "/api/v1/sessions/<id>/cancel arrived. The screen was "
+                    "still saying 'esc again to interrupt' the whole time. "
+                    "This is the report — the user pressed Esc twice, nothing "
+                    "happened, and they had to queue /exit to get out.\n"
+                    f"POSTs since the first Esc: "
+                    f"{[p for p, _ in posts_since(cancel_mark)] or 'none'}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_one_stray_escape_still_does_not_kill_a_turn(backend: StubBackend) -> None:
+    """The confirm step survives the window change. Untimed is not unconditional.
+
+    Removing the timer must not turn Esc into a single-press kill, and — the
+    subtler half — an intervening keystroke must still withdraw the arm. That
+    is now the ONLY thing that does, so if it were broken the first Esc of a
+    session would sit armed forever and some much later, unrelated Esc would
+    kill a turn the user was not trying to stop.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+            mark = post_mark()
+            s.write(b"HANG FOR A WHILE")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            waited = 0.0
+            while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+                s.pump(0.25)
+                waited += 0.25
+            if not s.wait_for_text("esc to interrupt", 5.0):
+                raise AssertionError(
+                    f"no running turn.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            cancel_mark = post_mark()
+            s.write(b"\x1b")          # arm
+            s.pump(0.5)
+            s.write(b"x")             # an ordinary keystroke — withdraws it
+            s.pump(0.5)
+            s.write(b"\x1b")          # this is a FIRST press again, not a pair
+            s.pump(SETTLE)
+
+            if posts_since(cancel_mark, "/api/v1/sessions/pty-stub-session/cancel"):
+                raise AssertionError(
+                    "Esc, a keystroke, Esc cancelled the turn. An intervening "
+                    "key must break the pair — with no time bound left it is "
+                    "the only thing that can, so a stale arm would otherwise "
+                    "let an unrelated Esc kill a turn much later."
+                )
+    finally:
+        release_turn()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -1010,6 +1305,10 @@ TESTS = [
     test_provider_picker_shows_account_plan_and_a_limit_meter,
     test_a_provider_with_no_reported_quota_says_so_instead_of_drawing_zero,
     test_claude_code_is_installed_and_signed_in_without_leaving_osa,
+    test_connecting_splash_does_not_trap_the_user,
+    test_a_draft_typed_while_connecting_survives_into_the_composer,
+    test_a_slow_second_escape_still_interrupts,
+    test_one_stray_escape_still_does_not_kill_a_turn,
 ]
 
 

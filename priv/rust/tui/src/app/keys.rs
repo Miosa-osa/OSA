@@ -49,6 +49,39 @@ impl EscTracker {
         }
     }
 
+    /// Register an Esc press with **no time bound**: any earlier press that has
+    /// not been `reset()` pairs with this one, however long ago it was.
+    ///
+    /// This is the in-turn interrupt chord, and the reason it is untimed is that
+    /// there is nothing left to disambiguate. `press` exists to tell two
+    /// meanings of Esc apart; while a turn is running Esc has exactly one
+    /// meaning — interrupt — so the only job of the first press is to ask for
+    /// confirmation, and a clock is the wrong thing to withdraw that offer.
+    ///
+    /// The offer is withdrawn by an intervening non-Esc key instead
+    /// (`handle_processing_key` calls `reset` on every one, and disarms the
+    /// on-screen affordance in the same breath), which is the event that
+    /// actually means "I am doing something else now".
+    ///
+    /// What made the timed version a defect rather than a preference: the armed
+    /// state is PAINTED. The first Esc flips the spinner's affordance to
+    /// "esc again to interrupt" and nothing un-paints it when the window
+    /// lapses — so past 800 ms the screen went on promising a second Esc would
+    /// work while the tracker had quietly forgotten the first. Untimed makes
+    /// the code agree with what is already on screen.
+    ///
+    /// Takes `now` (like `press`) purely to record the press; it is never
+    /// compared against.
+    pub fn press_sticky(&mut self, now: Instant) -> bool {
+        match self.last.take() {
+            Some(_) => true,
+            None => {
+                self.last = Some(now);
+                false
+            }
+        }
+    }
+
     /// Whether a single Esc is currently "pending" (waiting for a possible
     /// second press). Used to decide whether to show the double-Esc hint.
     pub fn is_pending(&self) -> bool {
@@ -375,6 +408,51 @@ mod esc_tracker_tests {
         assert!(!t.is_pending());
         // The next Esc is a fresh first press, not a double.
         assert!(!t.press(start + Duration::from_millis(100)));
+    }
+
+    /// The in-turn interrupt chord does not expire. This is the regression:
+    /// a second Esc pressed a full minute later still interrupts, because while
+    /// a turn is running Esc has only one meaning and the armed affordance is
+    /// on screen the whole time saying so.
+    #[test]
+    fn sticky_press_pairs_however_late_the_second_esc_is() {
+        let mut t = EscTracker::new(Duration::from_millis(800));
+        let start = Instant::now();
+        assert!(!t.press_sticky(start), "first Esc only arms");
+        assert!(t.is_pending());
+        assert!(
+            t.press_sticky(start + Duration::from_secs(60)),
+            "a slow second Esc must still interrupt — the 800ms window dropped \
+             it silently while the screen still said 'esc again to interrupt'"
+        );
+        assert!(!t.is_pending(), "the pair is consumed");
+    }
+
+    /// …but an intervening key still withdraws the offer, which is the event
+    /// that actually means "I am doing something else now". Untimed must not
+    /// mean unconditional.
+    #[test]
+    fn sticky_press_is_still_broken_by_an_intervening_key() {
+        let mut t = EscTracker::new(Duration::from_millis(800));
+        let start = Instant::now();
+        assert!(!t.press_sticky(start));
+        t.reset(); // any non-Esc key, mirroring handle_processing_key
+        assert!(!t.is_pending());
+        assert!(
+            !t.press_sticky(start + Duration::from_millis(10)),
+            "after an intervening key the next Esc is a fresh first press"
+        );
+    }
+
+    /// The timed window is NOT removed — it still governs the Idle chords,
+    /// where Esc genuinely is ambiguous (dismiss a dropdown, clear a draft,
+    /// open the rewind picker) and an untimed pair could destroy a draft.
+    #[test]
+    fn the_timed_window_is_untouched_for_the_ambiguous_chords() {
+        let mut t = EscTracker::new(Duration::from_millis(800));
+        let start = Instant::now();
+        assert!(!t.press(start));
+        assert!(!t.press(start + Duration::from_secs(60)));
     }
 
     #[test]

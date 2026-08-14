@@ -372,3 +372,157 @@ mod processing_affordances {
         );
     }
 }
+
+// ── no state may drop keys through a catch-all ──────────────────────────────
+//
+// `App::handle_key` matched on `self.state` and ended in `_ => false`. Exactly
+// one variant fell into it — `Connecting` — and the consequence was that while
+// the TUI was connecting to the backend EVERY key was silently discarded,
+// Ctrl+C and Ctrl+D included. Connect is not instantaneous (twelve health
+// retries against a backend that will not start), so that is up to a minute of
+// a user pressing keys into a void with no way out, which is the same trapped-
+// user class as a turn that cannot be interrupted.
+//
+// The catch-all is gone: the match is exhaustive, so the COMPILER now refuses a
+// new `AppState` that nothing routes keys for. These tests pin that the arm
+// cannot come back — an exhaustive match plus a re-added `_ => false` compiles
+// perfectly happily and silently restores the defect.
+#[cfg(test)]
+mod key_routing_is_exhaustive {
+    /// The body of `App::handle_key`, from the `match self.state {` that routes
+    /// by state to the end of that match.
+    fn state_match_body() -> &'static str {
+        let src = include_str!("update.rs");
+        let after = src
+            .split("fn handle_key")
+            .nth(1)
+            .expect("App::handle_key exists");
+        let body = after
+            .split("match self.state {")
+            .nth(1)
+            .expect("handle_key dispatches on self.state");
+        // Bounded to the dispatch match: the first `fn ` after it is the next
+        // handler, and every arm of interest is above that.
+        let end = body.find("\n    /// ").or_else(|| body.find("\n    fn "));
+        &body[..end.unwrap_or(body.len())]
+    }
+
+    #[test]
+    fn no_catch_all_arm_swallows_a_state() {
+        let body = state_match_body();
+        assert!(
+            !body.contains("_ => false"),
+            "`handle_key` has a catch-all arm again. Every AppState must route \
+             keys deliberately; a state that falls through one drops EVERY key \
+             the user presses, quit keys included, and shows nothing to say so. \
+             That shipped as `Connecting`."
+        );
+    }
+
+    #[test]
+    fn connecting_routes_keys() {
+        let body = state_match_body();
+        assert!(
+            body.contains("AppState::Connecting => self.handle_connecting_key"),
+            "the connect splash must route keys — it is where a user who \
+             cannot reach Idle is stuck"
+        );
+    }
+
+    /// The two keys a trapped user reaches for. Asserted against the handler's
+    /// source because there is no in-process seam that can drive `App` through
+    /// a real `Connecting` — the PTY suite proves the behaviour end to end
+    /// (`test_connecting_splash_does_not_trap_the_user`), and this is the cheap
+    /// guard that fails first if the arm is gutted.
+    #[test]
+    fn the_connecting_handler_can_quit() {
+        let src = include_str!("update.rs");
+        let handler = src
+            .split("fn handle_connecting_key")
+            .nth(1)
+            .expect("handle_connecting_key exists");
+        let handler = &handler[..handler.len().min(1200)];
+        assert!(
+            handler.contains("KeyCode::Char('c')") && handler.contains("KeyCode::Char('d')"),
+            "Ctrl+C and Ctrl+D must quit from the connect splash"
+        );
+        assert!(
+            handler.contains("is_typed_text"),
+            "typing during connect must be buffered into the composer, not dropped"
+        );
+        assert!(
+            !handler.contains("KeyCode::Enter"),
+            "Enter must NOT be routed while connecting — a buffered draft must \
+             not be submittable, nor a `/command` executable, before the \
+             session exists"
+        );
+    }
+}
+
+// ── a dialog state whose dialog is gone must not keep the keyboard ──────────
+//
+// The second half of the same audit. Fifteen states route every key into an
+// `Option<Dialog>`, and most of them reach their close path only through an
+// action that dialog RETURNS — so with the Option unset, no key at all leaves
+// the state. Same trap as the missing `Connecting` arm, different route.
+#[cfg(test)]
+mod overlay_dialog_lost_is_complete {
+    use super::AppState;
+
+    /// Every state that `is_overlay()` claims, plus the two inline dialog
+    /// states, checked against the escape hatch's list. A new dialog state that
+    /// forgets `overlay_dialog_lost` is a new way to trap a user.
+    #[test]
+    fn every_option_backed_dialog_state_is_listed() {
+        let src = include_str!("update.rs");
+        let body = src
+            .split("fn overlay_dialog_lost")
+            .nth(1)
+            .expect("overlay_dialog_lost exists");
+        let body = &body[..body.len().min(2000)];
+
+        // The states whose key handling is `self.<dialog>.as_mut()…` with no
+        // fallback of their own. Named here so the list is reviewable next to
+        // the enum rather than only inside the function.
+        for state in [
+            AppState::Trust,
+            AppState::ThemePicker,
+            AppState::Keybindings,
+            AppState::Tools,
+            AppState::PermissionsManager,
+            AppState::Hooks,
+            AppState::Mcp,
+            AppState::Cost,
+            AppState::Skills,
+            AppState::Channels,
+            AppState::Memory,
+            AppState::Metrics,
+            AppState::Tasks,
+            AppState::Persona,
+            AppState::Sandbox,
+        ] {
+            let arm = format!("AppState::{state:?} =>");
+            assert!(
+                body.contains(&arm),
+                "{state:?} routes every key into an Option<Dialog> but is not \
+                 listed in overlay_dialog_lost — with that Option unset there \
+                 is no key, Esc or Ctrl+C included, that can leave the state"
+            );
+        }
+    }
+
+    /// The guard has to run BEFORE the per-state dispatch, or the trapped
+    /// states swallow the key on the way past it.
+    #[test]
+    fn the_guard_runs_before_the_state_dispatch() {
+        let src = include_str!("update.rs");
+        let after = src.split("fn handle_key").nth(1).expect("handle_key exists");
+        let guard = after.find("self.overlay_dialog_lost()");
+        let dispatch = after.find("match self.state {");
+        assert!(
+            guard.is_some() && dispatch.is_some() && guard < dispatch,
+            "the lost-dialog escape hatch must be checked before keys are \
+             dispatched by state"
+        );
+    }
+}

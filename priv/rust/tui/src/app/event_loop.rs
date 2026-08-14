@@ -1795,13 +1795,17 @@ impl App {
             frame.render_widget(ratatui::widgets::Clear, area);
             match self.state {
                 AppState::Connecting => {
-                    crate::view::connecting::draw_connecting(frame, area);
+                    crate::view::connecting::draw_connecting(
+                        frame,
+                        area,
+                        self.connecting_draft(),
+                    );
                 }
                 AppState::Onboarding => {
                     if let Some(ref wizard) = self.onboarding {
                         crate::view::onboarding_flow::draw_onboarding_flow(frame, area, wizard);
                     } else {
-                        crate::view::connecting::draw_connecting(frame, area);
+                        crate::view::connecting::draw_connecting(frame, area, "");
                     }
                 }
                 AppState::AgentsDashboard => {

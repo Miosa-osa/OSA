@@ -212,6 +212,50 @@ def set_claude_cli_state(**fields) -> None:
     CLAUDE_CLI_STATE.update(fields)
 
 
+# --- gates: holding the TUI in a state long enough to press keys at it -------
+#
+# Two of the tests here are about what the INPUT layer does in a state, not
+# about what the screen looks like once it has left it. Both states are ones the
+# stub normally blows through in single-digit milliseconds:
+#
+#   * `Connecting` — held open by making `/health` not answer yet. This is a
+#     faithful stand-in for the real cause (a backend that is slow or dead;
+#     `handle_health_result` retries twelve times before giving up), and it is
+#     the window in which every keystroke used to be discarded.
+#   * `Processing` — held open by making `POST /api/v1/orchestrate` not answer.
+#     That call is a long poll for a whole turn, so a stub that returns
+#     instantly means the TUI is never in the state where Esc means "interrupt".
+#
+# Both are `threading.Event`s rather than sleeps so a test can release them the
+# moment it is done, and both carry a ceiling so a wedged gate fails a test
+# instead of hanging the suite.
+_HEALTH_GATE = threading.Event()
+_HEALTH_GATE.set()
+_TURN_GATE = threading.Event()
+_TURN_GATE.set()
+
+#: Longest a gated request will ever be held, whatever the test forgets to do.
+GATE_CEILING = 30.0
+
+
+def hold_health() -> None:
+    """Stop `/health` answering, so the TUI stays on the connect splash."""
+    _HEALTH_GATE.clear()
+
+
+def release_health() -> None:
+    _HEALTH_GATE.set()
+
+
+def hold_turn() -> None:
+    """Stop `/api/v1/orchestrate` answering, so the turn stays in flight."""
+    _TURN_GATE.clear()
+
+
+def release_turn() -> None:
+    _TURN_GATE.set()
+
+
 #: Every POST the stub received, as `(path, body)`, oldest first.
 #: Appended by `_Handler.do_POST`; read by the tests through `posts_since`.
 POSTS: list[tuple[str, str]] = []
@@ -236,11 +280,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _json(self, payload, status: int = 200) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        # A GATED request (see the gate comment above) is deliberately still
+        # being held when its test kills the session, so the client is often
+        # gone by the time the answer is written. That is the harness working,
+        # not a failure — but socketserver's default is to print a full
+        # traceback for it, which buries the suite's own output. Swallow the
+        # disconnect and nothing else.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _sse(self) -> None:
         """Hold the event stream open, silently.
@@ -268,6 +321,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/health":
+            # See the gate comment above: held open, this is what keeps the TUI
+            # on the connect splash long enough to press keys at it.
+            _HEALTH_GATE.wait(GATE_CEILING)
             return self._json(_HEALTH)
         if path.startswith("/api/v1/stream/"):
             return self._sse()
@@ -313,6 +369,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(_LOGIN)
         if path == "/api/v1/sessions":
             return self._json({"session_id": "pty-stub-session", "id": "pty-stub-session"})
+        if path == "/api/v1/orchestrate":
+            # Recorded ABOVE, then held: a test can see the turn start while it
+            # is still in flight, which is the whole point — Esc only means
+            # "interrupt" while the long poll is outstanding.
+            _TURN_GATE.wait(GATE_CEILING)
+            return self._json({})
         return self._json({})
 
 

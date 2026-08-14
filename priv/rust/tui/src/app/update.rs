@@ -235,6 +235,30 @@ impl App {
             };
         }
 
+        // A dialog state whose dialog is GONE must not keep the keyboard.
+        //
+        // Thirteen states below are backed by an `Option<Dialog>` and route
+        // every key into it. Eleven of them (`Trust`, `ThemePicker`, `Mcp`,
+        // `PermissionsManager`, `Hooks`, `Cost`, `Skills`, `Channels`,
+        // `Memory`, `Metrics`, `Tasks`, `Persona`, `Sandbox`) reach their close
+        // path only through an action the dialog RETURNS, so with the Option
+        // unset there is no key at all — Esc, q, Ctrl+C included — that can
+        // leave the state. That is the same trap as the missing `Connecting`
+        // arm, arriving by a different route, and it is the reason it is worth
+        // fixing pre-emptively rather than waiting for a report: it is not
+        // reachable by any path found today, but its symptom would be a session
+        // frozen on a blank overlay with no way out and nothing on screen to
+        // explain it.
+        //
+        // `Keybindings` and `Tools` already did the right thing here
+        // (`unwrap_or(Close)`); this generalises their behaviour to all of
+        // them, in one auditable place, without touching any handler's
+        // in-dialog key semantics.
+        if self.overlay_dialog_lost() {
+            self.exit_overlay();
+            return false;
+        }
+
         match self.state {
             AppState::Quit => self.handle_quit_dialog_key(key),
             AppState::Palette => self.handle_palette_key(key),
@@ -393,8 +417,99 @@ impl App {
                 }
                 false
             }
+            AppState::Connecting => self.handle_connecting_key(key),
+        }
+    }
+
+    /// True when the current state is one that routes every key into an
+    /// `Option<Dialog>` and that Option is `None`.
+    ///
+    /// Such a state cannot be left by any keystroke, because its close path
+    /// runs on an action the (absent) dialog would have returned. Listed
+    /// explicitly rather than derived, so adding a dialog state and forgetting
+    /// this list is a visible omission rather than a silent one.
+    pub(crate) fn overlay_dialog_lost(&self) -> bool {
+        match self.state {
+            AppState::Trust => self.trust_dialog.is_none(),
+            AppState::ThemePicker => self.theme_picker.is_none(),
+            AppState::Keybindings => self.keybindings_viewer.is_none(),
+            AppState::Tools => self.tools_browser.is_none(),
+            AppState::PermissionsManager => self.permissions_manager.is_none(),
+            AppState::Hooks => self.hooks_viewer.is_none(),
+            AppState::Mcp => self.mcp_servers.is_none(),
+            AppState::Cost => self.cost_dashboard.is_none(),
+            AppState::Skills => self.skills_browser.is_none(),
+            AppState::Channels => self.channels_panel.is_none(),
+            AppState::Memory => self.memory_browser.is_none(),
+            AppState::Metrics => self.metrics_dashboard.is_none(),
+            AppState::Tasks => self.tasks_panel.is_none(),
+            AppState::Persona => self.persona_picker.is_none(),
+            AppState::Sandbox => self.sandbox_picker.is_none(),
             _ => false,
         }
+    }
+
+    /// Keys pressed while the connect splash owns the screen.
+    ///
+    /// This arm did not exist. `Connecting` fell through the match's trailing
+    /// `_ => false`, so **every** key was discarded — Ctrl+C and Ctrl+D
+    /// included. Connect is not instantaneous: `handle_health_result` retries a
+    /// dead backend twelve times at `HEALTH_RETRY_DELAY`, so a user facing a
+    /// backend that will not start can sit on this splash for a minute with no
+    /// key of any kind working. That is a trapped user, which is the same
+    /// complaint class as the turn that could not be interrupted, and it is
+    /// strictly worse than the thing being waited for.
+    ///
+    /// Three behaviours, all deliberate:
+    ///
+    /// * **Quit always works.** Ctrl+C and Ctrl+D quit *immediately* rather
+    ///   than raising the confirm dialog Idle uses. There is no session, no
+    ///   draft worth a confirmation prompt and — decisively — `Connecting` has
+    ///   no transition to `Quit` in the table, so a confirm dialog here would be
+    ///   a second trap rather than a courtesy.
+    ///
+    /// * **Typing is kept, not dropped.** Someone whose session is slow to
+    ///   start types their first prompt into the wait; the composer already
+    ///   exists behind the splash, so the characters go into it and are there
+    ///   when Idle arrives. Only `is_typed_text` keys and the two erase keys are
+    ///   forwarded — Enter is NOT among them, so nothing can be submitted, and
+    ///   nothing (a leading `/`, a leading `#`) can be executed as a command,
+    ///   before the session is ready. The `/`-completion popup that a leading
+    ///   slash raises is client-side and invisible under the splash; without an
+    ///   Enter reaching the composer it can accept nothing.
+    ///
+    /// * **Everything else is ignored VISIBLY.** Enter, Esc, arrows, F-keys and
+    ///   chords have no meaning yet, and `draw_connecting` says so on screen —
+    ///   it prints the quit key, and it echoes the buffered draft so a user can
+    ///   see their typing was kept rather than eaten.
+    fn handle_connecting_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Quit, unconditionally and without a dialog.
+        if matches!(key.modifiers, KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+        {
+            return true;
+        }
+
+        // Text and its corrections are buffered into the real composer.
+        let buffers = crate::app::keys::is_typed_text(&key)
+            || matches!(key.code, KeyCode::Backspace | KeyCode::Delete);
+        if buffers {
+            let _ = self
+                .input
+                .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+            return false;
+        }
+
+        // Deliberately ignored: Enter, Esc, navigation and every chord. They
+        // have no meaning until the backend answers, and the splash says as
+        // much rather than leaving the user guessing whether the key landed.
+        false
+    }
+
+    /// The draft typed while `Connecting` was on screen, echoed by the splash so
+    /// buffered keystrokes are visibly kept rather than silently swallowed.
+    pub(crate) fn connecting_draft(&self) -> &str {
+        self.input.value()
     }
 
     /// `/trust` dialog: Accept persists trust for the workspace via the backend
@@ -1150,12 +1265,22 @@ impl App {
         match (key.code, key.modifiers) {
             // U-T22 — double-press Esc to interrupt (distinct from the Idle
             // msg-nav "esc again to clear/edit" chord). The first Esc arms the
-            // affordance + hints; a second Esc within the 800ms window actually
-            // cancels. A single stray Esc can no longer kill a long turn. Ctrl+C
-            // stays a single-press hard interrupt below.
+            // affordance + hints; the NEXT Esc cancels. A single stray Esc can
+            // no longer kill a long turn. Ctrl+C stays a single-press hard
+            // interrupt below.
+            //
+            // `press_sticky`, not `press`: the arm has no expiry while a turn
+            // is running. It used to lapse after 800 ms, silently — the user
+            // pressed Esc, read "esc again to interrupt" off the spinner,
+            // pressed Esc a second too late, and nothing happened, with the
+            // screen still showing the armed affordance because nothing
+            // un-paints it on a lapse. That is the reported "I could not escape
+            // the session"; the reporter queued `/exit` instead. See
+            // `EscTracker::press_sticky` for why a wider fixed window is not
+            // the fix and why unbounded is safe here specifically.
             (KeyCode::Esc, _) => {
                 let now = std::time::Instant::now();
-                if self.esc_tracker.press(now) {
+                if self.esc_tracker.press_sticky(now) {
                     self.activity.arm_interrupt(false);
                     self.cancel_processing();
                     // Cancelling moves us to Idle, where the SAME tracker drives a

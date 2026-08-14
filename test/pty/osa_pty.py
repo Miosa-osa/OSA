@@ -236,6 +236,37 @@ class PtySession:
             f"{timeout}s. Screen was:\n{self.dump()}"
         )
 
+    def wait_for_text(self, needle: str, timeout: float) -> bool:
+        """Pump until `needle` is anywhere on the rendered screen."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.pump(0.1)
+            if needle in "\n".join(self.lines()):
+                return True
+        return False
+
+    def wait_exit(self, timeout: float) -> bool:
+        """Pump until the child process exits, or give up.
+
+        The only way to prove a quit key actually quits. Asserting on the screen
+        cannot: a TUI that ignores Ctrl+C and one that handles it draw the same
+        thing right up until the process is gone.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.pump(0.1)
+            if self.pid is None:
+                return True
+            try:
+                pid, _ = os.waitpid(self.pid, os.WNOHANG)
+            except (ChildProcessError, ProcessLookupError):
+                self.pid = None
+                return True
+            if pid:
+                self.pid = None
+                return True
+        return False
+
     # -- observing ---------------------------------------------------------
 
     def lines(self) -> list[str]:
