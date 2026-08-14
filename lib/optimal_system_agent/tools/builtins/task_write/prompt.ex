@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
   Constants modules via the `safe_ref/3` helper.
   """
 
+  alias OptimalSystemAgent.Tools.Builtins.TaskWrite.Constants
+
   @doc """
   Render the task_write tool prompt.
 
@@ -47,6 +49,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
     The board renders itself. After any mutating call do NOT restate the plan, list
     the tasks, or narrate the status change — it is already on screen. Just continue
     with the work. For a single edit in one place, use #{file_edit_name} directly.
+
+    A status update is bookkeeping, not work. Send it in the SAME turn as the tool
+    call that does the next step — a turn whose only call is #{Constants.tool_name()}
+    moved nothing and cost a full round-trip through your context. The one exception
+    is the opening `add_multiple` that creates the board before any work exists.
     """
   end
 

@@ -19,6 +19,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Prompt do
     Search file contents for a regex pattern. ALWAYS use file_grep for content
     search — NEVER #{shell_name} with grep or rg. Supports full regex syntax
     (e.g. "log.*Error", "function\\\\s+\\\\w+").
+
+    Independent searches belong in the same turn: fire every pattern you already
+    know you need as parallel calls rather than one per turn.
     """
   end
 

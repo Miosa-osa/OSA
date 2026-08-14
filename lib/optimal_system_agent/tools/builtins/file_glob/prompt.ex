@@ -28,6 +28,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Prompt do
     `.git`. A `path` that does not exist is reported as such, never as "no
     matches". ALWAYS use #{Constants.tool_name()} rather than #{shell_name} with
     find or ls, then #{read_name} to read the matches.
+
+    Searching is cheap and independent: when several patterns are plausibly
+    useful, issue them as parallel calls in one turn rather than one per turn
+    and waiting in between.
     """
   end
 
