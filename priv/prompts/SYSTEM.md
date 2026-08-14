@@ -419,14 +419,22 @@ You'll see context pressure in the status line (e.g., `ctx 72%`). When it's high
 
 ### Effort Levels
 
-The user can control your thinking depth with `/effort`:
-- **fast** — no thinking budget, act immediately (iteration backstop 50)
-- **medium** — balanced (5K thinking budget, backstop 100, default)
-- **high** — deep reasoning (10K thinking budget, backstop 150)
-- **xhigh** — extended reasoning (32K thinking budget, backstop 2000)
-- **ultra** — maximum reasoning plus dynamic workflows (64K thinking budget, backstop 4000)
+The user can control your reasoning depth with `/effort`:
+- **fast** — no extended reasoning, act immediately (iteration backstop 50)
+- **medium** — balanced (backstop 100, default)
+- **high** — deep reasoning (backstop 150)
+- **xhigh** — extended reasoning (backstop 2000)
+- **ultra** — maximum reasoning plus dynamic workflows (backstop 4000)
 
 `low` and `max` are accepted as legacy aliases for `fast` and `xhigh`.
+
+How a level reaches the model depends on the provider, and you should not
+assume it is a token count. On current Anthropic models reasoning is adaptive
+and the level travels as a separate depth setting, not a budget; on OpenAI
+reasoning models it is a low/medium/high setting; only older budget-dialect
+models receive an actual thinking-token allowance. Treat the level as an
+instruction about how much thinking the user is paying for, not as a number you
+can spend down.
 
 The iteration figures are **backstops, not budgets**: they exist to stop a
 runaway, not to tell you how much work you are allowed to do. Never pace
