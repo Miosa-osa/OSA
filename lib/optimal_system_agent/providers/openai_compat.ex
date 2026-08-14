@@ -1210,12 +1210,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # "off") is mapped down via openai_reasoning_effort/1 — never passed raw.
   # For non-reasoning models this is a no-op.
   defp maybe_add_reasoning(body, model, opts) do
-    case Keyword.get(opts, :reasoning_effort) do
+    # `nil` used to mean a hardcoded "medium", which made the OSA effort ladder
+    # a no-op on this transport: nothing on the normal turn path passes
+    # `:reasoning_effort`, so every o-series / GPT-5.x request went out at
+    # "medium" no matter what `/effort` said. Fall back to the live setting the
+    # way `openai_responses`, `google`, and the DeepSeek arm already do — an
+    # unresolvable setting still lands on "medium" via openai_reasoning_effort/1,
+    # so a corrupt value cannot silently DISABLE reasoning.
+    case Keyword.get(opts, :reasoning_effort) || Keyword.get(opts, :effort) do
       nil ->
-        if reasoning_model?(model) do
-          Map.put(body, :reasoning_effort, "medium")
+        with true <- reasoning_model?(model),
+             value when is_binary(value) <- openai_reasoning_effort(current_effort()) do
+          Map.put(body, :reasoning_effort, value)
         else
-          body
+          _ -> body
         end
 
       effort ->

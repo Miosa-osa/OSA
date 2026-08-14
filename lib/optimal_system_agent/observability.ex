@@ -75,16 +75,29 @@ defmodule OptimalSystemAgent.Observability do
       :ok
   end
 
-  @doc "Emit a `:turn_start` lifecycle event + open a GenAI turn span."
+  @doc """
+  Emit a `:turn_start` lifecycle event + open a GenAI turn span.
+
+  Carries the **effort level in force** (`:fast | :medium | :high | :xhigh |
+  :ultra`). Reasoning effort moves the same model under a fixed harness by more
+  than the harness itself does — Anthropic measured 10.3 points on Opus 4.6
+  (55.1 low → 65.4 max) against a 7.2-point harness delta — so a number
+  produced without a recorded effort setting is not reproducible and cannot be
+  set beside any published figure. Every published leaderboard row names it;
+  so must every OSA run.
+  """
   @spec turn_start(map()) :: :ok
   def turn_start(state) do
+    effort = current_effort()
+
     emit(
       :system_event,
       %{
         event: :turn_start,
         turn_id: Map.get(state, :turn_id),
         turn_count: Map.get(state, :turn_count),
-        model: Map.get(state, :model)
+        model: Map.get(state, :model),
+        effort: effort
       },
       state,
       source: "agent.turn"
@@ -95,11 +108,28 @@ defmodule OptimalSystemAgent.Observability do
       OTel.gen_ai_attributes(
         operation: "turn",
         model: Map.get(state, :model),
+        effort: effort,
         conversation_id: Map.get(state, :session_id)
       )
     )
 
     :ok
+  end
+
+  @doc """
+  The effort level in force, as a string, or `nil` when it cannot be resolved.
+
+  `nil` is meaningful and is recorded as-is: it means the run was **unpinned**,
+  which is exactly the condition that makes a benchmark number unquotable.
+  Never substitute a plausible-looking default here.
+  """
+  @spec current_effort() :: String.t() | nil
+  def current_effort do
+    OptimalSystemAgent.Agent.Effort.current() |> to_string()
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
   end
 
   @doc "Emit a `:turn_end` lifecycle event with response size + running spend."
@@ -112,7 +142,11 @@ defmodule OptimalSystemAgent.Observability do
         turn_id: Map.get(state, :turn_id),
         iterations: Map.get(state, :iteration),
         response_bytes: response_bytes(response),
-        session_cost_usd: Map.get(state, :session_cost_usd)
+        session_cost_usd: Map.get(state, :session_cost_usd),
+        # Recorded on BOTH ends of the turn: `/effort` can be changed mid-run,
+        # so a turn that started at one tier can finish at another. A single
+        # start-only reading would attribute the whole turn to the wrong level.
+        effort: current_effort()
       },
       state,
       source: "agent.turn"
@@ -133,6 +167,7 @@ defmodule OptimalSystemAgent.Observability do
       OTel.gen_ai_attributes(
         operation: "chat",
         model: Map.get(state, :model),
+        effort: current_effort(),
         conversation_id: Map.get(state, :session_id)
       )
     )

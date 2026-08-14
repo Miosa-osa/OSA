@@ -78,6 +78,7 @@ defmodule OptimalSystemAgent.Observability.OTel do
     %{}
     |> put("gen_ai.operation.name", opts[:operation])
     |> put("gen_ai.request.model", opts[:model])
+    |> put("gen_ai.request.effort", opts[:effort])
     |> put("gen_ai.conversation.id", opts[:conversation_id])
     |> put("gen_ai.tool.name", opts[:tool_name])
     |> put_usage(opts[:usage])

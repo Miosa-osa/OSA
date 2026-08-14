@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
           ctx: pos_integer(),
           max_output: pos_integer(),
           thinking: :adaptive | :budget | :none,
+          effort: :full | :no_xhigh | :none,
           prefill: boolean(),
           vision: boolean(),
           tools: boolean(),
@@ -90,6 +91,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      effort: :full,
       prefill: false,
       vision: true,
       tools: true,
@@ -104,6 +106,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      effort: :full,
       prefill: false,
       vision: true,
       tools: true,
@@ -120,6 +123,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      effort: :full,
       prefill: false,
       vision: true,
       tools: true,
@@ -135,6 +139,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 64_000,
       # Haiku 4.5 predates adaptive thinking — it still takes a token budget.
       thinking: :budget,
+      effort: :none,
       # ...and predates the prefill removal: a trailing assistant turn is a
       # legitimate prefill here, so the provider must NOT normalize it away.
       prefill: true,
@@ -151,6 +156,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      effort: :full,
       prefill: false,
       vision: true,
       tools: true,
@@ -165,6 +171,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       ctx: 1_000_000,
       max_output: 128_000,
       thinking: :adaptive,
+      effort: :full,
       prefill: false,
       vision: true,
       tools: true,
@@ -180,6 +187,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 128_000,
       # 4.6 still accepts budget_tokens (deprecated) but adaptive is correct.
       thinking: :adaptive,
+      effort: :no_xhigh,
       prefill: false,
       vision: true,
       tools: true,
@@ -195,6 +203,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       max_output: 128_000,
       # 4.6 still accepts budget_tokens (deprecated) but adaptive is correct.
       thinking: :adaptive,
+      effort: :no_xhigh,
       prefill: false,
       vision: true,
       tools: true,
@@ -357,6 +366,111 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   @doc "True when this model takes `thinking: {type: \"adaptive\"}`."
   @spec adaptive_thinking?(String.t() | nil) :: boolean()
   def adaptive_thinking?(id), do: thinking_mode(id) == :adaptive
+
+  # ── Effort (`output_config.effort`) ──────────────────────────────────────
+  #
+  # On every adaptive-thinking model the thinking BLOCK carries no depth
+  # information — `%{type: "adaptive"}` is the same payload at every tier. Depth
+  # is steered by a separate top-level `output_config.effort`, and OSA sent that
+  # field nowhere, so the whole `Agent.Effort` ladder was inert on Anthropic's
+  # current models: `/effort fast` and `/effort ultra` produced byte-identical
+  # requests.
+  #
+  # Support is per-model and NOT uniform:
+  #
+  #   * `:full`     — low | medium | high | xhigh | max  (Claude 5 family, Opus 4.7/4.8)
+  #   * `:no_xhigh` — low | medium | high | max          (Opus 4.6, Sonnet 4.6;
+  #                   `xhigh` was introduced with Opus 4.7 and is rejected here)
+  #   * `:none`     — the field errors on this model      (Haiku 4.5 and older)
+  #
+  # Source: https://platform.claude.com/docs/en/build-with-claude/effort
+  @effort_ladders %{
+    full: ~w(low medium high xhigh max),
+    no_xhigh: ~w(low medium high max),
+    none: []
+  }
+
+  @doc """
+  Which `output_config.effort` levels this model accepts, lowest→highest.
+
+  `[]` means the model has no effort parameter and the field must be omitted —
+  sending it is a request error, not a degraded response.
+  """
+  @spec effort_levels(String.t() | nil) :: [String.t()]
+  def effort_levels(id) do
+    mode =
+      case resolve(id) do
+        # An unknown id is assumed current-generation, matching `thinking_mode/1`.
+        nil -> :full
+        m -> Map.get(m, :effort, :full)
+      end
+
+    Map.get(@effort_ladders, mode, [])
+  end
+
+  @doc """
+  Map an OSA effort level onto the wire value for `output_config.effort`.
+
+  Returns `nil` when nothing should be sent — either the model has no effort
+  parameter, or the level is unrecognised. **A corrupt or unknown level omits
+  the field rather than guessing**, so the model runs at its own documented
+  default (`high`) and the run is honestly recorded as unpinned.
+
+  The ladder maps one-to-one onto Anthropic's, with `:ultra` — OSA's top rung —
+  landing on `max`:
+
+      fast → low    medium → medium    high → high    xhigh → xhigh    ultra → max
+
+  Legacy OSA names route through `Agent.Effort.normalize/1` first, so `:low`
+  becomes `low` and `:max` becomes `xhigh` (OSA renamed `:max` to `:xhigh`; the
+  rung that means "spend everything" is `:ultra`).
+
+  On a `:no_xhigh` model an `xhigh` request **clamps down to `high`**, not up to
+  `max` — a level the model does not accept must not silently become a more
+  expensive one.
+  """
+  @spec effort_value(String.t() | nil, atom() | String.t() | nil) :: String.t() | nil
+  def effort_value(model, level) do
+    levels = effort_levels(model)
+
+    with false <- levels == [],
+         wire when is_binary(wire) <- ladder_value(level) do
+      clamp_effort(wire, levels)
+    else
+      _ -> nil
+    end
+  end
+
+  defp ladder_value(nil), do: nil
+
+  defp ladder_value(level) do
+    case OptimalSystemAgent.Agent.Effort.normalize(level) do
+      :fast -> "low"
+      :medium -> "medium"
+      :high -> "high"
+      :xhigh -> "xhigh"
+      :ultra -> "max"
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Clamp DOWN to the nearest accepted level. `xhigh` on a model that predates
+  # it becomes `high`, never `max`.
+  defp clamp_effort(wire, levels) do
+    if wire in levels do
+      wire
+    else
+      order = @effort_ladders.full
+      idx = Enum.find_index(order, &(&1 == wire))
+
+      order
+      |> Enum.take(idx || 0)
+      |> Enum.reverse()
+      |> Enum.find(&(&1 in levels))
+    end
+  end
 
   @doc """
   True when this model accepts a request whose last message is `assistant`

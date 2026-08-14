@@ -9,21 +9,28 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
 
   Expected matrix (tier → provider param):
 
-      tier    anthropic-adaptive    anthropic-budget    openai (reasoning)  gemini-2.5      ollama
-              (4.6+, Claude 5)      (haiku-4-5, older)
-      ----    ------------------    -----------------   -----------------   ------------    ------
-      fast    (none — fast_mode)    (none — fast_mode)  reasoning=low       (none, budget0) no-op
-      medium  adaptive              enabled/5000        reasoning=medium    budget 5000     no-op
-      high    adaptive              enabled/10000       reasoning=high      budget 10000    no-op
-      xhigh   adaptive              enabled/32000       reasoning=high      budget 32000    no-op
-      ultra   adaptive              enabled/64000       reasoning=high      budget 64000    no-op
-      off     (none)                (none)              (omit)              (none, budget0) no-op
+      tier    anthropic-adaptive           anthropic-budget    openai (reasoning)  gemini-2.5      ollama
+              (4.6+, Claude 5)             (haiku-4-5, older)
+      ----    -------------------------    -----------------   -----------------   ------------    ------
+      fast    (no block — fast_mode)/low   (none — fast_mode)  reasoning=low       (none, budget0) no-op
+      medium  adaptive + effort=medium     enabled/5000        reasoning=medium    budget 5000     no-op
+      high    adaptive + effort=high       enabled/10000       reasoning=high      budget 10000    no-op
+      xhigh   adaptive + effort=xhigh      enabled/32000       reasoning=high      budget 32000    no-op
+      ultra   adaptive + effort=max        enabled/64000       reasoning=high      budget 64000    no-op
+      off     (none)                       (none)              (omit)              (none, budget0) no-op
 
   The anthropic split is by MODEL, not by opus-vs-sonnet. Anthropic removed the
   fixed thinking budget on the Claude 5 family and on Opus 4.7/4.8: sending
   `{type: "enabled", budget_tokens: N}` to those models is a hard 400. Depth on
   them is steered by `output_config.effort`, not a token count — so every tier
   maps to plain `adaptive` and the effort tier rides the separate effort param.
+
+  **That effort param was sent from nowhere until v1.0.99**, which made the whole
+  ladder inert on every current Claude model: the `adaptive` column above is
+  identical in all five rows, so `/effort fast` and `/effort ultra` produced
+  byte-identical requests. The `+ effort=` half of that column is the fix; the
+  `openai (reasoning)` column had the same defect from the other direction (a
+  hardcoded \"medium\" on the no-opt branch).
   """
   use ExUnit.Case, async: false
 
@@ -174,9 +181,57 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       refute Map.has_key?(body, :reasoning_effort)
     end
 
-    test "no reasoning_effort opt on an o-series model still defaults to medium" do
-      body = OpenAICompat.build_stream_body(@openai_model, [], [])
-      assert body.reasoning_effort == "medium"
+    test "no reasoning_effort opt follows the LIVE setting, not a constant" do
+      # This assertion used to read `== "medium"` with no effort set, which
+      # locked in the defect: `maybe_add_reasoning/3` hardcoded "medium" on the
+      # nil branch, and NOTHING on the normal turn path passes
+      # `:reasoning_effort`. So every o-series / GPT-5.x request went out at
+      # "medium" no matter what `/effort` said — the ladder was inert on this
+      # transport exactly as it was on Anthropic.
+      Effort.set(:ultra)
+      assert OpenAICompat.build_stream_body(@openai_model, [], []).reasoning_effort == "high"
+
+      Effort.set(:fast)
+      assert OpenAICompat.build_stream_body(@openai_model, [], []).reasoning_effort == "low"
+
+      Effort.set(:medium)
+      assert OpenAICompat.build_stream_body(@openai_model, [], []).reasoning_effort == "medium"
+    end
+
+    test "a non-reasoning model still gets no reasoning_effort at any tier" do
+      Effort.set(:ultra)
+      body = OpenAICompat.build_stream_body("gpt-4o-mini", [], [])
+      refute Map.has_key?(body, :reasoning_effort)
+    end
+  end
+
+  # ── Anthropic effort (output_config.effort — the depth carrier) ─────────────
+
+  describe "anthropic — output_config.effort per tier" do
+    # The thinking BLOCK is identical at every tier on an adaptive model
+    # (asserted above). Depth rides entirely on this separate field, which OSA
+    # sent from nowhere — so the ladder was a no-op on every current Claude
+    # model. Full coverage lives in `anthropic_effort_test.exs`; this row keeps
+    # the matrix honest.
+    for {tier, wire} <- [
+          {:fast, "low"},
+          {:medium, "medium"},
+          {:high, "high"},
+          {:xhigh, "xhigh"},
+          {:ultra, "max"}
+        ] do
+      test "#{tier} → output_config.effort=#{wire}" do
+        Effort.set(unquote(tier))
+        assert Anthropic.build_output_config(@opus, []) == %{effort: unquote(wire)}
+      end
+    end
+
+    test "haiku takes budget_tokens instead and gets no output_config" do
+      Effort.set(:ultra)
+      assert Anthropic.build_output_config(@haiku, []) == nil
+
+      assert LLMClient.thinking_config(%{provider: :anthropic, model: @haiku}) ==
+               %{type: "enabled", budget_tokens: 64_000}
     end
   end
 

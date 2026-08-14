@@ -86,6 +86,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
+      |> maybe_add_output_config(model, opts)
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
@@ -253,6 +254,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
+      |> maybe_add_output_config(model, opts)
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
@@ -1226,6 +1228,66 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def maybe_add_thinking(body, _), do: body
 
   @doc """
+  Add `output_config.effort` — the ONLY thing that carries reasoning depth on
+  an adaptive-thinking model.
+
+  `thinking: {type: "adaptive"}` is byte-identical at every OSA effort tier, so
+  before this existed the entire `Agent.Effort` ladder was a silent no-op on
+  every current Claude model: `/effort fast` and `/effort ultra` produced the
+  same request. Only Haiku 4.5 (a `:budget` model) ever saw the tier at all,
+  via `budget_tokens`.
+
+  Resolution order matches the Google and Responses transports:
+  `opts[:reasoning_effort]` → `opts[:effort]` → `Agent.Effort.current/0`.
+
+  Omits the field entirely when the model has no effort parameter or the level
+  is unrecognised — see `AnthropicModels.effort_value/2`.
+
+  > #### Effective default changed {: .warning}
+  >
+  > Anthropic's own default is `high`. OSA's default effort is `:medium`, so a
+  > user who never touched `/effort` now gets `effort: "medium"` where they
+  > previously got the model's `high`. That is cheaper and slightly less
+  > capable. It is also the point: an effort ladder whose middle rung does not
+  > mean `medium` is a ladder that lies. Pin `/effort high` to restore the old
+  > behaviour exactly.
+  """
+  @spec maybe_add_output_config(map(), String.t() | atom() | nil, keyword()) :: map()
+  def maybe_add_output_config(body, model, opts \\ []) do
+    case build_output_config(model, opts) do
+      nil -> body
+      cfg -> Map.put(body, :output_config, cfg)
+    end
+  end
+
+  @doc """
+  Test seam: build just the `output_config` map for a model + opts, with no
+  live HTTP call. `nil` means "send nothing".
+  """
+  @spec build_output_config(String.t() | atom() | nil, keyword()) :: map() | nil
+  def build_output_config(model, opts \\ []) do
+    level =
+      Keyword.get(opts, :reasoning_effort) ||
+        Keyword.get(opts, :effort) ||
+        current_effort()
+
+    case AnthropicModels.effort_value(to_string(model || ""), level) do
+      nil -> nil
+      wire -> %{effort: wire}
+    end
+  end
+
+  # A renderer of a request body must never be the thing that kills the turn:
+  # an unavailable Settings table means "unpinned", not "crash".
+  defp current_effort do
+    OptimalSystemAgent.Agent.Effort.current()
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  @doc """
   Coerce a thinking config to the dialect `model` actually accepts.
 
   Belt-and-braces for `Agent.Loop.LLMClient.thinking_config/1`: any caller that
@@ -1432,9 +1494,41 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # segment whenever the system prompt alone moves.
   defp maybe_add_tools(body, opts) do
     case Keyword.get(opts, :tools) do
-      nil -> body
-      [] -> body
-      tools -> body |> Map.put(:tools, format_tools(tools)) |> mark_tools_cache_boundary()
+      nil ->
+        body
+
+      [] ->
+        body
+
+      tools ->
+        body
+        |> Map.put(:tools, format_tools(tools))
+        |> mark_tools_cache_boundary(stable_tool_count(tools))
+    end
+  end
+
+  # How many tools at the FRONT of the array are the session's stable base.
+  #
+  # `Agent.Loop.ToolDiscovery` appends tools mid-session when a `tool_search`
+  # hit surfaces something the model could otherwise never call, and tags each
+  # one `discovered?: true`. Those appended schemas are new bytes in the most
+  # cache-sensitive position in the request. Putting the tools breakpoint on the
+  # very last tool would move it past them, so the request would carry no
+  # breakpoint at the boundary the previous turns cached and the whole ~15.5k
+  # tool segment would be re-written.
+  #
+  # Marking the last STABLE tool instead leaves that prefix byte-identical, so
+  # Anthropic's tools-tier entry still matches; only the `system` tier — which
+  # renders after the tools and therefore genuinely moved — is re-written. That
+  # is the difference between a widening costing the tools+system segments and
+  # costing system alone.
+  #
+  # A session that never discovers anything has no tagged tools and this is the
+  # last index, i.e. exactly the previous behaviour.
+  defp stable_tool_count(tools) do
+    case Enum.find_index(tools, &Map.get(&1, :discovered?, false)) do
+      nil -> length(tools)
+      idx -> idx
     end
   end
 
@@ -1455,10 +1549,17 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # same threshold the string-system path uses.
   @min_cacheable_tools_bytes 4_000
 
-  defp mark_tools_cache_boundary(%{tools: tools} = body) when is_list(tools) and tools != [] do
-    if prompt_caching_enabled?() and tools_payload_bytes(tools) >= @min_cacheable_tools_bytes do
-      {leading, [last]} = Enum.split(tools, length(tools) - 1)
-      marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})]
+  defp mark_tools_cache_boundary(%{tools: tools} = body, stable_count)
+       when is_list(tools) and tools != [] do
+    # The breakpoint goes on the last STABLE tool. `stable_count` is the full
+    # length unless discovery appended something, and is clamped to at least one
+    # so a pathological all-discovered array still gets a usable marker.
+    boundary = tools |> length() |> min(max(stable_count, 1))
+    cacheable = Enum.take(tools, boundary)
+
+    if prompt_caching_enabled?() and tools_payload_bytes(cacheable) >= @min_cacheable_tools_bytes do
+      {leading, [last | trailing]} = Enum.split(tools, boundary - 1)
+      marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})] ++ trailing
 
       body
       |> Map.put(:tools, marked)
@@ -1468,7 +1569,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
-  defp mark_tools_cache_boundary(body), do: body
+  defp mark_tools_cache_boundary(body, _stable_count), do: body
 
   defp tools_payload_bytes(tools) do
     Enum.reduce(tools, 0, fn tool, acc ->
