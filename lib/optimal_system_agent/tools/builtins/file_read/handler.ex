@@ -211,7 +211,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     case File.read(expanded) do
       {:ok, content} ->
         if String.valid?(content) do
-          {:ok, Lines.clamp(content)}
+          # A whole-file read is by definition at EOF; say so. Without the stamp
+          # the model cannot distinguish "this is all of it" from "this is what
+          # the tool chose to give me", and the measured response to that
+          # ambiguity is another read. See `Messages.eof_stamp/1`.
+          {:ok, Lines.clamp(content) <> Messages.eof_stamp(line_count(content))}
         else
           # `binary_verdict/1` only sniffs the head, so a file that turns to
           # binary further in still lands here. Identify it from what we now
@@ -362,14 +366,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     drop_count = if offset && offset > 1, do: offset - 1, else: 0
     start_line = if offset && offset > 0, do: offset, else: 1
 
-    lines =
+    # ONE line past the window is taken deliberately. It is the cheapest
+    # possible answer to "is there more after this?", which is the question the
+    # model otherwise answers by issuing another read. The extra line is
+    # dropped, never rendered — it exists only to set the stamp.
+    raw =
       expanded
       |> File.stream!()
       |> Stream.drop(drop_count)
       |> then(fn stream ->
-        if limit && limit > 0, do: Stream.take(stream, limit), else: stream
+        if limit && limit > 0, do: Stream.take(stream, limit + 1), else: stream
       end)
-      |> Stream.with_index(start_line)
+      |> Enum.to_list()
+
+    more? = is_integer(limit) and limit > 0 and length(raw) > limit
+    window = if more?, do: Enum.take(raw, limit), else: raw
+
+    lines =
+      window
+      |> Enum.with_index(start_line)
       |> Enum.map(fn {line, line_num} ->
         num_str = line_num |> Integer.to_string() |> String.pad_leading(5)
         clamped = line |> String.trim_trailing("\n") |> Lines.clamp_line(line_num)
@@ -384,8 +399,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       # "no lines in range" into a bounded range the caller can actually use.
       {:error, Messages.past_eof(display_path, start_line, count_lines(expanded))}
     else
-      {:ok, ensure_utf8(lines)}
+      last_line = start_line + length(window) - 1
+      {:ok, ensure_utf8(lines) <> range_stamp(more?, start_line, last_line)}
     end
+  end
+
+  # `more?` is known exactly (the take-one-extra above), so the stamp is never a
+  # guess. The EOF branch reports the true total, which a window that reached the
+  # end knows for free: `last_line`. The continuation branch deliberately does
+  # NOT report a total — that would cost a full extra pass over the file on every
+  # windowed read, and the decision it informs ("read again from here" vs "stop")
+  # is already settled by the branch itself.
+  defp range_stamp(true, first_line, last_line),
+    do: Messages.continuation_stamp(first_line, last_line, last_line + 1)
+
+  defp range_stamp(_no_more, _first_line, last_line), do: Messages.eof_stamp(last_line)
+
+  # Line count of in-memory content, matching `File.stream!/1` semantics: one
+  # line per newline, plus a trailing partial line when the file does not end in
+  # one. `String.split/2` cannot be used directly — it yields a phantom trailing
+  # "" for newline-terminated content, which would over-report every normal
+  # source file by one.
+  defp line_count(""), do: 0
+
+  defp line_count(content) do
+    newlines = content |> :binary.matches("\n") |> length()
+    if String.ends_with?(content, "\n"), do: newlines, else: newlines + 1
   end
 
   # The whole-file path checks `String.valid?/1` before returning; this one did

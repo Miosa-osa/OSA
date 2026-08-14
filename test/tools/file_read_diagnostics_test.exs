@@ -32,6 +32,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
     Handler.execute(Map.merge(%{"path" => path}, opts), nil)
   end
 
+  # Every successful read now ends with a terminator stamp — either
+  # `(End of file — N lines total)` or a continuation offset — so that a model
+  # can tell "this is the whole file" from "this is what I was given" without
+  # reading again to find out. The byte-for-byte assertions below therefore
+  # compare against content PLUS the stamp; they are still exact, and they are
+  # still what catches content being mangled.
+  #
+  # Delegating to the module that produces it rather than restating the text
+  # keeps this from becoming a second, drifting copy of the wording.
+  defp eof_stamp(lines),
+    do: OptimalSystemAgent.Tools.Builtins.FileRead.Messages.eof_stamp(lines)
+
   # Runs `fun` with a hard wall-clock bound and fails — rather than hanging the
   # suite — if it does not return. Used for the special-file guard, where the
   # regression being defended against is a block, not an error.
@@ -239,7 +251,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
 
       File.write!(Path.join(tmp, nfd_name), "espresso")
 
-      assert {:ok, "espresso"} = read(Path.join(tmp, nfc_name))
+      assert {:ok, out} = read(Path.join(tmp, nfc_name))
+      assert out == "espresso" <> eof_stamp(1)
     end
 
     test "a path typed in NFD opens a file stored in NFC", %{tmp: tmp} do
@@ -249,7 +262,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
 
       File.write!(Path.join(tmp, nfc_name), "curriculum vitae")
 
-      assert {:ok, "curriculum vitae"} = read(Path.join(tmp, nfd_name))
+      assert {:ok, out} = read(Path.join(tmp, nfd_name))
+      assert out == "curriculum vitae" <> eof_stamp(1)
     end
 
     test "a rescued read is recorded so a follow-up edit is not blocked", %{tmp: tmp} do
@@ -261,7 +275,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
       File.write!(Path.join(tmp, nfd_name), "content")
 
       ctx = %{session_id: "file-read-diag-#{System.unique_integer([:positive])}"}
-      assert {:ok, "content"} = Handler.execute(%{"path" => Path.join(tmp, nfc_name)}, ctx)
+      assert {:ok, out} = Handler.execute(%{"path" => Path.join(tmp, nfc_name)}, ctx)
+      assert out == "content" <> eof_stamp(1)
 
       assert :ok =
                OptimalSystemAgent.Tools.FileState.check_read(
@@ -386,7 +401,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
       test "a regular file is still read normally", %{tmp: tmp} do
         path = Path.join(tmp, "ordinary.txt")
         File.write!(path, "still fine")
-        assert {:ok, "still fine"} = read(path)
+        assert {:ok, out} = read(path)
+        assert out == "still fine" <> eof_stamp(1)
       end
 
       test "a symlink to a regular file is still read normally", %{tmp: tmp} do
@@ -395,7 +411,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
         File.write!(target, "through the link")
         :ok = File.ln_s(target, link)
 
-        assert {:ok, "through the link"} = read(link)
+        assert {:ok, out} = read(link)
+        assert out == "through the link" <> eof_stamp(1)
       end
 
       test "a symlink pointing at a FIFO is refused, not followed into a block", %{tmp: tmp} do
@@ -450,7 +467,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
       body = "alpha\nbeta\ngamma\n"
       File.write!(path, body)
 
-      assert {:ok, ^body} = read(path)
+      assert {:ok, out} = read(path)
+      assert out == body <> eof_stamp(3)
     end
 
     test "a line exactly at the cap is not clamped", %{tmp: tmp} do
@@ -458,7 +476,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
       body = String.duplicate("z", 2_000)
       File.write!(path, body)
 
-      assert {:ok, ^body} = read(path)
+      assert {:ok, out} = read(path)
+      assert out == body <> eof_stamp(1)
     end
 
     test "clamping never splits a multi-byte character", %{tmp: tmp} do

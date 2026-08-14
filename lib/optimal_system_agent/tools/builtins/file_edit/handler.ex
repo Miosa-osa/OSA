@@ -189,11 +189,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
             fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
 
             base_result =
-              if replace_all and occurrences > 1 do
-                "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
-              else
-                "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
-              end
+              edit_report(%{
+                display_path: display_path,
+                stage: stage,
+                fuzzy_note: fuzzy_note,
+                replace_all: replace_all,
+                occurrences: occurrences,
+                old: old,
+                new: new,
+                content: content
+              })
 
             result = base_result <> hook_note
 
@@ -205,6 +210,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
             end
         end
     end
+  end
+
+  # ── What a successful edit reports back to the model ──────────────────
+  #
+  # An **exact** match gets a one-line confirmation and no diff.
+  #
+  # The model supplied `old_string` and `new_string` in the request. On an exact
+  # match, "it matched verbatim and was replaced" adds nothing the model does not
+  # already hold — so echoing a synthetic diff of those same two strings pays for
+  # the edit twice: once outbound in the arguments, once inbound in the result,
+  # and then permanently, because the result stays in the transcript for the rest
+  # of the session. Measured on `schemelike-metacircular-eval`: 58 edits at a
+  # median argument of 506 bytes. Measured here on a 76-byte `old_string`: the
+  # result was 374 bytes, of which 335 was the echo.
+  #
+  # A **fuzzy** match keeps the diff, and this is the whole reason the split
+  # exists rather than a blanket removal. Under the line-endings/whitespace
+  # cascade (`Matcher`), `old_string` did NOT appear in the file verbatim — the
+  # matcher chose a region that merely resembles it. What actually changed is
+  # therefore genuinely new information, and it is the model's only chance to
+  # notice that the edit landed somewhere it did not intend. That is a
+  # correctness signal, not an echo, so it is not something to economise on.
+  #
+  # `replace_all` with multiple occurrences already returned no diff (a single
+  # hunk cannot describe N sites), which is unchanged.
+  #
+  # The unified diff for the TUI is untouched: it travels in the 3-tuple's
+  # `:diff` metadata field, which SSE consumers and the Rust TUI read, and which
+  # was never part of the model-facing string.
+  defp edit_report(%{replace_all: true, occurrences: n} = r) when n > 1,
+    do: "Replaced #{n} occurrences in #{r.display_path}#{r.fuzzy_note}"
+
+  defp edit_report(%{stage: :exact} = r), do: "Replaced in #{r.display_path}"
+
+  defp edit_report(r) do
+    "Replaced in #{r.display_path}#{r.fuzzy_note}\n" <>
+      format_diff(r.old, r.new, r.content, r.display_path)
   end
 
   # ── Idempotent re-application ─────────────────────────────────────────

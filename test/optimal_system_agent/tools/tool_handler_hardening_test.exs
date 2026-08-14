@@ -48,7 +48,15 @@ defmodule OptimalSystemAgent.Tools.ToolHandlerHardeningTest do
     test "still reads a normal small text file", %{tmp: tmp} do
       path = Path.join(tmp, "ok.txt")
       File.write!(path, "hello world")
-      assert {:ok, "hello world"} = FileRead.Handler.execute(%{"path" => path}, nil)
+      assert {:ok, out} = FileRead.Handler.execute(%{"path" => path}, nil)
+
+      # The content is returned verbatim, followed by the end-of-file stamp
+      # every successful read now carries (see `FileRead.Messages.eof_stamp/1`)
+      # — the hardening property under test is that a normal file still reads,
+      # not that the result is bare content.
+      assert out ==
+               "hello world" <>
+                 OptimalSystemAgent.Tools.Builtins.FileRead.Messages.eof_stamp(1)
     end
   end
 

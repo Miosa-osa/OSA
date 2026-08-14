@@ -257,8 +257,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         nudge_msg = %{
           role: "system",
           content:
-            "[System: You modified #{paths_str} without reading #{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
-              "Always call file_read before file_edit/file_write on existing files to understand current content.]"
+            "[System: You modified #{paths_str} without this session having read or written " <>
+              "#{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
+              "Read a file once before your FIRST edit to it. Do not re-read after your own " <>
+              "successful edits — you already know what you changed, and if anything else " <>
+              "changes the file the next edit is rejected with a stale-view error.]"
         }
 
         %{state | messages: state.messages ++ [nudge_msg]}
@@ -1375,6 +1378,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         success: not tool_failed,
         fault_owner: fault_owner,
         args: arg_hint,
+        # Same faithful pair as the :start event. Carried on BOTH phases
+        # because an analysis that scans for completed calls (it needs
+        # `success` / `duration_ms`, which only exist here) would otherwise
+        # be forced back onto the display hint — the exact substitution that
+        # produced the withdrawn 43.5%-duplicate and 62-byte-median figures.
+        args_bytes: tool_call_arg_bytes(Map.get(tool_call, :arguments)),
+        args_hash: tool_call_arg_hash(Map.get(tool_call, :arguments)),
         session_id: state.session_id,
         agent: state.session_id
       },
@@ -1397,6 +1407,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          # screen — the sibling Bus.emit above already computed the real value.
          success: not tool_failed,
          fault_owner: fault_owner,
+         # This broadcast is the SSE stream the bench driver writes out as
+         # `osa-events.jsonl`, so the faithful pair has to be here, not only
+         # on the Bus.emit sibling above — the file is what every post-hoc
+         # analysis actually reads.
+         args_bytes: tool_call_arg_bytes(Map.get(tool_call, :arguments)),
+         args_hash: tool_call_arg_hash(Map.get(tool_call, :arguments)),
          session_id: state.session_id
        }}
     )

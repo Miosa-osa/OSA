@@ -140,6 +140,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   version measured 607 bytes, which is larger than many of the files it would
   replace. The handler additionally declines to substitute it for a file smaller
   than the notice itself — see `Handler.redundant_read/3`.
+
+  ## How this composes with `eof_stamp/1` / `continuation_stamp/3`
+
+  The two mechanisms answer different questions and are mutually exclusive by
+  construction, so neither has to know about the other:
+
+    * The stamps ride on **delivered content** and answer *"is there more after
+      this window?"*. They are the only thing that addresses a walk of
+      **different** windows, every one of which is a legitimately new question
+      that suppression can never fire on.
+    * This notice replaces content on a **byte-identical repeat** of a window
+      already delivered. That window carried its own stamp when it was
+      delivered, so the fact the notice points back to ("its content is already
+      in your context above") includes the stamp. Restating it here would be
+      duplicating a line the model already holds, to save nothing.
+
+  One interaction is deliberate rather than incidental: `record_read/3` records
+  the delivered byte count *including* the stamp, and `Handler.redundant_read/3`
+  compares the notice against that figure. That is the correct comparison — the
+  notice substitutes for the whole result, stamp included, so the stamp's bytes
+  are genuinely part of what suppression saves.
   """
   @spec unchanged_since_last_read(String.t()) :: String.t()
   def unchanged_since_last_read(display_path) do
@@ -154,6 +175,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   """
   @spec unchanged_notice_overhead() :: pos_integer()
   def unchanged_notice_overhead, do: byte_size(unchanged_since_last_read(""))
+
+  @doc """
+  Terminator stamp for a read that reached the last line of the file.
+
+  ## Why this exists
+
+  Measured on the `schemelike-metacircular-eval` head-to-head: 49 `file_read`
+  calls against one path, each a *different* `offset`/`limit` window of the same
+  growing file. Nothing in the result told the model where the window sat in the
+  file or whether anything followed it, so the only way to find out was another
+  read — and a model that cannot tell how much it is missing re-slices
+  defensively.
+
+  opencode has no duplicate-call detector at all and still measured **zero**
+  duplicate calls on the same task. Its `tool/read.ts:344-350` always ends the
+  result with one of these two stamps. The suppression this file already
+  implements (`unchanged_since_last_read/1`) catches the *byte-identical* repeat;
+  a stamp is what stops the near-miss window walk that suppression can never see,
+  because every one of those calls has different arguments and is, strictly, a
+  new question.
+
+  Kept to one short line: it rides on every successful read, so unlike the
+  unchanged-notice it is a cost paid on the success path, not a saving.
+  """
+  @spec eof_stamp(non_neg_integer()) :: String.t()
+  def eof_stamp(total_lines) do
+    "\n(End of file — #{total_lines} #{pluralise(total_lines, "line")} total)"
+  end
+
+  @doc """
+  Terminator stamp for a read that stopped before the end of the file, naming
+  the exact `offset` that continues it.
+
+  The counterpart to `eof_stamp/1`: the model never has to guess a next offset,
+  and never has to probe to discover it guessed wrong.
+  """
+  @spec continuation_stamp(pos_integer(), pos_integer(), pos_integer()) :: String.t()
+  def continuation_stamp(first_line, last_line, next_offset) do
+    "\n(Showing lines #{first_line}-#{last_line}. Use offset=#{next_offset} to continue.)"
+  end
 
   @doc """
   The requested `offset` starts after the last line of the file.

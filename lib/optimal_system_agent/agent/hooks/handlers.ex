@@ -364,8 +364,11 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
            Map.put(
              payload,
              :nudge,
-             "[Read-before-write] You're modifying #{path} without reading it first. " <>
-               "Call file_read on #{path} to understand its current content before editing."
+             "[Read-before-write] You're modifying #{path}, and this session has neither " <>
+               "read nor written it — so you have no basis for its current content. " <>
+               "Call file_read on #{path} once before this first edit. You do NOT need to " <>
+               "read it again after your own successful edits; if the file changes under " <>
+               "you, the edit is rejected and says so."
            )}
         end
       end
@@ -376,11 +379,32 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
   def read_before_write(payload), do: {:ok, payload}
 
-  # Track files read — record paths after successful file_read/dir_list/glob.
+  # Track files whose current content the model has a basis for — the input to
+  # the read-before-write NUDGE (advisory only; enforcement is `FileState` +
+  # `DriftGuard`, which are untouched by this list).
+  #
+  # `file_write` and `file_edit` are in the list because AUTHORING a file is a
+  # basis for its contents just as reading it is. Without them, measured on a
+  # scripted work session: write a file, then edit it, and the nudge fires —
+  # "You're modifying <path> without reading it first" — about a file the model
+  # composed itself one turn earlier. It fires again on the following edit
+  # (the cap is 2 per file), so a create-then-refine sequence, which is the
+  # normal shape of building an artefact, was told twice to go and read back
+  # something it already held. That is the read→edit→read→edit rhythm being
+  # *instructed*, and it is instructed on no evidence at all.
+  #
+  # This weakens no guarantee. A stale edit is still rejected — `FileState`
+  # compares on-disk `{mtime, size}` against the recorded read/write and
+  # `DriftGuard` cross-checks a content fingerprint, both of which record on
+  # write already. Verified in the same session probe: an external writer
+  # touching the file between edits is still refused with the stale-view
+  # message, and an edit to a file this session has neither read nor written is
+  # still refused outright.
   def track_files_read(
         %{tool_name: tool_name, arguments: args, session_id: sid, result: result} = payload
       )
-      when tool_name in ["file_read", "dir_list", "glob"] and is_binary(result) and
+      when tool_name in ["file_read", "dir_list", "glob", "file_write", "file_edit"] and
+             is_binary(result) and
              not (result == "") do
     if String.starts_with?(result, "Error:") or String.starts_with?(result, "Blocked:") do
       {:ok, payload}

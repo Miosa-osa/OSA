@@ -26,15 +26,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.DirList.Constants, :tool_name, "dir_list")
 
     """
-    Reads a file from the local filesystem.
+    Reads a file from the local filesystem. `path` must be absolute. Reads the
+    full file by default; use `offset` and `limit` for large files. Reads images
+    (PNG, JPG, GIF, WEBP) as base64 for vision analysis. Files only — use
+    `#{dir_list_name}` for directories. A file that exists but is empty returns a
+    warning.
 
-    Usage:
-    - The path parameter must be an absolute path, not a relative path.
-    - By default, reads the full file. Use `offset` and `limit` for large files.
-    - This tool can read images (PNG, JPG, GIF, WEBP) — returns base64 for vision analysis.
-    - This tool can only read files, not directories. Use `#{dir_list_name}` for directories.
-    - If you read a file that exists but has empty contents you will receive a warning.
-    - ALWAYS read a file with this tool before editing it with `#{edit_name}` or `#{write_name}`.
+    Every result ends with either `(End of file — N lines total)` or
+    `(Showing lines A-B. Use offset=C to continue.)`, so you never have to read
+    again to find out whether you have the whole file. Trust that stamp. If you
+    need more than the window gave you, continue from the offset it names or ask
+    for a larger `limit` — do not walk the file in small overlapping slices.
+    Reading several different files is independent work: issue those calls in
+    parallel in one turn.
+
+    Read a file once before your FIRST `#{edit_name}` or `#{write_name}` to it.
+    Do not re-read it after your own successful edit — you know what you
+    changed, and if anything else changes the file, the next edit is rejected
+    with a stale-view error rather than silently landing.
     """
   end
 
