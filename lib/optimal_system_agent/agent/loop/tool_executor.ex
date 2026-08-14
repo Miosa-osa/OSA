@@ -1307,6 +1307,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     tool_failed =
       String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
 
+    # P1-3: record this call in the grounded-verification evidence ledger. A
+    # successful write marks a changed file; a successful check (shell build/
+    # test, re-read of the file, grep referencing it) is the evidence the gate
+    # requires before the model may declare completion. `not tool_failed` is
+    # the exit-0 / no-error signal, computed above on the CLEAN result so an
+    # appended "<system-reminder>" can never flip it.
+    #
+    # This MUST run before `maybe_append_reminders/3`. The test-first nudge is a
+    # reminder that reads this ledger, so while recording came second the ledger
+    # could not contain the edit the nudge is about: the nudge only ever fired
+    # on the NEXT tool call. On the shape it matters most for — edit once, then
+    # answer — there is no next tool call, so the cheap one-shot steer was
+    # provably never delivered and the expensive completion gate fired instead.
+    # That is the "the nudge was never sent" half of the over-firing report.
+    OptimalSystemAgent.Agent.Loop.VerificationEvidence.record(state.session_id, %{
+      tool: tool_call.name,
+      args: Map.get(tool_call, :arguments) || %{},
+      success: not tool_failed
+    })
+
     # Cross-cutting <system-reminder> pipeline (grok src/reminders parity):
     # surface finished background tasks / subagents, a SKILL.md near a touched
     # path, and post-edit diagnostics — deduped per session, non-fatal. Both
@@ -1316,17 +1336,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     if tool_failed do
       run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
     end
-
-    # P1-3: record this call in the grounded-verification evidence ledger. A
-    # successful write marks a changed file; a successful check (shell build/
-    # test, re-read of the file, grep referencing it) is the evidence the gate
-    # requires before the model may declare completion. `not tool_failed` is
-    # the exit-0 / no-error signal.
-    OptimalSystemAgent.Agent.Loop.VerificationEvidence.record(state.session_id, %{
-      tool: tool_call.name,
-      args: Map.get(tool_call, :arguments) || %{},
-      success: not tool_failed
-    })
 
     # Record telemetry
     try do

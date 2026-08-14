@@ -37,10 +37,18 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   # keeps for DoomLoop). Older writes are considered settled.
   @window 40
 
+  # `file_transform` is missing here no longer. It is one of OSA's own edit
+  # tools, its name contains neither "write" nor "edit" nor "patch", so
+  # `write_like?/1` did not catch it either, and every fix made through it was
+  # invisible to this ledger. Measured live on a substantive task: the model
+  # authored a module, wrote a real test file, and iterated red -> fix -> green
+  # four times through `file_transform` — and because not one of those fixes was
+  # recorded as a source write, no discriminating triple could form and the gate
+  # demanded the work it had just watched happen, three times over.
   @write_edit_tools ~w(file_write file_edit multi_file_edit notebook_edit
-                       write_file edit_file apply_patch str_replace
-                       str_replace_editor create_file file_append multi_edit
-                       file_create)
+                       file_transform write_file edit_file apply_patch
+                       str_replace str_replace_editor create_file file_append
+                       multi_edit file_create)
 
   # Tools that produce a grounded external signal about the workspace.
   # Tools that EXECUTE and can therefore FAIL. A grounded check is one the
@@ -63,29 +71,50 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   def record(session_id, %{tool: tool} = call) when not is_nil(session_id) do
     ensure_table()
 
+    args = Map.get(call, :args) || %{}
+
+    # Relative paths must resolve against the SESSION's workspace, not against
+    # whatever directory the OSA process happens to be running in.
+    #
+    # They did not, and it made the adequacy clause unsatisfiable for the normal
+    # way of running a test. Measured live: the model wrote
+    # `tests/test_ratelimit.py`, ran it red, fixed the source, ran it green —
+    # and the ledger stored every invocation as
+    # `<osa-process-cwd>/tests/test_ratelimit.py`, a file that does not exist and
+    # was never written. `persisted?/2` therefore said no, no identity formed,
+    # `discriminating_evidence/1` stayed nil, and the gate demanded the work the
+    # model had just done — three times, until the re-prompt cap released it.
+    # A gate nobody can satisfy is pure cost, and this is a large share of it.
+    base = base_dir(session_id, args)
+
     entry = %{
       tool: to_string(tool),
       kind: classify(tool),
-      paths: extract_paths(Map.get(call, :args) || %{}),
-      command: extract_command(Map.get(call, :args) || %{}),
-      build_or_test: build_or_test_command?(Map.get(call, :args) || %{}),
+      paths: extract_paths(args, base),
+      command: extract_command(args),
+      build_or_test: build_or_test_command?(args),
       # Recorded separately so a gate can require a TEST — which asserts
       # behaviour — rather than accepting a build, which only asserts it
       # compiles. They were one predicate, so `go build` passing covered a red
       # test.
-      test_command: test_command?(Map.get(call, :args) || %{}),
+      test_command: test_command?(args),
       # Paths this call CREATED OR OVERWROTE. For a write tool that is its
       # `path` argument; for a shell command it is every redirection / `tee`
       # target. Without the shell half the ledger is blind to the single most
       # common way a model writes a file — `cat > f << 'EOF'` — which is
       # exactly how the `cancel-async-tasks` run produced its deliverable, so
       # the gate saw a session with NO writes at all and never fired.
-      written_paths: written_paths(Map.get(call, :args) || %{}, tool),
+      written_paths: written_paths(args, tool, base),
       # Paths this call RAN or READ (path-like tokens in the command that are
       # not redirection targets). A test invocation names its test file here;
       # an inline `python3 - << PY` heredoc names nothing, which is the whole
       # point — see `discriminating_evidence/1`.
-      ran_paths: ran_paths(Map.get(call, :args) || %{}),
+      ran_paths: ran_paths(args, base),
+      # How big, and how sweeping, this write was. The completion gate prices
+      # its demand off these two: a one-site edit of a few lines does not buy
+      # the same evidence as authoring a file. See `change_scale/1`.
+      edit_shape: edit_shape(args, tool),
+      changed_lines: changed_lines(args, tool),
       success: Map.get(call, :success, false) == true,
       ts: System.monotonic_time()
     }
@@ -196,7 +225,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
     last_write_idx =
       indexed
-      |> Enum.filter(fn {e, _} -> e.kind == :write end)
+      |> Enum.filter(fn {e, _} -> e.kind == :write and Map.get(e, :written_paths, []) != [] end)
       |> List.last()
       |> case do
         {_e, idx} -> idx
@@ -287,7 +316,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
     last_write_idx =
       indexed
-      |> Enum.filter(fn {e, _} -> e.kind == :write end)
+      |> Enum.filter(fn {e, _} -> e.kind == :write and Map.get(e, :written_paths, []) != [] end)
       |> List.last()
       |> case do
         {_e, idx} -> idx
@@ -344,11 +373,41 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
   # --- Argument extraction ---
 
-  defp extract_paths(args) when is_map(args) do
+  # Where a relative path in this call resolves. A `cd <dir> && …` prefix wins
+  # (the model said so explicitly), then the session's declared workspace, then
+  # the launch directory.
+  @cd_prefix_re ~r/^\s*cd\s+(['"]?)([^\s'"&;|]+)\1\s*(?:&&|;)/
+
+  defp base_dir(session_id, args) do
+    session_base =
+      OptimalSystemAgent.Workspace.Cwd.session_dir(to_string(session_id)) ||
+        OptimalSystemAgent.Workspace.Cwd.original_cwd()
+
+    case extract_command(args) do
+      cmd when is_binary(cmd) ->
+        case Regex.run(@cd_prefix_re, cmd) do
+          [_, _q, dir | _] -> Path.expand(dir, session_base)
+          _ -> session_base
+        end
+
+      _ ->
+        session_base
+    end
+  rescue
+    _ -> File.cwd!()
+  end
+
+  defp extract_paths(args, base) when is_map(args) do
     single = List.wrap(Map.get(args, "path"))
 
+    # `multi_file_edit` names its targets under `edits`, not `files`, and only
+    # `files` was read — so every multi-file edit landed in the ledger with an
+    # EMPTY path list. A change spanning five files registered as touching
+    # none: it could not be pending, could not be covered, and could not be
+    # weighed by `change_scale/1`. Both key names are accepted now.
     multi =
-      case Map.get(args, "files") do
+      [Map.get(args, "files"), Map.get(args, "edits")]
+      |> Enum.flat_map(fn
         list when is_list(list) ->
           Enum.flat_map(list, fn
             %{"path" => p} -> [p]
@@ -358,21 +417,18 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
 
         _ ->
           []
-      end
+      end)
 
     (single ++ multi)
     |> Enum.filter(&is_binary/1)
-    |> Enum.map(&normalize_path/1)
+    |> Enum.map(&normalize_path(&1, base))
     |> Enum.uniq()
   end
 
-  defp extract_paths(_), do: []
+  defp extract_paths(_, _), do: []
 
-  defp normalize_path(p) do
-    Path.expand(p)
-  rescue
-    _ -> p
-  end
+  defp normalize_path(p, base) when is_binary(base), do: Path.expand(p, base)
+  defp normalize_path(p, _), do: Path.expand(p)
 
   defp extract_command(args) when is_map(args) do
     case Map.get(args, "command") || Map.get(args, "code") do
@@ -382,6 +438,217 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   end
 
   defp extract_command(_), do: nil
+
+  # --- Size and shape of a write ---
+  #
+  # Tools that replace a NAMED REGION of an existing file. Everything else that
+  # writes — `file_write`, `cat > f << EOF`, `apply_patch` (which may create) —
+  # authors whole files, and authoring is never "one small edit" no matter how
+  # few lines the argument happens to carry. That asymmetry is what keeps the
+  # `cancel-async-tasks` shape at full strength: every deliverable in that run
+  # was produced by `file_write` or a heredoc.
+  @in_place_tools ~w(file_edit multi_file_edit multi_edit str_replace
+                     str_replace_editor edit_file file_transform)
+
+  defp edit_shape(args, tool) do
+    name = to_string(tool)
+
+    cond do
+      name in @in_place_tools -> :in_place
+      classify(tool) == :write -> :whole_file
+      redirect_targets(args, nil) != [] -> :whole_file
+      true -> nil
+    end
+  end
+
+  # Lines this call put into the workspace. For an in-place edit that is the
+  # larger of the two sides — a 3-line block swapped for a 9-line one is a
+  # 9-line change, not 6 and not 12.
+  defp changed_lines(args, tool) when is_map(args) do
+    name = to_string(tool)
+
+    cond do
+      name in @in_place_tools ->
+        edit_pair_lines(args) + nested_edit_lines(args) + operation_lines(args)
+
+      is_binary(Map.get(args, "content")) ->
+        line_count(Map.get(args, "content"))
+
+      is_binary(extract_command(args)) ->
+        line_count(extract_command(args))
+
+      true ->
+        0
+    end
+  end
+
+  defp changed_lines(_, _), do: 0
+
+  defp edit_pair_lines(args) do
+    max(line_count(Map.get(args, "old_string")), line_count(Map.get(args, "new_string")))
+  end
+
+  defp nested_edit_lines(args) do
+    case Map.get(args, "edits") do
+      list when is_list(list) ->
+        Enum.reduce(list, 0, fn
+          e, acc when is_map(e) -> acc + edit_pair_lines(e)
+          _, acc -> acc
+        end)
+
+      _ ->
+        0
+    end
+  end
+
+  # `file_transform` carries its payload under `operations`, each with its own
+  # `to`/`text` replacement body.
+  defp operation_lines(args) do
+    case Map.get(args, "operations") do
+      list when is_list(list) ->
+        Enum.reduce(list, 0, fn
+          op, acc when is_map(op) ->
+            acc + max(line_count(Map.get(op, "to")), line_count(Map.get(op, "text")))
+
+          _, acc ->
+            acc
+        end)
+
+      _ ->
+        0
+    end
+  end
+
+  defp line_count(s) when is_binary(s) and s != "", do: length(String.split(s, "\n"))
+  defp line_count(_), do: 0
+
+  # ---------------------------------------------------------------------------
+  # Proportionality: how big is the change the gate is pricing?
+  # ---------------------------------------------------------------------------
+  #
+  # The adequacy requirement — a persisted test that failed once and then passed
+  # across a source fix — is the right price for authoring a module and the
+  # wrong price for a one-line fix. Measured on this repository: of the last 264
+  # commits touching `lib/`, 58 touch a single file and only 21 of those change
+  # 20 lines or fewer. So `:small` as defined here is ~8% of real changes; the
+  # other 92% keep the full requirement. The threshold is chosen to catch the
+  # one-site fix and nothing broader.
+  @small_change_max_lines 20
+  @small_change_max_files 1
+  @small_change_max_edits 3
+
+  @doc """
+  How much change this session made to non-test source, as a risk tier.
+
+    * `:none`  — nothing a test could exercise was written (docs, config).
+    * `:small` — in-place edits only, one code file, at most
+      #{@small_change_max_edits} of them, at most #{@small_change_max_lines}
+      lines in total.
+    * `:large` — anything else: a whole-file write or heredoc, more than one
+      file, or more than #{@small_change_max_lines} lines.
+
+  Authoring a file is deliberately never `:small`. A model that writes
+  `/app/run.py` wholesale has produced the deliverable, not tweaked one, and
+  that is exactly the shape the adequacy requirement exists for.
+  """
+  @spec change_scale(term() | [map()]) :: :none | :small | :large
+  def change_scale(session_id) when not is_list(session_id),
+    do: change_scale(get(session_id))
+
+  def change_scale(entries) when is_list(entries) do
+    writes =
+      for e <- entries,
+          e.success,
+          paths = source_code_paths(e),
+          paths != [],
+          do: {e, paths}
+
+    files = writes |> Enum.flat_map(fn {_e, p} -> p end) |> Enum.uniq()
+    lines = Enum.reduce(writes, 0, fn {e, _}, acc -> acc + Map.get(e, :changed_lines, 0) end)
+
+    cond do
+      writes == [] -> :none
+      Enum.any?(writes, fn {e, _} -> Map.get(e, :edit_shape) != :in_place end) -> :large
+      length(writes) > @small_change_max_edits -> :large
+      length(files) > @small_change_max_files -> :large
+      lines > @small_change_max_lines -> :large
+      true -> :small
+    end
+  rescue
+    # Unknown shape must cost MORE, never less.
+    _ -> :large
+  end
+
+  defp source_code_paths(entry) do
+    entry
+    |> Map.get(:written_paths, [])
+    |> Enum.filter(&code_file?/1)
+    |> Enum.reject(&test_artifact_path?/1)
+  end
+
+  # ---------------------------------------------------------------------------
+  # The project's own suite, which the session did not write
+  # ---------------------------------------------------------------------------
+
+  # Ways to run a suite while excusing part of it from running. A green result
+  # under any of these is not a green suite.
+  @suite_narrowing_re ~r/(--ignore|--deselect|--exclude|-k\s|--only|--skip|SKIP=|-run\s)/
+
+  # Ways to make a suite green by removing what was red.
+  @test_removal_re ~r/\b(rm|unlink|mv|truncate|rmtree)\b/
+
+  @doc """
+  True when the project's **own** test suite ran and passed after the last
+  source write — evidence the session did not author and therefore cannot have
+  written in order to satisfy the gate.
+
+  This is the cheapest strong evidence available and it costs no extra turns
+  when the suite already exists, which is why the gate prefers discovering it
+  over demanding a new test. It is only accepted for a `:small` change: a green
+  pre-existing suite proves no regression, which is the right claim about a
+  one-site edit and an incomplete one about newly authored behaviour.
+
+  Refused when the session authored ANY test artefact (the suite would then be
+  partly the model's own work), when a suite was run with a narrowing flag, or
+  when a command removed or moved a test file.
+  """
+  @spec external_suite_pass?(term()) :: boolean()
+  def external_suite_pass?(session_id) do
+    entries = get(session_id)
+
+    not session_authored_test?(entries) and not suite_tampering?(entries) and
+      suite_passed_after_last_source_write?(entries)
+  rescue
+    _ -> false
+  end
+
+  defp session_authored_test?(entries) do
+    Enum.any?(entries, fn e ->
+      e.success and Enum.any?(Map.get(e, :written_paths, []), &test_artifact_path?/1)
+    end)
+  end
+
+  defp suite_tampering?(entries) do
+    Enum.any?(entries, fn e ->
+      cmd = Map.get(e, :command)
+
+      is_binary(cmd) and
+        (Regex.match?(@suite_narrowing_re, cmd) or
+           (Regex.match?(@test_removal_re, cmd) and
+              Enum.any?(Map.get(e, :ran_paths, []), &test_artifact_path?/1)))
+    end)
+  end
+
+  defp suite_passed_after_last_source_write?(entries) do
+    last = entries |> source_write_indices() |> List.last()
+
+    entries
+    |> Enum.with_index()
+    |> Enum.any?(fn {e, idx} ->
+      (last == nil or idx > last) and e.kind == :check and e.success and
+        Map.get(e, :test_command, false) and suite_key(Map.get(e, :command)) != nil
+    end)
+  end
 
   # A TEST asserts behaviour. A build only asserts it compiles.
   #
@@ -704,44 +971,48 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   # `> f`, `>> f`, `2> f`, `| tee f`, `| tee -a f`.
   @redirect_re ~r/(?:^|[\s;&|])(?:\d?>>?\s*|\|\s*tee\s+(?:-a\s+)?)(['"]?)([^\s'"<>|;&]+)\1/
 
-  defp written_paths(args, tool) when is_map(args) do
+  defp written_paths(args, tool, base) when is_map(args) do
     from_tool =
       if classify(tool) == :write do
-        extract_paths(args)
+        extract_paths(args, base)
       else
         []
       end
 
-    from_shell =
-      case extract_command(args) do
-        cmd when is_binary(cmd) ->
-          @redirect_re
-          |> Regex.scan(cmd)
-          |> Enum.map(fn m -> List.last(m) end)
-          |> Enum.filter(&plausible_path?/1)
-          |> Enum.map(&normalize_path/1)
-
-        _ ->
-          []
-      end
-
-    Enum.uniq(from_tool ++ from_shell)
+    Enum.uniq(from_tool ++ redirect_targets(args, base))
   end
 
-  defp written_paths(_, _), do: []
+  defp written_paths(_, _, _), do: []
+
+  # Files a shell command creates or overwrites: `> f`, `>> f`, `| tee f`.
+  defp redirect_targets(args, base) when is_map(args) do
+    case extract_command(args) do
+      cmd when is_binary(cmd) ->
+        @redirect_re
+        |> Regex.scan(cmd)
+        |> Enum.map(fn m -> List.last(m) end)
+        |> Enum.filter(&plausible_path?/1)
+        |> Enum.map(&normalize_path(&1, base))
+
+      _ ->
+        []
+    end
+  end
+
+  defp redirect_targets(_, _), do: []
 
   # Path-like tokens in a command. Deliberately conservative: a token must look
   # like a filename (has an extension) or contain a `/`.
   @token_re ~r/[A-Za-z0-9_@%+=:,.\/~^-]+/
 
-  defp ran_paths(args) when is_map(args) do
+  defp ran_paths(args, base) when is_map(args) do
     case extract_command(args) do
       cmd when is_binary(cmd) ->
         @token_re
         |> Regex.scan(cmd)
         |> Enum.map(&hd/1)
         |> Enum.filter(&plausible_path?/1)
-        |> Enum.map(&normalize_path/1)
+        |> Enum.map(&normalize_path(&1, base))
         |> Enum.uniq()
 
       _ ->
@@ -749,7 +1020,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     end
   end
 
-  defp ran_paths(_), do: []
+  defp ran_paths(_, _), do: []
 
   defp plausible_path?(tok) when is_binary(tok) do
     byte_size(tok) > 1 and byte_size(tok) < 512 and

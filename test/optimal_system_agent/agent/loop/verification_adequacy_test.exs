@@ -33,6 +33,27 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
   defp edit(sid, path, ok \\ true),
     do: L.record(sid, %{tool: "file_edit", args: %{"path" => path}, success: ok})
 
+  # A change that is NOT one small site: a whole file authored at once. Every
+  # tier-sensitive assertion below is stated twice, once per tier, so the
+  # proportionality is pinned in both directions.
+  defp authored(sid, path, ok \\ true),
+    do:
+      L.record(sid, %{
+        tool: "file_write",
+        args: %{"path" => path, "content" => String.duplicate("x\n", 60)},
+        success: ok
+      })
+
+  defp large_directive do
+    sid = "adequacy-large-#{System.unique_integer([:positive])}"
+    L.reset(sid)
+    authored(sid, "/tmp/app.py")
+    sh(sid, "python3 -m py_compile /tmp/app.py", true)
+    {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+    L.reset(sid)
+    d.content
+  end
+
   # ===========================================================================
   # The replay
   # ===========================================================================
@@ -258,11 +279,12 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
              "no runnable test is possible and none is demanded"
     end
 
-    test "the explicit NO_RUNNABLE_TEST escape releases the gate, but only after one pushback",
+    test "on a LARGE change the escape is honoured only from the second pushback",
          %{session_id: sid} do
-      edit(sid, "/tmp/app.py")
+      authored(sid, "/tmp/app.py")
       sh(sid, "python3 -m py_compile /tmp/app.py", true)
 
+      assert L.change_scale(sid) == :large
       assert G.trigger(sid, 0, nil) == :inadequate_test
 
       # First pushback: the escape is NOT yet honoured — the model has to have
@@ -278,6 +300,19 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
              )
     end
 
+    test "on a SMALL change the escape is honoured immediately", %{session_id: sid} do
+      # Spending a whole round-trip to be told a one-line fix has no harness is
+      # most of what the trivial case was paying for. The sentence is explicit
+      # and logged, and it still cannot excuse never running anything — see the
+      # next test.
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+
+      assert L.change_scale(sid) == :small
+      assert G.trigger(sid, 0, nil) == :inadequate_test
+      assert G.trigger(sid, 0, "NO_RUNNABLE_TEST: no harness in this image") == nil
+    end
+
     test "the escape cannot mask an outright unchecked write", %{session_id: sid} do
       edit(sid, "/tmp/app.py")
 
@@ -285,12 +320,292 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
              "declaring no test possible does not excuse never running anything"
     end
 
-    test "the re-prompt cap always releases the loop", %{session_id: sid} do
-      edit(sid, "/tmp/app.py")
+    test "the re-prompt cap always releases the loop — 3 for a large change",
+         %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
       sh(sid, "python3 -m py_compile /tmp/app.py", true)
 
       assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 2})
       refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 3})
+    end
+
+    test "…and 2 for a small one: the extra room bought nothing there",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+
+      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 1})
+      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 2})
+    end
+  end
+
+  # ===========================================================================
+  # Proportionality: the price is set by the size and shape of the change
+  # ===========================================================================
+
+  describe "change_scale/1" do
+    test "no code change at all is :none", %{session_id: sid} do
+      edit(sid, "/tmp/README.md")
+      assert L.change_scale(sid) == :none
+    end
+
+    test "a one-site edit of a few lines is :small", %{session_id: sid} do
+      L.record(sid, %{
+        tool: "file_edit",
+        args: %{"path" => "/tmp/app.py", "old_string" => "a\nb", "new_string" => "a\nc\nd"},
+        success: true
+      })
+
+      assert L.change_scale(sid) == :small
+    end
+
+    test "authoring a whole file is :large however few lines it carries",
+         %{session_id: sid} do
+      L.record(sid, %{
+        tool: "file_write",
+        args: %{"path" => "/tmp/app.py", "content" => "x"},
+        success: true
+      })
+
+      assert L.change_scale(sid) == :large,
+             "writing the deliverable is not a tweak — this is the cancel-async-tasks shape"
+    end
+
+    test "a shell heredoc that creates the file is :large", %{session_id: sid} do
+      sh(sid, "cat > /app/run.py << 'EOF'\nimport asyncio\nEOF", true)
+      assert L.change_scale(sid) == :large
+    end
+
+    test "more than one code file is :large", %{session_id: sid} do
+      edit(sid, "/tmp/a.py")
+      edit(sid, "/tmp/b.py")
+      assert L.change_scale(sid) == :large
+    end
+
+    test "a multi_file_edit is seen at all, and is :large", %{session_id: sid} do
+      # `multi_file_edit` names its targets under `edits`; only `files` was
+      # read, so a change spanning five files registered as touching none.
+      L.record(sid, %{
+        tool: "multi_file_edit",
+        args: %{
+          "edits" => [
+            %{"path" => "/tmp/a.py", "old_string" => "x", "new_string" => "y"},
+            %{"path" => "/tmp/b.py", "old_string" => "x", "new_string" => "y"}
+          ]
+        },
+        success: true
+      })
+
+      assert L.changed_source_files(sid) == ["/tmp/a.py", "/tmp/b.py"]
+      assert L.change_scale(sid) == :large
+    end
+
+    test "more than 20 changed lines in one file is :large", %{session_id: sid} do
+      L.record(sid, %{
+        tool: "file_edit",
+        args: %{
+          "path" => "/tmp/app.py",
+          "old_string" => "a",
+          "new_string" => String.duplicate("x\n", 30)
+        },
+        success: true
+      })
+
+      assert L.change_scale(sid) == :large
+    end
+
+    test "more than three edit calls is :large even if each is tiny", %{session_id: sid} do
+      for _ <- 1..4, do: edit(sid, "/tmp/app.py")
+      assert L.change_scale(sid) == :large
+    end
+
+    test "writes to test files do not count toward the change being measured",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      edit(sid, "/tmp/test_app.py")
+      assert L.change_scale(sid) == :small
+    end
+  end
+
+  describe "every edit tool OSA actually ships is a write" do
+    test "file_transform fixes are visible, so a triple can form around them",
+         %{session_id: sid} do
+      # Measured live: the model authored a module, wrote a real test file, and
+      # iterated red -> fix -> green four times through `file_transform`. Its
+      # name contains neither "write" nor "edit" nor "patch", so it classified
+      # as `:other`, not one of those fixes was recorded, no triple could form,
+      # and the gate demanded the work it had just watched happen.
+      sh(sid, "cat > /tmp/app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "cat > /tmp/test_app.py << 'EOF'\nimport app\nEOF", true)
+      sh(sid, "python3 /tmp/test_app.py", false)
+
+      L.record(sid, %{
+        tool: "file_transform",
+        args: %{
+          "path" => "/tmp/app.py",
+          "operations" => [%{"op" => "replace", "find" => "x", "to" => "y"}]
+        },
+        success: true
+      })
+
+      sh(sid, "python3 /tmp/test_app.py", true)
+
+      assert "/tmp/app.py" in L.changed_source_files(sid)
+      assert %{artifact: {:file, "/tmp/test_app.py"}} = L.discriminating_evidence(sid)
+      refute L.needs_discriminating_test?(sid)
+    end
+
+    test "a file_transform of a few lines is still a :small change", %{session_id: sid} do
+      L.record(sid, %{
+        tool: "file_transform",
+        args: %{
+          "path" => "/tmp/app.py",
+          "operations" => [%{"op" => "replace", "find" => "x", "to" => "y\nz"}]
+        },
+        success: true
+      })
+
+      assert L.change_scale(sid) == :small
+    end
+  end
+
+  describe "a test invoked by RELATIVE path is still the same test" do
+    test "red -> source fix -> green counts when the model never types an absolute path",
+         %{session_id: sid} do
+      # Measured live: the model wrote `tests/test_ratelimit.py`, ran it red,
+      # fixed the source, ran it green — and every invocation was stored against
+      # the OSA process's own cwd, a file that does not exist. No identity
+      # formed, so the gate demanded the work that had just been done, three
+      # times, until the cap released it. A gate nobody can satisfy is pure cost.
+      ws = Path.join(System.tmp_dir!(), "osa-relpath-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(ws, "tests"))
+      OptimalSystemAgent.Workspace.Cwd.put_session_dir(sid, ws)
+      on_exit(fn -> File.rm_rf(ws) end)
+
+      sh(sid, "cat > app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "cat > tests/test_app.py << 'EOF'\nimport app\nEOF", true)
+      sh(sid, "python3 tests/test_app.py", false)
+      sh(sid, "cat > app.py << 'EOF'\ny\nEOF", true)
+      sh(sid, "python3 tests/test_app.py", true)
+
+      assert L.changed_source_files(sid) == [Path.join(ws, "app.py")]
+
+      assert %{artifact: {:file, path}} = L.discriminating_evidence(sid)
+      assert path == Path.join(ws, "tests/test_app.py")
+
+      refute L.needs_discriminating_test?(sid)
+    end
+
+    test "a `cd <dir> &&` prefix wins over the session workspace", %{session_id: sid} do
+      OptimalSystemAgent.Workspace.Cwd.put_session_dir(sid, "/workspace")
+      sh(sid, "cd /app && python3 tests/test_x.py", false)
+
+      assert "/app/tests/test_x.py" in (L.entries(sid) |> List.last() |> Map.get(:ran_paths))
+    end
+  end
+
+  describe "external_suite_pass?/1 — the project's own suite, not the model's" do
+    test "a green project suite after the last source write counts", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "pytest", true)
+      assert L.external_suite_pass?(sid)
+    end
+
+    test "a suite run BEFORE the last source write does not", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "pytest", true)
+      edit(sid, "/tmp/app.py")
+      refute L.external_suite_pass?(sid)
+    end
+
+    test "a red suite does not", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "pytest", false)
+      refute L.external_suite_pass?(sid)
+    end
+
+    test "a suite the session partly WROTE does not — that is the original attack",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "cat > tests/test_mine.py << 'EOF'\nassert True\nEOF", true)
+      sh(sid, "pytest", true)
+
+      refute L.external_suite_pass?(sid),
+             "authoring a passing test into the suite must not launder it into external evidence"
+
+      assert L.needs_discriminating_test?(sid)
+    end
+
+    test "a suite run with a narrowing flag does not", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "pytest --ignore=tests/test_hard.py", true)
+      refute L.external_suite_pass?(sid)
+    end
+
+    test "removing a test file disables the shortcut for the rest of the session",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "rm tests/test_hard.py", true)
+      sh(sid, "pytest", true)
+
+      refute L.external_suite_pass?(sid),
+             "a suite made green by deleting what was red is not a green suite"
+    end
+
+    test "a build is not a suite", %{session_id: sid} do
+      edit(sid, "/tmp/app.go")
+      sh(sid, "go build ./...", true)
+      refute L.external_suite_pass?(sid)
+    end
+
+    test "an inline probe is not a suite", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 - << 'PY'\nimport app\nPY", true)
+      refute L.external_suite_pass?(sid)
+    end
+  end
+
+  describe "the tier decides what discharges adequacy" do
+    test "small change + green project suite completes", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "./run_tests.sh", true)
+
+      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 0}),
+             "the cheapest strong evidence available, and it costs no extra turns"
+    end
+
+    test "large change + green project suite still blocks", %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "./run_tests.sh", true)
+
+      assert G.trigger(sid, 0, nil) == :inadequate_test,
+             "a pre-existing suite proves no regression, not that new behaviour works"
+    end
+
+    test "a small change still may not finish on NOTHING having run", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+
+      assert G.trigger(sid, 0, "NO_RUNNABLE_TEST: nope") == :unchecked_write,
+             "the liveness clause is tier-blind"
+    end
+
+    test "a small change still may not finish on a RED check", %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "pytest", false)
+
+      assert G.trigger(sid, 0, "NO_RUNNABLE_TEST: nope") == :failing_check
+    end
+
+    test "the kill switch still turns the whole adequacy clause off", %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+
+      assert G.trigger(sid, 0, nil) == :inadequate_test
+
+      System.put_env("OSA_VERIFICATION_ADEQUACY", "0")
+      on_exit(fn -> System.delete_env("OSA_VERIFICATION_ADEQUACY") end)
+
+      assert G.trigger(sid, 0, nil) == nil
     end
   end
 
@@ -313,9 +628,9 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
       end
     end
 
-    test "the adequacy directive states all three properties and the escape",
+    test "the LARGE adequacy directive states all three properties and the escape",
          %{session_id: sid} do
-      edit(sid, "/tmp/app.py")
+      authored(sid, "/tmp/app.py")
       sh(sid, "python3 -m py_compile /tmp/app.py", true)
 
       {d, st} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
@@ -325,6 +640,23 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
       assert d.content =~ "FAILED AT LEAST ONCE"
       assert d.content =~ "NO_RUNNABLE_TEST"
       assert st.verification_gate_prompts == 1
+    end
+
+    test "the SMALL directive asks for the existing suite first, and is short",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert d.content =~ "already has a test suite"
+      assert d.content =~ "NO_RUNNABLE_TEST"
+
+      refute d.content =~ "FAILED AT LEAST ONCE",
+             "a one-site edit does not buy a hand-built red -> fix -> green cycle"
+
+      assert byte_size(d.content) < byte_size(large_directive()),
+             "the cheap case must not pay the expensive case's prompt"
     end
 
     test "ending on a red check gets its own directive, naming the command",

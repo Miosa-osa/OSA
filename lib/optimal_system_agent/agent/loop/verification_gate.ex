@@ -32,18 +32,46 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   files, and iterated write -> test -> fix. This gate is that difference,
   encoded. See `VerificationEvidence` for the evidence rules.
 
-  **It costs turns on purpose.** Measured on a one-line bug fix in a live
-  session: 6 tool calls / 7 turns without the adequacy clause versus 10 / 12
-  with it, and only the second run produced a test that had ever been red.
+  **It costs turns on purpose — but the cost is now priced to the change.**
+  Clause 3 as first shipped charged every change the same: measured on a
+  one-line bug fix in a live session, 6 tool calls / 7 turns without it versus
+  10 / 12 with it, and separately a 14-call verification tangent after a correct
+  one-line fix. That is the right price for authoring a module and the wrong
+  price for a tweak, and a gate that expensive can lose a task outright by
+  running it into a wall-clock ceiling.
+
+  ## Proportionality (clause 3 only)
+
+  `VerificationEvidence.change_scale/1` sorts the session's source writes into
+  `:none | :small | :large`, and the tier decides three things:
+
+  | | `:small` (one site, ≤1 file, ≤20 lines, in-place) | `:large` (authored a file, or wider) |
+  |---|---|---|
+  | discharged by | the project's own suite passing, **or** a discriminating test | a discriminating test only |
+  | `NO_RUNNABLE_TEST` honoured | immediately | from the second pushback |
+  | re-prompt cap | #{2} | #{3} |
+
+  Preferring a suite the project already has is the largest saving available
+  and the *strongest* evidence, not the weakest: the model did not write it, so
+  it cannot have written it in order to pass this gate. It is refused when the
+  session authored any test artefact, when a suite was narrowed with
+  `--ignore`/`--deselect`, or when a command removed a test file.
+
+  Authoring a whole file is never `:small`, whatever its line count — that is
+  the `cancel-async-tasks` shape, and it keeps full strength.
+
+  Clauses 1 and 2 are tier-blind. Every code change, however small, must still
+  have had something run and pass against it, and may never end on a red check.
+
   `config :optimal_system_agent, :verification_adequacy, false` (or
-  `OSA_VERIFICATION_ADEQUACY=0`) turns clause 3 off.
+  `OSA_VERIFICATION_ADEQUACY=0`) turns clause 3 off entirely.
 
   It cannot trap the loop:
 
     * A non-code change (docs, config) never reaches clause 3 at all.
-    * `NO_RUNNABLE_TEST: <reason>` in the answer releases clause 3 from the
-      second pushback onward — explicit, logged, and unavailable for clause 2.
-    * Re-prompts are capped at #{3} per turn (`@max_reprompts`), reset by
+    * `NO_RUNNABLE_TEST: <reason>` in the answer releases clause 3 — explicit,
+      logged, and unavailable for clause 2.
+    * Re-prompts are capped per turn, reset by
       `TurnPipeline.reset_per_turn_fields/1`. After the cap the gate steps
       aside unconditionally.
 
@@ -75,6 +103,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # enough room to complete one. It is still a hard cap — the loop cannot be
   # trapped — and it resets every turn (`TurnPipeline.reset_per_turn_fields/1`).
   @max_reprompts 3
+
+  # …but a `:small` change is not a write -> test -> fix loop. It is one command
+  # (run the suite) or one sentence (`NO_RUNNABLE_TEST:`), so the extra room
+  # buys nothing there and the worst case stays at two.
+  @max_reprompts_small 2
 
   # The explicit, auditable escape. A task can genuinely have no runnable test
   # (documentation, a config value, a change with no harness in the image). The
@@ -120,8 +153,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     reprompts = Map.get(state, :verification_gate_prompts, 0)
     session_id = Map.get(state, :session_id)
 
-    reprompts < @max_reprompts and session_id != nil and
-      trigger(session_id, reprompts, content) != nil
+    session_id != nil and
+      case triaged(session_id, reprompts, content) do
+        {nil, _scale} -> false
+        {_reason, scale} -> reprompts < cap_for(scale)
+      end
   end
 
   def needs_verification?(_, _), do: false
@@ -139,15 +175,59 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   """
   @spec trigger(term(), non_neg_integer(), String.t() | nil) :: atom() | nil
   def trigger(session_id, reprompts \\ 0, content \\ nil) do
-    cond do
-      VerificationEvidence.failing_check_since_write(session_id) != nil -> :failing_check
-      VerificationEvidence.pending_files(session_id) != [] -> :unchecked_write
-      not adequacy_enabled?() -> nil
-      escaped?(reprompts, content) -> nil
-      VerificationEvidence.needs_discriminating_test?(session_id) -> :inadequate_test
-      true -> nil
-    end
+    {reason, _scale} = triaged(session_id, reprompts, content)
+    reason
   end
+
+  @doc """
+  The unanswered question **and the risk tier it was priced at**.
+
+  The tier (`VerificationEvidence.change_scale/1`) decides three things and
+  nothing else: what discharges the adequacy clause, when the explicit escape is
+  honoured, and how many pushbacks are available. The red-check and
+  unchecked-write clauses are tier-blind — every code change, however small,
+  must still have had something run and pass against it.
+  """
+  @spec triaged(term(), non_neg_integer(), String.t() | nil) ::
+          {atom() | nil, :none | :small | :large}
+  def triaged(session_id, reprompts \\ 0, content \\ nil) do
+    scale = VerificationEvidence.change_scale(session_id)
+
+    reason =
+      cond do
+        VerificationEvidence.failing_check_since_write(session_id) != nil -> :failing_check
+        VerificationEvidence.pending_files(session_id) != [] -> :unchecked_write
+        not adequacy_enabled?() -> nil
+        not VerificationEvidence.needs_discriminating_test?(session_id) -> nil
+        adequate_for_scale?(scale, session_id) -> nil
+        escaped?(scale, reprompts, content) -> nil
+        true -> :inadequate_test
+      end
+
+    {reason, scale}
+  end
+
+  # What discharges the adequacy clause, by tier.
+  #
+  # `:large` — a persisted test that failed once and then passed across a source
+  # fix. Unchanged, and deliberately so: authoring a file is the shape the
+  # requirement was built for and the shape the extra solve came from.
+  #
+  # `:small` — that, OR the project's own suite passing. A green pre-existing
+  # suite is evidence the model did not write and therefore cannot have written
+  # in order to pass this gate, it proves the one-site edit regressed nothing,
+  # and it costs a single command instead of a red -> fix -> green cycle. It is
+  # NOT accepted for `:large`, where "regressed nothing" is not the claim at
+  # issue.
+  defp adequate_for_scale?(:none, _session_id), do: true
+
+  defp adequate_for_scale?(:small, session_id),
+    do: VerificationEvidence.external_suite_pass?(session_id)
+
+  defp adequate_for_scale?(_large, _session_id), do: false
+
+  defp cap_for(:small), do: @max_reprompts_small
+  defp cap_for(_), do: @max_reprompts
 
   # Kill switch for the adequacy requirement alone. This is the one clause that
   # deliberately BUYS turns (measured: +5 tool calls / +6 turns on a one-line
@@ -163,10 +243,22 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     end
   end
 
-  defp escaped?(reprompts, content) when is_binary(content) and reprompts >= 1,
+  # When the escape becomes readable.
+  #
+  # `:large` — from the SECOND pushback, so it cannot be used to skip the
+  # requirement without having been asked once and having tried.
+  #
+  # `:small` — immediately. Requiring a wasted round-trip before a one-line fix
+  # may say "this repo has no test harness" is most of what the trivial case was
+  # paying for, and the sentence is explicit, logged, and still cannot touch the
+  # liveness clause: something must have run and passed either way.
+  defp escaped?(:small, _reprompts, content) when is_binary(content),
     do: Regex.match?(@no_test_marker, content)
 
-  defp escaped?(_, _), do: false
+  defp escaped?(_scale, reprompts, content) when is_binary(content) and reprompts >= 1,
+    do: Regex.match?(@no_test_marker, content)
+
+  defp escaped?(_, _, _), do: false
 
   @doc """
   Build the grounded-verification directive and advance the per-turn re-prompt
@@ -187,21 +279,27 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     reprompts = Map.get(state, :verification_gate_prompts, 0)
     step = reprompts + 1
     session_id = Map.get(state, :session_id)
-    reason = trigger(session_id, reprompts, content) || :unchecked_write
+    {reason, scale} = triaged(session_id, reprompts, content)
+    reason = reason || :unchecked_write
+    cap = cap_for(scale)
     last_write = session_id && VerificationEvidence.last_write_tool(session_id)
 
     Logger.info(
-      "[verification-gate] #{reason} (last write tool: #{last_write || "unknown"}) — " <>
-        "injecting directive #{step}/#{@max_reprompts} (session: #{inspect(session_id)})"
+      "[verification-gate] #{reason} scale=#{scale} " <>
+        "(last write tool: #{last_write || "unknown"}) — " <>
+        "injecting directive #{step}/#{cap} (session: #{inspect(session_id)})"
     )
 
     Bus.emit(:system_event, %{
       event: :verification_gate_triggered,
       session_id: session_id,
       reason: reason,
+      # Emitted so the A/B can attribute cost to the tier that incurred it
+      # rather than to "the gate" as an undifferentiated whole.
+      scale: scale,
       last_write_tool: last_write,
       reprompt: step,
-      max_reprompts: @max_reprompts
+      max_reprompts: cap
     })
 
     directive = %{
@@ -210,7 +308,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       # 400. That made the verification gate a no-op on those families: it
       # never ran once. See react_loop's handle_result for the full note.
       role: "user",
-      content: body(reason, session_id, step)
+      content: body(reason, session_id, step, cap, scale)
     }
 
     {directive, Map.put(state, :verification_gate_prompts, step)}
@@ -227,13 +325,47 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # gate that publishes its own bypass is not a gate. Nothing below can be
   # discharged by looking at a file.
 
-  defp header(step), do: "[VERIFICATION REQUIRED #{step}/#{@max_reprompts}] "
+  defp header(step, cap), do: "[VERIFICATION REQUIRED #{step}/#{cap}] "
 
-  defp body(:failing_check, session_id, step) do
+  defp body(:inadequate_test, session_id, step, cap, :small),
+    do: small_change_body(session_id, step, cap)
+
+  defp body(reason, session_id, step, cap, _scale), do: body(reason, session_id, step, cap)
+
+  # A one-site edit of a handful of lines. The evidence that fits it is the
+  # project's own suite, which costs one command when it exists and is stronger
+  # than anything the model could write here — so this asks for that first and
+  # names the way out when there is no suite, instead of opening with a
+  # red -> fix -> green cycle the change does not warrant.
+  defp small_change_body(session_id, step, cap) do
+    changed = (session_id && VerificationEvidence.changed_source_files(session_id)) || []
+
+    target =
+      case changed do
+        [] -> "your change"
+        [one] -> "`#{Path.basename(one)}`"
+        many -> Enum.map_join(Enum.take(many, 3), ", ", &"`#{Path.basename(&1)}`")
+      end
+
+    header(step, cap) <>
+      "You made a small, single-site change to #{target} and nothing has tested it.\n\n" <>
+      "Cheapest sufficient evidence, in order — take the first that applies:\n" <>
+      "  1. The project already has a test suite: run it (`mix test`, `pytest`, " <>
+      "`go test ./...`, `npm test`, `./run_tests.sh`) and report what it printed. " <>
+      "Run the WHOLE suite — not a subset, and do not skip or deselect anything.\n" <>
+      "  2. No suite exists, but the change is testable: add a persisted test that " <>
+      "fails before your fix and passes after it.\n" <>
+      "  3. Neither is possible in this environment: answer " <>
+      "`NO_RUNNABLE_TEST: <one-line reason>` on its own line and finish.\n\n" <>
+      "Do not manufacture a throwaway inline snippet, and do not build a " <>
+      "red -> fix -> green cycle by hand for a change this size — find the suite first."
+  end
+
+  defp body(:failing_check, session_id, step, cap) do
     failing = VerificationEvidence.failing_check_since_write(session_id)
     cmd = (failing && Map.get(failing, :command)) || "your last check"
 
-    header(step) <>
+    header(step, cap) <>
       "A check RAN AND FAILED after your most recent edit:\n" <>
       "  #{String.slice(to_string(cmd), 0, 300)}\n" <>
       "You are about to finish on a red check. Do not. Diagnose the failure, fix the " <>
@@ -241,7 +373,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "before/after output."
   end
 
-  defp body(:unchecked_write, session_id, step) do
+  defp body(:unchecked_write, session_id, step, cap) do
     pending = (session_id && VerificationEvidence.pending_files(session_id)) || []
 
     files_note =
@@ -251,14 +383,14 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
         many -> Enum.map_join(many, ", ", &"`#{&1}`")
       end
 
-    header(step) <>
+    header(step, cap) <>
       "You modified #{files_note} but nothing has RUN and PASSED against it since. " <>
       "An unrelated read, a command that only printed the file, or a failed command do " <>
       "not count. Run something that can fail — the project's build, its linter, or " <>
       "better, its tests — and report what it printed."
   end
 
-  defp body(:inadequate_test, session_id, step) do
+  defp body(:inadequate_test, session_id, step, cap) do
     changed = (session_id && VerificationEvidence.changed_source_files(session_id)) || []
     known = (session_id && VerificationEvidence.known_test_artifacts(session_id)) || []
 
@@ -283,7 +415,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
             "passed may be testing nothing."
       end
 
-    header(step) <>
+    header(step, cap) <>
       "You changed #{target}, but there is no evidence that what you changed actually " <>
       "works.\n\n" <>
       have <>
@@ -326,11 +458,15 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
 
     if changed != [] and known == [] do
       "You just changed code (#{Enum.map_join(Enum.take(changed, 3), ", ", &Path.basename/1)}). " <>
-        "Before going further, write a PERSISTED test file that fails against the current " <>
-        "state — a real file such as `tests/test_x.py` or `x_test.exs`, invoked by path, not " <>
-        "an inline `python3 - << EOF` snippet. Then fix the source until it passes. " <>
-        "Completion requires a test that failed at least once and then passed; setting that " <>
-        "up now is much cheaper than reconstructing it at the end."
+        "Establish how this gets tested NOW, while it is cheap:\n" <>
+        "  1. FIRST look for a suite this project already has — `run_tests.sh`, `mix test`, " <>
+        "`pytest`, `go test ./...`, a `test/` or `tests/` directory. Running one that exists " <>
+        "is the strongest evidence available and costs a single command.\n" <>
+        "  2. Only if there is none, write a PERSISTED test file — a real file such as " <>
+        "`tests/test_x.py` or `x_test.exs`, invoked by path, never an inline " <>
+        "`python3 - << EOF` snippet — run it against the CURRENT state so you see it fail, " <>
+        "then fix the source until it passes.\n" <>
+        "Setting this up now is much cheaper than reconstructing it at the end."
     end
   rescue
     _ -> nil

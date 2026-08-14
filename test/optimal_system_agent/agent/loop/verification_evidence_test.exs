@@ -168,15 +168,39 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidenceTest do
       shell(sid, "mix test", true)
       assert Ledger.verified?(sid)
 
-      # …but not the ADEQUACY one: a suite that has only ever been green proves
-      # only that it ran. See `VerificationAdequacyTest` for the full account.
+      # …and, because this is a one-site edit, the ADEQUACY one too: the
+      # project's own suite is evidence the session did not author, so a green
+      # run of it is proportionate proof that a small edit regressed nothing.
+      assert Ledger.change_scale(sid) == :small
+      assert VerificationGate.trigger(sid, 0, nil) == nil
+      refute VerificationGate.needs_verification?(state)
+    end
+
+    test "a green project suite does NOT discharge adequacy for a large change",
+         %{session_id: sid, path: path} do
+      # Authoring a file is never `:small`, so "the suite still passes" is not
+      # the claim at issue and does not buy completion. See
+      # `VerificationAdequacyTest` for the full account.
+      Ledger.record(sid, %{
+        tool: "file_write",
+        args: %{"path" => path, "content" => String.duplicate("x\n", 60)},
+        success: true
+      })
+
+      shell(sid, "mix test", true)
+
+      assert Ledger.change_scale(sid) == :large
       assert VerificationGate.trigger(sid, 0, nil) == :inadequate_test
 
       # Red -> source fix -> green is what discharges it.
       shell(sid, "mix test", false)
       write(sid, path)
       shell(sid, "mix test", true)
-      refute VerificationGate.needs_verification?(state)
+
+      refute VerificationGate.needs_verification?(%{
+               session_id: sid,
+               verification_gate_prompts: 0
+             })
     end
 
     test "gate steps aside after the re-prompt cap even with pending evidence",

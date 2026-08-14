@@ -42,8 +42,14 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGatePerTurnResetTest do
     }
   end
 
+  # A whole-file write, so this exercises the `:large` tier and its cap of 3.
+  # (`:small` — a one-site edit — is capped at 2; see `VerificationAdequacyTest`.)
   defp unverified_write(sid, path) do
-    Ledger.record(sid, %{tool: "file_edit", args: %{"path" => path}, success: true})
+    Ledger.record(sid, %{
+      tool: "file_write",
+      args: %{"path" => path, "content" => String.duplicate("x\n", 60)},
+      success: true
+    })
   end
 
   test "the gate fires again on the NEXT turn after exhausting its budget",
