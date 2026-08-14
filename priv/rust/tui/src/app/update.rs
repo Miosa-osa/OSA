@@ -1093,6 +1093,42 @@ impl App {
             return false;
         }
 
+        // `↓ to manage` and `← for agents` must work WHILE agents are running.
+        //
+        // Both affordances lived only in `handle_idle_key`, but agents run
+        // during Processing — so the hints were advertised in the one state
+        // where the keys were never routed. Reported twice: the arrow keys
+        // "don't work", pressed at exactly the moment the roster is on screen
+        // saying they do.
+        //
+        // The gates are identical to the Idle ones on purpose. `↓` needs
+        // something to manage (`has_dashboard_items`), `←` needs roster rows
+        // (`has_entries`, checked inside `enter_fleet_select`), and both need an
+        // empty composer with no @-file dropdown so they never steal a
+        // keystroke from someone typing a queued message mid-turn.
+        //
+        // `(Processing, AgentsDashboard)` and `(Processing, FleetSelect)` are
+        // both legal transitions, and both surfaces return through
+        // `exit_overlay`, so closing one lands back on the live turn rather
+        // than dropping it to Idle.
+        if key.modifiers == KeyModifiers::NONE
+            && self.input.value().is_empty()
+            && !self.input.file_search_active()
+            && self.chord_pending.is_none()
+        {
+            match key.code {
+                KeyCode::Down if self.has_dashboard_items() => {
+                    self.open_agents_dashboard();
+                    return false;
+                }
+                KeyCode::Left if self.agents.is_active() && self.agents.has_entries() => {
+                    self.enter_fleet_select();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         // Same rule as Idle: a printable character is text and goes to the
         // composer (here, the queued-message draft). Processing has no
         // bare-letter shortcut today; this keeps it that way, so the Idle bug

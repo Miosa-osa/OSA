@@ -317,3 +317,58 @@ mod fleet_select_transition_tests {
         assert!(!FleetSelect.can_transition_to(AgentsDashboard));
     }
 }
+
+// ── an affordance must be routed in the state that advertises it ────────────
+//
+// Two reports of "the arrow keys don't work", both at the moment the roster was
+// on screen saying they do. `↓ to manage` and `← for agents` are shown whenever
+// there are agent rows, and agents run during Processing — but both key arms
+// lived only in `handle_idle_key`, so during a live turn neither key was ever
+// routed. The transition table permitted both; nothing dispatched them.
+#[cfg(test)]
+mod processing_affordances {
+    use super::AppState::*;
+
+    #[test]
+    fn processing_can_reach_both_agent_surfaces() {
+        assert!(
+            Processing.can_transition_to(AgentsDashboard),
+            "`↓ to manage` is shown during Processing, so it must be reachable from it"
+        );
+        assert!(
+            Processing.can_transition_to(FleetSelect),
+            "`← for agents` is shown during Processing, so it must be reachable from it"
+        );
+    }
+
+    #[test]
+    fn both_surfaces_hand_a_running_turn_back() {
+        // They return via `exit_overlay`, so closing one must land on the live
+        // turn rather than dropping it to Idle.
+        assert!(FleetSelect.can_transition_to(Processing));
+        assert!(AgentsDashboard.can_transition_to(Processing));
+    }
+
+    #[test]
+    fn the_processing_handler_routes_both_keys() {
+        // Source assertion, deliberately: the transition being legal is not the
+        // same as a key reaching it, and that gap is exactly what shipped.
+        let src = include_str!("update.rs");
+
+        let handler = src
+            .split("fn handle_processing_key")
+            .nth(1)
+            .expect("handle_processing_key exists");
+        // Bound the search to this handler, not the whole file.
+        let handler = &handler[..handler.len().min(4000)];
+
+        assert!(
+            handler.contains("KeyCode::Down") && handler.contains("open_agents_dashboard"),
+            "Processing does not route ↓ to the dashboard"
+        );
+        assert!(
+            handler.contains("KeyCode::Left") && handler.contains("enter_fleet_select"),
+            "Processing does not route ← to the roster"
+        );
+    }
+}
