@@ -63,6 +63,80 @@ defmodule OptimalSystemAgent.Agent.Loop.CheckpointSpendTest do
     )
   end
 
+  # Read the sidecar as it literally sits on disk. `load_spend/1` cannot be used
+  # for these assertions: it FILLS IN a missing `tree_cost_usd` from `cost_usd`,
+  # which is exactly the absence under test.
+  defp raw_sidecar(session) do
+    Application.get_env(:optimal_system_agent, :config_dir)
+    |> Path.join("sessions")
+    |> Path.join("#{session}.spend.json")
+    |> File.read!()
+    |> Jason.decode!()
+  end
+
+  describe "the spend sidecar has ONE shape, whichever writer wrote it last" do
+    # The defect: `save_spend/2` overwrites the file, and there were two writers
+    # with two payload shapes — the turn-boundary save (full) and Checkpoint's
+    # per-tool-cycle mirror (token counters only). Whichever ran last decided
+    # the file's shape. Because a turn's final LLM round-trip makes no tool
+    # call, the mid-turn checkpoint was usually last, so the published sidecar
+    # lost `tree_cost_usd` AND lagged the true token count by one round-trip.
+    # Measured on the 8-task cost probe: 5 of 8 trials, ~1.1% of input tokens
+    # missing, always in the direction that makes OSA look cheaper.
+    test "a Checkpoint write carries the tree figures, not just the counters",
+         %{session: session} do
+      Checkpoint.checkpoint_state(state(session, %{}))
+
+      raw = raw_sidecar(session)
+
+      assert Map.has_key?(raw, "tree_cost_usd")
+      assert Map.has_key?(raw, "tree_cost_complete")
+      # Node-local `cost_usd` must stay node-local: `tree_spend/1` sums THAT
+      # field across descendants, so a tree total there double-counts.
+      assert raw["cost_usd"] == 48.25
+    end
+
+    test "a Checkpoint write after a full turn-boundary save does not erase the tree figures",
+         %{session: session} do
+      st = state(session, %{})
+
+      :ok = SessionPersistence.save_from_state(session, st)
+      assert Map.has_key?(raw_sidecar(session), "tree_cost_usd")
+
+      # The write that used to clobber it.
+      Checkpoint.checkpoint_state(st)
+
+      assert Map.has_key?(raw_sidecar(session), "tree_cost_usd")
+    end
+
+    test "flush_spend/2 writes the same shape and the later figures win",
+         %{session: session} do
+      Checkpoint.checkpoint_state(state(session, %{}))
+
+      # The final LLM round-trip of the turn: more spend, no tool call, so no
+      # further checkpoint. This is the flush the loop now performs at turn end.
+      :ok =
+        SessionPersistence.flush_spend(
+          session,
+          state(session, %{session_cost_usd: 49.75, session_input_tokens: 1_500})
+        )
+
+      raw = raw_sidecar(session)
+      assert Map.has_key?(raw, "tree_cost_usd")
+      assert raw["cost_usd"] == 49.75
+      assert raw["input_tokens"] == 1_500
+
+      loaded = SessionPersistence.load_spend(session)
+      assert loaded.input_tokens == 1_500
+      assert loaded.complete
+    end
+
+    test "flush_spend/2 never raises on a nil session or a non-map state" do
+      assert {:error, :invalid_args} = SessionPersistence.flush_spend(nil, %{})
+      assert {:error, :invalid_args} = SessionPersistence.flush_spend("s", :not_a_map)
+    end
+  end
+
   describe "checkpoint round-trips the spend accumulators + started_at" do
     test "restore_checkpoint returns the persisted spend and started_at", %{session: session} do
       Checkpoint.checkpoint_state(state(session, %{}))

@@ -70,6 +70,74 @@ TEST_HINT = """\
 """
 
 
+# --- cost: prefer the whole agent tree --------------------------------------
+#
+# Subagent/fleet children bill to their OWN spend sidecars. `cost_usd` is the
+# parent session's figure alone, so any delegating run under-reports -- and
+# $/task is the published headline. The Elixir side now carries `tree_cost_usd`
+# (parent + descendants) and `tree_cost_complete` on the sidecar, on
+# Loop.get_state's :spend map and on the :cost_update event.
+#
+# Read-side preference ONLY. The sidecar's own `cost_usd` field must not be
+# rewritten with a tree total: `tree_spend/1` sums that field across
+# descendants, so a tree total stored there makes every ancestor double-count
+# its grandchildren.
+
+
+def _tree_cost(primary: dict, fallback: dict, session_key: str = "cost_usd"):
+    """tree_cost_usd if present, else the parent-only figure. Never summed."""
+    for src, key in ((primary, "tree_cost_usd"), (primary, session_key),
+                     (fallback, "tree_cost_usd"), (fallback, "cost_usd")):
+        v = (src or {}).get(key)
+        if v is not None:
+            return v
+    return None
+
+
+def _cost_complete(primary: dict, fallback: dict) -> bool | None:
+    """False => the cost is a LOWER BOUND. None => pre-field run, unknowable."""
+    for src in (primary, fallback):
+        v = (src or {}).get("tree_cost_complete")
+        if v is not None:
+            return bool(v)
+        if (src or {}).get("cost_complete") is not None:
+            return bool(src["cost_complete"])
+    # No tree figure at all: the number is the parent alone. It is not "complete"
+    # in the tree sense and must not be presented as if it were.
+    if (primary or {}).get("tree_cost_usd") is None and (fallback or {}).get(
+        "tree_cost_usd"
+    ) is None:
+        return None
+    return True
+
+
+# --- turn-error attribution ------------------------------------------------
+#
+# OSA emits `turn_error` on the agent_response/cost_update frame when a turn
+# ended on an error instead of an answer. Four OSA-internal fault kinds
+# (encoding faults, :request_shape -- "This is a bug in OSA" -- :tool_use_mismatch
+# and :duplicate_tool_use) used to be emitted as `kind: :llm_error`; they are
+# now stamped with an additive `owner` field.
+#
+# `unknown` is deliberately its own status rather than being folded into
+# `provider` or into plain "ok": an unattributed fault counted as the model's is
+# exactly the bias being removed here, and older runs carry no `owner` at all.
+_OWNER_STATUS = {
+    "osa": "osa_internal_error",
+    "provider": "provider_error",
+    "unknown": "turn_error_unattributed",
+}
+
+
+def _turn_error_owner(turn_error) -> str:
+    """`osa` | `provider` | `unknown` from an additive, possibly absent field."""
+    if isinstance(turn_error, dict):
+        owner = turn_error.get("owner")
+        if isinstance(owner, str) and owner.lstrip(":") in ("osa", "provider"):
+            return owner.lstrip(":")
+    return "unknown"
+
+
 def _sanitize(sid: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]", "_", sid)
 
@@ -518,7 +586,14 @@ class OsaRunner:
             tokens_cache_write=pick(
                 "cache_creation_tokens", "cache_creation_input_tokens"
             ),
-            cost_usd=spend.get("cost_usd", telemetry.get("cost_usd")),
+            # `cost_usd` on the sidecar is the PARENT session only; a run that
+            # delegates bills its children to their own sidecars, so quoting it
+            # under-reports. `tree_cost_usd` is parent + descendants. Absent on
+            # sidecars written before the field existed, hence the fallback.
+            cost_usd=_tree_cost(spend, telemetry),
+            # False => `cost_usd` above is a LOWER BOUND (a descendant's spend
+            # could not be read). Any report quoting the number must say so.
+            cost_complete=_cost_complete(spend, telemetry),
             tool_calls=telemetry.get("tool_calls"),
             turns=telemetry.get("turns"),
             model=telemetry.get("model") or self.model,
@@ -588,7 +663,14 @@ class OsaRunner:
             "cache_read_input_tokens": 0,
         }
         cost = None
+        cost_complete = True
         model = None
+        # A turn can end on an error rather than an answer. `turn_error` carries
+        # an additive `owner` field (`:osa` | `:provider`); without reading it
+        # this runner returned status "ok" for a turn that died inside OSA, and
+        # diagnose.py then filed the missing patch as `model_no_patch`. Every
+        # OSA-internal fault was being charged to the model.
+        turn_error = None
         deadline = time.monotonic() + task.timeout_s
         log = self._open_log(task.instance_id)
         sig = _SignalCollector()
@@ -597,7 +679,10 @@ class OsaRunner:
             return {
                 "status": status, "error": error,
                 "usage_sum": dict(usage_sum), "cost_usd": cost,
+                "cost_complete": cost_complete,
                 "tool_calls": tool_calls, "turns": turns, "model": model,
+                "turn_error": turn_error,
+                "turn_error_owner": _turn_error_owner(turn_error),
                 "signals": sig.finish(),
             }
 
@@ -626,10 +711,21 @@ class OsaRunner:
                         v = (ev.get("usage") or {}).get(k)
                         if isinstance(v, int):
                             usage_sum[k] += v
-                    cost = ev.get("session_cost_usd", cost)
+                    # Prefer the tree total over the parent-only session cost;
+                    # see _tree_cost. Both are cumulative, so neither is summed.
+                    cost = _tree_cost(ev, {"cost_usd": cost}, session_key="session_cost_usd")
+                    if ev.get("tree_cost_complete") is False:
+                        cost_complete = False
                     model = ev.get("model") or model
                     turns += 1
+                    if ev.get("turn_error"):
+                        turn_error = ev["turn_error"]
                 elif etype == "done":
+                    if turn_error:
+                        owner = _turn_error_owner(turn_error)
+                        msg = (turn_error.get("message")
+                               if isinstance(turn_error, dict) else None)
+                        return snapshot(_OWNER_STATUS[owner], msg or f"turn_error ({owner})")
                     return snapshot("ok")
         finally:
             stop.set()

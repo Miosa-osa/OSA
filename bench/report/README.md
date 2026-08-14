@@ -7,6 +7,15 @@ with.
 It never writes into `bench/swebench`. Standard library only — no dependencies,
 no venv.
 
+**Scope: SWE-bench-shaped runs only.** `loader.py` requires the `instances`
+schema that `bench/swebench/report.py` owns, and it refuses anything else rather
+than guessing. Harbor runs (`bench/terminalbench`, `bench/headtohead`) are
+task-shaped, not instance-shaped, and have their own control gate with the same
+contract: **`bench/terminalbench/controls.py gate <run>`**. It plays the part
+gold-apply and empty-patch play here — `oracle` must solve every task in the run
+and `nop` must solve none — and it exits 1 when they do not, so a Harbor number
+is no more quotable without controls than a SWE-bench one is.
+
 ## Why this exists separately
 
 `bench/swebench` answers "did the agent solve the task". This answers "is the

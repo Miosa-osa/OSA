@@ -2,10 +2,18 @@
 # Build the portable OSA OTP release tarball that gets injected into every
 # Terminal-Bench task container.
 #
-#   ./build_release.sh            build if dist/ is missing
-#   ./build_release.sh --force    always rebuild
+#   ./build_release.sh              build if dist/ is missing
+#   ./build_release.sh --force      always rebuild
+#   ./build_release.sh --bullseye   build the bullseye variant into dist-bullseye/
 #
 # Output: dist/osa-release-linux-x86_64.tar.gz  (~40-80 MB, ERTS bundled)
+#         dist-bullseye/... for --bullseye (kept separate on purpose: it never
+#         overwrites the known-good bookworm artefact)
+#
+# The bullseye variant is built on glibc 2.31 / OpenSSL 1.1 and, with the
+# vendored-library wiring in osa_agent.py, has been measured to boot on
+# debian:bullseye-slim, python:3.13-slim-bookworm and ubuntu:24.04 -- i.e. it
+# covers the 2 tasks the bookworm artefact cannot reach as well as the other 87.
 #
 # The build happens inside a debian-bookworm container on purpose. See the
 # header of Dockerfile.release for why building on the host would produce an
@@ -14,9 +22,19 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-OUT="$HERE/dist/osa-release-linux-x86_64.tar.gz"
+DOCKERFILE="$HERE/Dockerfile.release"
+OUTDIR="$HERE/dist"
 CTX="$HERE/.buildctx"
 IMAGE="osa-bench-release-builder"
+
+if [[ "${1:-}" == "--bullseye" ]]; then
+  DOCKERFILE="$HERE/Dockerfile.release.bullseye"
+  OUTDIR="$HERE/dist-bullseye"
+  CTX="$HERE/.buildctx-bullseye"
+  IMAGE="osa-bench-release-builder-bullseye"
+  shift
+fi
+OUT="$OUTDIR/osa-release-linux-x86_64.tar.gz"
 
 if [[ -f "$OUT" && "${1:-}" != "--force" ]]; then
   echo "release already built: $OUT ($(du -h "$OUT" | cut -f1))"
@@ -40,10 +58,10 @@ rsync -a \
   "$REPO/" "$CTX/"
 
 echo "==> building release image (this takes a few minutes)"
-docker build -f "$HERE/Dockerfile.release" -t "$IMAGE" "$CTX"
+docker build -f "$DOCKERFILE" -t "$IMAGE" "$CTX"
 
 echo "==> extracting tarball"
-mkdir -p "$HERE/dist"
+mkdir -p "$OUTDIR"
 cid=$(docker create "$IMAGE" /bin/true)
 docker cp "$cid:/osa-release-linux-x86_64.tar.gz" "$OUT"
 docker rm -f "$cid" >/dev/null

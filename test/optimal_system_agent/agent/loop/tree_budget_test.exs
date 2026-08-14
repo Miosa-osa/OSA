@@ -162,4 +162,72 @@ defmodule OptimalSystemAgent.Agent.Loop.TreeBudgetTest do
       assert Accounting.tree_budget_remaining(resumed) == 0.0
     end
   end
+
+  # The rollup existed but was wired ONLY to the budget guard. Every figure a
+  # human or a benchmark reads — `session_cost_usd`, the `:cost_update` event,
+  # the spend sidecar — was the parent's own spend alone, so a run whose arms
+  # delegate under-reported `$/task` by however much the children cost.
+  #
+  # Both figures are now published side by side, explicitly named. Neither one
+  # silently changes meaning, because both meanings are load-bearing: the
+  # node-local figure is what every rollup sums, and a tree total in that slot
+  # would make every ancestor double-count its grandchildren.
+  describe "the reported figures carry BOTH the node and the tree bill" do
+    test "snapshot/1 exposes node spend, tree spend, and whether the tree bill is complete",
+         %{root: root} do
+      _ = child(root, 20.0)
+      _ = child(root, 12.5)
+
+      snap =
+        Accounting.snapshot(%{
+          session_id: root,
+          session_cost_usd: 5.0,
+          session_input_tokens: 10,
+          session_output_tokens: 2
+        })
+
+      # Node-local — unchanged meaning, and what `Fleet.default_budget_exhausted?/1`
+      # feeds back into `budget_exhausted?/1`.
+      assert snap.cost_usd == 5.0
+      # Whole tree — what "$ per task" means once an arm delegates.
+      assert snap.tree_cost_usd == 37.5
+      assert snap.tree_cost_complete == true
+    end
+
+    test "a childless session reports the same number twice, not a surprise", %{root: root} do
+      snap = Accounting.snapshot(%{session_id: root, session_cost_usd: 3.25})
+      assert snap.cost_usd == 3.25
+      assert snap.tree_cost_usd == 3.25
+    end
+
+    test "the spend sidecar keeps cost_usd NODE-LOCAL and adds tree_cost_usd beside it",
+         %{root: root} do
+      # This is the invariant the whole rollup rests on: `tree_spend/1` sums
+      # `cost_usd` across every descendant sidecar. If a parent wrote its tree
+      # total there, a grandparent would count the grandchildren twice.
+      c1 = child(root, 10.0)
+      _gc = child(c1, 4.0)
+
+      SessionPersistence.save_from_state(root, %{
+        session_id: root,
+        session_cost_usd: 2.0,
+        messages: [],
+        model: "claude-3-5-sonnet"
+      })
+
+      loaded = SessionPersistence.load_spend(root)
+      assert loaded.cost_usd == 2.0
+      assert loaded.tree_cost_usd == 16.0
+    end
+
+    test "a sidecar written before tree_cost_usd existed falls back to the node figure" do
+      id = "legacy_#{System.unique_integer([:positive])}"
+      SessionPersistence.save_spend(id, %{cost_usd: 1.75})
+
+      loaded = SessionPersistence.load_spend(id)
+      # Correct for a childless session, and a LOWER BOUND otherwise — never an
+      # over-statement.
+      assert loaded.tree_cost_usd == 1.75
+    end
+  end
 end

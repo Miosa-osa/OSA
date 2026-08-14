@@ -57,6 +57,14 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       "OSA built a request this model rejects (400) · This is a bug in OSA, not your prompt — " <>
         "switching models will not help. Run /compact or start a new session to reset the " <>
         "conversation shape, and please report it.",
+    # OSA raised on its own request before (or instead of) the provider seeing
+    # it — an encoding fault, a malformed body, a crash inside a provider
+    # module. Same "not your prompt, not the model" shape as :request_shape,
+    # but the request never got a verdict at all.
+    harness_error:
+      "OSA failed to build or send this request · This is a bug in OSA, not your prompt and " <>
+        "not the model — switching models will not help. Retry; if it repeats, run /compact " <>
+        "or start a new session, and please report it.",
     tool_use_mismatch:
       "Conversation history is out of sync (a tool call has no result) · Start a new session or /resume an earlier one.",
     duplicate_tool_use:
@@ -96,6 +104,54 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
 
   def classify(reason) when is_binary(reason), do: classify_string(String.downcase(reason))
   def classify(reason), do: classify_string(String.downcase(inspect(reason)))
+
+  # Categories whose fault lies with OSA, not with the provider or the model.
+  #
+  # This is a CATEGORY of misattribution, not one instance. Every one of these
+  # describes a request OSA built wrong or failed to build at all, and every
+  # one of them was reported to consumers as `kind: :llm_error`:
+  #
+  #   :harness_error      — OSA raised while building/sending (encoding faults,
+  #                         crashes inside a provider module)
+  #   :request_shape      — a 400 on a body shape OSA assembled; its own message
+  #                         already says "This is a bug in OSA"
+  #   :tool_use_mismatch  — a tool call in OSA's history with no result
+  #   :duplicate_tool_use — duplicate tool-call IDs in OSA's history
+  #
+  # The last three reproduce on every model, which is the operational test for
+  # "the model did not fail here".
+  @harness_fault_categories [
+    :harness_error,
+    :request_shape,
+    :tool_use_mismatch,
+    :duplicate_tool_use
+  ]
+
+  @doc """
+  True when `category` describes an OSA fault rather than a provider or model
+  failure.
+
+  Callers use this to decide ATTRIBUTION — whether a failed turn is charged to
+  the harness or to the model. Emitting all of these as `:llm_error` inflated
+  the apparent model failure rate in exactly the measurements the benchmarks
+  rely on, and hid the OSA defects underneath.
+  """
+  @spec harness_fault?(atom()) :: boolean()
+  def harness_fault?(category) when is_atom(category),
+    do: category in @harness_fault_categories
+
+  def harness_fault?(_category), do: false
+
+  @doc """
+  Who is at fault for `reason`: `:osa` or `:provider`.
+
+  Convenience over `classify/1` + `harness_fault?/1` for callers that only need
+  the attribution and not the category.
+  """
+  @spec fault_owner(term()) :: :osa | :provider
+  def fault_owner(reason) do
+    if reason |> classify() |> harness_fault?(), do: :osa, else: :provider
+  end
 
   @doc """
   Actionable user-facing message for an error reason. Replaces the canned
@@ -228,6 +284,15 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       request_shape_error?(down) ->
         :request_shape
 
+      # LAST of the specific branches, deliberately. `harness_error?/1` matches
+      # the registry's own rescue WRAPPERS, which wrap whatever a provider
+      # module raised — including raises whose text is a perfectly good
+      # provider diagnosis ("ANTHROPIC_API_KEY not configured"). Every branch
+      # above has already had its chance to recognise that text, so what falls
+      # through to here is an OSA-internal fault with no provider meaning.
+      harness_error?(down) ->
+        :harness_error
+
       String.contains?(down, "ids were found without") ->
         :tool_use_mismatch
 
@@ -274,6 +339,41 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       true ->
         :unknown
     end
+  end
+
+  # Substrings that only ever appear when OSA ITSELF failed — the request never
+  # reached the provider, or it reached it in a state OSA created.
+  #
+  #   * `invalid byte 0x` / `jason.encodeerror` — `Jason.encode_to_iodata!/1`
+  #     refusing a binary in the request body that is not valid UTF-8. This is
+  #     the encoding fault: a tool read bytes off disk, they landed in a `tool`
+  #     message, and the encoder raised before any HTTP call. Measured end to
+  #     end from a single `file_grep` hit on a latin-1 line.
+  #   * `provider error: ` / `raised: ` — `Registry.do_apply_provider/3`,
+  #     `do_native_stream/4` and `do_try_stream_provider/4` each rescue a raise
+  #     from a provider module into a string with one of these prefixes. The
+  #     raise is ours: a `FunctionClauseError`, a list where a string was
+  #     expected, a missing key in a body OSA assembled.
+  #   * the bare exception names — the same raises seen through a different
+  #     wrapper (`Exception.message/1` output, `inspect/1` of a reason tuple).
+  #
+  # Every one of these was previously reported as `kind: :llm_error` with
+  # `category: :unknown`, which is how an OSA defect got charged to the model
+  # in the benchmark numbers.
+  defp harness_error?(down) do
+    String.contains?(down, "invalid byte 0x") or
+      String.contains?(down, "jason.encodeerror") or
+      String.contains?(down, "provider error: ") or
+      String.contains?(down, "raised: ") or
+      String.contains?(down, "streaming raised") or
+      String.contains?(down, "functionclauseerror") or
+      String.contains?(down, "no function clause matching") or
+      String.contains?(down, "argumenterror") or
+      String.contains?(down, "keyerror") or
+      String.contains?(down, "badmaperror") or
+      String.contains?(down, "badarityerror") or
+      String.contains?(down, "protocol.undefinederror") or
+      String.contains?(down, "cannot convert the given list to a string")
   end
 
   # True when the provider rejected the SHAPE of the request body rather than

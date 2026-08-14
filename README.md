@@ -1033,10 +1033,67 @@ entries — and the leaderboard was never re-issued.
 So the only comparison we consider meaningful is one we run ourselves, with one
 model, one task set, and one set of limits.
 
+### Cost per task
+
+The field publishes token and cost figures; ours were far outside them. Divided
+out from goose's model-pinned Harbor table:
+
+| harness | input/task | in:out | effective $/M input |
+|---|---|---|---|
+| Claude Code | 1.15M | 85:1 | $0.24 |
+| opencode | 1.25M | 70:1 | $0.42 |
+| goose | 0.71–0.88M | 56–67:1 | $3.00 |
+| **OSA (before)** | **3–8M** | **~140:1** | **$3.00** |
+
+$3.00/M is the full **uncached** rate; $0.24 implies ~96–100% cache hits. OSA had
+both multipliers stacked — several times the field's token volume *and* zero
+caching — for 12–35x Claude Code's cost per task.
+
+Measured on `tb-cost-probe-v1`, 8 Terminal-Bench tasks, same provider
+(`ollama/glm-5.2:cloud`), same limits, changing only the code:
+
+| | before | after | change |
+|---|---|---|---|
+| input tokens / task | 4,654,997 | **2,821,177** | **−39.4%** |
+| $ / task | $2.8628 | **$1.7310** | **−39.5%** |
+| in:out ratio | 146.7:1 | 162.3:1 | +10.6% |
+| tasks solved | 5/8 | 5/8 | unchanged |
+
+That puts us at **2.2–3.9x** the field's input volume, down from 3.6–6.5x. It is
+progress, not parity.
+
+Four things this table is not, stated because each one could be read as a bigger
+claim than we can support:
+
+- **Both arms are priced at the same correct rates.** Our accounting was
+  separately found to misprice models by up to 3x; presenting a raw dollar delta
+  across that fix would have manufactured an improvement. The delta above tracks
+  the token delta exactly, as it must.
+- **The prompt-caching win is not in these numbers.** Caching went 0% → 94.1%
+  measured live, but the benchmark path runs on Ollama, which has no cache to hit
+  and no counter to read. The −39.4% comes from compaction, accounting and loop
+  fixes alone; caching is additive on top for Anthropic-routed traffic, and is
+  not yet demonstrated end-to-end on a benchmark.
+- **The in:out ratio got worse**, because output fell faster than input. The
+  ratio is a diagnostic, not a goal.
+- **Solve rate is unchanged, not improved**, and its composition moved: one task
+  regressed and one improved. The regression was re-run 3 times on the identical
+  pre-fix build and flipped without any code change — 4 pass / 2 fail across 6
+  observations. It is variance, and single runs on this set are not evidence of
+  small differences in either direction.
+
 ### Head-to-head, model held fixed
 
 Terminal-Bench 2.0 tasks, all arms on `glm-5.2:cloud` through one local daemon,
 wire-verified per arm that no arm silently substituted a model.
+
+**These are Terminal-Bench 2.0 numbers, and 2.0 is superseded.** The live
+leaderboards are 2.1 and 3; 2.1 corrects 26 tasks upstream (a byte-diff of the
+two trees finds 27). Nothing below has been re-run on the current sets yet.
+
+**The harness-fault column below reads 0 for every arm because it was computed
+before we could measure it.** See the correction under *What the benchmarks were
+actually for*.
 
 | harness | solved | harness faults |
 |---|---|---|
@@ -1075,8 +1132,23 @@ the dataset itself, so the achievable ceiling on that prefix is 98%, not 100%.
 ### What the benchmarks were actually for
 
 Finding our own bugs. When we started, **a quarter of failures were OSA's
-fault** rather than the model's. Two benchmarks now independently report **zero
-harness faults**. Fixed along the way:
+fault** rather than the model's.
+
+**Correction.** An earlier version of this section claimed two benchmarks
+reported *zero* harness faults. That claim was produced by a broken instrument
+and was false. Four classes of OSA's own errors — encoding faults that killed a
+turn, malformed requests, and two kinds of corruption in our own history — were
+being emitted as `llm_error` and therefore scored as **model** failures. Every
+harness-vs-model split we published was biased in our favour.
+
+Re-scored under corrected attribution, `osa-hard40-airgap` goes from 17 model /
+0 harness to **16 model / 1 harness** — a harness-fault share of **5.9% of
+failures, not 0%**. Terminal-Bench does not move: 17 telemetry files on disk,
+none carrying an affected fault. The gap was smaller than we feared, but it was
+not zero, and the instrument that reported zero could not have reported anything
+else.
+
+Fixed along the way:
 
 - A nil model silently disabled compaction on 37 of 40 sessions and budgeted a
   1M-token window as 32k

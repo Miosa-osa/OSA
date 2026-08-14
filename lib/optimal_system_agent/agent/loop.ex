@@ -1321,6 +1321,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       duration_ms: System.monotonic_time(:millisecond) - started_at
     )
 
+    # The summarizer round-trips ran in the bounded task above and staged their
+    # priced usage into `Accounting`'s side ledger; bill them to this session
+    # now that we are back in the loop process holding the state.
+    state = Accounting.absorb_side_spend(state)
+
     {:reply, :ok, %{state | messages: compacted}}
   end
 
@@ -1346,6 +1351,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
       tokens_before: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(messages),
       tokens_after: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(compacted)
     }
+
+    # Bill the summarizer round-trips staged by the bounded task above.
+    state = Accounting.absorb_side_spend(state)
 
     {:reply, {:ok, stats}, %{state | messages: compacted}}
   end
@@ -1558,6 +1566,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp end_session(state, hook_reason) do
     clear_cancel_key(state.session_id)
+
+    # Last chance to make the durable bill match what this process actually
+    # spent. The clean-exit branch below DELETES the crash checkpoint, so after
+    # this point the sidecar is the only surviving record of the run's spend —
+    # writing it before dropping the checkpoint, rather than after, is the whole
+    # point. Best-effort: a save problem must never make a stop hang.
+    _ = SessionPersistence.flush_spend(state.session_id, state)
 
     if turn_in_flight?(state) do
       save_unsaved_turn(state, hook_reason)
@@ -1887,6 +1902,23 @@ defmodule OptimalSystemAgent.Agent.Loop do
     }
 
     Telemetry.emit_context_pressure(state)
+
+    # Flush the durable spend sidecar SYNCHRONOUSLY, here, in the loop's own
+    # process, with the turn's final accounting already folded into `state`.
+    #
+    # The turn-boundary save below is the `:post_response` hook
+    # (`SessionPersistence.auto_save/1`), which runs in an ASYNC hook process
+    # and casts `{:persist_session, id}` back to this loop. Two hops. A session
+    # that stops right after its last answer — every headless/benchmark run —
+    # can be torn down before either hop lands, leaving the mid-turn checkpoint
+    # as the newest sidecar on disk. That checkpoint predates this turn's final
+    # LLM round-trip, so the published token/cost figures came out LOW by one
+    # round-trip (30k-110k input tokens per task, measured). An instrument whose
+    # error runs in our own favour is worse than no instrument.
+    #
+    # This write is a few hundred bytes and cannot race itself: it is ordered by
+    # this process' own execution, not by a mailbox.
+    _ = SessionPersistence.flush_spend(state.session_id, state)
 
     # Turn-end lifecycle event (primitive #30) — correlated to the turn_id minted
     # at turn start, so the per-session event stream brackets each turn.

@@ -322,16 +322,16 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   defp serialize_started_at(_), do: nil
 
   # Mirror the running spend into the durable between-turn sidecar (never raises).
+  #
+  # This goes through `SessionPersistence.flush_spend/2` and NOT a locally-built
+  # payload. `save_spend/2` overwrites the file, so a second writer with a
+  # narrower shape silently deletes fields the other writer put there: this
+  # function used to omit `tree_cost_usd`/`tree_cost_complete`, and because a
+  # turn's final LLM round-trip makes no tool call, this mid-turn write was the
+  # LAST one to touch the file on most runs. The published sidecar then lacked
+  # the tree figure and lagged the true token count by one round-trip.
   defp persist_spend_sidecar(state) do
-    OptimalSystemAgent.Agent.SessionPersistence.save_spend(state.session_id, %{
-      cost_usd: Map.get(state, :session_cost_usd, 0.0),
-      input_tokens: Map.get(state, :session_input_tokens, 0),
-      output_tokens: Map.get(state, :session_output_tokens, 0),
-      cache_creation_tokens: Map.get(state, :session_cache_creation_tokens, 0),
-      cache_read_tokens: Map.get(state, :session_cache_read_tokens, 0),
-      started_at: serialize_started_at(Map.get(state, :started_at))
-    })
-
+    OptimalSystemAgent.Agent.SessionPersistence.flush_spend(state.session_id, state)
     :ok
   rescue
     _ -> :ok

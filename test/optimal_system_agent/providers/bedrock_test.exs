@@ -331,13 +331,65 @@ defmodule OptimalSystemAgent.Providers.BedrockTest do
       assert {:ok, result} = Bedrock.chat([%{role: "user", content: "x"}])
       assert result.content == "checking"
       assert result.tool_calls == [%{id: "t9", name: "f", arguments: %{"a" => 1}}]
-      assert result.usage == %{prompt_tokens: 3, completion_tokens: 4, total_tokens: 7}
+      # The KEY NAMES are load-bearing: `Loop.Accounting.normalize_usage/1`
+      # reads `:input_tokens` / `:output_tokens` / the two cache fields and
+      # NOTHING else. This used to emit `:prompt_tokens` / `:completion_tokens`
+      # / `:total_tokens`, so every Bedrock turn accounted as $0.00.
+      assert result.usage == %{
+               input_tokens: 3,
+               output_tokens: 4,
+               cache_read_input_tokens: 0,
+               cache_creation_input_tokens: 0
+             }
     end
 
     test "usage OSA was not given is reported as zero, not invented" do
       stub(200, %{"output" => %{"message" => %{"content" => [%{"text" => "x"}]}}})
 
-      assert {:ok, %{usage: %{total_tokens: 0}}} = Bedrock.chat([%{role: "user", content: "x"}])
+      assert {:ok, %{usage: %{input_tokens: 0, output_tokens: 0}}} =
+               Bedrock.chat([%{role: "user", content: "x"}])
+    end
+
+    # UNVERIFIED against a live Bedrock call — synthetic payload built from the
+    # documented Converse response shape. The field names are the risk here; the
+    # arithmetic is exercised end-to-end below.
+    test "carries the Converse cache slices, and they price at the Anthropic multipliers" do
+      stub(200, %{
+        "output" => %{"message" => %{"content" => [%{"text" => "ok"}]}},
+        "usage" => %{
+          "inputTokens" => 100,
+          "outputTokens" => 50,
+          "cacheReadInputTokens" => 900,
+          "cacheWriteInputTokens" => 200,
+          "totalTokens" => 1250
+        }
+      })
+
+      assert {:ok, %{usage: usage}} = Bedrock.chat([%{role: "user", content: "x"}])
+
+      assert usage == %{
+               input_tokens: 100,
+               output_tokens: 50,
+               cache_read_input_tokens: 900,
+               cache_creation_input_tokens: 200
+             }
+
+      # Bedrock is in `Accounting`'s @disjoint_prompt_slices: `inputTokens` is
+      # the uncached tail, so the three prompt slices must NOT be reconciled
+      # against each other. Assert that end-to-end rather than by inspection.
+      norm =
+        usage
+        |> OptimalSystemAgent.Agent.Loop.Accounting.normalize_usage()
+        |> OptimalSystemAgent.Agent.Loop.Accounting.reconcile_prompt_slices(:bedrock)
+
+      assert norm.input_tokens == 100
+      assert norm.cache_read_input_tokens == 900
+
+      # claude-3-5-sonnet {$3, $15}/1M: 100*3 + 200*3*1.25 + 900*3*0.1 + 50*15
+      # = 300 + 750 + 270 + 750 = 2070 → $0.00207
+      assert_in_delta OptimalSystemAgent.Agent.Pricing.cost("claude-3-5-sonnet", norm),
+                      0.00207,
+                      0.000_001
     end
   end
 

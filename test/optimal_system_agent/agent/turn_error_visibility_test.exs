@@ -30,8 +30,20 @@ defmodule OptimalSystemAgent.Agent.TurnErrorVisibilityTest do
   test "the provider-failure path records the failure on state" do
     src = File.read!(@react_loop)
 
-    assert src =~ "state = Map.put(state, :turn_error,",
+    # Matched WITHOUT the leading `state =` and without the intervening
+    # whitespace. The behaviour is unchanged; only the formatting moved. The
+    # turn-error map gained an `owner: :osa | :provider` field (the
+    # `ErrorCatalog.fault_owner/1` work), which pushed the call past the line
+    # limit, so `mix format` broke `state = Map.put(...)` across two lines and a
+    # single-line source match stopped seeing it. Pinning the punctuation of a
+    # formatter-owned line is not what this test is for.
+    assert src =~ ~r/Map\.put\(state, :turn_error, %\{/,
            "react_loop no longer marks state when a turn ends on provider failure"
+
+    # The fault attribution rides on the same map — a turn error whose owner is
+    # OSA must not be reported to a harness as a provider outage.
+    assert src =~ "owner: owner",
+           "the turn error no longer carries fault attribution"
   end
 
   test "agent_response carries the marker on the wire" do

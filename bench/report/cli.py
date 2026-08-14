@@ -159,6 +159,19 @@ def cmd_summarise(args) -> int:
                     "cost_usd_total",
                     "cost_usd_per_resolved",
                 )
+            }
+            | {
+                # The four axes the published field reports, per attempted task
+                # (docs/research/what-harnesses-benchmark.md §5), plus the two
+                # flags that say whether the `$` may be quoted at all.
+                "cost_usd_per_task": run.cost_usd_per_task,
+                "input_tokens_per_task": run.input_tokens_per_task,
+                "output_tokens_per_task": run.output_tokens_per_task,
+                "in_out_ratio": run.in_out_ratio,
+                "cache_hit_rate": run.cache_hit_rate,
+                "cost_completeness": run.cost_completeness,
+                "pricing_epoch": run.pricing_epoch,
+                "cost_caveats": run.cost_caveats,
             },
             "config": run.config,
         }

@@ -27,6 +27,61 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
     end
   end
 
+  # ── Gateway-prefixed model ids (the ~2.5x over-accounting) ──────────────
+  #
+  # OSA reaches Claude/GLM/DeepSeek through OpenRouter in the benchmarks, and
+  # OpenRouter names models `<vendor>/<id>`. Those strings matched no catalog
+  # key and fell through to the coarse `@families` substring table.
+  # Reconciled against a real run (bench/swebenchpro/runs/or-opus5-probe3):
+  # 1,534,954 in / 9,929 out on `anthropic/claude-opus-5` was billed
+  # $23.768985 — exactly `in*15 + out*75` per 1M, exactly 3x the real
+  # {5.00, 25.00}.
+  describe "rates/1 with a gateway vendor prefix" do
+    test "anthropic/claude-opus-5 prices as claude-opus-5, not the Opus 3 family rate" do
+      assert Pricing.rates("anthropic/claude-opus-5") == Pricing.rates("claude-opus-5")
+      assert {5.00, 25.00} = Pricing.rates("anthropic/claude-opus-5")
+      refute Pricing.rates("anthropic/claude-opus-5") == {15.0, 75.0}
+    end
+
+    test "the prefixed id is priced identically to the bare id for every gateway model" do
+      for id <- ~w(claude-opus-5 claude-sonnet-5 claude-haiku-4-5 gpt-5.6-sol deepseek-v4-pro) do
+        for vendor <- ~w(anthropic openai deepseek z-ai) do
+          assert Pricing.rates(vendor <> "/" <> id) == Pricing.rates(id),
+                 "#{vendor}/#{id} priced differently from #{id}"
+        end
+      end
+    end
+
+    test "a prefixed id no longer under-accounts at $0.00 or at a retired rate" do
+      # Both were live under-counts, the opposite direction from the Opus 3x.
+      assert Pricing.rates("openai/gpt-5.6-sol") == Pricing.rates("gpt-5.6-sol")
+      refute is_nil(Pricing.rates("openai/gpt-5.6-sol"))
+      assert Pricing.rates("deepseek/deepseek-v4-pro") == Pricing.rates("deepseek-v4-pro")
+      refute Pricing.rates("deepseek/deepseek-v4-pro") == {0.27, 1.10}
+    end
+
+    test "a real colon-tagged id still wins on the full string" do
+      # `:cloud` is model identity; `:free`/`:nitro` are OpenRouter routing.
+      assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
+      assert Pricing.rates("anthropic/claude-opus-5:floor") == Pricing.rates("claude-opus-5")
+    end
+
+    test "an unknown prefixed model is still never guessed" do
+      assert is_nil(Pricing.rates("acme/totally-made-up-model-x"))
+    end
+
+    test "the real or-opus5-probe3 turn reconciles to the provider rate" do
+      usage = %{input_tokens: 1_534_954, output_tokens: 9_929}
+      # What OSA recorded for this instance, at the wrong family rate.
+      assert_in_delta 23.768985,
+                      (1_534_954 * 15.0 + 9_929 * 75.0) / 1_000_000,
+                      0.000_01
+
+      # What it should have been, and now is.
+      assert_in_delta Pricing.cost("anthropic/claude-opus-5", usage), 7.923, 0.001
+    end
+  end
+
   describe "cost/2" do
     test "computes input + output cost per 1M tokens" do
       # 1M input @ $3, 1M output @ $15 => $18 for sonnet
@@ -54,6 +109,89 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
     test "tolerates string-keyed usage maps" do
       usage = %{"input_tokens" => 1_000_000, "output_tokens" => 0}
       assert Pricing.cost("glm-5.2:cloud", usage) == 0.60
+    end
+  end
+
+  # The `@families` substring table is a guess by construction. `"claude-opus"
+  # => {15, 75}` was right for Claude 3 Opus and 3x wrong for Opus 5, and that
+  # single row is the whole of the 2.487x by which a benchmark run over-reported
+  # its own spend. The vendor-prefix fix closed the door for `claude-opus-5`; it
+  # cannot close it for the next unknown `claude-opus-N`. So a fall-through must
+  # be visible — structurally, not just in a log line nobody greps.
+  describe "confidence/1 — an estimate must announce itself as one" do
+    test "a catalog / SSOT hit is :exact" do
+      assert Pricing.confidence("claude-opus-5") == :exact
+      assert Pricing.confidence("anthropic/claude-opus-5") == :exact
+      assert Pricing.confidence("glm-5.2:cloud") == :exact
+    end
+
+    test "a family-table fall-through is :estimated, not :exact" do
+      # No catalog knows this id, but "claude-opus" matches the family table.
+      assert Pricing.confidence("claude-opus-99") == :estimated
+      # ...and it still returns a (guessed) rate rather than nothing, because an
+      # over-estimate is more useful to a budget cap than $0.00.
+      assert Pricing.rates("claude-opus-99") == {15.0, 75.0}
+    end
+
+    test "no rate at all is :unknown, and costs $0.0" do
+      assert Pricing.confidence("no-such-model-anywhere") == :unknown
+      assert Pricing.cost("no-such-model-anywhere", %{input_tokens: 1_000_000}) == 0.0
+    end
+
+    test "nil / non-string models are :unknown rather than raising" do
+      assert Pricing.confidence(nil) == :unknown
+      assert Pricing.confidence(42) == :unknown
+    end
+
+    test "confidence/1 does not itself emit the family warning" do
+      # It is called from display paths; only real pricing should be loud.
+      Pricing.reset_family_warnings()
+      log = ExUnit.CaptureLog.capture_log(fn -> Pricing.confidence("claude-opus-98") end)
+      refute log =~ "ESTIMATED price"
+    end
+  end
+
+  describe "cost_with_confidence/2" do
+    test "carries the qualifier alongside the dollar figure" do
+      usage = %{input_tokens: 1_000_000, output_tokens: 0}
+
+      assert {3.0, :exact} = Pricing.cost_with_confidence("claude-3-5-sonnet", usage)
+      assert {15.0, :estimated} = Pricing.cost_with_confidence("claude-opus-97", usage)
+      assert {+0.0, :unknown} = Pricing.cost_with_confidence("no-such-model-anywhere", usage)
+    end
+  end
+
+  describe "the family fall-through is LOUD" do
+    test "names the model and says the price is a guess" do
+      Pricing.reset_family_warnings()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Pricing.cost("claude-opus-96", %{input_tokens: 1_000})
+        end)
+
+      assert log =~ "claude-opus-96"
+      assert log =~ "ESTIMATED"
+      assert log =~ "SUBSTRING GUESS"
+    end
+
+    test "warns once per model, not once per round-trip" do
+      Pricing.reset_family_warnings()
+
+      first =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Pricing.cost("claude-opus-95", %{input_tokens: 1_000})
+        end)
+
+      second =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Pricing.cost("claude-opus-95", %{input_tokens: 1_000})
+        end)
+
+      assert first =~ "claude-opus-95"
+      # A warning repeated 400x a session is noise nobody reads, which is
+      # functionally the same as being silent.
+      refute second =~ "claude-opus-95"
     end
   end
 end

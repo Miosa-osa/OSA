@@ -874,7 +874,15 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       Application.put_env(:optimal_system_agent, :compaction_chunk_token_limit, 30)
 
       # 70 messages: cold_end = total - 50 = 20 (well above the 30-token chunk limit)
-      messages = build_conversation(35, 8)
+      #
+      # 40 words/message, not 8: `run_pipeline/6` now refuses to APPLY a pass
+      # whose steps reclaimed nothing, and on the old 8-word fixture the
+      # pipeline measured 1,330 tokens in and 1,474 out — the chunk scaffolding
+      # cost more than 19-token messages carry — so the pass was correctly
+      # discarded and no `[Context Summary]` reached the result. At 40
+      # words/message the same run measures 4,200 -> 2,444 and still produces 8
+      # balanced chunks, which is what this test is actually about.
+      messages = build_conversation(35, 40)
 
       rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
       total_tokens = Compactor.estimate_tokens(messages)

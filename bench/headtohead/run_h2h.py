@@ -378,6 +378,11 @@ def main() -> int:
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--arms", nargs="+", default=["osa", "codex", "opencode",
                                                   "mini-swe-agent"])
+    ap.add_argument("--no-control", action="store_true",
+                    help=f"run WITHOUT the standing control arm "
+                         f"'{arms_mod.STANDING_CONTROL_ARM}'. Only for "
+                         "debugging an arm; a published OSA number needs the "
+                         "control row beside it")
     ap.add_argument("--tasks", nargs="*", default=None)
     ap.add_argument("--task-set", default="default6", choices=sorted(TASK_SETS))
     ap.add_argument("--seed", type=int, default=20260814,
@@ -420,7 +425,24 @@ def main() -> int:
     if args.shuffle:
         random.Random(args.seed).shuffle(tasks)
 
-    selected = [arms_mod.get(n) for n in args.arms]
+    # The standing control arm rides along whenever OSA does. An OSA number with
+    # no scaffold control beside it is a number nobody can interpret: it mixes
+    # the model, the tasks and the harness, and the reader has no way to tell
+    # how much of it is the 190-line bash loop's floor. Dropping it needs
+    # --no-control, which is recorded in the config so the omission is visible
+    # in the artefact rather than only in someone's shell history.
+    arm_names = list(args.arms)
+    control_added = False
+    if (
+        not args.no_control
+        and "osa" in arm_names
+        and arms_mod.STANDING_CONTROL_ARM not in arm_names
+    ):
+        arm_names.append(arms_mod.STANDING_CONTROL_ARM)
+        control_added = True
+        log(f"added standing control arm '{arms_mod.STANDING_CONTROL_ARM}' "
+            "(pass --no-control to run without it, and say so when publishing)")
+    selected = [arms_mod.get(n) for n in arm_names]
 
     pre = provider_probe()
     if not args.report_only and not pre.get("servable"):
@@ -458,6 +480,19 @@ def main() -> int:
         "seed": args.seed,
         "shuffled": args.shuffle,
         "arms": [a.name for a in selected],
+        "standing_control_arm": arms_mod.STANDING_CONTROL_ARM,
+        "standing_control_present": arms_mod.STANDING_CONTROL_ARM in
+        [a.name for a in selected],
+        "standing_control_auto_added": control_added,
+        "standing_control_note": (
+            "mini-swe-agent is the field's scaffold control — SWE-bench's own "
+            "'Bash Only' board exists to pin it so scores compare models "
+            "rather than harnesses. Any OSA figure here must be read against "
+            "its row; an OSA number published without it is uninterpretable."
+            if arms_mod.STANDING_CONTROL_ARM in [a.name for a in selected]
+            else "RUN WITHOUT THE STANDING CONTROL ARM (--no-control). This "
+                 "run's OSA figure has no scaffold floor beside it and must "
+                 "not be published as a harness result."),
         "shared_model": arms_mod.SHARED_MODEL,
         "model_held_fixed": True,
         "model_fixed_caveat": (

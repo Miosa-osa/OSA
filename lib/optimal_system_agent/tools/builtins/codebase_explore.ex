@@ -385,21 +385,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodebaseExplore do
     end
   end
 
+  # The UTF-8 repair used to run ONLY on the overflow branch, so a summary that
+  # fit under the cap and happened to contain non-UTF-8 bytes (a filename or a
+  # matched line out of a latin-1 tree) went to the provider raw and raised
+  # `Jason.EncodeError` there. `Utils.Text.utf8_head/2` bounds by BYTES and
+  # coerces on both branches.
+  #
+  # It also stops DROPPING the bad bytes: `String.chunk/2` + filter deleted
+  # every invalid run, which silently shortens the output and shifts anything
+  # the caller counts. U+FFFD preserves position.
   defp cap(text) do
     max = 12_000
 
     if byte_size(text) > max do
-      <<truncated::binary-size(max), _rest::binary>> = text
-      # Find last valid UTF-8 boundary by dropping trailing invalid bytes
-      truncated =
-        case String.chunk(truncated, :valid) do
-          [] -> ""
-          chunks -> Enum.filter(chunks, &String.valid?/1) |> Enum.join()
-        end
-
-      String.trim_trailing(truncated) <> "\n[Output truncated]"
-    else
       text
+      |> OptimalSystemAgent.Utils.Text.utf8_head(max)
+      |> String.trim_trailing()
+      |> Kernel.<>("\n[Output truncated]")
+    else
+      OptimalSystemAgent.Utils.Text.scrub_utf8(text)
     end
   end
 end

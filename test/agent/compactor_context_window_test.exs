@@ -57,16 +57,49 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
   # ---------------------------------------------------------------------------
 
   describe "1M-token window" do
-    for pct <- [15, 30, 50] do
-      test "does NOT compact at #{pct}% utilization", %{messages: messages} do
-        used = div(@million * unquote(pct), 100)
+    # These used to be expressed as PERCENTAGES of the raw window (15/30/50%),
+    # which was the right unit while every threshold scaled linearly with the
+    # window. `CompactionThresholds.operative_window/1` now clamps that window
+    # to 200,000 before any threshold is derived, so on a 1M model the ladder is
+    # warn 147,000 / compact 167,000 / block 177,000 in ABSOLUTE tokens and a
+    # percentage of 1M no longer names a point on it — 30% of 1M is 300,000,
+    # which is past the blocking limit, not "nowhere near full".
+    #
+    # The clamp is deliberate and is the fix for the defect this file's
+    # moduledoc describes only half of: the 128k default made OSA compact far
+    # too EARLY, and removing it made a 1M model compact at 967,000 — i.e.
+    # never, since a session that large is unreachable. Both are the same bug
+    # (thresholds not connected to reality); the ceiling is what bounds it at
+    # both ends.
+    #
+    # So the property being pinned is unchanged — a large-window model must not
+    # be summarized while its context is still small — but it is now stated in
+    # the unit the decision is actually made in.
+    for used <- [50_000, 100_000, 140_000] do
+      test "does NOT compact at #{used} tokens", %{messages: messages} do
+        used = unquote(used)
 
         assert Compactor.severity_for(used, @million) == :none,
-               "#{unquote(pct)}% of a 1M window is nowhere near full"
+               "#{used} tokens is below warn_at(1M) = #{CompactionThresholds.warn_at(@million)}"
 
         assert Compactor.maybe_compact(messages, used, nil, context_window: {:ok, @million}) ==
                  messages,
-               "a 1M-window model must not be summarized at #{unquote(pct)}% occupancy"
+               "a 1M-window model must not be summarized at #{used} tokens"
+      end
+    end
+
+    test "the clamped ladder is where those numbers come from" do
+      # Pins the ceiling itself, so a change to @context_ceiling shows up here
+      # as an explicit diff rather than as six mysterious failures above.
+      assert CompactionThresholds.operative_window(@million) == 200_000
+      assert CompactionThresholds.warn_at(@million) == 147_000
+      assert CompactionThresholds.compact_at(@million) == 167_000
+      assert CompactionThresholds.block_at(@million) == 177_000
+
+      # And it is a no-op at or below the ceiling — the clamp cannot regress a
+      # model that was already working.
+      for cw <- [@thirty_two_k, 128_000, 200_000] do
+        assert CompactionThresholds.operative_window(cw) == cw
       end
     end
 
@@ -144,7 +177,13 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
     test "the same message list compacts for 32k and not for 1M", %{messages: messages} do
       # One token count, two models. Under the bug both were divided by 128_000
       # and produced the same answer — that is exactly what this pins.
-      used = 500_000
+      #
+      # 100_000, not 500_000: with the 200k operative ceiling, 500,000 tokens is
+      # past block_at(1M) = 177,000 and now correctly compacts on BOTH models,
+      # which would make the comparison vacuous. 100_000 still sits below
+      # warn_at(1M) = 147,000 and far above block_at(32k), so the two models
+      # still disagree — which is the whole point.
+      used = 100_000
 
       assert Compactor.severity_for(used, @million) == :none
       assert Compactor.severity_for(used, @thirty_two_k) == :emergency
@@ -162,7 +201,9 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
     test "a bare integer window is accepted as well as the {:ok, n} registry shape", %{
       messages: messages
     } do
-      used = 500_000
+      # 100_000: below warn_at(1M) = 147,000 under the 200k operative ceiling.
+      # 500_000 (the old value) is now past block_at and would compact.
+      used = 100_000
       assert Compactor.maybe_compact(messages, used, nil, context_window: @million) == messages
       assert Compactor.resolve_window(@million) == {:ok, @million}
       assert Compactor.resolve_window({:ok, @million}) == {:ok, @million}
@@ -228,7 +269,12 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
 
       assert Compactor.resolve_window({:ok, @million}) == {:ok, @million}
 
-      assert Compactor.maybe_compact(messages, 500_000, nil, context_window: {:ok, @million}) ==
+      # 100_000: below warn_at(1M) = 147,000 under the 200k operative ceiling,
+      # but wildly above anything an 8,000-token override would tolerate — so
+      # the assertion still distinguishes "the real window won" from "the stale
+      # override won". 500_000 (the old value) now compacts under BOTH, which
+      # would have made this pass for the wrong reason.
+      assert Compactor.maybe_compact(messages, 100_000, nil, context_window: {:ok, @million}) ==
                messages
     after
       Application.delete_env(:optimal_system_agent, :max_context_tokens)

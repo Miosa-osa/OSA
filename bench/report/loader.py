@@ -53,6 +53,11 @@ class Instance:
     tokens_cache_read: int | None
     tokens_cache_write: int | None
     cost_usd: float | None
+    #: True  -> cost_usd covers the whole agent tree (parent + subagents).
+    #: False -> a descendant's spend was unreadable: cost_usd is a LOWER BOUND.
+    #: None  -> written before tree costs existed: PARENT SESSION ONLY, with
+    #:          subagent spend missing entirely and no way to know how much.
+    cost_complete: bool | None
     tool_calls: int | None
     turns: int | None
     patch_bytes: int
@@ -116,6 +121,7 @@ class Instance:
                 "tokens_cache_read": d.get("tokens_cache_read"),
                 "tokens_cache_write": d.get("tokens_cache_write"),
                 "cost_usd": d.get("cost_usd"),
+                "cost_complete": d.get("cost_complete"),
                 "tool_calls": d.get("tool_calls"),
                 "turns": d.get("turns"),
                 "patch_bytes": int(d.get("patch_bytes") or 0),
@@ -325,6 +331,125 @@ class Run:
         present = [v for v in vals if v is not None]
         missing = len(vals) - len(present)
         return (sum(present) if present else None), missing
+
+    # -- the four columns the field publishes -------------------------------
+    #
+    # docs/research/what-harnesses-benchmark.md §5 reproduces goose's
+    # cross-harness table: in/task, out/task, in:out ratio, $/task, and an
+    # implied cache-hit rate. Those are the axes a competitor's row can be
+    # compared against, and they are per ATTEMPTED task, not per resolved one --
+    # a harness that solves nothing must not look cheap.
+
+    @property
+    def cost_usd_per_task(self) -> float | None:
+        total, _ = self._sum("cost_usd")
+        return round(total / self.n, 4) if total is not None and self.n else None
+
+    @property
+    def input_tokens_per_task(self) -> float | None:
+        """Uncached input + cache reads + cache writes: everything sent in.
+
+        Cache reads are input the model saw; excluding them would flatter a
+        cached harness on token count and is not what the published tables do.
+        """
+        parts = [self._sum(a)[0] or 0
+                 for a in ("tokens_in", "tokens_cache_read", "tokens_cache_write")]
+        total = sum(parts)
+        return round(total / self.n, 1) if self.n and total else None
+
+    @property
+    def output_tokens_per_task(self) -> float | None:
+        total, _ = self._sum("tokens_out")
+        return round(total / self.n, 1) if total is not None and self.n else None
+
+    @property
+    def in_out_ratio(self) -> float | None:
+        """Input:output. The field lands at 56-85:1; OSA has measured ~140:1."""
+        i, o = self.input_tokens_per_task, self.output_tokens_per_task
+        if not i or not o:
+            return None
+        return round(i / o, 1)
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """cache_read / all input tokens, in the unit range.
+
+        Denominator is uncached input + cache reads + cache writes, i.e. every
+        input token billed at any rate. Returns None (not 0.0) when no token
+        accounting was recorded at all -- "no data" and "no cache hits" are
+        different findings, and this metric existed while the streaming path was
+        silently dropping `cache_read_input_tokens`, which made a working cache
+        read as 0%.
+        """
+        read = self._sum("tokens_cache_read")[0] or 0
+        write = self._sum("tokens_cache_write")[0] or 0
+        plain = self._sum("tokens_in")[0] or 0
+        denom = read + write + plain
+        if not denom:
+            return None
+        return round(read / denom, 4)
+
+    # -- can these cost figures be quoted? ----------------------------------
+
+    @property
+    def cost_completeness(self) -> str:
+        """`tree` | `lower_bound` | `parent_only`.
+
+        `parent_only` means the run predates tree costs: subagent/fleet spend is
+        missing from the number entirely. It is NOT the same as complete.
+        """
+        flags = [i.cost_complete for i in self.instances if i.cost_usd is not None]
+        if not flags or any(f is None for f in flags):
+            return "parent_only"
+        return "tree" if all(flags) else "lower_bound"
+
+    #: OSA's cost accounting overstated spend by 2.487x until it was fixed on
+    #: 2026-08-14. Every `$` figure computed before that used the wrong rates,
+    #: so it cannot be compared against a post-fix number -- including against
+    #: our own earlier runs. Detected by date, with the tree-cost fields as a
+    #: corroborating signal, because both landed in the same window.
+    PRICING_FIX_DATE = "2026-08-14"
+
+    @property
+    def pricing_epoch(self) -> str:
+        """`post_fix` | `pre_fix` | `unknown`."""
+        started = str(self.config.get("started_at") or "")[:10]
+        if not started:
+            return "unknown"
+        if started < self.PRICING_FIX_DATE:
+            return "pre_fix"
+        # On/after the fix date, a run that also carries tree-cost flags is
+        # unambiguous; one that does not may have run on an older binary.
+        return "post_fix" if self.cost_completeness != "parent_only" else "unknown"
+
+    @property
+    def cost_caveats(self) -> list[str]:
+        """Everything that must be printed next to a `$` figure from this run."""
+        out: list[str] = []
+        if self.pricing_epoch == "pre_fix":
+            out.append(
+                f"PRE-FIX PRICING: this run started {str(self.config.get('started_at'))[:10]}, "
+                f"before the {self.PRICING_FIX_DATE} rate fix that removed a "
+                f"2.487x overstatement. Its $ figures are NOT comparable with "
+                f"post-fix numbers, ours or anyone's."
+            )
+        elif self.pricing_epoch == "unknown":
+            out.append(
+                "PRICING EPOCH UNKNOWN: no start date, or no tree-cost fields to "
+                "corroborate one. Do not compare these $ figures across runs."
+            )
+        if self.cost_completeness == "parent_only":
+            out.append(
+                "PARENT SESSION ONLY: subagent/fleet spend is not included in "
+                "these figures at all. The true cost is higher by an unknown "
+                "amount."
+            )
+        elif self.cost_completeness == "lower_bound":
+            out.append(
+                "LOWER BOUND: at least one descendant's spend could not be read, "
+                "so the tree total is incomplete."
+            )
+        return out
 
     @classmethod
     def load(cls, path: Path) -> "Run":

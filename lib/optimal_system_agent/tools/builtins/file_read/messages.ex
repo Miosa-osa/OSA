@@ -141,6 +141,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   end
 
   @doc """
+  The file IS text — the head sniff says so — but the whole of it is not valid
+  UTF-8, so somewhere past the sniff window there are bytes in another
+  encoding.
+
+  Distinct from `binary/2`, and the distinction is what makes it actionable:
+  "this is a binary, use a different tool" is wrong advice for a latin-1 source
+  file. One `iconv` pass makes it readable.
+
+  Reaching this used to raise `FunctionClauseError` — `Magic.identify/1`
+  returns the atom `:text` and `binary/2` only matches the `{:image, …}` and
+  `{:binary, …}` tuples — so a latin-1 file whose first accented byte fell
+  past the sniff window crashed the tool call instead of failing it.
+  """
+  @spec non_utf8_text(String.t()) :: String.t()
+  def non_utf8_text(display_path) do
+    "#{display_path} looks like text but is not valid UTF-8 — it is stored in another " <>
+      "encoding (latin-1/cp1252 or similar), and the offending bytes are past the point " <>
+      "where the leading-bytes check looks. `file_read` returns UTF-8 text only. Detect the " <>
+      "encoding with `shell_execute` and `file -I #{display_path}`, then convert it with " <>
+      "`iconv -f <that encoding> -t UTF-8 #{display_path}`. To see a slice without " <>
+      "converting, call `file_read` again with `offset`/`limit` — undecodable bytes are " <>
+      "shown as � there rather than refused."
+  end
+
+  @doc """
+  Trailing note for an `offset`/`limit` slice that contained non-UTF-8 bytes.
+
+  The slice is still returned — see `Handler.ensure_utf8/1` for why — so this
+  explains the � the caller is looking at and how to get the real characters.
+  """
+  @spec non_utf8_slice_note() :: String.t()
+  def non_utf8_slice_note do
+    "[note: this file is not valid UTF-8 — it is stored in another encoding " <>
+      "(latin-1/cp1252 or similar). Undecodable bytes are shown as �; line numbers and " <>
+      "every other byte are unchanged. To read the real characters, convert first: " <>
+      "`shell_execute` with `iconv -f <encoding> -t UTF-8 <path>`.]"
+  end
+
+  @doc """
   The bytes are not UTF-8 text, and `Magic` identified what they actually are.
   """
   @spec binary(String.t(), tuple()) :: String.t()

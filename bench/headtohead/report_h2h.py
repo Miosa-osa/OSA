@@ -349,8 +349,30 @@ def report_md(results: dict) -> str:
         L.append(f"| `{n}` | {w} |")
 
     # -- headline --------------------------------------------------------
-    L += ["", "## Per-arm result", "",
-          "| arm | solved | accuracy | 95% CI | harness | model | ambiguous | provider outage |",
+    L += ["", "## Per-arm result", ""]
+    control = cfg.get("standing_control_arm")
+    if control and control in names:
+        L += [
+            f"> The `{control}` row is the **standing scaffold control**, not a "
+            "competitor. SWE-bench's own 'Bash Only' leaderboard filter exists "
+            "to pin this scaffold so that scores compare models rather than "
+            "harnesses, and ProgramBench uses it as its sole scaffold for the "
+            "same reason. It is ~190 lines around one bash tool. **Read every "
+            "other row as a delta from it**: an arm that does not beat it is "
+            "not earning its complexity, and that is a finding about the arm, "
+            "not about the control.",
+            "",
+        ]
+    elif control:
+        L += [
+            f"> ⚠ **The standing control arm `{control}` was not run.** "
+            "Without it there is no scaffold floor on this task set, so the "
+            "rows below can be ranked against each other but none of them can "
+            "be said to be earning its complexity. This run's OSA figure must "
+            "not be published as a harness result.",
+            "",
+        ]
+    L += ["| arm | solved | accuracy | 95% CI | harness | model | ambiguous | provider outage |",
           "|---|---|---|---|---|---|---|---|"]
     for n in names:
         a = agg[n]

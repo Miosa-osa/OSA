@@ -552,10 +552,18 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             messages
 
           severity ->
+            # Report the OPERATIVE window, not the raw one. `used_percent/2` is
+            # computed against the clamped window, so printing the raw model
+            # window beside it produced lines like "32960/1000000 (59.9%)" —
+            # arithmetic that cannot be checked by the person reading the log.
             Logger.info(
-              "Compactor: #{decision_tokens}/#{cw} tokens " <>
-                "(#{CompactionThresholds.used_percent(decision_tokens, cw)}% of usable window) " <>
-                "— running #{severity} pipeline"
+              "Compactor: #{decision_tokens}/#{CompactionThresholds.operative_window(cw)} tokens " <>
+                "(#{CompactionThresholds.used_percent(decision_tokens, cw)}% of usable window" <>
+                if(CompactionThresholds.operative_window(cw) < cw,
+                  do: ", clamped from #{cw}",
+                  else: ""
+                ) <>
+                ") — running #{severity} pipeline"
             )
 
             run_pipeline(messages, estimated, severity, cw, session_id, overhead)
@@ -591,6 +599,31 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp run_pipeline(messages, tokens_before, severity, cw, session_id, overhead) do
+    # Compaction's own bookkeeping must not accumulate — and it is dropped from
+    # the pipeline's INPUT, never its output.
+    #
+    # Every pass appends a restore block, and a truncating pass also appends a
+    # "[Context truncated…]" notice, but no pass ever removed the ones its
+    # predecessors left behind. Each block describes the transcript AS IT STOOD
+    # WHEN THAT PASS RAN, so a stack of twenty-five of them is one current fact
+    # and twenty-four stale ones that contradict it. MEASURED, in the first
+    # session where compaction ran to completion (28 turns, 25 passes): 25
+    # `[Post-compaction context restore]` blocks in a single request, 2,700
+    # tokens of which 2,592 were redundant.
+    #
+    # Dropping them here — before `split_system/1`, before any step runs — is
+    # what makes this SUPERSEDE rather than DELETE. Filtering the finished
+    # `final_messages` instead also removes the notice THIS pass just wrote
+    # (`apply_step(:emergency_truncate, …)` emits it into `system_msgs`), which
+    # silently strips the one message whose whole job is to tell the model that
+    # its history was cut. Superseding is free here: compaction rewrites
+    # history wholesale, so the prompt prefix is reset by this pass regardless
+    # and there is no additional cache breakage to pay for.
+    # `tokens_before` stays the caller's estimate of the ORIGINAL list, so the
+    # tokens reclaimed by dropping stale notices are counted as savings like
+    # any other step's.
+    messages = drop_stale_compaction_notices(messages)
+
     # PreCompact hook — SYNCHRONOUS (CC parity). Command hooks receive the
     # full event on stdin and can contribute custom summarization
     # instructions (additionalContext / exit-0 stdout), threaded into every
@@ -674,32 +707,85 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     {final_annotated, final_system, last_step} = result
     final_messages = final_system ++ strip_annotations(final_annotated)
 
-    # Post-compact restore: re-inject working context (files, tasks, workspace)
-    final_messages =
-      case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(session_id) do
-        nil -> final_messages
-        restore_msg -> final_messages ++ [restore_msg]
-      end
+    # NOTE: stale compaction notices were dropped from the INPUT at the top of
+    # this function, deliberately. Do not filter here — `final_system` already
+    # carries the truncation notice THIS pass emitted.
 
-    # Post-compact active-agent reminder (grok reminder.rs parity): when a step
-    # dropped or summarized the working tail, the model can lose awareness of
-    # work still in flight. Re-inject a <system-reminder> listing still-running
-    # background tasks, sub-agents, and the live TODO list so it keeps tracking
-    # them across the compaction boundary.
-    final_messages =
-      if last_step in [:summarize_warm, :compress_cold, :emergency_truncate] do
-        case CompactionSafety.build_reminder_message(session_id) do
+    # A compaction pass that reclaims NOTHING must not be applied.
+    #
+    # The steps above can legitimately reclaim nothing — a transcript whose tool
+    # results are already truncated has nothing left to truncate — but the two
+    # post-compaction injections below (`CompactRestore` and the
+    # `CompactionSafety` reminder) are appended on the strength of `last_step`
+    # alone, not on the strength of anything having been removed. When the steps
+    # reclaim nothing, the pass would return the input PLUS those blocks: a
+    # compactor that grows the context it was called to shrink.
+    #
+    # MEASURED, once the absolute ceiling made the warning band reachable: the
+    # background pipeline ran on every request and reported `saved -62`, `-99`,
+    # `-337`, `-515` on consecutive turns, each pass appending another reminder
+    # for the next pass to carry.
+    #
+    # The test is deliberately taken HERE, on the steps' own output, not after
+    # the injections. Measuring after them conflates "the steps reclaimed
+    # nothing" with "the steps reclaimed less than the injections cost" — two
+    # different situations with opposite correct answers. The second one is
+    # ordinary on a small window, where a single restore block can outweigh a
+    # real cold-zone summary, and treating it as the first throws away genuine
+    # compaction work (and the LLM call already paid for to produce it) and
+    # returns a transcript that still has to be compacted next turn.
+    tokens_after_steps = estimate_tokens(final_messages)
+    steps_saved = tokens_before - tokens_after_steps
+
+    if steps_saved <= 0 do
+      Logger.info(
+        "Compactor pipeline (#{severity}): reclaimed nothing " <>
+          "(#{tokens_before} tokens, last_step=#{last_step}) — returning history unchanged"
+      )
+
+      CompactionEvents.completed(session_id,
+        tokens_before: tokens_before,
+        tokens_after: tokens_before,
+        messages_before: length(messages),
+        messages_after: length(messages),
+        duration_ms: System.monotonic_time(:millisecond) - compaction_started_at
+      )
+
+      messages
+    else
+      # Post-compact restore: re-inject working context (files, tasks, workspace)
+      restored =
+        case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(session_id) do
           nil -> final_messages
-          reminder_msg -> final_messages ++ [reminder_msg]
+          restore_msg -> final_messages ++ [restore_msg]
         end
-      else
-        final_messages
-      end
 
-    tokens_after = estimate_tokens(final_messages)
-    saved = tokens_before - tokens_after
+      # Post-compact active-agent reminder (grok reminder.rs parity): when a step
+      # dropped or summarized the working tail, the model can lose awareness of
+      # work still in flight. Re-inject a <system-reminder> listing still-running
+      # background tasks, sub-agents, and the live TODO list so it keeps tracking
+      # them across the compaction boundary.
+      restored =
+        if last_step in [:summarize_warm, :compress_cold, :emergency_truncate] do
+          case CompactionSafety.build_reminder_message(session_id) do
+            nil -> restored
+            reminder_msg -> restored ++ [reminder_msg]
+          end
+        else
+          restored
+        end
 
-    if saved > 0 do
+      # The injections are advisory; the compaction is the point. If they would
+      # cost more than the steps reclaimed, keep the compacted history and drop
+      # the injections rather than the other way round — that is what keeps a
+      # net-negative pass impossible without discarding real work.
+      {final_messages, tokens_after} =
+        case estimate_tokens(restored) do
+          t when t < tokens_before -> {restored, t}
+          _ -> {final_messages, tokens_after_steps}
+        end
+
+      saved = tokens_before - tokens_after
       record_compaction(saved, last_step)
 
       # Emit post_compact hook event
@@ -715,23 +801,55 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       rescue
         _ -> :ok
       end
+
+      Logger.info(
+        "Compactor pipeline (#{severity}): #{tokens_before} -> #{tokens_after} tokens " <>
+          "(saved #{saved}, last_step=#{last_step})"
+      )
+
+      CompactionEvents.completed(session_id,
+        tokens_before: tokens_before,
+        tokens_after: tokens_after,
+        messages_before: length(messages),
+        messages_after: length(final_messages),
+        duration_ms: System.monotonic_time(:millisecond) - compaction_started_at
+      )
+
+      final_messages
     end
-
-    Logger.info(
-      "Compactor pipeline (#{severity}): #{tokens_before} -> #{tokens_after} tokens " <>
-        "(saved #{saved}, last_step=#{last_step})"
-    )
-
-    CompactionEvents.completed(session_id,
-      tokens_before: tokens_before,
-      tokens_after: tokens_after,
-      messages_before: length(messages),
-      messages_after: length(final_messages),
-      duration_ms: System.monotonic_time(:millisecond) - compaction_started_at
-    )
-
-    final_messages
   end
+
+  # Markers for the self-describing blocks compaction injects. Each describes
+  # the transcript as it stood when that pass ran, so only the newest is true.
+  # An EMPTY truncation notice ("…was about: ]") carries no information at all
+  # and is dropped outright rather than superseded.
+  @compaction_notice_markers [
+    "[Post-compaction context restore",
+    "[Context truncated due to length"
+  ]
+
+  @doc false
+  @spec drop_stale_compaction_notices([map()]) :: [map()]
+  def drop_stale_compaction_notices(messages) when is_list(messages) do
+    Enum.reject(messages, fn msg ->
+      text = msg |> Map.get(:content, Map.get(msg, "content")) |> notice_text()
+      Enum.any?(@compaction_notice_markers, &String.starts_with?(text, &1))
+    end)
+  end
+
+  defp notice_text(t) when is_binary(t), do: String.trim_leading(t)
+
+  defp notice_text(parts) when is_list(parts) do
+    parts
+    |> Enum.map_join(" ", fn
+      p when is_binary(p) -> p
+      p when is_map(p) -> Map.get(p, :text) || Map.get(p, "text") || ""
+      _ -> ""
+    end)
+    |> String.trim_leading()
+  end
+
+  defp notice_text(_), do: ""
 
   # Post-compaction token target for a severity tier, derived from the shared
   # reserve-based thresholds (no second ratio ladder). With no resolvable
@@ -1442,27 +1560,100 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         Providers.chat(messages, opts)
       end)
 
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} ->
-        result
+    result =
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} ->
+          result
 
-      {:exit, reason} ->
-        {:error, {:summarizer_crashed, reason}}
+        {:exit, reason} ->
+          {:error, {:summarizer_crashed, reason}}
 
-      nil ->
-        Logger.error(
-          "[compactor] summarizer exceeded #{timeout}ms (wedged provider call) — " <>
-            "killed it; falling back to the deterministic path"
-        )
+        nil ->
+          Logger.error(
+            "[compactor] summarizer exceeded #{timeout}ms (wedged provider call) — " <>
+              "killed it; falling back to the deterministic path"
+          )
 
-        {:error, :summarizer_timeout}
-    end
+          {:error, :summarizer_timeout}
+      end
+
+    bill_summarizer_call(result, opts)
+    result
   rescue
     # No TaskSupervisor (bare unit test, stripped release) — degrade to an
     # inline call rather than failing compaction outright. Unbounded, but
     # strictly better than crashing, and the supervisor exists in every real
     # runtime.
-    _ -> Providers.chat(messages, opts)
+    _ ->
+      result = Providers.chat(messages, opts)
+      bill_summarizer_call(result, opts)
+      result
+  end
+
+  # Bill one summarizer round-trip to the session that asked for the compaction.
+  #
+  # `bounded_chat/2` is the SINGLE choke point for every provider call the
+  # compaction subsystem makes — `call_summary_llm/1`, `call_key_facts_llm/1`,
+  # `summarize_chunk/2` here, and `Loop.ProactiveCompaction.summarize/2`. All of
+  # that spend used to be invisible: it never reached `Loop.Accounting.record/2`,
+  # so `session_cost_usd`, the `max_budget_usd` cap, the spend sidecar and every
+  # `$/task` figure downstream all behaved as if summarization were free. It is
+  # not, and it is about to fire routinely rather than never.
+  #
+  # This runs in the compaction task, which is NOT the `Loop` process and holds
+  # no loop state, so it stages into `Accounting`'s side ledger; the loop
+  # absorbs it (`Accounting.absorb_side_spend/1`) at its next compaction
+  # boundary. Pricing uses the summarizer's OWN model/provider, which
+  # `summarizer_opts/0` may point at something cheaper than the session model.
+  #
+  # The session id comes from the same process-dictionary stash
+  # `CompactionEvents` already uses, so nothing needed a new signature. When
+  # there is no session id in scope (a bare unit call) the spend is dropped
+  # rather than billed to the wrong session.
+  #
+  # MUST NOT raise. `bounded_chat/2`'s `rescue` clause re-issues
+  # `Providers.chat/2` (its no-TaskSupervisor degradation), so an exception
+  # escaping the billing step would silently send the summarizer request a
+  # SECOND time — turning a bookkeeping bug into a doubled provider bill. Hence
+  # the total rescue/catch here, on top of `stage_side_spend/3`'s own.
+  defp bill_summarizer_call({:ok, %{} = resp}, opts) do
+    OptimalSystemAgent.Agent.Loop.Accounting.stage_side_spend(
+      CompactionEvents.current_session_id(),
+      Map.get(resp, :usage, %{}),
+      model: summarizer_model(opts),
+      provider: summarizer_provider(opts),
+      kind: :compaction
+    )
+  rescue
+    e ->
+      Logger.debug("[compactor] summarizer billing failed: #{inspect(e)}")
+      :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # A failed/timed-out summarizer reports no usage — there is nothing to bill.
+  defp bill_summarizer_call(_other, _opts), do: :ok
+
+  defp summarizer_provider(opts) do
+    Keyword.get(opts, :provider) || Providers.resolved_default_provider()
+  rescue
+    _ -> Keyword.get(opts, :provider)
+  end
+
+  # `summarizer_opts/0` may name neither a provider nor a model, in which case
+  # the wire runs on the provider's own default — so resolve it exactly the way
+  # `Registry.chat/2` will, rather than guessing or pricing against `nil`.
+  defp summarizer_model(opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        Providers.resolved_default_model(summarizer_provider(opts))
+    end
+  rescue
+    _ -> Keyword.get(opts, :model)
   end
 
   @doc false

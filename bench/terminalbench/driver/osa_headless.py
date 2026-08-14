@@ -81,6 +81,46 @@ SELF_INFLICTED = [
 ]
 
 
+# `owner` on a turn_error -> the status this driver records for the episode.
+#
+# The unknown case is deliberately NOT `provider_error`. An unlabeled fault is
+# a fault we cannot attribute, and quietly attributing it to the model (which
+# is what `provider_error` does downstream, since it is not a HARNESS_FAULT) is
+# precisely the bias being removed. It gets its own bucket so it is visible and
+# lands in `ambiguous` rather than inflating either side. Older runs and any
+# OSA build predating the `owner` field will land here, correctly.
+_OWNER_STATUS = {
+    "osa": "osa_internal_error",
+    "provider": "provider_error",
+    "unknown": "turn_error_unattributed",
+}
+
+def _newer(a, b):
+    """Reconcile two cumulative readings of one monotonic counter.
+
+    Both the spend sidecar and the summed `cost_update` frames count the same
+    session from zero, so neither can legitimately exceed the truth and the
+    larger of the two is the fresher. Non-numbers are treated as absent.
+    """
+    vals = [v for v in (a, b) if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return max(vals) if vals else None
+
+
+#: `status` values that mean "no terminal branch has claimed this run yet", and
+#: may therefore be replaced by `ok` when the stream ends on a clean `done`.
+#: See the comment beside the `telemetry` literal in `main()`.
+_STATUS_UNSET = (None, "", "running", "runner_error")
+
+
+def _turn_error_owner(turn_error) -> str:
+    """`osa` | `provider` | `unknown` from an additive, possibly absent field."""
+    if isinstance(turn_error, dict):
+        owner = turn_error.get("owner")
+        if isinstance(owner, str) and owner.lstrip(":") in ("osa", "provider"):
+            return owner.lstrip(":")
+    return "unknown"
+
+
 def log(msg: str) -> None:
     print(f"[osa-driver {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -212,6 +252,18 @@ def main() -> int:
     instruction = instruction_path.read_text()
     workdir = os.getcwd()
 
+    # The values `status` can hold that mean "nothing has decided this yet".
+    #
+    # `runner_error` is the INITIAL value, deliberately: a driver that dies
+    # before any terminal branch runs must not leave behind a status that reads
+    # like success. But that makes it a sentinel, and the clean-exit branch on
+    # `done` only overwrote (None, "", "running") -- none of which this driver
+    # ever sets. So every clean exit kept the sentinel, and `report.py` bucketed
+    # each unsolved task as `unclassified:runner_error` instead of
+    # `completed_but_wrong`. Token counts and reward were unaffected; the
+    # failure TAXONOMY was, and the taxonomy is how the next round of bugs gets
+    # found. Any real fault sets a specific status and breaks out before `done`,
+    # so widening the sentinel set cannot mask one.
     telemetry = {
         "status": "runner_error",
         "error": None,
@@ -226,6 +278,9 @@ def main() -> int:
             "cache_read_input_tokens": 0,
         },
         "cost_usd": None,
+        # True | False (lower bound) | None (no tree figure seen: parent-only,
+        # subagent spend missing entirely). None must never render as True.
+        "cost_complete": None,
         "model": None,
         "boot_s": None,
         "run_s": None,
@@ -298,6 +353,23 @@ def main() -> int:
                 raw.write(json.dumps(ev) + "\n")
                 etype = ev.get("type") or ev.get("_event") or "?"
                 telemetry["last_event_type"] = etype
+
+                # Capture `turn_error` from WHATEVER event carries it.
+                #
+                # This used to be read only inside the `cost_update` branch,
+                # while OSA stamps it on `agent_response` -- so a turn where
+                # every provider call failed carried a fully-populated
+                # `turn_error` that this driver never looked at. Verified live:
+                # a run against an unreachable Ollama produced
+                # `agent_response.turn_error = {owner: provider, category:
+                # connection_error}` and was still recorded as a clean exit.
+                # The bug was masked for as long as `status` was stuck on its
+                # `runner_error` sentinel; fixing that sentinel without fixing
+                # this would have turned a wrongly-alarming record into a
+                # wrongly-REASSURING one, which is the worse of the two.
+                if ev.get("turn_error"):
+                    telemetry["turn_error"] = ev["turn_error"]
+                    telemetry["turn_error_owner"] = _turn_error_owner(ev["turn_error"])
                 telemetry["event_type_counts"][etype] = (
                     telemetry["event_type_counts"].get(etype, 0) + 1
                 )
@@ -311,14 +383,28 @@ def main() -> int:
                         v = usage.get(k)
                         if isinstance(v, int):
                             telemetry["usage_sum"][k] += v
-                    telemetry["cost_usd"] = ev.get("session_cost_usd", telemetry["cost_usd"])
+                    # `session_cost_usd` is the PARENT session only. A turn
+                    # that delegates bills its children to their own sidecars,
+                    # so quoting it under-reports -- and $/task is the headline
+                    # metric. `tree_cost_usd` is parent + descendants; it is
+                    # absent on builds predating the field, hence the fallback.
+                    # Both are cumulative: neither is ever summed.
+                    for _k in ("tree_cost_usd", "session_cost_usd"):
+                        if ev.get(_k) is not None:
+                            telemetry["cost_usd"] = ev[_k]
+                            break
+                    # False => the figure is a LOWER BOUND. Sticky: one
+                    # incomplete turn makes the session total a lower bound.
+                    if ev.get("tree_cost_complete") is False:
+                        telemetry["cost_complete"] = False
+                    elif ev.get("tree_cost_usd") is not None and telemetry.get(
+                        "cost_complete"
+                    ) is None:
+                        telemetry["cost_complete"] = True
                     telemetry["model"] = ev.get("model") or telemetry["model"]
                     telemetry["turns"] += 1
-                    # Additive field: absent on a normal turn, present when the
-                    # turn ended because every provider call failed rather than
-                    # because the model answered.
-                    if ev.get("turn_error"):
-                        telemetry["turn_error"] = ev["turn_error"]
+                    # `turn_error` is captured for EVERY event type above, not
+                    # just this one -- see the comment there.
                 elif etype == "done":
                     telemetry["saw_done"] = True
                     # A `done` frame means the turn ENDED, not that it
@@ -331,10 +417,22 @@ def main() -> int:
                     # failure.
                     #
                     # `turn_error` is now carried on the agent_response event
-                    # for exactly this. Read it.
+                    # for exactly this. Read it -- and read WHO it belongs to.
+                    #
+                    # A turn_error used to become `provider_error`
+                    # unconditionally, and `provider_error` is not in the
+                    # report's HARNESS_FAULTS set, so every OSA-internal fault
+                    # that ended a turn was counted against the model. Four
+                    # error kinds were mislabeled `:llm_error` on OSA's side
+                    # (encoding faults, `:request_shape` -- whose own message
+                    # says "This is a bug in OSA" -- `:tool_use_mismatch` and
+                    # `:duplicate_tool_use`). react_loop.ex now stamps an
+                    # additive `owner` field, so the split is readable here.
                     if telemetry.get("turn_error"):
-                        telemetry["status"] = "provider_error"
-                    elif telemetry.get("status") in (None, "", "running"):
+                        telemetry["status"] = _OWNER_STATUS[
+                            telemetry.get("turn_error_owner", "unknown")
+                        ]
+                    elif telemetry.get("status") in _STATUS_UNSET:
                         telemetry["status"] = "ok"
                     break
         finally:
@@ -349,7 +447,33 @@ def main() -> int:
     spend = Path(os.environ.get("HOME", "/root")) / ".osa" / "sessions" / f"{SESSION}.spend.json"
     if spend.exists():
         try:
-            telemetry["spend_sidecar"] = json.loads(spend.read_text())
+            sidecar = json.loads(spend.read_text())
+            telemetry["spend_sidecar"] = sidecar
+            # The sidecar and the summed `cost_update` frames are two cumulative
+            # measurements of the SAME quantity, so they reconcile by `max`, not
+            # by precedence. The sidecar covers subagent spend the parent's own
+            # frames never carry, so it is usually the larger; but it is written
+            # by the agent process and can LAG the frames by one LLM round-trip
+            # if the run is torn down before the final flush. Preferring it
+            # unconditionally is how the published figures came out low.
+            #
+            # `max` cannot over-count here: both counters are monotonic totals
+            # of one session, and on every trial where the sidecar was current
+            # the two agreed to the token.
+            #
+            # The sidecar's own `cost_usd` is never rewritten: `tree_spend/1`
+            # sums that field across descendants, so a tree total stored there
+            # would make every ancestor double-count its grandchildren. Read-side
+            # preference only.
+            if isinstance(sidecar, dict):
+                sidecar_cost = sidecar.get("tree_cost_usd")
+                if sidecar_cost is not None:
+                    telemetry["cost_complete"] = bool(
+                        sidecar.get("tree_cost_complete", True)
+                    )
+                else:
+                    sidecar_cost = sidecar.get("cost_usd")
+                telemetry["cost_usd"] = _newer(telemetry.get("cost_usd"), sidecar_cost)
         except (json.JSONDecodeError, OSError):
             telemetry["spend_sidecar"] = None
 

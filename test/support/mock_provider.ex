@@ -44,11 +44,27 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     maybe_sleep()
     bump_round_trips()
 
-    case forced_final_text() do
-      nil -> chat_scripted()
-      text -> {:ok, %{content: text, tool_calls: []}}
+    result =
+      case forced_final_text() do
+        nil -> chat_scripted()
+        text -> {:ok, %{content: text, tool_calls: []}}
+      end
+
+    with_forced_usage(result)
+  end
+
+  # Real providers return a `:usage` map; this mock did not, which made it
+  # useless for testing anything about cost accounting. Opt-in via
+  # `:mock_provider_usage` so every existing test's response shape is byte-for-
+  # byte unchanged when the key is unset.
+  defp with_forced_usage({:ok, resp}) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_usage) do
+      usage when is_map(usage) -> {:ok, Map.put(resp, :usage, usage)}
+      _ -> {:ok, resp}
     end
   end
+
+  defp with_forced_usage(other), do: other
 
   defp chat_scripted do
     case Process.get(:mock_provider_call_count, 0) do

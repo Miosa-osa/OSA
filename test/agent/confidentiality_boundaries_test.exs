@@ -82,7 +82,20 @@ defmodule OptimalSystemAgent.Agent.ConfidentialityBoundariesTest do
   # return the emitted `[Context Summary]` message content (or nil).
   defp compact_under(session_id) do
     Application.put_env(:optimal_system_agent, :compaction_chunk_token_limit, 30)
-    messages = build_conversation(35, 8)
+
+    # 40 words/message, not 8. `Compactor.run_pipeline/6` now refuses to APPLY a
+    # pass whose steps reclaimed nothing — it returns the input untouched rather
+    # than a summarized history that is larger than what it replaced. On the old
+    # 8-word fixture the pipeline measured 1,330 tokens in and 1,474 out (the
+    # per-chunk `<chunk_summary>` scaffolding, the warm-summary headers and the
+    # truncation notice cost more than 19-token messages carry), so the whole
+    # pass is now correctly discarded and no `[Context Summary]` is observable.
+    # That is the compactor behaving properly; the fixture was just too small to
+    # exercise it. At 40 words/message the same pipeline runs to
+    # `compress_cold` and measures 4,200 -> 2,444, and the chunked cold path
+    # (the one that folds the previous summary back in — the actual subject of
+    # these tests) is still the path taken.
+    messages = build_conversation(35, 40)
 
     rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
     total_tokens = Compactor.estimate_tokens(messages)

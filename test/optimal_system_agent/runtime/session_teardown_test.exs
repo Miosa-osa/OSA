@@ -60,9 +60,18 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       assert Enum.sort(ran) == Enum.sort(expected)
       # Seven original zero-caller cleanups + `:compactor_summary` (the
       # session-scoped compaction summary, added when that summary stopped
-      # being a global that leaked across sessions).
-      assert length(expected) == 8, "every per-session cleanup must be wired in"
+      # being a global that leaked across sessions) + `:side_spend`.
+      #
+      # `:side_spend` is the staged-but-unabsorbed compaction spend that
+      # `Loop.Accounting` now keeps for summarizer calls made off the Loop
+      # process. It is per-session state with a lifetime, so it belongs in this
+      # list for exactly the reason the other eight do: left behind, a later
+      # session that reused the id would absorb — and be billed for — spend it
+      # never made. This count is the whole point of the test, so it is asserted
+      # rather than derived; bump it deliberately when a cleanup is added.
+      assert length(expected) == 9, "every per-session cleanup must be wired in"
       assert :compactor_summary in expected
+      assert :side_spend in expected
     end
 
     test "the WorldState ledger is covered — it pins rendered payload text" do
@@ -87,8 +96,9 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       assert SessionTeardown.run(:not_a_binary) == []
 
       s = sid()
-      assert length(SessionTeardown.run(s)) == 8
-      assert length(SessionTeardown.run(s)) == 8
+      # 9 steps — see the count assertion above for why `:side_spend` joined.
+      assert length(SessionTeardown.run(s)) == 9
+      assert length(SessionTeardown.run(s)) == 9
     end
   end
 

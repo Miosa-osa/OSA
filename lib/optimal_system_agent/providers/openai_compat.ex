@@ -397,15 +397,15 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
         # Capture usage if present (some providers send it in the final chunk)
         case chunk do
-          %{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}} ->
-            %{acc | usage: %{input_tokens: inp, output_tokens: out}}
+          %{"usage" => %{"prompt_tokens" => _, "completion_tokens" => _} = u} ->
+            %{acc | usage: stream_usage(u)}
 
           _ ->
             acc
         end
 
-      {:ok, %{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}} ->
-        %{acc | usage: %{input_tokens: inp, output_tokens: out}}
+      {:ok, %{"usage" => %{"prompt_tokens" => _, "completion_tokens" => _} = u}} ->
+        %{acc | usage: stream_usage(u)}
 
       # `inspect/1` rather than interpolation: a non-binary `message` here would
       # raise inside the SSE accumulator and kill the whole stream over a log line.
@@ -643,7 +643,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # block list (ToolExecutor's screenshot branch emits text + image),
           # and the OpenAI `tool` role accepts only a string — so blocks are
           # flattened to text with an honest note where the image was.
-          "content" => encode_text(content),
+          "content" => encode_text_preserving_cache(content),
           "tool_call_id" => to_string(id)
         }
 
@@ -655,7 +655,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # Assistant messages with tool_calls — preserve structured tool calls
       %{role: "assistant", content: content, tool_calls: calls}
       when is_list(calls) and calls != [] ->
-        msg = %{"role" => "assistant", "content" => encode_text(content)}
+        msg = %{"role" => "assistant", "content" => encode_text_preserving_cache(content)}
 
         formatted_calls =
           Enum.map(calls, fn tc ->
@@ -714,11 +714,21 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> Enum.reject(&is_nil/1)
 
     case parts do
-      [] -> ""
+      [] ->
+        ""
+
       # A single text part is emitted as a plain string: byte-identical to what
       # every provider received before, so nothing about a text-only turn moves.
-      [%{"type" => "text", "text" => text}] -> text
-      parts -> parts
+      # A part carrying `cache_control` is the exception — collapsing it to a
+      # string is exactly the deletion this fix exists to stop (map patterns in
+      # Elixir are partial, so the clause below would otherwise match and drop
+      # the marker), so it stays an array of one.
+      [%{"type" => "text", "text" => text} = part]
+      when not is_map_key(part, "cache_control") ->
+        text
+
+      parts ->
+        parts
     end
   end
 
@@ -739,14 +749,41 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp content_part(%{type: "image_url", image_url: url}),
     do: %{"type" => "image_url", "image_url" => url}
 
-  defp content_part(%{type: "text", text: t}) when is_binary(t),
-    do: %{"type" => "text", "text" => t}
+  defp content_part(%{type: "text", text: t} = b) when is_binary(t),
+    do: carry_cache_control(%{"type" => "text", "text" => t}, b)
 
-  defp content_part(%{"type" => "text", "text" => t}) when is_binary(t),
-    do: %{"type" => "text", "text" => t}
+  defp content_part(%{"type" => "text", "text" => t} = b) when is_binary(t),
+    do: carry_cache_control(%{"type" => "text", "text" => t}, b)
 
-  defp content_part(%{text: t}) when is_binary(t), do: %{"type" => "text", "text" => t}
-  defp content_part(%{"text" => t}) when is_binary(t), do: %{"type" => "text", "text" => t}
+  defp content_part(%{text: t} = b) when is_binary(t),
+    do: carry_cache_control(%{"type" => "text", "text" => t}, b)
+
+  defp content_part(%{"text" => t} = b) when is_binary(t),
+    do: carry_cache_control(%{"type" => "text", "text" => t}, b)
+
+  # `cache_control` is an Anthropic field, but OpenRouter forwards it verbatim
+  # on an OpenAI-shaped content part when the upstream model is Anthropic —
+  # which is the only case `Registry.anthropic_prompt_cache?/2` lets reach here.
+  # Keys are normalized to strings so the serialized body is byte-stable
+  # regardless of how the caller built the block; a prefix that is not
+  # byte-stable is not a cacheable prefix.
+  defp carry_cache_control(target, source) when is_map(source) do
+    case Map.get(source, :cache_control) || Map.get(source, "cache_control") do
+      nil ->
+        target
+
+      cc when is_map(cc) ->
+        normalized =
+          Map.new(cc, fn {k, v} -> {to_string(k), if(is_atom(v), do: to_string(v), else: v)} end)
+
+        Map.put(target, "cache_control", normalized)
+
+      cc ->
+        Map.put(target, "cache_control", cc)
+    end
+  end
+
+  defp carry_cache_control(target, _source), do: target
 
   # Anything else structured (a stray tool_use block) carries nothing this API
   # can render.
@@ -802,6 +839,34 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   def encode_text(other) do
     if String.Chars.impl_for(other), do: to_string(other), else: inspect(other)
   end
+
+  # `encode_text/1`, except a block list carrying a `cache_control` marker is
+  # kept as an ARRAY so the marker survives.
+  #
+  # `tool` and `assistant` turns are normally flattened to a string, because
+  # that is what the OpenAI schema asks for. But `PromptCache` puts the rolling
+  # conversation breakpoint on the LAST history message, and in an agent loop
+  # that message is usually a tool result — so flattening it deleted the one
+  # breakpoint that lets the transcript itself be cached.
+  #
+  # Verified on the wire against OpenRouter → Anthropic (2026-08-14): a
+  # `tool`-role message with array content and a `cache_control` part is
+  # accepted, and it is what makes the cached prefix GROW with the conversation
+  # (26,213 → 28,297 tokens over six turns) instead of staying pinned to the
+  # static prefix.
+  @doc false
+  @spec encode_text_preserving_cache(term()) :: String.t() | list(map())
+  def encode_text_preserving_cache(content) when is_list(content) do
+    parts = content |> Enum.map(&content_part/1) |> Enum.reject(&is_nil/1)
+
+    if Enum.any?(parts, &Map.has_key?(&1, "cache_control")) do
+      parts
+    else
+      encode_text(content)
+    end
+  end
+
+  def encode_text_preserving_cache(content), do: encode_text(content)
 
   @doc "Format tools into the OpenAI function-calling format."
   def format_tools(tools) do
@@ -1271,14 +1336,42 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # it (OpenAI, DeepSeek, Groq, OpenRouter, xAI) under
   # `prompt_tokens_details.cached_tokens` — and this dropped it on the floor,
   # so those providers reported cache_read = 0 even when they HAD cached. The
-  # key name matters as much as the value: `CacheAttribution` reads
-  # `:cache_read_input_tokens`, which is why openai_responses.ex storing the
-  # same number under `:cached_tokens` is invisible to it.
+  # key name matters as much as the value: `CacheAttribution` and
+  # `Loop.Accounting` both read `:cache_read_input_tokens` and nothing else, so
+  # a provider parser that files the same number under any other key is
+  # invisible to pricing. `openai_responses.ex` used to store it as
+  # `:cached_tokens` for exactly that reason; it does not any more
+  # (`openai_responses.ex:462` emits `:cache_read_input_tokens`), so this is a
+  # convention to keep, not a live divergence.
   defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out} = u}) do
     %{
       input_tokens: inp,
       output_tokens: out,
-      cache_read_input_tokens: cached_input(u)
+      cache_read_input_tokens: cached_input(u),
+      cache_creation_input_tokens: cache_written(u)
+    }
+  end
+
+  # The SSE path's equivalent of `parse_usage/1`.
+  #
+  # Both streaming branches used to build `%{input_tokens: .., output_tokens: ..}`
+  # and nothing else, so `cache_read_input_tokens` was ALWAYS absent on the
+  # streamed path — and the agent loop streams. The effect was not just a blind
+  # dashboard: `Accounting` reconciles OpenAI-shaped `prompt_tokens` (which is
+  # INCLUSIVE of cached tokens) against the cache slices, so a missing
+  # cache_read meant the whole cached prefix was billed at full input rate
+  # instead of 0.1x — a ~10x overcharge on exactly the requests the prompt-cache
+  # fix had just made cheap.
+  #
+  # Same shape of bug as the caching one itself: the compat path silently
+  # diverging from the native Anthropic path, with a plausible-looking number
+  # hiding it.
+  defp stream_usage(%{"prompt_tokens" => inp, "completion_tokens" => out} = u) do
+    %{
+      input_tokens: inp,
+      output_tokens: out,
+      cache_read_input_tokens: cached_input(u),
+      cache_creation_input_tokens: cache_written(u)
     }
   end
 
@@ -1287,6 +1380,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp cached_input(%{"cached_tokens" => n}) when is_integer(n), do: n
   defp cached_input(_), do: 0
+
+  # Cache WRITES bill at ~1.25x input, and nothing on this path captured them
+  # at all — so a cache miss looked free and the cost of a cold prefix was
+  # under-reported on every first turn. OpenRouter reports it as
+  # `prompt_tokens_details.cache_write_tokens`; Anthropic-shaped gateways use
+  # `cache_creation_input_tokens`. Accept both.
+  defp cache_written(%{"prompt_tokens_details" => %{"cache_write_tokens" => n}})
+       when is_integer(n),
+       do: n
+
+  defp cache_written(%{"cache_creation_input_tokens" => n}) when is_integer(n), do: n
+  defp cache_written(%{"cache_write_tokens" => n}) when is_integer(n), do: n
+  defp cache_written(_), do: 0
 
   defp parse_usage(_), do: %{}
 

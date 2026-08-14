@@ -381,6 +381,26 @@ BLOCKED: dict[str, BlockedArm] = {
 }
 
 
+#: THE STANDING CONTROL ARM. Every OSA number we publish must sit next to this
+#: one, on the same model and the same tasks.
+#:
+#: This is not a preference; it is the field's own convention. SWE-bench's
+#: maintainers ship a "Bash Only" leaderboard filter whose tooltip reads "Show
+#: only runs in the mini-SWE-agent environment, so scores compare models rather
+#: than harnesses" — i.e. they built a view specifically to REMOVE the scaffold,
+#: and mini-SWE-agent is the scaffold they chose as the neutral one. ProgramBench
+#: adopted it as its sole scaffold for the same stated reason.
+#:
+#: It is ~190 lines: a loop around one bash tool, no tool-calling interface,
+#: linear history, `subprocess.run` per action. It has already beaten OSA in our
+#: own head-to-head. That is the finding, and it is more useful to us than any
+#: number where OSA wins — a 190-line bash loop matching a whole harness is a
+#: measurement of how much of the harness is doing nothing.
+#:
+#: `run_h2h.py` re-adds it if it is dropped from --arms, and records that it did.
+STANDING_CONTROL_ARM = "mini-swe-agent"
+
+
 def all_arm_names() -> list[str]:
     return sorted(RUNNABLE) + sorted(BLOCKED)
 

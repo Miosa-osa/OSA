@@ -158,7 +158,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
           # `binary_verdict/1` only sniffs the head, so a file that turns to
           # binary further in still lands here. Identify it from what we now
           # hold rather than falling back to "appears to be binary".
-          {:error, Messages.binary(display_path, Magic.identify(sniff_slice(content)))}
+          #
+          # `Magic.identify/1` returns the ATOM `:text` when the head looks
+          # like ordinary text, and `Messages.binary/2` has no clause for it —
+          # so a latin-1 source file with hundreds of ASCII lines before its
+          # first accented byte raised `FunctionClauseError` here rather than
+          # returning a tool error. Measured on a 400-line padded fixture.
+          case Magic.identify(sniff_slice(content)) do
+            :text -> {:error, Messages.non_utf8_text(display_path)}
+            verdict -> {:error, Messages.binary(display_path, verdict)}
+          end
         end
 
       {:error, :eisdir} ->
@@ -317,7 +326,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       # "no lines in range" into a bounded range the caller can actually use.
       {:error, Messages.past_eof(display_path, start_line, count_lines(expanded))}
     else
-      {:ok, lines}
+      {:ok, ensure_utf8(lines)}
+    end
+  end
+
+  # The whole-file path checks `String.valid?/1` before returning; this one did
+  # not, so `offset`/`limit` was a hole straight through to the wire. It is the
+  # path the tool's own "too large" message tells the caller to use, and
+  # `binary_verdict/1` only sniffs the head — so a latin-1 file with ASCII
+  # padding in front of it passed every guard and handed the provider raw
+  # bytes. Measured: `Jason.encode_to_iodata!/1` raises `invalid byte 0xDA`,
+  # the registry rescues it into `{:error, "Provider error: …"}`, the turn ends.
+  #
+  # A slice SCRUBS rather than refusing (which is what the whole-file read
+  # does), because refusing is a dead end here: `offset`/`limit` is the
+  # documented way to get at a file `file_read` will not return whole, so it
+  # has to return something. The undecodable bytes become U+FFFD, every other
+  # byte and every line number survives, and the note names the one command
+  # that recovers the real characters.
+  defp ensure_utf8(text) do
+    if String.valid?(text) do
+      text
+    else
+      OptimalSystemAgent.Utils.Text.scrub_utf8(text) <> "\n\n" <> Messages.non_utf8_slice_note()
     end
   end
 

@@ -95,7 +95,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     }
 
     case try_ripgrep(pattern, path, rg_opts) do
-      {:ok, output} -> {:ok, truncate(output)}
+      {:ok, output} -> {:ok, bound_output(output)}
       {:fallback, _} -> fallback_grep(pattern, path, rg_opts)
     end
   end
@@ -252,7 +252,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
         case results do
           [] -> {:ok, "No matches found."}
-          lines -> {:ok, truncate(Enum.join(lines, "\n"))}
+          lines -> {:ok, bound_output(Enum.join(lines, "\n"))}
         end
     end
   end
@@ -274,11 +274,40 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
   @max_output_bytes Constants.max_output_bytes()
 
-  defp truncate(output) when byte_size(output) > @max_output_bytes do
-    String.slice(output, 0, @max_output_bytes) <> "\n...[truncated]"
-  end
+  @non_utf8_note "[note: some matched lines are not valid UTF-8 — the file is stored in a " <>
+                   "non-UTF-8 encoding (latin-1/cp1252 or similar). Undecodable bytes are shown " <>
+                   "as �; line numbers, columns and every other byte are unchanged. To see " <>
+                   "the real characters, convert first: `shell_execute` with " <>
+                   "`iconv -f <encoding> -t UTF-8 <path>`.]"
 
-  defp truncate(output), do: output
+  # Bound the result AND guarantee it is valid UTF-8. Both halves are load-bearing:
+  #
+  #   * ripgrep prints matched lines as RAW BYTES. A latin-1 source file is
+  #     text to `rg` — it is NOT skipped the way a binary file is — so one
+  #     match is enough to hand OSA a binary `Jason.encode_to_iodata!/1`
+  #     refuses. Measured: that raise is rescued into
+  #     `{:error, "Provider error: invalid byte 0xDA"}`, the turn ends, and the
+  #     session produces a 0-byte patch. `Utils.WireEncoding` now catches this
+  #     at the provider boundary too, but the model still deserves to be told
+  #     WHY the text looks odd rather than being handed silent mojibake.
+  #
+  #   * `String.slice/3` counts GRAPHEMES, not bytes, so the old cap was only
+  #     accidentally correct on ASCII: against CJK it let through ~3x the byte
+  #     budget, and against an invalid binary its behaviour is undefined.
+  #     `Utils.Text.utf8_head/2` is byte-bounded and cuts on a codepoint
+  #     boundary.
+  defp bound_output(output) do
+    note = if String.valid?(output), do: "", else: "\n\n" <> @non_utf8_note
+
+    bounded =
+      if byte_size(output) > @max_output_bytes do
+        OptimalSystemAgent.Utils.Text.utf8_head(output, @max_output_bytes) <> "\n...[truncated]"
+      else
+        OptimalSystemAgent.Utils.Text.scrub_utf8(output)
+      end
+
+    bounded <> note
+  end
 
   defp sensitive?(expanded_path) do
     Enum.any?(Constants.sensitive_paths(), fn p -> String.contains?(expanded_path, p) end)

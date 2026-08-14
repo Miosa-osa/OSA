@@ -25,8 +25,12 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
-# Terminal-Bench 2.0 is 89 tasks. A run over fewer is a pipeline signal, not a
-# score, and `is_full_dataset_run` is what stops it being quoted as one.
+# Terminal-Bench 2.0 and 2.1 are both 89 tasks. Kept as a constant only for
+# callers that predate `datasets.py`; the size that actually governs
+# `is_full_dataset_run` now comes from the run config, because the runner can
+# point at datasets of 74, 80, 89 or 200 tasks and a fixed 89 would have
+# declared an 80-task Harbor-Index run "not full" and a 74-task
+# Terminal-Bench-3 run "not full" forever.
 TERMINAL_BENCH_2_SIZE = 89
 
 # Failure reasons whose owner is OSA/the harness rather than the model. Anything
@@ -39,6 +43,13 @@ HARNESS_FAULTS = {
     "stream_closed_without_done",
     "harness_exception",
     "no_telemetry_written",
+    # A turn that ended on an OSA-internal fault (encoding, :request_shape,
+    # :tool_use_mismatch, :duplicate_tool_use). These were emitted as
+    # `kind: :llm_error`, became `provider_error` in the driver, and -- because
+    # `provider_error` is not in this set -- were counted against the MODEL.
+    # Every harness-vs-model split published before the `owner` field existed
+    # was computed with OSA's own faults credited to the model.
+    "osa_internal_error",
 }
 
 
@@ -75,6 +86,16 @@ def _failure_reason(reward: float | None, exc: dict | None, meta: dict) -> str:
         return ""
 
     status = meta.get("osa_status")
+    # `runner_error` is the driver's INITIAL sentinel, and for a window of runs
+    # its clean-exit branch could not overwrite it: the guard listed only
+    # (None, "", "running"), none of which the driver ever sets. Every clean
+    # exit therefore kept the sentinel and landed here as
+    # `unclassified:runner_error`. A driver that genuinely died never recorded a
+    # `done` frame, so the two are distinguishable on disk — re-derive, the same
+    # way `provider_error` is re-derived from its owner below, rather than
+    # leaving an archived run mis-bucketed forever.
+    if status == "runner_error" and meta.get("osa_saw_done") and not exc:
+        status = "ok"
     if exc:
         name = exc.get("exception_type") or exc.get("type") or "Exception"
         # A non-zero exit from the driver with a boot failure underneath is an
@@ -92,6 +113,19 @@ def _failure_reason(reward: float | None, exc: dict | None, meta: dict) -> str:
         return "stream_closed_without_done"
     if status == "timeout":
         return "agent_timeout"
+    if status in ("osa_internal_error", "turn_error_unattributed"):
+        return status
+    # Runs recorded before the driver read `turn_error["owner"]` stamped every
+    # turn-ending error as `provider_error`, whoever owned it. Re-derive from
+    # the owner the telemetry carries, so an old run can be re-scored from disk
+    # rather than being stamped forever with the wrong attribution.
+    if status == "provider_error":
+        owner = meta.get("osa_turn_error_owner")
+        if owner == "osa":
+            return "osa_internal_error"
+        if owner != "provider":
+            return "turn_error_unattributed"
+        return "provider_error"
     if status == "ok":
         if not meta.get("osa_tool_calls"):
             # Ran to completion having never touched the machine. Terminal-Bench
@@ -107,9 +141,15 @@ def _fault_owner(reason: str) -> str:
     base = reason.split(":", 1)[0]
     if base in HARNESS_FAULTS or reason.startswith("harness_exception"):
         return "harness"
-    if reason == "agent_timeout":
-        # Ambiguous by construction: a real ceiling and a slow model look the
-        # same from outside. Kept in its own bucket rather than guessed at.
+    if reason in ("agent_timeout", "provider_error", "turn_error_unattributed"):
+        # Ambiguous by construction, for three different reasons:
+        #   agent_timeout            a real ceiling and a slow model look the
+        #                            same from outside;
+        #   provider_error           upstream refused/failed -- not OSA's code,
+        #                            but not the model's competence either;
+        #   turn_error_unattributed  the turn died on an error carrying no
+        #                            `owner`. Unknown is not "the model's
+        #                            fault"; it is unknown, and it says so.
         return "ambiguous"
     return "model"
 
@@ -148,6 +188,93 @@ def _rescan_serve_log(trial_dir: Path) -> tuple[dict, dict] | None:
     return counts, samples
 
 
+def _max_num(*vals):
+    """Largest readable number among cumulative readings of one counter."""
+    nums = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return max(nums) if nums else None
+
+
+def _last_frame_spend(trial_dir: Path) -> dict:
+    """Cumulative cost from the LAST `cost_update` frame in the raw event log.
+
+    The event stream is the one record of a run that no writer can lag: each
+    `cost_update` carries the session-to-date totals as of that round-trip, and
+    the final frame therefore includes the closing answer that the spend sidecar
+    could miss. Cheap to scan (these logs are hundreds of KB) and absent on runs
+    that kept no raw log, in which case this contributes nothing.
+    """
+    path = trial_dir / "agent" / "osa-events.jsonl"
+    if not path.exists():
+        return {}
+    last: dict = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"cost_update"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (ev.get("type") or ev.get("_event")) == "cost_update":
+                    last = ev
+    except OSError:
+        return {}
+    return last
+
+
+def _reconcile_spend(trial_dir: Path, agent_result: dict, meta: dict) -> dict:
+    """Re-derive tokens and cost from every record the trial retained.
+
+    Motivation is the same as `_rescan_serve_log`: an archived run should be
+    re-scorable with a corrected reader rather than being stamped forever with
+    whatever the reader believed on the day.
+
+    What was wrong: the agent adapter preferred OSA's spend sidecar over the
+    summed SSE frames whenever the sidecar had the key. The sidecar is written
+    by the agent process and, on a turn whose final LLM round-trip makes no tool
+    call, could be one round-trip stale — so the published input-token and $
+    figures came out LOW (measured: 30k-110k input tokens per task, ~1.1% of the
+    probe total). Every one of these counters is a monotonic session total, so
+    the largest readable value is the freshest and `max` is the reconciliation
+    that carries no bias in either direction.
+    """
+    spend = meta.get("osa_spend_sidecar") or {}
+    summed = meta.get("osa_usage_sum") or {}
+    frame = _last_frame_spend(trial_dir)
+
+    cache_r = _max_num(spend.get("cache_read_tokens"), summed.get("cache_read_input_tokens"))
+    cache_w = _max_num(
+        spend.get("cache_creation_tokens"), summed.get("cache_creation_input_tokens")
+    )
+    cache_total = (cache_r or 0) + (cache_w or 0)
+
+    return {
+        "tokens_in": _max_num(
+            agent_result.get("n_input_tokens"),
+            spend.get("input_tokens"),
+            summed.get("input_tokens"),
+        ),
+        "tokens_out": _max_num(
+            agent_result.get("n_output_tokens"),
+            spend.get("output_tokens"),
+            summed.get("output_tokens"),
+        ),
+        # Keep `None` rather than 0 when no source reported a cache counter at
+        # all — "not measured" and "measured as zero" are different claims.
+        "tokens_cache": cache_total
+        if (cache_r is not None or cache_w is not None) and cache_total
+        else agent_result.get("n_cache_tokens"),
+        "cost_usd": _max_num(
+            agent_result.get("cost_usd"),
+            spend.get("tree_cost_usd"),
+            spend.get("cost_usd"),
+            frame.get("tree_cost_usd"),
+            frame.get("session_cost_usd"),
+        ),
+    }
+
+
 def collect(job_dir: Path) -> list[dict]:
     """Read every trial under a Harbor job directory."""
     rows = []
@@ -166,6 +293,7 @@ def collect(job_dir: Path) -> list[dict]:
         reason = _failure_reason(reward, exc, meta)
         telemetry_path = trial_dir / "agent" / "osa-telemetry.json"
 
+        spend_fix = _reconcile_spend(trial_dir, agent_result, meta)
         rescan = _rescan_serve_log(trial_dir)
         inflicted = rescan[0] if rescan else (meta.get("osa_self_inflicted") or {})
         inflicted_samples = (
@@ -189,10 +317,7 @@ def collect(job_dir: Path) -> list[dict]:
                     (r.get("agent_execution") or {}).get("started_at"),
                     (r.get("agent_execution") or {}).get("finished_at"),
                 ),
-                "tokens_in": agent_result.get("n_input_tokens"),
-                "tokens_out": agent_result.get("n_output_tokens"),
-                "tokens_cache": agent_result.get("n_cache_tokens"),
-                "cost_usd": agent_result.get("cost_usd"),
+                **spend_fix,
                 "turns": meta.get("osa_turns"),
                 "tool_calls": meta.get("osa_tool_calls"),
                 "osa_status": meta.get("osa_status"),
@@ -235,8 +360,10 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
 
     tok_in = _total(r["tokens_in"] for r in rows)
     tok_out = _total(r["tokens_out"] for r in rows)
+    tok_cache = _total(r["tokens_cache"] for r in rows)
     cost = _total(r["cost_usd"] for r in rows)
     n_scoreable = n - len(harness_faults)
+    declared_size = config.get("dataset_size") or 0
 
     aggregate = {
         "tasks_attempted": n,
@@ -249,9 +376,14 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         "accuracy_excluding_harness_faults": (
             round(len(resolved) / n_scoreable, 4) if n_scoreable else None
         ),
-        "is_full_dataset_run": n == TERMINAL_BENCH_2_SIZE
-        and config.get("dataset_size") == TERMINAL_BENCH_2_SIZE,
+        # Full means "every task the selected dataset has", whatever that
+        # dataset is. Compared against the size the runner recorded, which it
+        # counted from disk.
+        "is_full_dataset_run": bool(declared_size) and n == declared_size,
         "dataset_size": config.get("dataset_size"),
+        "dataset_key": config.get("dataset_key"),
+        "dataset_label": config.get("dataset_label"),
+        "dataset_status": config.get("dataset_status"),
         "fault_owner_counts": {
             "resolved": len(resolved),
             "model": len(model_faults),
@@ -272,6 +404,27 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
             else None
         ),
         "cost_usd_total": round(cost, 4) if cost is not None else None,
+        # --- the cost-probe columns -------------------------------------
+        # These four are the ones the competitive field publishes and the ones
+        # `probeset.py` diffs across optimisation attempts. They are per-TASK,
+        # not per-solved-task, on purpose: the denominator must not move when
+        # the pass rate moves, or a change that solves fewer tasks looks like a
+        # cost win.
+        "input_tokens_per_task": round(tok_in / n, 1) if tok_in and n else None,
+        "output_tokens_per_task": round(tok_out / n, 1) if tok_out and n else None,
+        "in_out_ratio": (
+            round(tok_in / tok_out, 1) if tok_in and tok_out else None
+        ),
+        # Harbor's own `n_cache_tokens`, as a fraction of input. Every adapter
+        # in the field parses cache_read separately and reports this; a value
+        # of 0.0 with a non-null denominator is a real finding, not missing
+        # data. `None` means the adapter reported nothing at all, which is a
+        # different thing and must not be rendered as zero.
+        "cache_tokens_total": tok_cache,
+        "cache_hit_rate": (
+            round(tok_cache / tok_in, 4) if tok_cache is not None and tok_in else None
+        ),
+        "cost_usd_per_task": round(cost / n, 4) if cost is not None and n else None,
         "turns_mean": _mean(r["turns"] for r in rows),
         "tool_calls_mean": _mean(r["tool_calls"] for r in rows),
         "failure_taxonomy": dict(sorted(taxonomy.items(), key=lambda kv: -kv[1])),
@@ -281,7 +434,10 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "benchmark": "terminal-bench-2.0",
+        # Stamped from the run config. It used to be the literal string
+        # "terminal-bench-2.0" on every artefact, including runs that were not
+        # Terminal-Bench 2.0.
+        "benchmark": config.get("dataset_label") or "unknown",
         "config": config,
         "aggregate": aggregate,
         "tasks": rows,
@@ -296,10 +452,28 @@ def summary_md(results: dict) -> str:
     cfg = results["config"]
     a = results["aggregate"]
     lines = [
-        f"# OSA Terminal-Bench run — `{cfg['run_id']}`",
+        f"# OSA Harbor run — `{cfg['run_id']}`",
         "",
-        f"- **Benchmark**: Terminal-Bench 2.0 via Harbor `{cfg.get('harbor_version', '?')}`",
+        f"- **Benchmark**: {results.get('benchmark')} via Harbor "
+        f"`{cfg.get('harbor_version', '?')}`",
         f"- **Dataset**: `{cfg.get('dataset')}`  ({_fmt(a['dataset_size'])} tasks available)",
+        f"- **Dataset key**: `{cfg.get('dataset_key')}`   "
+        f"**status**: `{cfg.get('dataset_status')}`",]
+    if cfg.get("dataset_status") == "superseded":
+        lines += [
+            "",
+            "> ⚠ **This task set is SUPERSEDED.** It is kept so historical runs "
+            "stay re-derivable. A number from it is not comparable to a current "
+            "leaderboard and must be labelled with the version.",
+        ]
+    if cfg.get("probe_set"):
+        lines += [
+            "",
+            f"> Fixed cost probe `{cfg['probe_set']}` — the same tasks every "
+            "time, so token and cost figures across runs are paired. This is "
+            "**not** a pass-rate measurement; see the cost table below.",
+        ]
+    lines += [
         f"- **Agent**: `{cfg.get('agent')}`   **Model**: `{cfg.get('model') or 'from OSA config'}`",
         f"- **Started**: {cfg.get('started_at')}",
         f"- **Graded by**: the task's own `tests/test.sh` inside the task container "
@@ -314,9 +488,9 @@ def summary_md(results: dict) -> str:
     if not a["is_full_dataset_run"]:
         lines += [
             "> This is a **subset** run over "
-            f"{a['tasks_attempted']} of {TERMINAL_BENCH_2_SIZE} tasks. It is a "
-            "pipeline and regression signal, not a Terminal-Bench 2.0 score, and "
-            "must not be quoted as one.",
+            f"{a['tasks_attempted']} of {_fmt(a['dataset_size'])} tasks. It is a "
+            f"pipeline and regression signal, not a {results.get('benchmark')} "
+            "score, and must not be quoted as one.",
             "",
         ]
     fo = a["fault_owner_counts"]
@@ -369,6 +543,14 @@ def summary_md(results: dict) -> str:
         f"| tokens out | {_fmt(a['tokens_out_total'])} |",
         f"| tokens / solved task | {_fmt(a['tokens_per_resolved'])} |",
         f"| cost total | {_fmt(a['cost_usd_total'], ' USD')} |",
+        f"| **input tokens / task** | {_fmt(a['input_tokens_per_task'])} |",
+        f"| **in:out ratio** | {_fmt(a['in_out_ratio'], ':1')} |",
+        f"| **cache hit rate** | "
+        + ("n/a (adapter reported no cache counter)"
+           if a["cache_hit_rate"] is None
+           else f"{a['cache_hit_rate'] * 100:.1f}%")
+        + " |",
+        f"| **$ / task** | {_fmt(a['cost_usd_per_task'], ' USD')} |",
         f"| turns mean / task | {_fmt(a['turns_mean'])} |",
         f"| tool calls mean / task | {_fmt(a['tool_calls_mean'])} |",
         "",

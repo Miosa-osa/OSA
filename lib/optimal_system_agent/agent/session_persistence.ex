@@ -642,11 +642,37 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   def save_spend(_, _), do: {:error, :invalid_args}
 
   @doc """
+  Write the sidecar straight from a live loop state — the ONE builder every
+  sidecar writer must go through.
+
+  There used to be two writers with two different payload shapes: this module's
+  turn-boundary save (full shape, `tree_cost_usd` included) and
+  `Checkpoint.persist_spend_sidecar/1`'s per-tool-cycle mirror (token counters
+  only). `save_spend/2` OVERWRITES the file, so which shape survived was decided
+  by whichever writer happened to run last — and on a session whose final LLM
+  round-trip makes no tool call, the last writer is the mid-turn checkpoint.
+  That produced exactly the two correlated symptoms measured on the cost probe:
+  `tree_cost_usd` absent, AND the final round-trip's input tokens missing from
+  the published figure (an UNDER-count, i.e. an error in our own favour).
+
+  One builder means the file has one shape and one freshness rule.
+  """
+  @spec flush_spend(String.t() | nil, map()) :: :ok | {:error, term()}
+  def flush_spend(session_id, state) when is_binary(session_id) and is_map(state) do
+    save_spend(session_id, spend_from_state(state))
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  def flush_spend(_, _), do: {:error, :invalid_args}
+
+  @doc """
   Load the durable per-session spend totals. Returns a map with atom keys and
   zero defaults when no sidecar exists yet (never raises).
   """
   @spec load_spend(String.t()) :: %{
           cost_usd: number(),
+          tree_cost_usd: number(),
           input_tokens: non_neg_integer(),
           output_tokens: non_neg_integer(),
           cache_creation_tokens: non_neg_integer(),
@@ -659,6 +685,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
          {:ok, data} when is_map(data) <- Jason.decode(json) do
       %{
         cost_usd: spend_num(data["cost_usd"], 0.0),
+        # Absent in sidecars written before this key existed; fall back to the
+        # node figure, which is the tree total for a childless session and a
+        # lower bound otherwise — never an over-statement.
+        tree_cost_usd: spend_num(data["tree_cost_usd"], spend_num(data["cost_usd"], 0.0)),
         input_tokens: spend_num(data["input_tokens"], 0),
         output_tokens: spend_num(data["output_tokens"], 0),
         cache_creation_tokens: spend_num(data["cache_creation_tokens"], 0),
@@ -685,6 +715,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   defp zero_spend do
     %{
       cost_usd: 0.0,
+      tree_cost_usd: 0.0,
       input_tokens: 0,
       output_tokens: 0,
       cache_creation_tokens: 0,
@@ -695,8 +726,20 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   end
 
   defp spend_from_state(state) do
+    tree = OptimalSystemAgent.Agent.Loop.Accounting.safe_tree_spend(state)
+
     %{
+      # NODE-LOCAL, and it must stay that way. `Accounting.tree_spend/1` builds
+      # the whole-tree bill by summing THIS field across every descendant's
+      # sidecar; putting a tree total in it would make every ancestor
+      # double-count its grandchildren. `tree_cost_usd` below is the rolled-up
+      # figure, written for readers (benchmarks, `$/task` reporting) and read by
+      # no rollup.
       cost_usd: Map.get(state, :session_cost_usd, 0.0),
+      tree_cost_usd: tree.usd,
+      # False means `tree_cost_usd` is a LOWER BOUND — part of the tree's bill
+      # could not be read. A reader publishing a dollar figure must say so.
+      tree_cost_complete: tree.complete,
       input_tokens: Map.get(state, :session_input_tokens, 0),
       output_tokens: Map.get(state, :session_output_tokens, 0),
       cache_creation_tokens: Map.get(state, :session_cache_creation_tokens, 0),

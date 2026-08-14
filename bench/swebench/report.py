@@ -285,6 +285,9 @@ def build(
                 "tokens_cache_read": inf.get("tokens_cache_read"),
                 "tokens_cache_write": inf.get("tokens_cache_write"),
                 "cost_usd": inf.get("cost_usd"),
+                # None on pre-tree-cost runs (parent-only figure, completeness
+                # unknowable); False means the figure is a LOWER BOUND.
+                "cost_complete": inf.get("cost_complete"),
                 "tool_calls": inf.get("tool_calls"),
                 "turns": inf.get("turns"),
                 "patch_bytes": inf.get("patch_bytes", 0),
@@ -308,6 +311,14 @@ def build(
     tok_in = _total(r["tokens_in"] for r in rows)
     tok_out = _total(r["tokens_out"] for r in rows)
     cost = _total(r["cost_usd"] for r in rows)
+    # A total is only "complete" if every row that contributed to it was. One
+    # incomplete tree makes the whole total a lower bound; a single pre-field
+    # row makes the whole total parent-only.
+    flags = [r.get("cost_complete") for r in rows if r.get("cost_usd") is not None]
+    if any(f is None for f in flags) or not flags:
+        cost_complete = None
+    else:
+        cost_complete = all(flags)
 
     taxonomy: dict[str, int] = {}
     for r in rows:
@@ -333,6 +344,14 @@ def build(
             else None
         ),
         "cost_usd_total": round(cost, 4) if cost is not None else None,
+        # $/task, not $/resolved-task: the published headline the competitive
+        # field quotes (goose's cross-harness table, docs/research/
+        # what-harnesses-benchmark.md §5) is per ATTEMPTED task.
+        "cost_usd_per_task": round(cost / n, 4) if n and cost is not None else None,
+        # True | False (lower bound: a subagent's spend was unreadable) | None
+        # (recorded before tree costs existed -- parent-only, subagent spend
+        # missing entirely). Never render None as True.
+        "cost_complete": cost_complete,
         "cost_usd_per_resolved": (
             round(cost / len(resolved), 4) if resolved and cost is not None else None
         ),
@@ -492,6 +511,17 @@ def merge_attempts(attempt_docs: list[dict], config: dict) -> dict:
     }
 
 
+
+def _cost_caveat(a: dict) -> str:
+    """Suffix that stops an incomplete cost total reading as an exact one."""
+    c = a.get("cost_complete")
+    if c is True:
+        return ""
+    if c is False:
+        return " **(lower bound — a subagent's spend could not be read)**"
+    return " **(parent session only — subagent spend NOT included)**"
+
+
 def _fmt(v, suffix=""):
     return "n/a" if v is None else f"{v}{suffix}"
 
@@ -636,6 +666,10 @@ def summary_md(results: dict) -> str:
             "model's way — these are bugs to fix |",
             f"| model | {by.get('model', 0)} | OSA worked; the patch was wrong |",
             f"| bench | {by.get('bench', 0)} | this harness or Docker misbehaved |",
+            f"| provider | {by.get('provider', 0)} | the model provider failed "
+            "the turn — neither OSA's code nor the model's answer |",
+            f"| unattributed | {by.get('unattributed', 0)} | the turn died on an "
+            "error carrying no `owner` — deliberately not charged to anyone |",
             "",
             f"**{(share or 0) * 100:.0f}% of failures were OSA's fault**, not the model's."
             if share is not None
@@ -674,8 +708,11 @@ def summary_md(results: dict) -> str:
         f"| tokens in | {_fmt(a['tokens_in_total'])} |",
         f"| tokens out | {_fmt(a['tokens_out_total'])} |",
         f"| tokens / resolved task | {_fmt(a['tokens_per_resolved'])} |",
-        f"| cost total | {_fmt(a['cost_usd_total'], ' USD')} |",
-        f"| cost / resolved task | {_fmt(a['cost_usd_per_resolved'], ' USD')} |",
+        f"| cost total | {_fmt(a['cost_usd_total'], ' USD')}{_cost_caveat(a)} |",
+        f"| **cost / task** | {_fmt(a.get('cost_usd_per_task'), ' USD')}"
+        f"{_cost_caveat(a)} |",
+        f"| cost / resolved task | {_fmt(a['cost_usd_per_resolved'], ' USD')}"
+        f"{_cost_caveat(a)} |",
         f"| tool calls total | {_fmt(a['tool_calls_total'])} |",
         f"| tool calls mean / task | {_fmt(a['tool_calls_mean'])} |",
         f"| turns mean / task | {_fmt(a['turns_mean'])} |",

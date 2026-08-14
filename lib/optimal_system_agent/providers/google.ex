@@ -561,12 +561,29 @@ defmodule OptimalSystemAgent.Providers.Google do
   # spend on every thinking turn — and since thinking cannot be disabled on any
   # Gemini 3 model, that is every turn. On a high-effort turn the thought tokens
   # can exceed the visible answer, so this was not a rounding error.
+  #
+  # `cachedContentTokenCount` is the cached slice of the prompt, and Gemini
+  # reports `promptTokenCount` INCLUSIVE of it (OpenAI's convention, not
+  # Anthropic's). Dropping it meant the cached prefix was billed at the full
+  # input rate instead of the cache-read rate — a ~10x overcharge on exactly the
+  # requests caching was supposed to make cheap, and invisible because the field
+  # was never read.
+  #
+  # Because it is INCLUSIVE, `:google` belongs in `Accounting`'s
+  # `@inclusive_prompt_slices` list, which is where the overlap gets subtracted
+  # out of `input_tokens`. Emitting the field here without that entry would
+  # double-count the cached prompt instead of discounting it, so the two changes
+  # are one change.
+  #
+  # UNVERIFIED against a live Gemini call — implemented against the documented
+  # `usageMetadata` shape and covered by synthetic-payload tests only.
   defp extract_usage(%{"usageMetadata" => meta}) when is_map(meta) do
     thoughts = meta["thoughtsTokenCount"] || 0
 
     %{
       input_tokens: meta["promptTokenCount"] || 0,
-      output_tokens: (meta["candidatesTokenCount"] || 0) + thoughts
+      output_tokens: (meta["candidatesTokenCount"] || 0) + thoughts,
+      cache_read_input_tokens: meta["cachedContentTokenCount"] || 0
     }
   end
 

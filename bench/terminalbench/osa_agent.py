@@ -32,7 +32,8 @@ OSA is an Elixir/OTP application. Three routes were on the table:
      already produces exactly this artefact (``mix release osagent``, see
      ``.github/workflows/release.yml``) and it needs no Elixir, no Erlang and no
      toolchain on the target. It is 17 MB, extracts in about a second, and the
-     only host contract is glibc + libcrypto.
+     only host contract is glibc — libcrypto/libssl/libtinfo are vendored into
+     ``<release>/vendor`` and put on ``LD_LIBRARY_PATH`` at install time.
 
 Route 3's one real constraint is that ERTS is native code, so the release must
 be built against a glibc no newer than the task image's. ``build_release.sh``
@@ -63,6 +64,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 HERE = Path(__file__).resolve().parent
 RELEASE_TARBALL = HERE / "dist" / "osa-release-linux-x86_64.tar.gz"
 DRIVER = HERE / "driver" / "osa_headless.py"
+BOOT_CHECK = HERE / "driver" / "osa_boot_check.py"
 
 # Where the release lands in the container. /installed-agent is Harbor's own
 # convention (BaseInstalledAgent.setup creates it) and is outside anything a
@@ -70,7 +72,23 @@ DRIVER = HERE / "driver" / "osa_headless.py"
 REMOTE_ROOT = "/installed-agent"
 REMOTE_RELEASE = f"{REMOTE_ROOT}/osa"
 REMOTE_DRIVER = f"{REMOTE_ROOT}/osa_headless.py"
+REMOTE_BOOT_CHECK = f"{REMOTE_ROOT}/osa_boot_check.py"
 REMOTE_INSTRUCTION = f"{REMOTE_ROOT}/instruction.txt"
+
+
+# Appended (idempotently) to every `releases/<vsn>/env.sh` in the injected
+# release. The marker comment is what makes a re-install a no-op.
+_VENDOR_PATH_SNIPPET = f"""set -eu
+for f in {REMOTE_RELEASE}/releases/*/env.sh; do
+  if ! grep -q OSA_BENCH_VENDOR_PATH "$f"; then
+    cat >> "$f" <<'EOF'
+
+# OSA_BENCH_VENDOR_PATH -- added by bench/terminalbench/osa_agent.py
+export LD_LIBRARY_PATH="$RELEASE_ROOT/vendor${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+EOF
+  fi
+done
+"""
 
 
 class OsaAgent(BaseInstalledAgent):
@@ -199,6 +217,7 @@ class OsaAgent(BaseInstalledAgent):
         remote_tar = f"{REMOTE_ROOT}/osa-release.tar.gz"
         await environment.upload_file(RELEASE_TARBALL, remote_tar)
         await environment.upload_file(DRIVER, REMOTE_DRIVER)
+        await environment.upload_file(BOOT_CHECK, REMOTE_BOOT_CHECK)
 
         await self.exec_as_root(
             environment,
@@ -208,7 +227,7 @@ class OsaAgent(BaseInstalledAgent):
                 f"rm -f {shlex.quote(remote_tar)} && "
                 f"rm -rf {shlex.quote(REMOTE_RELEASE)} && "
                 f"mv {shlex.quote(REMOTE_ROOT)}/osagent {shlex.quote(REMOTE_RELEASE)} && "
-                f"chmod +x {shlex.quote(REMOTE_DRIVER)}"
+                f"chmod +x {shlex.quote(REMOTE_DRIVER)} {shlex.quote(REMOTE_BOOT_CHECK)}"
             ),
         )
 
@@ -240,6 +259,29 @@ class OsaAgent(BaseInstalledAgent):
             ),
         )
 
+        # Make the release's vendored shared libraries actually load.
+        #
+        # Dockerfile.release copies libcrypto/libssl/libtinfo out of the build
+        # image into `<release>/vendor/` precisely so the artefact does not
+        # depend on the task image shipping compatible ones. Nothing ever put
+        # that directory on the loader's search path, so the vendored copies
+        # were dead weight and the crypto NIF resolved against whatever
+        # /usr/lib/x86_64-linux-gnu the task image happened to have. That worked
+        # only because every current Terminal-Bench image ships libcrypto.so.3;
+        # it is an undeclared dependency on the environment and would break
+        # silently on an image without one (bullseye ships 1.1, not 3).
+        #
+        # `releases/<vsn>/env.sh` is the right seam: the release boot script
+        # sources it before every command (`. "$REL_VSN_DIR/env.sh"`, after it
+        # computes RELEASE_ROOT), so `version`, `doctor`, the boot check and the
+        # episode's `serve` all get it, without touching OSA's source. Vendor
+        # comes first so it wins over the system copy -- the point is to use the
+        # library we shipped, not to fall back to it.
+        await self.exec_as_root(
+            environment,
+            command=_VENDOR_PATH_SNIPPET,
+        )
+
         # OSA config. HOME-relative on purpose: OSA's dotenv loader uses
         # Path.expand("~/.osa/.env") and does NOT honour OSA_HOME, so writing
         # anywhere else silently produces an unconfigured agent.
@@ -260,11 +302,35 @@ class OsaAgent(BaseInstalledAgent):
                 f'chmod 600 "$HOME/.osa/{fname}"',
             )
 
-        # Fail loudly here rather than mid-episode: a release that cannot even
-        # print its version is an install failure, and Harbor should record it
-        # as one instead of scoring a zero that looks like the model's fault.
+        # Fail loudly here rather than mid-episode: an artefact that cannot boot
+        # is an install failure, and Harbor should record it as one instead of
+        # scoring a zero that looks like the model's fault.
+        #
+        # This used to run `osagent version` and claim exactly that guarantee,
+        # which it did not deliver. `bin/osagent version` is `<release> eval
+        # OptimalSystemAgent.CLI.version()`, and a Mix release's `eval` starts
+        # the VM without starting the OTP application tree -- no supervisor
+        # init/1 runs, and no boot-time NIF is loaded. A release with a corrupt
+        # or unloadable NIF prints its version happily. That is not a
+        # hypothetical: an entire 89-task run failed with `install_or_boot_failed`
+        # in the episode on an artefact whose `version` had passed on four
+        # different base images.
+        #
+        # So the gate now boots `serve` and waits for /health -- the same entry
+        # point and the same signal the episode itself depends on. Reaching
+        # /health means the application tree started, which is the capability
+        # being claimed. --require-vendor additionally asserts the VM mapped the
+        # release's own libcrypto, so the vendoring above is verified rather
+        # than assumed.
         await self.exec_as_root(
-            environment, command=f"{REMOTE_RELEASE}/bin/osagent version"
+            environment,
+            command=(
+                f"python3 -u {shlex.quote(REMOTE_BOOT_CHECK)} "
+                f"{shlex.quote(REMOTE_RELEASE)} "
+                f"--port {self._port + 1} --timeout {self._boot_timeout} "
+                f"--require-vendor"
+            ),
+            timeout_sec=self._boot_timeout + 120,
         )
 
     # ------------------------------------------------------------------- run
@@ -334,17 +400,52 @@ class OsaAgent(BaseInstalledAgent):
         summed = t.get("usage_sum") or {}
 
         def pick(spend_key: str, sse_key: str):
-            if spend_key in spend:
-                return spend[spend_key]
-            return summed.get(sse_key)
+            # Two cumulative counts of the same session, reconciled by `max`.
+            #
+            # This used to prefer the sidecar whenever the key was present. The
+            # sidecar is written by the agent process and can lag the SSE frames
+            # by one LLM round-trip when a run is torn down right after its
+            # final answer -- measured at 30k-110k input tokens per task on the
+            # cost probe, always in the direction that makes us look cheaper.
+            # Neither counter can exceed the truth, so `max` is the unbiased
+            # reconciliation rather than a guess about which source to trust.
+            vals = [
+                v
+                for v in (spend.get(spend_key), summed.get(sse_key))
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            ]
+            return max(vals) if vals else None
 
         context.n_input_tokens = pick("input_tokens", "input_tokens")
         context.n_output_tokens = pick("output_tokens", "output_tokens")
         cache_r = pick("cache_read_tokens", "cache_read_input_tokens") or 0
         cache_w = pick("cache_creation_tokens", "cache_creation_input_tokens") or 0
         context.n_cache_tokens = (cache_r + cache_w) or None
-        cost = spend.get("cost_usd", t.get("cost_usd"))
+        # Whole-tree cost, not the parent session alone: subagent/fleet children
+        # bill to their own sidecars, so `cost_usd` under-reports any run that
+        # delegates. Falls back through parent-only for artefacts written before
+        # `tree_cost_usd` existed. The sidecar's own `cost_usd` field is never
+        # rewritten -- `tree_spend/1` sums it across descendants, so a tree total
+        # stored there would make every ancestor double-count its grandchildren.
+        # Same reconciliation as `pick`: these are cumulative totals of one
+        # session, so the largest readable one is the freshest, not the first
+        # one that happens to be non-null. A stale sidecar taking precedence
+        # over a complete frame total is precisely the under-count above.
+        cost_vals = [
+            v
+            for v in (
+                spend.get("tree_cost_usd"),
+                t.get("cost_usd"),  # driver already preferred the tree total
+                spend.get("cost_usd"),
+            )
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        cost = max(cost_vals) if cost_vals else None
         context.cost_usd = cost if cost else None
+        # True | False (LOWER BOUND) | None (parent-only, pre-tree-cost run).
+        cost_complete = spend.get("tree_cost_complete")
+        if cost_complete is None:
+            cost_complete = t.get("cost_complete")
 
         context.metadata = {
             "osa_status": t.get("status"),
@@ -356,6 +457,16 @@ class OsaAgent(BaseInstalledAgent):
             "osa_run_s": t.get("run_s"),
             "osa_model": t.get("model"),
             "osa_last_event_type": t.get("last_event_type"),
+            # Who owns a turn-ending error: `osa` (an OSA bug -- harness fault),
+            # `provider` (upstream), or `unknown` (no `owner` field on the
+            # event). Carried through so the report can split them instead of
+            # charging every one of them to the model.
+            # Whether `cost_usd` covers the agent tree. False => lower bound;
+            # None => parent session only (subagent spend not included at all).
+            # A report quoting the cost MUST carry this.
+            "osa_cost_complete": cost_complete,
+            "osa_turn_error": t.get("turn_error"),
+            "osa_turn_error_owner": t.get("turn_error_owner"),
             "osa_event_type_counts": t.get("event_type_counts"),
             "osa_self_inflicted": (t.get("self_inflicted") or {}).get("counts"),
             "osa_self_inflicted_samples": (t.get("self_inflicted") or {}).get("samples"),

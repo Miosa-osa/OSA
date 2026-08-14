@@ -99,24 +99,111 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       state
   end
 
+  @doc """
+  Put one provider's usage map onto the DISJOINT convention that
+  `Pricing.cost/2` and `effective_input_tokens/1` both assume — fresh input,
+  cache writes and cache reads counting each prompt token exactly once.
+
+  Providers disagree, and the disagreement is silent:
+
+    * **Anthropic native** (`Providers.Anthropic.extract_usage/1`) is already
+      disjoint: `input_tokens` is the uncached tail only.
+    * **Every OpenAI-shaped API** — `Providers.OpenAICompat.parse_usage/1`
+      (`prompt_tokens` + `prompt_tokens_details.cached_tokens`) and
+      `Providers.OpenAIResponses.parse_usage/3`
+      (`input_tokens` + `input_tokens_details.cached_tokens`) — reports
+      `input_tokens` INCLUSIVE of the cached portion, with `cached_tokens` as a
+      breakdown of it, not an addition to it.
+
+  Left unreconciled, an inclusive usage map is billed as
+  `cached * rate + cached * rate * 0.1` — **11x** what the provider charges for
+  a cache read — and `effective_input_tokens/1` reports the cached prompt twice
+  to the context-pressure meter. Neither shows today because the cache-read
+  count is 0 on the live path; both go live the moment prompt caching starts
+  hitting, which is exactly why this is here now rather than after.
+
+  Unknown providers are left ALONE. Guessing that an unrecognised usage map is
+  inclusive would under-bill it, and this function is not allowed to invent
+  either direction.
+
+  This convention table belongs next to the transports in
+  `Providers.Registry`; it lives here only because that file is under
+  concurrent edit.
+  """
+  # Anthropic's wire format, wherever it is reached from.
+  @disjoint_prompt_slices [:anthropic, :bedrock, :claude_cli]
+
+  # OpenAI's wire format, plus every gateway that speaks it.
+  #
+  # `:google` is here on the same footing though it is not an OpenAI shape:
+  # Gemini's `usageMetadata.promptTokenCount` is INCLUSIVE of
+  # `cachedContentTokenCount` (see `Providers.Google.extract_usage/1`), so the
+  # cached slice must be subtracted back out of `input_tokens` exactly as for
+  # OpenAI. Unverified against a live Gemini call; documented shape only.
+  @inclusive_prompt_slices [
+    :google,
+    :openai,
+    :openai_codex,
+    :openrouter,
+    :groq,
+    :together,
+    :fireworks,
+    :deepseek,
+    :perplexity,
+    :mistral,
+    :qwen,
+    :moonshot,
+    :zhipu,
+    :volcengine,
+    :baichuan,
+    :xai,
+    :ollama,
+    :ollama_cloud
+  ]
+
+  @spec reconcile_prompt_slices(map(), atom() | {:compat, atom()} | String.t() | nil) :: map()
+  def reconcile_prompt_slices(norm, provider) when is_map(norm) do
+    if inclusive_prompt_slices?(provider) do
+      overlap = norm.cache_creation_input_tokens + norm.cache_read_input_tokens
+      %{norm | input_tokens: max(norm.input_tokens - overlap, 0)}
+    else
+      norm
+    end
+  end
+
+  defp inclusive_prompt_slices?({:compat, _}), do: true
+
+  defp inclusive_prompt_slices?(p) when is_binary(p) do
+    inclusive_prompt_slices?(safe_atom(p))
+  end
+
+  defp inclusive_prompt_slices?(p) when is_atom(p) and not is_nil(p) do
+    cond do
+      p in @disjoint_prompt_slices -> false
+      p in @inclusive_prompt_slices -> true
+      true -> false
+    end
+  end
+
+  defp inclusive_prompt_slices?(_), do: false
+
+  defp safe_atom(p) do
+    String.to_existing_atom(p)
+  rescue
+    ArgumentError -> nil
+  end
+
   defp do_record(state, usage) do
-    norm = normalize_usage(usage)
+    norm =
+      usage
+      |> normalize_usage()
+      |> reconcile_prompt_slices(Map.get(state, :provider))
+
     turn_cost = Pricing.cost(Map.get(state, :model), norm)
-
-    session_cost = round6(get(state, :session_cost_usd, 0.0) + turn_cost)
-
-    input = get(state, :session_input_tokens, 0) + norm.input_tokens
-    output = get(state, :session_output_tokens, 0) + norm.output_tokens
-    cache_write = get(state, :session_cache_creation_tokens, 0) + norm.cache_creation_input_tokens
-    cache_read = get(state, :session_cache_read_tokens, 0) + norm.cache_read_input_tokens
 
     state =
       state
-      |> put(:session_cost_usd, session_cost)
-      |> put(:session_input_tokens, input)
-      |> put(:session_output_tokens, output)
-      |> put(:session_cache_creation_tokens, cache_write)
-      |> put(:session_cache_read_tokens, cache_read)
+      |> accumulate_counters(norm, turn_cost)
       |> maybe_put_last_input(effective_input_tokens(norm))
 
     # Surrender this round-trip's numbers OUTSIDE the immutable state thread,
@@ -129,6 +216,217 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     maybe_record_trajectory(state, norm, turn_cost)
 
     state
+  end
+
+  # Add ONE already-normalized, already-reconciled, already-priced usage map to
+  # the session's running counters.
+  #
+  # Split out of `do_record/2` so the side-spend path (`absorb_side_spend/1`)
+  # can accumulate WITHOUT going through `reconcile_prompt_slices/2` a second
+  # time. That function is not idempotent — on an OpenAI-shaped provider it
+  # subtracts the cached overlap out of `input_tokens`, so applying it twice
+  # under-bills the fresh input by the cached amount. Exactly one reconcile per
+  # usage map, at the point the map first enters accounting, is the invariant.
+  defp accumulate_counters(state, norm, cost) do
+    state
+    |> put(:session_cost_usd, round6(get(state, :session_cost_usd, 0.0) + cost))
+    |> put(:session_input_tokens, get(state, :session_input_tokens, 0) + norm.input_tokens)
+    |> put(:session_output_tokens, get(state, :session_output_tokens, 0) + norm.output_tokens)
+    |> put(
+      :session_cache_creation_tokens,
+      get(state, :session_cache_creation_tokens, 0) + norm.cache_creation_input_tokens
+    )
+    |> put(
+      :session_cache_read_tokens,
+      get(state, :session_cache_read_tokens, 0) + norm.cache_read_input_tokens
+    )
+  end
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Side spend — LLM calls billed to the session but made OUTSIDE the loop
+  #
+  # `Agent.Compactor.bounded_chat/2` is the single choke point for every
+  # compaction/summarization provider call (three sites in `Compactor`, one in
+  # `Loop.ProactiveCompaction`). None of that usage ever reached `record/2`, so
+  # compaction was free as far as OSA's own books were concerned. It is real
+  # money on any long session, and it stops being rare the moment the
+  # compaction trigger thresholds are fixed.
+  #
+  # It cannot simply call `record/2`: compaction runs inside a supervised Task
+  # (`TurnPipeline.bounded_compaction/2`), a DIFFERENT process from the `Loop`
+  # GenServer, and it never sees the loop state. The immutable state thread
+  # does not cross that boundary, and neither does the process dictionary the
+  # crashed-turn stash uses.
+  #
+  # So the summarizer STAGES its priced usage into a public ETS ledger keyed by
+  # session id, and the loop ABSORBS it into state at the next point it holds
+  # both the state and the session id. Pricing/reconciliation happens once, at
+  # stage time, against the SUMMARIZER's own model and provider (which may
+  # differ from the session's). Absorb only adds.
+  # ══════════════════════════════════════════════════════════════════════
+
+  @side_table :osa_side_spend
+
+  @doc """
+  Stage one out-of-loop LLM round-trip's usage against `session_id`.
+
+  Called from whatever process made the call (typically a compaction task).
+  `opts` carries `:model` and `:provider` — the ones the call ACTUALLY used, not
+  the session's — plus a `:kind` label (default `:compaction`) that rides the
+  eventual `:cost_update` event so the spend is attributable.
+
+  Never raises: this is billing telemetry on a path whose failure must not take
+  compaction down with it.
+  """
+  @spec stage_side_spend(String.t() | nil, map() | nil, keyword()) :: :ok
+  def stage_side_spend(session_id, usage, opts \\ [])
+
+  def stage_side_spend(session_id, usage, opts)
+      when is_binary(session_id) and session_id != "" do
+    norm =
+      usage
+      |> normalize_usage()
+      |> reconcile_prompt_slices(Keyword.get(opts, :provider))
+
+    if norm.input_tokens + norm.output_tokens + norm.cache_creation_input_tokens +
+         norm.cache_read_input_tokens > 0 do
+      cost = Pricing.cost(Keyword.get(opts, :model), norm)
+      kind = Keyword.get(opts, :kind, :compaction)
+
+      table = side_table()
+
+      prior =
+        case :ets.lookup(table, session_id) do
+          [{^session_id, acc}] -> acc
+          _ -> %{usage: zero_usage(), cost_usd: 0.0, calls: 0, kinds: []}
+        end
+
+      acc = %{
+        usage: %{
+          input_tokens: prior.usage.input_tokens + norm.input_tokens,
+          output_tokens: prior.usage.output_tokens + norm.output_tokens,
+          cache_creation_input_tokens:
+            prior.usage.cache_creation_input_tokens + norm.cache_creation_input_tokens,
+          cache_read_input_tokens:
+            prior.usage.cache_read_input_tokens + norm.cache_read_input_tokens
+        },
+        cost_usd: round6(prior.cost_usd + cost),
+        calls: prior.calls + 1,
+        kinds: Enum.uniq([kind | prior.kinds])
+      }
+
+      :ets.insert(table, {session_id, acc})
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("[Accounting] stage_side_spend failed: #{inspect(e)}")
+      :ok
+  catch
+    _, _ -> :ok
+  end
+
+  def stage_side_spend(_session_id, _usage, _opts), do: :ok
+
+  @doc """
+  Merge (and clear) any staged side spend for `state`'s session into the
+  session counters. Returns the updated state; a no-op when nothing is staged,
+  so it is safe to call on every compaction path.
+
+  Deliberately does NOT touch `last_input_tokens`: a summarizer's prompt is not
+  the session's context, and writing it there would make the context-pressure
+  meter (and therefore the compaction trigger) read the summarizer's prompt
+  size as the conversation's size.
+  """
+  @spec absorb_side_spend(map()) :: map()
+  def absorb_side_spend(state) when is_map(state) do
+    session_id = Map.get(state, :session_id)
+
+    case take_side_spend(session_id) do
+      nil ->
+        state
+
+      acc ->
+        state = accumulate_counters(state, acc.usage, acc.cost_usd)
+
+        # Same surrender-across-a-crash guarantee the in-loop path gets.
+        stash_partial(state)
+
+        emit_cost_update(state, acc.usage, acc.cost_usd, %{
+          side_spend: true,
+          side_spend_calls: acc.calls,
+          side_spend_kinds: acc.kinds
+        })
+
+        maybe_bridge_budget(state, acc.usage, acc.cost_usd)
+
+        state
+    end
+  rescue
+    e ->
+      Logger.warning("[Accounting] absorb_side_spend failed: #{inspect(e)}")
+      state
+  end
+
+  def absorb_side_spend(state), do: state
+
+  @doc false
+  # Peek without consuming — tests and diagnostics only.
+  @spec peek_side_spend(String.t() | nil) :: map() | nil
+  def peek_side_spend(session_id) when is_binary(session_id) do
+    case :ets.lookup(side_table(), session_id) do
+      [{^session_id, acc}] -> acc
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def peek_side_spend(_), do: nil
+
+  @doc """
+  Drop any staged side spend for a session without billing it.
+
+  Used by session teardown so a dead session's ledger row cannot be absorbed by
+  a later session that happens to reuse the id.
+  """
+  @spec forget_side_spend(String.t() | nil) :: :ok
+  def forget_side_spend(session_id) when is_binary(session_id) do
+    :ets.delete(side_table(), session_id)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def forget_side_spend(_), do: :ok
+
+  defp take_side_spend(session_id) when is_binary(session_id) and session_id != "" do
+    table = side_table()
+
+    case :ets.take(table, session_id) do
+      [{^session_id, acc}] -> acc
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp take_side_spend(_), do: nil
+
+  # Lazily-created public named table, matching the convention used by
+  # `Agent.TurnTermination` and `Agent.RunStore` — no supervisor entry needed,
+  # and it survives every process that writes to it.
+  defp side_table do
+    case :ets.whereis(@side_table) do
+      :undefined ->
+        :ets.new(@side_table, [:named_table, :public, :set, read_concurrency: true])
+
+      _ ->
+        @side_table
+    end
+  rescue
+    ArgumentError -> @side_table
   end
 
   # ── Partial-spend surrender across a crashed turn ────────────────────────
@@ -213,11 +511,27 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   @doc """
   Return a compact spend snapshot for a session state — used by `Loop.get_state`
   so the TUI / auto-mode can display live spend.
+
+  Carries BOTH figures, explicitly named, because they answer different
+  questions and collapsing them has already cost us once:
+
+    * `:cost_usd` — this session NODE's own spend. What per-session display
+      wants, and the only figure any rollup may read (a parent sums its
+      children's node figures; a tree total in that slot double-counts).
+    * `:tree_cost_usd` — this node PLUS every descendant fleet node. What
+      "what did this task cost?" means once an arm delegates.
+    * `:tree_cost_complete` — false when part of the tree's bill could not be
+      read, in which case `:tree_cost_usd` is a LOWER BOUND. Display may show
+      it with a `≥`; enforcement must not spend on the strength of it.
   """
   @spec snapshot(map()) :: map()
   def snapshot(state) do
+    tree = safe_tree_spend(state)
+
     %{
       cost_usd: round6(get(state, :session_cost_usd, 0.0)),
+      tree_cost_usd: tree.usd,
+      tree_cost_complete: tree.complete,
       input_tokens: get(state, :session_input_tokens, 0),
       output_tokens: get(state, :session_output_tokens, 0),
       cache_creation_tokens: get(state, :session_cache_creation_tokens, 0),
@@ -225,6 +539,24 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       max_budget_usd: get(state, :max_budget_usd, nil)
     }
   end
+
+  @doc """
+  `tree_spend/1` that can never raise — for display and telemetry.
+
+  Enforcement paths must keep calling `tree_spend/1` (and fail closed on
+  `complete: false`); this one degrades to the node's own spend so a rollup
+  failure cannot break rendering a status line.
+  """
+  @spec safe_tree_spend(map()) :: %{usd: float(), complete: boolean(), unknown: [term()]}
+  def safe_tree_spend(state) when is_map(state) do
+    tree_spend(state)
+  rescue
+    _ -> %{usd: own_cost(state), complete: false, unknown: [:rollup_failed]}
+  catch
+    _, _ -> %{usd: own_cost(state), complete: false, unknown: [:rollup_failed]}
+  end
+
+  def safe_tree_spend(_), do: %{usd: 0.0, complete: false, unknown: [:no_state]}
 
   # ══════════════════════════════════════════════════════════════════════
   # Fleet / tree budget rollup (W2)
@@ -437,16 +769,23 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   # --- Private ---
 
-  defp emit_cost_update(state, norm, turn_cost) do
-    payload = %{
-      event: :cost_update,
-      session_id: Map.get(state, :session_id),
-      model: Map.get(state, :model),
-      turn_cost_usd: turn_cost,
-      session_cost_usd: get(state, :session_cost_usd, 0.0),
-      max_budget_usd: get(state, :max_budget_usd, nil),
-      usage: norm
-    }
+  defp emit_cost_update(state, norm, turn_cost, extra \\ %{}) do
+    payload =
+      %{
+        event: :cost_update,
+        session_id: Map.get(state, :session_id),
+        model: Map.get(state, :model),
+        turn_cost_usd: turn_cost,
+        session_cost_usd: get(state, :session_cost_usd, 0.0),
+        # The WHOLE-tree bill (this session plus every descendant fleet node).
+        # `session_cost_usd` above is this node's own spend and stays that way —
+        # every rollup reads node-local figures and would double-count a
+        # tree-total masquerading as one. See `tree_spend/1`.
+        tree_cost_usd: safe_tree_cost(state),
+        max_budget_usd: get(state, :max_budget_usd, nil),
+        usage: norm
+      }
+      |> Map.merge(extra)
 
     Bus.emit(:system_event, payload)
 
@@ -491,6 +830,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   rescue
     _ -> :ok
   end
+
+  # Whole-tree bill for display/telemetry. Never raises, and never blocks the
+  # turn on a rollup failure — it degrades to the node's own spend, which is a
+  # lower bound. Enforcement must NOT use this: it cannot tell a complete bill
+  # from a degraded one. `budget_exhausted?/1` uses `tree_spend/1` directly and
+  # fails closed on incompleteness; that is deliberate and stays that way.
+  #
+  # Cheap for the common case: a session with no fleet children resolves to one
+  # ETS lookup in `collect_descendants/1` plus the node's own float. Only a
+  # parent that actually fanned out pays the per-descendant sidecar read.
+  defp safe_tree_cost(state), do: safe_tree_spend(state).usd
 
   defp provider_atom(p) when is_atom(p) and not is_nil(p), do: p
 

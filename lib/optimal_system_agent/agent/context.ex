@@ -216,7 +216,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = build_system_message(static_base, world_state, volatile, provider)
+    system_msg = build_system_message(static_base, world_state, volatile, provider, model)
 
     # Per-process build counter. Assembling this message is the expensive part
     # of preparing a request — 21 dynamic blocks, each with its own budget —
@@ -399,8 +399,23 @@ defmodule OptimalSystemAgent.Agent.Context do
   # The second breakpoint is the payoff for the world-state diff: before it,
   # every dynamic token was re-prefilled on every single turn because one live
   # timestamp sat in the same uncached block as the tool doctrine and AGENTS.md.
-  defp build_system_message(static_base, world_state, volatile, provider) do
-    if provider == :anthropic and (world_state != "" or volatile != "") do
+  defp build_system_message(static_base, world_state, volatile, provider, model) do
+    # Blocks are emitted for any route that HONOURS `cache_control`, not just
+    # the native Anthropic one.
+    #
+    # This branch used to read `provider == :anthropic`. Every other provider —
+    # including Claude reached through OpenRouter, which is how the benchmarks
+    # actually run — got `[static, world_state, volatile] |> Enum.join("\n\n")`:
+    # one flat string, no breakpoints, and the volatile tail (clock, turn
+    # count, working tree) welded INSIDE it.
+    #
+    # Measured on the wire 2026-08-14 via a logging proxy, a real 3-turn
+    # headless session on `anthropic/claude-haiku-4.5`: 0 occurrences of
+    # `cache_control` in the request body, and ~29.9k of the ~31.0k input
+    # tokens were this static prefix plus the tool schemas — 96% of the
+    # request, re-sent uncached on every single turn.
+    if OptimalSystemAgent.Providers.Registry.anthropic_prompt_cache?(provider, model) and
+         (world_state != "" or volatile != "") do
       blocks =
         [
           %{type: "text", text: static_base, cache_control: %{type: "ephemeral"}},
@@ -775,6 +790,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       # race to a longer advisory block.
       {plan_mode_block(state), 0, "plan_mode"},
       {memory_block_relevant(state), 1, "memory"},
+      {memory_recall_block(state), 1, "memory_recall"},
       {episodic_block(state), 1, "episodic"},
       {task_state_block(state), 1, "task_state"},
       {workflow_block(state), 1, "workflow"},
@@ -1368,6 +1384,63 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  # Cross-tier memory recall (episodic ATTEMPTS + semantic skills), from
+  # `Agent.Memory.Coordinator`. Distinct from `memory_block_relevant/1` (the
+  # hybrid FTS5+vector long-term store) and from `episodic_block/1` (recent
+  # events in THIS session); this is "how did we do on tasks like this before".
+  #
+  # ## Why it lives here and not in the message list
+  #
+  # It used to be injected by `Loop.MessageHandler.build_pre_directives/2` as a
+  # `role: "system"` message appended to `state.messages` — permanently, once
+  # per user turn, with no budget. MEASURED over 15 turns: 14 near-identical
+  # copies in a single request, 2,950 tokens of which 2,717 were redundant —
+  # 24% of everything the session had accumulated, growing ~220 tokens/turn for
+  # as long as the session ran.
+  #
+  # Deleting the stale copy before appending a fresh one would have fixed the
+  # growth and broken something worse. `Providers.PromptCache` places a rolling
+  # cache breakpoint on the LAST HISTORY message, so turn N's cached segment is
+  # reusable only while it stays a strict PREFIX of turn N+1's request. Removing
+  # a message from the middle of history — or appending a per-turn block at the
+  # end, which next turn's real messages then displace — invalidates the whole
+  # stored segment. That is the exact failure `PromptCache` documents measuring
+  # (prefix pinned at 26,213 tokens for six turns), and it would have traded
+  # ~220 tokens/turn for the 93.5% hit rate.
+  #
+  # A dynamic block has neither problem. It is rebuilt from scratch each turn,
+  # so it cannot accumulate; it lands in the VOLATILE half of the system
+  # message, which `PromptCache` relocates AFTER the breakpoint, so it sits
+  # outside the cached prefix by construction; and it is fitted against the
+  # recall budget like every other recall block instead of being unbounded.
+  defp memory_recall_block(state) do
+    session_id = Map.get(state, :session_id)
+    query = find_latest_user_message(Map.get(state, :messages) || [])
+
+    if is_binary(session_id) and is_binary(query) and query != "" do
+      opts =
+        case cwd_or_nil() do
+          nil -> []
+          project -> [project: project]
+        end
+
+      case OptimalSystemAgent.Agent.Memory.Coordinator.recall_block(session_id, query, opts) do
+        block when is_binary(block) and block != "" -> "## Relevant memory\n" <> block
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp cwd_or_nil do
+    File.cwd!()
+  rescue
+    _ -> nil
   end
 
   defp episodic_block(state) do

@@ -476,8 +476,17 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   def normalize_outbound_messages(messages, target, opts) when is_list(messages) do
     messages
+    # FIRST: every step below reads or rebuilds these binaries, and the encoder
+    # at the end of the pipe raises on an undecodable byte. See
+    # `Utils.WireEncoding` — a `file_grep` hit on one latin-1 line used to kill
+    # the turn with `Jason.EncodeError: invalid byte 0xDA`, rescued into
+    # `{:error, "Provider error: …"}` and scored against the model.
+    |> OptimalSystemAgent.Utils.WireEncoding.scrub_messages()
     |> normalize_tool_call_arguments()
     |> normalize_message_content(target, opts)
+    # LAST: it reads the `cache_control` blocks the step above preserves, and
+    # appends a trailing message, so it must see the final message list.
+    |> Providers.PromptCache.restructure(target, opts)
   end
 
   def normalize_outbound_messages(messages, _target, _opts), do: messages
@@ -681,7 +690,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
       carry_images? = carry_images?(target, opts)
       reason = if carry_images?, do: nil, else: omission_reason(target)
 
-      Enum.map(messages, &flatten_message_content(&1, carry_images?, reason))
+      # The cache carve-out, exactly parallel to the image one above it. A
+      # `cache_control`-marked block list is the prompt-cache fix; flattening it
+      # to a string here is what silently deleted every breakpoint on the
+      # OpenRouter path and pinned the hit rate at 0%. `OpenAICompat` encodes
+      # these as OpenAI text content-parts with the marker preserved, which
+      # OpenRouter forwards to Anthropic.
+      keep_cache? = anthropic_prompt_cache?(target, Keyword.get(opts, :model))
+
+      Enum.map(messages, &flatten_message_content(&1, carry_images?, keep_cache?, reason))
     else
       messages
     end
@@ -694,6 +711,40 @@ defmodule OptimalSystemAgent.Providers.Registry do
     transport_carries_images?(target) and
       ImageBudget.vision_capable?(provider_key(target), Keyword.get(opts, :model))
   end
+
+  @doc """
+  Does this (provider, model) pair honour Anthropic-style `cache_control`
+  breakpoints on the wire?
+
+  MEASURED, not assumed. Against a live OpenRouter key on 2026-08-14, the same
+  12.4k-token system prefix sent twice:
+
+      cache_control present → cache_write 12,408 then cache_read 12,408, and
+                              the second request cost $0.00127
+      cache_control absent  → cached_tokens 0 on both, $0.01244 each
+
+  A 9.8x difference on identical content, decided by one field. OSA emitted
+  that field on the native Anthropic path only, so every Claude model reached
+  through OpenRouter — which is how the benchmarks actually run — paid the full
+  uncached rate on a ~30k-token prefix that never changed. That is the 0% cache
+  hit rate; it was never the timestamp.
+
+  Deliberately narrow. `cache_control` is an Anthropic wire field, and an
+  OpenAI-compatible gateway is only obliged to forward it when the upstream is
+  Anthropic. Gating on the model prefix as well as the provider means a
+  `openai/*` or `google/*` model routed through the same gateway keeps the
+  exact bytes it has today, so this cannot regress a non-Claude route.
+  """
+  @spec anthropic_prompt_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
+  def anthropic_prompt_cache?(target, model \\ nil)
+  def anthropic_prompt_cache?(:anthropic, _model), do: true
+  def anthropic_prompt_cache?(Providers.Anthropic, _model), do: true
+
+  def anthropic_prompt_cache?(provider, model)
+      when provider in [:openrouter, {:compat, :openrouter}] and is_binary(model),
+      do: String.starts_with?(model, "anthropic/")
+
+  def anthropic_prompt_cache?(_target, _model), do: false
 
   # `{:compat, _}` is served by `OpenAICompat`, whose `encode_content/1` emits
   # OpenAI `image_url` parts. Every other target is asked directly; a module
@@ -731,23 +782,29 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp structured_content?(%{"content" => c}) when is_list(c), do: true
   defp structured_content?(_msg), do: false
 
-  defp flatten_message_content(%{content: c} = msg, carry_images?, reason) when is_list(c) do
-    if carry_images? and Enum.any?(c, &image_block?/1) do
-      msg
-    else
-      %{msg | content: flatten_blocks(c, reason)}
+  defp flatten_message_content(%{content: c} = msg, carry_images?, keep_cache?, reason)
+       when is_list(c) do
+    cond do
+      carry_images? and Enum.any?(c, &image_block?/1) -> msg
+      keep_cache? and Enum.any?(c, &cache_marked?/1) -> msg
+      true -> %{msg | content: flatten_blocks(c, reason)}
     end
   end
 
-  defp flatten_message_content(%{"content" => c} = msg, carry_images?, reason) when is_list(c) do
-    if carry_images? and Enum.any?(c, &image_block?/1) do
-      msg
-    else
-      Map.put(msg, "content", flatten_blocks(c, reason))
+  defp flatten_message_content(%{"content" => c} = msg, carry_images?, keep_cache?, reason)
+       when is_list(c) do
+    cond do
+      carry_images? and Enum.any?(c, &image_block?/1) -> msg
+      keep_cache? and Enum.any?(c, &cache_marked?/1) -> msg
+      true -> Map.put(msg, "content", flatten_blocks(c, reason))
     end
   end
 
-  defp flatten_message_content(msg, _carry_images?, _reason), do: msg
+  defp flatten_message_content(msg, _carry_images?, _keep_cache?, _reason), do: msg
+
+  defp cache_marked?(%{cache_control: cc}) when not is_nil(cc), do: true
+  defp cache_marked?(%{"cache_control" => cc}) when not is_nil(cc), do: true
+  defp cache_marked?(_), do: false
 
   defp image_block?(%{type: t}) when t in ["image", "image_url", :image, :image_url], do: true
   defp image_block?(%{"type" => t}) when t in ["image", "image_url"], do: true

@@ -170,6 +170,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # never regenerated per request.
     opts = maybe_put_session(opts, Map.get(state, :session_id))
 
+    # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
+    OptimalSystemAgent.Agent.Loop.ContextTrace.dump(
+      Map.get(state, :session_id, "session"),
+      messages,
+      opts,
+      mode: "sync", iteration: Map.get(state, :iteration)
+    )
+
     Providers.chat(messages, opts)
   end
 
@@ -366,6 +374,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
     opts = maybe_put_session(opts, session_id)
+
+    # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
+    OptimalSystemAgent.Agent.Loop.ContextTrace.dump(session_id, messages, opts, mode: "stream")
 
     Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
 

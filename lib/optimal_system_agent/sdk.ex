@@ -408,6 +408,20 @@ defmodule OptimalSystemAgent.SDK do
       end
     end
 
+    @doc """
+    Record an EXTERNAL API call's raw token counts against the global ledger.
+
+    For SDK callers making their own provider calls, and for those only. OSA's
+    own agent loop must never reach this: `Loop.Accounting.record/2` already
+    prices every round-trip with `Agent.Pricing` and bridges the result via
+    `Budget.record_priced_cost/5`. Billing the same tokens here as well would
+    double-count them in the daily/monthly ledger `/cost` prints and `$/task`
+    is derived from — and this path re-prices from `Budget`'s coarse provider
+    table at the full input rate, so the two numbers would not even agree.
+
+    No in-tree caller exists (verified: the only other `record_cost/5` call site
+    was the dormant `cost_tracker` post-tool hook, which no longer bills).
+    """
     def record_cost(provider, model, tokens_in, tokens_out, session_id) do
       try do
         OptimalSystemAgent.Budget.record_cost(provider, model, tokens_in, tokens_out, session_id)

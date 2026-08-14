@@ -268,6 +268,53 @@ def render(
         ],
     )
 
+    # ---- 7b. the columns the field publishes -----------------------------
+    #
+    # docs/research/what-harnesses-benchmark.md §5 tabulates every competing
+    # harness on exactly these axes (goose's cross-harness table over 89
+    # Terminal-Bench 2 tasks). Reporting the same four is what makes our row
+    # directly comparable instead of merely adjacent. All are per ATTEMPTED
+    # task: a harness that solves nothing must not come out looking cheap.
+    def _pct(x):
+        return "n/a" if x is None else f"{x * 100:.1f}%"
+
+    L += ["### Comparable with the published field", ""]
+    L += _table(
+        ["metric", "this run", "field (Claude Code / opencode / pi / goose)"],
+        [
+            ["$ / task", _na(run.cost_usd_per_task, " USD"),
+             "$0.48 / $0.79 / $0.84 / $2.32-2.86"],
+            ["input tokens / task", _na(run.input_tokens_per_task),
+             "1.15M / 1.25M / 1.29M / 0.71-0.88M"],
+            ["in : out ratio", _na(run.in_out_ratio, ":1"), "85 / 70 / 64 / 56-67"],
+            ["cache hit rate", _pct(run.cache_hit_rate), "~100% / ~96% / ~96% / 0%"],
+        ],
+    )
+    L += [
+        "Cache hit rate is `cache_read / (uncached_input + cache_read + "
+        "cache_write)`. It reads `n/a`, never 0%, when no token accounting was "
+        "recorded — a working cache and absent telemetry are different "
+        "findings, and the streaming path was until recently dropping "
+        "`cache_read_input_tokens` outright, which made a working cache report "
+        "as 0%.",
+        "",
+    ]
+    caveats = run.cost_caveats
+    if caveats:
+        L += [
+            "> **These `$` figures carry caveats and must not be quoted "
+            "without them:**",
+            "",
+        ]
+        L += [f"> - {c}" for c in caveats]
+        L += [""]
+    else:
+        L += [
+            "Cost covers the whole agent tree (parent + subagents) and was "
+            "computed with post-fix rates.",
+            "",
+        ]
+
     # ---- 8. config fingerprint ------------------------------------------
     c = run.config
     L += ["## Configuration fingerprint", ""]

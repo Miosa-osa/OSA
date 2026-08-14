@@ -202,6 +202,142 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
     end
   end
 
+  # ── Provider prompt-slice conventions (the cache-rate misapplication) ────
+  #
+  # Anthropic reports input/cache_write/cache_read as DISJOINT slices; every
+  # OpenAI-shaped API reports `input_tokens` INCLUSIVE of `cached_tokens`.
+  # Pricing.cost/2 assumes disjoint, so an unreconciled inclusive map bills the
+  # cached portion at `1.0 + 0.1` of the input rate — 11x the real cache-read
+  # price — and effective_input_tokens/1 counts the cached prompt twice.
+  #
+  # The live cache-read count is 0 today, which is exactly why this is pinned
+  # now: the path goes live the moment prompt caching starts hitting, and a
+  # regression here would be invisible until the next provider invoice.
+  describe "reconcile_prompt_slices/2" do
+    test "an OpenAI-shaped inclusive map has the cached portion removed from input" do
+      norm =
+        Accounting.normalize_usage(%{
+          input_tokens: 100_000,
+          output_tokens: 1_000,
+          cache_read_input_tokens: 90_000
+        })
+
+      assert %{input_tokens: 10_000, cache_read_input_tokens: 90_000} =
+               Accounting.reconcile_prompt_slices(norm, :openrouter)
+    end
+
+    test "an Anthropic disjoint map is left exactly as reported" do
+      norm =
+        Accounting.normalize_usage(%{
+          input_tokens: 10_000,
+          output_tokens: 1_000,
+          cache_read_input_tokens: 90_000
+        })
+
+      assert Accounting.reconcile_prompt_slices(norm, :anthropic) == norm
+    end
+
+    test "an unknown provider is left alone rather than guessed in either direction" do
+      norm = Accounting.normalize_usage(%{input_tokens: 100, cache_read_input_tokens: 40})
+      assert Accounting.reconcile_prompt_slices(norm, nil) == norm
+      assert Accounting.reconcile_prompt_slices(norm, :some_new_provider) == norm
+    end
+
+    test "a {:compat, _} dispatch target is inclusive" do
+      norm = Accounting.normalize_usage(%{input_tokens: 100, cache_read_input_tokens: 40})
+
+      assert %{input_tokens: 60} =
+               Accounting.reconcile_prompt_slices(norm, {:compat, :openrouter})
+    end
+
+    test "reconciliation never drives input negative" do
+      norm = Accounting.normalize_usage(%{input_tokens: 10, cache_read_input_tokens: 999})
+      assert %{input_tokens: 0} = Accounting.reconcile_prompt_slices(norm, :openai)
+    end
+
+    test "reconciliation is NOT idempotent, so it must stay on exactly one path" do
+      # Stated rather than wished away: subtracting the cached portion twice
+      # under-bills. `record/2` is the single call site, applied to a freshly
+      # normalized provider map, and this pins the shape a second application
+      # would produce so that anyone adding a second call site sees why not.
+      norm = Accounting.normalize_usage(%{input_tokens: 100_000, cache_read_input_tokens: 90_000})
+      once = Accounting.reconcile_prompt_slices(norm, :openrouter)
+      twice = Accounting.reconcile_prompt_slices(once, :openrouter)
+
+      assert once.input_tokens == 10_000
+      assert twice.input_tokens == 0
+      refute twice == once
+    end
+
+    test "record/2 reconciles exactly once — the second call is a fresh round-trip" do
+      state = %{base_state() | provider: :openrouter, model: "anthropic/claude-opus-5"}
+      usage = %{input_tokens: 100_000, cache_read_input_tokens: 90_000}
+
+      one = Accounting.record(state, usage)
+      two = Accounting.record(one, usage)
+
+      # Two identical round-trips cost exactly twice one, not less.
+      assert_in_delta two.session_cost_usd, one.session_cost_usd * 2, 0.000_01
+      assert two.session_input_tokens == one.session_input_tokens * 2
+    end
+
+    test "record/2 bills a cache read at 0.1x, not 1.1x, on an OpenAI-shaped provider" do
+      state = %{
+        base_state()
+        | model: "anthropic/claude-opus-5",
+          provider: :openrouter
+      }
+
+      # 1M prompt tokens of which 900k were cache hits, reported inclusively.
+      usage = %{
+        input_tokens: 1_000_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 900_000
+      }
+
+      recorded = Accounting.record(state, usage)
+
+      # 100k fresh @ $5/1M + 900k cached @ $0.50/1M = 0.50 + 0.45
+      assert_in_delta recorded.session_cost_usd, 0.95, 0.000_01
+
+      # The unreconciled figure would have been 1M @ $5 + 900k @ $0.50 = $5.45.
+      refute_in_delta recorded.session_cost_usd, 5.45, 0.01
+    end
+
+    test "context pressure no longer counts the cached prompt twice" do
+      state = %{base_state() | provider: :openrouter, model: "anthropic/claude-opus-5"}
+
+      recorded =
+        Accounting.record(state, %{input_tokens: 1_000_000, cache_read_input_tokens: 900_000})
+
+      # The prompt occupied 1M tokens of context, not 1.9M.
+      assert recorded.last_input_tokens == 1_000_000
+    end
+  end
+
+  # ── Double counting ─────────────────────────────────────────────────────
+  describe "no double counting" do
+    test "one round-trip is billed exactly once" do
+      state = %{base_state() | model: "anthropic/claude-opus-5", provider: :openrouter}
+      usage = %{input_tokens: 1_534_954, output_tokens: 9_929}
+
+      once = Accounting.record(state, usage)
+      # This is the or-opus5-probe3 instance, reconciled against the provider.
+      assert_in_delta once.session_cost_usd, 7.923, 0.001
+      assert once.session_input_tokens == 1_534_954
+    end
+
+    test "the crash-recovery stash is an ABSOLUTE snapshot, so re-adopting cannot re-bill" do
+      state = %{base_state() | model: "anthropic/claude-opus-5", provider: :openrouter}
+      recorded = Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0})
+
+      twice = recorded |> Accounting.adopt_partial() |> Accounting.adopt_partial()
+
+      assert twice.session_cost_usd == recorded.session_cost_usd
+      assert twice.session_input_tokens == recorded.session_input_tokens
+    end
+  end
+
   describe "snapshot/1" do
     test "exposes running spend for the TUI / auto-mode" do
       state = Accounting.record(base_state(), %{input_tokens: 1_000_000, output_tokens: 0})

@@ -82,6 +82,41 @@ REFUSAL_MARKERS = (
 )
 
 
+#: OSA-internal faults that end a turn but were emitted as `kind: :llm_error`,
+#: i.e. as if the model provider had failed. There is now an additive `owner`
+#: field on `turn_error` that says `:osa`, but runs recorded before it carry no
+#: owner at all -- so historical artifacts are re-scored from the fault's own
+#: text, which is unambiguous.
+#:
+#: Measured on disk: `osa-hard40-airgap/sympy__sympy-13877` died at iteration 18
+#: on `Ollama unexpected error: invalid byte 0xA9 in <<...>>` -- a non-UTF-8
+#: file path in tool output -- and was filed as `model_no_patch`, fault=model.
+LEGACY_OSA_FAULT_MARKERS = (
+    ("encoding_fault", "invalid byte 0x"),
+    ("encoding_fault", "not valid utf-8"),
+    ("request_shape", "this is a bug in osa"),
+    ("request_shape", "request_shape"),
+    ("tool_use_mismatch", "tool_use_mismatch"),
+    ("duplicate_tool_use", "duplicate_tool_use"),
+)
+
+
+def _legacy_osa_fault(inference: dict) -> str | None:
+    """Name the OSA-internal fault a turn died on, for runs with no `owner`.
+
+    Only the FINAL message is consulted: a marker seen mid-run may have been
+    retried past, whereas the last thing the session said is what ended it.
+    """
+    sig = (inference.get("raw") or {}).get("osa_signals") or {}
+    tail = (sig.get("final_message_tail") or "").lower()
+    if not tail:
+        return None
+    for name, marker in LEGACY_OSA_FAULT_MARKERS:
+        if marker in tail:
+            return name
+    return None
+
+
 def _looks_refused(inference: dict) -> bool:
     sig = (inference.get("raw") or {}).get("osa_signals") or {}
     tail = (sig.get("final_message_tail") or "").strip().lower()
@@ -170,6 +205,40 @@ def classify(
             ],
         }
 
+    # A turn that ended on an OSA-internal fault. `st` covers runs recorded by
+    # the owner-aware runner; `_legacy_osa_fault` re-scores everything older.
+    legacy = _legacy_osa_fault(inference)
+    if st == "osa_internal_error" or legacy:
+        return {
+            "bucket": f"osa_internal_turn_error:{legacy or 'owner_osa'}",
+            "fault": "harness",
+            "evidence": [
+                inference.get("error")
+                or ((inference.get("raw") or {}).get("osa_signals") or {}).get(
+                    "final_message_tail", ""
+                )[:300],
+                "the turn ended on an OSA-internal fault emitted as an LLM "
+                "error; the missing/partial patch is not the model's doing",
+            ],
+        }
+    if st == "provider_error":
+        return {
+            "bucket": "provider_turn_error",
+            "fault": "provider",
+            "evidence": [inference.get("error") or "the provider failed the turn"],
+        }
+    if st == "turn_error_unattributed":
+        return {
+            "bucket": "turn_error_unattributed",
+            "fault": "unattributed",
+            "evidence": [
+                inference.get("error") or "turn ended on an error",
+                "the error carried no `owner` field and matched no known "
+                "OSA-internal fault, so it is attributed to nobody rather than "
+                "to the model",
+            ],
+        }
+
     # ---- 1. OSA visibly broke, in ways that make the patch irrelevant -----
     if st == "runner_error":
         err = inference.get("error") or ""
@@ -191,18 +260,6 @@ def classify(
             "fault": "harness",
             "evidence": [inference.get("error") or "agent exited non-zero"],
         }
-
-    if st == "timeout":
-        e = [f"agent hit the {inference.get('wall_clock_s', 0):.0f}s wall-clock budget"]
-        if sig.get("stalled"):
-            e.append(
-                f"and went silent for {sig.get('max_event_gap_s')}s at its longest "
-                f"gap, which is what a cut-off tool or a hung phase looks like "
-                f"from outside"
-            )
-        if sig.get("slowest_tool_ms"):
-            e.append(f"slowest single tool call {sig['slowest_tool_ms'] / 1000:.0f}s")
-        return {"bucket": "osa_timeout", "fault": "harness", "evidence": e}
 
     # ---- 2. Nothing was submitted -----------------------------------------
     if st == "tests_only_patch":
@@ -303,7 +360,12 @@ def classify(
 def summarize(rows: list[dict]) -> dict:
     """Aggregate the per-instance classifications into the report block."""
     buckets: dict[str, int] = {}
-    faults: dict[str, int] = {"none": 0, "model": 0, "harness": 0, "bench": 0}
+    faults: dict[str, int] = {
+        "none": 0, "model": 0, "harness": 0, "bench": 0,
+        # Neither OSA's code nor the model's competence. Kept separate so
+        # neither side absorbs them by default.
+        "provider": 0, "unattributed": 0,
+    }
     for r in rows:
         b = r.get("failure_bucket") or ""
         if b:

@@ -267,20 +267,42 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
   # ── Cost / telemetry ───────────────────────────────────────────────
 
-  # Cost tracker — record actual API costs after tool use.
-  def cost_tracker(%{tool_name: _name, result: _result} = payload) do
-    try do
-      provider = Map.get(payload, :provider, "unknown")
-      model = Map.get(payload, :model, "unknown")
-      tokens_in = Map.get(payload, :tokens_in, 0)
-      tokens_out = Map.get(payload, :tokens_out, 0)
-      session_id = Map.get(payload, :session_id, "unknown")
+  # Cost tracker — DORMANT BY MEASUREMENT, and deliberately refuses to bill.
+  #
+  # This is a registered `:post_tool_use` hook, so it runs after every tool
+  # call. It used to call `Budget.record_cost/5` — the COARSE path, which
+  # re-prices raw token counts against the ledger's own provider table — on any
+  # payload carrying `:tokens_in`/`:tokens_out`.
+  #
+  # Measured: the only `:post_tool_use` payload the loop constructs
+  # (`Loop.ToolExecutor`, `post_payload = %{tool_name, result, duration_ms,
+  # session_id}`) has neither key, and it is the only dispatch site for the
+  # event outside the external shell/HTTP hook bridges. So the branch has never
+  # fired. That is the ONLY reason it has not corrupted anything.
+  #
+  # If it ever did fire it would double-bill: LLM usage is already recorded
+  # exactly once by `Loop.Accounting.record/2`, which prices it with
+  # `Pricing.cost/2` and bridges the RESULT via `Budget.record_priced_cost/5`.
+  # A second, differently-priced write for the same tokens lands in the same
+  # daily/monthly ledger `/cost` prints — and `$/task` is a published number
+  # now, so a latent second billing path is not acceptable to leave armed.
+  #
+  # The hook stays registered (it is part of the post-hook contract and asserted
+  # by `hooks_test`/`hooks_ets_test`) but it no longer writes to the ledger. A
+  # payload that does carry token counts is a NEW producer that must go through
+  # the priced path, so it is surfaced loudly rather than silently billed.
+  def cost_tracker(%{tool_name: name, result: _result} = payload) do
+    tokens_in = Map.get(payload, :tokens_in, 0)
+    tokens_out = Map.get(payload, :tokens_out, 0)
 
-      if tokens_in > 0 or tokens_out > 0 do
-        OptimalSystemAgent.Budget.record_cost(provider, model, tokens_in, tokens_out, session_id)
-      end
-    catch
-      :exit, _ -> :ok
+    if is_number(tokens_in) and is_number(tokens_out) and tokens_in + tokens_out > 0 do
+      Logger.warning(
+        "[cost_tracker] post_tool_use payload for #{inspect(name)} carried token counts " <>
+          "(in=#{tokens_in} out=#{tokens_out}) — NOT billed. LLM usage is recorded exactly " <>
+          "once by Loop.Accounting.record/2 via Budget.record_priced_cost/5; billing here " <>
+          "too would double-count it in the ledger /cost prints. Route the new producer " <>
+          "through Loop.Accounting instead."
+      )
     end
 
     {:ok, payload}

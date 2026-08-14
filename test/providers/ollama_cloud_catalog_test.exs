@@ -102,7 +102,16 @@ defmodule OptimalSystemAgent.Providers.OllamaCloudCatalogTest do
       for m <- OllamaCloud.models() do
         assert OllamaCloud.cloud_tag?(m.id), "#{m.id} is not a recognised cloud tag"
         assert is_integer(m.ctx) and m.ctx > 0
-        assert m.ctx_source in [:probe, :docs]
+        # `:static` joined `:probe` and `:docs` as a provenance. It is the
+        # honest label for a tag whose /api/show model_info carries no
+        # `context_length` at all, so the probe CANNOT resolve it and there is
+        # no published figure to cite either — `glm-4.7:cloud` is the case that
+        # forced it. The alternative was leaving such a tag out of the catalog,
+        # which is what made `ContextWindow.resolve/1` answer `:unknown` for a
+        # model this project ships as its configured default. A weaker
+        # provenance recorded as such beats an absent entry; what the assertion
+        # still forbids is an entry with no stated provenance at all.
+        assert m.ctx_source in [:probe, :docs, :static]
         assert is_binary(m.note) and m.note != ""
       end
 

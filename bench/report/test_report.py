@@ -120,6 +120,82 @@ def make_results(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# cost: whole-tree preference, completeness, and the pricing epoch
+# ---------------------------------------------------------------------------
+
+
+class TestCostColumns(unittest.TestCase):
+    """The four columns the published field reports, plus the two flags that
+    decide whether the `$` may be quoted at all."""
+
+    def _run(self, tmp, **kw):
+        doc = make_results(n=4, k=2, cost=kw.pop("cost", 0.5), **{
+            k: v for k, v in kw.items() if k in ("started", "run_id")
+        })
+        for inst in doc["instances"]:
+            if "cost_complete" in kw:
+                inst["cost_complete"] = kw["cost_complete"]
+            inst["tokens_in"] = kw.get("tokens_in", 1000)
+            inst["tokens_cache_read"] = kw.get("cache_read", 0)
+            inst["tokens_cache_write"] = kw.get("cache_write", 0)
+            inst["tokens_out"] = kw.get("tokens_out", 100)
+        return write_run(tmp, doc)
+
+    def test_per_task_metrics_are_per_attempted_task(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t), cost=0.5)
+            # 4 tasks, 2 resolved: $/task must use 4, not 2.
+            self.assertAlmostEqual(r.cost_usd_per_task, 0.5)
+            self.assertAlmostEqual(r.input_tokens_per_task, 1000.0)
+            self.assertAlmostEqual(r.in_out_ratio, 10.0)
+
+    def test_cache_hit_rate_counts_reads_over_all_input(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t), tokens_in=100, cache_read=900, cache_write=0)
+            self.assertAlmostEqual(r.cache_hit_rate, 0.9)
+            # cache reads are input the model saw, so they count in in/task too
+            self.assertAlmostEqual(r.input_tokens_per_task, 1000.0)
+
+    def test_cache_hit_rate_is_none_not_zero_without_token_accounting(self):
+        with tempfile.TemporaryDirectory() as t:
+            doc = make_results(n=2, k=1)
+            for inst in doc["instances"]:
+                inst["tokens_in"] = inst["tokens_cache_read"] = None
+                inst["tokens_cache_write"] = None
+            r = write_run(Path(t), doc)
+            # "no data" and "no cache hits" are different findings.
+            self.assertIsNone(r.cache_hit_rate)
+
+    def test_missing_cost_complete_is_parent_only_not_complete(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t))  # no cost_complete field at all
+            self.assertEqual(r.cost_completeness, "parent_only")
+            self.assertTrue(any("PARENT SESSION ONLY" in c for c in r.cost_caveats))
+
+    def test_incomplete_tree_is_reported_as_a_lower_bound(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t), cost_complete=False,
+                          started="2026-08-15T10:00:00+00:00")
+            self.assertEqual(r.cost_completeness, "lower_bound")
+            self.assertTrue(any("LOWER BOUND" in c for c in r.cost_caveats))
+
+    def test_complete_tree_post_fix_has_no_caveats(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t), cost_complete=True,
+                          started="2026-08-15T10:00:00+00:00")
+            self.assertEqual(r.cost_completeness, "tree")
+            self.assertEqual(r.pricing_epoch, "post_fix")
+            self.assertEqual(r.cost_caveats, [])
+
+    def test_pre_fix_run_is_flagged_as_incomparable(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(Path(t), started="2026-08-13T10:00:00+00:00")
+            self.assertEqual(r.pricing_epoch, "pre_fix")
+            self.assertTrue(any("2.487x" in c for c in r.cost_caveats))
+
+
 def write_run(tmp: Path, doc: dict) -> Run:
     d = tmp / doc["config"]["run_id"]
     d.mkdir(parents=True, exist_ok=True)

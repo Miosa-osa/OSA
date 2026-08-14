@@ -419,42 +419,20 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> maybe_add_progress_ledger_directive(state)
-    |> maybe_add_memory_directive(message, state)
     |> Enum.reverse()
   end
 
-  # Inject a compact "relevant memory" block recalled across the three memory
-  # tiers (episodic attempts + semantic skills) for the current user message.
-  # Mirrors maybe_add_progress_ledger_directive: best-effort, injects nothing
-  # when no relevant memory is found or the coordinator is unavailable.
-  defp maybe_add_memory_directive(acc, message, %{session_id: sid})
-       when is_binary(sid) and is_binary(message) do
-    project = state_cwd()
-
-    opts = if project, do: [project: project], else: []
-
-    try do
-      case OptimalSystemAgent.Agent.Memory.Coordinator.recall_block(sid, message, opts) do
-        block when is_binary(block) and block != "" ->
-          [%{role: "system", content: "[System: Relevant memory]\n" <> block} | acc]
-
-        _ ->
-          acc
-      end
-    rescue
-      _ -> acc
-    catch
-      :exit, _ -> acc
-    end
-  end
-
-  defp maybe_add_memory_directive(acc, _message, _state), do: acc
-
-  defp state_cwd do
-    File.cwd!()
-  rescue
-    _ -> nil
-  end
+  # The cross-tier memory recall block used to be injected here, as a
+  # `role: "system"` message appended permanently to `state.messages` once per
+  # user turn. MEASURED over 15 turns: 14 near-identical copies in one request,
+  # 2,717 redundant tokens, growing ~220/turn forever.
+  #
+  # It now lives in `Agent.Context.memory_recall_block/1` as a dynamic block, so
+  # it is rebuilt (not accumulated) each turn, budgeted with the other recall
+  # blocks, and placed in the volatile system tail where `Providers.PromptCache`
+  # moves it outside the cached prefix. See that function for why deleting the
+  # previous copy in place — the obvious fix — would have broken prefix
+  # stability and cost more than it saved.
 
   # Prepend a compact recap of the progress ledger so coherence survives
   # context resets/compaction. summarize/1 returns {:error, :not_found} until

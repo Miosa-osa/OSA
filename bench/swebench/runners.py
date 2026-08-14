@@ -74,6 +74,11 @@ class RunResult:
     tokens_cache_read: Optional[int] = None
     tokens_cache_write: Optional[int] = None
     cost_usd: Optional[float] = None
+    #: True  -> cost_usd covers the whole agent tree (parent + subagents).
+    #: False -> a descendant's spend could not be read: cost_usd is a LOWER BOUND.
+    #: None  -> recorded before tree costs existed; parent-only, completeness
+    #:          unknowable. Never render None as if it were True.
+    cost_complete: Optional[bool] = None
     tool_calls: Optional[int] = None
     turns: Optional[int] = None
 

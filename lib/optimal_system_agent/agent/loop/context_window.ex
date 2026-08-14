@@ -23,10 +23,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextWindow do
   admits ignorance — NOT `effective_context_window/2`, which silently
   substitutes the 128k config default for any model nobody has heard of.
 
-  Callers must handle `:unknown` deliberately. For compaction the policy is to
-  DEFER (see `Agent.Compactor.maybe_compact/4`): a guessed denominator is what
-  caused the bug, and an unnecessary compaction is unrecoverable while a
-  deferred one is corrected by the provider's own context-length error.
+  Callers must handle `:unknown` deliberately, and "deliberately" is not the
+  same policy everywhere:
+
+    * **Metering** (status bar, telemetry) reports ignorance as ignorance. A
+      meter that invents a denominator is worse than a blank one.
+    * **Compaction** substitutes `CompactionThresholds.fallback_window/0`.
+      Deferring used to be right — a guessed 128k denominator on a 1M model
+      fired a fidelity-destroying summarization at ~11% occupancy — but that
+      argument died with the absolute ceiling: every window at or above the
+      ceiling now yields the same thresholds, so the guess is exact for those
+      models and bounded below them. Deferring today means a model missing from
+      a lookup table runs with compaction silently switched off for the life of
+      the session, which is fail-open on a safety mechanism. MEASURED on
+      `glm-4.7:cloud`.
   """
 
   alias OptimalSystemAgent.Providers.Registry

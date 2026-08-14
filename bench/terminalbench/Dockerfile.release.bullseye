@@ -1,0 +1,70 @@
+# Build a portable, self-contained OSA OTP release for injection into
+# Terminal-Bench task containers.
+#
+# Why bookworm and not this host (Ubuntu 24.04, glibc 2.39):
+#
+#   A Mix release bundles ERTS, but ERTS is native code. It links glibc and
+#   OpenSSL dynamically, so a release built on glibc 2.39 will NOT start on a
+#   task image with an older glibc, and glibc is not forward compatible. The
+#   Terminal-Bench 2.0 task images are:
+#
+#       41x python:3.13-slim-bookworm   glibc 2.36  libcrypto.so.3
+#       40x ubuntu:24.04                glibc 2.39  libcrypto.so.3
+#        4x python:3.1x-slim(-bookworm) glibc 2.36  libcrypto.so.3
+#        2x debian:13.0-slim (trixie)   glibc 2.41  libcrypto.so.3
+#        2x debian:bullseye-slim        glibc 2.31  libcrypto.so.1.1
+#
+#   Building on bookworm (glibc 2.36, OpenSSL 3) therefore covers 87 of the 89
+#   tasks. The two bullseye tasks are out of reach for this artefact and are
+#   reported as such rather than silently skipped.
+#
+# OTP 26.2.5 / Elixir 1.17.3 match .github/workflows/release.yml exactly; OTP 27+
+# has Mix release bugs that OSA has not yet cleared.
+FROM hexpm/elixir:1.17.3-erlang-26.2.5-debian-bullseye-20260610-slim
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        git build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV MIX_ENV=prod
+
+# exqlite ships a PRECOMPILED sqlite3_nif.so and prefers it over building, and
+# that prebuilt binary requires GLIBC_2.33. Bullseye has 2.31, so building the
+# release *on* bullseye still yields an artefact whose boot dies with:
+#
+#   Failed to load NIF library: '/lib/x86_64-linux-gnu/libc.so.6: version
+#   `GLIBC_2.33' not found (required by .../exqlite-0.35.0/priv/sqlite3_nif.so)'
+#
+# (measured -- this is what the pre-force-build bullseye artefact does).
+# Forcing a source build is what actually makes the artefact bullseye-native.
+#
+# exqlite reads this as *build-time application config*, not an env var:
+#   deps/exqlite/mix.exs:14  make_force_build: Application.get_env(:exqlite, :force_build, false)
+# so an `ENV EXQLITE_FORCE_BUILD=1` does nothing (measured: the artefact built
+# that way still shipped the GLIBC_2.33 prebuilt .so). The config line is
+# appended to the *staged copy* of config/config.exs inside this image; the repo
+# is untouched.
+WORKDIR /src
+
+COPY . /src
+
+RUN printf '\n# bench/terminalbench: build sqlite3_nif from source (see header)\nconfig :exqlite, force_build: true\n' >> /src/config/config.exs
+
+RUN mix local.hex --force && mix local.rebar --force
+RUN mix deps.get --only prod
+RUN mix release osagent --overwrite
+
+# Collect the release plus the handful of host shared libraries ERTS resolves at
+# runtime, so the tarball does not depend on the task image having them.
+RUN set -eux; \
+    mkdir -p /out/vendor; \
+    for lib in \
+        /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 \
+        /usr/lib/x86_64-linux-gnu/libssl.so.1.1 \
+        /lib/x86_64-linux-gnu/libtinfo.so.6 \
+        /lib/x86_64-linux-gnu/libncursesw.so.6 \
+    ; do [ -f "$lib" ] && cp -L "$lib" /out/vendor/ || true; done; \
+    cp -a /src/_build/prod/rel/osagent /out/osagent; \
+    mv /out/vendor /out/osagent/vendor; \
+    tar -C /out -czf /osa-release-linux-x86_64.tar.gz osagent; \
+    ls -la /osa-release-linux-x86_64.tar.gz

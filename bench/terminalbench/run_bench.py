@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-"""Terminal-Bench 2.0 runner for OSA.
+"""Harbor benchmark runner for OSA.
 
 Harbor is the harness; this is the thin layer around it that (a) supplies the
 flags OSA needs, and (b) turns Harbor's per-trial output into one results file
 with the honesty flags attached, in the same shape as bench/swebench.
 
+The dataset is a FIRST-CLASS, RECORDED INPUT (`bench/terminalbench/datasets.py`).
+It used to be hard-coded to a local clone of Terminal-Bench 2.0, which is a
+superseded task set: 2.1 modified 26 of the same 89 tasks, so a failure recorded
+against 2.0 may be an artefact of a task that has since been fixed. The default
+is now **2.1**; 2.0 is still runnable, on purpose, so old results stay
+re-derivable and 2.0-vs-2.1 deltas can be attributed.
+
     # sanity: the oracle solutions must score 1.0, or the harness is broken
     ./run_bench.py --agent oracle --tasks regex-log
 
-    # OSA on a named task
+    # OSA on a named task, on the CURRENT Terminal-Bench
     ./run_bench.py --agent osa --tasks regex-log
 
-    # OSA on the hard end
-    ./run_bench.py --agent osa --difficulty hard --limit 8
+    # OSA on the hard end of the superseded 2.0 set, for comparison
+    ./run_bench.py --dataset-key tb2.0 --agent osa --difficulty hard --limit 8
 
-Run `--agent oracle` first on any new machine. It should score 1.0 on every
-task; if it does not, the harness is broken rather than the agent.
+    # the cheap cross-agent instrument
+    ./run_bench.py --dataset-key harbor-index --agent osa --limit 8
+
+    # the fixed cost probe (same 8 tasks every time; see probeset.py)
+    ./run_bench.py --agent osa --probe
+
+Run `--agent oracle` first on any new machine, or better, use
+`./controls.py run --dataset-key <k>`, which runs oracle AND nop and writes the
+gate file that `controls.py gate` reads. An OSA number from a dataset whose
+oracle did not score ~100% is not a measurement of OSA.
 """
 
 from __future__ import annotations
@@ -33,10 +48,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import datasets as datasets_mod  # noqa: E402
+import probeset as probeset_mod  # noqa: E402
 import report as report_mod  # noqa: E402
 
 TASKS_DIR_ENV = "OSA_TBENCH_TASKS_DIR"
-DEFAULT_DATASET = "terminal-bench@2.0"
+#: Legacy-registry id, still accepted via --legacy-dataset. The legacy registry
+#: has not been updated past Terminal-Bench 2.0; see datasets.py.
+DEFAULT_LEGACY_DATASET = "terminal-bench@2.0"
+DEFAULT_DATASET_KEY = "tb2.1"
 
 
 def log(msg: str) -> None:
@@ -62,18 +82,23 @@ def harbor_version() -> str:
         return "?"
 
 
-def local_tasks_dir() -> Path | None:
-    """A local clone of harbor-framework/terminal-bench-2, if one is configured.
+def local_tasks_dir(ds: "datasets_mod.Dataset | None") -> Path | None:
+    """The on-disk copy of the selected dataset, if there is one.
 
-    Using the local clone avoids re-resolving the registry on every run and is
-    the only way to filter on task.toml metadata (difficulty), which the Harbor
-    CLI does not expose as a flag.
+    Using the local copy avoids re-resolving the registry on every run, is the
+    only way to filter on task.toml metadata (difficulty) — which the Harbor CLI
+    does not expose as a flag — and pins the task content so an upstream edit
+    mid-run cannot change the denominator underneath us. That last point matters
+    for `tb3`, which is a continuous benchmark whose `@latest` moves.
+
+    `OSA_TBENCH_TASKS_DIR` still overrides everything, for a scratch task set.
     """
     p = os.environ.get(TASKS_DIR_ENV)
     if p and Path(p).is_dir():
         return Path(p)
-    default = HERE / "tasks" / "terminal-bench-2"
-    return default if default.is_dir() else None
+    if ds is None:
+        return None
+    return ds.path if ds.present else None
 
 
 def read_task_meta(task_dir: Path) -> dict:
@@ -88,21 +113,20 @@ def read_task_meta(task_dir: Path) -> dict:
         return {}
 
 
-def select_tasks(args) -> tuple[list[str], int]:
+def select_tasks(args, ds) -> tuple[list[str], int]:
     """Return (task names, dataset size).
 
-    Difficulty filtering requires the local clone; without it the only filters
+    Difficulty filtering requires the local copy; without it the only filters
     Harbor itself offers are name globs and a count.
     """
-    tasks_dir = local_tasks_dir()
+    tasks_dir = local_tasks_dir(ds)
     if tasks_dir is None:
         if args.difficulty:
             raise SystemExit(
-                f"--difficulty needs a local task clone. Set {TASKS_DIR_ENV} or:\n"
-                f"  git clone --depth 1 https://github.com/harbor-framework/terminal-bench-2 "
-                f"{HERE / 'tasks' / 'terminal-bench-2'}"
+                f"--difficulty needs a local copy of the task set. Fetch it:\n"
+                f"  ./datasets.py sync {ds.key if ds else 'tb2.1'}"
             )
-        return (args.tasks or []), report_mod.TERMINAL_BENCH_2_SIZE
+        return (args.tasks or []), (ds.size if ds else 0)
 
     all_dirs = sorted(p.parent for p in tasks_dir.glob("*/task.toml"))
     dataset_size = len(all_dirs)
@@ -130,15 +154,23 @@ def main() -> int:
     )
     ap.add_argument("--agent", default="osa", help="osa | oracle | nop | any harbor agent")
     ap.add_argument("--run-id", default=None, help="defaults to <agent>-<timestamp>")
-    ap.add_argument("--dataset", default=None,
-                    help=f"harbor dataset id (default {DEFAULT_DATASET}); "
-                         "ignored when a local task clone is used")
+    ap.add_argument("--dataset-key", default=DEFAULT_DATASET_KEY,
+                    choices=list(datasets_mod.ORDER),
+                    help=f"which task set (default {DEFAULT_DATASET_KEY}). "
+                         "See ./datasets.py list")
+    ap.add_argument("--legacy-dataset", default=None,
+                    help="bypass --dataset-key and resolve a LEGACY registry id "
+                         f"(e.g. {DEFAULT_LEGACY_DATASET}). The legacy registry "
+                         "stops at Terminal-Bench 2.0")
 
     sel = ap.add_argument_group("task selection")
     sel.add_argument("--tasks", nargs="*", default=None, help="task directory names")
     sel.add_argument("--difficulty", default=None, choices=["easy", "medium", "hard"],
-                     help="from task.toml [metadata]; needs the local clone")
+                     help="from task.toml [metadata]; needs the local copy")
     sel.add_argument("--limit", type=int, default=None)
+    sel.add_argument("--probe", action="store_true",
+                     help="run the FIXED cost-probe task set for this dataset "
+                          "(see probeset.py). Overrides --tasks/--difficulty")
 
     run = ap.add_argument_group("execution")
     run.add_argument("--model", default=None, help="passed to harbor as -m provider/model")
@@ -161,15 +193,36 @@ def main() -> int:
     out = HERE / "runs" / run_id
     out.mkdir(parents=True, exist_ok=True)
 
-    tasks_dir = local_tasks_dir()
-    chosen, dataset_size = select_tasks(args)
+    ds = None if args.legacy_dataset else datasets_mod.get(args.dataset_key)
+    if ds is not None and not ds.present:
+        raise SystemExit(
+            f"dataset '{ds.key}' is not on disk at {ds.path}.\n"
+            f"  ./datasets.py sync {ds.key}"
+        )
+
+    if args.probe:
+        probe = probeset_mod.get(args.dataset_key)
+        args.tasks = list(probe.tasks)
+        args.difficulty = None
+        args.limit = None
+
+    tasks_dir = local_tasks_dir(ds)
+    chosen, dataset_size = select_tasks(args, ds)
 
     config = {
         "run_id": run_id,
         "agent": args.agent,
         "model": args.model,
-        "dataset": str(tasks_dir) if tasks_dir else (args.dataset or DEFAULT_DATASET),
+        # The key is what everything downstream keys off; the path/id is the
+        # provenance. Both are recorded because either alone is ambiguous.
+        "dataset_key": ds.key if ds else "legacy",
+        "dataset_label": ds.label if ds else (args.legacy_dataset or DEFAULT_LEGACY_DATASET),
+        "dataset_status": ds.status if ds else "unknown",
+        "dataset_hub_id": ds.hub_id if ds else None,
+        "dataset": str(tasks_dir) if tasks_dir else (args.legacy_dataset or DEFAULT_LEGACY_DATASET),
         "dataset_size": dataset_size,
+        "dataset_notes": list(ds.notes) if ds else [],
+        "probe_set": probeset_mod.get(args.dataset_key).name if args.probe else None,
         "tasks_requested": chosen,
         "difficulty_filter": args.difficulty,
         "n_concurrent": args.n_concurrent,
@@ -194,7 +247,7 @@ def main() -> int:
             if not chosen:
                 raise SystemExit("no tasks selected")
         else:
-            cmd += ["-d", args.dataset or DEFAULT_DATASET]
+            cmd += ["-d", args.legacy_dataset or DEFAULT_LEGACY_DATASET]
             for t in (args.tasks or []):
                 cmd += ["-i", t]
             if args.limit:

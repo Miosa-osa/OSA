@@ -1,11 +1,18 @@
 # The OTP release artefact: ~17 MB of bundled ERTS, rebuilt with ./build_release.sh
 dist/
+dist-bullseye/
 .buildctx/
+.buildctx-bullseye/
 
-# Local clone of harbor-framework/terminal-bench-2 (89 task definitions)
+# Downloaded task definitions, one directory per dataset. Reproduce with
+# `./datasets.py sync`; the sizes and hub ids are pinned in datasets.py.
 tasks/
 
-# Harbor + report output
+# Harbor + report output. NOTE this also covers runs/_controls/<ds>/controls.json,
+# the file `controls.py gate` reads. That is deliberate: a control observation is
+# a statement about THIS machine's images, timeouts and credentials, and is not
+# transferable. On a fresh checkout the gate correctly reports "no controls have
+# ever been run" and blocks, rather than inheriting someone else's assurance.
 runs/
 
 .venv/

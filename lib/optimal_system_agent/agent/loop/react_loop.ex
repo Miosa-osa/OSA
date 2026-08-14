@@ -301,9 +301,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               # post-compaction continuation (cleared when the model continues with a
               # tool call — see the tool-calls branch). Map.put, since the loop state
               # is a plain map that may not have this key at every entry point.
+              # `ProactiveCompaction.compact/2` just made one or more summarizer
+              # round-trips. They cost real money and used to be recorded
+              # nowhere; they now stage into `Accounting`'s side ledger and are
+              # billed to this session here. A no-op when nothing was staged.
               %{state | messages: compacted}
               |> Map.put(:just_compacted, changed?)
               |> Map.put(:just_compacted_overflow, false)
+              |> Accounting.absorb_side_spend()
 
             ProactiveCompaction.should_microcompact?(state, cw) ->
               # Warning band: cheap standalone microcompact pass (truncate
@@ -429,6 +434,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end
 
     input_tokens = Map.get(usage, :input_tokens, 0)
+
+    # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
+    OptimalSystemAgent.Agent.Loop.ContextTrace.usage(state.session_id, usage,
+      iteration: state.iteration,
+      duration_ms: duration_ms,
+      state_message_count: length(state.messages || [])
+    )
 
     # Record real token usage + cost for this LLM round-trip and accumulate it
     # into the per-session accounting (primitive #29). Also refreshes
@@ -1000,21 +1012,51 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # resolved from `effective_context_window_info/2`, the variant that admits
   # ignorance.
   #
-  # Returns 0 for "unknown", which makes the caller's `cw > 0` guard skip
-  # compaction entirely. That deferral is deliberate: the previous behaviour
-  # here fell back to the trained window and ultimately to the flat 128k config
-  # default, on the reasoning that "never compacting is far worse than
-  # compacting against a rough number". That reasoning was wrong and is the
-  # exact shape of the bug this path now avoids — a rough number on a 1M-window
-  # model fires a fidelity-destroying summarization at ~11% occupancy, every
-  # turn, unrecoverably. An unknown window instead waits for the provider's own
-  # context-length error, which the reactive ContextCollapse / forced-compaction
-  # path in handle_result/3 already handles.
+  # An UNKNOWN window resolves to `CompactionThresholds.fallback_window/0`, not
+  # to 0.
+  #
+  # Returning 0 made the caller's `cw > 0` guard skip compaction entirely, and
+  # that deferral was deliberate: the behaviour before it fell back to the flat
+  # 128k config default, which on a 1M-window model fired a fidelity-destroying
+  # summarization at ~11% occupancy, every turn, unrecoverably. Deferring was
+  # the right call against that failure.
+  #
+  # It stopped being the right call once `CompactionThresholds` grew an
+  # absolute ceiling. The old objection was that a guess can be an order of
+  # magnitude wrong; with the clamp, EVERY window at or above the ceiling
+  # produces identical thresholds, so for those models the guess is not
+  # approximately right, it is exactly right — `compact_at` is 167,000 whether
+  # we know the model has 200k, 1M, or nothing at all. Below the ceiling the
+  # guess compacts later than ideal and the reactive ContextCollapse path in
+  # handle_result/3 still catches the provider's context-length error, which is
+  # a bounded, recoverable error.
+  #
+  # What it is no longer is fail-OPEN. MEASURED: `glm-4.7:cloud` resolves to
+  # `:unknown` — Ollama's /api/show reports no context_length for that tag and
+  # it was absent from the static table — so a model this machine is configured
+  # to run had compaction silently disabled for the entire life of every
+  # session. A safety mechanism must not switch itself off for the models
+  # nobody remembered to enumerate.
+  #
+  # `ContextWindow.resolve/1` itself stays honest and keeps returning
+  # `:unknown`; the status meter and every other consumer still see ignorance
+  # as ignorance. Only the compaction DECISION substitutes a bounded default.
   @spec effective_context_window(map()) :: non_neg_integer()
   defp effective_context_window(state) do
     case OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state) do
-      {:ok, cw} -> cw
-      :unknown -> 0
+      {:ok, cw} ->
+        cw
+
+      :unknown ->
+        fallback = OptimalSystemAgent.Agent.Loop.CompactionThresholds.fallback_window()
+
+        Logger.debug(
+          "[loop] context window unknown for model=#{inspect(Map.get(state, :model))} " <>
+            "provider=#{inspect(Map.get(state, :provider))} — compacting against the " <>
+            "conservative fallback window #{fallback}"
+        )
+
+        fallback
     end
   end
 
@@ -1501,12 +1543,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
           category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
 
+          # `kind` is ATTRIBUTION, and it was a lie for a whole class of
+          # failures. Not every reason that reaches here is the provider's: an
+          # encoding fault (a tool result carrying non-UTF-8 bytes, which
+          # `Jason` refuses before any HTTP call), a body OSA assembled wrong,
+          # a crash inside a provider module — all arrive as
+          # `{:error, "Provider error: …"}` and all used to be stamped
+          # `:llm_error`.
+          #
+          # Downstream that is not cosmetic. The benchmark driver keys on this
+          # to set `status: "provider_error"`, so every OSA defect in this
+          # class inflated the measured MODEL failure rate and hid itself in
+          # the process — in exactly the numbers the current work is being
+          # judged by.
+          owner = OptimalSystemAgent.Providers.ErrorCatalog.fault_owner(reason)
+          kind = if owner == :osa, do: :harness_error, else: :llm_error
+
           Observability.emit(
             :system_event,
             %{
               event: :error,
-              kind: :llm_error,
+              kind: kind,
               category: category,
+              # Additive, and the field a consumer should actually read: `kind`
+              # keeps its old values for old consumers, `owner` answers the
+              # only question attribution cares about.
+              owner: owner,
               reason: reason_str,
               iteration: state.iteration
             },
@@ -1536,7 +1598,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           # Carried on state and surfaced as an additive field on the
           # agent_response event, so existing consumers are unaffected and new
           # ones can tell an outage from an answer.
-          state = Map.put(state, :turn_error, %{category: category, reason: reason_str})
+          #
+          # `owner` rides along for the same reason it is on the system_event:
+          # the driver currently maps ANY `turn_error` to
+          # `status: "provider_error"`, which is wrong when the fault is ours.
+          # Additive, so a driver that ignores it behaves exactly as before.
+          state =
+            Map.put(state, :turn_error, %{
+              category: category,
+              owner: owner,
+              reason: reason_str
+            })
 
           {message, state}
         end

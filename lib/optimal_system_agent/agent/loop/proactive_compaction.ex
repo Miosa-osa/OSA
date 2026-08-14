@@ -229,7 +229,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         started_at = System.monotonic_time(:millisecond)
         CompactionEvents.started(session_id, :manual, older_tokens)
 
-        case summarize_with_retries(older, @summary_retries, instructions) do
+        # Same process-dictionary stash `Compactor.run_pipeline/6` sets, for the
+        # same reason and now for a second consumer: `Compactor.bounded_chat/2`
+        # reads it to attribute the summarizer's token spend to this session
+        # (`Accounting.stage_side_spend/3`). Without it this path's LLM calls
+        # are billed to nobody — which is exactly what they were before.
+        prior_compact_sid = Process.get(:osa_compact_session_id)
+        if is_binary(session_id), do: Process.put(:osa_compact_session_id, session_id)
+
+        result = summarize_with_retries(older, @summary_retries, instructions)
+
+        restore_compact_session_id(prior_compact_sid)
+
+        case result do
           {:ok, summary} ->
             reset_failures(session_id)
 
@@ -319,6 +331,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   end
 
   def compact(messages, _session_id, _instructions), do: messages
+
+  defp restore_compact_session_id(nil), do: Process.delete(:osa_compact_session_id)
+  defp restore_compact_session_id(prior), do: Process.put(:osa_compact_session_id, prior)
 
   # Compact-boundary message: CC continuation preamble + formatted summary
   # (analysis scratchpad stripped) + resume-without-recap instruction.

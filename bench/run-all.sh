@@ -22,7 +22,10 @@
 #   bench/run-all.sh smoke              # controls only, ~15 min, proves the pipeline
 #   bench/run-all.sh swebench  [N]      # SWE-bench Verified, N instances (default 40)
 #   bench/run-all.sh pro       [N]      # SWE-bench Pro, N instances (default 12)
-#   bench/run-all.sh terminal  [N]      # Terminal-Bench, N tasks (default 10)
+#   bench/run-all.sh terminal  [N]      # Terminal-Bench 2.1 (current), N concurrent
+#   bench/run-all.sh tb3       [N]      # Terminal-Bench 3, 74 tasks
+#   bench/run-all.sh harbor-index [N]   # Harbor-Index, 80 tasks, cross-agent
+#   bench/run-all.sh probe     [N]      # fixed 8-task cost probe (paired)
 #   bench/run-all.sh recovery           # Recovery-Bench, both arms
 #   bench/run-all.sh report             # re-gate everything already on disk
 #
@@ -100,13 +103,46 @@ case "$cmd" in
     run_osa swebenchpro "${n:-12}"
     gate "$BENCH_DIR/swebenchpro/runs/osa-$STAMP"
     ;;
-  terminal)
+  terminal|harbor-index|tb3)
+    # One code path for every Harbor dataset: controls, then the arm, then the
+    # gate. `terminal` is Terminal-Bench 2.1 -- the CURRENT set. 2.0 is still
+    # runnable by hand (`--dataset-key tb2.0`) but is not what `run-all` runs,
+    # because a superseded task set is not what anyone means by "the number".
+    case "$cmd" in
+      terminal)      dskey=tb2.1 ;;
+      harbor-index)  dskey=harbor-index ;;
+      tb3)           dskey=tb3 ;;
+    esac
     require_disk 80
-    say "Terminal-Bench (oracle arm validates the harness; it must score 1.0)"
-    python3 "$BENCH_DIR/terminalbench/run_bench.py" -n "${n:-10}" --run-id "tb-$STAMP" \
-      || die "Terminal-Bench did not complete"
+    say "$dskey — controls first. oracle must solve everything, nop nothing."
+    say "Neither calls a model, so there is no budget reason to skip them."
+    python3 "$BENCH_DIR/terminalbench/controls.py" run --dataset-key "$dskey" \
+      --n-concurrent "${n:-4}" || die "controls did not complete"
+    python3 "$BENCH_DIR/terminalbench/controls.py" status --dataset-key "$dskey"
+    say "OSA arm"
+    python3 "$BENCH_DIR/terminalbench/run_bench.py" --dataset-key "$dskey" \
+      --n-concurrent "${n:-4}" --run-id "tb-$STAMP" \
+      || die "$dskey did not complete"
     say "contamination probe — task images must not ship their solutions"
     python3 "$BENCH_DIR/terminalbench/contamination_probe.py" --all || true
+    say "gate: is this run's task set control-clean?"
+    python3 "$BENCH_DIR/terminalbench/controls.py" gate \
+      "$BENCH_DIR/terminalbench/runs/tb-$STAMP" \
+      || die "controls do not vouch for this run; no rate from it may be quoted"
+    ;;
+  probe)
+    # The standing cost instrument. Same eight tasks every time; the point is
+    # that the comparison is paired, so the task list must not be parameterised.
+    require_disk 40
+    say "fixed cost probe — token burn and cost, NOT a pass rate"
+    python3 "$BENCH_DIR/terminalbench/run_bench.py" --probe \
+      --n-concurrent "${n:-2}" --run-id "probe-$STAMP" \
+      || die "probe did not complete"
+    python3 "$BENCH_DIR/terminalbench/probeset.py" check \
+      "$BENCH_DIR/terminalbench/runs/probe-$STAMP" \
+      || die "the probe run did not cover the probe set; it is not comparable"
+    say "compare against a previous probe with:"
+    say "  python3 bench/terminalbench/probeset.py compare <old> bench/terminalbench/runs/probe-$STAMP"
     ;;
   recovery)
     require_disk 80

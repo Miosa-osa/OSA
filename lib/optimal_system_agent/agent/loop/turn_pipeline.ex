@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Compactor
   alias OptimalSystemAgent.Agent.TurnTermination
+  alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ContextWindow
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.GenreRouter
@@ -316,6 +317,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       else
         state
       end
+
+    # Compaction's own summarizer round-trips run in the task above, which holds
+    # no loop state; they staged their priced usage into `Accounting`'s side
+    # ledger. This is the first point after that task returns where we hold both
+    # the state and the session id, so bill them here. A no-op when nothing was
+    # staged (deterministic compaction, no-op compaction, LLM disabled).
+    state = Accounting.absorb_side_spend(state)
 
     %{state | messages: compacted}
   end

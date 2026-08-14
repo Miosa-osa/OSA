@@ -96,7 +96,12 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
       {:skill_touch, &SkillTouch.reset/1},
       {:coordinator_mode, &CoordinatorMode.clear/1},
       {:permission_broker, &PermissionBroker.clear_session/1},
-      {:compactor_summary, &Compactor.forget_session/1}
+      {:compactor_summary, &Compactor.forget_session/1},
+      # Staged-but-unabsorbed compaction spend. Dropping it loses at most the
+      # last summarizer call of a dying session; LEAVING it would let a later
+      # session that reused the id absorb — and be billed for — spend it never
+      # made, which is the worse error for a figure we publish.
+      {:side_spend, &OptimalSystemAgent.Agent.Loop.Accounting.forget_side_spend/1}
     ]
   end
 

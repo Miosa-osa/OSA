@@ -39,6 +39,23 @@
         ctx: 1_000_000,
         recommended: true
       },
+      # DELIBERATE post-snapshot addition, not drift. `glm-4.7:cloud` carries no
+      # `context_length` in Ollama's /api/show model_info, so the probe could
+      # not resolve it and it was missing from the catalog entirely — which made
+      # `Loop.ContextWindow.resolve/1` return `:unknown` for a tag this project
+      # ships as its configured model, and an unknown window used to mean "never
+      # compact". Adding the tag to `Providers.OllamaCloud` is the fix; it flows
+      # into `Onboarding.providers_list/0`, so the frozen baseline has to carry
+      # it too or the byte-exact comparison reports a catalog change that was
+      # intended. Everything else in this file is still the pre-refactor dump.
+      %{
+        id: "glm-4.7:cloud",
+        name: "GLM-4.7",
+        tools: true,
+        note: "previous-generation Z.ai flagship — agentic + coding",
+        ctx: 202_752,
+        recommended: false
+      },
       %{
         id: "glm-5.1:cloud",
         name: "GLM-5.1",

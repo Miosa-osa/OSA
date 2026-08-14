@@ -534,15 +534,44 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   # Bedrock reports usage on every Converse response. Passed through rather
   # than recomputed — a locally estimated token count that disagrees with the
   # bill is worse than none.
+  #
+  # The KEY NAMES are the whole point. `Loop.Accounting.normalize_usage/1` reads
+  # exactly four keys — `:input_tokens`, `:output_tokens`,
+  # `:cache_creation_input_tokens`, `:cache_read_input_tokens` — and nothing
+  # else. This used to emit `:prompt_tokens` / `:completion_tokens` /
+  # `:total_tokens`, none of which it looks at, so **every Bedrock turn
+  # accounted as 0 tokens and $0.00**: the session cost, the `max_budget_usd`
+  # cap, the spend sidecar and `$/task` were all blind on this provider, exactly
+  # the way Google was before `extract_usage/1` was added there.
+  #
+  # Cache slices: Bedrock serves Anthropic models and supports the same
+  # `cache_control` blocks, and the Converse response reports
+  # `cacheReadInputTokens` / `cacheWriteInputTokens` alongside `inputTokens`.
+  # They are DISJOINT from `inputTokens` (Anthropic's convention, which Bedrock
+  # mirrors) — which is why `:bedrock` sits in `Accounting`'s
+  # `@disjoint_prompt_slices` list and must stay there. If AWS ever made
+  # `inputTokens` inclusive, the fix is to move the atom to
+  # `@inclusive_prompt_slices`, NOT to subtract here.
+  #
+  # UNVERIFIED against a live Bedrock call — implemented against the documented
+  # Converse response shape and covered by synthetic-payload tests only. The
+  # field names are the risk; the arithmetic is not.
   defp extract_usage(%{"usage" => u}) when is_map(u) do
     %{
-      prompt_tokens: u["inputTokens"] || 0,
-      completion_tokens: u["outputTokens"] || 0,
-      total_tokens: u["totalTokens"] || 0
+      input_tokens: u["inputTokens"] || 0,
+      output_tokens: u["outputTokens"] || 0,
+      cache_read_input_tokens: u["cacheReadInputTokens"] || 0,
+      cache_creation_input_tokens: u["cacheWriteInputTokens"] || 0
     }
   end
 
-  defp extract_usage(_), do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
+  defp extract_usage(_),
+    do: %{
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    }
 
   # ── small helpers ─────────────────────────────────────────────────────────
 

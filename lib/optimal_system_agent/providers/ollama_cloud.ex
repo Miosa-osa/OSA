@@ -110,6 +110,26 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
     },
+    # `glm-4.7:cloud` carries no `context_length` in Ollama's /api/show
+    # model_info, so the probe cannot resolve it and it was absent here too —
+    # which made `ContextWindow.resolve/1` return `:unknown` for a tag this
+    # project has shipped as its configured model. The entry closes the hole
+    # for THIS tag; `CompactionThresholds.fallback_window/0` is what keeps the
+    # NEXT unenumerated tag safe without anyone editing this table.
+    %{
+      id: "glm-4.7:cloud",
+      name: "GLM-4.7",
+      ctx: 202_752,
+      ctx_source: :static,
+      tools: true,
+      thinking: true,
+      vision: false,
+      audio: false,
+      pricing: {0.60, 2.20},
+      recommended: false,
+      requires_subscription: nil,
+      note: "previous-generation Z.ai flagship — agentic + coding"
+    },
     %{
       id: "glm-5.1:cloud",
       name: "GLM-5.1",

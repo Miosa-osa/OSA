@@ -641,3 +641,13 @@ anthropic_base_url = System.get_env("ANTHROPIC_BASE_URL")
 if is_binary(anthropic_base_url) and anthropic_base_url != "" do
   config :optimal_system_agent, anthropic_url: anthropic_base_url
 end
+
+# Same, for OpenRouter. `OpenAICompatProvider.resolve_credential/2` already
+# reads `:openrouter_url`; nothing set it, so the only way to aim OSA at a
+# logging proxy or a self-hosted gateway was to edit the compiled default.
+# Needed to measure what we actually put on the wire.
+openrouter_base_url = System.get_env("OPENROUTER_BASE_URL")
+
+if is_binary(openrouter_base_url) and openrouter_base_url != "" do
+  config :optimal_system_agent, openrouter_url: openrouter_base_url
+end
