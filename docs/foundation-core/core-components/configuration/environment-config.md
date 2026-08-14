@@ -72,7 +72,7 @@ precedence over `OSA_MODEL` for their specific provider.
 |----------|---------|-------------|
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL; override for cloud Ollama instances |
 | `OLLAMA_API_KEY` | — | Required for authenticated cloud Ollama instances |
-| `OLLAMA_THINK` | — | Set to `true` to enable extended reasoning for models that support it (kimi-k2, qwen3-thinking). Set to `false` to explicitly disable. Omit for auto behavior |
+| `OLLAMA_THINK` | — | `true` / `false` to force extended reasoning on or off for all Ollama models. Omit for the serving-mode default: on for cloud tags (`:cloud` / `-cloud`), off for locally served reasoning models (stall guard) |
 
 ## HTTP Server
 

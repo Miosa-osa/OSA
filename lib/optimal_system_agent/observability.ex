@@ -97,7 +97,8 @@ defmodule OptimalSystemAgent.Observability do
         turn_id: Map.get(state, :turn_id),
         turn_count: Map.get(state, :turn_count),
         model: Map.get(state, :model),
-        effort: effort
+        effort: effort,
+        reasoning: current_reasoning(state)
       },
       state,
       source: "agent.turn"
@@ -146,12 +147,47 @@ defmodule OptimalSystemAgent.Observability do
         # Recorded on BOTH ends of the turn: `/effort` can be changed mid-run,
         # so a turn that started at one tier can finish at another. A single
         # start-only reading would attribute the whole turn to the wrong level.
-        effort: current_effort()
+        effort: current_effort(),
+        reasoning: current_reasoning(state)
       },
       state,
       source: "agent.turn"
     )
   end
+
+  @doc """
+  Whether model reasoning is enabled for this turn, and why — or `nil` when the
+  provider/model has no such setting.
+
+  Same rationale as `current_effort/0`: reasoning moves a model's score more
+  than the harness does (cline measured 68.5% vs 57.3% on Terminal-Bench 2.0 for
+  `glm-5.2` with and without it), so a run that does not record the condition is
+  not reproducible and cannot be set beside a published figure.
+
+  Rendered as `"on:cloud_default"` / `"off:local_stall_guard"` / `"on:config"` —
+  the value AND the rule that produced it, so a benchmark row states not just
+  what was in force but whether the operator chose it or inherited a default.
+  """
+  @spec current_reasoning(map()) :: String.t() | nil
+  def current_reasoning(state) do
+    model = Map.get(state, :model)
+
+    if normalize_provider(Map.get(state, :provider)) == :ollama and is_binary(model) do
+      case OptimalSystemAgent.Providers.Ollama.reasoning_decision(model, []) do
+        {nil, _} -> nil
+        {true, source} -> "on:#{source}"
+        {false, source} -> "off:#{source}"
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp normalize_provider(p) when is_atom(p) and not is_nil(p), do: p
+  defp normalize_provider(p) when is_binary(p), do: String.to_existing_atom(p)
+  defp normalize_provider(_), do: nil
 
   @doc "Emit a structured `:compaction` event correlated to the current turn."
   @spec compaction(map(), map()) :: :ok

@@ -344,8 +344,12 @@ config :optimal_system_agent,
     System.get_env("OLLAMA_MODEL") ||
       Application.compile_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud"),
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
-  # OLLAMA_THINK: set to "true" to enable extended reasoning (kimi-k2, qwen3-thinking, etc.)
-  # Default nil → ollama.ex disables thinking for known reasoning models to prevent timeouts.
+  # OLLAMA_THINK: force extended reasoning on ("true") or off ("false") for ALL
+  # Ollama models, overriding the serving-mode default in both directions.
+  # Default nil → Ollama.reasoning_decision/2 decides by SERVING MODE: reasoning
+  # ON for cloud-served tags (the provider manages stall risk and the user is
+  # paying for the capability), OFF for locally served reasoning models, where an
+  # unbounded thinking phase can stall a turn for 10+ minutes.
   ollama_think:
     (case System.get_env("OLLAMA_THINK") do
        "true" -> true

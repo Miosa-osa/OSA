@@ -816,30 +816,99 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def apply_think(body, model, opts), do: maybe_add_think(body, model, opts)
 
   # Controls the `think` field for Ollama reasoning models (kimi, qwen3 thinking, etc.)
-  # Default: disabled for known thinking models to prevent unbounded timeouts.
-  # Override per-call: opts[:think] = true/false
-  # Override globally: OLLAMA_THINK=true in .env (sets :ollama_think in app env)
+  # See `reasoning_decision/2` for the rule and why it keys off SERVING MODE.
   defp maybe_add_think(body, model, opts) do
-    case Keyword.get(opts, :think) do
-      nil ->
-        think_cfg = Application.get_env(:optimal_system_agent, :ollama_think)
-
-        cond do
-          think_cfg != nil ->
-            Map.put(body, "think", think_cfg)
-
-          thinking_model?(model) ->
-            # Disable extended reasoning by default — prevents 10+ minute stalls
-            Map.put(body, "think", false)
-
-          true ->
-            body
-        end
-
-      val ->
-        Map.put(body, "think", val)
+    case reasoning_decision(model, opts) do
+      {nil, _source} -> body
+      {val, _source} when is_boolean(val) -> Map.put(body, "think", val)
     end
   end
+
+  @doc """
+  Decide whether this request enables model reasoning, and say why.
+
+  Returns `{true | false | nil, source}`. `nil` means **send no `think` field at
+  all** — the model has no reasoning mode, so the key would be noise.
+
+  ## Why this keys off serving mode, not capability
+
+  The `think: false` default was introduced against a real failure: a **locally
+  served** reasoning model can enter an unbounded thinking phase and stall a
+  turn for 10+ minutes with no output. That guard is worth keeping.
+
+  The bug was that it was applied via a *capability* flag (`thinking_model?/1`),
+  so it also fired on `:cloud`-served models — where the stall risk is the
+  provider's to manage, and the user is paying for a reasoning capability they
+  then never receive. Every OSA user on a reasoning-capable Ollama Cloud model
+  silently ran with reasoning OFF.
+
+  Measured cost of running these models without reasoning: cline's published
+  Terminal-Bench 2.0 run on `glm-5.2` scored **68.5% with reasoning vs 57.3%
+  without** (11.2 points). A single paired local observation (n=1, confounded
+  across artefacts — a hypothesis, not a result) also converged in 9 turns
+  instead of 25, using 4.1x less input for 14% more output.
+
+  ## The rule
+
+  | condition | result | source |
+  |---|---|---|
+  | `opts[:think]` set | that value | `:opt` |
+  | `:ollama_think` app env set (`OLLAMA_THINK`) | that value | `:config` |
+  | not a reasoning model | `nil` (no field) | `:unsupported` |
+  | reasoning model, cloud-served | `true` | `:cloud_default` |
+  | reasoning model, locally served | `false` | `:local_stall_guard` |
+
+  Both explicit routes override in BOTH directions and for BOTH serving modes:
+  `OLLAMA_THINK=false` still disables a cloud model, `OLLAMA_THINK=true` still
+  enables a local one (accepting the stall risk knowingly).
+
+  The value is constant for a given model + configuration, so it does not vary
+  turn-to-turn within a session; and it is a request-body field rather than
+  prompt content, so it cannot perturb a cached prompt prefix either way.
+  """
+  @spec reasoning_decision(String.t() | nil, keyword()) ::
+          {boolean() | nil, :opt | :config | :unsupported | :cloud_default | :local_stall_guard}
+  def reasoning_decision(model, opts \\ []) do
+    cond do
+      is_boolean(val = Keyword.get(opts, :think)) ->
+        {val, :opt}
+
+      is_boolean(cfg = Application.get_env(:optimal_system_agent, :ollama_think)) ->
+        {cfg, :config}
+
+      not thinking_model?(model) ->
+        {nil, :unsupported}
+
+      cloud_model?(model) ->
+        {true, :cloud_default}
+
+      true ->
+        # Locally served reasoning model: keep the guard against unbounded
+        # thinking phases. Opt in with OLLAMA_THINK=true.
+        {false, :local_stall_guard}
+    end
+  end
+
+  @doc """
+  True when `model` is served by Ollama Cloud rather than by local weights.
+
+  The discriminator is the hosted TAG SHAPE — a bare `":cloud"` tag
+  (`glm-5.2:cloud`) or a size-qualified `"-cloud"` suffix
+  (`gpt-oss:120b-cloud`) — via `OllamaCloud.cloud_tag?/1`, which is the same
+  predicate `Registry.ollama_cloud_model?/1` already uses to decide context-window
+  probing and the local `num_ctx` clamp. It is a naming convention Ollama itself
+  imposes on hosted tags, not an OSA invention, and it is already load-bearing
+  elsewhere in this codebase — so a model that lies about it is already
+  mis-budgeted regardless of this call. It is not a live server probe: a
+  `/api/show` round trip cannot be afforded on the request path, and an
+  unreachable daemon would have to fall back to the tag shape anyway.
+
+  A false negative is safe (a cloud model mistagged as local merely keeps the
+  old, conservative behaviour). A false positive costs a possible stall on a
+  local model, recoverable with `OLLAMA_THINK=false`.
+  """
+  @spec cloud_model?(String.t() | nil) :: boolean()
+  def cloud_model?(model), do: OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model)
 
   # Returns true for models known to enter unbounded thinking phases by default.
   @doc false

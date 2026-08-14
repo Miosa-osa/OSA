@@ -382,10 +382,16 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       end
     end
 
-    test "known thinking model defaults think:false (extended reasoning disabled)" do
+    test "LOCALLY served reasoning model defaults think:false (unbounded-stall guard)" do
       Application.delete_env(:optimal_system_agent, :ollama_think)
       body = Ollama.apply_think(%{}, "kimi-k2", [])
       assert body["think"] == false
+    end
+
+    test "CLOUD served reasoning model defaults think:true (stall risk is the provider's)" do
+      Application.delete_env(:optimal_system_agent, :ollama_think)
+      body = Ollama.apply_think(%{}, "glm-5.2:cloud", [])
+      assert body["think"] == true
     end
   end
 

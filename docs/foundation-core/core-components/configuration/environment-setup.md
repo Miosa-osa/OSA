@@ -54,7 +54,7 @@ Set at least one of these or ensure Ollama is running locally:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint URL |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Ollama model name |
 | `OLLAMA_API_KEY` | none | Required for cloud-hosted Ollama instances |
-| `OLLAMA_THINK` | auto | `true` / `false` to force extended reasoning mode |
+| `OLLAMA_THINK` | auto | `true` / `false` to force extended reasoning mode. Auto = on for cloud tags, off for local reasoning models |
 | `OSA_FALLBACK_CHAIN` | auto-built | Comma-separated provider list: `anthropic,openai,ollama` |
 
 Per-provider model overrides: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL`, `OPENROUTER_MODEL`, `GOOGLE_MODEL`, `DEEPSEEK_MODEL`, `MISTRAL_MODEL`, `TOGETHER_MODEL`, `FIREWORKS_MODEL`, `COHERE_MODEL`, `XAI_MODEL`, `CEREBRAS_MODEL`, `LMSTUDIO_MODEL`, `LLAMACPP_MODEL`.

@@ -60,7 +60,7 @@ Examples: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL`, `OLLAMA_MODEL`, `GOOG
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model to use with Ollama |
 | `OLLAMA_API_KEY` | — | Required for Ollama cloud instances |
-| `OLLAMA_THINK` | `nil` | Set `true` to enable extended reasoning for models like `qwen3-thinking`. Default `nil` disables thinking for known reasoning models to prevent timeouts. |
+| `OLLAMA_THINK` | `nil` | Forces reasoning on (`true`) or off (`false`) for every Ollama model, overriding the serving-mode default in both directions. Default `nil` = reasoning **on** for cloud-served tags (`:cloud` / `-cloud`), **off** for locally served reasoning models, where an unbounded thinking phase can stall a turn for 10+ minutes. |
 
 ## Agent Behaviour
 
