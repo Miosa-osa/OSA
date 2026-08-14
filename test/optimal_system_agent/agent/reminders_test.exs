@@ -312,6 +312,57 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
     end
   end
 
+  describe "post-edit diagnostics" do
+    # A ratchet, not an example. `collect_diagnostics/2` gates on a hardcoded
+    # list of tool names, and `file_transform` — the tool whose entire premise
+    # is editing a file the model is NOT holding, so the one most in need of
+    # automatic feedback — was missing from it for its whole first day. A list
+    # of names that some tool has to remember to join is exactly the shape the
+    # roadmap's Tier 3 asks to be defended by a test rather than by attention.
+    @mutating_file_tools ~w(file_edit multi_file_edit file_write file_create file_transform)
+
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :diagnostics_provider)
+
+      Application.put_env(:optimal_system_agent, :diagnostics_provider, fn path, _state ->
+        "SAW #{path}"
+      end)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :diagnostics_provider, prev),
+          else: Application.delete_env(:optimal_system_agent, :diagnostics_provider)
+      end)
+
+      dir = Path.join(System.tmp_dir!(), "osa_diag_#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "target.py")
+      File.write!(path, "x = 1\n")
+      on_exit(fn -> File.rm_rf(dir) end)
+      {:ok, path: path}
+    end
+
+    test "every mutating file tool routes its touched path to the provider", ctx do
+      for tool <- @mutating_file_tools do
+        tc = %{name: tool, arguments: %{"path" => ctx.path}}
+        out = Reminders.append("ok", tc, %{session_id: sid()})
+
+        assert out =~ "Diagnostics for #{ctx.path}",
+               "#{tool} did not reach the diagnostics provider"
+      end
+    end
+
+    test "a read does not", ctx do
+      tc = %{name: "file_read", arguments: %{"path" => ctx.path}}
+      refute Reminders.append("ok", tc, %{session_id: sid()}) =~ "Diagnostics for"
+    end
+
+    test "a file_transform dry run does not — it promised to write nothing", ctx do
+      tc = %{name: "file_transform", arguments: %{"path" => ctx.path, "dry_run" => true}}
+      refute Reminders.append("ok", tc, %{session_id: sid()}) =~ "Diagnostics for"
+    end
+  end
+
   # Poll BackgroundManager.output until the task is no longer :running.
   defp wait_terminal(_id, 0), do: :timeout
 

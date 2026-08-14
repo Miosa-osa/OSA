@@ -77,7 +77,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   # skill-discovery. Read/write/edit/list — anything else has no reliable path.
   @path_tools ~w(
     file_read read_file file_write file_create file_edit multi_file_edit
-    dir_list list_dir notebook_edit
+    file_transform dir_list list_dir notebook_edit
   )
 
   # Ancestor-walk bound: never climb more than this many directories looking
@@ -489,7 +489,14 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   defp collect_diagnostics(tool_call, state) do
     name = Map.get(tool_call, :name)
 
-    with true <- name in ~w(file_edit multi_file_edit file_write file_create),
+    # `file_transform` belongs on this list and was missing from it. It is a
+    # mutating file tool like the other four, and it is the one MOST in need of
+    # the hook: the whole premise of the tool is that the model changes a file
+    # it is not holding, so a syntax error it introduces has no other way to
+    # become visible. Its own `assert_balanced` is opt-in and checks delimiters,
+    # not grammar; this is the automatic check the other write tools already get.
+    with true <- name in ~w(file_edit multi_file_edit file_write file_create file_transform),
+         false <- dry_run?(tool_call),
          provider when not is_nil(provider) <-
            Application.get_env(:optimal_system_agent, :diagnostics_provider),
          path when is_binary(path) <- touched_path(tool_call),
@@ -501,6 +508,14 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     end
   rescue
     _ -> []
+  end
+
+  # A `file_transform` dry run promises that nothing was written. The
+  # diagnostics provider FORMATS the file it checks, so running it on a dry run
+  # would break that promise for the sake of a check of a file that did not
+  # change.
+  defp dry_run?(tool_call) do
+    (Map.get(tool_call, :arguments) || %{}) |> Map.get("dry_run") == true
   end
 
   # ── Collector 4: self-correction after a failed tool (P7) ─────────────────
