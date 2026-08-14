@@ -447,6 +447,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # last_input_tokens for context-pressure telemetry.
     state = Accounting.record(state, usage)
 
+    # A request that died mid-stream returns no usage (the `_ -> %{}` above is
+    # right about what it was handed), but it was still billed: Anthropic
+    # delivers the whole prompt cost in `message_start`, before the failure.
+    # The provider stages that into the side ledger keyed on session id
+    # (`Anthropic.stage_failed_request_spend/1`); this is the first point after
+    # the call where we hold both the state and the session id, so bill it
+    # here. A no-op when nothing was staged, which is every successful turn.
+    state = Accounting.absorb_side_spend(state)
+
     Bus.emit(
       :llm_response,
       %{

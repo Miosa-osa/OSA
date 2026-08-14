@@ -285,6 +285,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             stop_reason: nil,
             cache_scope: cache_scope,
             cache_fp: cache_fp,
+            # Carried purely so the MID-STREAM ERROR path can bill what this
+            # request already cost. `message_start` delivers the whole prompt
+            # cost up front; without an identity to bill it against, a stream
+            # that dies afterwards took the money and left no record.
+            session_id: Keyword.get(opts, :session_id),
+            model: model,
             usage: %{
               input_tokens: 0,
               output_tokens: 0,
@@ -408,6 +414,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
               # partial output was already streamed to the callback.
               acc.stream_error != nil ->
                 Logger.warning("Anthropic mid-stream error: #{acc.stream_error}")
+                stage_failed_request_spend(acc)
                 {:error, {:stream_error, acc.stream_error, acc.content}}
 
               done? ->
@@ -437,6 +444,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
           {:error, reason} ->
             Logger.error("Anthropic stream error: #{inspect(reason)}")
+            stage_failed_request_spend(acc)
             {:error, "Stream error: #{inspect(reason)}"}
 
           :unknown ->
@@ -446,8 +454,47 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     after
       620_000 ->
         Logger.error("Anthropic stream timeout after 620s")
+        stage_failed_request_spend(acc)
         {:error, "Stream timeout"}
     end
+  end
+
+  # ── Billing a request that failed after the meter started ──────────────
+  #
+  # Anthropic sends `message_start` with the FULL prompt cost (`input_tokens`
+  # plus the cache slices) before a single output token exists. Every failure
+  # exit below it returns an error tuple that carries partial CONTENT but no
+  # usage, and the loop's `usage = %{}` on the error branch is correct given
+  # what it is handed — the loss is here. On a long-prompt turn the prompt IS
+  # the bill, so this was silently the majority of the money on every failed
+  # stream.
+  #
+  # Staged rather than returned, because the error tuple's shape is
+  # pattern-matched at six-plus sites across the loop and the retry classifier;
+  # widening it to carry usage would put a billing change on the
+  # retry-classification path. `Accounting.stage_side_spend/3` already exists
+  # for exactly this — an out-of-loop round-trip billed against a session id —
+  # and the loop absorbs it at the point it holds both state and session id.
+  #
+  # Notes:
+  #   * Reconciliation happens ONCE, inside `stage_side_spend/3`, against
+  #     `:anthropic` (a disjoint-slice provider, so it is a no-op) — the
+  #     one-reconcile-per-usage-map invariant of `reconcile_prompt_slices/2`
+  #     is preserved.
+  #   * A failure BEFORE `message_start` (auth rejection, connect error, a 4xx
+  #     that never opened a stream) leaves the accumulator at all zeros, and
+  #     `stage_side_spend/3` ignores an all-zero map. That case genuinely costs
+  #     nothing and is closed here explicitly rather than by accident.
+  #   * Each HTTP attempt is separately billed by Anthropic, so a retried
+  #     stream staging once per attempt is correct, not double-counting.
+  defp stage_failed_request_spend(acc) do
+    OptimalSystemAgent.Agent.Loop.Accounting.stage_side_spend(
+      Map.get(acc, :session_id),
+      Map.get(acc, :usage, %{}),
+      kind: :failed_request,
+      model: Map.get(acc, :model),
+      provider: :anthropic
+    )
   end
 
   # Attribute a cache break on the streaming path. The accumulator carries the
