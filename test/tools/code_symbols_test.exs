@@ -219,4 +219,121 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert UI.render(:progress, %{}, []) == nil
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # `name` — one definition instead of grep-then-read
+  # ---------------------------------------------------------------------------
+
+  describe "definition extraction" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "osa_symbols_#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      {:ok, dir: dir}
+    end
+
+    defp write(dir, name, content) do
+      path = Path.join(dir, name)
+      File.write!(path, content)
+      path
+    end
+
+    test "returns the python definition and its line range, not the file", c do
+      path =
+        write(c.dir, "m.py", """
+        import os
+
+
+        def before():
+            return 0
+
+
+        def target(a, b):
+            total = a + b
+            return total
+
+
+        def after():
+            return 1
+        """)
+
+      assert {:ok, out} = Handler.execute(%{"path" => path, "name" => "target"}, ctx())
+
+      assert out =~ "def target(a, b):"
+      assert out =~ "return total"
+      # The neighbours are what a fixed read window would have dragged in.
+      refute out =~ "def before"
+      refute out =~ "def after"
+      assert out =~ ":8-10"
+      assert byte_size(out) < byte_size(File.read!(path))
+    end
+
+    test "returns a C function body, closing brace included", c do
+      path =
+        write(c.dir, "m.c", """
+        #include <stdio.h>
+
+        int add(int a, int b)
+        {
+            return a + b;
+        }
+
+        int main(void)
+        {
+            return add(1, 2);
+        }
+        """)
+
+      assert {:ok, out} = Handler.execute(%{"path" => path, "name" => "add"}, ctx())
+      assert out =~ "int add(int a, int b)"
+      assert out =~ "return a + b;"
+      refute out =~ "int main"
+    end
+
+    test "outlines a shell script's functions", c do
+      path =
+        write(c.dir, "s.sh", """
+        #!/bin/bash
+        setup() {
+          mkdir -p /tmp/x
+        }
+
+        function teardown {
+          echo done
+        }
+        """)
+
+      assert {:ok, out} = Handler.execute(%{"path" => path}, ctx())
+      assert out =~ "setup"
+    end
+
+    test "a name that is not defined here says so and does not guess", c do
+      path = write(c.dir, "m.py", "def alpha():\n    return 1\n")
+
+      assert {:ok, out} = Handler.execute(%{"path" => path, "name" => "beta"}, ctx())
+      assert out =~ "No symbol named \"beta\" is DEFINED"
+      refute out =~ "def alpha"
+    end
+
+    test "a near-miss name is offered back", c do
+      path = write(c.dir, "m.py", "def fetch_user_by_id():\n    return 1\n")
+
+      assert {:ok, out} = Handler.execute(%{"path" => path, "name" => "fetch_user"}, ctx())
+      assert out =~ "fetch_user_by_id"
+    end
+
+    test "a non-string name is refused before any file is opened" do
+      assert {:error, msg, -32_602} = Handler.validate(%{"path" => "/x", "name" => 42}, ctx())
+
+      assert msg =~ "name must be a string"
+    end
+
+    test "the outline is unchanged when name is omitted", c do
+      path = write(c.dir, "m.py", "def alpha():\n    return 1\n")
+
+      assert {:ok, out} = Handler.execute(%{"path" => path}, ctx())
+      assert out =~ "Symbols in"
+      assert out =~ "[function] alpha"
+    end
+  end
 end

@@ -20,10 +20,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool do
   def name, do: Constants.tool_name()
 
   @impl true
-  def aliases, do: ["symbols", "list_symbols"]
+  def aliases, do: ["symbols", "list_symbols", "find_definition", "goto_definition"]
 
   @impl true
-  def search_hint, do: "list functions, classes, and modules in a source file"
+  def search_hint,
+    do:
+      "find where a function or class is defined in a file and read just that " <>
+        "definition; outline all symbols in a source file"
 
   # ── Schema & description ──────────────────────────────────────────────
   @impl true
@@ -40,6 +43,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool do
         "path" => %{
           "type" => "string",
           "description" => "Path to the source file to analyze"
+        },
+        "name" => %{
+          "type" => "string",
+          "description" =>
+            "Return the SOURCE of the symbol with this exact name, and nothing else. " <>
+              "Omit to get the outline instead."
         },
         "type" => %{
           "type" => "string",

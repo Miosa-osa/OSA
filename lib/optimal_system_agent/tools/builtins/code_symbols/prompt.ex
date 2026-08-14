@@ -9,9 +9,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
 
     """
-    List functions, classes, and modules defined in a source file. `path` must be absolute.
-    Languages: Elixir, Python, JavaScript/TypeScript, Go, Rust, Ruby, Java/Kotlin.
-    For full file contents use `#{file_read_name}` instead.
+    Find a definition in a source file, without reading the file.
+
+    With `name`: returns the source of that one function or class and its line
+    range — the definition, not a guessed window around it. This is the call to
+    make instead of grepping for `def foo` and then reading 40 lines near the
+    hit; it costs the definition, not the file.
+
+    Without `name`: lists every function, class and module defined in the file,
+    with line numbers.
+
+    `path` must be absolute, and only this file is examined — a name defined
+    elsewhere will not be found. Languages: C/C++, Python, JavaScript/TypeScript,
+    Go, Rust, Ruby, Java/Kotlin, Elixir, shell. For full file contents use
+    `#{file_read_name}` instead.
     """
   end
 
