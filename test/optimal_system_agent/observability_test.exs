@@ -49,6 +49,44 @@ defmodule OptimalSystemAgent.ObservabilityTest do
     end
   end
 
+  describe "unobserved_background_count/1 (recorded on both ends of every turn)" do
+    # The condition `VerificationGate` clause 0 refuses: a turn ending with
+    # background work in flight. Measured at 9/20 model failures and 0/37
+    # solves on `bench/terminalbench/runs/osa-tb20-full89-f6981b61`. It is on
+    # the wire next to `effort` and `reasoning` because every defect found in
+    # that arm had been silent, and this one must not be the next.
+    defmodule StubBackground do
+      def list,
+        do: [
+          %{id: "bg_1", command: "pytest", session_id: "obs-bg", status: :running},
+          %{id: "bg_2", command: "make", session_id: "obs-bg", status: :done},
+          %{id: "bg_3", command: "sleep 9", session_id: "other", status: :running}
+        ]
+    end
+
+    defmodule BrokenBackground do
+      def list, do: raise("registry is down")
+    end
+
+    setup do
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :background_manager) end)
+      :ok
+    end
+
+    test "counts only this session's still-running jobs" do
+      Application.put_env(:optimal_system_agent, :background_manager, StubBackground)
+      assert Observability.unobserved_background_count(%{session_id: "obs-bg"}) == 1
+      assert Observability.unobserved_background_count(%{session_id: "other"}) == 1
+      assert Observability.unobserved_background_count(%{session_id: "nobody"}) == 0
+    end
+
+    test "reads as 0 when it cannot be resolved — telemetry never fabricates a fire" do
+      Application.put_env(:optimal_system_agent, :background_manager, BrokenBackground)
+      assert Observability.unobserved_background_count(%{session_id: "obs-bg"}) == 0
+      assert Observability.unobserved_background_count(%{}) == 0
+    end
+  end
+
   describe "structured events reach the durable per-session stream (correlated)" do
     @tag :integration
     test "emitted lifecycle event lands in the session stream carrying the turn_id" do

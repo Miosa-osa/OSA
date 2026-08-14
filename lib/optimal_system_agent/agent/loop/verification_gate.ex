@@ -10,11 +10,14 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   claim. This gate enforces that discipline at the point the agent is about to
   declare a turn "done".
 
-  ## The three questions, weakest to strongest
+  ## The four questions, weakest to strongest
 
   When the agent is about to finish a turn (the model emitted no tool calls)
   after having changed files, the gate asks, in order:
 
+    0. `:unobserved_background` — is a background command this session started
+       STILL RUNNING? Then the turn is finishing on work it has not seen.
+       (**Engagement**. See below.)
     1. `:failing_check`   — did something RUN AND FAIL since the last write and
        not been superseded? Ending here is ending on a red test.
     2. `:unchecked_write` — has any grounded check PASSED against the changed
@@ -65,6 +68,88 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
 
   `config :optimal_system_agent, :verification_adequacy, false` (or
   `OSA_VERIFICATION_ADEQUACY=0`) turns clause 3 off entirely.
+
+  ## Clause 0 — engagement, and what it is NOT
+
+  A benchmark arm turned up a cluster of failures that ended `status=ok` with
+  no self-inflicted markers and passed all three clauses above. The hypothesis
+  was "turns that did not think", proxied by wall clock: under 5 s/turn against
+  7.7 s/turn for solves.
+
+  **That proxy does not survive the larger sample, and neither does any
+  reasoning-volume signal.** Replayed over 60 graded trials of
+  `bench/terminalbench/runs/osa-tb20-full89-f6981b61` (see
+  `scripts/engagement_replay.py`):
+
+  | signal | fires on failures | fires on solves |
+  |---|---|---|
+  | wall clock < 5 s/turn | 7/19 | 12/34 |
+  | zero reasoning on the final turn | 15/19 | 30/34 |
+  | episode reasoning chars/turn < 200 | 6/19 | 8/34 |
+
+  A third of the solves are fast. `fix-code-vulnerability` solved at 2.2 s/turn
+  with 19 reasoning characters per turn — the least "engaged" episode in the
+  entire set, and correct. Any of those detectors punishes fast correct work,
+  which is worse than not detecting at all.
+
+  What the transcripts actually show is narrower, mechanical, and directly
+  readable:
+
+      hf-model-inference  "I'll run the full test suite the moment the download completes."
+      sqlite-with-gcov    "I'll wait for the completion notification rather than re-checking."
+      train-fasttext      "I'll wait for its completion notification, then re-run this test."
+      query-optimize      "Waiting for the background test to complete on its own."
+
+  Each ended its final turn while a background command **it had started** was
+  still running, deferring the verification to a notification that never
+  arrives — because the episode ends when the model stops.
+
+  The harness invites this, in as many words. `shell_execute`'s prompt
+  (`tools/builtins/shell_execute/prompt.ex`) says "You WILL be notified
+  automatically when a background command finishes… Do unrelated work, or stop
+  and let the notification wake you", and `query-optimize` quoted it back:
+  "I was told I'd be notified on completion. I'll stop calling it and wait."
+
+  That instruction is TRUE in a persistent session — `BackgroundNotifier`
+  queues the completion and `Loop.poke/1` wakes an idle loop with a synthetic
+  turn — and FALSE in a one-shot or headless run, where the loop is torn down
+  the moment the model returns a final answer. The prompt cannot know which it
+  is in; the gate can, because it asks about state rather than about the
+  future. That is why the fix lives here and not in the tool description, and
+  why the directive below does not claim the notification will never come.
+
+  So clause 0 asks a fact, not a proxy: **at the moment of the completion
+  claim, is a background command from this session still in the `:running`
+  state?** That is a lookup in `Shell.BackgroundManager`, costs nothing, and
+  cannot be confounded by provider latency, model, or task difficulty.
+
+  Replayed against the same 60 trials: **fires on 9 of 19 model failures and 0
+  of 34 solves** — and on 6 of the 7 failures the wall-clock proxy flagged. It
+  is silent on both timeouts and on all three unsound tasks. The only episode
+  in the set that ends with background work in flight *and* is a solve is
+  `path-tracing`, which was killed at the 1800 s deadline and never made a
+  completion claim at all; keying on the claim rather than on end-of-episode is
+  what keeps it quiet there.
+
+  It is deliberately NOT a turn cap, an episode-length cap, or anything derived
+  from turn counts or wall clock. `path-tracing` solved at 170 turns and
+  `build-pov-ray` failed at 62; neither number is evidence.
+
+  **It does not stack cost on the adequacy gate.** Clause 0 shares the single
+  per-turn re-prompt counter with clauses 1-3, so a turn still gets at most one
+  pushback in total; when clause 0 fires it *replaces* the adequacy pushback
+  rather than adding to it. Its detection cost is a registry lookup, not tokens.
+  `BACKGROUND_INTENTIONAL: <reason>` in the answer releases it immediately —
+  the honest case is a long-lived service the model started on purpose.
+
+  `config :optimal_system_agent, :verification_engagement, false` (or
+  `OSA_VERIFICATION_ENGAGEMENT=0`) turns clause 0 off entirely.
+
+  Known blind spot, stated rather than papered over: 10 of the 19 model
+  failures are invisible to it, including `build-pov-ray`, which ran 62 turns
+  at 4.4 s/turn and started no background command at all. Clause 0 detects one
+  species of unengaged completion. It does not detect "shallow" in general, and
+  nothing measured here does.
 
   It cannot trap the loop:
 
@@ -122,6 +207,17 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # Only honoured from the SECOND pushback onward, so it cannot be used to skip
   # the requirement without having been asked once and having tried.
   @no_test_marker ~r/NO[_\s-]?RUNNABLE[_\s-]?TEST\s*:/i
+
+  # The escape for clause 0. A long-lived service the model started on purpose
+  # — a dev server, a daemon under test — is `:running` forever by design, and
+  # "wait for it to finish" is the wrong instruction for it.
+  #
+  # Honoured IMMEDIATELY rather than from the second pushback, for the same
+  # reason `:small` gets `NO_RUNNABLE_TEST` immediately: charging a round trip
+  # to say a true and cheap thing is most of what the benign case would pay.
+  # It is explicit, it is logged, and it cannot touch clauses 1-3 — a server
+  # left running still has to have had something run and pass against it.
+  @background_ok_marker ~r/BACKGROUND[_\s-]?INTENTIONAL\s*:/i
 
   @doc """
   Returns `true` when the current turn is about to finish with an *unverified*
@@ -199,6 +295,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
 
     reason =
       cond do
+        # Clause 0 first, and ahead of the ledger clauses on purpose: while a
+        # job this session started is still running, every other answer the
+        # gate could give is provisional. It is also the cheapest of the four
+        # (a registry lookup, no ledger scan).
+        background_pending?(session_id, content) -> :unobserved_background
         VerificationEvidence.failing_check_since_write(session_id) != nil -> :failing_check
         VerificationEvidence.pending_files(session_id) != [] -> :unchecked_write
         not adequacy_enabled?() -> nil
@@ -231,6 +332,63 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   defp adequate_for_scale?(_large, _session_id), do: false
 
   defp cap_for(_scale), do: @max_reprompts
+
+  @doc """
+  Background commands **this session started** that are still `:running`.
+
+  The engagement signal of clause 0, and a directly observable fact rather than
+  a proxy: no wall clock, no token count, no turn count. Returns `[]` when the
+  detector is switched off, when there is no session, or when the background
+  manager is unavailable — every failure mode is silence, never a false fire.
+  """
+  @spec unobserved_background(term()) :: [map()]
+  def unobserved_background(session_id) when is_binary(session_id) do
+    if engagement_enabled?() do
+      background_module().list()
+      |> Enum.filter(fn snap ->
+        Map.get(snap, :status) == :running and Map.get(snap, :session_id) == session_id
+      end)
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  def unobserved_background(_), do: []
+
+  defp background_pending?(session_id, content) do
+    not background_escaped?(content) and unobserved_background(session_id) != []
+  end
+
+  defp background_escaped?(content) when is_binary(content),
+    do: Regex.match?(@background_ok_marker, content)
+
+  defp background_escaped?(_), do: false
+
+  # Injection seam. Production resolves to the real manager; tests substitute a
+  # stub so the clause can be exercised without spawning real processes.
+  defp background_module do
+    Application.get_env(
+      :optimal_system_agent,
+      :background_manager,
+      OptimalSystemAgent.Shell.BackgroundManager
+    )
+  end
+
+  # Kill switch for clause 0 alone, matching the adequacy switch in shape so
+  # there is one convention to remember. Clauses 1-3 are unaffected.
+  defp engagement_enabled? do
+    case System.get_env("OSA_VERIFICATION_ENGAGEMENT") do
+      v when v in ["0", "false", "off", "no"] ->
+        false
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :verification_engagement, true) != false
+    end
+  end
 
   # Kill switch for the adequacy requirement alone. This is the one clause that
   # deliberately BUYS turns (measured: +5 tool calls / +6 turns on a one-line
@@ -362,6 +520,45 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "`NO_RUNNABLE_TEST: <one-line reason>` on its own line and finish.\n\n" <>
       "Do not manufacture a throwaway inline snippet, and do not build a " <>
       "red -> fix -> green cycle by hand for a change this size — find the suite first."
+  end
+
+  # Clause 0. The correction is specific and small: you are about to report on
+  # something you have not seen. It names the command, so the model does not
+  # have to go looking, and it names all three exits — wait, kill, or declare
+  # the job deliberate — so the turn has somewhere to go that is not "argue".
+  #
+  # It does NOT say "keep working" or "you stopped too early". The episodes
+  # this catches include one that ran 62 turns; the defect is the claim resting
+  # on unobserved work, not the length of the run.
+  defp body(:unobserved_background, session_id, step, cap) do
+    running = (session_id && unobserved_background(session_id)) || []
+
+    listed =
+      running
+      |> Enum.take(3)
+      |> Enum.map_join("\n", fn snap ->
+        "  * `#{Map.get(snap, :id)}`: #{String.slice(to_string(Map.get(snap, :command) || "?"), 0, 200)}"
+      end)
+
+    header(step, cap) <>
+      "You are finishing while #{length(running)} background command(s) you started " <>
+      "are STILL RUNNING:\n" <>
+      listed <>
+      "\n\nA completion notification MAY wake you afterwards, and it may not — a " <>
+      "one-shot or headless run ends when you stop, and then nothing does. Either " <>
+      "way you have not seen this result yet, so any claim that rests on it is a " <>
+      "guess right now, and \"I'll check once it completes\" is not a finished " <>
+      "turn.\n\n" <>
+      "Take one of these, now:\n" <>
+      "  1. Wait for it and look: poll with `bash_output` until it reports a final " <>
+      "status, then report what it actually printed and whether it passed.\n" <>
+      "  2. If waiting is not affordable, kill it and do the same work " <>
+      "synchronously in the foreground, so you see the result.\n" <>
+      "  3. If it is a long-lived service you started deliberately and it is " <>
+      "SUPPOSED to keep running (a server under test, a daemon), say so on its own " <>
+      "line as `BACKGROUND_INTENTIONAL: <one-line reason>` and finish.\n\n" <>
+      "Do not report a result you have not observed, and do not promise to check " <>
+      "it later."
   end
 
   defp body(:failing_check, session_id, step, cap) do

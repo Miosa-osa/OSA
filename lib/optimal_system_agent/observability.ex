@@ -98,7 +98,8 @@ defmodule OptimalSystemAgent.Observability do
         turn_count: Map.get(state, :turn_count),
         model: Map.get(state, :model),
         effort: effort,
-        reasoning: current_reasoning(state)
+        reasoning: current_reasoning(state),
+        unobserved_background: unobserved_background_count(state)
       },
       state,
       source: "agent.turn"
@@ -148,11 +149,36 @@ defmodule OptimalSystemAgent.Observability do
         # so a turn that started at one tier can finish at another. A single
         # start-only reading would attribute the whole turn to the wrong level.
         effort: current_effort(),
-        reasoning: current_reasoning(state)
+        reasoning: current_reasoning(state),
+        unobserved_background: unobserved_background_count(state)
       },
       state,
       source: "agent.turn"
     )
+  end
+
+  @doc """
+  How many background commands this session started are still running.
+
+  Recorded on both ends of every turn, next to `effort` and `reasoning`, and
+  for the same reason: it is the condition a turn ran under. A turn that ENDS
+  with this above zero and no tool calls is the shape `VerificationGate`
+  clause 0 refuses — measured at 9 of 19 model failures and 0 of 34 solves on
+  `bench/terminalbench/runs/osa-tb20-full89-f6981b61`. Every defect found in
+  that arm had been silent; this one is on the wire from the first turn.
+
+  Never raises and never blocks: any failure reads as `0`.
+  """
+  @spec unobserved_background_count(map()) :: non_neg_integer()
+  def unobserved_background_count(state) do
+    state
+    |> Map.get(:session_id)
+    |> OptimalSystemAgent.Agent.Loop.VerificationGate.unobserved_background()
+    |> length()
+  rescue
+    _ -> 0
+  catch
+    _, _ -> 0
   end
 
   @doc """
