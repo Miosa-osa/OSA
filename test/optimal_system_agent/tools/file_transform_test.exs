@@ -374,6 +374,85 @@ defmodule OptimalSystemAgent.Tools.FileTransformTest do
       assert reason =~ "1 unclosed ("
     end
 
+    test "a delimiter inside a comment is not counted", ctx do
+      # Valid C. The character-counting version of this operation refused it —
+      # and because assert_balanced aborts the whole list, it discarded the
+      # correct edit alongside it.
+      c = Path.join(ctx.dir, "main.c")
+      File.write!(c, "int main() { return 0; } // trailing brace in a comment: }\n")
+
+      assert {:ok, result, _meta} =
+               run(%{
+                 "path" => c,
+                 "operations" => [
+                   %{"op" => "replace", "find" => "return 0", "to" => "return 1", "expect" => 1},
+                   %{"op" => "assert_balanced", "open" => "{", "close" => "}"}
+                 ]
+               })
+
+      assert result =~ "balance: 0"
+      assert File.read!(c) =~ "return 1"
+    end
+
+    test "a delimiter inside a string literal is not counted", ctx do
+      py = Path.join(ctx.dir, "s.py")
+      File.write!(py, ~s|print("a smiley :) and nothing else")\n|)
+
+      assert {:ok, result} =
+               run(%{"path" => py, "operations" => [%{"op" => "assert_balanced"}]})
+
+      assert result =~ "balance: 0"
+    end
+
+    test "a delimiter cancelled out by one inside a string is still reported", ctx do
+      # The quiet direction, and the worse one: the raw count says 0 here and
+      # the model builds three more edits on a file it was told is fine.
+      py = Path.join(ctx.dir, "cancel.py")
+      File.write!(py, ~s|x = foo(1\ny = ")"\n|)
+
+      assert {:error, reason} =
+               run(%{"path" => py, "operations" => [%{"op" => "assert_balanced"}]})
+
+      assert reason =~ "1 unclosed ("
+      assert reason =~ "line 1"
+    end
+
+    test "an unclosed delimiter is reported at the line it was opened on", ctx do
+      c = Path.join(ctx.dir, "open.c")
+      File.write!(c, "void a(void) {}\nvoid b(void) {\n  int x = 1;\n")
+
+      assert {:error, reason} =
+               run(%{
+                 "path" => c,
+                 "operations" => [%{"op" => "assert_balanced", "open" => "{", "close" => "}"}]
+               })
+
+      assert reason =~ "from line 2"
+    end
+
+    test "a Rust lifetime is not read as a string literal", ctx do
+      rs = Path.join(ctx.dir, "l.rs")
+      File.write!(rs, "fn f<'a>(x: &'a str) -> &'a str {\n    x\n}\n")
+
+      assert {:ok, result} =
+               run(%{
+                 "path" => rs,
+                 "operations" => [%{"op" => "assert_balanced", "open" => "{", "close" => "}"}]
+               })
+
+      assert result =~ "balance: 0"
+    end
+
+    test "an unknown file type degrades to counting and says so", ctx do
+      unknown = Path.join(ctx.dir, "notes.qqq")
+      File.write!(unknown, "a ( b\n")
+
+      assert {:error, reason} =
+               run(%{"path" => unknown, "operations" => [%{"op" => "assert_balanced"}]})
+
+      assert reason =~ "unknown file type"
+    end
+
     test "dry_run reports the change and writes nothing", ctx do
       before = digest(ctx.path)
 

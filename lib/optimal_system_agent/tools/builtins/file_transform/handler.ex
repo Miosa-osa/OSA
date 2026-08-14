@@ -127,7 +127,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Handler do
 
   defp run(expanded, display, ops, dry_run?, session) do
     with {:ok, content} <- read_source(expanded, display),
-         {:ok, out, reports} <- apply_bounded(content, ops) do
+         {:ok, out, reports} <- apply_bounded(content, ops, expanded) do
       if dry_run? do
         {:ok, dry_run_report(display, content, out, reports)}
       else
@@ -175,8 +175,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Handler do
 
   # ── Applying, under a time bound ──────────────────────────────────────
 
-  defp apply_bounded(content, ops) do
-    task = Task.async(fn -> Ops.apply_all(content, ops) end)
+  defp apply_bounded(content, ops, path) do
+    task = Task.async(fn -> Ops.apply_all(content, ops, path: path) end)
 
     case Task.yield(task, @apply_timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} ->

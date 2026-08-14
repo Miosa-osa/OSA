@@ -60,7 +60,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
   *"is this file well-formed / how many X does it contain"* can be answered for
   the price of its answer rather than the price of the file, which is the
   measured difference between codex's 94k peak context and OSA's 201k.
+
+  `assert_balanced` delegates to `FileTransform.Balance`, which skips string
+  literals and comments when the file extension identifies a syntax family, and
+  degrades to a bare character count — saying so in its report — when it does
+  not. See that module for why the bare count was wrong in both directions.
   """
+
+  alias OptimalSystemAgent.Tools.Builtins.FileTransform.Balance
 
   @type op :: map()
   @type report :: String.t()
@@ -73,11 +80,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
   nothing at all.
   """
   @spec apply_all(String.t(), [op()]) :: {:ok, String.t(), [report()]} | {:error, String.t()}
-  def apply_all(content, ops) when is_binary(content) and is_list(ops) do
+  def apply_all(content, ops), do: apply_all(content, ops, [])
+
+  @doc """
+  As `apply_all/2`, with `opts`.
+
+  The only option is `:path` — the declared path, used *solely* to infer a
+  syntax family for `assert_balanced` (see `FileTransform.Balance`). Nothing in
+  this module opens it, and no operation can see it.
+  """
+  @spec apply_all(String.t(), [op()], keyword()) ::
+          {:ok, String.t(), [report()]} | {:error, String.t()}
+  def apply_all(content, ops, opts) when is_binary(content) and is_list(ops) do
     ops
     |> Enum.with_index(1)
     |> Enum.reduce_while({:ok, content, []}, fn {op, idx}, {:ok, acc, reports} ->
-      case apply_one(acc, op) do
+      case apply_one(acc, op, opts) do
         {:ok, next, report} ->
           {:cont, {:ok, next, [numbered(idx, op, report) | reports]}}
 
@@ -185,7 +203,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
 
   # ── Operations ────────────────────────────────────────────────────────
 
-  defp apply_one(content, %{"op" => "replace", "find" => find, "to" => to} = op) do
+  defp apply_one(content, %{"op" => "replace", "find" => find, "to" => to} = op, _opts) do
     count = length(:binary.matches(content, find))
 
     with :ok <- check_count(op, count, "occurrences of the literal") do
@@ -193,7 +211,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
     end
   end
 
-  defp apply_one(content, %{"op" => "replace_regex", "pattern" => pattern, "to" => to} = op) do
+  defp apply_one(
+         content,
+         %{"op" => "replace_regex", "pattern" => pattern, "to" => to} = op,
+         _opts
+       ) do
     with {:ok, re} <- compile(pattern) do
       count = length(Regex.scan(re, content))
 
@@ -203,7 +225,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
     end
   end
 
-  defp apply_one(content, %{"op" => "delete_matching_lines", "pattern" => pattern} = op) do
+  defp apply_one(content, %{"op" => "delete_matching_lines", "pattern" => pattern} = op, _opts) do
     with {:ok, re} <- compile(pattern) do
       {lines, eol} = split_lines(content)
       {kept, removed} = Enum.split_with(lines, &(not Regex.match?(re, &1)))
@@ -214,27 +236,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
     end
   end
 
-  defp apply_one(content, %{"op" => "insert_after", "pattern" => pattern, "text" => text} = op) do
+  defp apply_one(
+         content,
+         %{"op" => "insert_after", "pattern" => pattern, "text" => text} = op,
+         _opts
+       ) do
     insert(content, op, pattern, text, :after)
   end
 
-  defp apply_one(content, %{"op" => "insert_before", "pattern" => pattern, "text" => text} = op) do
+  defp apply_one(
+         content,
+         %{"op" => "insert_before", "pattern" => pattern, "text" => text} = op,
+         _opts
+       ) do
     insert(content, op, pattern, text, :before)
   end
 
-  defp apply_one(content, %{"op" => "append", "text" => text}) do
+  defp apply_one(content, %{"op" => "append", "text" => text}, _opts) do
     joined =
       if content == "" or String.ends_with?(content, "\n"), do: content, else: content <> "\n"
 
     {:ok, joined <> text, "#{byte_size(text)} bytes appended"}
   end
 
-  defp apply_one(content, %{"op" => "prepend", "text" => text}) do
+  defp apply_one(content, %{"op" => "prepend", "text" => text}, _opts) do
     sep = if text == "" or String.ends_with?(text, "\n"), do: "", else: "\n"
     {:ok, text <> sep <> content, "#{byte_size(text)} bytes prepended"}
   end
 
-  defp apply_one(content, %{"op" => "count", "pattern" => pattern} = op) do
+  defp apply_one(content, %{"op" => "count", "pattern" => pattern} = op, _opts) do
     with {:ok, re} <- compile(pattern) do
       count = length(Regex.scan(re, content))
 
@@ -249,7 +279,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
     end
   end
 
-  defp apply_one(content, %{"op" => "assert_balanced"} = op) do
+  defp apply_one(content, %{"op" => "assert_balanced"} = op, opts) do
     open = Map.get(op, "open", "(")
     close = Map.get(op, "close", ")")
 
@@ -261,25 +291,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
         {:error, "close must be a single character"}
 
       true ->
-        balance = length(:binary.matches(content, open)) - length(:binary.matches(content, close))
+        family = Balance.family(Keyword.get(opts, :path))
 
-        if balance == 0 do
-          {:ok, content, "balance: 0 (#{open}#{close} balanced)"}
-        else
-          {:error,
-           "balance: #{balance} — #{unbalanced_hint(balance, open, close)}. " <>
-             "Nothing was written."}
+        case Balance.check(content, open, close, family) do
+          {:ok, report} -> {:ok, content, report}
+          {:error, report} -> {:error, report}
         end
     end
   end
 
-  defp apply_one(_content, op), do: {:error, "malformed operation #{inspect(op)}"}
-
-  defp unbalanced_hint(balance, open, close) when balance > 0,
-    do: "#{balance} unclosed #{open} (missing #{balance} #{close})"
-
-  defp unbalanced_hint(balance, open, close),
-    do: "#{abs(balance)} extra #{close} with no matching #{open}"
+  defp apply_one(_content, op, _opts), do: {:error, "malformed operation #{inspect(op)}"}
 
   # ── Helpers ───────────────────────────────────────────────────────────
 
