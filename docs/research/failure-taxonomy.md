@@ -461,6 +461,65 @@ matching `osa-tests` entry, because a gate that prescribes a location and then r
 recognise `check_polyglot.py` written there is the same defect as one that refuses the
 red→green cycle it demanded. Rank: **6**.
 
+### 6a. The ten solves are re-checked, and none of them is conditional (2026-08-15)
+
+The open question above — "the ten survived only because their verifiers do not
+inspect directory contents", i.e. would a stricter grader have failed them —
+is now answered by measurement rather than left standing. Two findings, both
+re-derivable with `bench/terminalbench/pollution_recheck.py` and pinned by
+`test_conformance.py::TestDeliverablePollutionRecheck`.
+
+**1. None of the ten is a conditional pass.** Not "their grader happened not to
+look" — **none of those ten verifiers enumerates a directory at all**, resolved
+by parsing every `os.listdir` / `os.walk` / `os.scandir` / `glob` / `iterdir` /
+`rglob` site in each task's own `tests/` and resolving its argument to an
+absolute path. All ten come back with an empty set and zero unresolved sites.
+That verdict also survives the scanner's blind spot (`shell_execute` args are
+clipped at 60 characters, 1,956 unreadable calls in that run): a verifier that
+never lists a directory cannot fail on an artefact, seen or unseen.
+
+Across all 89 trials, exactly **three** carry an artefact the grader could have
+reached, and **none of the three is a solve**: `polyglot-c-py` and
+`polyglot-rust-c` (the two known failures, artefacts in `/app/polyglot`, which
+their verifiers list literally) and `filter-js-from-html` (reward 0.0; its
+verifier globs `testcases_path = download_attack_vectors()`, which the resolver
+cannot follow, so it is marked `CONDITIONAL-UNRESOLVED` fail-closed).
+
+`reshard-c4-data` is the near-miss worth naming, because a coarse "does the
+verifier call `listdir`" check gets it wrong. It is a **solve** that wrote
+`/app/tests/test_reshard.py`, and its verifier calls both `os.walk` and
+`os.listdir` — on `TEST_OUTPUT_DIR = f"/app/c4_test_{uuid.uuid4()}/"`, a
+directory the verifier creates during its own run. The artefact is not in it.
+
+Every polluted row in `runs/osa-tb20-full89-f6981b61/results.json` now carries a
+`deliverable_pollution` marker recording which artefacts were left, which
+directories the verifier can see, and the verdict — so the conclusion does not
+have to be re-derived by hand before the number is quoted.
+
+**2. Terminal-Bench 2.1 deleted the assertion.** Upstream classified its own
+`assert polyglot_files == [...]` as a task bug. `tasks/terminal-bench-2-1/
+polyglot-rust-c/tests/test_outputs.py`, verbatim:
+
+```python
+# Check that main.rs exists (dont require it to be the only file — compilation may leave binaries)
+assert os.path.isfile("/app/polyglot/main.rs"), "main.rs not found in /app/polyglot"
+```
+
+and `polyglot-c-py`'s: *"The task description allows compiling to
+`/app/polyglot/cmain`, so we allow additional files like compiled binaries to
+exist"*. That is the correct diagnosis: the instruction's **own example command**
+(`gcc /app/polyglot/main.py.c -o /app/polyglot/cmain`) writes a second file into
+the directory the assertion required to hold one, and the listing check runs
+*before* the verifier compiles — so any agent that verified its own work the way
+the instruction demonstrates would fail on the listing.
+
+So species 6 is a **Terminal-Bench 2.0 artefact**. The relocation to
+`/tmp/osa-tests/` remains right on its own merits — an unrequested file in a
+graded workspace is bad practice regardless of who checks — but it should not be
+scored as having recovered two tasks on the current task set, and the "loaded
+gun at every workspace-graded task" framing overstates the exposure: the only
+gun in TB 2.0 was these two, and 2.1 unloaded it.
+
 ---
 
 ## 7. Species 7 — Ended on an announcement, no other cause (1 task)

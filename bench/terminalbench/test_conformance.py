@@ -446,5 +446,89 @@ class TestJudgeTaskFiltering(unittest.TestCase):
         self.assertLess(head.index("over 64 tasks"), head.index("## Who failed"))
 
 
+
+class TestDeliverablePollutionRecheck(unittest.TestCase):
+    """The 12 polluted trials: is any of the 10 solves a conditional pass?
+
+    OSA's verification gate asked for a PERSISTED test file and on 12 trials of
+    the full-89 TB 2.0 run it landed in the graded workspace. Ten were solves.
+    They were not graded on directory contents, which is luck rather than
+    correctness, so the question had to be settled rather than assumed.
+
+    Answer, machine-derived by `pollution_recheck` from the task copies on disk:
+    **none of the ten is conditional**, because none of those ten verifiers
+    enumerates a directory AT ALL. That verdict survives this scanner's own
+    blind spot (clipped `shell_execute` args, 1,956 unreadable calls in that
+    run): a verifier that never lists a directory cannot fail on an artefact,
+    whether or not we managed to see the artefact.
+    """
+
+    TAXONOMY_SOLVES = [
+        "bn-fit-modify", "build-cython-ext", "chess-best-move",
+        "distribution-search", "extract-elf", "merge-diff-arc-agi-task",
+        "openssl-selfsigned-cert", "path-tracing-reverse",
+        "pytorch-model-recovery", "write-compressor",
+    ]
+
+    def setUp(self):
+        self.pr = _localimport.load("pollution_recheck")
+        ds = datasets_mod.get("tb2.0")
+        if not ds.present:
+            self.skipTest("tb2.0 not on disk")
+        self.ds = ds
+
+    def test_none_of_the_ten_solves_has_an_enumerating_verifier(self):
+        for task in self.TAXONOMY_SOLVES:
+            dirs, unresolved = self.pr.enumerated_dirs(self.ds.path / task)
+            self.assertEqual(
+                (dirs, unresolved), (set(), 0),
+                f"{task}'s verifier enumerates something; its pass is conditional",
+            )
+
+    def test_the_polyglot_verifiers_do_enumerate_the_deliverable_directory(self):
+        """The positive control. Without it the test above proves nothing."""
+        for task in ("polyglot-c-py", "polyglot-rust-c"):
+            dirs, _ = self.pr.enumerated_dirs(self.ds.path / task)
+            self.assertIn("/app/polyglot", dirs)
+
+    def test_reshard_enumerates_only_directories_it_creates_itself(self):
+        """The near-miss that a coarse scan gets wrong.
+
+        `reshard-c4-data` is a SOLVE that wrote `/app/tests/test_reshard.py` and
+        whose verifier calls both `os.walk` and `os.listdir`. A "does it call
+        listdir" check marks it conditional. Both calls target
+        `TEST_OUTPUT_DIR = f"/app/c4_test_{uuid.uuid4()}/"`, a directory the
+        verifier creates during its own run, which the artefact is not in.
+        """
+        dirs, unresolved = self.pr.enumerated_dirs(self.ds.path / "reshard-c4-data")
+        self.assertEqual(unresolved, 0)
+        self.assertTrue(dirs and all(d.startswith("/app/c4_test_") for d in dirs), dirs)
+        self.assertFalse(
+            any("/app/tests".startswith(d) for d in dirs),
+            "the agent's artefact directory must not be reachable",
+        )
+
+    def test_terminal_bench_2_1_retracted_the_exclusive_listing(self):
+        """Upstream classified the assertion as a task bug, and removed it.
+
+        TB 2.1's `polyglot-rust-c` verifier now reads, verbatim: "Check that
+        main.rs exists (dont require it to be the only file -- compilation may
+        leave binaries)". `polyglot-c-py`'s says the task description allows
+        compiling to `/app/polyglot/cmain`, "so we allow additional files like
+        compiled binaries to exist" -- which is the instruction's OWN example
+        command writing into the directory the assertion required to hold one
+        file. So the stricter grader this whole question is measured against no
+        longer exists, and species 6 is a TB 2.0 artefact.
+        """
+        tb21 = datasets_mod.get("tb2.1")
+        if not tb21.present:
+            self.skipTest("tb2.1 not on disk")
+        got = self.pr.polyglot_rule_retracted()
+        self.assertTrue(got["tb2.0/polyglot-c-py"])
+        self.assertTrue(got["tb2.0/polyglot-rust-c"])
+        self.assertFalse(got["tb2.1/polyglot-c-py"])
+        self.assertFalse(got["tb2.1/polyglot-rust-c"])
+
+
 if __name__ == "__main__":
     unittest.main()
