@@ -57,7 +57,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Tool do
         "output_mode" => %{
           "type" => "string",
           "enum" => ["content", "files_with_matches", "count"],
-          "description" => "Result shape (default files_with_matches)"
+          "description" => "Result shape (default content)"
         },
         "max_results" => %{
           "type" => "integer",

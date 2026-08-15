@@ -11,8 +11,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   changes — just relocation + permission/validation split.
   """
 
+  alias OptimalSystemAgent.Tools.Ablation
   alias OptimalSystemAgent.Tools.Builtins.FileGrep.Constants
   alias OptimalSystemAgent.Tools.UseContext
+
+  @ignored_matches_note "\n\n(These matches are in files excluded by a .gitignore/.ignore rule " <>
+                          "or hidden by a leading dot, so the default search skipped them. They " <>
+                          "are shown because the default search found nothing — the paths are real.)"
+
+  @no_matches_anywhere "No matches found. This search DID widen to the files an ordinary " <>
+                         "search skips — .gitignore'd, hidden, and dependency/build directories " <>
+                         "— so the pattern is genuinely absent from that path. Re-running it " <>
+                         "through the shell will not give a different answer. If you expected a " <>
+                         "hit, the pattern is wrong (regex metacharacters need escaping) or the " <>
+                         "path is."
+
+  @pruned_matches_note "\n\n(These matches are in dependency or build directories " <>
+                         "(node_modules, .git, _build, deps, target, __pycache__, .venv), which " <>
+                         "the ordinary search skips. They are shown because the ordinary search " <>
+                         "found nothing — the paths are real.)"
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
@@ -96,7 +113,55 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
     case try_ripgrep(pattern, path, rg_opts) do
       {:ok, output} -> {:ok, output |> bound_output() |> with_spread_trailer()}
+      :empty -> empty_result(pattern, path, rg_opts)
       {:fallback, _} -> fallback_grep(pattern, path, rg_opts)
+    end
+  end
+
+  # ── "No matches found." was a wrong answer 285 times in the corpus ────
+  #
+  # ripgrep does not search every file under the path it is given. By default it
+  # obeys `.gitignore`, `.ignore` and `.rgignore` at every level, and skips
+  # dotfiles. Nothing in the result said so, so a search that was never
+  # performed came back indistinguishable from a search that found nothing —
+  # the same silent-wrong-answer class as the missing-path case above, and the
+  # more expensive one, because a missing path at least looks like an error.
+  #
+  # Measured across 118 SWE-bench/-Pro transcripts (862 `file_grep` calls):
+  # 285 returned "No matches found." and 42 returned a missing-path error. Of
+  # those, 58 were followed within six calls by a `shell_execute` grep for the
+  # same token that DID return matches — the model routing around its own tool
+  # and paying full shell price for it. 16 assistant turns say so outright:
+  # *"the grep tool seems to have a systemic issue with this repo"*, *"the grep
+  # for `parent_link` returned nothing — that's odd"*, *"the grep tool seems
+  # unreliable here"*. Reproduced exactly in this repository: `bench/*/runs/` is
+  # gitignored, so every benchmark workspace under it is invisible to
+  # `file_grep` and fully visible to `grep -r`.
+  #
+  # So on an empty result — and ONLY on an empty result, which is where a second
+  # exec is affordable and where a false negative is the whole cost — re-run
+  # with the ignore rules and the dotfile skip lifted. If that finds something,
+  # the matches were real and they are returned, with one sentence saying why
+  # they needed asking for twice. If it finds nothing, the answer was honest and
+  # says so in terms the model can act on.
+  defp empty_result(pattern, path, opts) do
+    if Ablation.on?(:grep_coverage) do
+      do_empty_result(pattern, path, opts)
+    else
+      {:ok, "No matches found."}
+    end
+  end
+
+  defp do_empty_result(pattern, path, opts) do
+    case try_ripgrep(pattern, path, opts, unrestricted: true) do
+      {:ok, output} ->
+        {:ok,
+         (output <> @ignored_matches_note)
+         |> bound_output()
+         |> with_spread_trailer()}
+
+      _ ->
+        {:ok, @no_matches_anywhere}
     end
   end
 
@@ -166,10 +231,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
   # ── Private: ripgrep path ─────────────────────────────────────────────
 
-  defp try_ripgrep(pattern, path, opts) do
+  defp try_ripgrep(pattern, path, opts, mode \\ []) do
     max = opts[:max_results] || Constants.default_max_results()
 
     args = ["--no-heading", "--color", "never"]
+
+    # `--no-ignore` lifts .gitignore/.ignore/.rgignore; `--hidden` lifts the
+    # dotfile skip. `.git/` stays excluded — pack files and loose objects are
+    # binary noise that would drown the answer this pass exists to recover.
+    args =
+      if mode[:unrestricted],
+        do: args ++ ["--no-ignore", "--hidden", "--glob", "!.git/"],
+        else: args
 
     args =
       case opts[:output_mode] do
@@ -189,7 +262,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
     case System.cmd("rg", args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
-      {_output, 1} -> {:ok, "No matches found."}
+      {_output, 1} -> :empty
       {_, _} -> {:fallback, :rg_not_found}
     end
   rescue
@@ -197,79 +270,287 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   end
 
   # ── Private: Elixir fallback ──────────────────────────────────────────
-
+  #
+  # This is not a rare path. `System.cmd("rg", …)` raises `:enoent` whenever the
+  # ripgrep binary is not on the BEAM's PATH, and the rescue below turns that
+  # into a fallback — silently. Measured on the 118-session corpus: of the 50
+  # `file_grep` calls that asked for `context_lines` and got matches back, ZERO
+  # results contain a single context line. The fallback ignored the parameter,
+  # so every one of those 50 answers was served here. Not "sometimes" — the
+  # ripgrep path never ran in any of the 118 sessions, and nothing said so.
+  #
+  # Three defects compounded on top of that, and together they are the
+  # "systemic issue with this repo" the transcripts complain about:
+  #
+  #   1. **The file list was truncated to 500 after a full-tree walk.**
+  #      `Path.wildcard("**/*") |> Enum.take(500)` keeps the first 500 paths in
+  #      lexicographic order and discards the rest with no mention. Measured on
+  #      the NodeBB workspace in `bench/`: 54,905 files, of which 500 were
+  #      searched — **0.9%** — and the walk stopped inside `build/`, having
+  #      never reached `src/` or `test/`. Every search of that repository
+  #      answered "No matches found." from a 0.9% sample.
+  #   2. **`glob` was not recursive.** `Path.join(path, "*.py")` matches the top
+  #      level only, where `rg -g '*.py'` matches at any depth.
+  #   3. **`context_lines` was dropped.**
+  #
+  # All three are fixed below, and the coverage cap now REPORTS itself. A search
+  # that examined part of the tree and said nothing is the same failure as the
+  # missing-path case at the top of this file: a confident wrong answer that
+  # sends the agent down a false trail, and the one it is most expensive to
+  # recover from because nothing looks broken.
   defp fallback_grep(pattern, path, opts) do
     regex_opts = if opts[:case_insensitive], do: "i", else: ""
 
     case Regex.compile(pattern, regex_opts) do
-      {:error, _} ->
-        {:error, "Invalid regex pattern: #{pattern}"}
+      {:error, reason} ->
+        {:error,
+         "Invalid regex pattern: #{pattern} (#{inspect(reason)}). " <>
+           "Escape regex metacharacters — `.` `*` `+` `?` `(` `)` `[` `]` `{` `}` `|` `^` `$` — " <>
+           "if you meant them literally."}
 
       {:ok, r} ->
-        files = collect_files(path, opts[:glob])
-        max = opts[:max_results] || Constants.default_max_results()
+        {files, cut?} = collect_files(path, opts[:glob])
 
-        results =
-          case opts[:output_mode] do
-            "files_with_matches" ->
-              Enum.filter(files, fn file ->
-                case File.read(file) do
-                  {:ok, content} -> Regex.match?(r, content)
-                  _ -> false
-                end
-              end)
-
-            "count" ->
-              Enum.flat_map(files, fn file ->
-                case File.read(file) do
-                  {:ok, content} ->
-                    count =
-                      content |> String.split("\n") |> Enum.count(&Regex.match?(r, &1))
-
-                    if count > 0, do: ["#{file}:#{count}"], else: []
-
-                  _ ->
-                    []
-                end
-              end)
-
-            _ ->
-              Enum.flat_map(files, fn file ->
-                case File.read(file) do
-                  {:ok, content} ->
-                    content
-                    |> String.split("\n")
-                    |> Enum.with_index(1)
-                    |> Enum.filter(fn {line, _} -> Regex.match?(r, line) end)
-                    |> Enum.take(max)
-                    |> Enum.map(fn {line, num} -> "#{file}:#{num}:#{line}" end)
-
-                  _ ->
-                    []
-                end
-              end)
+        if Ablation.on?(:grep_coverage) do
+          covered_scan(files, r, opts, path, cut?)
+        else
+          case scan(files, r, opts) do
+            [] -> {:ok, "No matches found."}
+            lines -> {:ok, emit(lines)}
           end
-
-        case results do
-          [] -> {:ok, "No matches found."}
-          lines -> {:ok, lines |> Enum.join("\n") |> bound_output() |> with_spread_trailer()}
         end
     end
   end
 
-  defp collect_files(path, glob) do
-    if File.regular?(path) do
-      [path]
-    else
-      file_pattern = glob || "**/*"
+  defp covered_scan(files, r, opts, path, cut?) do
+    case scan(files, r, opts) do
+      [] ->
+        # Nothing in the ordinary tree. Widen to the directories the walk
+        # prunes, exactly as the ripgrep path widens to ignored and hidden
+        # files, so the two backends answer the same question.
+        {pruned, pruned_cut?} = collect_files(path, opts[:glob], pruned_only: true)
 
-      Path.wildcard(Path.join(path, file_pattern))
-      |> Enum.filter(&File.regular?/1)
-      |> Enum.reject(fn p ->
-        Enum.any?(Constants.sensitive_paths(), &String.contains?(p, &1))
-      end)
-      |> Enum.take(Constants.max_fallback_files())
+        case scan(pruned, r, opts) do
+          [] -> {:ok, @no_matches_anywhere <> coverage_note(cut? or pruned_cut?)}
+          lines -> {:ok, emit(lines) <> @pruned_matches_note}
+        end
+
+      lines ->
+        {:ok, emit(lines) <> coverage_note(cut?)}
     end
+  end
+
+  defp emit(lines), do: lines |> Enum.join("\n") |> bound_output() |> with_spread_trailer()
+
+  defp coverage_note(false), do: ""
+
+  defp coverage_note(true) do
+    "\n\n(Coverage limit: this search examined the first " <>
+      "#{Constants.max_fallback_files()} files under that path and there are more. " <>
+      "The result is therefore a lower bound, NOT proof of absence. Narrow it with a " <>
+      "more specific `path` or a `glob` and search again.)"
+  end
+
+  defp scan(files, r, opts) do
+    max = opts[:max_results] || Constants.default_max_results()
+
+    case opts[:output_mode] do
+      "files_with_matches" ->
+        Enum.flat_map(files, fn file ->
+          case File.read(file) do
+            {:ok, content} -> if Regex.match?(r, content), do: [file], else: []
+            _ -> []
+          end
+        end)
+
+      "count" ->
+        Enum.flat_map(files, fn file ->
+          with {:ok, content} <- File.read(file),
+               count when count > 0 <-
+                 content |> String.split("\n") |> Enum.count(&Regex.match?(r, &1)) do
+            ["#{file}:#{count}"]
+          else
+            _ -> []
+          end
+        end)
+
+      _ ->
+        Enum.flat_map(files, &scan_lines(&1, r, max, opts[:context_lines]))
+    end
+  end
+
+  # `context_lines` is honoured here now, in ripgrep's own output shape: a
+  # matched line is `path:line:text`, a context line is `path-line-text`, and
+  # non-adjacent groups are separated by `--`. The separator characters are what
+  # let a reader (and `distinct_match_files/1` below) tell the two apart.
+  defp scan_lines(file, r, max, context) do
+    case File.read(file) do
+      {:ok, content} ->
+        lines = String.split(content, "\n")
+
+        hits =
+          lines
+          |> Enum.with_index(1)
+          |> Enum.filter(fn {line, _} -> Regex.match?(r, line) end)
+          |> Enum.take(max)
+          |> Enum.map(&elem(&1, 1))
+
+        cond do
+          hits == [] -> []
+          context in [nil, 0] -> Enum.map(hits, &"#{file}:#{&1}:#{Enum.at(lines, &1 - 1)}")
+          true -> with_context(file, lines, hits, context)
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp with_context(file, lines, hits, context) do
+    wanted = MapSet.new(hits)
+
+    ranges =
+      Enum.map(hits, fn n -> max(n - context, 1)..min(n + context, length(lines)) end)
+
+    ranges
+    |> Enum.flat_map(&Enum.to_list/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.chunk_while(
+      [],
+      fn n, acc ->
+        case acc do
+          [] -> {:cont, [n]}
+          [prev | _] when n == prev + 1 -> {:cont, [n | acc]}
+          _ -> {:cont, Enum.reverse(acc), [n]}
+        end
+      end,
+      fn acc -> {:cont, Enum.reverse(acc), []} end
+    )
+    |> Enum.map(fn group ->
+      Enum.map_join(group, "\n", fn n ->
+        sep = if MapSet.member?(wanted, n), do: ":", else: "-"
+        "#{file}#{sep}#{n}#{sep}#{Enum.at(lines, n - 1)}"
+      end)
+    end)
+    |> Enum.intersperse("--")
+  end
+
+  # Walk the tree ourselves rather than through `Path.wildcard/2`, so the prune
+  # list is applied to DIRECTORIES and a `node_modules` costing 50,000 files is
+  # never enumerated at all. That is what makes the budget affordable enough to
+  # raise: the cap now bounds source files, not dependency noise.
+  #
+  # Returns `{files, truncated?}` — the boolean is the whole point. A caller
+  # that cannot tell a complete search from a partial one cannot tell "absent"
+  # from "not looked at".
+  @pruned_dirs ~w(.git node_modules _build deps target __pycache__ .venv venv
+                  .tox .mypy_cache .pytest_cache .next .nuxt .gradle vendor)
+
+  defp collect_files(path, glob, mode \\ []) do
+    if File.regular?(path) do
+      {[path], false}
+    else
+      cap = Constants.max_fallback_files()
+
+      files =
+        path
+        |> walk(mode[:pruned_only] == true)
+        |> Stream.reject(fn p ->
+          Enum.any?(Constants.sensitive_paths(), &String.contains?(p, &1))
+        end)
+        |> Stream.filter(&glob_match?(&1, path, glob))
+        # One more than the cap, so "exactly at the cap" is distinguishable
+        # from "more than the cap" without walking the rest of the tree.
+        |> Enum.take(cap + 1)
+
+      {Enum.take(files, cap), length(files) > cap}
+    end
+  end
+
+  defp walk(dir, pruned_only?) do
+    Stream.resource(
+      fn -> [dir] end,
+      fn
+        [] ->
+          {:halt, []}
+
+        [current | rest] ->
+          case File.ls(current) do
+            {:ok, entries} ->
+              {dirs, files} =
+                entries
+                |> Enum.sort()
+                |> Enum.map(&Path.join(current, &1))
+                |> Enum.split_with(&File.dir?/1)
+
+              keep =
+                Enum.filter(dirs, fn d ->
+                  pruned? = Path.basename(d) in @pruned_dirs
+                  if pruned_only?, do: true, else: not pruned?
+                end)
+
+              {Enum.filter(files, &File.regular?/1), keep ++ rest}
+
+            _ ->
+              {[], rest}
+          end
+      end,
+      fn _ -> :ok end
+    )
+  end
+
+  # `rg -g` semantics: a glob with no `/` matches the BASENAME at any depth; a
+  # glob with a `/` is matched against the path relative to the search root.
+  defp glob_match?(_file, _root, nil), do: true
+
+  defp glob_match?(file, root, glob) do
+    if String.contains?(glob, "/") do
+      rel = Path.relative_to(file, root)
+
+      Regex.match?(glob_regex(glob), rel) or
+        Regex.match?(glob_regex(String.replace_prefix(glob, "**/", "")), rel)
+    else
+      Regex.match?(glob_regex(glob), Path.basename(file))
+    end
+  end
+
+  # A glob compiled once per distinct pattern and cached in the process
+  # dictionary — `glob_match?/3` runs once per file, and recompiling the same
+  # regex tens of thousands of times per search is the difference between this
+  # walk being affordable and not.
+  defp glob_regex(glob) do
+    key = {:osa_file_grep_glob, glob}
+
+    case Process.get(key) do
+      nil ->
+        r = compile_glob(glob)
+        Process.put(key, r)
+        r
+
+      r ->
+        r
+    end
+  end
+
+  # `**` crosses directory separators, `*` does not, `?` is one non-separator
+  # character. Everything else is literal.
+  defp compile_glob(glob) do
+    # Private-use codepoints as placeholders: `Regex.escape/1` leaves them
+    # alone, and no real path contains them.
+    body =
+      glob
+      |> String.replace("**/", "")
+      |> String.replace("**", "")
+      |> String.replace("*", "")
+      |> String.replace("?", "")
+      |> Regex.escape()
+      |> String.replace("", "(?:.*/)?")
+      |> String.replace("", ".*")
+      |> String.replace("", "[^/]*")
+      |> String.replace("", "[^/]")
+
+    Regex.compile!("^" <> body <> "$")
   end
 
   @max_output_bytes Constants.max_output_bytes()

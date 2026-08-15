@@ -35,8 +35,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Constants do
   @max_output_bytes 100_000
   def max_output_bytes, do: @max_output_bytes
 
-  # Legacy per-file truncation kept for the fallback path.
-  @max_fallback_files 500
+  # How many files the pure-Elixir fallback will read in one search.
+  #
+  # Was 500, applied to a full-tree `Path.wildcard/1` result with `Enum.take/2`
+  # and never mentioned in the output. On the NodeBB workspace under `bench/`
+  # that meant 500 of 54,905 files — 0.9% of the tree, stopping inside `build/`
+  # without ever reaching `src/` — reported as "No matches found."
+  #
+  # 20,000 is affordable now for two reasons that did not hold before: the walk
+  # prunes dependency and build directories at the DIRECTORY level, so the
+  # budget is spent on source; and when the cap does bite the result says so, so
+  # a partial search is no longer indistinguishable from an exhaustive one.
+  @max_fallback_files 20_000
   def max_fallback_files, do: @max_fallback_files
 
   @default_max_results 50

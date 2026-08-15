@@ -15,10 +15,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Prompt do
         "shell_execute"
       )
 
+    symbols_name =
+      safe_ref(
+        OptimalSystemAgent.Tools.Builtins.CodeSymbols.Constants,
+        :tool_name,
+        "code_symbols"
+      )
+
     """
     Search file contents for a regex pattern. ALWAYS use file_grep for content
     search — NEVER #{shell_name} with grep or rg. Supports full regex syntax
-    (e.g. "log.*Error", "function\\\\s+\\\\w+").
+    (e.g. "log.*Error", "function\\\\s+\\\\w+"). Ignored and hidden files are
+    searched too when the ordinary search finds nothing, so "No matches found."
+    means the pattern is absent, not filtered.
+
+    To see what a definition SAYS, call #{symbols_name} with `name` — it returns
+    that one function or class. Do not grep for `def foo` and then read a guessed
+    window around the hit.
 
     Independent searches belong in the same turn: fire every pattern you already
     know you need as parallel calls rather than one per turn.
