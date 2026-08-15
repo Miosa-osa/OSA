@@ -479,15 +479,30 @@ impl ApiClient {
 
     /// POST /api/v1/sessions/:id/clear — reset the backend session context
     /// (session_end hooks → save → fresh loop with parent lineage →
-    /// session_start hooks; workstream M). The body is ignored: a 2xx means
-    /// the model's context is actually gone, not just the TUI's view of it.
-    pub async fn clear_session(&self, id: &str) -> Result<()> {
-        self.post(
-            &format!("/api/v1/sessions/{}/clear", id),
-            &serde_json::json!({}),
-        )
-        .await?;
-        Ok(())
+    /// session_start hooks; workstream M).
+    ///
+    /// The endpoint is a session SWAP, not an in-place wipe: it stops the old
+    /// loop and returns a BRAND NEW session id (`{id, status: "cleared",
+    /// parent_session, working_dir}`), which deserializes into
+    /// `SessionCreateResponse`. The caller MUST adopt that id.
+    ///
+    /// This used to return `Result<()>` and drop the body, which made `/clear`
+    /// a lie in the one way that matters. Keeping the old id meant the next
+    /// `POST /orchestrate` addressed the session the clear had just stopped;
+    /// `ensure_loop` restarted it, and `Loop.init` found no checkpoint (the
+    /// clear had wiped it) and fell through to `load_persisted_messages/1` —
+    /// reading back the very file the clear endpoint itself had just written
+    /// via its pre-clear `auto_save`. The entire "cleared" conversation was
+    /// reloaded into the model, and the fresh session the backend had built
+    /// was orphaned, never addressed by anyone.
+    pub async fn clear_session(&self, id: &str) -> Result<SessionCreateResponse> {
+        let resp = self
+            .post(
+                &format!("/api/v1/sessions/{}/clear", id),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(resp.json().await?)
     }
 
     /// GET /api/v1/sessions/:id/recap — short LLM summary of the session so far.

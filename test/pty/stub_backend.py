@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Version reported on /health. The TUI only displays it, so any well-formed
@@ -256,6 +257,48 @@ def release_turn() -> None:
     _TURN_GATE.set()
 
 
+# --- pushing events down the SSE stream --------------------------------------
+#
+# The stream used to be keepalives and nothing else, which is fine for layout
+# but cannot express the single most important fact about a turn: that it ENDED.
+# The HTTP response to `POST /orchestrate` is deliberately only an
+# acknowledgement — `handle_backend.rs` will not leave `Processing` on it, by
+# design — so the ONLY thing that ends a turn on a connected stream is an
+# `agent_response` frame. A test about what happens after a turn ends therefore
+# has to be able to send one.
+_SSE_OUTBOX: list[bytes] = []
+_SSE_LOCK = threading.Lock()
+
+
+def push_sse(event: str, payload: dict) -> None:
+    """Queue one SSE frame for delivery on every open stream."""
+    frame = f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode()
+    with _SSE_LOCK:
+        _SSE_OUTBOX.append(frame)
+
+
+def end_turn(response: str = "done thinking") -> None:
+    """End the in-flight turn the way the real backend does.
+
+    `agent_response` is the frame that drives `Processing -> Idle`. Sent alone
+    it is exactly what a normal, successful turn looks like from the TUI's side.
+    """
+    push_sse(
+        "agent_response",
+        {"response": response, "response_type": "text", "message_id": "stub-msg-1"},
+    )
+
+
+def reset_sse() -> None:
+    with _SSE_LOCK:
+        _SSE_OUTBOX.clear()
+
+
+#: The id `POST /sessions/:id/clear` hands back. Deliberately NOT the id the TUI
+#: started with, so "did the client adopt the new session?" is answerable by
+#: looking at where its next request went.
+CLEARED_SESSION_ID = "pty-stub-session-cleared"
+
 #: Every POST the stub received, as `(path, body)`, oldest first.
 #: Appended by `_Handler.do_POST`; read by the tests through `posts_since`.
 POSTS: list[tuple[str, str]] = []
@@ -309,11 +352,32 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        # Each stream tracks how much of the shared outbox it has already sent,
+        # so a frame pushed by a test reaches every open stream exactly once.
+        # A stream only ever sends frames pushed AFTER it opened. The outbox is
+        # process-global and a test may leave frames in it, so starting at the
+        # current end (rather than 0) stops a previous test's turn-end leaking
+        # into the next session's stream.
+        with _SSE_LOCK:
+            sent = len(_SSE_OUTBOX)
+        last_keepalive = 0.0
         try:
             while not self.server._stopping:  # type: ignore[attr-defined]
-                self.wfile.write(b": keepalive\n\n")
+                with _SSE_LOCK:
+                    pending = _SSE_OUTBOX[sent:]
+                    sent = len(_SSE_OUTBOX)
+                for frame in pending:
+                    self.wfile.write(frame)
+                # Keepalive cadence is unchanged at ~1s: it exists to hold the
+                # connection, and the layout tests are calibrated to that much
+                # quiet. Only the POLL is fast, so a pushed frame is not stuck
+                # behind a one-second sleep.
+                now = time.time()
+                if not pending and now - last_keepalive >= 1.0:
+                    self.wfile.write(b": keepalive\n\n")
+                    last_keepalive = now
                 self.wfile.flush()
-                if self.server._stop_event.wait(1.0):  # type: ignore[attr-defined]
+                if self.server._stop_event.wait(0.05):  # type: ignore[attr-defined]
                     break
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -375,6 +439,23 @@ class _Handler(BaseHTTPRequestHandler):
             # "interrupt" while the long poll is outstanding.
             _TURN_GATE.wait(GATE_CEILING)
             return self._json({})
+        if path.startswith("/api/v1/sessions/") and path.endswith("/clear"):
+            # The real endpoint is a session SWAP, not an in-place wipe: it stops
+            # the old loop and returns a NEW id, with the old one as
+            # `parent_session` (session_routes.ex `post "/:id/clear"`). The stub
+            # has to return the same shape or it cannot tell a client that adopts
+            # the new id from one that drops it on the floor — which was the
+            # actual defect, and is invisible to any check that only looks at
+            # whether a 2xx came back.
+            return self._json(
+                {
+                    "id": CLEARED_SESSION_ID,
+                    "status": "cleared",
+                    "parent_session": path.split("/")[4],
+                    "working_dir": "/tmp",
+                },
+                status=201,
+            )
         return self._json({})
 
 

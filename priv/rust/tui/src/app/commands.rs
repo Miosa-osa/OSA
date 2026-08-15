@@ -133,6 +133,42 @@ impl App {
                 self.tasks.clear();
                 self.transcript_log.clear();
                 self.attachments.clear();
+                // ...including everything that can PUT A MESSAGE BACK.
+                //
+                // `/clear` cleared what was on screen and nothing that could
+                // repaint it. The queue was the visible half: prompts typed
+                // during a turn are held in `message_queue` and rendered as dim
+                // rows directly above the composer, so after the transcript and
+                // the real scrollback were purged, the top of an otherwise empty
+                // screen showed the user's own last message back at them —
+                // reported as "it showed me the duplicate of the thing at the
+                // top". It was not a duplicate and not a rendering artefact: it
+                // was a live queue entry that `/clear` had no opinion about,
+                // still waiting to be sent. The user retyped the message because
+                // the thing on screen was never in the composer to begin with.
+                //
+                // `last_submitted_prompt` is the same hazard by another route —
+                // the interrupt path re-inserts it into the composer when the
+                // queue is empty, which after a clear would resurrect a prompt
+                // from the conversation the user just discarded.
+                self.message_queue.clear();
+                self.input.set_queued_items(Vec::new());
+                self.last_submitted_prompt = None;
+                // Per-turn accumulators. A clear that leaves these behind lets a
+                // half-streamed reply from the old context finish rendering into
+                // the new one.
+                self.assistant_stream.reset();
+                self.thinking_buf.clear();
+                self.agent_header_sent = false;
+                // The context meter measures the model's context, which the
+                // backend swap has just emptied — so it reads 0 until the next
+                // turn reports a real figure. Leaving it alone (what it did)
+                // meant the bar kept showing the discarded conversation's usage,
+                // which is the one number a user checks to confirm a clear
+                // actually happened.
+                self.status.note_input_tokens(0);
+                self.status.set_pending_input_tokens(0);
+                self.sidebar.set_context(0.0);
                 // In inline mode the finalized transcript lives in the real
                 // terminal scrollback (each message was flushed there via
                 // insert_before), which the clears above never touch. Signal
@@ -149,13 +185,26 @@ impl App {
                 let tx = self.event_tx.clone();
                 let sid = self.session_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = client.clear_session(&sid).await {
-                        let _ = tx.send(Event::Backend(BackendEvent::CommandResult(Err(
-                            format!(
-                                "/clear: backend reset failed ({}) \u{2014} the model may still remember earlier context",
-                                e
-                            ),
-                        ))));
+                    match client.clear_session(&sid).await {
+                        // The clear SWAPPED sessions — adopt the id the backend
+                        // returned. Routed through the existing `SessionCreated`
+                        // handler because adopting an id is never just a field
+                        // write: it also has to reconnect SSE to the new stream
+                        // and drop the old session's title. Dropping this
+                        // response (which is what the code did) left the TUI
+                        // talking to the stopped session, whose history the
+                        // backend then reloaded from disk — see `clear_session`.
+                        Ok(resp) => {
+                            let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Ok(resp))));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Backend(BackendEvent::CommandResult(Err(
+                                format!(
+                                    "/clear: backend reset failed ({}) \u{2014} the model may still remember earlier context",
+                                    e
+                                ),
+                            ))));
+                        }
                     }
                 });
                 self.toasts.push(

@@ -1042,14 +1042,14 @@ impl App {
         if self.state.is_processing() {
             self.transition(AppState::Idle);
         }
-        // Not an `else`: a turn can be parked while `self.state` is also
-        // `Processing` only transiently, but rewriting the stack is idempotent
-        // and must happen in both shapes.
-        for s in self.return_stack.iter_mut() {
-            if *s == AppState::Processing {
-                *s = AppState::Idle;
-            }
-        }
+        // Not an `else`: rewriting the stack is idempotent and must happen in
+        // both shapes.
+        retire_parked_processing(&mut self.return_stack);
+        debug_assert!(
+            !turn_active(self.state, &self.return_stack),
+            "a turn ended but the app is still marked busy — every later submit \
+             will be queued and never drained"
+        );
     }
 
     /// Enter an overlay, remembering the caller on the return stack so closing
@@ -1342,6 +1342,18 @@ fn turn_active(state: AppState, return_stack: &[AppState]) -> bool {
     state.is_processing() || return_stack.contains(&AppState::Processing)
 }
 
+/// Retire every `Processing` parked on the return stack, for a turn that has
+/// ENDED. Pure over its input so the invariant that actually matters —
+/// afterwards `turn_active` is false, so submits dispatch again — is testable
+/// without building an `App`.
+fn retire_parked_processing(return_stack: &mut [AppState]) {
+    for s in return_stack.iter_mut() {
+        if *s == AppState::Processing {
+            *s = AppState::Idle;
+        }
+    }
+}
+
 /// The mutually-exclusive `Option<_>`-backed modal overlays that float above the
 /// state machine, in priority order (highest first). A single source of truth so
 /// the draw layer (`event_loop::draw`) and the key router (`update::handle_key`)
@@ -1413,6 +1425,44 @@ mod turn_active_tests {
             AppState::ContextBreakdown,
             &[AppState::Idle]
         ));
+    }
+
+    #[test]
+    fn retiring_a_parked_turn_makes_the_app_dispatch_again() {
+        // The wedge: a turn ends while an overlay drawn over it owns the screen.
+        // `self.state` is the overlay, so the old `if self.state.is_processing()`
+        // teardown did nothing and the parked `Processing` outlived its turn.
+        // `exit_overlay` then restored it, and from that moment `turn_active`
+        // was true forever — `submit_input` enqueued every prompt and
+        // `queue_may_drain` (which needs `state == Idle`) could never fire. The
+        // user pressed Enter and nothing happened, with no error at all.
+        let mut stack = vec![AppState::Idle, AppState::Processing];
+        assert!(
+            turn_active(AppState::Cost, &stack),
+            "precondition: the turn is parked under the overlay"
+        );
+
+        super::retire_parked_processing(&mut stack);
+
+        assert!(
+            !turn_active(AppState::Cost, &stack),
+            "the turn is over, so nothing may still report it as in flight"
+        );
+        // And the caller is still restorable — the stack keeps its depth, so
+        // `exit_overlay`'s one-pop-per-open balance is untouched.
+        assert_eq!(stack, vec![AppState::Idle, AppState::Idle]);
+    }
+
+    #[test]
+    fn retiring_is_idempotent_and_leaves_other_callers_alone() {
+        let mut stack = vec![AppState::Idle, AppState::Processing, AppState::Sessions];
+        super::retire_parked_processing(&mut stack);
+        super::retire_parked_processing(&mut stack);
+        assert_eq!(
+            stack,
+            vec![AppState::Idle, AppState::Idle, AppState::Sessions],
+            "only Processing is retired; every other parked caller is preserved"
+        );
     }
 }
 

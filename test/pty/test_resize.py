@@ -1368,6 +1368,22 @@ def _start_a_turn(s: PtySession, prompt: bytes) -> None:
         )
 
 
+def _submit_slash(s: PtySession, text: bytes) -> None:
+    """Type and SUBMIT a slash command.
+
+    Two Enters, deliberately. Typing `/` opens the command-completion popup, and
+    the first Enter accepts the highlighted completion rather than submitting —
+    so a single `\\r` leaves the text sitting in the composer, unsent. A test
+    that sent one Enter would be asserting about a command that never ran, and
+    would "fail" identically on a fixed build.
+    """
+    s.write(text)
+    s.pump(SETTLE)
+    s.write(b"\r")
+    s.pump(SETTLE)
+    s.write(b"\r")
+
+
 def test_a_turn_that_ends_under_an_overlay_does_not_wedge_the_session(
     backend: StubBackend,
 ) -> None:
@@ -1494,9 +1510,7 @@ def test_clear_leaves_no_queued_message_behind(backend: StubBackend) -> None:
             # meant to escape is itself the defect that made "ℹ Chat cleared"
             # repeat down the screen in the reported paste.
             clear_mark = post_mark()
-            s.write(b"/clear")
-            s.pump(SETTLE)
-            s.write(b"\r")
+            _submit_slash(s, b"/clear")
             s.pump(1.5)
 
             if "ok how about now" in "\n".join(s.lines()):
@@ -1554,9 +1568,7 @@ def test_clear_adopts_the_session_the_backend_hands_back(
     with PtySession(backend.base_url, cols=120, rows=30) as s:
         s.boot()
 
-        s.write(b"/clear")
-        s.pump(SETTLE)
-        s.write(b"\r")
+        _submit_slash(s, b"/clear")
         s.pump(1.5)
 
         mark = post_mark()
