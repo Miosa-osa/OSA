@@ -39,6 +39,11 @@ defmodule OptimalSystemAgent.Tools.Ablation do
       caller can tell "the file ends here" from "the window ends here".
     * `:read_unchanged_suppression` — replacing a byte-identical re-read with a
       short notice instead of the file's contents.
+    * `:read_range_subtraction` — sending only the part of a requested window
+      the session does not already hold, with the omission named, instead of the
+      whole window. Off restores "any window that is not byte-identical returns
+      in full", which is what shipped before and which addressed 0.8% of the
+      measured read payload.
     * `:read_line_clamp` — the per-line character cap that stops one minified
       line from being megabytes.
     * `:edit_diff_echo` — echoing a synthetic unified diff back for an edit
@@ -66,6 +71,7 @@ defmodule OptimalSystemAgent.Tools.Ablation do
   @defaults %{
     read_stamps: true,
     read_unchanged_suppression: true,
+    read_range_subtraction: true,
     read_line_clamp: true,
     edit_diff_echo: false,
     edit_diff_anchor: true,

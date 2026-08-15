@@ -21,6 +21,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Magic
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Messages
   alias OptimalSystemAgent.Tools.Builtins.FileRead.PathResolve
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Spans
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Subtraction
   alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
@@ -93,7 +95,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     # that is not an ablation harness, so this reads as an unconditional
     # `redundant_read/3` on every live path. See `Tools.Ablation`.
     redundancy =
-      if Ablation.on?(:read_unchanged_suppression),
+      if Ablation.on?(:read_unchanged_suppression) and not resend?(input),
         do: redundant_read(sid, target, range),
         else: :ablated
 
@@ -109,28 +111,51 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         {:ok, notice}
 
       _ ->
-        result = do_read(input)
+        result = do_read(input, sid, target)
 
         # Record read-state for read-before-edit / stale-write enforcement
-        # (P0-1) and for redundant-read suppression above. Only successful reads
-        # of an actual file are recorded; canonical() inside FileState re-stats
-        # the path, so a directory/enoent that slipped through is a harmless
-        # no-op.
+        # (P0-1), for redundant-read suppression above, and for range
+        # subtraction. Only successful reads of an actual file are recorded;
+        # canonical() inside FileState re-stats the path, so a directory/enoent
+        # that slipped through is a harmless no-op.
         case result do
+          {:ok, body, %{lines: spans}} when is_binary(body) ->
+            FileState.record_read(sid, target,
+              range: range,
+              bytes: byte_size(body),
+              lines: spans
+            )
+
+            {:ok, body}
+
           {:ok, body} when is_binary(body) ->
             FileState.record_read(sid, target, range: range, bytes: byte_size(body))
+            result
 
           {:ok, _other} ->
             # An image payload — recorded for read-before-edit, never suppressed.
             FileState.record_read(sid, target, range: range, bytes: 0)
+            result
 
           _ ->
-            :ok
+            result
         end
-
-        result
     end
   end
+
+  # The one escape hatch out of every already-read mechanism in this tool: the
+  # byte-identical notice AND range subtraction both stand down for a call that
+  # says `resend: true`.
+  #
+  # It exists because both mechanisms withhold content on the strength of a
+  # belief about the model's context — that an earlier result is still there and
+  # still legible. The compaction epoch covers the case we can observe, but not
+  # the ones we cannot: a summarised turn, a truncated tool result, a model that
+  # simply lost the thread. Without an override, a wrong belief is unfalsifiable
+  # from the model's side and the only remaining move is to touch the file, which
+  # is a worse outcome than the redundant read. Every message that withholds
+  # names this flag.
+  defp resend?(input), do: Map.get(input, "resend") == true
 
   # Which WINDOW of the file this call asks for, for redundant-read suppression.
   #
@@ -193,12 +218,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     |> resolve_real_path()
   end
 
-  defp do_read(%{"path" => path} = input) do
+  defp do_read(%{"path" => path} = input, sid, target) do
     literal = path |> Path.expand() |> resolve_real_path()
     expanded = resolve_target(path)
     offset = input["offset"]
     limit = input["limit"]
     ext = expanded |> Path.extname() |> String.downcase()
+
+    # What this session is already holding of this file, re-verified against the
+    # file's current hash/mtime/size and the session's compaction epoch by
+    # `FileState.held_lines/2`. `[]` — no basis to subtract — for an exempt
+    # session, a changed file, an ablated run, or an explicit `resend: true`.
+    held =
+      if Ablation.on?(:read_range_subtraction) and not resend?(input),
+        do: held_lines(sid, target),
+        else: []
 
     cond do
       # A Unicode-normalisation rescue must not become an allowlist bypass:
@@ -244,15 +278,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         {:error, Messages.binary(path, binary_verdict)}
 
       offset || limit ->
-        read_with_range(expanded, path, offset, limit)
+        read_with_range(expanded, path, offset, limit, held)
 
       too_large?(expanded) ->
         {mb, cap_mb} = size_report(expanded)
         {:error, Messages.too_large(path, mb, cap_mb)}
 
       true ->
-        read_whole(expanded, path)
+        read_whole(expanded, path, held)
     end
+  end
+
+  defp held_lines(sid, target) do
+    FileState.held_lines(sid, target)
+  rescue
+    _ -> []
   end
 
   # ── Byte-range reads ──────────────────────────────────────────────────
@@ -357,15 +397,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     end
   end
 
-  defp read_whole(expanded, display_path) do
+  defp read_whole(expanded, display_path, held) do
     case File.read(expanded) do
       {:ok, content} ->
         if String.valid?(content) do
+          total = line_count(content)
+
           # A whole-file read is by definition at EOF; say so. Without the stamp
           # the model cannot distinguish "this is all of it" from "this is what
           # the tool chose to give me", and the measured response to that
           # ambiguity is another read. See `Messages.eof_stamp/1`.
-          {:ok, Lines.clamp(content) <> whole_file_stamp(content)}
+          stamp = whole_file_stamp(content)
+
+          # `per_delivered_line: 7` — the `"%5d| "` prefix a whole-file read does
+          # not otherwise carry. See `Subtraction.worth_it?/5`.
+          case Subtraction.plan({1, total}, held, byte_size(content), per_delivered_line: 7) do
+            :full ->
+              # Byte-for-byte the pre-subtraction result, including the ABSENCE
+              # of line numbers. A whole-file read that has nothing to omit must
+              # not change shape just because the mechanism exists.
+              {:ok, Lines.clamp(content) <> stamp, %{lines: [{1, total}]}}
+
+            {:all_held, omitted} ->
+              {:ok, Messages.unchanged_since_last_read(display_path), %{lines: omitted}}
+
+            {:partial, deliver, omitted} ->
+              body =
+                content
+                |> numbered_lines(1, total)
+                |> render_subtracted(deliver, omitted, display_path)
+
+              {:ok, body <> stamp, %{lines: Spans.union(deliver, omitted)}}
+          end
         else
           # `binary_verdict/1` only sniffs the head, so a file that turns to
           # binary further in still lands here. Identify it from what we now
@@ -499,7 +562,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   defp session_id(%{session_id: s}), do: s
   defp session_id(_), do: nil
 
-  defp read_with_range(expanded, display_path, offset, limit) do
+  defp read_with_range(expanded, display_path, offset, limit, held) do
     cond do
       File.dir?(expanded) ->
         {:error, Messages.directory(display_path)}
@@ -508,11 +571,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
         {:error, Messages.missing(display_path, expanded)}
 
       true ->
-        read_with_range_inner(expanded, display_path, offset, limit)
+        read_with_range_inner(expanded, display_path, offset, limit, held)
     end
   end
 
-  defp read_with_range_inner(expanded, display_path, offset, limit) do
+  defp read_with_range_inner(expanded, display_path, offset, limit, held) do
     drop_count = if offset && offset > 1, do: offset - 1, else: 0
     start_line = if offset && offset > 0, do: offset, else: 1
 
@@ -539,22 +602,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
     more? = is_integer(limit) and limit > 0 and length(raw) > limit
     window = if more?, do: Enum.take(raw, limit), else: raw
 
-    lines =
+    numbered =
       window
       |> Enum.with_index(start_line)
       |> Enum.map(fn {{line, byte_offset}, line_num} ->
-        num_str = line_num |> Integer.to_string() |> String.pad_leading(5)
-
         clamped =
           line
           |> String.trim_trailing("\n")
           |> Lines.clamp_line(line_num, nil, byte_offset)
 
-        "#{num_str}| #{clamped}"
+        {line_num, clamped}
       end)
-      |> Enum.join("\n")
 
-    if lines == "" do
+    if numbered == [] do
       # The empty file case is caught earlier and answered separately, so
       # reaching here means the file has content and the window missed it.
       # Counting is a second pass, but only on the failure path, and it turns
@@ -562,8 +622,95 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       {:error, Messages.past_eof(display_path, start_line, count_lines(expanded))}
     else
       last_line = start_line + length(window) - 1
-      {:ok, ensure_utf8(lines) <> range_stamp(more?, start_line, last_line)}
+
+      # The stamp describes the WINDOW — where it sits in the file and what
+      # continues it — and is computed before any subtraction so it keeps saying
+      # that. Subtraction changes which of the window's lines are rendered; it
+      # must not change where the window was, or the offset the model is told to
+      # continue from stops being true. This is why the ablation shows range
+      # subtraction and read stamps as independent flags.
+      stamp = range_stamp(more?, start_line, last_line)
+      window_bytes = Enum.reduce(numbered, 0, fn {_n, t}, acc -> acc + byte_size(t) + 7 end)
+
+      case Subtraction.plan({start_line, last_line}, held, window_bytes) do
+        :full ->
+          {:ok, ensure_utf8(render_numbered(numbered)) <> stamp,
+           %{lines: [{start_line, last_line}]}}
+
+        {:all_held, omitted} ->
+          {:ok, Messages.unchanged_since_last_read(display_path), %{lines: omitted}}
+
+        {:partial, deliver, omitted} ->
+          body = render_subtracted(numbered, deliver, omitted, display_path)
+          {:ok, ensure_utf8(body) <> stamp, %{lines: Spans.union(deliver, omitted)}}
+      end
     end
+  end
+
+  # ── Rendering: numbered lines, with and without omissions ─────────────
+
+  # `{line_no, text}` pairs for `content`, which the whole-file path holds in
+  # memory already. Only built when subtraction actually fires — an unsubtracted
+  # whole-file read keeps returning raw content with no line numbers, exactly as
+  # before.
+  defp numbered_lines(content, start_line, total) do
+    content
+    |> String.split("\n")
+    |> Enum.take(total)
+    |> Enum.with_index(start_line)
+    # The byte offset is accumulated so a clamped line inside a subtracted read
+    # still names a real `byte_offset` to resume from — the clamp's undo must
+    # survive subtraction, or the two features together lose a fact neither
+    # loses alone. +1 per line for the newline `String.split/2` consumed.
+    |> Enum.map_reduce(0, fn {line, line_no}, offset ->
+      {{line_no, Lines.clamp_line(line, line_no, nil, offset)}, offset + byte_size(line) + 1}
+    end)
+    |> elem(0)
+  end
+
+  defp render_numbered(numbered) do
+    Enum.map_join(numbered, "\n", fn {line_no, text} ->
+      "#{line_no |> Integer.to_string() |> String.pad_leading(5)}| #{text}"
+    end)
+  end
+
+  # Drop the held lines, and say so at the top AND at each hole.
+  #
+  # Both, deliberately. The header is what a model reads when it scans the first
+  # line of a result and decides whether it has the file; the inline marker is
+  # what stops a jump from line 39 to line 81 reading as corrupted output at the
+  # point where it is actually looked at. Neither alone is sufficient and the
+  # pair costs about 300 bytes against omissions that are only ever taken when
+  # they save more than that — see `Subtraction.plan/3`.
+  defp render_subtracted(numbered, deliver, omitted, display_path) do
+    by_line = Map.new(numbered)
+
+    delivered_chunks =
+      Enum.map(deliver, fn {f, l} ->
+        text =
+          f..l//1
+          |> Enum.flat_map(fn n ->
+            case Map.fetch(by_line, n) do
+              {:ok, t} -> [{n, t}]
+              :error -> []
+            end
+          end)
+          |> render_numbered()
+
+        {f, text}
+      end)
+
+    gap_chunks = Enum.map(omitted, fn {f, l} -> {f, Messages.omitted_gap(f, l)} end)
+
+    # Sorted by first line, so the result reads top-to-bottom like the file
+    # does and the gap markers sit exactly where the holes are.
+    body =
+      (delivered_chunks ++ gap_chunks)
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.reject(fn {_f, text} -> text == "" end)
+      |> Enum.map_join("\n", &elem(&1, 1))
+
+    Messages.subtracted_header(display_path, deliver, omitted) <> body
   end
 
   # `more?` is known exactly (the take-one-extra above), so the stamp is never a

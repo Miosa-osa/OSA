@@ -19,7 +19,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   on the exact wording without reaching into read logic.
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.FileRead.{Constants, PathResolve}
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.{Constants, PathResolve, Spans}
 
   @doc "The path is a directory. Different tool, not a different path."
   @spec directory(String.t()) :: String.t()
@@ -166,7 +166,52 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   def unchanged_since_last_read(display_path) do
     "<file_read notice: #{display_path} is UNCHANGED since you last read it this session; " <>
       "its content is already in your context above and is current. Re-reading returns this " <>
-      "notice, not bytes, until the file changes. The file counts as read — you may edit it.>"
+      "notice, not bytes, until the file changes. The file counts as read — you may edit it. " <>
+      "If you genuinely need the bytes again, pass `resend: true`.>"
+  end
+
+  @doc """
+  Header for a read whose requested window overlapped lines this session is
+  already holding, so only the remainder was sent.
+
+  ## Why this is worded as an answer, not a refusal
+
+  A silent subtraction is the failure mode this message exists to prevent: the
+  model asks for a file, receives 40 lines, and has no way to tell that from a
+  40-line file. It would then reason about a fragment believing it holds the
+  whole — which is strictly worse than the redundant read, because nothing in
+  the result contradicts it.
+
+  So the notice states three things and in this order: **what you are getting**,
+  **what was left out and exactly which lines**, and **why leaving it out is
+  safe** (you have it, above, unchanged). It ends with the undo, because a
+  mechanism that withholds content and cannot be told to stop is a dead end —
+  the same rule `Lines.clamp/2`'s marker follows.
+  """
+  @spec subtracted_header(String.t(), [{pos_integer(), pos_integer()}], [
+          {pos_integer(), pos_integer()}
+        ]) :: String.t()
+  def subtracted_header(display_path, delivered, omitted) do
+    "<file_read notice: showing lines #{Spans.describe(delivered)} of #{display_path}. " <>
+      "Lines #{Spans.describe(omitted)} are omitted because you already read them this " <>
+      "session and the file has not changed since — that content is above in your context " <>
+      "and is still current, so this is the rest of what you asked for, not a truncation. " <>
+      "Pass `resend: true` to get the omitted lines again.>\n"
+  end
+
+  @doc """
+  Inline marker at each hole in a subtracted read.
+
+  The header names every omission up front; this repeats the one at *this*
+  position, because line-numbered output makes a jump from 39 to 81 look like a
+  rendering bug unless something says otherwise at the jump itself.
+  """
+  @spec omitted_gap(pos_integer(), pos_integer()) :: String.t()
+  def omitted_gap(first, last) do
+    count = last - first + 1
+    lines = pluralise(count, "line")
+
+    "     … [lines #{first}-#{last} omitted — #{count} #{lines} you already hold, unchanged]"
   end
 
   @doc """

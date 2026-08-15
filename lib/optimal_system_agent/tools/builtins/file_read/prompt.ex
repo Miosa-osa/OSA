@@ -47,6 +47,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
     different files is independent work: issue those calls in parallel in one
     turn.
 
+    Lines you have already been shown this session are not sent twice. If part
+    of a window is already in your context and the file has not changed, the
+    result carries the rest and names the lines it left out — that is the whole
+    of what you asked for, split between this result and the earlier one, not a
+    truncation. Pass `resend: true` if you no longer have the earlier result.
+
     A line too wide to return whole is clamped, and the notice names the
     `byte_offset` that continues it — bytes are a second axis, and the only one
     that can reach the rest of a line `limit` already selected in full.

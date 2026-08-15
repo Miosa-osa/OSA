@@ -1,7 +1,7 @@
 defmodule OptimalSystemAgent.Tools.Ablation.Runner do
   @moduledoc """
-  Toggle one tool-output feature, re-read nine hostile files, report tokens AND
-  whether the answer survived.
+  Toggle one tool-output feature, re-read the corpus, report tokens AND whether
+  the answer survived.
 
   ## The method
 
@@ -169,6 +169,9 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
       scenario_window_ends_exactly(),
       scenario_whole_small_file(),
       scenario_identical_reread(),
+      scenario_overlapping_windows(),
+      scenario_whole_after_window(),
+      scenario_disjoint_windows(),
       scenario_tiny_reread(),
       scenario_changed_reread(),
       scenario_minified_line(),
@@ -304,6 +307,161 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
               Regex.match?(~r/unchanged|already read|same as/i, last) -> :ok
               true -> :lost
             end
+          end
+        }
+      ]
+    }
+  end
+
+  defp scenario_overlapping_windows do
+    # The 16.1% case, and the one the byte-identical verdict cannot see at all:
+    # every call has different arguments, so `read_status/3` answers `:changed`
+    # for all of them and the whole overlap is re-delivered. Measured across 118
+    # transcripts: 293 such calls, 412 KB, the single largest overlap bucket.
+    #
+    # The walk here is what a model actually does when it does not trust a
+    # window — widen and re-ask — rather than a contrived exact repeat.
+    %{
+      id: :overlapping_windows,
+      title: "400-line window, then 800 lines from the same start, then 1..1200",
+      run: fn dir, ctx ->
+        [
+          read(dir, "huge_flat.txt", ctx, offset: 1, limit: 400),
+          read(dir, "huge_flat.txt", ctx, offset: 1, limit: 800),
+          read(dir, "huge_flat.txt", ctx, offset: 1, limit: 1_200)
+        ]
+      end,
+      probes: [
+        %{
+          id: :new_content_delivered,
+          question: "What does line 1000 say? (it is only in the third window)",
+          check: fn out ->
+            if String.contains?(joined(out), "line 1000 |"), do: :ok, else: :lost
+          end
+        },
+        %{
+          id: :old_content_still_known,
+          question: "Do I still know what line 50 says after the third call?",
+          check: fn out ->
+            # Recoverable either because it came back again, or because the
+            # first call delivered it and the later results say plainly that it
+            # was omitted for that reason. A subtraction the model cannot see is
+            # a truncation, so a silent drop must score `:wrong`, not `:ok`.
+            first = out |> List.first() |> to_text()
+            rest = out |> Enum.drop(1) |> joined()
+
+            cond do
+              String.contains?(rest, "line 50 |") -> :ok
+              not String.contains?(first, "line 50 |") -> :lost
+              Regex.match?(~r/omitted|already read|unchanged/i, rest) -> :ok
+              true -> :wrong
+            end
+          end
+        },
+        %{
+          id: :omission_is_addressable,
+          question: "If lines were withheld, can I get them back?",
+          check: fn out ->
+            t = joined(out)
+
+            cond do
+              not Regex.match?(~r/omitted|already read|unchanged/i, t) -> :ok
+              Regex.match?(~r/resend/i, t) -> :ok
+              true -> :lost
+            end
+          end
+        }
+      ]
+    }
+  end
+
+  defp scenario_whole_after_window do
+    # The 15.4% case: 177 calls, 395 KB. A mid-file window is held, then the
+    # whole file is asked for — so the remainder is TWO disjoint spans, which is
+    # the shape the design note argues about. The probes check both halves come
+    # back and that the hole between them is announced where it occurs.
+    %{
+      id: :whole_after_window,
+      title: "mid-file window held, then the whole file asked for",
+      run: fn dir, ctx ->
+        [
+          read(dir, "source_module.py", ctx, offset: 60, limit: 80),
+          read(dir, "source_module.py", ctx, [])
+        ]
+      end,
+      probes: [
+        %{
+          id: :head_delivered,
+          question: "What is at the top of the file?",
+          check: fn out ->
+            if String.contains?(out |> List.last() |> to_text(), "value_11 ="),
+              do: :ok,
+              else: :lost
+          end
+        },
+        %{
+          id: :tail_delivered,
+          question: "What is at the bottom of the file?",
+          check: fn out ->
+            if String.contains?(out |> List.last() |> to_text(), "value_239 ="),
+              do: :ok,
+              else: :lost
+          end
+        },
+        %{
+          id: :hole_is_announced,
+          question: "The line numbers jump — is that the file or the tool?",
+          check: fn out ->
+            last = out |> List.last() |> to_text()
+            held? = not String.contains?(last, "step 105")
+
+            cond do
+              # Nothing was withheld, so there is no hole to explain.
+              not held? -> :ok
+              Regex.match?(~r/omitted/i, last) -> :ok
+              # Lines missing with nothing saying so is the failure this probe
+              # exists for, and it is `:wrong`: the result reads as a short file.
+              true -> :wrong
+            end
+          end
+        }
+      ]
+    }
+  end
+
+  defp scenario_disjoint_windows do
+    # The control. 219 calls / 412 KB of the measured payload are windows that
+    # do NOT overlap anything held, and subtraction must leave every byte of
+    # them alone. Without this row the table cannot distinguish "saves tokens"
+    # from "withholds content", which is the only way this feature can fail.
+    %{
+      id: :disjoint_windows,
+      title: "three non-overlapping 200-line windows",
+      run: fn dir, ctx ->
+        [
+          read(dir, "huge_flat.txt", ctx, offset: 1, limit: 200),
+          read(dir, "huge_flat.txt", ctx, offset: 400, limit: 200),
+          read(dir, "huge_flat.txt", ctx, offset: 800, limit: 200)
+        ]
+      end,
+      probes: [
+        %{
+          id: :every_window_intact,
+          question: "Did all three windows come back in full?",
+          check: fn out ->
+            t = joined(out)
+
+            if String.contains?(t, "line 100 |") and String.contains?(t, "line 500 |") and
+                 String.contains?(t, "line 900 |"),
+               do: :ok,
+               else: :lost
+          end
+        },
+        %{
+          id: :nothing_withheld,
+          question: "Was anything omitted from a window that shares no lines with another?",
+          check: fn out ->
+            if Regex.match?(~r/omitted/i, joined(out)), do: :wrong, else: :ok
           end
         }
       ]

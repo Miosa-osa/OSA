@@ -62,7 +62,7 @@ defmodule Mix.Tasks.Osa.Ablate do
     Mix.shell().info("""
 
     ── Read-tool ablation ────────────────────────────────────────────────
-    Corpus: 9 hostile files, 13 scenarios. Tokens are OSA's own estimator
+    Corpus: 10 files, 19 scenarios. Tokens are OSA's own estimator
     (no tokenizer binary in this tree); bytes are exact.
 
     `Δ remove` is what REMOVING the feature does to the bill: positive means
@@ -121,9 +121,7 @@ defmodule Mix.Tasks.Osa.Ablate do
   end
 
   defp print_probe_baseline(scenarios) do
-    Mix.shell().info(
-      "\n── Baseline probe verdicts (production defaults) ─────────────────────"
-    )
+    Mix.shell().info("\n── Baseline probe verdicts (production defaults) ─────────────────────")
 
     Enum.each(scenarios, fn s ->
       verdicts =

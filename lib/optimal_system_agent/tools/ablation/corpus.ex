@@ -69,7 +69,8 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
       "growing.log",
       "stable_config.yaml",
       "window_exact.txt",
-      "decoy_methods.py"
+      "decoy_methods.py",
+      "source_module.py"
     ]
   end
 
@@ -216,6 +217,27 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
           def apply(self):
               return "SENTINEL_TARGET"
       """
+  end
+
+  def content("source_module.py") do
+    # The ORDINARY shape, and the only one here that is not hostile.
+    #
+    # Every other fixture is a pathology, which made the corpus blind to the
+    # largest measured waste bucket: a normal source file, read as a window and
+    # then re-read whole (177 calls / 395 KB / 15.4% of read payload across 118
+    # transcripts). Range subtraction has to be priced on a file whose lines are
+    # the width real code has — the 8-byte rows of `window_exact.txt` make the
+    # per-line render cost dominate, which is a true fact about 8-byte lines and
+    # a misleading one about source.
+    Enum.map_join(1..240, "\n", fn n ->
+      cond do
+        rem(n, 20) == 1 -> "def handler_#{div(n, 20)}(request, context, *, retries=3):"
+        rem(n, 20) == 2 -> "    \"\"\"Dispatch #{n} and record the outcome.\"\"\""
+        rem(n, 20) == 0 -> ""
+        rem(n, 7) == 0 -> "    logger.debug(\"step #{n} of the pipeline\", extra={\"n\": #{n}})"
+        true -> "    value_#{n} = compute(context, offset=#{n}, window=#{rem(n, 13)})"
+      end
+    end) <> "\n"
   end
 
   def content("window_exact.txt") do

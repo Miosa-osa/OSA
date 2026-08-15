@@ -58,6 +58,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Tool do
         "byte_limit" => %{
           "type" => "integer",
           "description" => "Bytes per byte_offset read. Default 2000, max 20000. Optional."
+        },
+        "resend" => %{
+          "type" => "boolean",
+          "description" =>
+            "Return the bytes even for lines you already read this session. Normally those " <>
+              "lines are omitted (the result says which). Use this if you no longer have " <>
+              "them. Optional."
         }
       },
       "required" => ["path"]

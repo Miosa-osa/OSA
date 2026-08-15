@@ -67,10 +67,11 @@ defmodule OptimalSystemAgent.Tools.FileState do
   safe and returning "unchanged" wrongly is not:
 
     1. **Ranges are tracked individually.** An entry carries the set of
-       `offset/limit` windows actually read. A re-read with a *different*
-       window — even one wholly contained in a window already read — is
-       `:changed`-equivalent and returns real content. Only a byte-identical
-       repeat of a window already delivered is suppressed.
+       `offset/limit` windows actually read, keyed verbatim. Only a
+       byte-identical repeat of a window already delivered is answered with the
+       notice. Windows that *overlap* are handled on a different axis — see
+       `held_lines/2` and range subtraction below — because a partly-new window
+       has a partly-new answer, and a yes/no verdict cannot give it.
     2. **Any write clears the range set.** `record_write/2` refreshes
        `{mtime, size, hash}` (so staleness enforcement keeps working) but drops
        every recorded range, because after an edit the model holds a *delta*,
@@ -81,10 +82,27 @@ defmodule OptimalSystemAgent.Tools.FileState do
        may have been summarised out of the transcript, so the entry no longer
        proves the model holds it. `bump_epoch/1` is called from
        `Agent.CompactionEvents.completed/2`.
+
+  ## Third role: range subtraction (`held_lines/2`)
+
+  The exact-window verdict above turned out to address the wrong 0.8%. Measured
+  over 118 transcripts (1,142 `file_read` calls, 2.63 MB delivered): 708 calls
+  re-read an already-read path, but only 19 of them — 20 KB, 0.8% of the
+  payload — asked for the byte-identical window a same/different verdict can
+  catch. Overlapping windows and whole-file re-reads together are 31.5%.
+
+  Those calls are *partly* new, so the operation they need is not a verdict but
+  a subtraction: the session holds lines 40–80, the model asks for 1–120, and
+  the honest answer is 1–39 plus 81–120 with the omission named. `held_lines/2`
+  is the state half of that; `FileRead.Spans` is the arithmetic. Both ride on
+  the same entry and the same validity guard as everything above — one ledger of
+  "what has this session been shown", not two.
   """
 
   use GenServer
   require Logger
+
+  alias OptimalSystemAgent.Tools.Builtins.FileRead.Spans
 
   @table :osa_tool_file_state
 
@@ -120,6 +138,11 @@ defmodule OptimalSystemAgent.Tools.FileState do
     * `:bytes` — how many bytes that window actually delivered. Recorded so a
       caller can tell whether replacing the window with a short notice would
       save anything; a windowed read of a large file can deliver very few bytes.
+    * `:lines` — the LINE SPANS actually delivered, as `[{first, last}]`. This
+      is the axis range subtraction works on (see `held_lines/2`); it is
+      recorded separately from `:range` because `:range` is a verbatim key for
+      the arguments and spans are an interval algebra over the file. Omitted for
+      byte-axis reads, images and errors, all of which record no spans at all.
 
   Idempotent and best-effort — a stat failure (file vanished between read and
   record) is silently ignored rather than raised.
@@ -131,6 +154,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
     key = {skey(session_id), cpath}
     range = Keyword.get(opts, :range, :whole)
     delivered = Keyword.get(opts, :bytes, 0)
+    lines = Keyword.get(opts, :lines, [])
 
     case stat(cpath) do
       {:ok, mtime, size} ->
@@ -140,14 +164,15 @@ defmodule OptimalSystemAgent.Tools.FileState do
         # Carry forward previously-read ranges only when the bytes are provably
         # the same content the model already holds. Any difference in
         # hash/mtime/size — or an intervening compaction — starts a fresh set.
-        prior_ranges =
+        # The line spans ride on exactly the same guard, because they make
+        # exactly the same claim: "the model is holding these bytes."
+        {prior_ranges, prior_lines} =
           case safe_lookup(key) do
-            [{^key, %{hash: ^hash, mtime: ^mtime, size: ^size, epoch: ^epoch, ranges: rs}}]
-            when is_map(rs) ->
-              rs
+            [{^key, %{hash: ^hash, mtime: ^mtime, size: ^size, epoch: ^epoch} = prior}] ->
+              {take_map(prior, :ranges), take_list(prior, :lines)}
 
             _ ->
-              %{}
+              {%{}, []}
           end
 
         entry = %{
@@ -156,6 +181,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
           hash: hash,
           epoch: epoch,
           ranges: Map.put(prior_ranges, range, delivered),
+          lines: Spans.union(prior_lines, lines),
           read_at: System.system_time(:second)
         }
 
@@ -163,6 +189,20 @@ defmodule OptimalSystemAgent.Tools.FileState do
 
       :error ->
         :ok
+    end
+  end
+
+  defp take_map(entry, key) do
+    case Map.get(entry, key) do
+      m when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  defp take_list(entry, key) do
+    case Map.get(entry, key) do
+      l when is_list(l) -> l
+      _ -> []
     end
   end
 
@@ -191,6 +231,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
           hash: content_hash(cpath, size),
           epoch: epoch(session_id),
           ranges: %{},
+          lines: [],
           read_at: System.system_time(:second)
         }
 
@@ -199,6 +240,50 @@ defmodule OptimalSystemAgent.Tools.FileState do
       :error ->
         :ok
     end
+  end
+
+  @doc """
+  Which LINE SPANS of `path` this session is currently holding, verbatim and
+  still valid.
+
+  Returns `[]` — never a stale answer — when there is no entry, when the file's
+  `{mtime, size, content hash}` disagrees with the recorded read, when a
+  compaction has run since, or when the session is exempt from enforcement.
+  Every one of those is a reason the model may no longer hold what the ledger
+  says it holds, and the cost asymmetry is the same one that governs
+  `read_status/3`: an unnecessary re-read costs tokens, a wrong "you have this"
+  costs the model its working context.
+
+  This is the state `FileRead` subtracts a requested window against. It is
+  deliberately the SAME entry, guarded by the SAME hash/mtime/size/epoch checks,
+  as byte-identical suppression — there is one ledger of "what has this session
+  been shown", not two.
+  """
+  @spec held_lines(term(), String.t()) :: [Spans.span()]
+  def held_lines(session_id, path) do
+    if enforce?(session_id) do
+      ensure_table()
+      cpath = canonical(path)
+      key = {skey(session_id), cpath}
+
+      case safe_lookup(key) do
+        [{^key, %{mtime: rmtime, size: rsize, hash: rhash, epoch: repoch} = entry}] ->
+          with true <- repoch == epoch(session_id),
+               {:ok, ^rmtime, ^rsize} <- stat(cpath),
+               ^rhash when not is_nil(rhash) <- content_hash(cpath, rsize) do
+            entry |> take_list(:lines) |> Spans.normalize()
+          else
+            _ -> []
+          end
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
   end
 
   @doc """

@@ -93,10 +93,25 @@ defmodule OptimalSystemAgent.Tools.AblationHarnessTest do
   describe "the instrument responds" do
     setup %{tmp_dir: tmp}, do: {:ok, dir: Path.join(tmp, "corpus")}
 
+    # `:read_unchanged_suppression` is the one flag exempt from this, and the
+    # exemption is a measured finding rather than a carve-out. Byte-identical
+    # suppression fires only on a repeat of a window ALREADY delivered — 19 of
+    # 1,142 calls and 0.8% of read payload across 118 transcripts. Range
+    # subtraction reaches the same calls by a wider route (a window whose held
+    # overlap is total has no remainder to send), so with subtraction shipped,
+    # ablating byte-identical suppression alone moves nothing on the line axis.
+    #
+    # It stays wired because it is still the only mechanism on the BYTE axis,
+    # where subtraction does not apply — mixing line intervals and byte offsets
+    # is not sound arithmetic. This corpus has no identical byte-slice repeat to
+    # exercise that, and inventing one to keep a table row non-zero would be
+    # measuring the fixture.
+    @subsumed_flags [:read_unchanged_suppression]
+
     test "every flag moves either tokens or a probe verdict", %{dir: dir} do
       %{rows: rows} = Runner.run(dir: dir)
 
-      for row <- rows do
+      for row <- rows, row.flag not in @subsumed_flags do
         moved_tokens? = row.tokens_with != row.tokens_without
         moved_probes? = row.regressions != [] or row.improvements != []
 
@@ -104,6 +119,17 @@ defmodule OptimalSystemAgent.Tools.AblationHarnessTest do
                "#{row.flag} changed nothing when ablated — its guard is no longer " <>
                  "wired to anything, and the ablation is silently reporting it free"
       end
+    end
+
+    test "range subtraction pays for itself and costs no fact", %{dir: dir} do
+      %{rows: [row]} = Runner.run(dir: dir, flags: [:read_range_subtraction])
+
+      assert row.tokens_without > row.tokens_with,
+             "removing range subtraction no longer costs tokens — either it stopped " <>
+               "firing, or no scenario overlaps a window it already read"
+
+      assert row.regressions == [],
+             "range subtraction withheld a fact: #{inspect(row.regressions)}"
     end
 
     test "stamps are what make 'did the file end?' answerable", %{dir: dir} do
