@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   require Logger
 
+  alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
@@ -67,6 +68,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_provider_thinking(model, opts, base_url)
       |> maybe_add_prompt_cache_key(opts, base_url)
 
+    # Fingerprint AFTER every body transform, so what is hashed is what goes on
+    # the wire. Hashes only — no payload retained.
+    #
+    # This route is the one the 92.8% hit rate was MEASURED on (OpenRouter →
+    # Anthropic), and it was the only major route with no attribution at all:
+    # the watchdog was wired into `anthropic.ex` alone. So the instrument built
+    # to catch a dead prompt cache was absent from the path whose cache was
+    # dead — the headline bug of this whole sweep could not have been reported
+    # by the thing written to report it.
+    cache_fp = CacheAttribution.fingerprint(body)
+
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
     headers =
@@ -95,6 +107,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
             |> Text.strip_thinking_tokens()
 
           usage = parse_usage(resp)
+
+          # Name the culprit when the provider's reported cache read drops, and
+          # name a cache that never warmed at all. Diagnostics only — cannot
+          # fail the request (see CacheAttribution).
+          observe_cache(cache_fp, usage, opts)
 
           {:ok,
            %{
@@ -141,6 +158,31 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       e -> {:error, "Unexpected error: #{Exception.message(e)}"}
     end
   end
+
+  @doc false
+  # Hand this turn's fingerprint and reported usage to the cache attributor.
+  #
+  # Guarded on the usage actually having been REPORTED. A backend that ignores
+  # `stream_options.include_usage` (several local Ollama builds) leaves
+  # `acc.usage == %{}`, and `estimate_usage_fallback/3` then synthesises token
+  # counts that carry no cache slice at all. Feeding those to the attributor
+  # would report a permanently cold prompt cache on every such backend — a
+  # confident reading taken from a measurement that was never made, which is
+  # the exact failure shape this instrument exists to end.
+  def observe_cache(fp, usage, opts) do
+    if reported_usage?(usage) do
+      CacheAttribution.observe(CacheAttribution.scope(opts), fp, usage)
+    else
+      :ok
+    end
+  end
+
+  defp reported_usage?(usage) when is_map(usage) do
+    not Map.get(usage, :estimated, false) and
+      (Map.get(usage, :input_tokens, 0) > 0 or Map.get(usage, :output_tokens, 0) > 0)
+  end
+
+  defp reported_usage?(_), do: false
 
   # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
   # and terminate with `data: [DONE]`.
@@ -257,6 +299,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
     body = build_stream_body(model, messages, opts, base_url)
 
+    # Same watchdog as the sync path. The streaming entrance is the one the
+    # agent loop actually takes, so leaving it unattributed would have kept the
+    # measured route dark even after wiring `do_chat/5`.
+    cache_fp = CacheAttribution.fingerprint(body)
+
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
     headers =
@@ -310,6 +357,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         {:ok, _resp} ->
           acc = Process.get(stream_key)
           Process.delete(stream_key)
+          # `acc.usage` is what the SERVER reported, before
+          # `estimate_usage_fallback/3` may substitute an estimate — the
+          # attributor must only ever see a real measurement.
+          observe_cache(cache_fp, Map.get(acc, :usage, %{}), opts)
           finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->

@@ -58,6 +58,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   alias OptimalSystemAgent.Auth.Providers.Bedrock, as: Auth
   alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.ImageBudget
+  alias OptimalSystemAgent.Providers.PromptCache
 
   # A concrete, currently-served cross-region inference profile rather than a
   # bare model id: Bedrock increasingly requires the `<geo>.` prefixed profile
@@ -728,9 +729,11 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   Anthropic models refuse to cache a prefix below roughly 1,024 tokens, and the
   refusal is not an error: the request succeeds and the marker is ignored. So a
   marker on a short prefix costs the cache-write premium for nothing. The byte
-  threshold below is `4_500`, deliberately the same figure as
-  `Anthropic.@min_cacheable_tools_bytes` — one recalibrated number, not two
-  drifting ones — and a prefix under it is skipped WITH a line saying so.
+  threshold is `PromptCache.min_cacheable_bytes/0` — the ONE named constant the
+  Anthropic system side, the Anthropic tools side and this route all read, after
+  a period in which the same minimum existed as three separate numbers (4,000,
+  4,500 and 4,500) held equal by comment — and a prefix under it is skipped WITH
+  a line saying so.
 
   > #### Unverified against a live call {: .warning}
   >
@@ -742,10 +745,6 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   """
   @spec cache_point_decision(String.t() | nil, keyword()) :: {[atom()], atom()}
 
-  # ~1,024 tokens of prefix, at the ~4.4 bytes/token this codebase already
-  # assumes elsewhere. Held equal to `Anthropic.@min_cacheable_tools_bytes`.
-  @min_cacheable_bytes 4_500
-
   @cache_point %{"cachePoint" => %{"type" => "default"}}
 
   def cache_point_decision(model, opts \\ []) do
@@ -753,13 +752,17 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
       not cache_point_model?(model) ->
         {[], :model_unsupported}
 
-      not Application.get_env(:optimal_system_agent, :prompt_caching_enabled, true) ->
+      not PromptCache.enabled?() ->
         {[], :disabled_by_config}
 
       true ->
         {Keyword.get(opts, :__scopes__, [:system, :tools]), :enabled}
     end
   end
+
+  # ~1,024 tokens of prefix. Read from the shared constant rather than restated:
+  # a comment promising to hold two numbers equal is not a mechanism.
+  defp min_cacheable_bytes, do: PromptCache.min_cacheable_bytes()
 
   # Only Anthropic models on Bedrock are known to honour `cachePoint` with the
   # 1,024-token minimum OSA's threshold is calibrated to. Amazon Nova supports
@@ -798,7 +801,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   defp mark_scope(body, :system) do
     case Map.get(body, "system") do
       blocks when is_list(blocks) and blocks != [] ->
-        if serialized_bytes(blocks) >= @min_cacheable_bytes and not marked?(blocks),
+        if serialized_bytes(blocks) >= min_cacheable_bytes() and not marked?(blocks),
           do: {:ok, Map.put(body, "system", blocks ++ [@cache_point])},
           else: :skip
 
@@ -810,7 +813,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   defp mark_scope(body, :tools) do
     case get_in(body, ["toolConfig", "tools"]) do
       tools when is_list(tools) and tools != [] ->
-        if serialized_bytes(tools) >= @min_cacheable_bytes and not marked?(tools),
+        if serialized_bytes(tools) >= min_cacheable_bytes() and not marked?(tools),
           do: {:ok, put_in(body, ["toolConfig", "tools"], tools ++ [@cache_point])},
           else: :skip
 
@@ -847,7 +850,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
         {[], :below_minimum} ->
           Logger.info(
             "[Bedrock] prompt cache NOT marked for #{model}: static prefix is under " <>
-              "#{@min_cacheable_bytes} bytes, below the ~1,024-token minimum Anthropic " <>
+              "#{min_cacheable_bytes()} bytes, below the ~1,024-token minimum Anthropic " <>
               "models cache. cache_read_input_tokens will stay 0."
           )
 

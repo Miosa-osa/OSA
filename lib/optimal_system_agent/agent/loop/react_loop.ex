@@ -448,6 +448,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         _ -> %{}
       end
 
+    # Siblings of `:usage`, not fields inside it, and they were being dropped
+    # here. `ClaudeCli` publishes the CLI's authoritative `total_cost_usd` as
+    # `:provider_cost_usd` and `CopilotCli` publishes `:provider_quota`; this
+    # was the only point that held them, so accounting priced every CLI turn
+    # from the rate card instead — `tokens x list price`, which is the wrong
+    # number on a Max plan.
+    billing_opts =
+      case result do
+        {:ok, resp} ->
+          [
+            provider_cost_usd: Map.get(resp, :provider_cost_usd),
+            provider_quota: Map.get(resp, :provider_quota)
+          ]
+
+        _ ->
+          []
+      end
+
     input_tokens = Map.get(usage, :input_tokens, 0)
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
@@ -460,7 +478,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Record real token usage + cost for this LLM round-trip and accumulate it
     # into the per-session accounting (primitive #29). Also refreshes
     # last_input_tokens for context-pressure telemetry.
-    state = Accounting.record(state, usage)
+    state = Accounting.record(state, usage, billing_opts)
 
     # A request that died mid-stream returns no usage (the `_ -> %{}` above is
     # right about what it was handed), but it was still billed: Anthropic

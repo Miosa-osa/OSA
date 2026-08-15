@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   alias OptimalSystemAgent.Providers.AnthropicModels
   alias OptimalSystemAgent.Providers.CacheAttribution
+  alias OptimalSystemAgent.Providers.PromptCache
 
   @impl true
   def default_model, do: AnthropicModels.default_model()
@@ -1154,14 +1155,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # covers a longer stable prefix than the marker after it.
   @max_cache_breakpoints 4
 
-  defp maybe_add_system(body, ""), do: body
-  defp maybe_add_system(body, nil), do: body
-  defp maybe_add_system(body, []), do: body
+  # Public as a test seam, exactly like `maybe_add_thinking/2` and
+  # `maybe_add_output_config/3` above: the system-side cache decision had no
+  # observable output at all, so there was nothing to assert on short of
+  # standing up an HTTP stub.
+  @doc false
+  def maybe_add_system(body, ""), do: body
+  def maybe_add_system(body, nil), do: body
+  def maybe_add_system(body, []), do: body
 
   # Pre-blocked system prompt (Context's static / world-state / volatile split).
   # Passed through as an array so each block keeps its own cache breakpoint —
   # crucially leaving the volatile tail OUTSIDE every cached region.
-  defp maybe_add_system(body, blocks) when is_list(blocks) do
+  def maybe_add_system(body, blocks) when is_list(blocks) do
     blocks =
       if prompt_caching_enabled?() do
         cap_cache_breakpoints(blocks)
@@ -1172,22 +1178,79 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     Map.put(body, :system, blocks)
   end
 
-  defp maybe_add_system(body, system_text) do
-    if prompt_caching_enabled?() do
-      # Split system prompt into cacheable blocks.
-      # Anthropic caches from the end of the last cache_control marker,
-      # so we mark the full system text as one ephemeral cached block.
-      # Minimum cacheable size is 1024 tokens (~4K chars).
-      if byte_size(system_text) >= 4_000 do
-        Map.put(body, :system, [
-          %{type: "text", text: system_text, cache_control: %{type: "ephemeral"}}
-        ])
-      else
-        Map.put(body, :system, system_text)
-      end
+  def maybe_add_system(body, system_text) do
+    # Anthropic caches from the end of the last `cache_control` marker, so an
+    # unblocked system prompt is marked as one ephemeral block — but only once
+    # it is long enough for the marker to create a cache entry at all.
+    #
+    # The threshold is `PromptCache.min_cacheable_bytes/0`, NOT a local 4,000.
+    # There were three numbers for this one minimum: 4,000 here, 4,500 on the
+    # tools-side sibling (recalibrated against a measured 4.1 bytes/token so a
+    # placed marker clears the 1024-token floor), and 4,500 again in `Bedrock`
+    # with a comment promising to hold it equal by hand. This one was also the
+    # only one of the three that made its decision in silence.
+    bytes = byte_size(system_text)
+    caching? = prompt_caching_enabled?()
+    place? = caching? and bytes >= PromptCache.min_cacheable_bytes()
+
+    report_system_cache_decision(place?, caching?, bytes)
+
+    if place? do
+      Map.put(body, :system, [
+        %{type: "text", text: system_text, cache_control: %{type: "ephemeral"}}
+      ])
     else
       Map.put(body, :system, system_text)
     end
+  end
+
+  # Same instrument the tools side got, for the same reason: a breakpoint that
+  # is not placed produces no error and no marker, just a system prefix re-billed
+  # in full every turn. Deduped on the decision shape so a steady-state session
+  # logs once rather than once per turn.
+  defp report_system_cache_decision(placed?, caching?, bytes) do
+    reason =
+      cond do
+        placed? -> :placed
+        not caching? -> :caching_disabled
+        true -> :below_min_cacheable
+      end
+
+    :telemetry.execute(
+      [:osa, :anthropic, :system_cache],
+      %{bytes: bytes, threshold: PromptCache.min_cacheable_bytes()},
+      %{placed: placed?, reason: reason}
+    )
+
+    signature = {reason, div(bytes, 1_000)}
+
+    if Process.get(:osa_system_cache_decision) != signature do
+      Process.put(:osa_system_cache_decision, signature)
+      tokens = PromptCache.approx_tokens(bytes)
+
+      case reason do
+        :placed ->
+          Logger.debug(
+            "[Anthropic] system cache breakpoint placed: #{bytes} B (~#{tokens} tok)"
+          )
+
+        :caching_disabled ->
+          Logger.debug(
+            "[Anthropic] system cache breakpoint skipped: prompt caching disabled (#{bytes} B)"
+          )
+
+        :below_min_cacheable ->
+          Logger.info(
+            "[Anthropic] system cache breakpoint NOT placed: #{bytes} B (~#{tokens} tok) is " <>
+              "below the #{PromptCache.min_cacheable_bytes()} B minimum — this system prefix " <>
+              "is re-billed in full every turn."
+          )
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp cap_cache_breakpoints(blocks), do: cap_cache_breakpoints(blocks, @max_cache_breakpoints)
@@ -1205,9 +1268,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     kept
   end
 
-  defp prompt_caching_enabled? do
-    Application.get_env(:optimal_system_agent, :prompt_caching_enabled, true)
-  end
+  # The switch is GLOBAL policy, not this module's. It used to be read here and
+  # only here (five call sites, all in this file), which meant setting it false
+  # disabled caching on the native path and left it fully on for
+  # OpenRouter → Anthropic. `PromptCache.enabled?/0` is now the single reader
+  # and every marking route consults it.
+  defp prompt_caching_enabled?, do: PromptCache.enabled?()
 
   @doc """
   Add extended thinking configuration to request body.
@@ -1554,12 +1620,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # therefore ~1,100 tokens, just clear of the 1024 floor. (The old 4,000 was
   # calibrated against a count that omitted `input_schema`, so it was neither a
   # byte figure nor a token figure.)
-  @min_cacheable_tools_bytes 4_500
-
-  # Bytes/token on this payload shape, measured on the default tool array
-  # (33,897 bytes / 8,267 tokens). Used only to report an estimate alongside the
-  # decision, never to make it.
-  @tools_bytes_per_token 4.1
+  #
+  # The figure now lives in `PromptCache.min_cacheable_bytes/0`, shared with the
+  # system side above and with `Bedrock`, because three copies of one minimum is
+  # how they drift.
+  defp min_cacheable_tools_bytes, do: PromptCache.min_cacheable_bytes()
 
   defp mark_tools_cache_boundary(%{tools: tools} = body, stable_count)
        when is_list(tools) and tools != [] do
@@ -1570,7 +1635,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     cacheable = Enum.take(tools, boundary)
     bytes = tools_payload_bytes(cacheable)
     caching? = prompt_caching_enabled?()
-    place? = caching? and bytes >= @min_cacheable_tools_bytes
+    place? = caching? and bytes >= min_cacheable_tools_bytes()
 
     report_tools_cache_decision(place?, caching?, bytes, length(cacheable))
 
@@ -1640,7 +1705,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
     :telemetry.execute(
       [:osa, :anthropic, :tools_cache],
-      %{bytes: bytes, tool_count: count, threshold: @min_cacheable_tools_bytes},
+      %{bytes: bytes, tool_count: count, threshold: min_cacheable_tools_bytes()},
       %{placed: placed?, reason: reason}
     )
 
@@ -1648,7 +1713,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
     if Process.get(:osa_tools_cache_decision) != signature do
       Process.put(:osa_tools_cache_decision, signature)
-      tokens = round(bytes / @tools_bytes_per_token)
+      tokens = PromptCache.approx_tokens(bytes)
 
       case reason do
         :placed ->
@@ -1665,7 +1730,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         :below_min_cacheable ->
           Logger.info(
             "[Anthropic] tools cache breakpoint NOT placed: #{count} tools, #{bytes} B " <>
-              "(~#{tokens} tok) is below the #{@min_cacheable_tools_bytes} B minimum — " <>
+              "(~#{tokens} tok) is below the #{min_cacheable_tools_bytes()} B minimum — " <>
               "this tool segment is re-billed in full every turn."
           )
       end

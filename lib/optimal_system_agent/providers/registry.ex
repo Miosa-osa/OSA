@@ -719,7 +719,17 @@ defmodule OptimalSystemAgent.Providers.Registry do
       # OpenRouter path and pinned the hit rate at 0%. `OpenAICompat` encodes
       # these as OpenAI text content-parts with the marker preserved, which
       # OpenRouter forwards to Anthropic.
-      keep_cache? = anthropic_prompt_cache?(target, resolved_model(target, opts))
+      # Two questions, deliberately separate. `anthropic_prompt_cache?/2` is a
+      # CAPABILITY question — does this wire forward the field — and stays a
+      # pure fact about the route. `PromptCache.enabled?/0` is the global POLICY
+      # switch. Flattening the blocks here is what deletes every breakpoint the
+      # system-prompt builder placed, so this is the point on the compat path
+      # where the kill switch has to bite; without it, setting the flag false
+      # disabled caching on native Anthropic and left OpenRouter → Anthropic
+      # fully cached.
+      keep_cache? =
+        Providers.PromptCache.enabled?() and
+          anthropic_prompt_cache?(target, resolved_model(target, opts))
 
       flattened =
         Enum.map(messages, &flatten_message_content(&1, carry_images?, keep_cache?, reason))

@@ -64,6 +64,21 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
   defp restore(key, nil), do: Application.delete_env(:optimal_system_agent, key)
   defp restore(key, val), do: Application.put_env(:optimal_system_agent, key, val)
 
+  # `capture_log/2`'s `:level` option filters what is CAPTURED; it cannot raise
+  # the Logger's own level, so an `:info` line emitted while the Logger sits at
+  # `:warning` was never produced in the first place. Every assertion in this
+  # file about a message being visible needs this.
+  defp capture_info(fun) do
+    prev = Logger.level()
+    Logger.configure(level: :info)
+
+    try do
+      ExUnit.CaptureLog.capture_log([level: :info], fun)
+    after
+      Logger.configure(level: prev)
+    end
+  end
+
   # ── 1. A global read inside a per-request decision ────────────────────────
 
   describe "thinking is decided by the provider of THIS request" do
@@ -1162,6 +1177,356 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
 
       assert log =~ "[info]",
              "a tool the model was never offered looks exactly like a tool it chose not to call"
+    end
+  end
+
+  # ── 13. The instrument, absent from the route it was measured on ──────────
+
+  describe "every route that builds a cached prefix reports the cache read back" do
+    # THE CLASS TEST for this sweep.
+    #
+    # `CacheAttribution` is the watchdog for a prompt cache that breaks or never
+    # warms. It was wired into `anthropic.ex` (4 call sites) and nowhere else —
+    # in particular NOT into the OpenAI-compatible route, which is where the
+    # 92.8% hit rate was measured and where caching was dead for months. The
+    # instrument built to catch exactly that failure was absent from the path
+    # the failure was on, so it could not have reported it.
+    #
+    # This refuses the NEXT provider wired with a cache marker and no attributor,
+    # which is a strictly better guarantee than three tests naming the three
+    # routes that exist today.
+    test "a provider that places a cache marker also hands its usage to CacheAttribution" do
+      # Assembling one of these into a REQUEST is the trigger. Parsing a counter
+      # off a response is not enough on its own — that is the previous ratchet's
+      # question, and the two are different failures.
+      # `cachedContent` must not match Gemini's RESPONSE-side
+      # `cachedContentTokenCount`: parsing a counter is the previous ratchet's
+      # question, and google.ex places no request-side marker at all.
+      request_markers = [~r/cache_control/, ~r/cachePoint/, ~r/cachedContent(?!Token)/]
+
+      # Each exemption is a module that helps BUILD a marked request but never
+      # sees a response, so it has no usage to attribute and no scope to attach
+      # it to. The provider module downstream of it is the one that must observe.
+      #
+      #   cache_attribution.ex — the attributor itself.
+      #   prompt_cache.ex      — restructures the message list; the transport
+      #                          that sends it (openai_compat.ex) observes.
+      #   registry.ex          — decides whether marked blocks survive to the
+      #                          wire; same reasoning.
+      exempt = ~w(cache_attribution.ex prompt_cache.ex registry.ex)
+
+      lib = Path.join(File.cwd!(), "lib/optimal_system_agent/providers")
+
+      offenders =
+        lib
+        |> File.ls!()
+        |> Enum.filter(&String.ends_with?(&1, ".ex"))
+        |> Enum.reject(&(&1 in exempt))
+        |> Enum.map(&{&1, File.read!(Path.join(lib, &1))})
+        |> Enum.filter(fn {_name, src} ->
+          Enum.any?(request_markers, &Regex.match?(&1, src)) and
+            not String.contains?(src, "CacheAttribution.observe")
+        end)
+        |> Enum.map(&elem(&1, 0))
+
+      assert offenders == [], """
+      #{inspect(offenders)} assemble a request-side prompt-cache marker but never
+      hand the resulting usage to `CacheAttribution.observe/3`.
+
+      That route can break its cache, or never warm it at all, with nothing
+      reporting either. It is the precise state the OpenRouter route was in while
+      OSA paid the full uncached rate on a ~30k-token prefix every turn — the
+      watchdog existed, was correct, and was wired only into the one route that
+      was already working.
+      """
+    end
+
+    test "the compat route names a cache that never warms" do
+      # The cold-cache arm fires on this route now that it is called at all.
+      # Synthetic: no OpenRouter credentials exist on this machine, so the usage
+      # map is hand-built in the shape `OpenAICompat.parse_usage/1` produces.
+      scope = "compat-cold-scope"
+      CacheAttribution.reset(scope)
+      on_exit(fn -> CacheAttribution.reset(scope) end)
+
+      body = %{
+        model: "anthropic/claude-sonnet-4.5",
+        messages: [%{"role" => "user", "content" => "hi"}],
+        tools: []
+      }
+
+      fp = CacheAttribution.fingerprint(body)
+
+      results =
+        for _ <- 1..3 do
+          OpenAICompat.observe_cache(
+            fp,
+            %{input_tokens: 12_000, output_tokens: 40, cache_read_input_tokens: 0},
+            session_id: scope
+          )
+        end
+
+      assert Enum.any?(results, &match?({:cold, _}, &1)),
+             "the compat route must be able to report a permanently cold cache — that is the " <>
+               "reading nothing on this route could produce for months"
+    end
+
+    test "an ESTIMATED usage map is not fed to the attributor as a measurement" do
+      # `estimate_usage_fallback/3` synthesises token counts for backends that
+      # ignore `stream_options.include_usage` (several local Ollama builds).
+      # Those maps carry no cache slice, so passing them through would report a
+      # permanently cold cache on every such backend — a confident verdict drawn
+      # from a measurement that was never taken, which is the same class of
+      # error as the silence it replaced.
+      scope = "compat-estimated-scope"
+      CacheAttribution.reset(scope)
+      on_exit(fn -> CacheAttribution.reset(scope) end)
+
+      fp = CacheAttribution.fingerprint(%{model: "local", messages: [], tools: []})
+
+      for _ <- 1..5 do
+        assert OpenAICompat.observe_cache(
+                 fp,
+                 %{input_tokens: 900, output_tokens: 30, estimated: true},
+                 session_id: scope
+               ) == :ok
+      end
+
+      assert CacheAttribution.cold_run(scope) == 0,
+             "an absent measurement must not accumulate as a zero one"
+    end
+  end
+
+  # ── 14. A global switch enforced in one module ────────────────────────────
+
+  describe "prompt_caching_enabled is global, as its name says" do
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :prompt_caching_enabled)
+      on_exit(fn -> restore(:prompt_caching_enabled, prev) end)
+      :ok
+    end
+
+    @cached_system [
+      %{"type" => "text", "text" => String.duplicate("static base. ", 400),
+        "cache_control" => %{"type" => "ephemeral"}},
+      %{"type" => "text", "text" => "volatile tail: 12:04:11"}
+    ]
+
+    defp compat_messages do
+      [
+        %{role: "system", content: @cached_system},
+        %{role: "user", content: "first"},
+        %{role: "assistant", content: "ok"},
+        %{role: "user", content: "second"}
+      ]
+    end
+
+    test "the switch reaches the OpenRouter route, not only anthropic.ex" do
+      # All five call sites lived inside `anthropic.ex`. Setting the flag false
+      # therefore turned caching OFF on the native path — the one route that had
+      # it — and left it fully ON for OpenRouter → Anthropic, which is the route
+      # the hit rate was measured on. An operator disabling caching to isolate a
+      # billing question got the exact opposite on the path that mattered.
+      opts = [model: "anthropic/claude-sonnet-4.5"]
+
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on = Registry.normalize_outbound_messages(compat_messages(), {:compat, :openrouter}, opts)
+
+      assert marked_anywhere?(on),
+             "with caching ON the compat route must still carry cache_control — this test is " <>
+               "worthless if the marker was never there to begin with"
+
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, false)
+      off = Registry.normalize_outbound_messages(compat_messages(), {:compat, :openrouter}, opts)
+
+      refute marked_anywhere?(off),
+             "prompt_caching_enabled: false must leave the OpenRouter wire free of every " <>
+               "marker, exactly as it already does for the native Anthropic path"
+    end
+
+    test "PromptCache.restructure/3 consults it, and says so once" do
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, false)
+      Process.delete(:osa_prompt_cache_off)
+
+      log =
+        capture_info(fn ->
+          assert PromptCache.restructure(compat_messages(), {:compat, :openrouter},
+                   model: "anthropic/claude-sonnet-4.5"
+                 ) == compat_messages()
+        end)
+
+      assert log =~ "[PromptCache]"
+
+      assert log =~ "[info]",
+             "a rolling breakpoint that was not placed is worth ~16 points of hit rate by " <>
+               "PromptCache's own measured table; skipping it silently is how the last one hid"
+    end
+
+    defp marked_anywhere?(messages) do
+      Enum.any?(messages, fn msg ->
+        case Map.get(msg, :content) || Map.get(msg, "content") do
+          parts when is_list(parts) ->
+            Enum.any?(parts, fn p ->
+              is_map(p) and (Map.has_key?(p, :cache_control) or Map.has_key?(p, "cache_control"))
+            end)
+
+          _ ->
+            false
+        end
+      end)
+    end
+  end
+
+  # ── 15. One minimum, three numbers ────────────────────────────────────────
+
+  describe "the cacheable minimum is one named constant" do
+    # CLASS TEST. 4,000 on the Anthropic system side, 4,500 on its tools-side
+    # sibling, 4,500 again in Bedrock with a comment promising to hold it equal
+    # by hand. A comment is not a mechanism, and three copies of one number is
+    # a description of how they drift, not of how they stay equal.
+    test "no provider restates the threshold as its own literal" do
+      lib = Path.join(File.cwd!(), "lib/optimal_system_agent/providers")
+
+      offenders =
+        lib
+        |> File.ls!()
+        |> Enum.filter(&String.ends_with?(&1, ".ex"))
+        |> Enum.reject(&(&1 == "prompt_cache.ex"))
+        |> Enum.map(&{&1, File.read!(Path.join(lib, &1))})
+        |> Enum.filter(fn {_name, src} ->
+          # A module attribute or assignment whose VALUE is one of the drifted
+          # figures, on a line that mentions caching. Prose and comments are not
+          # the mechanism and are not matched.
+          src
+          |> String.split("\n")
+          |> Enum.reject(&(String.trim_leading(&1) |> String.starts_with?("#")))
+          |> Enum.any?(&Regex.match?(~r/cache\w*\s+4_[05]00\b|@min_cacheable\w*\s+\d/i, &1))
+        end)
+        |> Enum.map(&elem(&1, 0))
+
+      assert offenders == [], """
+      #{inspect(offenders)} declare their own copy of the minimum cacheable
+      payload size. There is one: `PromptCache.min_cacheable_bytes/0`.
+
+      The figure is a measurement (4.1 bytes/token on the default 23-tool array,
+      so 4,500 B ~ 1,100 tok, just clear of Anthropic's 1024-token floor). A
+      second copy is a second calibration nobody will remember to redo.
+      """
+    end
+
+    test "the three routes read the same number" do
+      assert PromptCache.min_cacheable_bytes() == 4_500
+
+      # Bedrock's marker and Anthropic's both sit on the same side of it.
+      assert PromptCache.approx_tokens(PromptCache.min_cacheable_bytes()) >= 1024,
+             "a threshold that does not clear the 1024-token floor buys a cache-write premium " <>
+               "and no cache entry"
+    end
+
+    test "the Anthropic system side SAYS when it skips, like its tools sibling" do
+      # The tools side reports `:below_min_cacheable` at :info with the numbers
+      # that produced it. The system side made the same decision in total
+      # silence — no marker, no error, no log, just a system prefix re-billed at
+      # full rate every turn.
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+      Process.delete(:osa_system_cache_decision)
+
+      short = String.duplicate("x", PromptCache.min_cacheable_bytes() - 1)
+
+      log =
+        capture_info(fn ->
+          body = OptimalSystemAgent.Providers.Anthropic.maybe_add_system(%{}, short)
+          assert body.system == short, "an unmarkable prefix is sent as a plain string"
+        end)
+
+      assert log =~ "[Anthropic] system cache breakpoint NOT placed"
+      assert log =~ "re-billed in full every turn"
+      assert log =~ "[info]"
+    end
+
+    test "a prefix over the minimum is still marked" do
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+
+      long = String.duplicate("x", PromptCache.min_cacheable_bytes() + 1)
+      body = OptimalSystemAgent.Providers.Anthropic.maybe_add_system(%{}, long)
+
+      assert [%{cache_control: %{type: "ephemeral"}}] = body.system
+    end
+  end
+
+  # ── 16. A rate card overruling the provider's own bill ────────────────────
+
+  describe "the provider's own price wins over the rate card" do
+    defp billing_state do
+      %{
+        session_id: "billing-#{System.unique_integer([:positive])}",
+        provider: :claude_cli,
+        model: "claude-sonnet-4-5",
+        session_cost_usd: 0.0
+      }
+    end
+
+    @cli_usage %{
+      input_tokens: 1200,
+      output_tokens: 340,
+      cache_read_input_tokens: 900,
+      cache_creation_input_tokens: 12
+    }
+
+    test "a CLI-reported cost replaces the estimate rather than adding to it" do
+      estimate = Accounting.turn_cost(billing_state(), Accounting.normalize_usage(@cli_usage), [])
+
+      assert estimate > 0.0,
+             "this test is meaningless unless the rate card would have produced a number"
+
+      priced =
+        Accounting.record(billing_state(), @cli_usage, provider_cost_usd: 0.0412)
+
+      assert priced.session_cost_usd == 0.0412,
+             "the CLI's own total_cost_usd is the authoritative figure on a Max plan — the " <>
+               "user runs one, so `tokens x list price` is not a rounding error here but a " <>
+               "number that never matched the bill"
+
+      refute_in_delta priced.session_cost_usd, 0.0412 + estimate, 1.0e-9
+    end
+
+    test "with no provider figure the rate card still prices the turn" do
+      state = Accounting.record(billing_state(), @cli_usage, [])
+
+      assert state.session_cost_usd > 0.0,
+             "the override must not become a silent way to bill nothing"
+    end
+
+    test "the substitution is announced, not silent" do
+      Process.delete(:osa_provider_cost_source)
+
+      log =
+        capture_info(fn ->
+          Accounting.record(billing_state(), @cli_usage, provider_cost_usd: 0.0412)
+        end)
+
+      assert log =~ "[Accounting]"
+      assert log =~ "total_cost_usd"
+
+      assert log =~ "[info]",
+             "the one place a session's cost stops coming from OSA's price table must be " <>
+               "visible; a silent substitution is indistinguishable from a pricing bug"
+    end
+
+    test "Copilot's premium requests accumulate as themselves, not as dollars" do
+      # `:copilot_cli` is in NEITHER prompt-slice list, deliberately: it reports
+      # no tokens, so it has no slice convention to belong to. That is not a gap
+      # to be closed.
+      state =
+        Accounting.record(billing_state(), nil, provider_quota: %{premium_requests: 0.33})
+
+      assert state.session_premium_requests == 0.33
+      assert state.session_cost_usd == 0.0, "a premium request is not a dollar figure"
+
+      state2 = Accounting.record(state, nil, provider_quota: %{premium_requests: 0.33})
+      assert state2.session_premium_requests == 0.66
     end
   end
 end

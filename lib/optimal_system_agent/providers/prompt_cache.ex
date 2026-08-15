@@ -60,11 +60,77 @@ defmodule OptimalSystemAgent.Providers.PromptCache do
   in that one case; verified accepted on the wire.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Providers.Registry
 
   # Marks the message this module appends, so `restructure/3` is idempotent
   # across retry and provider-fallback hops. Never interpolated.
   @tail_marker "## Runtime State"
+
+  # ── The two figures every cache-marking route has to agree on ─────────────
+
+  @doc """
+  The global prompt-caching kill switch, `:prompt_caching_enabled` (default
+  `true`).
+
+  It lives here rather than in a provider because it names a GLOBAL policy and
+  had all five of its call sites inside `Providers.Anthropic`. The polarity
+  that produced was inverted in practice: setting it `false` turned caching off
+  on the native Anthropic path — the one route that had it — and left it fully
+  on for OpenRouter → Anthropic, which is the route the 92.8% hit rate was
+  actually measured on. An operator disabling caching (to isolate a billing
+  question, or because a gateway mishandles the markers) got the opposite of
+  what they asked for on the path that mattered.
+
+  Nothing documented the flag as native-only: its sole prose mention outside
+  the source is `docs/roadmap-beat-the-field.md`, which lists
+  "`prompt_caching_enabled?` inverse polarity" as a DEFECT. So the behaviour is
+  what moved, not the documentation.
+
+  Every route that places a cache marker consults this: `Anthropic`
+  (system + tools), `Bedrock` (`cachePoint`), `Registry.normalize_message_content/3`
+  (which decides whether marked blocks survive to the OpenAI wire) and
+  `restructure/3` below.
+  """
+  @spec enabled?() :: boolean()
+  def enabled? do
+    Application.get_env(:optimal_system_agent, :prompt_caching_enabled, true)
+  end
+
+  # 4,500 bytes, measured: the default 23-tool array serializes to 33,897 bytes
+  # and Anthropic counts it as ~8,267 tokens — 4.1 bytes/token. 4,500 bytes is
+  # therefore ~1,100 tokens, just clear of the 1024-token floor below which a
+  # breakpoint silently does nothing.
+  @min_cacheable_bytes 4_500
+
+  # Bytes/token on this payload shape, from the same measurement. Used only to
+  # report an estimate alongside a decision, never to make one.
+  @bytes_per_token 4.1
+
+  @doc """
+  Minimum serialized bytes a segment must reach before a cache breakpoint is
+  worth placing on it.
+
+  ONE number, because there were three. `Anthropic.maybe_add_system/2` used
+  4,000 (calibrated against a token count that omitted `input_schema`, so it
+  was neither a byte figure nor a token figure), its tools-side sibling was
+  recalibrated to 4,500, and `Bedrock` was calibrated to 4,500 independently
+  with a comment promising to hold it equal by hand. Three numbers for one
+  minimum is how they drift; this is the one they now all read.
+  """
+  @spec min_cacheable_bytes() :: pos_integer()
+  def min_cacheable_bytes, do: @min_cacheable_bytes
+
+  @doc """
+  Approximate token count for `bytes` of this payload shape.
+
+  For reporting a decision, never for making one — the decision is a byte
+  comparison against `min_cacheable_bytes/0`.
+  """
+  @spec approx_tokens(non_neg_integer()) :: non_neg_integer()
+  def approx_tokens(bytes) when is_integer(bytes) and bytes >= 0,
+    do: round(bytes / @bytes_per_token)
 
   @doc """
   Move the volatile system tail to the end of `messages` and mark the resulting
@@ -105,16 +171,56 @@ defmodule OptimalSystemAgent.Providers.PromptCache do
     # (the largest payloads in the system), the classifier, keeper, weaver,
     # dream and workflow callers, and EVERY provider-fallback hop —
     # `cross_provider_opts/1` drops `:model` deliberately.
-    if applies?(target) and
+    # `enabled?/0` FIRST, and as a real gate rather than a comment: this module
+    # places a `cache_control` breakpoint on the last history message, so an
+    # operator who turned prompt caching off and still saw markers on the wire
+    # was looking at this function. See `enabled?/0` for why the flag is global.
+    if enabled?() and applies?(target) and
          Registry.anthropic_prompt_cache?(target, Registry.resolved_model(target, opts)) and
          not already_restructured?(messages) do
       do_restructure(messages)
     else
-      messages
+      report_skip(messages, target, opts)
     end
   end
 
   def restructure(messages, _target, _opts), do: messages
+
+  # A skipped restructure is a cache decision, and until now it was an
+  # invisible one: the messages came back byte-identical and nothing recorded
+  # that the rolling breakpoint — worth ~16 points of hit rate by this module's
+  # own measured table — had not been placed. Telemetry always; a LOG only for
+  # the arm an operator can act on (the kill switch), deduped per process so a
+  # steady-state session says it once rather than once per turn.
+  defp report_skip(messages, target, opts) do
+    reason =
+      cond do
+        not enabled?() -> :disabled_by_config
+        not applies?(target) -> :transport_not_supported
+        already_restructured?(messages) -> :already_restructured
+        true -> :route_not_anthropic_cached
+      end
+
+    :telemetry.execute(
+      [:osa, :prompt_cache, :restructure_skipped],
+      %{message_count: length(messages)},
+      %{reason: reason, target: target, model: Registry.resolved_model(target, opts)}
+    )
+
+    if reason == :disabled_by_config and Process.get(:osa_prompt_cache_off) != true do
+      Process.put(:osa_prompt_cache_off, true)
+
+      Logger.info(
+        "[PromptCache] prompt caching is disabled by config — no cache_control breakpoints " <>
+          "will be placed on ANY route, and cache_read_input_tokens will stay 0."
+      )
+    end
+
+    messages
+  rescue
+    # Telemetry on a hot path must never be able to fail the request.
+    _ -> messages
+  end
 
   # DELIBERATELY limited to the OpenAI-compatible transport, which is the only
   # one this was measured on (OpenRouter → Anthropic, live, 2026-08-14).

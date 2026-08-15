@@ -83,9 +83,38 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   `:cost_update` event with the new running totals.
   """
   @spec record(map(), map() | nil) :: map()
-  def record(state, usage) do
+  def record(state, usage), do: record(state, usage, [])
+
+  @doc """
+  As `record/2`, plus whatever the provider said about the turn's price that
+  OSA's rate card cannot know.
+
+  `opts`:
+
+    * `:provider_cost_usd` — the provider's OWN authoritative dollar figure for
+      this round-trip (`ClaudeCli.reported_cost/0` publishes the CLI's
+      `total_cost_usd` here). When present it REPLACES the rate-card estimate;
+      it is never added to one.
+    * `:provider_quota` — a non-dollar meter the provider bills in
+      (`CopilotCli.reported_quota/0` publishes `%{premium_requests: float}`).
+      Accumulated and reported alongside cost; never converted into dollars or
+      tokens.
+
+  ## Why a provider figure has to win
+
+  `Pricing.cost/2` computes `tokens x list price`. On a Max-plan account that
+  is simply the wrong number — the marginal cost of a turn is not the list
+  rate, and the CLI is the only party that knows what it actually was. The user
+  running this is on such a plan, so the rate-card estimate is not a rounding
+  error here; it is a figure that never matched the bill.
+
+  Both figures are also the input to `max_budget_usd`, which is enforced off
+  these totals. A cap checked against an invented number is not a cap.
+  """
+  @spec record(map(), map() | nil, keyword()) :: map()
+  def record(state, usage, opts) do
     report_unaccounted(state, usage)
-    do_record(state, usage)
+    do_record(state, usage, opts)
   rescue
     e ->
       # Accounting is best-effort telemetry — a pricing/emit failure must never
@@ -264,17 +293,18 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     ArgumentError -> nil
   end
 
-  defp do_record(state, usage) do
+  defp do_record(state, usage, opts) do
     norm =
       usage
       |> normalize_usage()
       |> reconcile_prompt_slices(Map.get(state, :provider))
 
-    turn_cost = Pricing.cost(Map.get(state, :model), norm)
+    turn_cost = turn_cost(state, norm, opts)
 
     state =
       state
       |> accumulate_counters(norm, turn_cost)
+      |> accumulate_provider_quota(Keyword.get(opts, :provider_quota))
       |> maybe_put_last_input(effective_input_tokens(norm))
 
     # Surrender this round-trip's numbers OUTSIDE the immutable state thread,
@@ -282,11 +312,103 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     # See `adopt_partial/1`.
     stash_partial(state)
 
-    emit_cost_update(state, norm, turn_cost)
+    emit_cost_update(state, norm, turn_cost, cost_update_extra(state, opts))
     maybe_bridge_budget(state, norm, turn_cost)
     maybe_record_trajectory(state, norm, turn_cost)
 
     state
+  end
+
+  # ── The provider's own price beats OSA's rate card ────────────────────────
+
+  @doc """
+  This round-trip's price: the provider's own figure when it published one,
+  otherwise `Pricing.cost/2` against the rate card.
+
+  Never the sum. A provider that reports `total_cost_usd` has ALREADY priced
+  every token in the same usage map OSA would price again, so adding the two
+  double-bills the turn — which is why this is a replacement and the telemetry
+  below names which of the two produced the number.
+  """
+  @spec turn_cost(map(), map(), keyword()) :: float()
+  def turn_cost(state, norm, opts \\ []) do
+    estimate = Pricing.cost(Map.get(state, :model), norm)
+
+    case provider_cost(opts) do
+      nil ->
+        estimate
+
+      reported ->
+        report_cost_source(state, reported, estimate)
+        reported
+    end
+  end
+
+  defp provider_cost(opts) do
+    case Keyword.get(opts, :provider_cost_usd) do
+      c when is_float(c) and c >= 0.0 -> round6(c)
+      c when is_integer(c) and c >= 0 -> c * 1.0
+      _ -> nil
+    end
+  end
+
+  # A billing figure that changed must be visible. This is the one place a
+  # session's cost stops being derived from OSA's own price table, and a silent
+  # substitution would be indistinguishable from a pricing bug.
+  defp report_cost_source(state, reported, estimate) do
+    :telemetry.execute(
+      [:osa, :accounting, :provider_cost],
+      %{provider_cost_usd: reported, rate_card_estimate_usd: estimate, delta_usd: reported - estimate},
+      %{provider: Map.get(state, :provider), model: Map.get(state, :model)}
+    )
+
+    signature = {Map.get(state, :provider), Map.get(state, :model)}
+
+    if Process.get(:osa_provider_cost_source) != signature do
+      Process.put(:osa_provider_cost_source, signature)
+
+      Logger.info(
+        "[Accounting] pricing #{inspect(Map.get(state, :provider))} turns from the provider's " <>
+          "own total_cost_usd ($#{reported}) instead of the rate card ($#{estimate}) — the " <>
+          "rate-card figure is tokens x list price, which is not what a Max-plan turn costs."
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # A meter that is not dollars and not tokens. Copilot bills in fractional
+  # `premiumRequests` against a monthly allowance, so there is nothing to price
+  # and nothing to convert; the honest thing is to carry it under its own name.
+  # `:copilot_cli` is in NEITHER prompt-slice list on purpose — it reports no
+  # tokens, so it has no slice convention to belong to.
+  defp accumulate_provider_quota(state, %{premium_requests: n}) when is_number(n) and n > 0 do
+    put(state, :session_premium_requests, round6(get(state, :session_premium_requests, 0.0) + n))
+  end
+
+  defp accumulate_provider_quota(state, _), do: state
+
+  defp cost_update_extra(state, opts) do
+    base =
+      case provider_cost(opts) do
+        nil -> %{cost_source: :rate_card}
+        c -> %{cost_source: :provider_reported, provider_cost_usd: c}
+      end
+
+    case Keyword.get(opts, :provider_quota) do
+      %{premium_requests: n} when is_number(n) ->
+        base
+        |> Map.put(:provider_quota, %{premium_requests: n})
+        |> Map.put(
+          :session_premium_requests,
+          get(state, :session_premium_requests, 0.0)
+        )
+
+      _ ->
+        base
+    end
   end
 
   # Add ONE already-normalized, already-reconciled, already-priced usage map to
@@ -361,7 +483,12 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
     if norm.input_tokens + norm.output_tokens + norm.cache_creation_input_tokens +
          norm.cache_read_input_tokens > 0 do
-      cost = Pricing.cost(Keyword.get(opts, :model), norm)
+      # Same rule as the in-loop path: a provider that priced its own call wins
+      # over the rate card, and is never added to it.
+      cost =
+        provider_cost(opts) ||
+          Pricing.cost(Keyword.get(opts, :model), norm)
+
       kind = Keyword.get(opts, :kind, :compaction)
 
       table = side_table()
