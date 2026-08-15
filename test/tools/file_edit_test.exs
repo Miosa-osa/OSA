@@ -194,6 +194,83 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
   # ── Metadata ─────────────────────────────────────────────────────
 
+  # ── The diff a fuzzy edit reports back ───────────────────────────
+  #
+  # `format_diff` used to locate its hunk by scanning for the first line in the
+  # file CONTAINING the first line of old_string, falling back to line 1 when
+  # nothing matched. On a fuzzy match — the only path that still renders a diff
+  # — old_string does not appear verbatim, so that scan routinely anchored on an
+  # unrelated region and printed real code from it. 50 assistant turns across 21
+  # corpus sessions call the result "misleading", "garbled" or "landed in the
+  # wrong place", several of them paying a full file re-read to recover.
+
+  describe "fuzzy-match diff" do
+    setup do
+      path = "/tmp/osa_edit_fuzzydiff_#{:rand.uniform(100_000)}.py"
+
+      # `SENTINEL_DECOY` is what the old anchor would have found: the first line
+      # of old_string ("    def apply(self):") also occurs near the TOP of the
+      # file, far from the region actually edited.
+      File.write!(path, """
+      class Early:
+          def apply(self):
+              return "SENTINEL_DECOY"
+
+      #{String.duplicate("# filler\n", 40)}
+      class Target:
+          def apply(self):
+              return "SENTINEL_TARGET"
+      """)
+
+      on_exit(fn -> File.rm(path) end)
+      %{path: path}
+    end
+
+    test "the hunk describes the region that changed, not a look-alike", %{path: path} do
+      # Trailing whitespace on every line forces the `:whitespace` fuzzy stage.
+      old = "    def apply(self):   \n        return \"SENTINEL_TARGET\"   "
+
+      result =
+        FileEdit.execute(%{
+          "path" => path,
+          "old_string" => old,
+          "new_string" => "    def apply(self):\n        return \"SENTINEL_REPLACED\""
+        })
+
+      out =
+        case result do
+          {:ok, text, _meta} -> text
+          {:ok, text} -> text
+        end
+
+      assert out =~ "fuzzy"
+      assert out =~ "SENTINEL_REPLACED"
+      # The decoy near the top of the file must not appear in the hunk at all.
+      refute out =~ "SENTINEL_DECOY"
+      assert File.read!(path) =~ "SENTINEL_REPLACED"
+      assert File.read!(path) =~ "SENTINEL_DECOY"
+    end
+
+    test "an exact match still reports one line and no diff", %{path: path} do
+      result =
+        FileEdit.execute(%{
+          "path" => path,
+          "old_string" => "SENTINEL_TARGET",
+          "new_string" => "SENTINEL_EXACT"
+        })
+
+      out =
+        case result do
+          {:ok, text, _meta} -> text
+          {:ok, text} -> text
+        end
+
+      refute out =~ "@@"
+      assert out =~ "Replaced in"
+    end
+  end
+
+  # ── Tool metadata ────────────────────────────────────────────────
   describe "tool metadata" do
     test "name returns file_edit" do
       assert FileEdit.name() == "file_edit"

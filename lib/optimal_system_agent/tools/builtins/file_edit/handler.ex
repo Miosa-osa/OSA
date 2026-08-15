@@ -198,7 +198,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
                 occurrences: occurrences,
                 old: old,
                 new: new,
-                content: content
+                content: content,
+                diff: diff_text
               })
 
             result = base_result <> hook_note
@@ -249,15 +250,88 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   # taking the commit message's word for it.
   defp edit_report(%{stage: :exact} = r) do
     if Ablation.on?(:edit_diff_echo) do
-      "Replaced in #{r.display_path}\n" <> format_diff(r.old, r.new, r.content, r.display_path)
+      "Replaced in #{r.display_path}" <> diff_body(r)
     else
       "Replaced in #{r.display_path}"
     end
   end
 
   defp edit_report(r) do
-    "Replaced in #{r.display_path}#{r.fuzzy_note}\n" <>
-      format_diff(r.old, r.new, r.content, r.display_path)
+    "Replaced in #{r.display_path}#{r.fuzzy_note}" <> diff_body(r)
+  end
+
+  # The diff the model is shown is the SAME diff the TUI is shown — the real
+  # one, computed by `Utils.Diff.unified/3` from the before and after content.
+  #
+  # It used to be a separate, hand-rolled rendering that located its hunk by
+  # scanning for the first line in the file *containing* the first line of
+  # `old_string`:
+  #
+  #     start_idx = Enum.find_index(lines, &String.contains?(&1, first_old_line)) || 0
+  #
+  # Three ways that is wrong, and all three were observable in the benchmark
+  # transcripts. A common first line (`    return`, `def __init__(self):`, or
+  # `""` when `old_string` began with a newline) anchors the hunk at the FIRST
+  # such line anywhere in the file; the `|| 0` anchors it at line 1 when nothing
+  # matches at all; and the context lines are then sliced from that wrong index,
+  # so the model is shown real code from a region the edit never touched. The
+  # hunk header `@@ -N,M @@` compounded it — no `+` side, and `M` a fiction
+  # (`length(old_lines) + 4`).
+  #
+  # This is worst on exactly the path that still renders a diff. A fuzzy match
+  # means `old_string` does NOT appear verbatim, so `String.contains?/2` on its
+  # first line is least likely to find the real site and most likely to land on
+  # `|| 0`. The one case where the diff is a correctness signal is the case
+  # where it was most reliably misleading.
+  #
+  # Measured in the corpus (118 SWE-bench/-Pro transcripts): 50 assistant
+  # statements calling the returned diff "misleading", "garbled", "confusing",
+  # or "landed in the wrong place", across 21 sessions — several followed by a
+  # full re-read of the file to find out what actually happened. The exact/fuzzy
+  # split shipped earlier does not touch this: it removes the diff on exact
+  # matches and keeps this renderer on fuzzy ones.
+  #
+  # The file header (`--- a/path` / `+++ b/path`) is dropped because the line
+  # above it already names the path; the hunks are what carry information.
+  defp diff_body(r) do
+    if Ablation.on?(:edit_diff_anchor) do
+      real_diff_body(r)
+    else
+      "\n" <> legacy_format_diff(r.old, r.new, r.content, r.display_path)
+    end
+  end
+
+  defp real_diff_body(%{diff: diff}) when is_binary(diff) and diff != "" do
+    "\n" <>
+      (diff
+       |> String.split("\n")
+       |> Enum.drop_while(&(String.starts_with?(&1, "--- ") or String.starts_with?(&1, "+++ ")))
+       |> Enum.join("\n"))
+  end
+
+  defp real_diff_body(_), do: ""
+
+  # The renderer described above, kept ONLY so `:edit_diff_anchor` can price the
+  # fix by restoring it. Nothing in production reaches this.
+  defp legacy_format_diff(old, new, content, path) do
+    lines = String.split(content, "\n")
+    old_lines = String.split(old, "\n")
+    first_old_line = List.first(old_lines) || ""
+
+    start_idx = Enum.find_index(lines, fn l -> String.contains?(l, first_old_line) end) || 0
+
+    ctx_before = Enum.slice(lines, max(start_idx - 2, 0), min(2, start_idx))
+    ctx_after = Enum.slice(lines, start_idx + length(old_lines), 2)
+
+    removed = Enum.map(old_lines, fn l -> "- #{l}" end)
+    added = new |> String.split("\n") |> Enum.map(fn l -> "+ #{l}" end)
+    context_b = Enum.map(ctx_before, fn l -> "  #{l}" end)
+    context_a = Enum.map(ctx_after, fn l -> "  #{l}" end)
+
+    header = "--- #{path}\n+++ #{path}"
+    hunk = "@@ -#{max(start_idx - 1, 1)},#{length(old_lines) + 4} @@"
+
+    Enum.join([header, hunk] ++ context_b ++ removed ++ added ++ context_a, "\n")
   end
 
   # ── Idempotent re-application ─────────────────────────────────────────
@@ -379,33 +453,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
       "" -> nil
       text -> text
     end
-  end
-
-  # Build a minimal unified diff showing the change with context lines.
-  # Kept identical to the original implementation — callers depend on the exact
-  # output format.
-  defp format_diff(old, new, content, path) do
-    lines = String.split(content, "\n")
-    old_lines = String.split(old, "\n")
-    first_old_line = List.first(old_lines) || ""
-
-    # Find the line number where the match starts
-    start_idx = Enum.find_index(lines, fn l -> String.contains?(l, first_old_line) end) || 0
-
-    # Context: 2 lines before and after
-    ctx_before = Enum.slice(lines, max(start_idx - 2, 0), min(2, start_idx))
-    ctx_after = Enum.slice(lines, start_idx + length(old_lines), 2)
-
-    removed = old_lines |> Enum.map(fn l -> "- #{l}" end)
-    added = String.split(new, "\n") |> Enum.map(fn l -> "+ #{l}" end)
-    context_b = ctx_before |> Enum.map(fn l -> "  #{l}" end)
-    context_a = ctx_after |> Enum.map(fn l -> "  #{l}" end)
-
-    header = "--- #{path}\n+++ #{path}"
-    hunk = "@@ -#{max(start_idx - 1, 1)},#{length(old_lines) + 4} @@"
-
-    diff_lines = [header, hunk] ++ context_b ++ removed ++ added ++ context_a
-    Enum.join(diff_lines, "\n")
   end
 
   # Resolve symlinks BEFORE security checks to prevent symlink traversal attacks.
