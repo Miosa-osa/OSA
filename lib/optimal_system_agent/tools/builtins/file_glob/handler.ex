@@ -137,7 +137,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
             "#{total} #{if total == 1, do: "file", else: "files"} found"
           end
 
-        {:ok, "#{header}:\n#{files |> Enum.map(&decorate/1) |> Enum.join("\n")}"}
+        body = files |> Enum.map(&decorate/1) |> Enum.join("\n")
+
+        # Same reasoning as `file_grep`'s spread trailer: a multi-file match IS
+        # a list of independent next reads, and saying so at the END of the
+        # result keeps the signal adjacent to the decision instead of thousands
+        # of tokens behind it.
+        trailer =
+          if length(files) > 1 do
+            "\n\n(#{length(files)} paths. Reading several of them is independent work — " <>
+              "issue those file_read calls together in one turn, not one per turn.)"
+          else
+            ""
+          end
+
+        {:ok, "#{header}:\n#{body}#{trailer}"}
     end
   end
 

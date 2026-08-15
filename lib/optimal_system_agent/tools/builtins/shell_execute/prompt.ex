@@ -38,6 +38,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt do
     and compute, they do not mutate, so none of the write concerns above apply. \
     Prefer one command that answers the question over three that circle it.
 
+    Compression and batching are different moves and you want both. Compression \
+    is one command that answers one question instead of three that circle it — \
+    that is the paragraph above. Batching is several UNRELATED commands going \
+    out as several `shell_execute` calls IN THE SAME TURN: the status and the \
+    diff, the two test files, the build and the lint. Do not spend a turn each \
+    on those. And do not reach for `;` to fake it — chaining unrelated commands \
+    into one line merges their exit codes and sends the whole line to one \
+    approval decision, which is worse on both counts. Separate calls, one turn.
+
+    What batching buys is round trips, not concurrency, so the bar for putting \
+    two commands in one turn is that neither reads what the other writes. A \
+    build and the test run that consumes it stay in separate turns; `git status` \
+    and `git diff`, or two independent test files, do not. When in doubt about \
+    ordering, batch the reads and keep the writes on their own.
+
     Permission check: the line is split at `|`, `&&`, `||`, `;`, `&` (not inside \
     quotes or `$(...)`) and each segment's first word is classified — one risky \
     segment (rm, sudo, chmod, chown, kill, mount, systemctl, nc, shutdown) sends \

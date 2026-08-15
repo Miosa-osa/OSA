@@ -95,7 +95,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     }
 
     case try_ripgrep(pattern, path, rg_opts) do
-      {:ok, output} -> {:ok, bound_output(output)}
+      {:ok, output} -> {:ok, output |> bound_output() |> with_spread_trailer()}
       {:fallback, _} -> fallback_grep(pattern, path, rg_opts)
     end
   end
@@ -252,7 +252,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
         case results do
           [] -> {:ok, "No matches found."}
-          lines -> {:ok, bound_output(Enum.join(lines, "\n"))}
+          lines -> {:ok, lines |> Enum.join("\n") |> bound_output() |> with_spread_trailer()}
         end
     end
   end
@@ -307,6 +307,44 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
       end
 
     bounded <> note
+  end
+
+  # A grep that lands in several files is the one moment the caller provably
+  # holds a list of independent next reads. Ending the result with that count,
+  # and with what to do about it, puts the batching signal in the last thing the
+  # model saw rather than in a system prompt thousands of tokens behind it —
+  # which is where the measurement says the guidance stops being obeyed:
+  # read-only turns batch at 39% on turn 0 and 6% by turn 12, so a static
+  # instruction is not what is carrying the behaviour late in a session.
+  #
+  # Only emitted when the matches actually span two or more files, so it never
+  # advises a batch that does not exist.
+  defp with_spread_trailer(output) do
+    case distinct_match_files(output) do
+      n when n > 1 ->
+        output <>
+          "\n\n(Matches span #{n} files. Reading them is independent work — " <>
+          "issue those file_read calls together in one turn, not one per turn.)"
+
+      _ ->
+        output
+    end
+  end
+
+  # Every emitted mode prefixes the path: `path:line:text` for the default and
+  # `path:count` for counts, `path` alone for files_with_matches. Splitting on
+  # the first `:` therefore names the file in all three, and context lines
+  # (`path-line-text`) collapse onto the same key.
+  defp distinct_match_files(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&(&1 == "--" or String.starts_with?(&1, "...[truncated]")))
+    |> Enum.map(fn line ->
+      line |> String.split(~r/[:\-]/, parts: 2) |> List.first()
+    end)
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> length()
   end
 
   defp sensitive?(expanded_path) do
