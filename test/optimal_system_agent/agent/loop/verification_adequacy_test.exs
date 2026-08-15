@@ -803,4 +803,145 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
       refute G.first_write_nudge(sid)
     end
   end
+
+  # ===========================================================================
+  # Species 6 — the gate's own test file must not become part of the deliverable
+  # ===========================================================================
+  #
+  # `polyglot-c-py` and `polyglot-rust-c` were both lost on the FIRST line of
+  # their verifier — `assert os.listdir(...) == ["main.rs"]` — against a
+  # directory holding OSA's persisted test file, its `__pycache__` and the
+  # binaries the test compiled. All three are artefacts this gate asked for.
+  describe "keeps its test artefacts out of the deliverable directory" do
+    test "the early nudge names a scratch location and says not to sit beside the work",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      nudge = G.first_write_nudge(sid)
+
+      assert nudge =~ "/tmp/osa-tests/"
+      assert nudge =~ "never beside the files the task asked"
+      assert nudge =~ "__pycache__"
+    end
+
+    test "the large directive names the same scratch location", %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert d.content =~ "/tmp/osa-tests/"
+      assert d.content =~ "NEVER in the directory that holds the deliverable"
+      assert d.content =~ "PYTHONDONTWRITEBYTECODE=1"
+    end
+
+    test "the small directive says it too, without growing into the large one",
+         %{session_id: sid} do
+      edit(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert d.content =~ "/tmp/osa-tests/"
+      assert byte_size(d.content) < byte_size(large_directive())
+    end
+
+    test "a test written where the directive says to put it still counts as evidence",
+         %{session_id: sid} do
+      # The failure mode this guards: the gate prescribes a location whose files
+      # match none of its own basename patterns, and then refuses the evidence it
+      # asked for. `check_polyglot.py` is not `test_*.py`; the directory is what
+      # makes it a test artefact.
+      authored(sid, "/app/polyglot/main.rs")
+      sh(sid, "cat > /tmp/osa-tests/check_polyglot.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "python3 /tmp/osa-tests/check_polyglot.py", false)
+      authored(sid, "/app/polyglot/main.rs")
+      sh(sid, "python3 /tmp/osa-tests/check_polyglot.py", true)
+
+      assert L.test_artifact_path?("/tmp/osa-tests/check_polyglot.py")
+      assert "/tmp/osa-tests/check_polyglot.py" in L.known_test_artifacts(sid)
+
+      assert %{artifact: {:file, "/tmp/osa-tests/check_polyglot.py"}} =
+               L.discriminating_evidence(sid)
+
+      refute L.needs_discriminating_test?(sid)
+    end
+  end
+
+  # ===========================================================================
+  # Species 2 — the self-authored oracle tested the wrong thing
+  # ===========================================================================
+  #
+  # There is no detector for this (see `docs/research/failure-taxonomy.md` §2.4:
+  # every episode-shape proxy fires on the solves too). What the gate can do is
+  # spend the pushback it was already spending on the correspondence between the
+  # test and the TASK rather than on the mechanics of the test. These assertions
+  # pin that the ask is present, that it costs no extra pushback, and that the
+  # provenance observation is factual.
+  describe "asks what the test checks, not only whether it discriminates" do
+    test "the large directive asks for requirement-by-requirement coverage",
+         %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "python3 -m py_compile /tmp/app.py", true)
+      {d, st} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert d.content =~ "proves only the proposition IT states"
+      assert d.content =~ "name the assertion that checks it"
+      assert d.content =~ "DIRECTION"
+      assert d.content =~ "THAT is the oracle"
+
+      assert d.content =~ "testing your test",
+             "torch-tensor-parallelism's test performed the all-gather under test"
+
+      assert st.verification_gate_prompts == 1,
+             "re-aiming the pushback must not add one"
+    end
+
+    test "says so when nothing but the session's own files has ever run",
+         %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "cat > /tmp/osa-tests/test_app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "python3 /tmp/osa-tests/test_app.py", true)
+
+      assert L.oracle_provenance(sid) == :self_authored
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+      assert d.content =~ "nothing you did not author has had the chance to disagree"
+    end
+
+    test "and stays quiet about it once something external has run",
+         %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      # A suite the session did not write.
+      sh(sid, "pytest tests/", true)
+
+      assert L.oracle_provenance(sid) == :external
+      {d, _} = G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+      refute d.content =~ "nothing you did not author has had the chance to disagree"
+    end
+
+    test "provenance is :none when every check was a throwaway snippet",
+         %{session_id: sid} do
+      authored(sid, "/tmp/app.py")
+      sh(sid, "python3 - << 'PY'\nimport app\nPY", true)
+      sh(sid, "python3 -c \"import app\"", true)
+
+      assert L.oracle_provenance(sid) == :none
+    end
+
+    test "the provenance rides on the observable gate event", %{session_id: sid} do
+      me = self()
+
+      ref =
+        OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn ev ->
+          if is_map(ev.data) and ev.data[:event] == :verification_gate_triggered,
+            do: send(me, {:gate, ev.data})
+        end)
+
+      on_exit(fn -> OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, ref) end)
+
+      authored(sid, "/tmp/app.py")
+      sh(sid, "cat > /tmp/osa-tests/test_app.py << 'EOF'\nx\nEOF", true)
+      sh(sid, "python3 /tmp/osa-tests/test_app.py", true)
+      G.build_directive(%{session_id: sid, verification_gate_prompts: 0})
+
+      assert_receive {:gate, %{oracle: :self_authored}}, 2_000
+    end
+  end
 end

@@ -35,11 +35,11 @@ self-consistent, wrong evidence. Both are ours.
 | # | species | count | detectable | fixable | where the fix lives |
 |---|---|---:|---|---|---|
 | 1 | **Async abandonment** — "I'll wait for the notification" | 10 | yes, shipped | yes, one paragraph | `shell_execute/prompt.ex:64-70` |
-| 2 | **Self-authored oracle tested the wrong thing** | 9 | **no** (see §2.4) | partly, by design change | verification gate |
+| 2 | **Self-authored oracle tested the wrong thing** | 9 | **no** (see §2.4-2.5) | partly, directive re-aimed | verification gate |
 | 3 | **Background service dies with the session** | 3 | yes, shipped | yes, needs detach | `shell_execute/handler.ex` |
 | 4 | **Terminal output-token truncation** | 2 (+1 ambiguous) | yes, shipped | yes | provider loop |
 | 5 | **Guard text delivered as the answer** | 2 | yes, shipped | yes | `doom_loop/` |
-| 6 | **Deliverable directory polluted by our own test policy** | 2 | not generally | yes | verification gate |
+| 6 | **Deliverable directory polluted by our own test policy** | 2 (+10 near misses) | **no**, 10/49 solves do it too | **fixed** | verification gate |
 | 7 | **Ended on an announcement, no other cause** | 1 | yes, shipped | needs design | agent loop |
 | 8 | **Genuine model/domain error** | 2 | n/a | no | — |
 | — | task or machine unsound (not evidence) | 6 | already listed | n/a | — |
@@ -170,9 +170,29 @@ present in the repository after the sanitization." OSA's final message **[measur
 > - `ray_processing/ray_cluster.yaml` — `yaml.safe_load` → parsed OK
 > The targeted compile + parse is the meaningful gate for these edits, and both are green.
 
-It verified that its edits did not break syntax. It never re-ran the search. A second
-Huggingface token survived inside a stored git-diff string in
-`exp_data/datasets/tokenized/…json` **[measured]** and the verifier found it immediately.
+It verified that its edits did not break syntax. A second Huggingface token survived
+inside a stored git-diff string in `exp_data/datasets/tokenized/…json` **[measured]** and
+the verifier found it immediately.
+
+**Correction, from the full command log** (`command_output_delta` carries the untruncated
+command; `tool_call.args` is clipped at 60 characters, which is why the first reading
+missed this). It *did* re-run the search — twice, once before the edits and once after:
+
+```
+grep -rIn "AKIA1234567890123456\|D4w8z9wKN1aVeT3BpQj6kIuN7wH8X0M9KfV5OqzF\
+\|ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789\|hf_abcdefghijklmnopqrstuvwxyz123456" .
+  → "OK: no sensitive values found"
+```
+
+Four literal values — **the four its own discovery pass had returned**. That discovery pass
+was `grep -rEn "…|hf_[A-Za-z0-9]{30,}|…" --include=… . | grep -v "^Binary" | head -80`
+**[measured]**. The surviving token, `hf_REDACTED_BENCHMARK_FIXTURE_TOKEN`, is 37
+characters and matches that pattern; it was below the `head -80` cut.
+
+This makes the species *sharper*, not weaker. The oracle was not absent and it was not
+lazy — it was **derived from the implementation's own search**, so it inherited that
+search's blind spot exactly. Re-running a check whose scope you computed yourself cannot
+find what your scope computation missed.
 
 ### 2.4 Why there is no detector for this — and what to do instead
 
@@ -194,9 +214,9 @@ proposition matches the task's proposition — which requires reading the task, 
 
 The comparison that makes this concrete is `dna-insert` (**solved**) against
 `dna-assembly` (**failed**), same domain, same session shape, both wrote
-`tests/test_primers.py`, both reported red→green. The difference **[measured]**: on
-`dna-insert` OSA went looking for the *external* ground truth named in the instruction —
-`which oligotm`, then `apt-get install primer3`, then a calibration call
+`tests/test_primers.py`, both reported red→green. On `dna-insert` OSA went looking for the
+*external* ground truth named in the instruction — `which oligotm`, then
+`apt-get install primer3`, then a calibration call
 `oligotm -tp 1 -sc 1 … atgcatgc…` before writing a line of design code. On `dna-assembly`
 it reasoned about NEB's requirements from memory across 2,500 lines of thinking, correctly
 concluded "NEB recommends adding extra bases" at the 5′ end — and then emitted
@@ -207,6 +227,49 @@ identified as a requirement**. The verifier's first assertion is
 `assert i >= 1, "Primer must have clamp of at least 1 nucleotide before BsaI site."`
 **[measured]**.
 
+### 2.5 The anchoring hypothesis, tested and only half-true
+
+The reading above suggests the discriminator is *external anchoring*: `dna-insert` used a
+ground truth it did not author, `dna-assembly` did not. **The full command log falsifies
+the strong form of that on its own motivating example** **[measured]**. `dna-assembly`
+also installed and calibrated `oligotm` — five commands, including
+`oligotm -tp 1 -sc 1 -mv 50 -dv 2 -n 0.8 -d 500 ATGAGCAAGGGCGAGGAGCTG`. Both episodes
+anchored their melting-temperature check to the tool the instruction named, and both got
+melting temperatures right. The requirement `dna-assembly` lost on is the one stated only
+in prose — "if you aren't familiar with BsaI-HF v2 make sure to check that the enzyme
+cut-sites you design satisfy NEB's requirements" — for which the environment ships no
+oracle at all.
+
+So the axis is not "did an external oracle appear anywhere in the session". It is
+**per-requirement coverage**: a requirement with a named external oracle gets checked, and
+a requirement stated in prose gets reasoned about and never asserted. `sanitize-git-repo`
+is the same shape (the prose requirement "the sensitive values are not present" was
+checked only against a self-derived scope), and so is `torch-tensor-parallelism` (the
+prose clause "the output should be concatenated along the last dimension as if using
+all_gather" was satisfied by the *test* rather than by the module).
+
+Five further candidate detectors were built and replayed over all 89 trials. All are
+rejected:
+
+| candidate | SP2 (9) | other fails (19) | solves (49) | verdict |
+|---|---:|---:|---:|---|
+| no external artefact named in any command | 1 | 2 | **2** | rejected |
+| an instruction-named artefact never appears in a command | 2 | 13 | **19** | rejected |
+| instruction spells out a command line never run | **0** | 3 | 4 | rejected |
+| instruction names a deliverable no command mentions | **0** | 6 | 2 | rejected |
+| final answer names no instruction-named file | **0** | 5 | 3 | rejected |
+| last command is an inline snippet | 1 | 10 | **15** | rejected |
+| every test artefact run was self-authored | **0** | 0 | 0 | degenerate |
+
+**[measured]**, `scripts/failure_species.py` acceptance rule applied to each.
+
+There is also a hard artefact limit worth recording so nobody re-attempts it: **OSA's
+event log stores a `file_write`'s path but not its content**, and `tool_call.args` is
+clipped at 60 bytes. No replay over this run can compare what a test *asserted* against
+what the task *required*, which is the only comparison that separates these nine from the
+solves. A content-based detector is not merely unproven here — it is unmeasurable from
+these artefacts.
+
 **So the fix is not a detector, it is a rule about where the oracle comes from** **[inferred]**:
 when the environment ships a checker (`/app/eval.py`, `/app/check.py`, `oligotm`, a
 project test suite), running it must outrank writing one; and when the task states a
@@ -216,6 +279,21 @@ before any test the agent invents. The current gate asks "is there a persisted t
 did it discriminate?" and both failures and solves answer yes. It should also ask "which
 sentence of the task does each assertion correspond to?" Rank: **2** — largest genuinely
 open problem, no safe shippable detector.
+
+**Shipped** (`VerificationGate`): the adequacy directive now spends its one pushback on
+the correspondence between the test and the task instead of on the mechanics of the test.
+It asks for the requirements listed one per line with the assertion that covers each (or
+"nothing does"), for the *direction* of each assertion to be checked, for a test that
+performs a step the implementation owed to be recognised as testing itself, and for a tool
+named by the task to be run rather than replaced. **No extra pushback**: the counter is
+unchanged, so this is the same message re-aimed, and the kill switch
+(`OSA_VERIFICATION_ADEQUACY=0`) still removes it. It is a self-report and is **not
+claimed to be validated** — it cannot be replayed, because it changes behaviour rather
+than reading it. What is shipped alongside it is the instrumentation that *can* settle
+the question: `VerificationEvidence.oracle_provenance/1`
+(`:external | :self_authored | :none`) rides on every `verification_gate_triggered`
+event, so the next run answers "does anchoring separate solves from species 2" from data
+rather than from argument.
 
 ---
 
@@ -353,10 +431,35 @@ Note that the gate's own text already knows the risk in other episodes — on
 `filter-js-from-html` OSA wrote "The broken copy lives in `/tmp` (outside `/app`), so it
 can't pollute the deliverable" **[measured]** — so the concept exists but is not enforced.
 
-**Detectable**: not in general (only these two tasks assert directory contents).
-**Fixable, and unambiguously safe**: the persisted-test reminder must name a scratch
-location outside the deliverable tree by default, and say so — "persist it under
-`/tmp/osa-tests/` unless the project already has a test directory". Rank: **6**.
+**This is not a rare shape we got unlucky with twice.** Replayed over all 89 trials, **12
+wrote a test artefact into a directory the instruction names as a deliverable** — the two
+polyglot tasks and **10 solves** **[measured]**: `bn-fit-modify`, `build-cython-ext`,
+`chess-best-move`, `distribution-search`, `extract-elf`, `merge-diff-arc-agi-task`,
+`openssl-selfsigned-cert`, `path-tracing-reverse`, `pytorch-model-recovery`,
+`write-compressor`. The ten survived only because their verifiers do not inspect directory
+contents. The directive's default behaviour is to point a loaded gun at every
+workspace-graded task; two of them happened to be loaded.
+
+**Detectable**: no — 10 of 49 solves do the same thing, so any detector fails the
+acceptance test (measured above, not assumed).
+
+**Fixed, and unambiguously safe.** `VerificationGate` now names
+`@scratch_test_dir` (`/tmp/osa-tests/`) in all three places that ask for a test file — the
+first-write nudge, the small-change body and the large adequacy body — together with the
+rule that nothing may land beside the deliverable, and explicit instructions for the two
+artefacts the test *itself* creates (`-o /tmp/osa-tests/bin` for compiled output,
+`PYTHONDONTWRITEBYTECODE=1` for the `__pycache__`). The project's own test directory still
+wins when it has one.
+
+**Why relocation and not cleanup.** Deleting the test after the discriminating run also
+clears the directory, and it is strictly worse: it destroys the one property that makes
+the evidence worth demanding — a check the grader, the next engineer or the next session
+can run again — and it introduces a delete on a path adjacent to the deliverable, on tasks
+graded by final state, at the exact moment the model is trying to stop. Moving the file
+costs nothing and keeps both. `VerificationEvidence`'s `@test_dir_segments` gained the
+matching `osa-tests` entry, because a gate that prescribes a location and then refuses to
+recognise `check_polyglot.py` written there is the same defect as one that refuses the
+red→green cycle it demanded. Rank: **6**.
 
 ---
 

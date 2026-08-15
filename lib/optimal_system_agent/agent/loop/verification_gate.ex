@@ -214,6 +214,54 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # unverified session is still asked again on the next turn.
   @max_reprompts 1
 
+  # Clause 0 gets its OWN budget, and a bigger one. Sharing `@max_reprompts`
+  # with the ledger clauses is what made clause 0 a detector rather than a
+  # block: one pushback, and on the next text-only answer the counter is at the
+  # cap and the gate steps aside — with the job still running, which is the
+  # exact state it exists to refuse.
+  #
+  # The cap-of-1 argument does not transfer. It rests on "a model that has
+  # declined the ask twice is not about to accept it on the third try", which is
+  # true of adequacy (write a discriminating test — an argument about taste) and
+  # false here. Clause 0's ask is mechanical, its exit is a single blocking
+  # `bash_output` call with `wait_ms`, and — unlike every other clause — THE
+  # WORLD CHANGES BETWEEN PUSHBACKS: the job is advancing in real time, so the
+  # same question can get a different answer without the model doing anything
+  # differently.
+  #
+  # Three, not unbounded: the gate must never be able to trap the loop, and a
+  # model that will not block after three asks is not going to. The
+  # `BACKGROUND_INTENTIONAL:` escape still releases it immediately at any point.
+  @max_background_reprompts 3
+
+  # Where a test the gate ASKED FOR is allowed to land.
+  #
+  # This gate shipped a directive that destroyed two deliverables. `polyglot-c-py`
+  # and `polyglot-rust-c` both want exactly one file in `/app/polyglot`, and both
+  # verifiers assert it as their FIRST line:
+  #
+  #     assert polyglot_files == ["main.rs"], f"Expected only main.rs, found: …"
+  #     # found: ['test_polyglot.py', 'main.rs', 'cpp_fib', '__pycache__', 'rust_fib']
+  #
+  # Every extra entry is ours: the persisted test file this gate demanded, the
+  # `__pycache__` Python wrote beside it, and the binaries the test compiled. The
+  # solutions themselves were very likely correct and were never evaluated,
+  # because the directory listing failed first.
+  #
+  # Replayed over the reference run, 12 of 89 trials wrote a test artefact into a
+  # directory the instruction names as a deliverable — 10 of them SOLVES that
+  # happened not to be graded on directory contents. So this is not a rare shape
+  # we got unlucky with once; it is the default behaviour of the directive, and
+  # it is a loaded gun pointed at any workspace-graded task.
+  #
+  # The fix is the location, not the artefact. Deleting the test after the run
+  # would also clear the directory, and it would destroy the one thing that
+  # makes the evidence worth having — a check the grader, or the next engineer,
+  # can run again. Writing it somewhere harmless costs nothing and keeps both.
+  # `VerificationEvidence`'s `@test_dir_segments` carries the matching entry so
+  # a file placed here still counts as a test artefact.
+  @scratch_test_dir "/tmp/osa-tests/"
+
   # The explicit, auditable escape. A task can genuinely have no runnable test
   # (documentation, a config value, a change with no harness in the image). The
   # automatic half of the escape is `code_file?/1` — a docs-only change never
@@ -570,7 +618,8 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "`go test ./...`, `npm test`, `./run_tests.sh`) and report what it printed. " <>
       "Run the WHOLE suite — not a subset, and do not skip or deselect anything.\n" <>
       "  2. No suite exists, but the change is testable: add a persisted test that " <>
-      "fails before your fix and passes after it.\n" <>
+      "fails before your fix and passes after it. Put it in the project's test " <>
+      "directory, or in `#{@scratch_test_dir}` — never beside the deliverable.\n" <>
       "  3. Neither is possible in this environment: answer " <>
       "`NO_RUNNABLE_TEST: <one-line reason>` on its own line and finish.\n\n" <>
       "Do not manufacture a throwaway inline snippet, and do not build a " <>
@@ -691,6 +740,10 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "that fails before the fix and passes after it demonstrably discriminates; one that " <>
       "was green on its first run proves only that it ran. Editing the test to make it " <>
       "pass does not count — the fix has to be in the code under test.\n\n" <>
+      where_it_goes() <>
+      "\n\n" <>
+      what_it_must_check(session_id) <>
+      "\n\n" <>
       "NEVER un-fix working code to produce a red run. Do not revert, stash, or " <>
       "overwrite a corrected file so a test will fail — on a task graded by final " <>
       "state, an interruption mid-cycle ships the broken version, and on a security " <>
@@ -707,6 +760,95 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "value, no harness in the environment — say so explicitly on its own line, as " <>
       "`NO_RUNNABLE_TEST: <one-line reason>`, and finish. Do not use that to skip work " <>
       "you could have tested."
+  end
+
+  # ---------------------------------------------------------------------------
+  # Species 6: this gate's test file must not become part of the deliverable
+  # ---------------------------------------------------------------------------
+  #
+  # See `@scratch_test_dir`. Named in every directive that asks for a test file,
+  # because the two tasks it cost us were both lost on the FIRST line of the
+  # verifier, before any of the work was looked at.
+  defp where_it_goes do
+    "WHERE the file goes matters as much as what it asserts. Use the project's " <>
+      "existing test directory if it has one; otherwise write it under " <>
+      "`#{@scratch_test_dir}` — NEVER in the directory that holds the deliverable. " <>
+      "Some tasks are graded on the exact contents of a directory, and one stray " <>
+      "`test_x.py`, `__pycache__` or compiled binary there fails the whole task with " <>
+      "the real work untouched and unread. Send anything your test compiles to the " <>
+      "same scratch directory (`-o #{@scratch_test_dir}bin`, `--target-dir`), and run " <>
+      "Python with `PYTHONDONTWRITEBYTECODE=1` so it leaves no cache next to the code."
+  end
+
+  # ---------------------------------------------------------------------------
+  # Species 2: a green test proves only the proposition IT states
+  # ---------------------------------------------------------------------------
+  #
+  # This is the largest open failure mode in the benchmark and the only one with
+  # no detector. Nine tasks wrote a genuine persisted test, ran it red, fixed the
+  # source, ran it green — satisfying every clause above completely — and the
+  # test measured the wrong property:
+  #
+  #   * `model-extraction-relu-logits` asserted PRECISION ("20/25 stolen rows
+  #     matched a true neuron"); the verifier measures RECALL (27 of 30 true rows
+  #     unmatched).
+  #   * `torch-tensor-parallelism` reported `ALL TESTS PASSED` for world sizes
+  #     1/2/4 — its test performed the all-gather the implementation was
+  #     supposed to perform. The test did the work under test.
+  #   * `sanitize-git-repo` re-grepped for the four secrets IT had found, with
+  #     the pattern list IT had written, after a discovery pass IT had truncated
+  #     with `| head -80`. A fifth token sat below the cut. Its oracle inherited
+  #     the exact blind spot of its implementation.
+  #
+  # Nothing downstream of the test can separate these from the solves, because
+  # the solves did the same thing: `custom-memory-heap-crash`, `headless-terminal`,
+  # `merge-diff-arc-agi-task` and `video-processing` all wrote a persisted test,
+  # produced a red -> green cycle, and were right. Every proxy tried is recorded
+  # in `docs/research/failure-taxonomy.md` §2.4 as rejected.
+  #
+  # So the gate stops asking about the test and asks about the CORRESPONDENCE
+  # between the test and the task. This costs no extra pushback — it is the same
+  # message the gate was already sending, re-aimed — and it is the only lever
+  # that acts on the difference, because the difference is not in the transcript.
+  # It is grounded in the sense that matters here: the thing being compared
+  # against is the task statement, which the model did not write.
+  #
+  # It is NOT claimed to be validated. Ungrounded self-correction generally does
+  # not help (CRITIC; Huang et al.), and this is a self-report. What it is not is
+  # a re-judgement of the answer: enumerating which sentence of an external text
+  # each assertion covers is a coverage question with a checkable shape, and the
+  # measured contrast that motivates it — `dna-insert` solved after calibrating
+  # against `oligotm`, `dna-assembly` failed on the one requirement stated only
+  # in prose ("check that the enzyme cut-sites satisfy NEB's requirements") after
+  # reasoning it out correctly across 2,500 lines and never asserting it — is a
+  # coverage gap, not a reasoning error.
+  defp what_it_must_check(session_id) do
+    provenance = (session_id && VerificationEvidence.oracle_provenance(session_id)) || :none
+
+    anchor =
+      if provenance == :self_authored do
+        "Every re-runnable check in this session is a file you wrote in this session, " <>
+          "so nothing you did not author has had the chance to disagree with you yet. "
+      else
+        ""
+      end
+
+    "A passing test proves only the proposition IT states, and yours is a " <>
+      "proposition you chose. #{anchor}Before you finish, check it against the task, " <>
+      "not against your code:\n" <>
+      "  * List the requirements the task actually states — including the ones written " <>
+      "in prose with no obvious API, which are the ones that get dropped. Next to each, " <>
+      "name the assertion that checks it, or say plainly that nothing does. A " <>
+      "requirement you reasoned about and never asserted is not covered.\n" <>
+      "  * Check the DIRECTION of each assertion. \"Everything I produced is correct\" " <>
+      "is not \"everything required is present\" — those fail on opposite inputs.\n" <>
+      "  * If your test performs a step the implementation was supposed to perform, it " <>
+      "is testing your test. Drive the code exactly the way the task says it will be " <>
+      "driven.\n" <>
+      "  * If the task names a tool, fixture, file or command as the ground truth, THAT " <>
+      "is the oracle. Run it and report its output. Do not substitute one you wrote, " <>
+      "and do not derive your check's scope from your own earlier search — if that " <>
+      "search missed something, so will the check."
   end
 
   @doc """
@@ -736,9 +878,17 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
         "`pytest`, `go test ./...`, a `test/` or `tests/` directory. Running one that exists " <>
         "is the strongest evidence available and costs a single command.\n" <>
         "  2. Only if there is none, write a PERSISTED test file — a real file such as " <>
-        "`tests/test_x.py` or `x_test.exs`, invoked by path, never an inline " <>
+        "`#{@scratch_test_dir}test_x.py`, invoked by path, never an inline " <>
         "`python3 - << EOF` snippet — run it against the CURRENT state so you see it fail, " <>
         "then fix the source until it passes.\n" <>
+        "  3. Keep it OUT of the deliverable. Write it to the project's own test " <>
+        "directory or to `#{@scratch_test_dir}`, never beside the files the task asked " <>
+        "you to produce, and send compiled output and `__pycache__` there too. A task " <>
+        "graded on the contents of a directory fails on a stray test file before anyone " <>
+        "looks at your code.\n" <>
+        "  4. Test what the TASK asked for, in the direction it asked for it — not what " <>
+        "your implementation happens to do. If the task names a tool or file as the " <>
+        "ground truth, use that one.\n" <>
         "Setting this up now is much cheaper than reconstructing it at the end."
     end
   rescue

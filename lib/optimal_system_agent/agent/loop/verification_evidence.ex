@@ -753,7 +753,15 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     ~r/^tests?\.(py|sh|bash|js|ts|exs|rb)$/i
   ]
 
-  @test_dir_segments ~w(test tests spec specs __tests__ testing)
+  # `osa-tests` is the scratch directory the gate's own directive now names.
+  #
+  # It has to be here or the gate would not recognise the evidence it asked
+  # for: the directive says "put the test in `/tmp/osa-tests/` when the project
+  # has no test directory", and a file called `check_polyglot.py` under that
+  # path matches none of the basename patterns above. A gate that refuses the
+  # location it prescribed is the same defect as a gate that refuses the
+  # red -> green cycle it prescribed.
+  @test_dir_segments ~w(test tests spec specs __tests__ testing osa-tests)
 
   @doc """
   True when `path` is a test artefact by convention — `test_*.py`, `*_test.go`,
@@ -845,6 +853,63 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     end
   rescue
     _ -> nil
+  end
+
+  @doc """
+  Where the session's oracle came from: `:external`, `:self_authored`, `:none`.
+
+  ## Why this exists, and what it is NOT
+
+  It is **not** a gate and **not** a detector. It is an observation, recorded so
+  a hypothesis can be measured on the next run instead of argued about.
+
+  The hypothesis (`docs/research/failure-taxonomy.md` §2.4) is that what
+  separates a self-authored oracle that catches the bug from one that agrees
+  with it is whether the test is anchored to something the model did not write.
+  The nine species-2 failures all wrote a persisted test, ran it red, fixed the
+  source and ran it green — the adequacy clause is fully satisfied by every one
+  of them — and every one of those tests encoded the same misunderstanding as
+  the implementation, so it could not fail.
+
+  The offline artefacts cannot settle it: OSA's event log records a
+  `file_write`'s PATH but not its CONTENT, so no replay over
+  `osa-tb20-full89-f6981b61` can compare what a test asserted against what the
+  task required. What the ledger *can* say, cheaply and factually, is where the
+  oracle came from:
+
+    * `:external` — some passing check ran a test artefact this session did not
+      write, or invoked the project's own suite while the session authored no
+      test of its own. Something the model did not author had the opportunity
+      to disagree with it.
+    * `:self_authored` — the only re-runnable checks are files this session
+      wrote. Every proposition tested is one the model chose.
+    * `:none` — no re-runnable check at all.
+
+  Emitted on the gate's `:verification_gate_triggered` event so the next
+  benchmark run can cross this against solved/failed directly.
+  """
+  @spec oracle_provenance(term()) :: :external | :self_authored | :none
+  def oracle_provenance(session_id) do
+    entries = get(session_id)
+    written = written_path_set(entries)
+    checks = for e <- entries, e.kind == :check, e.success, do: e
+    authored_test? = session_authored_test?(entries)
+
+    external? =
+      Enum.any?(checks, fn e ->
+        Enum.any?(Map.get(e, :ran_paths, []), fn p ->
+          test_artifact_path?(p) and not MapSet.member?(written, p)
+        end) or
+          (suite_identity(e) != [] and not authored_test?)
+      end)
+
+    cond do
+      external? -> :external
+      Enum.any?(checks, &(test_identities(&1, written) != [])) -> :self_authored
+      true -> :none
+    end
+  rescue
+    _ -> :none
   end
 
   @doc """
