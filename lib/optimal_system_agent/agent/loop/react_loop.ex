@@ -63,6 +63,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # round-trips for a single text-only answer — 101 at the default effort.
   @max_zero_tool_gate_prompts 1
 
+  # Bound on the announcement backstop (see the clause in `handle_result/3` for
+  # the full note). One: the defect is a turn that ended one step early, and one
+  # step is what it gives back.
+  @max_announcement_continues 1
+
   # Should a text-only answer (visible content, no tool calls) be nudged back
   # into the loop on the strength of how its PROSE reads?
   #
@@ -814,6 +819,67 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           | messages: state.messages ++ [%{role: "assistant", content: content}, directive],
             iteration: state.iteration + 1
         }
+
+        run(state)
+
+      # Announcement backstop: the answer ANNOUNCES the next action instead of
+      # reporting a result — "I have enough understanding. Let me write the
+      # implementation now." — and then the turn ends and nothing writes it.
+      #
+      # This is NOT `prose_continue?`. That flag gates three clauses that key on
+      # wording alone and fire on ordinary explanatory prose, which is why it is
+      # off by default and stays off. `announcement_only?/1` is the conjunction
+      # of that wording with brevity, and that conjunction is the shipped
+      # `announced_next_action` detector: 9 of 34 model failures, 0 of 49 solves
+      # on the reference run (`docs/research/failure-taxonomy.md` §7).
+      #
+      # It is ALSO conditioned on the session having actually run something.
+      # "Let me check the configuration: the value lives in config/runtime.exs
+      # and is read at boot" is a complete answer to a question, and a session
+      # that has only talked is a conversation, not an interrupted task — see
+      # `TextOnlyTurnTerminationTest`, which pins a text-only answer at exactly
+      # one round trip. `torch-pipeline-parallelism` had 29 turns of tool calls
+      # behind its announcement. Adding this conjunct can only shrink the fire
+      # set, so the detector's measured 0-of-49-solves carries over.
+      #
+      # ONE nudge per turn. The failure it addresses is a turn that ended one
+      # step early, and one step is what it gives back; a model that announces
+      # again after being told is choosing to, and the answer has already
+      # streamed to the user either way.
+      Map.get(state, :announcement_continues, 0) < @max_announcement_continues and
+        Guardrails.announcement_only?(content) and
+          not Guardrails.talked_only?(state.messages) ->
+        Logger.info(
+          "[loop] Announcement backstop: answer announces the next action instead of " <>
+            "reporting a result — continuing once (iteration #{state.iteration})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :announcement_continue,
+          session_id: state.session_id,
+          iteration: state.iteration,
+          answer_preview: String.slice(content, 0, 200)
+        })
+
+        nudge = %{
+          role: "user",
+          content:
+            "[System: your answer announced what you were about to do rather than " <>
+              "reporting what you did, and you called no tools — so nothing happened. " <>
+              "This may be the last turn of this session; there is no guarantee anything " <>
+              "will run after it. DO THE THING NOW by calling the tools, then report the " <>
+              "result. If you genuinely are finished, say what you produced and where it " <>
+              "is, without announcing further steps.]"
+        }
+
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+            iteration: state.iteration + 1
+        }
+
+        state =
+          Map.put(state, :announcement_continues, Map.get(state, :announcement_continues, 0) + 1)
 
         run(state)
 

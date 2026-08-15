@@ -75,13 +75,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt do
     Long-running commands: the tool waits a bounded window (2 min default) which is \
     a YIELD, NOT a kill. On elapse the command is MOVED TO THE BACKGROUND still \
     running, and you get a `background_id` — do NOT re-run it. Pass \
-    `run_in_background: true` up front for builds, full suites and servers.
+    `run_in_background: true` up front for builds, full suites and other long jobs \
+    WHOSE RESULT YOU WILL COME BACK FOR.
 
-    You WILL be notified automatically when a background command finishes, with exit \
-    code, output tail and a file path. So do NOT poll: no bash_output "just to \
-    check", no `sleep`, no `ls`/`test -f` to see if the artifact landed. Do unrelated \
-    work, or stop and let the notification wake you. Call bash_output only for a \
-    command you were already told finished, or to kill one early.
+    Do NOT poll a background job: no bash_output "just to check", no `sleep`, no \
+    `ls`/`test -f` to see if the artifact landed. There are exactly two right moves, \
+    and which one applies depends on whether you need the result.
+
+    If you need it — the build you will test, the suite whose exit code is your \
+    evidence, the download your next step consumes — then WAIT FOR IT IN ONE CALL: \
+    `bash_output` with `wait_ms` (e.g. 600000) blocks until the command finishes and \
+    hands you its exit code and output. Do that before you answer. A completion \
+    notification may also wake you, but only if something drives another turn of this \
+    session after the command finishes — true in an interactive session, FALSE in a \
+    one-shot or headless run, which ends the moment you give your final answer. You \
+    cannot tell which one you are in, so never end a turn on "I'll report the result \
+    when it completes": that sentence is the answer in a one-shot run, and it \
+    contains no result. Report what you have SEEN, or block until you have seen it.
+
+    If you do not need it, leave it alone and do unrelated work.
+
+    Servers and daemons are a THIRD case, not a background job. `run_in_background` \
+    ties the process to this session: it is a supervised child, and it is killed when \
+    the session ends — which is correct for a build and fatal when the running \
+    service IS the deliverable. If the task asks for a service that must still be \
+    listening after you finish, daemonise it out of the session yourself, e.g. \
+    `setsid nohup <cmd> </dev/null >/tmp/<name>.log 2>&1 &`, then VERIFY it \
+    independently (`curl`, a client call, `ss -ltnp`) and say in your answer that you \
+    left it running. Only do that when the task calls for it; a service nobody asked \
+    to keep is a leak. For anything you merely want to outlive one command, \
+    `run_in_background` is still right.
 
     Discovery scans (du, find, ls -R): bound the first pass (`-maxdepth`, `-d 1`), \
     never re-scan ground already covered, and stop once the question is answered. On \

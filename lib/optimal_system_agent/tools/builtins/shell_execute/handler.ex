@@ -263,13 +263,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
           )
         end
 
+        # The prompt is read once, at the top of the session; this text arrives
+        # at the exact moment the model has just created the thing it is about
+        # to make a promise about, so it is where the condition belongs.
+        #
+        # It does NOT claim a notification will arrive. That claim is true only
+        # in a persistent session — `BackgroundNotifier` → `Loop.poke/1` — and
+        # false in a one-shot/headless run where the loop is torn down when the
+        # model answers. The old text asserted it unconditionally and 10
+        # Terminal-Bench episodes ended on the strength of it
+        # (`docs/research/failure-taxonomy.md` §1).
         {:ok,
          "Started background command.\n" <>
            "- background_id: #{id}\n" <>
            "- cwd: #{cwd}\n\n" <>
-           "The command is running in the background; you'll be notified automatically " <>
-           "when it completes (with its exit code). You can also poll its output and status " <>
-           "with the bash_output tool using background_id \"#{id}\". " <>
+           "This process belongs to THIS SESSION and is killed when the session ends. " <>
+           "If the task needs a service still listening after you finish, this is the " <>
+           "wrong way to start it — daemonise it instead " <>
+           "(`setsid nohup <cmd> </dev/null >/tmp/<name>.log 2>&1 &`).\n\n" <>
+           "If your answer depends on this command's result, you must SEE it before you " <>
+           "answer: call bash_output with background_id \"#{id}\" and a `wait_ms` (e.g. " <>
+           "600000) to block until it finishes. A completion notification may also reach " <>
+           "you, but only if something drives another turn after it finishes — that does " <>
+           "not happen in a one-shot or headless run, which ends when you give your final " <>
+           "answer. Do not end a turn promising to report this later.\n" <>
            "To stop it, call bash_output with kill=true."}
 
       {:error, reason} ->
@@ -651,10 +668,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
            "- background_id: #{id}\n" <>
            "- cwd: #{detach.cwd}\n\n" <>
            partial_output_section(output_so_far) <>
-           "The command is STILL RUNNING and its work is not lost. You will be " <>
-           "notified automatically when it completes (with its exit code). Poll it " <>
-           "with the bash_output tool using background_id \"#{id}\", or stop it with " <>
-           "kill=true. Continue with other work in the meantime."}
+           "The command is STILL RUNNING and its work is not lost — but you have NOT " <>
+           "seen its result yet. If your answer depends on it, block on it in one call: " <>
+           "bash_output with background_id \"#{id}\" and a `wait_ms` (e.g. 600000). A " <>
+           "completion notification may also reach you, but only if something drives " <>
+           "another turn after it finishes, which does not happen in a one-shot or " <>
+           "headless run. Otherwise continue with other work, or stop it with kill=true."}
 
       {:error, reason} ->
         # Adoption failed — fall back to the old destructive behaviour so a wedged
@@ -715,9 +734,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
          "Moved to background.\n" <>
            "- background_id: #{id}\n" <>
            "- cwd: #{detach.cwd}\n\n" <>
-           "The command keeps running in the background; you'll be notified " <>
-           "automatically when it completes (with its exit code). Poll it with " <>
-           "the bash_output tool using background_id \"#{id}\", or stop it with kill=true."}
+           "The command keeps running in the background. You have not seen its result " <>
+           "yet: if your answer depends on it, block on it in one call — bash_output " <>
+           "with background_id \"#{id}\" and a `wait_ms` (e.g. 600000). A completion " <>
+           "notification may also reach you, but only if something drives another turn " <>
+           "after it finishes, which does not happen in a one-shot or headless run. " <>
+           "Stop it with kill=true."}
 
       {:error, reason} ->
         # Adoption failed — keep running in the foreground as if nothing happened.

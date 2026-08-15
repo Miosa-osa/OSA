@@ -10,8 +10,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
     * `execute/2`           — polls (or kills) the background command by id
   """
 
+  alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Shell.BackgroundManager
   alias OptimalSystemAgent.Tools.UseContext
+
+  # How often the blocking wait re-reads the task snapshot. 250 ms is well below
+  # any human-visible latency and costs a `GenServer.call` per tick, so a 30-min
+  # wait is ~7200 cheap local calls — nothing next to the LLM round-trip it
+  # replaces.
+  @poll_interval_ms 250
+
+  # Ceiling on `wait_ms`. Terminal-Bench's own episode deadline is 1800 s, so a
+  # wait longer than this can only expire against something else first.
+  @max_wait_ms 1_800_000
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -40,12 +51,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
   # ── Stage 3: Execute ───────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"background_id" => id} = input, _ctx) do
-    result =
+  def execute(%{"background_id" => id} = input, ctx) do
+    {result, waited} =
       if truthy?(input["kill"]) do
-        BackgroundManager.kill(id)
+        {BackgroundManager.kill(id), nil}
       else
-        BackgroundManager.output(id)
+        await_terminal(id, wait_ms(input), ctx)
       end
 
     case result do
@@ -57,7 +68,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
           OptimalSystemAgent.Agent.TaskNotifications.mark_notified(snapshot.id)
         end
 
-        {:ok, format_snapshot(snapshot)}
+        {:ok, format_snapshot(snapshot, waited)}
 
       {:error, :not_found} ->
         {:ok, not_found_message(id)}
@@ -75,15 +86,90 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
   defp truthy?("true"), do: true
   defp truthy?(_), do: false
 
+  # ── Blocking wait ──────────────────────────────────────────────────────
+  #
+  # WHY THIS EXISTS. Before it, this tool had no way to wait and its own prompt
+  # said so in capitals ("DO NOT USE THIS TOOL TO WAIT"), while `shell_execute`
+  # forbade `sleep` and re-checking. The only sanctioned way to learn a
+  # background command's result was the completion notification — which only
+  # arrives if something drives another turn. In a one-shot/headless run
+  # nothing does, so "I'll report when it completes" was the last thing 10
+  # Terminal-Bench episodes ever produced
+  # (`docs/research/failure-taxonomy.md` §1).
+  #
+  # The verification gate can refuse such a completion claim, but a refusal is
+  # only useful if the turn has somewhere to go. Telling a model to "poll until
+  # it finishes" when every poll returns instantly is not somewhere to go: it
+  # burns the gate's re-prompt budget in seconds and ends in the same place.
+  # This is the affordance that makes the refusal actionable — one tool call
+  # that blocks until there is a real answer.
+  defp wait_ms(input) do
+    case Map.get(input, "wait_ms") do
+      n when is_integer(n) and n > 0 -> min(n, @max_wait_ms)
+      s when is_binary(s) -> s |> Integer.parse() |> parsed_wait()
+      _ -> 0
+    end
+  end
+
+  defp parsed_wait({n, _}) when n > 0, do: min(n, @max_wait_ms)
+  defp parsed_wait(_), do: 0
+
+  # Returns `{manager_result, waited_ms | nil}`. `nil` means no wait was asked
+  # for, so the formatter stays byte-identical to the non-waiting path.
+  defp await_terminal(id, 0, _ctx), do: {BackgroundManager.output(id), nil}
+
+  defp await_terminal(id, ms, ctx) do
+    started = System.monotonic_time(:millisecond)
+    session_id = ctx && Map.get(ctx, :session_id)
+
+    # Observable: a tool call that blocks changes the shape of the turn, so it
+    # is announced on the same bus the verification gate uses.
+    emit_wait(session_id, id, ms)
+
+    result = poll_until(id, started + ms)
+    {result, System.monotonic_time(:millisecond) - started}
+  end
+
+  defp poll_until(id, deadline) do
+    case BackgroundManager.output(id) do
+      {:ok, %{status: :running}} = still_running ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          still_running
+        else
+          Process.sleep(@poll_interval_ms)
+          poll_until(id, deadline)
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp emit_wait(session_id, id, ms) do
+    Bus.emit(:system_event, %{
+      event: :background_wait_started,
+      session_id: session_id,
+      background_id: id,
+      wait_ms: ms
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   defp not_found_message(id) do
     "No background command with id \"#{id}\". It may have finished and been " <>
       "retired, been killed, or the id may be incorrect."
   end
 
-  defp format_snapshot(snap) do
+  defp format_snapshot(snap, waited) do
     header =
       [
         "Background command #{snap.id} is #{snap.status}.",
+        wait_line(snap, waited),
         "- Command: #{snap.command}",
         "- Status: #{snap.status}",
         exit_line(snap),
@@ -101,6 +187,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
 
     header <> "\n\n--- output ---\n" <> body
   end
+
+  defp wait_line(_snap, nil), do: nil
+
+  defp wait_line(%{status: :running}, waited),
+    do:
+      "- Waited #{waited} ms and it is STILL RUNNING. This is not a result. " <>
+        "Wait again with a longer wait_ms, or kill it and do the work in the foreground."
+
+  defp wait_line(_snap, waited), do: "- Waited #{waited} ms for it to finish."
 
   defp exit_line(%{exit_code: nil}), do: nil
   defp exit_line(%{exit_code: code}), do: "- Exit code: #{code}"

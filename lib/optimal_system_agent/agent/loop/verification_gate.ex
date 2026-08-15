@@ -135,12 +135,28 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   from turn counts or wall clock. `path-tracing` solved at 170 turns and
   `build-pov-ray` failed at 62; neither number is evidence.
 
-  **It does not stack cost on the adequacy gate.** Clause 0 shares the single
-  per-turn re-prompt counter with clauses 1-3, so a turn still gets at most one
-  pushback in total; when clause 0 fires it *replaces* the adequacy pushback
-  rather than adding to it. Its detection cost is a registry lookup, not tokens.
+  **Clause 0 spends its own budget, and it is what makes this a block rather
+  than a detector.** It first shipped sharing the single per-turn counter with
+  clauses 1-3, which capped the whole gate at one pushback per turn — so the
+  turn got exactly one refusal and then finished anyway, with the job still
+  running. That is a detector with extra steps. It now carries
+  `:background_gate_prompts` / `@max_background_reprompts` (3), independent of
+  the adequacy budget in both directions: a clause-0 pushback cannot consume the
+  adequacy budget, and an adequacy pushback earlier in the turn cannot silence
+  clause 0. Its detection cost is still a registry lookup, not tokens.
+
+  The other half of "actually blocks" is that the refusal must have somewhere to
+  go. It did not: `bash_output` returned instantly and its own prompt said "DO
+  NOT USE THIS TOOL TO WAIT", so "wait for it" was an instruction with no
+  implementation and three pushbacks would have burned in seconds. `bash_output`
+  now takes `wait_ms` and blocks; the directive below names it.
+
   `BACKGROUND_INTENTIONAL: <reason>` in the answer releases it immediately —
-  the honest case is a long-lived service the model started on purpose.
+  the honest case is a long-lived service the model started on purpose. Note
+  that such a service should not be a background command at all (see §3 of the
+  taxonomy: a background command is a supervised child of the session and is
+  reaped by `fire_session_end/2`), which is why the directive says how to
+  daemonise instead.
 
   `config :optimal_system_agent, :verification_engagement, false` (or
   `OSA_VERIFICATION_ENGAGEMENT=0`) turns clause 0 off entirely.
@@ -256,6 +272,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     session_id != nil and
       case triaged(session_id, reprompts, content) do
         {nil, _scale} -> false
+        {:unobserved_background, _scale} -> background_prompts(state) < @max_background_reprompts
         {_reason, scale} -> reprompts < cap_for(scale)
       end
   end
@@ -332,6 +349,22 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   defp adequate_for_scale?(_large, _session_id), do: false
 
   defp cap_for(_scale), do: @max_reprompts
+
+  @doc """
+  The clause-0 re-prompt counter. Separate from `:verification_gate_prompts` so
+  a pushback about unobserved background work neither consumes nor is consumed
+  by the adequacy budget. Reset per turn by
+  `TurnPipeline.reset_per_turn_fields/1`, same as its sibling.
+  """
+  @spec background_prompts(map()) :: non_neg_integer()
+  def background_prompts(state), do: Map.get(state, :background_gate_prompts, 0)
+
+  # Which per-turn counter a given clause spends, and what it may spend.
+  defp counter_for(:unobserved_background), do: :background_gate_prompts
+  defp counter_for(_), do: :verification_gate_prompts
+
+  defp cap_for_reason(:unobserved_background, _scale), do: @max_background_reprompts
+  defp cap_for_reason(_reason, scale), do: cap_for(scale)
 
   @doc """
   Background commands **this session started** that are still `:running`.
@@ -438,11 +471,15 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   @spec build_directive(map(), String.t() | nil) :: {map(), map()}
   def build_directive(state, content) when is_map(state) do
     reprompts = Map.get(state, :verification_gate_prompts, 0)
-    step = reprompts + 1
     session_id = Map.get(state, :session_id)
     {reason, scale} = triaged(session_id, reprompts, content)
     reason = reason || :unchecked_write
-    cap = cap_for(scale)
+
+    # Clause 0 spends its own counter (see `@max_background_reprompts`); every
+    # other clause spends the shared adequacy budget.
+    counter = counter_for(reason)
+    step = Map.get(state, counter, 0) + 1
+    cap = cap_for_reason(reason, scale)
     last_write = session_id && VerificationEvidence.last_write_tool(session_id)
 
     Logger.info(
@@ -458,9 +495,27 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       # Emitted so the A/B can attribute cost to the tier that incurred it
       # rather than to "the gate" as an undifferentiated whole.
       scale: scale,
+      # Where the session's oracle came from — `:external`, `:self_authored`,
+      # `:none`. An observation, not a verdict: the species-2 failures and the
+      # solves are indistinguishable by every episode-shape proxy tried so far
+      # (see `VerificationEvidence.oracle_provenance/1`), and this is the one
+      # fact that would settle the remaining hypothesis. Recorded so the next
+      # run answers it instead of the next reader re-deriving it.
+      oracle: session_id && VerificationEvidence.oracle_provenance(session_id),
       last_write_tool: last_write,
       reprompt: step,
-      max_reprompts: cap
+      max_reprompts: cap,
+      # Which per-turn budget this pushback spent. Clause 0 blocks on its own
+      # counter, so a run's telemetry has to say which one moved or the two are
+      # indistinguishable after the fact.
+      counter: counter,
+      # The concrete thing being refused, so a replay can attribute a blocked
+      # completion to the jobs that caused it without re-reading the transcript.
+      background_running:
+        if(reason == :unobserved_background,
+          do: session_id |> unobserved_background() |> Enum.map(& &1[:id]),
+          else: []
+        )
     })
 
     directive = %{
@@ -472,7 +527,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       content: body(reason, session_id, step, cap, scale)
     }
 
-    {directive, Map.put(state, :verification_gate_prompts, step)}
+    {directive, Map.put(state, counter, step)}
   end
 
   # ---------------------------------------------------------------------------
@@ -550,13 +605,20 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "guess right now, and \"I'll check once it completes\" is not a finished " <>
       "turn.\n\n" <>
       "Take one of these, now:\n" <>
-      "  1. Wait for it and look: poll with `bash_output` until it reports a final " <>
-      "status, then report what it actually printed and whether it passed.\n" <>
-      "  2. If waiting is not affordable, kill it and do the same work " <>
-      "synchronously in the foreground, so you see the result.\n" <>
+      "  1. BLOCK ON IT IN ONE CALL: `bash_output` with the background_id above and " <>
+      "`wait_ms` (e.g. 600000). That waits until it reaches a terminal status and " <>
+      "hands you its exit code and output — then report what it actually printed and " <>
+      "whether it passed. Do NOT call `bash_output` without `wait_ms` in a loop; a " <>
+      "bare call returns instantly and tells you nothing new.\n" <>
+      "  2. If waiting is not affordable, kill it (`bash_output` with `kill: true`) " <>
+      "and do the same work synchronously in the foreground, so you see the result.\n" <>
       "  3. If it is a long-lived service you started deliberately and it is " <>
       "SUPPOSED to keep running (a server under test, a daemon), say so on its own " <>
-      "line as `BACKGROUND_INTENTIONAL: <one-line reason>` and finish.\n\n" <>
+      "line as `BACKGROUND_INTENTIONAL: <one-line reason>` and finish. Note that a " <>
+      "background command is a child of THIS SESSION and is killed when the session " <>
+      "ends — if something has to still be listening after you finish, restart it " <>
+      "detached (`setsid nohup <cmd> </dev/null >/tmp/<name>.log 2>&1 &`) and verify " <>
+      "it independently before you say so.\n\n" <>
       "Do not report a result you have not observed, and do not promise to check " <>
       "it later."
   end

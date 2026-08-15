@@ -113,6 +113,50 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
     Enum.any?(@intent_patterns, &Regex.match?(&1, content))
   end
 
+  # ── Announcement-only completion ───────────────────────────────────────
+  #
+  # A turn whose LAST words announce the next action rather than report a result
+  # did not finish; it stopped mid-sentence in the plan. `torch-pipeline-
+  # parallelism` is the clean case: 29 turns, no truncation, no guard, no
+  # background job, and a final answer of "I have enough understanding. Let me
+  # write the implementation now." — after 14,000 characters of reasoning that
+  # had worked the design out correctly. `/app/pipeline_parallel.py` was never
+  # created. See `docs/research/failure-taxonomy.md` §7.
+  #
+  # This is deliberately NOT `wants_to_continue?/1`, which fires on any narrating
+  # sentence anywhere in an answer of any length and is why `continue_on_text_only`
+  # is off by default. The discriminator is the CONJUNCTION with brevity, and
+  # both halves are load-bearing:
+  #
+  #   * announcement wording alone — an explanatory answer says "let me show
+  #     you…" all the time;
+  #   * `len < 500` alone — measured on the reference run, a bare length rule
+  #     fires on solved trials at every threshold from 200 to 600 characters.
+  #
+  # Together they are `scripts/failure_species.py`'s `announced_next_action`,
+  # which fires on 9 of 34 model failures and **0 of 49 solves** on that run.
+  # The regex and the ceiling below are that detector's, verbatim, so the
+  # measured precision is the same predicate and not a re-derivation of it.
+  @announcement_pattern ~r/(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop)|now let)/i
+  @announcement_max_chars 500
+
+  @doc """
+  Returns true when a text-only answer reads as an announcement of the next
+  action rather than a report of a result.
+
+  Keyed on wording AND brevity together; see the note above for why neither
+  half works alone.
+  """
+  @spec announcement_only?(String.t() | nil) :: boolean()
+  def announcement_only?(nil), do: false
+
+  def announcement_only?(content) when is_binary(content) do
+    String.length(content) < @announcement_max_chars and
+      Regex.match?(@announcement_pattern, content)
+  end
+
+  def announcement_only?(_), do: false
+
   @doc "Returns true when model embeds a substantial code block instead of calling file_write/file_edit."
   def code_in_text?(nil), do: false
   def code_in_text?(content) when byte_size(content) < 50, do: false
@@ -327,6 +371,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   @spec blind_file_write?([map()]) :: boolean()
   def blind_file_write?(tool_calls) do
     names = Enum.map(tool_calls, & &1.name)
+
     Enum.any?(names, &(&1 in @blind_write_tools)) and
       not Enum.any?(names, &(&1 in @read_tools))
   end
@@ -346,6 +391,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
         false
     end)
   end
+
+  @doc """
+  True when NO tool call in `messages` has succeeded — the session has only
+  talked.
+
+  Public because the announcement backstop needs the same question the
+  zero-tool gate asks, from the opposite side: an answer that announces the next
+  action only means "an interrupted task" if there was a task being executed.
+  A conversation that never ran anything is a conversation, and narrating inside
+  one ("Let me check the configuration: it lives in …") is ordinary prose.
+  """
+  @spec talked_only?([map()]) :: boolean()
+  def talked_only?(messages) when is_list(messages), do: zero_successful_tools?(messages)
+  def talked_only?(_), do: true
 
   defp zero_successful_tools?(messages) do
     tool_messages =

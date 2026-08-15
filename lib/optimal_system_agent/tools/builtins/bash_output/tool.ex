@@ -48,6 +48,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
         "kill" => %{
           "type" => "boolean",
           "description" => "Terminate the command and return final output. Default false."
+        },
+        "wait_ms" => %{
+          "type" => "integer",
+          "description" =>
+            "Block for up to this many milliseconds waiting for the command to reach a " <>
+              "terminal status (done/failed/killed), then return its final output. " <>
+              "0 (default) returns the current snapshot immediately. Use this instead of " <>
+              "polling in a loop or sleeping. Capped at 1800000 (30 min)."
         }
       }
     }
@@ -97,7 +105,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
   # ── Classifier input ──────────────────────────────────────────────────
   @impl true
   def to_classifier_input(%{"background_id" => id} = input),
-    do: %{background_id: id, kill: kill?(input)}
+    do: %{background_id: id, kill: kill?(input), wait_ms: Map.get(input, "wait_ms")}
 
   def to_classifier_input(_), do: ""
 

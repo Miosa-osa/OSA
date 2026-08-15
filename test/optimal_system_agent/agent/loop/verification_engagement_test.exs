@@ -154,12 +154,13 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEngagementTest do
       assert G.trigger(sid, 0, answer) == nil
     end
 
-    test "one pushback per turn, shared with the adequacy clause — never two",
+    test "an adequacy pushback earlier in the turn does not silence clause 0",
          %{session_id: sid} do
-      # The adequacy gate is measured at ~31% of tokens on the tasks where it
-      # fires. Clause 0 must not be a second charge on top of it: it consumes
-      # the SAME per-turn counter, so a turn that has already been pushed back
-      # once is not pushed back again.
+      # This is the reason the 10 async-abandonment episodes would still have
+      # been lost with clause 0 shipped. It used to spend the SAME per-turn
+      # counter as clauses 1-3, capped at one: whichever clause spoke first
+      # exhausted the turn's whole budget, and the completion claim then went
+      # through with the job still running. A detector, not a block.
       L.record(sid, %{tool: "file_write", args: %{"path" => "/app/svc.py"}, success: true})
 
       L.record(sid, %{
@@ -170,8 +171,44 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEngagementTest do
 
       bg([running(sid, "bg_1", "pytest")])
 
-      assert G.needs_verification?(%{session_id: sid, verification_gate_prompts: 0}, "Done.")
-      refute G.needs_verification?(%{session_id: sid, verification_gate_prompts: 1}, "Done.")
+      state = %{session_id: sid, verification_gate_prompts: 1, background_gate_prompts: 0}
+      assert G.needs_verification?(state, "Done.")
+    end
+
+    test "clause 0 is bounded on its own counter and then steps aside",
+         %{session_id: sid} do
+      # Bounded, because a gate that can never be exhausted can trap the loop.
+      # Three, not one: unlike adequacy, the ask is mechanical and the world
+      # changes between pushbacks — the job is advancing while we argue.
+      fully_verified(sid)
+      bg([running(sid, "bg_1", "pytest")])
+
+      for used <- 0..2 do
+        assert G.needs_verification?(
+                 %{session_id: sid, verification_gate_prompts: 0, background_gate_prompts: used},
+                 "Done."
+               ),
+               "clause 0 should still push back after #{used} of its own pushbacks"
+      end
+
+      refute G.needs_verification?(
+               %{session_id: sid, verification_gate_prompts: 0, background_gate_prompts: 3},
+               "Done."
+             )
+    end
+
+    test "a clause-0 pushback spends the background counter, not the adequacy one",
+         %{session_id: sid} do
+      fully_verified(sid)
+      bg([running(sid, "bg_1", "pytest")])
+
+      state = %{session_id: sid, verification_gate_prompts: 0, background_gate_prompts: 0}
+      {directive, state} = G.build_directive(state, "Done.")
+
+      assert state.background_gate_prompts == 1
+      assert state.verification_gate_prompts == 0
+      # And the directive must name the affordance that can actually satisfy it.
+      assert directive.content =~ "wait_ms"
     end
   end
 
@@ -223,7 +260,10 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEngagementTest do
       # `user`, not `system`: this is appended after assistant text, where
       # Anthropic and Gemini reject a system message with a 400.
       assert directive.role == "user"
-      assert state.verification_gate_prompts == 1
+      # Clause 0 spends its OWN counter — see "a clause-0 pushback spends the
+      # background counter" above for why the two must not share.
+      assert state.background_gate_prompts == 1
+      assert Map.get(state, :verification_gate_prompts) == 0
 
       body = directive.content
       assert body =~ "bg_gMnfY2Km"

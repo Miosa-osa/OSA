@@ -465,7 +465,15 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # nothing reset it — so two gate firings anywhere in a session disabled
       # the gate permanently, silently, on exactly the long sessions it exists
       # for. Written by `VerificationGate.build_directive/1` via `Map.put`.
-      verification_gate_prompts: 0
+      verification_gate_prompts: 0,
+      # Clause 0 (`:unobserved_background`) spends a SEPARATE budget from the
+      # ledger clauses — see `VerificationGate.@max_background_reprompts`. It
+      # needs the same per-turn reset for the same reason.
+      background_gate_prompts: 0,
+      # One-per-turn budget for the announcement backstop in `ReactLoop`
+      # (`docs/research/failure-taxonomy.md` §7): a turn that ends on "let me
+      # write it now" gets exactly one chance to actually write it.
+      announcement_continues: 0
     })
   end
 
