@@ -33,6 +33,11 @@ published result, fetch the raw bytes and quote them. Every quote below is from 
 | "D1: accept `agent_timeout_sec` as a kwarg, per `cline.py`" — **§11.1** | **Not implementable, and the wrong direction** | Harbor passes `agent_timeout_sec` **only when `agent.name == "oracle"`** (`trial/trial.py:822-828`) — our adapter can never receive it. And *deleting* the internal deadline is actively harmful: it is what lets the driver write telemetry and let the verifier grade. §9a. |
 | "The 1800s internal deadline pre-empts Harbor" — **§9 D1** | **Backwards in 56 of 89 cases** | At multiplier 2.0 **Harbor pre-empts the driver on 56 of 89 tasks**, hard-killing the exec with no telemetry. §9a. |
 | "One `__pycache__`, in `llm-inference-batching-scheduler`" — **§4** | **Understated ~27x** | 27 `__pycache__` directories / 38 `.pyc` files across the task copies. §4a. |
+| "D7: cache tokens are counted in `n_input_tokens`, so our figures are inflated" — **the brief for this pass** | **WRONG, and it changes nothing** | The defect was the reverse (we wrote the *uncached* remainder into a field meaning the total), and it moves no published figure: cache measured **0 on all 87 telemetry-writing trials** of the full-89 run. 1,815,273/task and 56.1:1 **stand**. §9b. |
+| "Three tasks differ in resources or budget" — **§4a** | **FOUR** | `query-optimize` was missed (verifier 1800 s vs 900 s), and `filter-js-from-html`'s verifier budget is doubled as well as its memory. §9b. |
+| "`crack-7z-hash` passed on double the agent budget" — **§4a** | **Inadmissible, but not for that reason** | Its trial records `agent_exec_s = 266.65` — under a third of even the Hub's 900 s. The timeout advantage was never used; only the 2x memory ceiling is unruled-out. §9b. |
+| "D4: on tasks with a non-root agent user we write root-owned files" — **§9** | **No such task exists** | All 332 task copies leave `[agent].user` unset, which Harbor defines as the image default (root). D4 stands deliberately and is now guarded. §9b. |
+| "The 6 retries died on provider quota" — **the brief for this pass** | **4 of 6** | The other 2 died at agent-setup on `GLIBC_2.34 not found`, already surfaced as `NonZeroAgentExitCodeError`. §9b. |
 
 ---
 
@@ -660,6 +665,186 @@ that is admissible under either leaderboard contract, plus the first real
 measurement of how much of our run-to-run variance is noise. Both are currently
 unknown, and the second is the one that decides whether any tuning delta we have
 quoted is real.
+
+---
+
+## 9b. Corrections to §9, from the implementation pass of 2026-08-15 (D4–D11)
+
+Every claim below was re-derived from Harbor 0.21.0's installed source and from
+the run artefacts, not from this document. **Four of §9's claims do not
+survive**, and one of §4a's is understated.
+
+### D7 was stated backwards, and it changes none of our published figures
+
+§9 D7 says "`n_input_tokens` excludes cache". That is the correct diagnosis of
+the *defect* (we wrote the uncached remainder into a field documented as the
+total) — but the framing under which this pass was commissioned, that "cache
+tokens are counted in `n_input_tokens`" and our figures are therefore inflated,
+is the opposite of what was on disk. Both readings imply the published number is
+wrong. **It is not.**
+
+Measured across `runs/osa-tb20-full89-f6981b61`, all 87 trials that wrote
+telemetry: `cache_read_input_tokens = 0` and `cache_creation_input_tokens = 0`
+on every one. `ollama/glm-5.2:cloud` reported no cache tokens at all. And
+`report.py` has summed `input + cache_read + cache_write` for
+`input_tokens_per_task` since before the run. So:
+
+| Figure | Published | Corrected | Change |
+| --- | --- | --- | --- |
+| input tokens / task | 1,815,273.4 | **1,815,273.4** | none |
+| in:out ratio | 56.1:1 | **56.1:1** | none |
+| `cache_read_tokens_total` | 0 | 0 | none |
+
+Re-derived through the corrected reader: `161,559,329 / 89 = 1,815,273.4` and
+`161,559,329 / 2,878,654 = 56.1`. Both stand exactly as quoted.
+
+What was genuinely broken is the **adapter's** `AgentContext`, which is what
+Harbor Hub, `harbor view` and any external consumer read. Fixed in
+`osa_agent.py::populate_context_post_run`. The magnitude it would have had on a
+caching provider is measurable: `runs/anthropic-cache-probe-20260814` recorded
+101,547 uncached input against 2,320,315 cache reads over 3 trials — a **23x**
+understatement. The uncached remainder now rides in
+`metadata.osa_uncached_input_tokens`, and its absence is what lets `report.py`
+identify a pre-D7 artefact and re-derive it unchanged (verified: the archived
+run re-scores to identical figures).
+
+Schema evidence, verbatim: `models/agent/context.py:9-11` — *"The number of
+input tokens used including cache."* `models/trajectories/final_metrics.py:11-14`
+— *"Sum of all prompt tokens across all steps, including cached tokens"*.
+`claude_code.py:755-759` computes `input + cache_read + cache_creation` with the
+comment *"Align with Anthropic session totals"*. `n_cache_tokens` is a **subset**
+of `n_input_tokens`, not a sibling (`claude_code.py:1526-1527`).
+
+### §4a undercounted the non-conforming tasks: it is FOUR, not three
+
+Re-measured by diffing all 89 `task.toml` files against the retained Hub
+download, comparing `[agent].timeout_sec`, `[verifier].timeout_sec`,
+`[environment].memory_mb`, `.cpus`, `.storage_mb`:
+
+| Task | Ours (agent / verifier / mem) | Hub | Result in full-89 |
+| --- | --- | --- | --- |
+| `crack-7z-hash` | 1800 s / 900 s / 4096 MB | 900 / 900 / 2048 | **PASSED** |
+| `filter-js-from-html` | 1800 / **1800** / 4096 | 1800 / 900 / 2048 | failed |
+| `gpt2-codegolf` | 900 / 900 / **8192** | 900 / 900 / 4096 | failed |
+| **`query-optimize`** | 900 / **1800** / 2048 | 900 / 900 / 2048 | failed |
+
+§4a missed `query-optimize` entirely and recorded `filter-js-from-html` as a
+memory-only divergence when its **verifier** budget is doubled too. `cpus` and
+`storage_mb` match on all 89.
+
+**And the reason `crack-7z-hash` passed is not the extra budget.** Its trial
+records `agent_exec_s = 266.65` — under a third of even the Hub's 900 s limit,
+which the doubled budget was therefore never used to exceed. The memory half
+(4096 vs 2048 MB) is a ceiling rather than a consumable and cannot be ruled out
+without a re-run. So the task is **inadmissible** — it ran on a copy no
+leaderboard would accept — but the specific claim "it passed on double the
+budget" is not supported by its own timing.
+
+This is now machine-checked rather than written down:
+`datasets.NONCONFORMING_TASKS` pins the Hub half, `check_conformance()`
+re-derives the local half from disk, `run_bench.py` refuses to launch on drift,
+and `report.py` marks every affected row `void` with a quotable reason.
+
+### The measured effect of the void set on the headline
+
+```
+raw            49 / 89 = 55.1%          (unchanged; still printed first)
+excluding void 48 / 85 = 56.5%
+```
+
+Only `crack-7z-hash` moves the numerator; the other three failed and could not
+have been helped. The raw rate is deliberately **not** overwritten — a shrinking
+denominator nobody can audit is the failure mode, and it is no better done in
+our favour than against us.
+
+### D4 stands, deliberately, and is now guarded
+
+§9 D4 says root-everywhere writes root-owned files "on tasks with a non-root
+agent user". **No such task exists in anything we hold**: all 332 task copies —
+89 TB 2.0, 89 TB 2.1, 80 Harbor-Index, 74 terminal-bench — leave `[agent].user`
+unset, and Harbor documents unset as *"the environment's default USER (e.g.,
+root)"* (`models/task/config.py:341-344`). `exec_as_agent` and `exec_as_root`
+therefore resolve to the same user on every task in the house.
+
+It is also not swappable: `install()` writes
+`-erlexec root true user root limit_users [root]` into the release's `vm.args`
+because erlexec refuses to start its port program as root without an explicit
+effective user. A non-root run against that `vm.args` fails to boot rather than
+running correctly. The adapter now **raises** if a task ever declares a non-root
+agent user, so the first one produces an attributed error instead of a silent
+ownership divergence.
+
+### D6 is not academic — but not on Terminal-Bench
+
+Measured: **0 of 89** TB 2.0 tasks and **0 of 89** TB 2.1 tasks declare
+`mcp_servers` or `skills_dir`, so this has never altered a Terminal-Bench
+number. It bites on the benchmark we were about to run: **5 of 80 Harbor-Index
+tasks** (`gaia2-adapt-hard-1`, `-hard-2`, `gaia2-ambiguous`, `gaia2-timed-1`,
+`-2`) declare an `are` server over `streamable-http`, and
+`terminal-bench/medical-claims-processing` declares `playwright` over `sse`. A
+Harbor-Index run made before this fix would have scored six tasks the agent was
+structurally unable to attempt.
+
+`mcp_servers` is now written to `~/.osa/mcp.json`, which is OSA's own
+Claude-Desktop-compatible format (`mcp/config.ex:3-13`); Harbor's three
+transports collapse to OSA's two without loss because OSA's remote transport
+probes StreamableHTTP and falls back to legacy SSE
+(`mcp/transport/http.ex:3-15`). **Untested against a live MCP task** — the file
+is verified against OSA's parser, not against an `are` sidecar.
+`skills_dir` is **refused**, not implemented: Harbor ships Anthropic-style
+`SKILL.md` folders and OSA reads `~/.osa/skills/<slug>.json`, so copying would
+look like support without being it.
+
+### D10 is mostly inapplicable, and the applicable part was a real hazard
+
+`CLI_FLAGS` builds a command line for an agent binary (`base.py:706-722`). This
+adapter never builds one — `osagent serve` is started by the driver and driven
+over HTTP — so descriptors for `provider`/`port`/`boot_timeout_sec` would be
+ceremony. **`effort` is different.** OSA does not reject an unknown rung: it
+logs "ignoring unknown [model].effort" and boots at its default, so
+`OSA_BENCH_EFFORT=hgih` produced a run that completed normally and recorded a
+pin it did not have — on the axis Anthropic measures at 10.3 pp and cline at
+11.2 pp on this exact model. Now an `EnvVar(type="enum", choices=[...])`
+descriptor, which rejects it at construction and makes `--ak effort=high` and
+`OSA_BENCH_EFFORT=high` the same pin.
+
+### D9's consequence, named
+
+`--ae OSA_VERIFICATION_ADEQUACY=0` was accepted, recorded in `config.json`, and
+had **no effect on the run**, because `ablation_env()` read `os.environ`
+directly and skipped the first two of Harbor's three precedence sources
+(`base.py:583-590`). That is a silently-void ablation, not a style point. All
+five direct `os.environ` reads now route through `OsaAgent._env`.
+
+### The quota classification, verified end to end
+
+The 6 retries at `runs/rerun-timeouts-f6981b61` were **not** all quota deaths:
+**4 died on provider quota** (`Ollama returned 429: ... you have reached your
+session usage limit`), and **2 died on a GLIBC mismatch** at agent-setup
+(`erlexec: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.34' not found`) —
+a bookworm/bullseye artefact problem, already surfaced as
+`NonZeroAgentExitCodeError`.
+
+The exit-code fix now classifies the four correctly, and this was verified by
+running Harbor's own `_classify_exec_error` over the driver's real output rather
+than by inspection. **It did not work on the first try**, and the reason is
+worth recording: `_classify_exec_error` keeps the match with the greatest END
+OFFSET in stdout+stderr (`base.py:792-798`), not the first pattern in table
+order. The driver's line read `classified: <phrase> (osa category=rate_limit)`,
+and `rate_limit` in that trailing annotation matches `rate.?limit` — so the
+annotation out-ranked the phrase and every quota death was still classified
+`ApiRateLimitError`, which is **not** in `exclude_exceptions` and is therefore
+retried against a wallet that will not refill. With the phrase moved last:
+
+```
+quota      -> exit 7, "Quota exceeded."  -> ApiUsageLimitError   excluded=True
+transient  -> exit 7, "rate limit"       -> ApiRateLimitError    excluded=False
+```
+
+All seven `_CATEGORY_PHRASE` entries were re-checked under the new ordering; none
+regressed. `report.py` additionally splits `provider_quota_exhausted` out of
+`provider_error`, keeps it out of the model's column, and prints a loud line
+under the headline naming the affected tasks.
 
 ---
 

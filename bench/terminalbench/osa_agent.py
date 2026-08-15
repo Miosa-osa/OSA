@@ -56,7 +56,13 @@ import shlex
 from pathlib import Path
 from typing import Any, override
 
-from harbor.agents.installed.base import BaseInstalledAgent
+from typing import ClassVar
+
+from harbor.agents.installed.base import (
+    BaseInstalledAgent,
+    EnvVar,
+    with_prompt_template,
+)
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
@@ -251,13 +257,31 @@ def driver_run_timeout() -> int | None:
     return int(DRIVER_RUN_TIMEOUT_BASE * mult)
 
 
-def ablation_env() -> dict[str, str]:
-    """The ablation switches actually set in the host process, if any."""
-    return {
-        k: os.environ[k]
-        for k in OSA_ABLATION_ENV_KEYS
-        if os.environ.get(k) not in (None, "")
-    }
+def ablation_env(lookup=None) -> dict[str, str]:
+    """The ablation switches actually set, if any.
+
+    ``lookup`` is a ``get(key) -> str | None`` callable. It exists so the
+    adapter can pass ``self._get_env`` and pick up Harbor's ``--ae`` values;
+    with no argument it falls back to the host process env, which is what the
+    module-level callers and the tests want.
+
+    ## D9 — why the callable, and what was broken without it
+
+    Harbor resolves an agent's environment from three sources, in precedence
+    order (`agents/installed/base.py:583-590`): `--ae`-resolved vars, the
+    agent's `extra_env`, then `os.environ`. Reading `os.environ` directly skips
+    the first two, so `--ae OSA_VERIFICATION_ADEQUACY=0` was accepted on the
+    command line, recorded in `config.json`, and then had **no effect on the
+    run** -- the exact shape of a silently-void ablation. `OLLAMA_URL` worked
+    only because it happened to go through `self._get_env`.
+    """
+    get = lookup if lookup is not None else os.environ.get
+    out: dict[str, str] = {}
+    for k in OSA_ABLATION_ENV_KEYS:
+        v = get(k)
+        if v not in (None, ""):
+            out[k] = str(v)
+    return out
 
 
 # Appended (idempotently) to every `releases/<vsn>/env.sh` in the injected
@@ -281,6 +305,36 @@ class OsaAgent(BaseInstalledAgent):
     # OSA emits its own event stream, not Harbor's ATIF trajectory format.
     SUPPORTS_ATIF = False
     SUPPORTS_RESUME = False
+
+    #: D10, in the one place it buys something.
+    #:
+    #: `CLI_FLAGS` is structurally inapplicable here: it builds a command line
+    #: for the agent's binary (`build_cli_flags`, `base.py:706-722`), and this
+    #: adapter never builds one -- `osagent serve` is started by the driver and
+    #: driven over HTTP. Descriptors for `provider`/`port`/`boot_timeout_sec`
+    #: would be ceremony around kwargs nothing else reads.
+    #:
+    #: `effort` is different, and the difference is a real hazard rather than a
+    #: style point. It is written into `~/.osa/config.toml` as
+    #: `[model].effort`, and OSA does not reject an unknown rung -- it logs
+    #: "ignoring unknown [model].effort" and boots at its own default. So a
+    #: typo produces a run that proceeds normally and records a pin it did not
+    #: have, on the axis Anthropic measured at 10.3 pp and cline at 11.2 pp on
+    #: this exact model. `choices` turns that into a construction-time
+    #: `ValueError` (`base.py:725-741` -> `_coerce_value`).
+    #:
+    #: `env_fallback` keeps `OSA_BENCH_EFFORT=high ./run_bench.py ...` working
+    #: unchanged while also accepting Harbor's own `--ak effort=high`.
+    ENV_VARS: ClassVar[list[EnvVar]] = [
+        EnvVar(
+            kwarg="effort",
+            env="OSA_BENCH_EFFORT",
+            type="enum",
+            # OSA's `Application.resolve_effort/1` accepts exactly these.
+            choices=["fast", "medium", "high", "xhigh", "ultra"],
+            env_fallback="OSA_BENCH_EFFORT",
+        ),
+    ]
 
     def __init__(
         self,
@@ -312,10 +366,47 @@ class OsaAgent(BaseInstalledAgent):
     def name() -> str:
         return "osa"
 
+    # --------------------------------------------------------------- env seam
+
+    def _env(self, key: str, default: str | None = None) -> str | None:
+        """One environment read, through Harbor's precedence chain.
+
+        `--ae KEY=VALUE` lands in `self._resolved_env_vars`, which `_get_env`
+        consults ahead of `self._extra_env` and `os.environ`
+        (`agents/installed/base.py:583-590`). Reading `os.environ` directly --
+        which this adapter used to do in five places -- silently ignores the
+        first two, so an `--ae` switch that appears in `config.json` never
+        reaches the run. See `ablation_env` for the measured consequence.
+
+        The `AttributeError` fallback covers an instance built outside a Harbor
+        trial: `_get_env` is inherited and therefore present, but it reads
+        `self._resolved_env_vars` / `self._extra_env`, which only
+        `BaseInstalledAgent.__init__` creates. The unit tests construct exactly
+        that shape, and a bare `os.environ` read is the correct answer there --
+        there is no `--ae` chain to consult.
+        """
+        get = getattr(self, "_get_env", None)
+        if get is not None:
+            try:
+                v = get(key)
+            except AttributeError:
+                v = os.environ.get(key)
+        else:
+            v = os.environ.get(key)
+        return v if v not in (None, "") else default
+
+    def _ablation_env(self) -> dict[str, str]:
+        """`ablation_env`, resolved through Harbor's precedence chain."""
+        return ablation_env(self._env)
+
     @override
     def get_version_command(self) -> str | None:
         return f"{REMOTE_RELEASE}/bin/osagent version"
 
+    # D11: this overrides `BaseInstalledAgent.parse_version`; the decorator is
+    # what makes a rename upstream a type error here instead of a silent
+    # fallback to the base implementation.
+    @override
     def parse_version(self, stdout: str) -> str:
         # `osagent version` prints an ERTS latin1-locale warning on a bare
         # container image before the version line, so take the last non-empty
@@ -354,25 +445,32 @@ class OsaAgent(BaseInstalledAgent):
             "OPENROUTER_API_KEY",
             "ZAI_API_KEY",
         )
-        lines = []
+        # D11: built as an ordered mapping, not an append-only list.
+        #
+        # `OSA_DEFAULT_PROVIDER` could previously be written up to three times
+        # in one file -- once from `keys`, once from `self._provider`, once from
+        # `--model`. Every OSA `.env` reader is last-wins so the *effective*
+        # value was right, but the artefact then disagreed with itself, and the
+        # dotenv is one of the two places a later reader reconstructs what a run
+        # was actually configured with. A config file that has to be replayed to
+        # be understood is not a record.
+        env: dict[str, str] = {}
         for k in keys:
-            v = self._get_env(k) if hasattr(self, "_get_env") else os.environ.get(k)
+            v = self._env(k)
             if v:
-                lines.append(f"{k}={v}")
+                env[k] = v
         if self._provider:
-            lines.append(f"OSA_DEFAULT_PROVIDER={self._provider}")
+            env["OSA_DEFAULT_PROVIDER"] = self._provider
         if self.model_name:
             provider, model = self._split_model(self.model_name)
-            lines.append(f"OSA_DEFAULT_PROVIDER={provider}")
-            lines.append(f"{provider.upper()}_MODEL={model}")
+            env["OSA_DEFAULT_PROVIDER"] = provider
+            env[f"{provider.upper()}_MODEL"] = model
         # The benchmark never wants a TUI, an updater, or telemetry chatter.
-        lines += [
-            "OSA_REQUIRE_AUTH=false",
-            f"OSA_HTTP_PORT={self._port}",
-        ]
+        env["OSA_REQUIRE_AUTH"] = "false"
+        env["OSA_HTTP_PORT"] = str(self._port)
         # Ablation switches (seam 1 of 2 -- see OSA_ABLATION_ENV_KEYS).
-        lines += [f"{k}={v}" for k, v in ablation_env().items()]
-        return "\n".join(lines) + "\n"
+        env.update(self._ablation_env())
+        return "\n".join(f"{k}={v}" for k, v in env.items()) + "\n"
 
     def _split_model(self, model_name: str) -> tuple[str, str]:
         """Harbor passes ``provider/model``; OSA wants them separately."""
@@ -385,8 +483,8 @@ class OsaAgent(BaseInstalledAgent):
         provider, model = (
             self._split_model(self.model_name)
             if self.model_name
-            else (self._provider or os.environ.get("OSA_DEFAULT_PROVIDER") or "ollama",
-                  os.environ.get("OLLAMA_MODEL") or "")
+            else (self._provider or self._env("OSA_DEFAULT_PROVIDER") or "ollama",
+                  self._env("OLLAMA_MODEL") or "")
         )
         return json.dumps({"provider": provider, "model": model}, indent=2)
 
@@ -405,7 +503,17 @@ class OsaAgent(BaseInstalledAgent):
         is kept to the one key that has no other seam. `ConfigFile.effort/0` is
         toml-only; there is no config.json or env equivalent.
         """
-        effort = os.environ.get("OSA_BENCH_EFFORT")
+        # Resolved through the `ENV_VARS` descriptor when one is available, so
+        # `--ak effort=high` and `OSA_BENCH_EFFORT=high` are the same pin and an
+        # invalid rung has already been rejected. Falls back to a plain env read
+        # for an instance built outside a Harbor trial.
+        effort = None
+        try:
+            effort = self.resolve_env_vars().get("OSA_BENCH_EFFORT")
+        except AttributeError:
+            pass
+        if not effort:
+            effort = self._env("OSA_BENCH_EFFORT")
         if not effort:
             return None
         return f'[model]\neffort = "{effort}"\n'
@@ -579,7 +687,7 @@ class OsaAgent(BaseInstalledAgent):
         if self._run_timeout_override:
             return self._run_timeout_override
 
-        raw = os.environ.get("OSA_BENCH_TIMEOUT_MULTIPLIER")
+        raw = self._env("OSA_BENCH_TIMEOUT_MULTIPLIER")
         try:
             mult = float(raw) if raw else 1.0
         except ValueError:
@@ -599,6 +707,162 @@ class OsaAgent(BaseInstalledAgent):
         # by the multiplier, which is all this could ever do before.
         return driver_run_timeout()
 
+    # ------------------------------------------------------- injected context
+
+    def _mcp_json(self) -> str | None:
+        """Harbor's `self.mcp_servers`, in the file OSA actually reads.
+
+        ## D6, half one
+
+        Harbor injects `mcp_servers` into the agent constructor whenever a task
+        or the job declares them (`trial/trial.py:828-840`), merging
+        `task.config.environment.mcp_servers` with `config.agent.mcp_servers`.
+        `BaseAgent.__init__` stores them on `self.mcp_servers`
+        (`agents/base.py:73,84`), and this adapter read the attribute nowhere --
+        so a task that ships an MCP server ran against an agent that could not
+        see it, and was still scored. That failure is indistinguishable from the
+        model being unable to do the task.
+
+        Measured across the datasets on disk: **0 of 89 on TB 2.0 and 0 of 89 on
+        TB 2.1** declare `mcp_servers`, so this has never altered a
+        Terminal-Bench number. It is not academic anywhere else: **5 of the 80
+        Harbor-Index tasks** (`gaia2-adapt-hard-1`, `-hard-2`, `gaia2-ambiguous`,
+        `gaia2-timed-1`, `-2`) declare an `are` server, and
+        `terminal-bench/medical-claims-processing` declares `playwright`. A
+        Harbor-Index run made before this fix would have scored six tasks the
+        agent was structurally unable to do.
+
+        ## The format
+
+        `~/.osa/mcp.json`, Claude-Desktop-compatible: a top-level `mcpServers`
+        object (`lib/optimal_system_agent/mcp/config.ex:3-13`). OSA's parser
+        picks the transport from the shape rather than from a field --
+        `transport = if is_binary(url) ... :http_sse, else: :stdio`
+        (`config.ex:416`).
+
+        Harbor's three transports map onto OSA's two without loss, and the
+        collapse is real rather than assumed: OSA's remote transport probes
+        StreamableHTTP first and falls back to legacy HTTP+SSE on 404/405/406/415
+        (`lib/optimal_system_agent/mcp/transport/http.ex:3-15,39-49`), which is
+        the same negotiation opencode does. So `sse` and `streamable-http` are
+        both "a URL", and OSA discovers which dialect the server speaks. Every
+        MCP-declaring task on disk uses one of those two (`streamable-http` for
+        the five gaia2 tasks, `sse` for `medical-claims-processing`).
+
+        NOT VERIFIED against a live MCP task. Writing the file is measured
+        against OSA's parser; that the resulting session reaches an `are`
+        sidecar is not, and cannot be until a Harbor-Index arm runs.
+        """
+        servers = getattr(self, "mcp_servers", None) or []
+        if not servers:
+            return None
+        out: dict[str, dict[str, Any]] = {}
+        for s in servers:
+            transport = getattr(s, "transport", None)
+            url = getattr(s, "url", None)
+            command = getattr(s, "command", None)
+            if url:
+                out[s.name] = {"url": url}
+            elif command:
+                entry: dict[str, Any] = {"command": command}
+                args = list(getattr(s, "args", None) or [])
+                if args:
+                    entry["args"] = args
+                out[s.name] = entry
+            else:
+                # Harbor's own validator forbids this
+                # (`models/task/config.py:630-636`), so reaching it means the
+                # shape changed upstream. Refuse rather than drop a server and
+                # score the trial as if the task had never asked for one.
+                raise RuntimeError(
+                    f"MCP server {s.name!r} declares transport {transport!r} with "
+                    "neither url nor command; refusing to run a task whose MCP "
+                    "server cannot be configured."
+                )
+        return json.dumps({"mcpServers": out}, indent=2)
+
+    def _reject_unsupported_injections(self, environment: BaseEnvironment) -> None:
+        """D4 and D6: refuse what we cannot honour, instead of ignoring it.
+
+        ## D4 — every exec in this adapter is `exec_as_root`
+
+        Harbor wraps the run phase in
+        `with self.agent_environment.with_default_user(user)`
+        (`trial/trial.py:464`) so that `exec_as_agent` picks up
+        `task.config.agent.user` (`agents/installed/base.py:875-886`). This
+        adapter calls `exec_as_root` everywhere, which pins root regardless.
+
+        **Measured: this changes nothing on anything we run.** All 332 task
+        copies on disk -- 89 TB 2.0, 89 TB 2.1, 80 Harbor-Index, 74
+        terminal-bench -- leave `[agent].user` unset, and Harbor documents unset
+        as "the environment's default USER (e.g., root)"
+        (`models/task/config.py:341-344`). So `exec_as_agent` and
+        `exec_as_root` resolve to the same user on every task in the house, and
+        the doc's claim that we "write root-owned files on tasks with a non-root
+        agent user" describes a task that does not exist here.
+
+        **It is not swapped anyway, because root is load-bearing.** The install
+        phase needs it for apt, for `chmod u+s` on erlexec's port program, and
+        for writing under `/installed-agent`. The run phase needs it because the
+        release's own `vm.args` carries
+        `-erlexec root true user root limit_users [root]` -- written by
+        `install()` precisely because erlexec refuses to start its C port
+        program as root without an explicit effective user. Running the driver
+        as a non-root user against that vm.args would not produce a
+        correctly-permissioned run; it would produce a boot failure.
+
+        So the deviation stands, deliberately, and this guard is what stops it
+        being silent: the first task that ever declares a non-root agent user
+        gets an errored trial with a message, not a root-owned filesystem and a
+        reward computed against it.
+        """
+        user = getattr(environment, "default_user", None)
+        if user is not None and str(user) not in ("root", "0"):
+            raise RuntimeError(
+                f"task declares [agent].user={user!r}, but this adapter execs as "
+                "root throughout (the injected release's vm.args pins erlexec to "
+                "root, so a non-root run would fail to boot rather than run "
+                "correctly). Refusing rather than writing root-owned files into a "
+                "task whose verifier may check ownership."
+            )
+        self._reject_skills_dir()
+
+    def _reject_skills_dir(self) -> None:
+        """D6, half two: refuse a `skills_dir` instead of ignoring it.
+
+        Harbor passes `skills_dir` as a path *inside the environment* holding
+        Anthropic-style skill folders, and `claude_code.py:1559-1585` copies
+        them into the agent's config dir. OSA's skills are a different artefact
+        entirely -- `~/.osa/skills/<slug>.json`, one JSON document per skill
+        (`lib/optimal_system_agent/skills.ex:24`,
+        `agent/skill_bootstrap.ex:14-17`) -- so copying Harbor's directory there
+        would produce files OSA's loader does not read. That is worse than doing
+        nothing, because it looks like support.
+
+        So this raises. A trial that errors is recorded with `exception_info`
+        set and reads as a harness fault; a trial that silently ignores the
+        injection is recorded as the model failing. Only one of those is true.
+
+        No task on any dataset copy we hold declares `skills_dir` (measured: 0
+        of 89 on TB 2.0, 0 of 89 on TB 2.1, 0 of 80 on Harbor-Index, 0 of 74 on
+        terminal-bench), so this cannot fire on anything we currently run.
+        """
+        skills_dir = getattr(self, "skills_dir", None)
+        if skills_dir:
+            raise RuntimeError(
+                f"Harbor injected skills_dir={skills_dir!r}, which this adapter "
+                "cannot honour: OSA loads skills from ~/.osa/skills/<slug>.json, "
+                "not from Anthropic-style SKILL.md folders. Refusing rather than "
+                "scoring a task whose skills the agent never received."
+            )
+
+    # D5. `--agent-prompt-template` is applied by this decorator and by nothing
+    # else: `render_instruction` is only ever called from `with_prompt_template`
+    # (`agents/installed/base.py:159-176,913-917`). Without it the flag was
+    # accepted, recorded in `config.json`, and silently discarded -- so a run
+    # claiming a prompt template ran the bare instruction. Same placement as
+    # `opencode.py:475-477`, `codex.py:1331-1333`, `claude_code.py:1599-1601`.
+    @with_prompt_template
     @override
     async def run(
         self,
@@ -606,6 +870,7 @@ class OsaAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        self._reject_unsupported_injections(environment)
         agent_dir = EnvironmentPaths.agent_dir.as_posix()
         await self._upload_config_text(
             environment,
@@ -613,6 +878,22 @@ class OsaAgent(BaseInstalledAgent):
             remote_path=REMOTE_INSTRUCTION,
             filename="instruction.txt",
         )
+        mcp_json = self._mcp_json()
+        if mcp_json:
+            await self._upload_config_text(
+                environment,
+                content=mcp_json,
+                remote_path=f"{REMOTE_ROOT}/mcp.json",
+                filename="mcp.json",
+            )
+            await self.exec_as_root(
+                environment,
+                command=(
+                    'mkdir -p "$HOME/.osa" && '
+                    f'mv {shlex.quote(REMOTE_ROOT + "/mcp.json")} "$HOME/.osa/mcp.json" && '
+                    'chmod 600 "$HOME/.osa/mcp.json"'
+                ),
+            )
         await self.exec_as_root(
             environment, command=f"chmod 644 {shlex.quote(REMOTE_INSTRUCTION)}"
         )
@@ -626,7 +907,7 @@ class OsaAgent(BaseInstalledAgent):
             # Ablation switches (seam 2 of 2 -- see OSA_ABLATION_ENV_KEYS).
             # This is the seam that reaches `osagent serve`'s real OS env,
             # which is what `System.get_env/1` reads at the point of use.
-            **ablation_env(),
+            **self._ablation_env(),
             **self.resolve_env_vars(),
         }
         run_timeout = self._effective_run_timeout()
@@ -685,10 +966,56 @@ class OsaAgent(BaseInstalledAgent):
             ]
             return max(vals) if vals else None
 
-        context.n_input_tokens = pick("input_tokens", "input_tokens")
+        uncached_in = pick("input_tokens", "input_tokens")
         context.n_output_tokens = pick("output_tokens", "output_tokens")
         cache_r = pick("cache_read_tokens", "cache_read_input_tokens") or 0
         cache_w = pick("cache_creation_tokens", "cache_creation_input_tokens") or 0
+
+        # D7. `n_input_tokens` is the WHOLE prompt, cache included.
+        #
+        # ## What the field means
+        #
+        # Harbor documents it as "The number of input tokens used **including
+        # cache**" (`models/agent/context.py:9-11`), and the ATIF field every
+        # reference adapter feeds it from says the same: `total_prompt_tokens`
+        # is "Sum of all prompt tokens across all steps, **including cached
+        # tokens**" (`models/trajectories/final_metrics.py:11-14`).
+        # `claude_code.py:755-759` computes it literally --
+        # `prompt_tokens = input_tokens + cache_read + cache_creation`, commented
+        # "Align with Anthropic session totals" -- and assigns it at `:1526`.
+        # `opencode.py:421`, `codex.py:1195`, `cursor_cli.py:821` and
+        # `openhands_sdk.py:160` all take the same `total_prompt_tokens`.
+        # `n_cache_tokens` is the cache slice on its own, and is a SUBSET of
+        # `n_input_tokens`, not a sibling of it (`claude_code.py:1527`).
+        #
+        # We were writing the uncached remainder into a field the whole field
+        # reads as the total. Every token and cost figure published from
+        # `results.json` was therefore incomparable with anyone else's.
+        #
+        # ## What OSA reports, measured
+        #
+        # OSA's `input_tokens` is the uncached remainder. `Loop.Accounting`
+        # subtracts the cached overlap back out for every `{:compat, _}` route,
+        # because an OpenAI-shaped gateway reports `prompt_tokens` inclusive of
+        # its cached slice. Confirmed on `runs/anthropic-cache-probe-20260814`:
+        # 101,547 input against 2,320,315 cache reads across 3 trials -- input
+        # cannot be the total when it is 4% of the cache alone. So the three
+        # counters are disjoint and adding them is the correct fold, not a
+        # double count.
+        #
+        # ## What this changes about the numbers we have published
+        #
+        # Nothing, on the run we have quoted. `runs/osa-tb20-full89-f6981b61`
+        # measured cache_read = 0 and cache_creation = 0 on all 87 trials that
+        # wrote telemetry -- `ollama/glm-5.2:cloud` reported no cache tokens at
+        # all -- so the fold adds zero. It matters for every future run on a
+        # provider that does report them, where on the probe above it would have
+        # been a 23x understatement.
+        context.n_input_tokens = (
+            (uncached_in or 0) + cache_r + cache_w
+            if uncached_in is not None or cache_r or cache_w
+            else None
+        )
         context.n_cache_tokens = (cache_r + cache_w) or None
         # Whole-tree cost, not the parent session alone: subagent/fleet children
         # bill to their own sidecars, so `cost_usd` under-reports any run that
@@ -717,6 +1044,14 @@ class OsaAgent(BaseInstalledAgent):
             cost_complete = t.get("cost_complete")
 
         context.metadata = {
+            # The uncached remainder, recorded explicitly because Harbor's
+            # schema has nowhere to put it once `n_input_tokens` became the
+            # total (D7). Without it a reader cannot recover a cache hit rate
+            # from `results.json` alone, and `report.py::_reconcile_spend` would
+            # have to guess whether an archived run's `n_input_tokens` came from
+            # a pre- or post-D7 adapter. `report.py` prefers this key and treats
+            # its absence as "pre-D7 artefact, `n_input_tokens` is uncached".
+            "osa_uncached_input_tokens": uncached_in,
             "osa_status": t.get("status"),
             "osa_error": t.get("error"),
             "osa_turns": t.get("turns"),

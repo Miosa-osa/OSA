@@ -410,6 +410,31 @@ def main() -> int:
                 f"  python3 datasets.py check {ds.key} --fix"
             )
 
+        # Refuse to launch against a task copy whose recorded non-conformance
+        # no longer matches the disk.
+        #
+        # `datasets.NONCONFORMING_TASKS` is what `report.py` uses to mark
+        # results void, and it is a pinned measurement against the canonical Hub
+        # package. If the local copy has since moved, the marking is either
+        # missing a task that now buys us an advantage or voiding one that no
+        # longer does -- and both are worse than not marking at all, because
+        # both are stated confidently in the summary. Stale-table means stop.
+        #
+        # This is NOT a substitute for `controls.py gate`, which still runs
+        # afterwards and still blocks on unmeasured tasks. It is the same class
+        # of pre-flight as the contamination check above: something that must be
+        # true before a run is worth starting.
+        drift = datasets_mod.check_conformance(ds)
+        if drift:
+            raise SystemExit(
+                f"the recorded non-conformance table for {ds.key} no longer "
+                "matches the task copy on disk, so results cannot be marked "
+                "void correctly:\n  "
+                + "\n  ".join(drift)
+                + "\nRe-measure against `harbor download` and update "
+                "`datasets.NONCONFORMING_TASKS`."
+            )
+
     config = {
         "run_id": run_id,
         "agent": args.agent,

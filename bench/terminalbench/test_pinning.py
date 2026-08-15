@@ -64,6 +64,17 @@ class _Agent:
         self._provider = provider
         self._port = port
 
+    # D9 routed every environment read through `OsaAgent._env`, which consults
+    # Harbor's `_get_env` (the `--ae` chain) and falls back to `os.environ`.
+    # Bound here too, so these tests keep exercising the real lookup rather than
+    # a copy of it -- with no `_get_env` on the stand-in, `_env` takes its
+    # `os.environ` branch, which is exactly what `monkeypatch.setenv` drives.
+    def _env(self, key, default=None):
+        return self._cls._env(self, key, default)
+
+    def _ablation_env(self):
+        return self._cls._ablation_env(self)
+
     def dotenv(self) -> str:
         return self._cls._dotenv(self)
 
@@ -72,6 +83,42 @@ class _Agent:
 
 
 # --------------------------------------------------------------- effort pin
+
+
+@pytest.mark.parametrize("bad", ["hgih", "maximum", "1", "med"])
+def test_an_invalid_effort_rung_is_rejected_at_construction(monkeypatch, tmp_path, bad):
+    """D10. The rung is not validated by OSA, so it has to be validated here.
+
+    `Application.resolve_effort/1` does not reject an unknown value -- it logs
+    "ignoring unknown [model].effort" and boots at OSA's own default. So before
+    the `ENV_VARS` descriptor existed, `OSA_BENCH_EFFORT=hgih` produced a run
+    that completed normally, wrote `effort: "hgih"` into `config.json`, and was
+    actually unpinned. Effort is the largest single lever anyone has published
+    on this axis (10.3 pp, Anthropic Opus 4.6 SC Fig 2.5.A; 11.2 pp on this very
+    model, cline), so a silently-unpinned arm is a voided comparison.
+
+    Constructed for real rather than through `_Agent`, because the rejection
+    happens in `BaseInstalledAgent.__init__` via `_coerce_value`.
+    """
+    mod = _load_osa_agent()
+    monkeypatch.setenv("OSA_BENCH_EFFORT", bad)
+    with pytest.raises(ValueError, match="effort"):
+        mod.OsaAgent(logs_dir=tmp_path)
+
+
+def test_the_kwarg_seam_and_the_env_seam_pin_identically(monkeypatch, tmp_path):
+    """`--ak effort=high` and `OSA_BENCH_EFFORT=high` must be the same run."""
+    mod = _load_osa_agent()
+    monkeypatch.delenv("OSA_BENCH_EFFORT", raising=False)
+    by_kwarg = mod.OsaAgent(logs_dir=tmp_path, effort="high")._config_toml()
+    monkeypatch.setenv("OSA_BENCH_EFFORT", "high")
+    by_env = mod.OsaAgent(logs_dir=tmp_path)._config_toml()
+    assert by_kwarg == by_env == '[model]\neffort = "high"\n'
+    # Case is normalised to the canonical rung rather than rejected
+    # (`_coerce_value`, `base.py:274-279`) -- and normalising matters, because
+    # `[model].effort = "HIGH"` is one of the values OSA would silently ignore.
+    monkeypatch.setenv("OSA_BENCH_EFFORT", "HIGH")
+    assert mod.OsaAgent(logs_dir=tmp_path)._config_toml() == by_env
 
 
 def test_config_toml_is_none_when_effort_unpinned(monkeypatch):

@@ -854,6 +854,33 @@ the task container can reach, which a benchmark should do deliberately.
   publishes. `cache_hit_rate` is `None` when the adapter emitted no cache
   counter and `0.0` when it emitted one and it was zero; those are different
   facts and the summary renders them differently.
+
+  `input_tokens_per_task` is **cache-inclusive**: uncached input + cache reads +
+  cache writes. That is what Harbor's schema means by input tokens
+  (`models/agent/context.py:9-11`, "including cache") and what every reference
+  adapter reports (`total_prompt_tokens`, "including cached tokens"). A cache
+  read is input the model saw and was billed for at 0.1x; excluding it would
+  flatter a cached harness by up to 25x on this figure. `in_out_ratio` uses the
+  same numerator, or it would be quoted against a different denominator than the
+  field's 56–85:1. `uncached_input_tokens_total` is kept beside it because it is
+  the figure that actually shrinks when caching starts working.
+
+* **`void_tasks` / `n_void` / `accuracy_excluding_void`** — trials that are not
+  measurements, listed per-task with a reason. Two causes: a **non-conforming
+  task copy** (our local `tasks/` declares a larger budget or memory than the
+  canonical Hub package — see `datasets.NONCONFORMING_TASKS`, and note this
+  never shows up in `config.json` because it is baked into the task file), and
+  **provider quota exhaustion** mid-episode. `accuracy` is *not* silently
+  corrected: it stays the raw over-everything rate a reader would compute
+  themselves, and `accuracy_excluding_void` is published beside it. Quoting
+  `accuracy` alone when `n_void > 0` is the thing this field exists to stop.
+
+* **`quota_exhausted_tasks`** — trials that stopped because the account ran out
+  of budget, not because the agent failed. Split out of `provider_error` because
+  an empty wallet and an upstream 500 are different findings and neither is the
+  model's. The driver additionally emits the phrase Harbor maps to
+  `ApiUsageLimitError` rather than `ApiRateLimitError`, so Harbor stops retrying
+  a quota that will not refill.
 * **the controls** — separate from `results.json` and, deliberately, not
   produced by the run itself. `controls.py gate` is what says whether the tasks
   in this run were sound. A run that has not been gated is not a result.

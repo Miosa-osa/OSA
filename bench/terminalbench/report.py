@@ -125,6 +125,39 @@ def _seconds(a: str | None, b: str | None) -> float | None:
         return None
 
 
+#: Provider-message phrasings that mean "this account/session has no budget
+#: left", as opposed to "you are going too fast, back off".
+#:
+#: The two arrive as the same HTTP 429 and OSA's `ErrorCatalog` collapses both
+#: to `:rate_limit` (`providers/error_catalog.ex:197`), so the distinction can
+#: only be recovered from the message. Sourced from the text actually observed:
+#: `runs/rerun-timeouts-f6981b61` carries `"you (focused_varahamihira_355) have
+#: reached your session usage limit, add extra usage: ..."` on 4 trials. The
+#: rest of the table is Harbor's own vocabulary for the same condition
+#: (`agents/installed/base.py:444-447`, the four `ApiUsageLimitError` patterns),
+#: kept aligned so our label and Harbor's exception type cannot disagree.
+_QUOTA_PHRASES = (
+    "usage limit",
+    "quota exceeded",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "unpaid invoice",
+    "billing hard limit",
+    "credit balance is too low",
+)
+
+
+def _is_quota_exhaustion(turn_error) -> bool:
+    """True when a turn-ending provider error was budget exhaustion."""
+    if not isinstance(turn_error, dict):
+        return False
+    if (turn_error.get("category") or "").lstrip(":") != "rate_limit":
+        return False
+    reason = str(turn_error.get("reason") or "").lower()
+    return any(p in reason for p in _QUOTA_PHRASES)
+
+
 def _failure_reason(
     reward: float | None, exc: dict | None, meta: dict, events: dict | None = None
 ) -> str:
@@ -183,6 +216,25 @@ def _failure_reason(
             return "osa_internal_error"
         if owner != "provider":
             return "turn_error_unattributed"
+        # "The provider refused this request" and "our account has no budget
+        # left" are the same status and utterly different findings, and only one
+        # of them says anything at all about the harness or the model.
+        #
+        # Measured on `runs/rerun-timeouts-f6981b61`: 4 of the 6 retry trials
+        # died on `Ollama returned 429: ... you have reached your session usage
+        # limit`, every one recorded as `provider_error` with reward 0.0 and
+        # `exception_info: null`. Those four are not measurements. Reporting
+        # them beside a genuine upstream 500 -- or, worse, inside an accuracy
+        # denominator -- is how a night of exhausted quota turns into a score.
+        #
+        # The category comes from OSA's own `ErrorCatalog`
+        # (`providers/error_catalog.ex:197` maps HTTP 429 -> `:rate_limit`), and
+        # the quota-vs-transient distinction from the provider's own message
+        # text. That text is a structured field on the error, not task output,
+        # so matching it is not the free-text guessing the driver's
+        # `_classifier_line` refuses to do.
+        if _is_quota_exhaustion(meta.get("osa_turn_error")):
+            return "provider_quota_exhausted"
         return "provider_error"
     if status == "ok":
         # A run that OSA obstructed is not a measurement of the model. This is
@@ -206,6 +258,13 @@ def _fault_owner(reason: str) -> str:
     base = reason.split(":", 1)[0]
     if base in HARNESS_FAULTS or reason.startswith("harness_exception"):
         return "harness"
+    if reason == "provider_quota_exhausted":
+        # Never the model's, never OSA's: our account ran out of budget
+        # mid-episode. It is not `harness` either -- `harness_fault_rate` is
+        # read as an OSA-quality signal and an exhausted wallet says nothing
+        # about OSA's code. It is reported separately and excluded from the
+        # quotable denominator entirely; see `void_tasks` in `build`.
+        return "ambiguous"
     if reason in ("agent_timeout", "provider_error", "turn_error_unattributed"):
         # Ambiguous by construction, for three different reasons:
         #   agent_timeout            a real ceiling and a slow model look the
@@ -477,9 +536,26 @@ def _reconcile_spend(trial_dir: Path, agent_result: dict, meta: dict) -> dict:
     )
     cache_total = (cache_r or 0) + (cache_w or 0)
 
+    # `n_input_tokens` is deliberately NOT a source here any more.
+    #
+    # Since D7 (`osa_agent.py::populate_context_post_run`) that field carries
+    # the WHOLE prompt -- uncached + cache read + cache creation -- because that
+    # is what Harbor's schema means by it (`models/agent/context.py:9-11`).
+    # `tokens_in` here is the UNCACHED remainder, and `prompt_tok` below adds
+    # the two cache counters back on. Leaving `n_input_tokens` in this `max`
+    # would therefore have fed a cache-inclusive total into a slot the caller
+    # adds cache to, double-counting every cached token exactly once.
+    #
+    # The adapter now writes the uncached figure to
+    # `metadata.osa_uncached_input_tokens`. Its ABSENCE identifies a pre-D7
+    # artefact, whose `n_input_tokens` was uncached and is therefore safe to use
+    # -- which is how archived runs stay re-derivable rather than being
+    # retroactively mis-scored by a corrected reader.
+    pre_d7 = "osa_uncached_input_tokens" not in meta
     return {
         "tokens_in": _max_num(
-            agent_result.get("n_input_tokens"),
+            meta.get("osa_uncached_input_tokens"),
+            agent_result.get("n_input_tokens") if pre_d7 else None,
             spend.get("input_tokens"),
             summed.get("input_tokens"),
             # Last resort, and the ONLY source on a trial Harbor killed before
@@ -673,8 +749,63 @@ def multi_trial(rows: list[dict], declared_k: int) -> dict[str, Any] | None:
     }
 
 
+def _mark_void(config: dict, rows: list[dict]) -> None:
+    """Stamp `void` / `void_reason` on every row that is not a measurement.
+
+    Two causes, both of which produce a reward that exists but means nothing:
+
+    1. **A non-conforming task copy.** Our local `tasks/` carries four TB 2.0
+       tasks with larger budgets or memory than the canonical Hub package
+       (`datasets.NONCONFORMING_TASKS`). Both leaderboard contracts forbid
+       timeout and resource overrides, and this one is invisible in
+       `config.json` because it is baked into the task file. `crack-7z-hash`
+       is the case that costs us a point: it **passed** in
+       `runs/osa-tb20-full89-f6981b61`.
+
+    2. **Provider quota exhaustion.** The episode stopped because our account
+       ran out, not because the agent did anything. See
+       `_is_quota_exhaustion`.
+
+    Marking is deliberately NOT subtraction. The row keeps its reward and stays
+    in `accuracy`, which remains the raw over-everything-attempted figure a
+    reader would compute themselves; the void set is published beside it with
+    `accuracy_excluding_void`. Silently shrinking a denominator is the failure
+    mode this whole reporter exists to prevent, and it would be no better done
+    in our own favour than against us.
+    """
+    key = config.get("dataset_key")
+    nonconforming: dict[str, Any] = {}
+    if key:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import datasets as _datasets
+
+            ds = _datasets.DATASETS.get(key)
+            if ds is not None:
+                nonconforming = _datasets.nonconforming_tasks(ds)
+                _void_note = _datasets.void_reason
+        except Exception:  # noqa: BLE001
+            nonconforming = {}
+    for r in rows:
+        short = r["task_name"].split("/")[-1]
+        reasons: list[str] = []
+        if short in nonconforming:
+            reasons.append(_void_note(_datasets.DATASETS[key], short) or "")
+        if r.get("failure_reason") == "provider_quota_exhausted":
+            reasons.append(
+                "provider quota exhausted mid-episode: the account ran out of "
+                "budget, so this trial measured neither the model nor the "
+                "harness. Not a scoreable result."
+            )
+        r["void"] = bool(reasons)
+        r["void_reason"] = " | ".join(x for x in reasons if x) or None
+
+
 def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
+    _mark_void(config, rows)
     n = len(rows)
+    void_rows = [r for r in rows if r.get("void")]
+    live_rows = [r for r in rows if not r.get("void")]
     resolved = [r for r in rows if r["resolved"]]
     harness_faults = [r for r in rows if r["fault_owner"] == "harness"]
     model_faults = [r for r in rows if r["fault_owner"] == "model"]
@@ -724,6 +855,33 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         # `multi_trial` and `pass_at_1` there is the one comparable to a
         # published row; see that function's docstring for why the two differ.
         "accuracy": round(len(resolved) / n, 4) if n else None,
+        # --- excluded-with-cause ----------------------------------------
+        # Trials that are not measurements at all: a non-conforming task copy,
+        # or an episode our provider quota killed. Published as an explicit
+        # per-task list rather than folded away, because "we dropped 1 of 89"
+        # is a claim a reader must be able to audit. See `_mark_void`.
+        "void_tasks": [
+            {"task_name": r["task_name"], "reward": r["reward"],
+             "resolved": r["resolved"], "reason": r["void_reason"]}
+            for r in void_rows
+        ],
+        "n_void": len(void_rows),
+        # The rate over what was actually measured. Quote THIS, with the void
+        # list beside it, or quote `accuracy` and say what is in it -- never
+        # `accuracy` alone once `n_void > 0`.
+        "accuracy_excluding_void": (
+            round(sum(1 for r in live_rows if r["resolved"]) / len(live_rows), 4)
+            if live_rows
+            else None
+        ),
+        # Quota deaths on their own. `provider_quota_exhausted` is reported
+        # apart from `provider_error` because an exhausted wallet and an
+        # upstream 500 are not the same finding, and neither is the model's.
+        "quota_exhausted_tasks": sorted(
+            r["task_name"]
+            for r in rows
+            if r.get("failure_reason") == "provider_quota_exhausted"
+        ),
         # None at k=1. Populated the moment any task has more than one trial,
         # and carries pass@1, pass@k and the list of tasks that disagreed with
         # themselves.
@@ -940,6 +1098,33 @@ def summary_md(results: dict) -> str:
         f"({(a['accuracy'] or 0) * 100:.1f}%)**",
         "",
     ]
+    if a.get("n_void"):
+        # Printed HERE, directly under the headline, and not in a footnote.
+        # A reader who stops after the headline must not stop before this.
+        n_live = a["trials_attempted"] - a["n_void"]
+        n_live_resolved = round((a["accuracy_excluding_void"] or 0) * n_live)
+        lines += [
+            f"> **{a['n_void']} of these {a['trials_attempted']} trials are NOT "
+            "measurements** and the headline above therefore is not a quotable "
+            "rate. Excluding them: "
+            f"**{n_live_resolved} / {n_live} = "
+            f"{(a['accuracy_excluding_void'] or 0) * 100:.1f}%**.",
+            ">",
+        ]
+        for v in a["void_tasks"]:
+            verdict = "PASSED" if v["resolved"] else "failed"
+            lines += [f"> - `{v['task_name']}` ({verdict}) — {v['reason']}"]
+        lines += [""]
+    if a.get("quota_exhausted_tasks"):
+        lines += [
+            f"> **Provider quota died during this run.** "
+            f"{len(a['quota_exhausted_tasks'])} trial(s) stopped because the "
+            "account ran out of budget, not because the agent failed: "
+            + ", ".join(f"`{t}`" for t in a["quota_exhausted_tasks"])
+            + ". These are infrastructure deaths and are excluded above. "
+            "Do not read them as model failures.",
+            "",
+        ]
     mt = a.get("multi_trial")
     if mt:
         # At k>1 the headline above is a per-TRIAL rate. Say so immediately and

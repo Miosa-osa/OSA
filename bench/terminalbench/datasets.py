@@ -171,20 +171,18 @@ DATASETS: dict[str, Dataset] = {
         #
         # ## And the part that changes a score
         #
-        # THREE tasks differ in resources or agent budget, and our copy is the
-        # more generous one in every case:
+        # FOUR tasks differ in resources or budget, and our copy is the more
+        # generous one in every case. The authoritative list is
+        # `NONCONFORMING_TASKS` below -- this prose is a pointer to it, not a
+        # second copy of it, because the previous prose-only version was wrong
+        # in two ways (it said THREE, missing `query-optimize` entirely, and it
+        # attributed `filter-js-from-html`'s divergence to memory alone when its
+        # verifier budget is doubled too). A table nothing checks drifts.
         #
-        #   crack-7z-hash        hub 900s / 2048MB   vs  ours 1800s / 4096MB
-        #   filter-js-from-html  hub      / 2048MB   vs  ours      / 4096MB
-        #   gpt2-codegolf        hub      / 4096MB   vs  ours      / 8192MB
-        #
-        # `crack-7z-hash` is the one that matters: it PASSED in the full-89 run
-        # with double the agent timeout the Hub package allows. Both leaderboard
-        # contracts forbid resource and timeout overrides, and running a task
-        # copy that carries larger values is the same thing arriving by a
-        # different route -- it just does not show up in `config.json` as an
-        # override. Any figure from this copy must not be compared against a
-        # published row without saying so.
+        # Both leaderboard contracts forbid resource and timeout overrides, and
+        # running a task copy that already carries larger values is the same
+        # thing arriving by a route that never appears in `config.json`. Any
+        # figure from these four must not be compared against a published row.
         #
         # Anything intended for SUBMISSION must be run against the canonical id
         # rather than this copy.
@@ -350,6 +348,142 @@ def judge_required_tasks(ds: Dataset) -> list[str]:
     return [n for n in ds.task_names() if n.startswith(prefixes)]
 
 
+# ---------------------------------------------------------------------------
+# Non-conforming task copies
+# ---------------------------------------------------------------------------
+
+#: Tasks whose LOCAL copy declares a larger budget or resource allocation than
+#: the canonical Hub package, keyed by dataset then task name.
+#:
+#: ## Why this is a table and not prose
+#:
+#: Both leaderboard contracts forbid timeout and resource overrides -- the HF
+#: policy names `override_timeout_sec` / `max_timeout_sec` / "No resource
+#: overrides", and TB 2.1's CI rejects all four per-phase multipliers plus
+#: `override_setup_timeout_sec`. A task copy that already carries larger values
+#: delivers exactly the same advantage by a route that never appears in
+#: `config.json`, so no CI check upstream would ever catch it and no reader of
+#: our `config.json` could ever see it. The only defence is a check of our own.
+#:
+#: The comment block on the `tb2.0` entry above previously carried this as
+#: prose, and was wrong twice over: it listed three tasks (`query-optimize` was
+#: missing) and it recorded `filter-js-from-html` as a memory-only divergence
+#: when its verifier budget is doubled as well. That is the argument for the
+#: table -- `check_conformance()` re-derives the LOCAL half from disk on every
+#: call, so our copy can never drift away from this record silently.
+#:
+#: ## Provenance
+#:
+#: The HUB half was measured 2026-08-15 by diffing all 89 `task.toml` files in
+#: our copy against a fresh `harbor download terminal-bench/terminal-bench-2`
+#: (retained at `/tmp/tb2canon`), comparing `[agent].timeout_sec`,
+#: `[verifier].timeout_sec`, `[environment].memory_mb`, `.cpus` and
+#: `.storage_mb`. Exactly four of the 89 differ, and our copy is the more
+#: generous one in every case. `cpus` and `storage_mb` match on all 89.
+#:
+#: Values are `(agent_timeout_sec, verifier_timeout_sec, memory_mb)`.
+NONCONFORMING_TASKS: dict[str, dict[str, dict[str, tuple[float, float, int]]]] = {
+    "tb2.0": {
+        # PASSED in `runs/osa-tb20-full89-f6981b61`, which is why this one
+        # voids a number rather than merely being noted. See `void_reason`.
+        "crack-7z-hash": {"hub": (900.0, 900.0, 2048), "ours": (1800.0, 900.0, 4096)},
+        "filter-js-from-html": {
+            "hub": (1800.0, 900.0, 2048),
+            "ours": (1800.0, 1800.0, 4096),
+        },
+        "gpt2-codegolf": {"hub": (900.0, 900.0, 4096), "ours": (900.0, 900.0, 8192)},
+        "query-optimize": {"hub": (900.0, 900.0, 2048), "ours": (900.0, 1800.0, 2048)},
+    },
+}
+
+
+def _task_budget(ds: Dataset, task: str) -> tuple[float, float, int] | None:
+    """`(agent_timeout, verifier_timeout, memory_mb)` read from disk, or None."""
+    path = ds.path / task / "task.toml"
+    if not path.is_file():
+        return None
+    try:
+        import tomllib
+
+        d = tomllib.loads(path.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    agent = (d.get("agent") or {}).get("timeout_sec")
+    verifier = (d.get("verifier") or {}).get("timeout_sec")
+    memory = (d.get("environment") or {}).get("memory_mb")
+    if not isinstance(agent, (int, float)) or not isinstance(memory, int):
+        return None
+    return (
+        float(agent),
+        float(verifier) if isinstance(verifier, (int, float)) else 0.0,
+        memory,
+    )
+
+
+def nonconforming_tasks(ds: Dataset) -> dict[str, dict[str, tuple[float, float, int]]]:
+    """The recorded non-conforming tasks for `ds`. Empty when there are none."""
+    return NONCONFORMING_TASKS.get(ds.key, {})
+
+
+def check_conformance(ds: Dataset) -> list[str]:
+    """Complaints about the recorded table versus what is on disk right now.
+
+    Returns an empty list when the copy matches the record exactly. A non-empty
+    result means the table is stale -- either a task was fixed and the entry
+    should go, or a NEW divergence appeared and was not recorded, which is the
+    dangerous direction and the reason this runs rather than being trusted.
+
+    It does NOT re-download the Hub package: that needs network and a credential
+    and would make an offline gate fail for the wrong reason. The `hub` column
+    is the pinned measurement; the `ours` column is re-derived from disk here.
+    """
+    recorded = nonconforming_tasks(ds)
+    if not recorded or not ds.present:
+        return []
+    out: list[str] = []
+    for task, vals in sorted(recorded.items()):
+        actual = _task_budget(ds, task)
+        if actual is None:
+            out.append(f"{task}: recorded as non-conforming but not readable on disk")
+            continue
+        if actual != tuple(vals["ours"]):
+            out.append(
+                f"{task}: local copy now {actual}, recorded as {tuple(vals['ours'])} "
+                "-- the table is stale; re-measure against the Hub package before "
+                "quoting anything from this dataset"
+            )
+        elif actual == tuple(vals["hub"]):
+            out.append(f"{task}: now matches the Hub package; remove it from the table")
+    return out
+
+
+def void_reason(ds: Dataset, task: str) -> str | None:
+    """Why a result on `task` is inadmissible, or None if it is fine.
+
+    One sentence, quotable directly into a report. Callers must not paraphrase
+    it -- the whole point is that every artefact says the same thing about the
+    same task.
+    """
+    entry = nonconforming_tasks(ds).get(task)
+    if not entry:
+        return None
+    hub_a, hub_v, hub_m = entry["hub"]
+    our_a, our_v, our_m = entry["ours"]
+    parts = []
+    if our_a != hub_a:
+        parts.append(f"agent budget {our_a:g}s vs the Hub package's {hub_a:g}s")
+    if our_v != hub_v:
+        parts.append(f"verifier budget {our_v:g}s vs {hub_v:g}s")
+    if our_m != hub_m:
+        parts.append(f"memory {our_m} MB vs {hub_m} MB")
+    return (
+        f"non-conforming task copy: " + "; ".join(parts) + ". Both leaderboard "
+        "contracts forbid timeout and resource overrides, and this one does not "
+        "appear in config.json because it is baked into the task file. Not "
+        "comparable to any published row."
+    )
+
+
 def gradeable_tasks(ds: Dataset, *, have_judge_key: bool) -> list[str]:
     """The tasks that can actually be scored on this machine."""
     names = ds.task_names()
@@ -506,6 +640,27 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  ... and {len(found) - 20} more")
             else:
                 print(f"clean: {ds.key}")
+            # Non-conformance is reported next to contamination because it is
+            # the same kind of finding -- a task copy that is not what a reader
+            # of `config.json` would assume it is. `--fix` cannot repair it:
+            # editing a task.toml to match the Hub would leave the copy
+            # disagreeing with the runs already scored against it. The repair is
+            # to re-download, which is `sync`.
+            nc = nonconforming_tasks(ds)
+            if nc:
+                print(
+                    f"  {len(nc)} non-conforming task(s) in {ds.key} -- results "
+                    "on these are marked void by report.py:"
+                )
+                for t in sorted(nc):
+                    print(f"    {t}: ours {tuple(nc[t]['ours'])} vs hub "
+                          f"{tuple(nc[t]['hub'])}  (agent_s, verifier_s, mem_mb)")
+            drift = check_conformance(ds)
+            if drift:
+                dirty += 1
+                print(f"  STALE non-conformance table for {ds.key}:")
+                for d in drift:
+                    print(f"    {d}")
         return 1 if (dirty and not args.fix) else 0
 
     if args.cmd == "diff":

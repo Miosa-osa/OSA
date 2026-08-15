@@ -194,6 +194,20 @@ _CATEGORY_PHRASE = {
 }
 
 
+#: Provider phrasings that mean "the account has no budget left" rather than
+#: "you are going too fast". Kept in sync with `report.py::_QUOTA_PHRASES`.
+_QUOTA_PHRASES = (
+    "usage limit",
+    "quota exceeded",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "unpaid invoice",
+    "billing hard limit",
+    "credit balance is too low",
+)
+
+
 def _classifier_line(telemetry: dict) -> str | None:
     """A line Harbor's `ERROR_PATTERNS` can match, or None if we cannot honestly
     produce one.
@@ -201,6 +215,29 @@ def _classifier_line(telemetry: dict) -> str | None:
     Read from the `turn_error.category` OSA already stamps. Never guessed from
     free text: a substring search over an arbitrary error message is how a task
     whose *output* mentions "rate limit" gets classified as a rate limit.
+
+    ## The one refinement, and why it is not that
+    #
+    A quota exhaustion and a transient rate limit both arrive as HTTP 429 and
+    OSA's `ErrorCatalog` collapses both to `:rate_limit`
+    (`providers/error_catalog.ex:197`). Harbor keeps them apart and it matters:
+    `rate.?limit` maps to `ApiRateLimitError`, which is **not** in the default
+    `exclude_exceptions` set and is therefore retried; the four quota patterns
+    map to `ApiUsageLimitError`, which **is** excluded
+    (`agents/installed/base.py:442-447`, `models/job/config.py:288-300`).
+    Emitting the wrong one makes Harbor sit in exponential backoff retrying a
+    wallet that will not refill.
+
+    The distinction is recovered from `turn_error.reason` -- a structured field
+    on the provider's error object, populated by the provider's own response
+    body. That is not the free-text search the docstring above forbids: the
+    forbidden case is scanning arbitrary TASK OUTPUT, which never reaches this
+    field. The category gate still runs first, so a task that prints "usage
+    limit" cannot reach this branch at all.
+
+    Sourced from the text actually observed on `runs/rerun-timeouts-f6981b61`:
+    `Ollama returned 429: ... you (...) have reached your session usage limit,
+    add extra usage: ...` on 4 trials.
     """
     te = telemetry.get("turn_error")
     if not isinstance(te, dict):
@@ -208,10 +245,36 @@ def _classifier_line(telemetry: dict) -> str | None:
     category = te.get("category")
     if not isinstance(category, str):
         return None
-    phrase = _CATEGORY_PHRASE.get(category.lstrip(":"))
+    key = category.lstrip(":")
+    phrase = _CATEGORY_PHRASE.get(key)
     if not phrase:
         return None
-    return f"[osa-driver] classified: {phrase} (osa category={category})"
+    if key == "rate_limit":
+        reason = str(te.get("reason") or "").lower()
+        if any(p in reason for p in _QUOTA_PHRASES):
+            # Verbatim from Harbor's own table so the mapping cannot drift.
+            phrase = "Quota exceeded."
+            key = "rate_limit/quota-exhausted"
+
+    # The phrase goes LAST, and that is load-bearing rather than cosmetic.
+    #
+    # `_classify_exec_error` does not take the first matching pattern, or the
+    # first pattern in table order. It scans every pattern over the whole
+    # stdout+stderr and keeps the match with the greatest END OFFSET
+    # (`agents/installed/base.py:792-798`) -- i.e. whatever appears latest in
+    # the text wins. This line used to read
+    # `classified: <phrase> (osa category=<category>)`, which put the CATEGORY
+    # NAME after the phrase. For `rate_limit` the category name itself matches
+    # `rate.?limit`, so the annotation out-ranked the phrase and decided the
+    # classification. Measured: with the suffix last, a quota exhaustion
+    # emitting the exact string `Quota exceeded.` was still classified
+    # `ApiRateLimitError` -- and therefore still retried, against a wallet that
+    # will not refill -- instead of the `ApiUsageLimitError` that is in
+    # `exclude_exceptions`.
+    #
+    # Nothing else in `_CATEGORY_PHRASE` collided, so this was latent for every
+    # other category and live for the one we actually hit.
+    return f"[osa-driver] classified (osa category={key}): {phrase}"
 
 
 def _newer(a, b):
