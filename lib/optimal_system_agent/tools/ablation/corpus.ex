@@ -34,6 +34,17 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
     9. `window_exact.txt`     — exactly as many lines as the read window asks
                                 for, so "the window filled up" and "the file
                                 ended" are indistinguishable without a stamp.
+   10. `decoy_methods.py`     — the same method header appears twice, once near
+                                the top and once 40 lines down. An edit diff
+                                that locates its hunk by searching for
+                                old_string's first line anchors on the wrong
+                                one, and prints real code from a region the
+                                edit never touched.
+
+  Plus a small directory tree, `tree/`, for the search tools: source under
+  `tree/src/deep/`, a look-alike copy under `tree/node_modules/`, and a
+  dotfile. A search that skips either without saying so answers "not found"
+  when it means "not looked at".
 
   ## Determinism
 
@@ -57,7 +68,24 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
       "base64_blob.txt",
       "growing.log",
       "stable_config.yaml",
-      "window_exact.txt"
+      "window_exact.txt",
+      "decoy_methods.py"
+    ]
+  end
+
+  @doc """
+  Names under the search-tree fixture, relative to the corpus directory.
+
+  Kept separate from `names/0` because these live in subdirectories and exist
+  to be *walked*, not read — the ambiguity they create is about coverage, not
+  about content.
+  """
+  @spec tree_names() :: [{String.t(), String.t()}]
+  def tree_names do
+    [
+      {"tree/src/deep/target.py", "one\ntwo\ndef resolve_target():\nfour\nfive\n"},
+      {"tree/node_modules/leftpad/vendored.py", "def only_in_deps():\n    pass\n"},
+      {"tree/.hidden_config", "SENTINEL_HIDDEN=1\n"}
     ]
   end
 
@@ -79,6 +107,12 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
     File.mkdir_p!(dir)
 
     Enum.each(names(), fn name -> File.write!(Path.join(dir, name), content(name)) end)
+
+    Enum.each(tree_names(), fn {rel, body} ->
+      target = Path.join(dir, rel)
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, body)
+    end)
 
     dir
   end
@@ -163,6 +197,25 @@ defmodule OptimalSystemAgent.Tools.Ablation.Corpus do
       - clamp
     SENTINEL_CONFIG: stable
     """
+  end
+
+  def content("decoy_methods.py") do
+    # Two classes with a byte-identical method header. The edit under test
+    # targets the SECOND; a renderer that scans for the first line containing
+    # `    def apply(self):` finds the first, 40-odd lines away.
+    """
+    class Early:
+        def apply(self):
+            return "SENTINEL_DECOY"
+
+    """ <>
+      String.duplicate("# filler\n", 40) <>
+      """
+
+      class Target:
+          def apply(self):
+              return "SENTINEL_TARGET"
+      """
   end
 
   def content("window_exact.txt") do

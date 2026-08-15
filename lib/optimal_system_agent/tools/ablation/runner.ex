@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
   alias OptimalSystemAgent.Tools.Ablation
   alias OptimalSystemAgent.Tools.Ablation.Corpus
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEdit
+  alias OptimalSystemAgent.Tools.Builtins.FileGrep.Handler, as: FileGrep
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Handler, as: FileRead
   alias OptimalSystemAgent.Tools.Builtins.FileTransform.Handler, as: FileTransform
   alias OptimalSystemAgent.Tools.UseContext
@@ -124,7 +125,7 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
           a.id == b.id,
           {bp, ap} <- Enum.zip(b.probes, a.probes),
           bp.verdict != ap.verdict,
-          (bp.verdict == :ok) == from_ok? do
+          bp.verdict == :ok == from_ok? do
         %{
           scenario: b.id,
           probe: bp.id,
@@ -176,7 +177,10 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
       scenario_binary_adjacent(),
       scenario_deep_nesting(),
       scenario_exact_edit(),
-      scenario_fuzzy_edit()
+      scenario_fuzzy_edit(),
+      scenario_fuzzy_edit_decoy(),
+      scenario_grep_dependency_only(),
+      scenario_grep_absent()
     ]
   end
 
@@ -425,6 +429,7 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
           question: "What do the ordinary lines around the monster line say?",
           check: fn out ->
             t = joined(out)
+
             if String.contains?(t, "ok 999") and String.contains?(t, "ok 1001"),
               do: :ok,
               else: :lost
@@ -484,7 +489,9 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
             next_named? = Regex.match?(~r/byte_offset=\d+/, recovered)
 
             cond do
-              resumed? and next_named? -> :ok
+              resumed? and next_named? ->
+                :ok
+
               # The clamp-ablated run: the whole blob came back on call one.
               String.contains?(first, "blob1=") and
                   not Regex.match?(~r/truncat|clamp|omitted/i, first) ->
@@ -662,8 +669,16 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
     text_b = Enum.map_join(route_b, "\n", &to_text/1)
 
     %{
-      route_a: %{calls: length(route_a), tokens: Tokens.estimate(text_a), bytes: byte_size(text_a)},
-      route_b: %{calls: length(route_b), tokens: Tokens.estimate(text_b), bytes: byte_size(text_b)},
+      route_a: %{
+        calls: length(route_a),
+        tokens: Tokens.estimate(text_a),
+        bytes: byte_size(text_a)
+      },
+      route_b: %{
+        calls: length(route_b),
+        tokens: Tokens.estimate(text_b),
+        bytes: byte_size(text_b)
+      },
       # Did the cheaper route still say what happened? `file_transform` reports
       # per-operation counts, which is the fact a caller needs and the thing an
       # unanchored bulk edit cannot provide.
@@ -672,6 +687,107 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
   end
 
   # ── Tool invocation ────────────────────────────────────────────────────
+
+  defp scenario_fuzzy_edit_decoy do
+    # The case that produced 50 complaints in the benchmark corpus. `old_string`
+    # differs from the file only in trailing whitespace, so the match is fuzzy
+    # and a diff is rendered — and the first line of `old_string`
+    # (`    def apply(self):`) also occurs 40-odd lines earlier, in `class
+    # Early`. The old renderer anchored there and printed `SENTINEL_DECOY`, real
+    # code from a region the edit never touched. That is `:wrong`, not `:lost`:
+    # the model cannot tell it is being misled, and the transcripts show it
+    # paying a full file re-read to find out.
+    %{
+      id: :fuzzy_edit_decoy,
+      title: "fuzzy file_edit where old_string's first line also occurs elsewhere",
+      run: fn dir, ctx ->
+        path = Path.join(dir, "decoy_methods.py")
+        _ = read(dir, "decoy_methods.py", ctx, [])
+
+        [
+          edit(
+            path,
+            ctx,
+            "    def apply(self):   \n        return \"SENTINEL_TARGET\"   ",
+            "    def apply(self):\n        return \"SENTINEL_REPLACED\""
+          )
+        ]
+      end,
+      probes: [
+        %{
+          id: :hunk_is_the_edited_region,
+          question: "Where in the file did my edit land?",
+          check: fn out ->
+            t = joined(out)
+
+            cond do
+              String.contains?(t, "SENTINEL_DECOY") -> :wrong
+              String.contains?(t, "SENTINEL_REPLACED") -> :ok
+              true -> :lost
+            end
+          end
+        }
+      ]
+    }
+  end
+
+  defp scenario_grep_dependency_only do
+    # A symbol that exists ONLY under `node_modules`. The ordinary walk prunes
+    # that directory, so without the widening pass the answer is "No matches
+    # found." for a symbol that is right there — the corpus's most expensive
+    # failure, because the model believes it and moves on.
+    %{
+      id: :grep_dependency_only,
+      title: "pattern present only in a pruned dependency directory",
+      run: fn dir, ctx -> [grep(ctx, "only_in_deps", Path.join(dir, "tree"))] end,
+      probes: [
+        %{
+          id: :found_at_all,
+          question: "Does `only_in_deps` exist anywhere under this path?",
+          check: fn out ->
+            t = joined(out)
+
+            cond do
+              String.contains?(t, "vendored.py") -> :ok
+              Regex.match?(~r/no matches/i, t) -> :wrong
+              true -> :lost
+            end
+          end
+        }
+      ]
+    }
+  end
+
+  defp scenario_grep_absent do
+    # The other half, and the one that keeps the feature honest: a pattern that
+    # genuinely is not there must still report absence, and must not be made
+    # expensive by the widening pass.
+    %{
+      id: :grep_absent,
+      title: "pattern genuinely absent from the tree",
+      run: fn dir, ctx -> [grep(ctx, "zzz_absent_zzz", Path.join(dir, "tree"))] end,
+      probes: [
+        %{
+          id: :absence_is_reported,
+          question: "Is this pattern absent, or was part of the tree not searched?",
+          check: fn out ->
+            t = joined(out)
+
+            cond do
+              Regex.match?(~r/no matches found/i, t) and Regex.match?(~r/widen|covered/i, t) ->
+                :ok
+
+              Regex.match?(~r/no matches found/i, t) ->
+                :lost
+
+              true ->
+                :wrong
+            end
+          end
+        }
+      ]
+    }
+  end
 
   defp read(dir, name, ctx, opts) do
     input =
@@ -682,6 +798,10 @@ defmodule OptimalSystemAgent.Tools.Ablation.Runner do
       |> maybe_put("byte_limit", Keyword.get(opts, :byte_limit))
 
     FileRead.execute(input, ctx)
+  end
+
+  defp grep(ctx, pattern, path) do
+    FileGrep.execute(%{"pattern" => pattern, "path" => path}, ctx)
   end
 
   defp edit(path, ctx, old, new) do

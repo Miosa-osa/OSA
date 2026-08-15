@@ -20,13 +20,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert Tool.name() == Constants.tool_name()
     end
 
-    test "should_defer? is false" do
-      assert Tool.should_defer?() == true
+    # Always loaded, and the two flags must agree — `should_defer?/0` governs
+    # the native `tools` array (`Registry.list_active/0`) and `always_load?/0`
+    # governs the prompt prose. Disagreement is what previously made this tool
+    # billed on every request and callable on none. See
+    # `Tools.DeferFlagConsistencyTest`.
+    test "should_defer? is false, so the name reaches the native tools array" do
+      assert Tool.should_defer?() == false
     end
 
-    # False while `should_defer?/0` is true. See `Tools.DeferFlagConsistencyTest`.
-    test "always_load? is false, because this tool defers" do
-      assert Tool.always_load?() == false
+    test "always_load? is true, agreeing with should_defer?" do
+      assert Tool.always_load?() == true
     end
 
     test "concurrency_safe? is true" do
@@ -64,8 +68,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert CodeSymbolsShim.safety() == Tool.safety()
     end
 
-    test "CodeSymbols.always_load?() is false, matching the tool it shims" do
-      assert CodeSymbolsShim.always_load?() == false
+    test "CodeSymbols.always_load?() matches the tool it shims" do
+      assert CodeSymbolsShim.always_load?() == Tool.always_load?()
     end
 
     test "CodeSymbols has execute/2 (structured)" do

@@ -49,9 +49,16 @@ defmodule OptimalSystemAgent.Tools.DefaultToolboxTest do
     active_set = active()
     all_set = all()
 
+    # `code_symbols` was on this list and has been promoted back into the
+    # default set — see `docs/design/symbol-resolution.md` §4.3. Its deferral
+    # rested on "never called in the measurement", and the measurement it rested
+    # on came from a corpus in which the always-loaded search tool was itself
+    # returning false negatives (§6). Deferral also cost it a discovery round
+    # trip on the one route it exists to shorten: 312 of 862 corpus greps are
+    # immediately followed by a read of a guessed window.
     for name <- ~w(browser skill_manager semantic_search codebase_explore use_skill
                    fleet send_message scratchpad task_resume task_stop task_output
-                   code_symbols github workspace_map) do
+                   github workspace_map) do
       refute MapSet.member?(active_set, name),
              "#{name} is back in the default set — it costs its schema on every request"
 

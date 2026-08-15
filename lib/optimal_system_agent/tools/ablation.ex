@@ -44,6 +44,14 @@ defmodule OptimalSystemAgent.Tools.Ablation do
     * `:edit_diff_echo` — echoing a synthetic unified diff back for an edit
       whose match was EXACT (currently OFF in production; the flag exists to
       measure what turning it off bought).
+    * `:edit_diff_anchor` — computing the fuzzy-match diff from the real before
+      and after content instead of guessing the hunk's position by scanning for
+      the first line that CONTAINS `old_string`'s first line. Off restores the
+      guess, which is what shipped until now.
+    * `:grep_coverage` — `file_grep` widening its search to ignored, hidden and
+      dependency files when the ordinary search finds nothing, and naming its
+      coverage limit when it truncates. Off restores a bare
+      "No matches found." for both cases.
 
   `:edit_diff_echo` is the odd one out: it is the only flag whose ON state is
   NOT production, because the feature was already removed. Its default is
@@ -59,7 +67,9 @@ defmodule OptimalSystemAgent.Tools.Ablation do
     read_stamps: true,
     read_unchanged_suppression: true,
     read_line_clamp: true,
-    edit_diff_echo: false
+    edit_diff_echo: false,
+    edit_diff_anchor: true,
+    grep_coverage: true
   }
 
   @doc "Every known flag with its production value."

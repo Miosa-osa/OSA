@@ -1,6 +1,6 @@
 # Symbol resolution: what to build, and what not to
 
-**Date** 2026-08-15 · **Status** cheap path shipped; LSP client designed and **not recommended for the current benchmark**
+**Date** 2026-08-15 · **Status** cheap path shipped; `code_symbols` now always-loaded; LSP client designed and **not recommended for the current benchmark**
 **Targets** `docs/roadmap-beat-the-field.md` Tier 1 item 4 ("An LSP client. Codex has one.")
 **Companion to** `docs/design/context-free-edits.md` (the same problem, on the write side)
 
@@ -225,16 +225,36 @@ Existing: Python, JS/TS, Go, Rust, Ruby, Java/Kotlin, Elixir.
 C function detection excludes prototypes (a trailing `;`) and the control
 keywords, which otherwise match the same `name(args)` shape.
 
-### 4.3 What was NOT changed, and why
+### 4.3 It is now always loaded
 
-**It is still deferred.** `should_defer?` stays `true` and `always_load?` stays
-`false`. The measured demand is 1 call in 6,637, and a schema at the front of the
-cached prefix is paid for on every request of every session forever. Improving
-the tool does not by itself justify the prefix; *demonstrated* demand would.
-`tool_search` + `ToolDiscovery.widen/2` make it reachable in the meantime, at the
-cost of one discovery round trip.
+`should_defer?` is `false` and `always_load?` is `true`, and they agree — the
+disagreement between them was the earlier defect (billed on every request,
+callable on none).
 
-This is the honest state and it is also the open question — see §6.
+The deferral argument rested on "invoked zero times", which was true and was not
+evidence about demand: for most of that window the tool was not callable, and
+when it was it returned an outline, so it could not end a lookup. What is
+measured is the behaviour it replaces — 312 grep-then-read pairs across 118
+transcripts, 2.6 per task, at 1,381 bytes and two round trips each against 517
+bytes and one.
+
+**Measured prefix cost of the change** *[measured, `Registry.list_active/0`
+schemas as JSON, OSA's own estimator]*:
+
+| | tools in array | bytes | est tokens |
+|---|---:|---:|---:|
+| before | 23 | 37,542 | 9,400 |
+| after (`code_symbols` + `file_grep` routing line) | 24 | 38,841 | 9,724 |
+| **delta** | +1 | **+1,299** | **+324** |
+
+Of that, `code_symbols`'s own schema is 976 bytes and the routing sentence added
+to `file_grep`'s description is the remainder. Note that the ~600-byte estimate
+in §6 was low by a third — the schema is bigger than the prose, because the
+parameter descriptions are re-encoded alongside it.
+
+This is a one-time change to the assembled prefix, which is what the cache
+tolerates: hits depend on the prefix being byte-identical across turns *within*
+a session, and nothing here varies per turn.
 
 ---
 
@@ -288,27 +308,73 @@ that can stall a turn. Against a measured demand of 4 instances in 118 sessions.
 
 ---
 
-## 6. Still open
+## 6. `file_grep` was defective, and it is the more important finding
 
-* **Adoption.** The capability is measured; the *use* of it is not, and that was
-  the explicit lesson of `file_transform` — a tool the model never calls is worth
-  zero. `code_symbols` is deferred, so adoption requires a `tool_search` first,
-  and the honest expectation is that adoption stays near zero until either the
-  tool is always-loaded or `file_grep`'s description routes to it. Both are the
-  prompt owner's call; text is handed over in §7 of
-  `docs/design/context-free-edits.md`'s successor note and in the report
-  accompanying this document.
-* **The prefix arithmetic, once demand exists.** `code_symbols`'s schema is
-  ~600 bytes. Against a measured saving of ~860 bytes and one round trip per
-  grep-then-read pair, and 2.6 such pairs per task in the corpus, always-loading
-  it pays for itself only if the model calls it more than about once per task —
-  under a prompt cache that never hits. Under a working cache the threshold is far
-  lower. Both numbers should be measured before the flag moves, not argued.
+§2.1 above prices the cheap path against `file_grep` on the assumption that
+`file_grep` works. It did not. Chasing the 262 shell greps and the 16 explicit
+complaints produced a defect chain that invalidates any conclusion drawn from
+"the model did not call X" on this corpus, including the one this document
+originally drew about `code_symbols`.
+
+**Every `file_grep` call in all 118 sessions was served by the pure-Elixir
+fallback, not by ripgrep.** *[measured]* `System.cmd("rg", …)` raises `:enoent`
+when the binary is not on the BEAM's PATH and the rescue converts that to a
+silent fallback. The proof is in the corpus rather than in the environment: of
+the 50 successful greps that asked for `context_lines`, **zero** results contain
+a context line, and only the fallback ignores that parameter.
+
+That fallback had three defects, none of them announced:
+
+| | effect |
+|---|---|
+| `Path.wildcard("**/*") \|> Enum.take(500)` | On the NodeBB workspace: **500 of 54,905 files searched — 0.9%** — stopping inside `build/`, never reaching `src/` or `test/`. Reported as "No matches found." |
+| `Path.join(path, glob)` | A bare `*.py` matched the **top level only**, where `rg -g` matches at any depth. |
+| `context_lines` unread | Silently dropped on all 50 calls that asked for it. |
+
+Corpus outcomes, 862 `file_grep` calls *[measured]*: 535 matched (62%), 285
+returned "No matches found." (33%), 42 errored on a missing path (5%). Of the
+327 failures, **58 were followed within six calls by a `shell_execute` grep for
+the same token that DID return matches** — 21 distinct sessions. The model said
+so in as many words: *"the grep tool seems to have a systemic issue with this
+repo"*, *"the grep for `parent_link` returned nothing — that's odd"*, *"the grep
+tool seems unreliable here"*.
+
+Fixed: the walk prunes dependency directories at the directory level so the
+budget buys source files, the cap is 20,000 and **says so when it bites**, `glob`
+is recursive and matches basenames the way `rg -g` does, `context_lines` is
+implemented in ripgrep's own output shape, and both backends widen — ripgrep to
+`--no-ignore --hidden`, the fallback to the pruned directories — when the
+ordinary search comes back empty, labelling what they found and where. Priced by
+ablation (`:grep_coverage`): the widening and the coverage note cost **158 tokens
+across the scenario set (1%)**, and removing them turns one probe `wrong` (a
+symbol that exists is reported absent) and one `lost`.
+
+The same measurement retires the argument this document used to make. "The model
+never called `code_symbols`" was offered as evidence of no demand; on a corpus
+where the always-loaded search tool was itself returning false negatives, the
+absence of a call is not evidence of anything.
+
+## 7. Still open
+
+* **Adoption.** The capability is measured; the *use* of it is not. It is now
+  always-loaded and `file_grep`'s description routes to it, which removes both
+  structural reasons it could not be called. Whether it IS called is the number
+  to take from the next benchmark run, and it is the number that decides whether
+  the +324 prefix tokens stay.
+* **Read re-use, which suppression cannot reach.** 708 of 1,142 corpus
+  `file_read` calls (62%, 1.27 MB of 2.63 MB) re-read a path already read in the
+  same session — but only **19 of them, 20 KB, 0.8% of the read payload**, ask
+  for the identical window. Path-and-range-keyed suppression is working exactly
+  as designed and 0.8% is its entire ceiling on this corpus. The bytes are in
+  **overlapping** windows (293 calls, 412 KB) and whole-file re-reads (177 calls,
+  395 KB). Reclaiming those needs range subtraction — "you already hold 40–80;
+  here is 81–120" — not a same/different verdict on the whole call.
 * **Cross-file.** Everything here is one file. `file_grep` remains the cross-file
-  answer and is good at it (median result 238 bytes). A repository-wide symbol
-  index built in-process — the ctags idea, without ctags — is the next rung, and
-  it is only worth climbing on a workload where §2.4's median is not zero.
-* **`file_grep`'s reliability.** 272 `shell_execute` calls in the corpus contain
-  `grep`, several with explicit complaints that the grep tool "seems to have a
-  systemic issue with this repo". Unchased, and it undermines the cheap path more
-  than the absence of an LSP does.
+  answer. A repository-wide symbol index built in-process — the ctags idea,
+  without ctags — is the next rung, and it is only worth climbing on a workload
+  where §2.4's median is not zero.
+* **ripgrep's actual absence.** The fallback is now correct, but it is still a
+  fallback: an Elixir tree walk is seconds where ripgrep is milliseconds (1.4 s
+  for one search of the 55k-file NodeBB workspace). Putting `rg` on the daemon's
+  PATH is worth more than any further tuning of the fallback, and nothing in the
+  tool can do it.

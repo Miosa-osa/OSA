@@ -9,20 +9,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Prompt do
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
 
     """
-    Find a definition in a source file, without reading the file.
+    Read one definition out of a source file, without reading the file.
 
-    With `name`: returns the source of that one function or class and its line
-    range — the definition, not a guessed window around it. This is the call to
-    make instead of grepping for `def foo` and then reading 40 lines near the
-    hit; it costs the definition, not the file.
+    With `name`: the source of that one function or class plus its line range —
+    the definition, not a guessed window around it. Make this call instead of
+    grepping for `def foo` and then reading 40 lines near the hit.
 
-    Without `name`: lists every function, class and module defined in the file,
-    with line numbers.
+    Without `name`: every function, class and module in the file, with line
+    numbers.
 
-    `path` must be absolute, and only this file is examined — a name defined
-    elsewhere will not be found. Languages: C/C++, Python, JavaScript/TypeScript,
-    Go, Rust, Ruby, Java/Kotlin, Elixir, shell. For full file contents use
-    `#{file_read_name}` instead.
+    Absolute `path`, and only that one file is examined. C/C++, Python, JS/TS,
+    Go, Rust, Ruby, Java/Kotlin, Elixir, shell. Whole files: `#{file_read_name}`.
     """
   end
 

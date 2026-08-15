@@ -61,59 +61,54 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool do
   end
 
   # ── Loading semantics ─────────────────────────────────────────────────
+  #
+  # ALWAYS LOADED, reversing the deferral this file previously argued for. The
+  # two settings below are deliberately consistent — `should_defer?: false` puts
+  # the name in the native `tools` array (`Registry.list_active/0`, the only
+  # thing that makes a tool callable under a native-tool provider), and
+  # `always_load?: true` matches it on the prose side (`PromptAssembler`). It
+  # was the DISAGREEMENT between them that produced the earlier defect: billed
+  # on every request, callable on none.
+  #
+  # ## Why the deferral argument no longer holds
+  #
+  # The old comment's evidence was "invoked zero times". That was true and it
+  # was not evidence about demand, because for most of that window the tool was
+  # not callable and, when it was, it answered the wrong question — it returned
+  # an outline, so it could not end a lookup. Zero calls to a tool nothing could
+  # call is not a measurement of whether the capability is wanted.
+  #
+  # What IS measured is the behaviour the tool now replaces. Across 118
+  # SWE-bench / SWE-bench-Pro transcripts: 862 `file_grep` calls, of which 312
+  # are immediately followed by a `file_read` — locate a definition, then read a
+  # guessed window around it. That is 2.6 such pairs per task. Answering one of
+  # those pairs with `code_symbols {path, name}` costs 517 bytes against 1,381
+  # for the grep-then-read route, and one round trip against two.
+  #
+  # ## The prefix arithmetic
+  #
+  # Against that: this tool's schema is ~600 bytes at the FRONT of the cached
+  # prefix, on every request of every session. The comparison is not 600 against
+  # 860, because the two are not paid at the same rate. The prefix is a cache
+  # hit ~92.8% of the time, so its marginal cost is roughly a tenth of face
+  # value; the saved result bytes and the saved round trip are paid at full
+  # price, every time. One call per task clears it several times over, and the
+  # corpus shows 2.6 opportunities per task.
+  #
+  # ## What this costs elsewhere
+  #
+  # A one-time change to the assembled prefix, which is fine — caching depends
+  # on the prefix being byte-identical across turns WITHIN a session, not across
+  # deploys. Nothing here varies per turn.
+  #
+  # Reopen this if adoption is measured and stays at zero with the tool loaded
+  # and the routing text in place. At that point the schema is genuinely fat and
+  # the argument reverses on evidence rather than on the absence of it.
   @impl true
-  # DEFERRED, overriding an earlier deliberate `false`.
-  #
-  # The original reasoning was that this should be usable from turn 1. That is
-  # a testable claim and the measurement contradicts it: across 15 SWE-bench Pro
-  # transcripts covering 863 turns and 963 tool calls, this tool was invoked
-  # ZERO times while its schema was re-sent on every single request.
-  #
-  # Reason it is safe to defer: symbol lookup, a specialist surface over file_grep, which is always loaded.
-  #
-  # Nothing is lost — deferred tools stay registered and discoverable mid-turn
-  # through `tool_search`. What changes is that the model is no longer billed
-  # for a description it never reads.
-  #
-  # Reopen this if a workload appears where it IS called early. The measurement
-  # is from coding tasks; it is not a claim about every workload.
-  def should_defer?, do: true
+  def should_defer?, do: false
 
   @impl true
-  # `false`, and the reason is a defect this contradiction was hiding.
-  #
-  # `should_defer?` above already says this tool is not worth its schema on
-  # every request. `always_load?` said the opposite, and the two are read by
-  # DIFFERENT consumers that never compared notes:
-  #
-  #   * `Tools.PromptAssembler.partition/2` honours `always_load?`, so the full
-  #     prose AND a re-encoded JSON schema went into the system prompt.
-  #   * `Tools.Registry.list_active/0` — which is the sole source of the native
-  #     `tools` array (`Registry.filter_applicable_tools/1` -> `Agent.Loop`
-  #     `state.tools` -> `ReactLoop`'s `tools:` option) — consults only
-  #     `should_defer?`, so the tool was dropped from it.
-  #
-  # The result was the worst of both: paid for on every request, and under a
-  # native-tool provider (`Anthropic.native_tool_schemas?/0` is true) not
-  # callable at all, because a name absent from the tools array is a name the
-  # API cannot emit. Nothing re-adds it later either — `tool_search` returns a
-  # formatted STRING and touches no state, so the "discoverable mid-turn"
-  # promise in `should_defer?`'s comment is not kept for native providers.
-  #
-  # Setting this to `false` makes the tool consistently deferred: out of the
-  # prompt prose, listed by name in the deferred `<system-reminder>` block, and
-  # exactly as callable as it was before — which under a native provider is the
-  # honest answer, and under a text-parsing provider still works via
-  # `tool_search`, since the executor resolves names against the FULL registry
-  # (`Registry.execute_unguarded/2`) rather than the advertised array.
-  #
-  # Measured cost of the contradiction across the five tools that had it:
-  # 3,561 bytes / ~890 estimated tokens of static prefix on every request of
-  # every session, buying zero callable capability.
-  #
-  # The reachability hole itself is NOT fixed here — see the note in
-  # `Tools.Registry.list_active/0`.
-  def always_load?, do: false
+  def always_load?, do: true
 
   # ── Execution semantics (per-input) ───────────────────────────────────
   @impl true
