@@ -13,11 +13,39 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
     - This spawns the tool execution as a supervised Task.
     - `collect_results/1` waits for all in-flight tools to complete.
     - Results are returned in the same order as tool_calls for message assembly.
+
+  ## Concurrency
+
+  This is the loop's SECOND tool-dispatch site (`ToolOrchestrator` is the
+  first), and only the Anthropic provider reaches it — `providers/anthropic.ex`
+  is the sole emitter of `{:tool_use_block, _}`. It used to spawn every tool
+  call as an unguarded Task, so a batched Anthropic turn ran all its tool calls
+  fully concurrently. Two `file_edit` calls against one file are a
+  read-modify-write race: last write wins, no error, and the model is told both
+  landed. Reproduced against the real tool in
+  `test/agent/loop/streaming_tool_concurrency_test.exs`.
+
+  The decision of what may run alongside what is NOT re-implemented here. Each
+  block asks `ToolOrchestrator.concurrency_safe?/2` — the same function
+  `ToolOrchestrator.dispatch/3` uses — and the same barrier semantics are
+  applied incrementally:
+
+    * a **safe** call starts as soon as the current barrier (if any) is done;
+    * an **unsafe** call is a barrier — it waits for everything already in
+      flight, and every later call waits for it.
+
+  The eager-start property is preserved. Safe calls (reads, greps, globs, web
+  fetches — the batches we actively want more of) still fire the instant their
+  block finishes parsing, long before the assistant message completes. Only
+  calls that would genuinely corrupt each other wait, and the wait happens
+  INSIDE the spawned Task, so `tool_block_complete/3` never blocks the
+  streaming callback.
   """
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
+  alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
 
   @doc """
   Start a new streaming executor context.
@@ -32,6 +60,12 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       completed: %{},
       # tool_use_ids in order received
       order: [],
+      # The pid of the most recent BARRIER (concurrency-unsafe) call, or nil.
+      # Every later call waits on it before touching anything.
+      barrier: nil,
+      # pids of concurrency-safe calls fired since that barrier. The next
+      # barrier waits on all of them.
+      open: [],
       # tool_use_id => the tool_call map that was fired. Kept so an ERROR path
       # (idle timeout, dropped connection) can rebuild the assistant message
       # that owns these tool_use ids — without it, already-executed tool results
@@ -42,10 +76,39 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
 
   @doc """
   Called when a complete tool_use block is detected during streaming.
-  Immediately fires the tool execution in a supervised Task.
+  Fires the tool execution in a supervised Task immediately.
+
+  "Immediately" means the Task is spawned immediately — this function never
+  blocks the provider's streaming callback. Whether the Task *runs* immediately
+  depends on `ToolOrchestrator.concurrency_safe?/2`: a concurrency-unsafe call
+  waits inside its own Task for the calls already in flight. See the moduledoc.
   """
   def tool_block_complete(ctx, tool_call, state) do
     executor = executor_for(state)
+
+    safe? = safe_to_run_alongside?(tool_call, state)
+    barrier = Map.get(ctx, :barrier)
+    open = Map.get(ctx, :open, [])
+
+    # Barrier semantics, applied incrementally — identical to the batching
+    # `ToolOrchestrator.execution_batches/2` performs on a complete list.
+    predecessors =
+      if safe?,
+        do: List.wrap(barrier),
+        else: Enum.uniq(open ++ List.wrap(barrier))
+
+    if predecessors != [] do
+      # Above debug on purpose. Every concurrency defect found in this loop so
+      # far was silent, and "the model asked for two edits and got them one at
+      # a time" is exactly the kind of thing whose absence from the logs made
+      # the original bug invisible.
+      Logger.info(
+        "[streaming_tools] serialising #{tool_call.name} (#{tool_call.id}) behind " <>
+          "#{length(predecessors)} in-flight call(s) — #{if safe?, do: "barrier", else: "unsafe call"}"
+      )
+
+      emit_serialized_telemetry(tool_call, state, safe?, length(predecessors))
+    end
 
     # Same process-boundary problem as ToolOrchestrator: `Cwd.get/0` reads the
     # process dictionary and a Task does not inherit one, so a tool spawned here
@@ -61,18 +124,83 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Task.Supervisor.async_nolink(
         OptimalSystemAgent.TaskSupervisor,
         fn ->
+          # Wait INSIDE the task, never in the caller: the caller is the agent
+          # loop draining the provider's streaming mailbox, and blocking it
+          # would stall the stream itself.
+          await_predecessors(predecessors)
           OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
           if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
           executor.execute_tool_call(tool_call, state)
         end
       )
 
+    {barrier, open} =
+      if safe?,
+        do: {barrier, [task.pid | open]},
+        else: {task.pid, []}
+
     %{
       ctx
       | in_flight: Map.put(ctx.in_flight, tool_call.id, task),
         order: ctx.order ++ [tool_call.id],
+        barrier: barrier,
+        open: open,
         calls: Map.put(Map.get(ctx, :calls, %{}), tool_call.id, tool_call)
     }
+  end
+
+  # The loop's ONE concurrency decision, borrowed rather than copied. A raw
+  # `state` map is all the streaming path has; the orchestrator accepts it and
+  # builds the `UseContext` itself.
+  #
+  # Fail-closed on any failure: if the decision cannot be made, serialise. The
+  # cost of a wrong `false` is latency; the cost of a wrong `true` is a lost
+  # file.
+  defp safe_to_run_alongside?(tool_call, state) do
+    ToolOrchestrator.concurrency_safe?(tool_call, state)
+  rescue
+    e ->
+      Logger.warning(
+        "[streaming_tools] concurrency check failed for #{inspect(Map.get(tool_call, :name))}: " <>
+          "#{Exception.message(e)} — serialising"
+      )
+
+      false
+  catch
+    :exit, _ -> false
+  end
+
+  # Block until each predecessor task process has exited. `Process.monitor/1`
+  # on an already-dead pid delivers `:DOWN` with `:noproc` straight away, so
+  # this needs no timeout and cannot wedge on a predecessor that finished
+  # before we got here. A predecessor that is brutal-killed (interrupt,
+  # `discard/1`) also produces `:DOWN`, so a cancelled turn never leaves a
+  # successor waiting forever.
+  defp await_predecessors([]), do: :ok
+
+  defp await_predecessors(pids) do
+    Enum.each(pids, fn pid ->
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      end
+    end)
+  end
+
+  defp emit_serialized_telemetry(tool_call, state, safe?, waiting_on) do
+    :telemetry.execute(
+      [:osa, :tools, :serialized],
+      %{count: 1, waiting_on: waiting_on},
+      %{
+        tool: Map.get(tool_call, :name),
+        session_id: Map.get(state, :session_id),
+        reason: if(safe?, do: :barrier, else: :unsafe),
+        path: :streaming
+      }
+    )
+  rescue
+    _ -> :ok
   end
 
   @doc """
@@ -159,7 +287,7 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Task.shutdown(task, :brutal_kill)
     end)
 
-    %{ctx | in_flight: %{}, completed: %{}, order: [], calls: %{}}
+    %{ctx | in_flight: %{}, completed: %{}, order: [], calls: %{}, barrier: nil, open: []}
   end
 
   @doc """

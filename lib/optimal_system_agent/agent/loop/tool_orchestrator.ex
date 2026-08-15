@@ -175,12 +175,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     Enum.split_with(tool_calls, &concurrency_safe?(&1, ctx))
   end
 
+  @doc """
+  Is this ONE tool call safe to run alongside others?
+
+  Public because it is the loop's **single** concurrency decision, and there is
+  more than one dispatch site. `StreamingToolExecutor` fires tool calls
+  eagerly, mid-stream, and used to spawn every one of them as an unguarded
+  Task — so on the Anthropic path (the only provider that emits
+  `:tool_use_block`) a batched turn ran two `file_edit` calls against one file
+  simultaneously and silently lost one of them. It now asks THIS function.
+
+  Duplicating the check in the streaming path would have been the same shape of
+  mistake that produced the drift this codebase has been paying down: two
+  copies of a capability check, one of which is quietly wrong. There is one
+  copy, here.
+
+  Per-input — looks up the tool's module and asks
+  `LegacyAdapter.concurrency_safe?(mod, input, ctx)`. Unknown tools are
+  **serial** (fail-closed). Accepts either a `UseContext` or a raw loop state
+  map (the streaming path has only the latter).
+
+  Note this is a property of ONE call, not of a PAIR. Combination safety comes
+  from how callers batch: an unsafe call is a barrier, so everything queued
+  before it drains first and nothing queued after it starts until it is done.
+  That is why no path comparison (or path normalisation) happens here — a
+  mutating tool is unsafe against every other call regardless of which file it
+  names.
+  """
+  @spec concurrency_safe?(tool_call(), UseContext.t() | map()) :: boolean()
+  def concurrency_safe?(tc, %UseContext{} = ctx), do: safe_call?(tc, ctx)
+  def concurrency_safe?(tc, state) when is_map(state), do: safe_call?(tc, build_use_context(state))
+
   # ── Private ───────────────────────────────────────────────────────────
 
   defp execution_batches(tool_calls, %UseContext{} = ctx) do
     {batches, safe_acc} =
       Enum.reduce(tool_calls, {[], []}, fn tc, {batches, safe_acc} ->
-        if concurrency_safe?(tc, ctx) do
+        if safe_call?(tc, ctx) do
           {batches, [tc | safe_acc]}
         else
           batches = flush_safe_batch(batches, safe_acc)
@@ -191,13 +222,47 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     batches
     |> flush_safe_batch(safe_acc)
     |> Enum.reverse()
+    |> tap(&report_serialization(&1, tool_calls, ctx))
+  end
+
+  # Observability parity with `StreamingToolExecutor`. Only speaks up when a
+  # BATCH was actually split — a lone tool call is not "serialised", it is just
+  # a tool call, and saying so on every turn would bury the signal.
+  defp report_serialization(batches, tool_calls, %UseContext{} = ctx) do
+    serial = for {:serial, tc} <- batches, do: tc
+
+    if length(tool_calls) > 1 and serial != [] do
+      names = serial |> Enum.map(&Map.get(&1, :name)) |> Enum.join(", ")
+
+      Logger.info(
+        "[tool_orchestrator] serialising #{length(serial)} of #{length(tool_calls)} " <>
+          "batched call(s) — not concurrency-safe: #{names}"
+      )
+
+      Enum.each(serial, fn tc ->
+        :telemetry.execute(
+          [:osa, :tools, :serialized],
+          %{count: 1, waiting_on: length(tool_calls) - 1},
+          %{
+            tool: Map.get(tc, :name),
+            session_id: ctx.session_id,
+            reason: :unsafe,
+            path: :orchestrator
+          }
+        )
+      end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp flush_safe_batch(batches, []), do: batches
   defp flush_safe_batch(batches, safe_acc), do: [{:parallel, Enum.reverse(safe_acc)} | batches]
 
-  defp concurrency_safe?(tc, %UseContext{} = ctx) do
-    mod = lookup_module(tc.name)
+  defp safe_call?(tc, %UseContext{} = ctx) do
+    mod = lookup_module(Map.get(tc, :name))
     input = decode_arguments(tc)
 
     cond do

@@ -78,8 +78,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Rollback.Tool do
   # ── Execution semantics (per-input) ───────────────────────────────────
 
   @impl true
-  # restore mutates the filesystem but list/diff are safe; fail conservative.
-  def concurrency_safe?(_input, _ctx), do: true
+  # The comment here used to say "restore mutates the filesystem but list/diff
+  # are safe; fail conservative" — and then returned `true` for all three, so
+  # a `restore` could rewrite the working tree while another tool read it. The
+  # split it described is now the split it performs (same shape as `scratchpad`
+  # and `config`): inspection is parallel, restoration is a barrier.
+  def concurrency_safe?(%{"action" => action}, _ctx) when action in ["list", "diff"], do: true
+  def concurrency_safe?(_input, _ctx), do: false
 
   @impl true
   def read_only?(_input, _ctx), do: false
