@@ -18,11 +18,51 @@ impl App {
                     "Backend healthy: {} v{} ({}/{})",
                     health.status, health.version, health.provider, health.model
                 );
-                // The backend's version is the single source of truth for the
-                // displayed version (its root VERSION file) — record it so the
-                // status bar, welcome banner, and /version never show a stale
-                // compile-time value.
-                crate::config::set_runtime_version(&health.version);
+                // Daemon version skew.
+                //
+                // The backend survives TUI exit and can be days older than the
+                // TUI attached to it. `bin/osa` self-repairs a stale daemon on
+                // launch, but deliberately refuses while another TUI is
+                // attached, and running `osagent` directly bypasses that check
+                // altogether - so a mismatch arrives here unannounced. A user
+                // reported a hang "on the old version"; an hour went into
+                // establishing that the daemon was stale, not the code.
+                //
+                // Two things happen on mismatch, and the second matters more.
+                let tui_version = crate::config::osa_version();
+                let skew = should_warn_version_skew(
+                    tui_version,
+                    &health.version,
+                    self.version_skew_notice_shown,
+                );
+
+                // 1. The TUI stops ADOPTING the daemon's version as its own.
+                //
+                // This line used to run unconditionally, and it is the reason
+                // the bug was invisible: a stale daemon silently rewrote the
+                // status-bar chip, the welcome banner and `/version` to the
+                // OLD number, so every surface the user could check agreed with
+                // the daemon and none of them revealed the disagreement. The
+                // comment it replaces called the backend "never stale", which
+                // is exactly backwards for a process that outlives its client.
+                // On agreement the behaviour is unchanged; only on mismatch does
+                // the TUI keep its own number.
+                if !skew {
+                    crate::config::set_runtime_version(&health.version);
+                }
+
+                // 2. Say so, once, in the transcript.
+                if skew {
+                    warn!(
+                        "Version skew: TUI v{} attached to backend v{}",
+                        tui_version, health.version
+                    );
+                    self.version_skew_notice_shown = true;
+                    self.chat.add_system_message(
+                        &version_skew_line(tui_version, &health.version),
+                        "warning",
+                    );
+                }
                 // One writer for every surface (header / status bar / sidebar /
                 // welcome), so the banner and the status bar cannot show
                 // different models on the same screen.
@@ -185,6 +225,7 @@ impl App {
     pub(super) fn handle_agent_response(
         &mut self,
         response: String,
+        response_type: &str,
         signal: Option<crate::client::types::Signal>,
         message_id: Option<String>,
     ) {
@@ -281,6 +322,23 @@ impl App {
                     self.input.insert_str(&prev);
                 }
             }
+        } else if is_system_authored(response_type) && finalized.is_some() {
+            // The backend says this text was written by a loop guard, a
+            // control-flow stop, or an error - NOT by the model.
+            //
+            // A user typed "ok how about now" and got the doom-loop guard's
+            // internal advice ("3 consecutive generations produced no tool
+            // calls... call a concrete tool to move forward") rendered under the
+            // agent header as if it were the answer. The text was addressed to
+            // the model; the user was never its audience.
+            //
+            // `add_system_message` renders a left rule in faint style with no
+            // agent header and no agent glyph, which is exactly the distinction
+            // that was missing. The text itself is unchanged - only the
+            // attribution is corrected.
+            self.chat.end_agent_chunk_flow();
+            self.chat
+                .add_system_message(&finalized.unwrap_or_default(), "warning");
         } else if let Some(final_text) = finalized {
             // `final_text` is the backend's message, which has already REPLACED
             // the streamed accumulation (falling back to it only when the final
@@ -354,10 +412,12 @@ impl App {
         }
         self.task_checklist.clear();
 
-        // Transition back to idle
-        if self.state.is_processing() {
-            self.transition(AppState::Idle);
-        }
+        // Transition back to idle — including a `Processing` parked on the
+        // return stack by an overlay opened mid-turn. A bare `is_processing()`
+        // guard here left that parked copy alive after the turn it belonged to
+        // had ended, and `exit_overlay` restored it; from then on every submit
+        // was queued and never drained. See `land_idle_including_parked`.
+        self.land_idle_including_parked();
 
         // Update signal in status bar
         if let Some(signal) = signal {
@@ -477,6 +537,28 @@ impl App {
         // context, so the work is kept rather than re-derived. Steering remains
         // available — it is just explicit now (`/steer`, handled above), which
         // is the right shape for a gesture that overrides work in flight.
+        // `/clear` is the exception, because queueing it inverts its meaning.
+        // It is the gesture for "stop, throw this away, start again" — the one
+        // command a user reaches for when a turn has gone wrong — and the gate
+        // below parked it behind the very turn it was meant to escape. Nothing
+        // visible happened, so the user pressed it again, and again; each press
+        // added another copy to the queue, and when the turn finally ended they
+        // all fired in a row. That is the "ℹ Chat cleared" repeating down the
+        // screen in the reported paste.
+        //
+        // The backend agrees with this reading: `POST /sessions/:id/clear`
+        // opens by cancelling the in-flight turn (`Loop.cancel/1`) precisely so
+        // that clearing while busy is legitimate. So the local turn is torn
+        // down here to match, rather than left running against a session that
+        // no longer exists.
+        if text == "/clear" && self.turn_is_active() {
+            self.finalize_turn_state();
+            self.land_idle_including_parked();
+            self.handle_command(text);
+            self.recompute_layout();
+            return;
+        }
+
         if self.turn_is_active() {
             self.enqueue_message(text);
             return;
@@ -1971,6 +2053,77 @@ pub(crate) fn join_queued_for_composer(items: &[String], current: &str) -> Strin
     parts.join("\n")
 }
 
+/// Whether this terminal text was authored by the harness rather than by the
+/// model.
+///
+/// The backend stamps `response_type` on every `agent_response`: `"agent"` for a
+/// real model answer, `"plan"`/`"genre"` for other model-authored surfaces, and
+/// `"system"` when a doom-loop guard, a control-flow stop (budget cap, max
+/// iterations, pause) or an error wrote the text instead.
+///
+/// This exists because the field was already on the wire, already parsed, and
+/// then bound to `_` and thrown away - so a guard's internal advice reached the
+/// user under the agent header, indistinguishable from an answer. A user typed
+/// "ok how about now" and was shown "Stopped: 3 consecutive generations produced
+/// no tool calls... call a concrete tool to move forward", which is a note the
+/// harness wrote to itself.
+///
+/// Unknown values are treated as model-authored. That is the compatible
+/// direction: an older backend sends `"agent"`, and a newer one that invents a
+/// value this build has not heard of must not have every answer hidden behind
+/// system chrome.
+pub(crate) fn is_system_authored(response_type: &str) -> bool {
+    matches!(response_type.trim(), "system" | "guard" | "control" | "error")
+}
+
+/// Whether to warn that the backend daemon is a different build from this TUI.
+///
+/// The daemon outlives the TUI. `bin/osa` already self-repairs a stale one on
+/// launch, but it deliberately refuses while another TUI is attached, and
+/// launching `osagent` directly bypasses that check entirely - so a mismatch
+/// reaches this process unannounced. A user reported a hang "on the old
+/// version" and it took an hour to establish the daemon was stale rather than
+/// the code.
+///
+/// Warn, never refuse. A refusal on a patch-level difference would be hostile,
+/// and the TUI has no way to know the mismatch is the cause of anything.
+///
+/// Compared on the raw strings from `config::osa_version()` and
+/// `HealthResponse.version`, NOT on the display forms:
+/// `config::pad_version_display` zero-pads the patch (`1.0.98` -> `1.0.098`), so
+/// comparing padded against unpadded would report a mismatch on every single
+/// connect. Empty on either side means "cannot tell", which is not a mismatch.
+pub(crate) fn should_warn_version_skew(
+    tui_version: &str,
+    daemon_version: &str,
+    already_shown: bool,
+) -> bool {
+    if already_shown {
+        return false;
+    }
+    let tui = tui_version.trim();
+    let daemon = daemon_version.trim();
+    !tui.is_empty() && !daemon.is_empty() && tui != daemon
+}
+
+/// The version-skew notice.
+///
+/// Deliberately does NOT tell the user to run `osa stop`. `bin/osa` states the
+/// intent explicitly: *"run osa stop first" is not an instruction anyone should
+/// ever be given, and the word "daemon" is not one they should ever have to
+/// learn.* Re-running `osa` with no TUI attached performs the repair by itself,
+/// so that is what this says.
+pub(crate) fn version_skew_line(tui_version: &str, daemon_version: &str) -> String {
+    format!(
+        "\u{26a0} Version mismatch: this TUI is v{} but the backend it connected to is v{}. \
+The backend survives TUI exit, so it can be older than your code. Quit every OSA window and \
+run `osa` again to refresh it. Until then, behaviour reflects v{}, not your working tree.",
+        tui_version.trim(),
+        daemon_version.trim(),
+        daemon_version.trim()
+    )
+}
+
 /// Whether to drop the one-time "update available" transcript notice on this
 /// health response. True only when the backend flags an available update AND we
 /// haven't already shown it this session — keeping it quiet (once, never a nag).
@@ -2023,6 +2176,95 @@ pub(crate) fn update_notice_line(update: &crate::client::types::HealthUpdate) ->
 /// dialog would fire a message the user is still being asked about.
 pub(crate) fn queue_may_drain(state: AppState, turn_done: bool) -> bool {
     state == AppState::Idle && turn_done
+}
+
+#[cfg(test)]
+mod terminal_source_tests {
+    use super::is_system_authored;
+
+    // Pins the live report: a user typed "ok how about now" and the doom-loop
+    // guard's advice was rendered under the agent header as OSA's answer.
+    // `response_type` was on the wire the whole time and was discarded.
+    #[test]
+    fn guard_and_control_and_error_text_is_not_the_model_speaking() {
+        assert!(is_system_authored("system"));
+        assert!(is_system_authored("guard"));
+        assert!(is_system_authored("control"));
+        assert!(is_system_authored("error"));
+    }
+
+    #[test]
+    fn a_real_model_answer_still_renders_as_the_model() {
+        // The healthy path must be bit-for-bit unchanged.
+        assert!(!is_system_authored("agent"));
+        assert!(!is_system_authored("plan"));
+        assert!(!is_system_authored("genre"));
+    }
+
+    #[test]
+    fn an_unknown_or_absent_type_is_treated_as_the_model() {
+        // Compatible direction: an older backend, or a newer one that invents a
+        // value this build has not heard of, must never have real answers
+        // hidden behind system chrome.
+        assert!(!is_system_authored(""));
+        assert!(!is_system_authored("something_new"));
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_defeat_the_check() {
+        assert!(is_system_authored("  system  "));
+    }
+}
+
+#[cfg(test)]
+mod version_skew_tests {
+    use super::{should_warn_version_skew, version_skew_line};
+
+    #[test]
+    fn a_mismatch_is_detected() {
+        assert!(should_warn_version_skew("1.0.98", "1.0.91", false));
+    }
+
+    #[test]
+    fn matching_versions_are_silent() {
+        assert!(!should_warn_version_skew("1.0.98", "1.0.98", false));
+    }
+
+    // The zero-padded display form (`pad_version_display`: 1.0.98 -> 1.0.098) is
+    // NOT what gets compared. Comparing a padded string against the raw one the
+    // backend sends would report skew on every single connect.
+    #[test]
+    fn comparison_uses_raw_versions_not_the_padded_display_form() {
+        assert!(!should_warn_version_skew("1.0.98", "1.0.98", false));
+        // Sanity: the padded form really is different, so the test above is not
+        // vacuous.
+        assert_ne!("1.0.098", "1.0.98");
+    }
+
+    #[test]
+    fn the_notice_is_shown_at_most_once_per_session() {
+        assert!(!should_warn_version_skew("1.0.98", "1.0.91", true));
+    }
+
+    // "Cannot tell" is not "mismatch".
+    #[test]
+    fn an_unknown_version_on_either_side_does_not_warn() {
+        assert!(!should_warn_version_skew("", "1.0.91", false));
+        assert!(!should_warn_version_skew("1.0.98", "", false));
+        assert!(!should_warn_version_skew("   ", "1.0.91", false));
+    }
+
+    #[test]
+    fn the_notice_names_both_versions_and_the_real_remedy() {
+        let line = version_skew_line("1.0.98", "1.0.91");
+        assert!(line.contains("1.0.98"));
+        assert!(line.contains("1.0.91"));
+        // Re-running `osa` is the documented repair. `bin/osa` states that
+        // telling a user to run `osa stop` is a failure of the product, so the
+        // notice must not say it.
+        assert!(line.contains("osa"));
+        assert!(!line.contains("osa stop"));
+    }
 }
 
 #[cfg(test)]

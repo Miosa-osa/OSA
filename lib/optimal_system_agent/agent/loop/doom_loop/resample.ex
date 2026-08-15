@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Resample do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Loop.TerminalSource
   alias OptimalSystemAgent.Events.Bus
 
   @default_max_retries 2
@@ -66,7 +67,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Resample do
 
     cond do
       not enabled?() ->
-        {doom_message, halted_state}
+        # The halt text is the GUARD talking about the loop, not the model
+        # answering the user. Marked so it cannot be rendered as the answer.
+        TerminalSource.halt(doom_message, halted_state, :guard)
 
       used >= max ->
         Logger.warning(
@@ -82,7 +85,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Resample do
           max_retries: max
         })
 
-        {doom_message, halted_state}
+        # The halt text is the GUARD talking about the loop, not the model
+        # answering the user. Marked so it cannot be rendered as the answer.
+        TerminalSource.halt(doom_message, halted_state, :guard)
 
       true ->
         attempt = used + 1

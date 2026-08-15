@@ -61,6 +61,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.Steer
   alias OptimalSystemAgent.Agent.Loop.Survey
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Loop.TerminalSource
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.TurnPipeline
   alias OptimalSystemAgent.Agent.Hooks
@@ -1974,14 +1975,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
             "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
           )
 
-          {"I hit an error processing that request. Check the logs for details.",
-           Accounting.adopt_partial(state)}
+          TerminalSource.halt(
+            "I hit an error processing that request. Check the logs for details.",
+            Accounting.adopt_partial(state),
+            :error
+          )
       catch
         :exit, reason ->
           Logger.error("[loop] EXIT in ReactLoop: #{inspect(reason)}")
 
-          {"I hit a timeout or process error. This usually means the LLM connection dropped — try again.",
-           Accounting.adopt_partial(state)}
+          TerminalSource.halt(
+            "I hit a timeout or process error. This usually means the LLM connection dropped — try again.",
+            Accounting.adopt_partial(state),
+            :error
+          )
       end
 
     response = maybe_scrub_prompt_leak(response)
@@ -2109,7 +2116,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
          # outage as a model failure.
          turn_error: Map.get(state, :turn_error),
          response: response,
-         response_type: "agent"
+         # WHO wrote `response`. `"agent"` for a real model answer — bit-for-bit
+         # what every existing consumer already receives — and `"system"` when a
+         # guard, a control-flow stop or an error authored the text instead.
+         #
+         # This is the fix for a live report: a user typed "ok how about now"
+         # and the doom-loop guard's internal advice ("3 consecutive generations
+         # produced no tool calls… call a concrete tool to move forward") was
+         # rendered as OSA's answer, under the ◈ OSA header, addressed to the
+         # model rather than to them.
+         response_type: TerminalSource.response_type(state),
+         # Additive companion so a client can label WHY the turn ended without
+         # parsing the text. nil on a normal answer.
+         terminal_source: TerminalSource.label(state)
        }}
     )
 

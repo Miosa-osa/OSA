@@ -354,7 +354,7 @@ impl App {
             }
             BackendEvent::AgentResponse {
                 response,
-                response_type: _,
+                response_type,
                 signal,
                 message_id,
             } => {
@@ -364,7 +364,7 @@ impl App {
                 // into scrollback, and the ordering must stay exact.)
                 self.flush_stream_pacer();
                 let was_processing = self.state.is_processing();
-                self.handle_agent_response(response, signal, message_id);
+                self.handle_agent_response(response, &response_type, signal, message_id);
                 // True turn-end edge: `handle_agent_response` flips Processing →
                 // Idle only when the turn actually completes. Fire the completion
                 // notification exactly on that transition (mid-turn agent_response
@@ -2889,18 +2889,28 @@ impl App {
             BackendEvent::CancelTimeout => {
                 // Safety net: if the backend cancel response never came via SSE,
                 // force the UI back to idle so the user isn't stuck.
-                if self.cancelled && self.state.is_processing() {
+                // `turn_is_active()`, not `state.is_processing()`: with an
+                // overlay open the live turn is parked on the return stack and
+                // `self.state` is the overlay, so the `is_processing()` form
+                // made the one safety net that exists for "the user is stuck"
+                // do nothing in exactly the case it was written for.
+                if self.cancelled && self.turn_is_active() {
                     info!("Cancel timeout — forcing UI back to Idle");
                     // Shared teardown: flush finished tools, drop partial text,
                     // reset per-turn buffers/spinner/status/agents.
                     self.finalize_turn_state();
                     self.cancelled = false;
-                    self.transition(AppState::Idle);
+                    self.land_idle_including_parked();
                     self.recompute_layout();
                     self.toasts.push(
                         "Interrupted".into(),
                         crate::components::toast::ToastLevel::Warning,
                     );
+                    // The queued-message hint reads "esc to send now", and this
+                    // is the path an interrupt takes when the backend never
+                    // answers the cancel. Without a drain the promise is false
+                    // and the queue sits there until some later turn ends.
+                    self.maybe_dequeue_message();
                 }
             },
 

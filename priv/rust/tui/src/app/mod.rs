@@ -356,6 +356,11 @@ pub struct App {
 
     // Backend auto-start
     pub backend_spawn_attempted: bool,
+    /// Latch: the daemon-version-skew notice is shown at most once per session.
+    /// `/health` is polled repeatedly, and a mismatch persists for the life of
+    /// the connection - without this the same warning would be re-emitted on
+    /// every poll.
+    pub version_skew_notice_shown: bool,
     pub health_retry_count: u32,
 
     // Whether the one-time "update available" transcript notice has been shown
@@ -749,6 +754,7 @@ impl App {
             bg_shell_count: 0,
             active_fg_shell_count: 0,
             backend_spawn_attempted: false,
+            version_skew_notice_shown: false,
             health_retry_count: 0,
             update_notice_shown: false,
             // Seed the Ctrl+K palette / `/help` with the full built-in set at
@@ -1003,16 +1009,47 @@ impl App {
     /// `Idle` instead of a dead, frozen spinner with a dangling bubble.
     pub(crate) fn end_active_turn_on_disconnect(&mut self) {
         self.finalize_turn_state();
+        self.land_idle_including_parked();
+        self.recompute_layout();
+    }
+
+    /// Land on `Idle` for a turn that has ENDED, whether or not an overlay is
+    /// currently drawn over it.
+    ///
+    /// `transition(Idle)` alone is not enough. ~20 overlays can be opened FROM
+    /// `Processing` (`/cost`, `/context`, `/tools`, …), and `enter_overlay`
+    /// parks the caller — `Processing` — on `return_stack`. While such an
+    /// overlay is up, `self.state` is the overlay, so a bare
+    /// `if self.state.is_processing()` guard does nothing, and the parked
+    /// `Processing` survives the turn that owned it. `exit_overlay` then
+    /// faithfully restores it, and the app is back in `Processing` with no turn
+    /// running and no event left that could ever end one.
+    ///
+    /// That is not cosmetic. `turn_is_active()` reads the parked value, so
+    /// `submit_input` takes the enqueue branch forever (handle_actions.rs), while
+    /// `queue_may_drain` requires `state == Idle` and can never be true again.
+    /// Every prompt from then on is silently queued behind a turn that already
+    /// finished — the user presses Enter and nothing happens, with no error and
+    /// a spinner that never stops. Esc does not rescue it either: both
+    /// `Action::Interrupt` and the `CancelTimeout` safety net are gated on
+    /// `state.is_processing()`, which the parked value also defeats.
+    ///
+    /// So every turn-end path rewrites the parked copy too. Only the disconnect
+    /// path used to do this; the normal completion path — by far the common one —
+    /// did not, which is how a session that answered one prompt correctly went
+    /// inert for the rest of its life.
+    pub(crate) fn land_idle_including_parked(&mut self) {
         if self.state.is_processing() {
             self.transition(AppState::Idle);
-        } else {
-            for s in self.return_stack.iter_mut() {
-                if *s == AppState::Processing {
-                    *s = AppState::Idle;
-                }
+        }
+        // Not an `else`: a turn can be parked while `self.state` is also
+        // `Processing` only transiently, but rewriting the stack is idempotent
+        // and must happen in both shapes.
+        for s in self.return_stack.iter_mut() {
+            if *s == AppState::Processing {
+                *s = AppState::Idle;
             }
         }
-        self.recompute_layout();
     }
 
     /// Enter an overlay, remembering the caller on the return stack so closing

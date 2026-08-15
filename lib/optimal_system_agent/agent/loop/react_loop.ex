@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Resample
+  alias OptimalSystemAgent.Agent.Loop.TerminalSource
   alias OptimalSystemAgent.Agent.Loop.Telemetry
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.Limits
@@ -197,8 +198,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           iteration: iter
         })
 
-        {"Paused at iteration #{iter}. The agent stopped cooperatively; resume it or send a new message to continue.",
-         state}
+        TerminalSource.halt(
+          "Paused at iteration #{iter}. The agent stopped cooperatively; resume it or send a new message to continue.",
+          state,
+          :control
+        )
 
       # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
       # (identical gap fingerprints) or the run cap — stop burning budget on a
@@ -215,8 +219,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           reason: reason
         })
 
-        {"Goal auto-paused (#{reason}): no measurable progress across turns. " <>
-           "Review the goal and resume, refine it, or send a new instruction.", state}
+        TerminalSource.halt(
+          "Goal auto-paused (#{reason}): no measurable progress across turns. " <>
+            "Review the goal and resume, refine it, or send a new instruction.",
+          state,
+          :control
+        )
 
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
@@ -233,8 +241,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           limit: limit
         })
 
-        {"Stopped: budget cap reached ($#{cost} / $#{limit}). Raise max_budget_usd to continue.",
-         state}
+        TerminalSource.halt(
+          "Stopped: budget cap reached ($#{cost} / $#{limit}). Raise max_budget_usd to continue.",
+          state,
+          :control
+        )
 
       iter >= max_iter ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
@@ -1063,7 +1074,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               iteration: state.iteration
             })
 
-            {msg, state}
+            # THE schemelike join point. `msg` is the guard's advisory —
+            # "3 consecutive generations produced no tool calls" — a note the
+            # harness wrote to itself about its own control flow. It was
+            # delivered to the user as the model's final answer. Marked, so it
+            # can never again be rendered as one.
+            TerminalSource.halt(msg, state, :guard)
 
           {:ok, state} ->
             nudge = %{
@@ -1347,9 +1363,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           {wrapup_fallback(state, max_iter), state}
       end
     rescue
-      _ -> {wrapup_fallback(state, max_iter), state}
+      # The canned fallback is harness text; the SUCCESS arm above is a real
+      # model-authored wrap-up and is deliberately left as `:model`.
+      _ -> TerminalSource.halt(wrapup_fallback(state, max_iter), state, :control)
     catch
-      :exit, _ -> {wrapup_fallback(state, max_iter), state}
+      :exit, _ -> TerminalSource.halt(wrapup_fallback(state, max_iter), state, :control)
     end
   end
 
@@ -1529,7 +1547,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
        }}
     )
 
-    {"The turn stopped on a fatal tool error: #{message}", state}
+    TerminalSource.halt("The turn stopped on a fatal tool error: #{message}", state, :error)
   end
 
   defp continue_after_tools(results, tool_calls, state, resample_snapshot) do
@@ -1623,7 +1641,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
                 "Review the blocked calls, then resume to continue."
 
-            {pause_message, state}
+            TerminalSource.halt(pause_message, state, :control)
           else
             # Goal-level verification runs HERE — at the tool-result boundary,
             # before the next generation — and nowhere else. Two reasons:
@@ -1749,7 +1767,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           source: "agent.react_loop"
         )
 
-        {"I've exceeded the context window. Try breaking your request into smaller parts.", state}
+        TerminalSource.halt(
+          "I've exceeded the context window. Try breaking your request into smaller parts.",
+          state,
+          :error
+        )
       else
         idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
 
@@ -1860,7 +1882,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               reason: reason_str
             })
 
-          {message, state}
+          # The turn ended in a provider OUTAGE, not an answer. `turn_error`
+          # above already says so in a field, but it is dropped by the Rust
+          # client (never declared in the SSE struct); the source mark is the
+          # carrier that actually reaches a renderer.
+          TerminalSource.halt(message, state, :error)
         end
       end
     end

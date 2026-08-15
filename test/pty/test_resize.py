@@ -17,6 +17,7 @@ dump rather than a pytest traceback, because the screen IS the evidence.
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -25,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from osa_pty import COMPOSER_TOP, SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
 from stub_backend import (  # noqa: E402
+    CLEARED_SESSION_ID,
     StubBackend,
+    end_turn,
     hold_health,
     hold_turn,
     post_mark,
@@ -36,7 +39,12 @@ from stub_backend import (  # noqa: E402
 )
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
-STUB_PORT = 12787
+#
+# Overridable so two harness runs (two agents, or a red/green pair against
+# different binaries) do not fight over the socket. A collision fails at bind
+# with EADDRINUSE before any test runs, which reads like a broken harness
+# rather than what it is.
+STUB_PORT = int(os.environ.get("OSA_PTY_STUB_PORT", "12787"))
 
 
 def assert_single_live_region(session: PtySession, context: str) -> None:
@@ -1293,6 +1301,293 @@ def test_one_stray_escape_still_does_not_kill_a_turn(backend: StubBackend) -> No
         release_turn()
 
 
+def test_a_stale_backend_says_so_instead_of_relabelling_the_tui(
+    backend: StubBackend,
+) -> None:
+    """A version mismatch between the TUI and the daemon is SHOWN, not adopted.
+
+    The OSA backend daemon survives TUI exit and can be days older than the TUI
+    that attaches to it. A user reported a hang "on the old version" and an hour
+    went into establishing that their daemon was stale rather than their code.
+
+    What made it invisible was not merely a missing warning. The TUI *adopted*
+    the daemon's version as its own display version — `set_runtime_version` ran
+    unconditionally on every health response — so a stale daemon silently
+    rewrote the status-bar chip, the welcome banner and `/version` to the OLD
+    number. Every surface the user could check agreed with the daemon, and none
+    of them revealed the disagreement.
+
+    The stub reports `STUB_VERSION`, which is deliberately never a real release
+    number, so attaching to it is exactly the stale-daemon shape. Two things are
+    asserted:
+
+      1. the transcript carries a notice naming the mismatch, and
+      2. it names the remedy the launcher actually performs — re-running `osa` —
+         and NOT `osa stop`, which `bin/osa` states is an instruction no user
+         should ever be given.
+
+    A binary with the shipped defect fails (1): the connect is silent and the
+    TUI relabels itself to the stub's version.
+    """
+    with PtySession(backend.base_url, cols=100, rows=30) as s:
+        if not s.wait_for_text("Version mismatch", 15.0):
+            raise AssertionError(
+                "attaching to a backend reporting a different version produced "
+                "no mismatch notice, so a stale daemon is still silent.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        screen = s.dump()
+        if "osa stop" in screen:
+            raise AssertionError(
+                "the notice tells the user to run `osa stop`. bin/osa states "
+                "that is a failure of the product: re-running `osa` performs "
+                "the repair by itself.\n"
+                f"--- rendered screen ---\n{screen}"
+            )
+
+
+def _start_a_turn(s: PtySession, prompt: bytes) -> None:
+    """Submit `prompt` and wait until the turn is genuinely outstanding.
+
+    Every test below needs a real in-flight turn, not a screen that looks like
+    one. `hold_turn()` must already be in force or this returns as the turn is
+    ending.
+    """
+    mark = post_mark()
+    s.write(prompt)
+    s.pump(SETTLE)
+    s.write(b"\r")
+    waited = 0.0
+    while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+        s.pump(0.25)
+        waited += 0.25
+    if not posts_since(mark, "/api/v1/orchestrate"):
+        raise AssertionError(
+            "the prompt never reached the backend, so no turn was started.\n"
+            f"--- rendered screen ---\n{s.dump()}"
+        )
+
+
+def test_a_turn_that_ends_under_an_overlay_does_not_wedge_the_session(
+    backend: StubBackend,
+) -> None:
+    """After a turn ends, the next prompt must still be SENT.
+
+    This is the "nothing happens" report. The session answered one prompt, and
+    from then on every prompt produced no reply, no error, and no request —
+    Enter simply did nothing.
+
+    The mechanism is a busy flag that outlives the turn it describes. ~20
+    overlays can be opened FROM `Processing` (`/cost`, `/context`, the command
+    palette on Ctrl+K…), and `enter_overlay` parks the caller — `Processing` —
+    on the return stack. The normal turn-end teardown only ever did
+    `if self.state.is_processing() { transition(Idle) }`, and while an overlay
+    is up `self.state` is the overlay, so the parked `Processing` survived the
+    turn that owned it. Closing the overlay restored it faithfully.
+
+    From there the session is inert for good: `turn_is_active()` reads the
+    parked value, so `submit_input` takes the enqueue branch forever, while
+    `queue_may_drain` requires `state == Idle` and can never be true again.
+    Prompts pile up in a queue nothing will drain. Esc is no escape either —
+    both `Action::Interrupt` and the `CancelTimeout` safety net were gated on
+    the same `is_processing()` the parked value defeats.
+
+    Asserted on the WIRE. The screen is not evidence here: a wedged build draws
+    a perfectly normal composer, accepts the keystrokes, echoes them, and sends
+    nothing. `POST /api/v1/orchestrate` arriving is the whole fact.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+            _start_a_turn(s, b"FIRST PROMPT")
+
+            # Open an overlay from Processing. `alt+p` (the provider/model
+            # picker) is bound in the GLOBAL keymap context, so it is one of the
+            # few overlays a user can actually reach mid-turn — Ctrl+K's palette
+            # is `Context::Idle` only, and every slash command is queued while a
+            # turn runs. This is what parks `Processing` on the return stack.
+            s.write(b"\x1bp")
+            s.pump(1.0)
+            if "Select Provider" not in "\n".join(s.lines()):
+                raise AssertionError(
+                    "the overlay did not open mid-turn, so this test never "
+                    "reaches the state it is about. If the binding moved, pick "
+                    "another Global-context overlay rather than deleting the "
+                    f"test.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # End the turn while the overlay owns the screen. This is the exact
+            # ordering that matters: the teardown runs with `self.state` set to
+            # the overlay, so a guard that only looks at `self.state` misses.
+            release_turn()
+            end_turn()
+            s.pump(1.0)
+
+            # Close the overlay. A wedged build lands back in `Processing`.
+            s.write(b"\x1b")
+            s.pump(SETTLE)
+
+            # The session must still work.
+            mark = post_mark()
+            s.write(b"SECOND PROMPT")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            waited = 0.0
+            while waited < 8.0 and not posts_since(mark, "/api/v1/orchestrate"):
+                s.pump(0.25)
+                waited += 0.25
+            if not posts_since(mark, "/api/v1/orchestrate"):
+                raise AssertionError(
+                    "the session went inert: a prompt typed after a turn that "
+                    "ended under an overlay produced no POST to "
+                    "/api/v1/orchestrate. This is the report — the user types, "
+                    "presses Enter, and nothing happens, with no error and "
+                    "nothing on screen to explain it.\n"
+                    f"POSTs since: {[p for p, _ in posts_since(mark)] or 'none'}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_clear_leaves_no_queued_message_behind(backend: StubBackend) -> None:
+    """`/clear` must not leave the user's own message on screen afterwards.
+
+    Reported as: after `/clear`, a duplicate of the previous message was
+    sitting at the top of the screen, and it had to be typed again.
+
+    It was neither a duplicate nor a rendering artefact. A prompt typed while a
+    turn is running is held in `message_queue` and drawn as a dim row directly
+    above the composer. `/clear` reset the transcript, the tool list, the
+    attachments and the real terminal scrollback — and had no opinion about the
+    queue. So on an otherwise empty screen the one surviving row was the user's
+    own queued text, at the top, looking exactly like a transcript entry that
+    the clear had failed to remove. Retyping was rational: the text on screen
+    was never in the composer.
+
+    Two assertions, and the second is the load-bearing one. The text being gone
+    from the SCREEN could be achieved by a build that merely stopped drawing
+    the queue; what must actually be true is that the message is no longer
+    pending, so it never fires afterwards.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+            _start_a_turn(s, b"FIRST PROMPT")
+
+            # Type a second prompt mid-turn — this one is QUEUED.
+            s.write(b"ok how about now")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            s.pump(SETTLE)
+            if not s.wait_for_text("ok how about now", 5.0):
+                raise AssertionError(
+                    "the mid-turn prompt was not queued/shown at all, so this "
+                    "test cannot prove anything about clearing it.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # Clear. Note this is typed while the turn is STILL running: that is
+            # how the user hit it, and queueing `/clear` behind the turn it is
+            # meant to escape is itself the defect that made "ℹ Chat cleared"
+            # repeat down the screen in the reported paste.
+            clear_mark = post_mark()
+            s.write(b"/clear")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            s.pump(1.5)
+
+            if "ok how about now" in "\n".join(s.lines()):
+                raise AssertionError(
+                    "after /clear the user's own message is still on screen. "
+                    "This is the report: a 'duplicate' at the top that the "
+                    "clear did not remove, which was really a live queue "
+                    "entry.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # And it must not be merely hidden. Let the held turn finish: if the
+            # queue survived, the drain fires it now and it reaches the backend.
+            release_turn()
+            end_turn()
+            s.pump(2.0)
+
+            leaked = [
+                (p, b) for p, b in posts_since(clear_mark, "/api/v1/orchestrate")
+                if "ok how about now" in b
+            ]
+            if leaked:
+                raise AssertionError(
+                    "/clear hid the queued message but did not cancel it: it "
+                    "was still sent to the backend after the turn ended. A "
+                    "clear that leaves work pending is a clear in appearance "
+                    f"only.\nleaked: {leaked}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_clear_adopts_the_session_the_backend_hands_back(
+    backend: StubBackend,
+) -> None:
+    """`/clear` must talk to the NEW session afterwards.
+
+    `POST /sessions/:id/clear` is a session SWAP, not an in-place wipe: the
+    backend stops the old loop and returns a brand-new id with the old one as
+    `parent_session`. The client dropped that response on the floor
+    (`clear_session` returned `Result<()>`), so the TUI kept addressing the
+    session the clear had just stopped.
+
+    That is what made the clear a lie rather than merely untidy. The next
+    orchestrate restarted the stopped loop, `Loop.init` found no checkpoint —
+    the clear had wiped it — and fell through to `load_persisted_messages/1`,
+    reading back the very file the clear endpoint itself had just written via
+    its pre-clear `auto_save`. The whole discarded conversation was reloaded
+    into the model, while the fresh session the backend built sat orphaned.
+
+    So the assertion is on the ADDRESS of the next request, which is the only
+    thing that distinguishes the two builds — both clear the screen identically.
+    """
+    with PtySession(backend.base_url, cols=120, rows=30) as s:
+        s.boot()
+
+        s.write(b"/clear")
+        s.pump(SETTLE)
+        s.write(b"\r")
+        s.pump(1.5)
+
+        mark = post_mark()
+        s.write(b"AFTER THE CLEAR")
+        s.pump(SETTLE)
+        s.write(b"\r")
+        waited = 0.0
+        while waited < 8.0 and not posts_since(mark, "/api/v1/orchestrate"):
+            s.pump(0.25)
+            waited += 0.25
+
+        sent = posts_since(mark, "/api/v1/orchestrate")
+        if not sent:
+            raise AssertionError(
+                "no prompt reached the backend after /clear.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        body = sent[-1][1]
+        if CLEARED_SESSION_ID not in body:
+            raise AssertionError(
+                "after /clear the TUI is still addressing the OLD session. The "
+                "backend returned a new id and the client discarded it, so the "
+                "next turn reopens the stopped session — which reloads the "
+                "'cleared' conversation from disk. The model still remembers "
+                "everything.\n"
+                f"expected session id {CLEARED_SESSION_ID!r} in the orchestrate "
+                f"body, got: {body}\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -1306,9 +1601,13 @@ TESTS = [
     test_a_provider_with_no_reported_quota_says_so_instead_of_drawing_zero,
     test_claude_code_is_installed_and_signed_in_without_leaving_osa,
     test_connecting_splash_does_not_trap_the_user,
+    test_a_stale_backend_says_so_instead_of_relabelling_the_tui,
     test_a_draft_typed_while_connecting_survives_into_the_composer,
     test_a_slow_second_escape_still_interrupts,
     test_one_stray_escape_still_does_not_kill_a_turn,
+    test_a_turn_that_ends_under_an_overlay_does_not_wedge_the_session,
+    test_clear_leaves_no_queued_message_behind,
+    test_clear_adopts_the_session_the_backend_hands_back,
 ]
 
 

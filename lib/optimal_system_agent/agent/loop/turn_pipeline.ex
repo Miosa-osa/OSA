@@ -434,6 +434,12 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # and `%{state | key: val}` raises `KeyError`/`BadKeyError` for a key that
     # isn't already present — `Map.merge/2` sets it either way.
     Map.merge(state, %{
+      # Clear the terminal-source mark each new user turn. This is what makes
+      # `TerminalSource`'s opt-in marking safe: without it, one guard halt would
+      # make every later turn in the session render as a system message instead
+      # of as the model's answer. A fresh user message is a fresh turn with a
+      # fresh author.
+      terminal_source: nil,
       # Reset the reasoning-only doom-loop streak each new user turn — a
       # turn that ended with 1-2 trailing empty/reasoning-only generations
       # must not carry that streak into the NEXT turn's threshold check

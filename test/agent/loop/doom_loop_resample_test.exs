@@ -87,8 +87,18 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ResampleTest do
       exhausted = snapshot(%{doom_resamples: 2})
       halted = snapshot(%{doom_resamples: 2, extra: :halt_state})
 
-      assert {"looped!", ^halted} = Resample.handle("looped!", halted, exhausted, run_fun)
+      assert {"looped!", out} = Resample.handle("looped!", halted, exhausted, run_fun)
       refute_received :should_not_run
+
+      # The halt STATE now carries one added field: who authored the text.
+      #
+      # This test used to assert the state came back byte-identical (`^halted`),
+      # which is what allowed the guard's advice to be delivered as the model's
+      # answer — nothing downstream could tell it apart from one. Everything
+      # else must still be untouched.
+      assert Map.delete(out, :terminal_source) == halted
+      assert OptimalSystemAgent.Agent.Loop.TerminalSource.of(out) == :guard
+      assert OptimalSystemAgent.Agent.Loop.TerminalSource.response_type(out) == "system"
     end
 
     test "resamples exactly max_retries times then falls back (walk the budget)" do
@@ -129,8 +139,14 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ResampleTest do
 
       halted = snapshot(%{marker: :old_behavior})
 
-      assert {"looped!", ^halted} = Resample.handle("looped!", halted, snapshot(), run_fun)
+      assert {"looped!", out} = Resample.handle("looped!", halted, snapshot(), run_fun)
       refute_received :should_not_run
+
+      # "Unchanged" now means "unchanged apart from provenance". Even with the
+      # resample remedy disabled, a doom halt is still the GUARD talking and
+      # must not be rendered as the assistant's reply.
+      assert Map.delete(out, :terminal_source) == halted
+      assert OptimalSystemAgent.Agent.Loop.TerminalSource.of(out) == :guard
     end
 
     test "defaults: enabled true, max_retries 2, threshold 4 when unconfigured" do
