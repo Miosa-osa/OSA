@@ -363,6 +363,70 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
     end
   end
 
+  describe "batching nudge (collector 6)" do
+    setup do
+      OptimalSystemAgent.Agent.BatchCadence.reset()
+      :ok
+    end
+
+    defp flatten(s, n) do
+      Enum.each(1..n, fn _ -> OptimalSystemAgent.Agent.BatchCadence.record(s, 1) end)
+    end
+
+    test "rides on the tool result, in the volatile tail" do
+      s = sid()
+      flatten(s, OptimalSystemAgent.Agent.BatchCadence.window())
+
+      out =
+        Reminders.append("tool output", %{name: "file_read", arguments: %{}}, %{
+          session_id: s,
+          iteration: 20
+        })
+
+      # Appended AFTER the result: the prefix runs at ~92.8% cache hit on a
+      # byte-identical prefix, and anything that varies per turn in front of it
+      # costs roughly 30x what it saves. This assertion is the cache contract.
+      assert String.starts_with?(out, "tool output")
+      assert out =~ "<system-reminder>"
+      assert out =~ "one tool call per turn"
+    end
+
+    test "does not fire when the recent turns already batch" do
+      s = sid()
+      flatten(s, OptimalSystemAgent.Agent.BatchCadence.window())
+      OptimalSystemAgent.Agent.BatchCadence.record(s, 4)
+
+      out =
+        Reminders.append("tool output", %{name: "file_read", arguments: %{}}, %{
+          session_id: s,
+          iteration: 20
+        })
+
+      refute out =~ "one tool call per turn"
+    end
+
+    test "does not fire without a turn index — it must not guess the regime" do
+      s = sid()
+      flatten(s, OptimalSystemAgent.Agent.BatchCadence.window())
+
+      out =
+        Reminders.append("tool output", %{name: "file_read", arguments: %{}}, %{session_id: s})
+
+      refute out =~ "one tool call per turn"
+    end
+
+    test "fires at most once for a turn even with several tool results" do
+      s = sid()
+      flatten(s, OptimalSystemAgent.Agent.BatchCadence.window())
+      state = %{session_id: s, iteration: 20}
+      tc = %{name: "file_read", arguments: %{}}
+
+      outs = Enum.map(1..3, fn _ -> Reminders.append("ok", tc, state) end)
+
+      assert Enum.count(outs, &(&1 =~ "one tool call per turn")) == 1
+    end
+  end
+
   # Poll BackgroundManager.output until the task is no longer :running.
   defp wait_terminal(_id, 0), do: :timeout
 

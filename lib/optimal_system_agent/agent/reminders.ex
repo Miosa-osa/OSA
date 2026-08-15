@@ -8,7 +8,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   opencode's post-read `<system-reminder>` injection: steering the model
   without polluting the system prompt and without the model having to poll.
 
-  Four collectors run, in order, and their outputs are concatenated:
+  Six collectors run, in order, and their outputs are concatenated:
 
     1. **task-completion** — background shell commands
        (`Shell.BackgroundManager`) and background subagents (`Agent.RunStore`)
@@ -108,7 +108,8 @@ defmodule OptimalSystemAgent.Agent.Reminders do
         collect_skill_discovery(session_id, tool_call, state) ++
         collect_diagnostics(tool_call, state) ++
         collect_self_correction(session_id, tool_call, result_str) ++
-        collect_test_first_nudge(session_id)
+        collect_test_first_nudge(session_id) ++
+        collect_batching_nudge(session_id, state)
 
     format_with_reminders(result_str, reminders)
   rescue
@@ -599,6 +600,39 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     end
   rescue
     _ -> []
+  end
+
+  # ── Collector 6: batching nudge ──────────────────────────────────────────
+  #
+  # The one intervention shaped like the mechanism it is fighting. Batch rate
+  # decays with session position (0.34 at turn 0 → 0.04 at turn 15+) and is
+  # self-conditioned 8x on the previous turn, which is in-context imitation: the
+  # model copies the shape of its own recent transcript. A prompt change cannot
+  # compete with that and an A/B confirmed it does not — so this rides in the
+  # VOLATILE TAIL, appended to a tool result, never in the cached prefix.
+  #
+  # Every decision about when to fire (and when to stop) lives in
+  # `Agent.BatchCadence`; this collector only carries it into the result. Note
+  # it deliberately does NOT go through `claim/2`: the claim table is
+  # once-per-session, and the whole point of this reminder is that it may fire a
+  # bounded number of times, at intervals, when the condition recurs.
+  defp collect_batching_nudge(session_id, state) do
+    turn = turn_index(state)
+
+    if is_integer(turn) and OptimalSystemAgent.Agent.BatchCadence.nudge?(session_id, turn) do
+      [OptimalSystemAgent.Agent.BatchCadence.message()]
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp turn_index(state) do
+    case Map.get(state, :iteration) do
+      n when is_integer(n) -> n
+      _ -> nil
+    end
   end
 
   defp run_diagnostics_provider(fun, path, state) when is_function(fun, 2),

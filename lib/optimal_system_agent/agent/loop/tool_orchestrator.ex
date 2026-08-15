@@ -84,6 +84,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   def dispatch(tool_calls, state, opts \\ []) when is_list(tool_calls) do
     ctx = build_use_context(state)
 
+    # One turn's worth of calls, seen together — the only layer where "how many
+    # did the model issue this turn?" is a fact rather than an inference. Feeds
+    # `Agent.BatchCadence`, which decides whether the recent shape of the
+    # transcript is flat enough to be worth a late-context nudge.
+    record_cadence(tool_calls, state)
+
     fresh =
       tool_calls
       |> execution_batches(ctx)
@@ -98,6 +104,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     Enum.map(tool_calls, fn tc ->
       Map.get(by_id, tc.id, {tc, error_result(tc, "Tool not executed")})
     end)
+  end
+
+  # Subagent turns are excluded for the same reason `Reminders` excludes them:
+  # the nudge is steering for the user-facing loop, and a delegated worker's
+  # cadence is not the cadence anyone is measuring.
+  defp record_cadence([], _state), do: :ok
+
+  defp record_cadence(tool_calls, state) do
+    if Map.get(state, :permission_tier) != :subagent do
+      OptimalSystemAgent.Agent.BatchCadence.record(
+        Map.get(state, :session_id),
+        length(tool_calls)
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc """
