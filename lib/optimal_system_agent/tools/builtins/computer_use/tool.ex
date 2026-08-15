@@ -173,7 +173,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   @impl true
   # On interrupt: cancel the pending action. Blocking would stall the agent
   # loop while a human has seized the keyboard/mouse.
-  def interrupt_behavior, do: :cancel
 
   # ── Flat-layout compatibility ──────────────────────────────────────────
 

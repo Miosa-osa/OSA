@@ -51,7 +51,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SleepTest do
       refute Tool.always_load?()
       assert Tool.read_only?(%{}, UseContext.empty())
       assert Tool.concurrency_safe?(%{}, UseContext.empty())
-      assert Tool.interrupt_behavior() == :cancel
     end
   end
 end

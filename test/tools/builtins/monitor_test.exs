@@ -70,7 +70,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.MonitorTest do
       refute Tool.destructive?(%{}, UseContext.empty())
       assert Tool.open_world?(%{"kind" => "url"}, UseContext.empty())
       refute Tool.open_world?(%{"kind" => "file"}, UseContext.empty())
-      assert Tool.interrupt_behavior() == :cancel
     end
   end
 end

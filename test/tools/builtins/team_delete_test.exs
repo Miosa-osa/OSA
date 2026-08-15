@@ -140,7 +140,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamDeleteTest do
       refute Tool.read_only?(%{}, ctx)
       assert Tool.destructive?(%{}, ctx)
       refute Tool.open_world?(%{}, ctx)
-      assert Tool.interrupt_behavior() == :block
     end
 
     test "parameters schema has required team_id" do

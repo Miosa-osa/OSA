@@ -31,7 +31,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron do
   defdelegate read_only?(input, ctx), to: @target
   defdelegate destructive?(input, ctx), to: @target
   defdelegate open_world?(input, ctx), to: @target
-  defdelegate interrupt_behavior(), to: @target
   defdelegate max_result_size_chars(), to: @target
   defdelegate validate_input(input, ctx), to: @target
   defdelegate check_permissions(input, ctx), to: @target

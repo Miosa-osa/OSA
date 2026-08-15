@@ -47,10 +47,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
     test "destructive? returns false" do
       assert AskUser.destructive?(%{}, ctx()) == false
     end
-
-    test "interrupt_behavior returns :block" do
-      assert AskUser.interrupt_behavior() == :block
-    end
   end
 
   # ---------------------------------------------------------------------------

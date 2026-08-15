@@ -26,7 +26,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
   defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
 

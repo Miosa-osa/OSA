@@ -90,10 +90,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanModeTest do
       assert Tool.safety() == :read_only
     end
 
-    test "interrupt_behavior is :cancel" do
-      assert Tool.interrupt_behavior() == :cancel
-    end
-
     test "parameters schema has no required fields" do
       params = Tool.parameters()
       assert Map.get(params, "required") == []

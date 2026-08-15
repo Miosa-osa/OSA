@@ -27,7 +27,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
   defdelegate safety(), to: OptimalSystemAgent.Tools.Builtins.Config.Tool
   defdelegate deferred?(), to: OptimalSystemAgent.Tools.Builtins.Config.Tool

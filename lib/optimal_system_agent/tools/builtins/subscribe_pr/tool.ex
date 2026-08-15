@@ -80,7 +80,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Tool do
   def open_world?(_input, _ctx), do: true
 
   @impl true
-  def interrupt_behavior, do: :block
 
   @impl true
   def max_result_size_chars, do: 2_000

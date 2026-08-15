@@ -86,7 +86,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
 
   @impl true
   # Long-running shells should be cancelable, not blocking.
-  def interrupt_behavior, do: :cancel
 
   @impl true
   def max_result_size_chars, do: 30_000

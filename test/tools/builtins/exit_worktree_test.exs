@@ -228,7 +228,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktreeTest do
       assert Tool.destructive?(%{}, ctx)
       refute Tool.concurrency_safe?(%{}, ctx)
       refute Tool.open_world?(%{}, ctx)
-      assert Tool.interrupt_behavior() == :block
       assert Tool.safety() == :write_safe
     end
 

@@ -89,7 +89,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Tool do
   def open_world?(_input, _ctx), do: true
 
   @impl true
-  def interrupt_behavior, do: :block
 
   # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true

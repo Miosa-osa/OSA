@@ -23,7 +23,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Download do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
   defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Download.Tool
   defdelegate check_permissions(input, ctx), to: OptimalSystemAgent.Tools.Builtins.Download.Tool

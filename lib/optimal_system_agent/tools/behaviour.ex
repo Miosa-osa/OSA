@@ -45,7 +45,6 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
           {:allow, updated_input :: input()}
           | {:deny, reason :: String.t()}
           | {:ask, prompt :: String.t()}
-  @type interrupt_behavior :: :cancel | :block
   @type tool_output ::
           {:ok, any()}
           | {:ok, content :: any(), metadata :: map()}
@@ -72,8 +71,43 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
   @callback read_only?(input(), UseContext.t()) :: boolean()
   @callback destructive?(input(), UseContext.t()) :: boolean()
   @callback open_world?(input(), UseContext.t()) :: boolean()
-  @callback interrupt_behavior() :: interrupt_behavior()
   @callback max_result_size_chars() :: pos_integer() | :infinity
+
+  # ── Removed: `interrupt_behavior/0` ──────────────────────────────────
+  #
+  # There was once a `@callback interrupt_behavior() :: :cancel | :block` here,
+  # declared on 35 tool modules across two unmerged branches. It had ZERO
+  # consumers, and — verified by diffing every commit in history that touches
+  # the symbol — never had one: every line ever written for it is an addition,
+  # and no code anywhere branched on the value.
+  #
+  # It was not dropped wiring. It was minted in dc2cb82b as one slot of an
+  # "18-callback contract with fail-closed defaults", written to a spec rather
+  # than to a caller, and then propagated by every subsequent tool author
+  # because the neighbouring tools all had the line. Thirteen unit tests
+  # asserted the declarations against themselves, which is why the absence of a
+  # consumer went unnoticed for as long as it did.
+  #
+  # It was deleted rather than wired, because wiring it AS DECLARED would have
+  # been a regression. Its injected default was `:block` — "do not cancel me" —
+  # copied from the fail-closed reasoning of its neighbours (`concurrency_safe?`
+  # and friends, where the safe answer is the restrictive one). For interruption
+  # that reasoning inverts: the safe default is `:cancel`. Honouring the
+  # declaration would have made the ~41 tools that never overrode it — including
+  # `file_read`, `file_write`, `web_fetch` and `delegate` — uninterruptible, so
+  # Esc would have stopped working for the common case.
+  #
+  # Interruption today is a single cooperative flag, `:osa_cancel_flags`, polled
+  # at three levels with no per-tool granularity: the LLM stream watcher
+  # (`agent/loop/llm_client.ex`), the ReAct iteration boundary
+  # (`agent/loop/react_loop.ex`), and tool dispatch
+  # (`agent/loop/tool_orchestrator.ex`). Every tool is effectively `:cancel`.
+  #
+  # If a per-tool interruption policy is ever genuinely wanted, the two places
+  # to implement it are the cancelled-chunk short-circuit and the
+  # brutal-kill branch of `collect_tasks/4`, both in `tool_orchestrator.ex`, and
+  # it must ship with a consumer and a test that observes DIFFERENT runtime
+  # behaviour for the two values — not another self-referential declaration.
 
   # ── Two-stage permissioning ──────────────────────────────────────────
   @callback validate_input(input(), UseContext.t()) :: validation_result()
@@ -107,7 +141,6 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
                       read_only?: 2,
                       destructive?: 2,
                       open_world?: 2,
-                      interrupt_behavior: 0,
                       max_result_size_chars: 0,
                       validate_input: 2,
                       check_permissions: 2,
@@ -140,7 +173,6 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
       def read_only?(_input, _ctx), do: false
       def destructive?(_input, _ctx), do: false
       def open_world?(_input, _ctx), do: false
-      def interrupt_behavior, do: :block
       def max_result_size_chars, do: 30_000
 
       # ── Two-stage permissioning ────────────────────────────────────
@@ -185,7 +217,6 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
                      read_only?: 2,
                      destructive?: 2,
                      open_world?: 2,
-                     interrupt_behavior: 0,
                      max_result_size_chars: 0,
                      validate_input: 2,
                      check_permissions: 2,

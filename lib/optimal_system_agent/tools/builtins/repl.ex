@@ -23,7 +23,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.REPL do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
   defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool
   defdelegate check_permissions(input, ctx), to: OptimalSystemAgent.Tools.Builtins.REPL.Tool

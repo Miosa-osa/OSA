@@ -30,7 +30,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
   defdelegate safety(), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool
   defdelegate deferred?(), to: OptimalSystemAgent.Tools.Builtins.SendMessage.Tool

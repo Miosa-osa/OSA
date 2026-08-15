@@ -70,7 +70,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamDelete.Tool do
   def open_world?(_input, _ctx), do: false
 
   @impl true
-  def interrupt_behavior, do: :block
 
   # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true

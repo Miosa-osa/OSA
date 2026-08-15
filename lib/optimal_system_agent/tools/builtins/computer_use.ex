@@ -48,7 +48,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
   def read_only?(input, ctx), do: Tool.read_only?(input, ctx)
   def destructive?(input, ctx), do: Tool.destructive?(input, ctx)
   def open_world?(input, ctx), do: Tool.open_world?(input, ctx)
-  defdelegate interrupt_behavior(), to: Tool
   defdelegate max_result_size_chars(), to: Tool
 
   # ── Two-stage permissioning ───────────────────────────────────────────

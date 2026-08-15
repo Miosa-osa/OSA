@@ -26,7 +26,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit do
   defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
   defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
   defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
-  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
   defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
   defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool
 

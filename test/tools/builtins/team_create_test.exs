@@ -201,7 +201,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreateTest do
       refute Tool.read_only?(%{}, ctx)
       refute Tool.destructive?(%{}, ctx)
       assert Tool.open_world?(%{}, ctx)
-      assert Tool.interrupt_behavior() == :block
     end
 
     test "parameters schema has required fields" do

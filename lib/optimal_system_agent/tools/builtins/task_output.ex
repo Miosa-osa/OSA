@@ -67,7 +67,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput do
   def open_world?(input, ctx), do: Tool.open_world?(input, ctx)
 
   @impl true
-  def interrupt_behavior, do: Tool.interrupt_behavior()
 
   @impl true
   def max_result_size_chars, do: Tool.max_result_size_chars()

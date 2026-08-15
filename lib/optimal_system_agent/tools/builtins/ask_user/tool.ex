@@ -80,7 +80,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Tool do
 
   @impl true
   # Block — the agent loop must wait for the user's answer.
-  def interrupt_behavior, do: :block
 
   # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true
