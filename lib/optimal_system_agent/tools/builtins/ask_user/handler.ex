@@ -5,9 +5,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
   Behaviour split:
     * `validate/2`           — checks input shape (cheap)
     * `check_permissions/2`  — always allowed (no filesystem or external access)
-    * `execute/2`            — emits Bus event, blocks on PubSub reply
+    * `execute/2`            — emits Bus event, blocks on PubSub reply — unless
+      `Agent.AskUserMode` says questions are off for this session, in which case
+      it returns an instruction to proceed on a stated assumption instead of
+      blocking. See `refuse/2`.
   """
 
+  alias OptimalSystemAgent.Agent.AskUserMode
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Tools.Builtins.AskUser.Constants
   alias OptimalSystemAgent.Tools.UseContext
@@ -35,12 +39,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"question" => question} = params, ctx) do
+    session_id = ctx.session_id || params["__session_id__"]
+
+    if AskUserMode.enabled?(session_id) do
+      do_execute(question, params, session_id)
+    else
+      refuse(session_id, question)
+    end
+  end
+
+  # Second layer of the gate. The first is the tool array — `Loop.init/1` and
+  # `Loop.ToolFilter` keep `ask_user` out of it entirely when disabled, and
+  # under a native-schema provider that alone is sufficient. It is NOT
+  # sufficient everywhere: a prose-only transport treats the array as advice,
+  # `use_tool` can name any registered tool by string, and models hallucinate
+  # calls. Blocking a long-running session for five minutes is exactly the
+  # failure this feature exists to remove, so the block itself is gated here
+  # too, at the last possible point.
+  #
+  # `{:ok, _}` rather than `{:error, _}`: the model asked a legitimate question
+  # and got a legitimate answer ("nobody is listening, decide for yourself").
+  # An error here would count against the doom-loop detector and could abort
+  # the turn — the same reasoning that makes a DECLINED question an `{:ok, _}`.
+  defp refuse(session_id, question) do
+    Bus.emit(:system_event, %{
+      event: :ask_user_suppressed,
+      question: question,
+      session_id: session_id
+    })
+
+    {:ok, AskUserMode.disabled_text()}
+  rescue
+    _ -> {:ok, AskUserMode.disabled_text()}
+  end
+
+  defp do_execute(question, params, session_id) do
     options = params["options"] || []
     # Optional ≤12-char category chip. Enforced here rather than trusted: the
     # TUI renders it in a fixed-width slot, so an over-long header would just be
     # cut off on screen with no signal to the model.
     header = normalize_header(params["header"])
-    session_id = ctx.session_id || params["__session_id__"]
     ref = make_ref()
     ref_str = inspect(ref)
 

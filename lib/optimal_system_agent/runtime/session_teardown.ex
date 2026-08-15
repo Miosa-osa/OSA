@@ -53,6 +53,7 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.AskUserMode
   alias OptimalSystemAgent.Agent.Compactor
   alias OptimalSystemAgent.Agent.Context.WorldState
   alias OptimalSystemAgent.Agent.CoordinatorMode
@@ -95,6 +96,10 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
       {:verification_evidence, &VerificationEvidence.reset/1},
       {:skill_touch, &SkillTouch.reset/1},
       {:coordinator_mode, &CoordinatorMode.clear/1},
+      # The sticky `/ask-user` choice. Cleared with the session so a recycled
+      # session id cannot inherit a stranger's "on" — the direction that would
+      # let a run block on a question its operator never enabled.
+      {:ask_user_mode, &AskUserMode.clear/1},
       {:permission_broker, &PermissionBroker.clear_session/1},
       {:compactor_summary, &Compactor.forget_session/1},
       # Staged-but-unabsorbed compaction spend. Dropping it loses at most the

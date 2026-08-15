@@ -69,9 +69,14 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       # session that reused the id would absorb — and be billed for — spend it
       # never made. This count is the whole point of the test, so it is asserted
       # rather than derived; bump it deliberately when a cleanup is added.
-      assert length(expected) == 9, "every per-session cleanup must be wired in"
+      # `:ask_user_mode` is the sticky `/ask-user` choice. It joined for the
+      # same reason: left behind, a recycled session id would inherit a
+      # stranger's "on" and could block on a question its operator never
+      # enabled — the exact failure the toggle exists to remove.
+      assert length(expected) == 10, "every per-session cleanup must be wired in"
       assert :compactor_summary in expected
       assert :side_spend in expected
+      assert :ask_user_mode in expected
     end
 
     test "the WorldState ledger is covered — it pins rendered payload text" do
@@ -96,9 +101,10 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       assert SessionTeardown.run(:not_a_binary) == []
 
       s = sid()
-      # 9 steps — see the count assertion above for why `:side_spend` joined.
-      assert length(SessionTeardown.run(s)) == 9
-      assert length(SessionTeardown.run(s)) == 9
+      # 10 steps — see the count assertion above for why `:side_spend` and
+      # `:ask_user_mode` joined.
+      assert length(SessionTeardown.run(s)) == 10
+      assert length(SessionTeardown.run(s)) == 10
     end
   end
 

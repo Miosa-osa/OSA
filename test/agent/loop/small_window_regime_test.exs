@@ -227,7 +227,11 @@ defmodule OptimalSystemAgent.Agent.Loop.SmallWindowRegimeTest do
         ToolFilter.filter(tools, %{
           provider: :ollama,
           model: @small_model,
-          messages: []
+          messages: [],
+          # This test is about the small-window BUDGET's priority ordering, not
+          # about the ask_user gate — which is off by default (`AskUserMode`)
+          # and would otherwise remove the tool before the budget ever ranks it.
+          ask_user_enabled: true
         })
         |> Enum.map(& &1.name)
 
@@ -255,7 +259,10 @@ defmodule OptimalSystemAgent.Agent.Loop.SmallWindowRegimeTest do
       state = %{
         provider: :ollama,
         model: @small_model,
-        messages: [%{role: "tool", name: "computer_use", content: "ok"}]
+        messages: [%{role: "tool", name: "computer_use", content: "ok"}],
+        # As above: the assertion here is the CU focus allowlist, so the
+        # independent ask_user gate is opened to keep the two separable.
+        ask_user_enabled: true
       }
 
       tools =

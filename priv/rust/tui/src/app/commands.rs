@@ -47,6 +47,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("overdrive", "Toggle overdrive (full auto)"),
     ("yolo", "Toggle overdrive (full auto)"),
     ("coordinator", "Toggle coordinator mode (delegation only)"),
+    ("ask-user", "Let the agent ask you questions mid-task (off by default)"),
     ("memory", "Save or recall a memory"),
     ("channels", "Show channel connectivity"),
     ("doctor", "Run backend diagnostics"),
@@ -432,6 +433,23 @@ impl App {
                     _ => "toggle",
                 };
                 self.execute_backend_command("coordinator", verb);
+            }
+            "/ask-user" => {
+                // May the agent stop mid-task and ask a question? OFF by default,
+                // everywhere — an unattended run that parks on a question nobody
+                // answers is the failure this exists to remove.
+                //
+                // Unlike /coordinator there is NO toggle verb: a bare `/ask-user`
+                // reports the current state instead of flipping it. Whether the
+                // agent can interrupt you is not something to find out by
+                // accident. The chip and toast come from the backend's
+                // `ask_user_mode` echo, so the UI shows the authoritative state.
+                let verb = match arg.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" | "enable" => "on",
+                    "off" | "false" | "0" | "no" | "disable" => "off",
+                    _ => "status",
+                };
+                self.execute_backend_command("ask-user", verb);
             }
             "/tools" => {
                 // Fetch the full tool list and open the searchable browser when
@@ -943,5 +961,23 @@ mod tests {
             "`coordinator` missing from BUILTIN_SLASH_COMMANDS"
         );
         assert_eq!(entry.unwrap().1, "Toggle coordinator mode (delegation only)");
+    }
+
+    #[test]
+    fn ask_user_command_is_registered() {
+        // `/ask-user` must be discoverable, and its description must say the
+        // default out loud. An operator who cannot see that questions are OFF
+        // will read a session that never asks as a broken agent.
+        let entry = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "ask-user");
+        assert!(
+            entry.is_some(),
+            "`ask-user` missing from BUILTIN_SLASH_COMMANDS"
+        );
+        assert!(
+            entry.unwrap().1.contains("off by default"),
+            "the /ask-user description must state the default"
+        );
     }
 }

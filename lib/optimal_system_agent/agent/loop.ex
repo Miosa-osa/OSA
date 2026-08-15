@@ -48,6 +48,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
 
+  alias OptimalSystemAgent.Agent.AskUserMode
   alias OptimalSystemAgent.Agent.CompactionEvents
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
@@ -154,6 +155,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Append-only within a session, and never reordered — see the module doc for
     # why that is what the prompt cache requires.
     discovered_tools: [],
+    # Is the `ask_user` tool available to the model this session?
+    #
+    # OFF by default, everywhere — see `Agent.AskUserMode`. Resolved ONCE in
+    # `init/1` and pinned here rather than re-read per request, so the tool
+    # array (and therefore the cached prompt prefix) is byte-stable across a
+    # session. `/ask-user on` mid-session rewrites it deliberately and pays one
+    # cache re-prime, which the command's confirmation says out loud.
+    ask_user_enabled: false,
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
     max_turns: nil,
@@ -590,6 +599,45 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
+  Turn the `ask_user` tool on or off for a session at runtime (`/ask-user`).
+
+  Mirrors `set_coordinator/2` exactly: the sticky store is written FIRST so the
+  choice survives (a) a toggle that lands before the turn's loop exists and
+  (b) a loop later re-created for the session, then the live loop — if any —
+  recomputes its tool array from the preserved unfiltered base. An
+  `ask_user_mode` system_event is emitted so the TUI confirms the resulting
+  state rather than the state it hoped for.
+
+  Turning it ON mid-session changes the tool array, which re-primes the
+  provider's prompt cache once on the next request. That is stated in the
+  operator-facing confirmation instead of being absorbed silently.
+  """
+  @spec set_ask_user(String.t(), boolean()) :: {:ok, boolean()}
+  def set_ask_user(session_id, on?) when is_boolean(on?) do
+    AskUserMode.put(session_id, on?)
+
+    result =
+      try do
+        GenServer.call(via(session_id), {:set_ask_user, on?})
+      catch
+        :exit, _ -> {:ok, on?}
+      end
+
+    emit_ask_user_mode(session_id, on?)
+    result
+  end
+
+  @doc "Is `ask_user` enabled for this session? (falls back to the resolved default)."
+  @spec get_ask_user(String.t()) :: {:ok, boolean()}
+  def get_ask_user(session_id) do
+    try do
+      GenServer.call(via(session_id), {:get_ask_user})
+    catch
+      :exit, _ -> {:ok, AskUserMode.enabled?(session_id)}
+    end
+  end
+
+  @doc """
   Cancel a running agent loop for the given session — TRANSITIVELY.
 
   Sets a flag in an ETS table that ReactLoop.run/1 checks at each iteration.
@@ -942,6 +990,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     all_tools = Tools.filter_applicable_tools(%{history: []}) ++ extra_tools
 
+    # `ask_user` availability, resolved ONCE and pinned. Precedence mirrors
+    # coordinator/permission mode: an explicit opt (subagent inheritance, an
+    # `osa.run --ask-user` flag) wins; then the sticky per-session store the
+    # `/ask-user` toggle writes; then env/settings, which default to OFF.
+    ask_user_enabled? =
+      case Keyword.get(opts, :ask_user) do
+        on? when is_boolean(on?) -> on?
+        _ -> AskUserMode.enabled?(session_id)
+      end
+
     state = %__MODULE__{
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
@@ -966,9 +1024,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
       session_output_tokens: session_output_tokens,
       session_cache_creation_tokens: session_cache_creation_tokens,
       session_cache_read_tokens: session_cache_read_tokens,
-      tools: ToolFilter.filter_for_coordinator(all_tools, coordinator?),
+      tools:
+        all_tools
+        |> ToolFilter.filter_for_coordinator(coordinator?)
+        |> AskUserMode.filter_tools(ask_user_enabled?),
       all_tools: all_tools,
       coordinator: coordinator?,
+      ask_user_enabled: ask_user_enabled?,
       # Budget cap precedence (audit gap D2 restore half): a cap PERSISTED in the
       # checkpoint wins, so a run started with an explicit $50 cap keeps it across
       # a crash/restart instead of resetting to the app-env default (nil =
@@ -1123,6 +1185,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
       event: :coordinator_mode,
       session_id: session_id,
       active: active
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # Announce an ask_user availability transition on the Bus, same bridge as
+  # `coordinator_mode`: TuiForwarder relays it to the session topic the TUI
+  # streams, so the toggle confirms from the BACKEND's resulting state rather
+  # than from the TUI's optimistic guess.
+  defp emit_ask_user_mode(session_id, enabled) do
+    Bus.emit(:system_event, %{
+      event: :ask_user_mode,
+      session_id: session_id,
+      enabled: enabled
     })
 
     :ok
@@ -1417,12 +1497,33 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # list from the preserved unfiltered base, no session restart. state.coordinator
   # is also read by Agent.Context to inject the "Mode: coordinator" system note.
   def handle_call({:set_coordinator, on?}, _from, state) when is_boolean(on?) do
-    tools = ToolFilter.filter_for_coordinator(state.all_tools, on?)
+    tools =
+      state.all_tools
+      |> ToolFilter.filter_for_coordinator(on?)
+      |> AskUserMode.filter_tools(state.ask_user_enabled)
+
     {:reply, {:ok, on?}, %{state | coordinator: on?, tools: tools}}
   end
 
   def handle_call({:get_coordinator}, _from, state) do
     {:reply, {:ok, state.coordinator}, state}
+  end
+
+  # In-place ask_user toggle, rebuilt from the same preserved base as the
+  # coordinator toggle so the two compose instead of clobbering each other.
+  # This is the ONE place the tool array legitimately changes mid-session; the
+  # cost (a single prompt-cache re-prime) is named in the reply text.
+  def handle_call({:set_ask_user, on?}, _from, state) when is_boolean(on?) do
+    tools =
+      state.all_tools
+      |> ToolFilter.filter_for_coordinator(state.coordinator)
+      |> AskUserMode.filter_tools(on?)
+
+    {:reply, {:ok, on?}, %{state | ask_user_enabled: on?, tools: tools}}
+  end
+
+  def handle_call({:get_ask_user}, _from, state) do
+    {:reply, {:ok, state.ask_user_enabled}, state}
   end
 
   def handle_call({:set_strategy, _strategy_name}, _from, state) do

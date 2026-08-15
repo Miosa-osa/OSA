@@ -55,6 +55,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "version" => {"Show version and check for updates", :cmd_version},
     "release-notes" => {"Show what's new in this release", :cmd_release_notes},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
+    "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
     "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
@@ -1377,6 +1378,75 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("")
         session_id
     end
+  end
+
+  # ── /ask-user — may the agent stop and ask you something? ─────────────
+  #
+  # Off by default, in every context (see `Agent.AskUserMode`). The failure it
+  # removes is concrete: an unattended long-running session calls `ask_user`,
+  # blocks for five minutes on a question nobody is there to answer, and does
+  # nothing until the timeout — then asks again. A stated assumption the
+  # operator can correct afterwards beats a session that stopped.
+  #
+  # `/ask-user` with no argument REPORTS rather than toggles. A blind toggle
+  # on a setting whose whole purpose is "I want to know when the agent can
+  # interrupt me" is how you end up unsure which state you are in.
+  def cmd_ask_user(args, session_id) do
+    IO.puts("")
+
+    case parse_on_off(args) do
+      :show ->
+        {:ok, on?} = Loop.get_ask_user(session_id)
+        print_ask_user_state(on?, false)
+
+      {:ok, on?} ->
+        {:ok, applied} = Loop.set_ask_user(session_id, on?)
+        print_ask_user_state(applied, true)
+
+      :error ->
+        IO.puts("  #{@yellow}usage: /ask-user [on|off]#{@reset}")
+        IO.puts("")
+    end
+
+    session_id
+  end
+
+  defp parse_on_off(args) do
+    case args |> to_string() |> String.trim() |> String.downcase() do
+      "" -> :show
+      "status" -> :show
+      v when v in ~w(on true 1 yes enable enabled) -> {:ok, true}
+      v when v in ~w(off false 0 no disable disabled) -> {:ok, false}
+      _ -> :error
+    end
+  end
+
+  # The changed-tool-array cost is stated, not hidden. Enabling mid-session
+  # rewrites the provider tool array, which re-primes the prompt cache once on
+  # the next request; saying so is cheaper than an operator discovering a
+  # one-off latency bump and not knowing why.
+  defp print_ask_user_state(on?, changed?) do
+    if on? do
+      IO.puts(
+        "  #{@green}✓#{@reset} Questions #{@bold}enabled#{@reset} — the agent may stop and ask you mid-task"
+      )
+
+      if changed? do
+        IO.puts(
+          "  #{@dim}  takes effect on the next request; the tool list changed, so the prompt cache re-primes once#{@reset}"
+        )
+      end
+    else
+      IO.puts(
+        "  #{@green}✓#{@reset} Questions #{@bold}disabled#{@reset} — the agent proceeds on its best assumption and states it"
+      )
+
+      if changed? do
+        IO.puts("  #{@dim}  takes effect on the next request#{@reset}")
+      end
+    end
+
+    IO.puts("")
   end
 
   # ── /login, /logout — real account sign-in ────────────────────────────

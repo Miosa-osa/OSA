@@ -87,6 +87,34 @@ defmodule OptimalSystemAgent.ObservabilityTest do
     end
   end
 
+  describe "ask_user_enabled/1 (recorded on both ends of every turn)" do
+    # Whether the agent could stop and ask is a condition the turn ran under,
+    # the same class of fact as `effort` and `reasoning`. A run where the model
+    # had to assume is not comparable to one where it could ask, and the point
+    # of the toggle is that the assuming happens deliberately — which is only
+    # checkable if the setting is on the wire rather than inferred afterwards.
+    test "reports the value pinned in loop state, not the ambient default" do
+      assert Observability.ask_user_enabled(%{ask_user_enabled: true}) == true
+      assert Observability.ask_user_enabled(%{ask_user_enabled: false}) == false
+    end
+
+    test "a state without the field reads as false — the default, not a guess" do
+      assert Observability.ask_user_enabled(%{}) == false
+      assert Observability.ask_user_enabled(%{ask_user_enabled: nil}) == false
+    end
+
+    test "the field is present in the turn_start and turn_end payloads" do
+      # Guards against the field being added to one end only: `/ask-user` can be
+      # toggled mid-run, so a start-only reading would attribute the whole turn
+      # to the wrong condition — the same failure the `effort` comment describes.
+      src = File.read!("lib/optimal_system_agent/observability.ex")
+      assert src =~ "ask_user: ask_user_enabled(state)"
+
+      assert length(String.split(src, "ask_user: ask_user_enabled(state)")) == 3,
+             "ask_user must be recorded on BOTH turn_start and turn_end"
+    end
+  end
+
   describe "structured events reach the durable per-session stream (correlated)" do
     @tag :integration
     test "emitted lifecycle event lands in the session stream carrying the turn_id" do

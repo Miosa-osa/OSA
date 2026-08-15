@@ -40,6 +40,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     verification_gate_triggered
     scratchpad_activity
     coordinator_mode
+    ask_user_mode
     error
     hook_run
     hook_blocked

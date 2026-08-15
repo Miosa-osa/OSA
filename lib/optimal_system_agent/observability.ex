@@ -99,6 +99,7 @@ defmodule OptimalSystemAgent.Observability do
         model: Map.get(state, :model),
         effort: effort,
         reasoning: current_reasoning(state),
+        ask_user: ask_user_enabled(state),
         unobserved_background: unobserved_background_count(state)
       },
       state,
@@ -150,12 +151,32 @@ defmodule OptimalSystemAgent.Observability do
         # start-only reading would attribute the whole turn to the wrong level.
         effort: current_effort(),
         reasoning: current_reasoning(state),
+        # Recorded on both ends for the same reason as `effort`: `/ask-user`
+        # can be toggled mid-run, and it changes the tool array — a turn that
+        # started without the tool can end with it.
+        ask_user: ask_user_enabled(state),
         unobserved_background: unobserved_background_count(state)
       },
       state,
       source: "agent.turn"
     )
   end
+
+  @doc """
+  Whether `ask_user` was available to the model for this turn.
+
+  Recorded next to `effort` and `reasoning`, and for the same reason: it is a
+  condition the turn ran under, and it changes what the model can do. A run
+  where the agent could not ask and had to assume is not comparable to one
+  where it could — and the whole point of the toggle is that the assuming
+  happens on purpose, which is only checkable if the setting is on the wire.
+
+  Reads the value PINNED in loop state (`Loop.init/1`), not the live default,
+  so it reports what the turn actually had rather than what a fresh session
+  would get. Never raises: any failure reads as `false`, matching the default.
+  """
+  @spec ask_user_enabled(map()) :: boolean()
+  def ask_user_enabled(state), do: Map.get(state, :ask_user_enabled, false) == true
 
   @doc """
   How many background commands this session started are still running.

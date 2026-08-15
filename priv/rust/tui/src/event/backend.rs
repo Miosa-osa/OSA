@@ -628,6 +628,14 @@ pub enum BackendEvent {
         active: bool,
     },
 
+    // === Ask-User Mode ===
+    /// Whether the `ask_user` tool is available to the model this session. Off by
+    /// default everywhere; when off the agent proceeds on a stated assumption
+    /// instead of blocking on a question nobody may be there to answer.
+    AskUserMode {
+        enabled: bool,
+    },
+
     // === Cancel ===
     /// Fired 3s after cancel request if the SSE stream hasn't delivered a response.
     /// Forces the UI back to Idle to prevent getting stuck.

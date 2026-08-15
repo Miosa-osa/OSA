@@ -126,6 +126,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         cmd_name == "coordinator" ->
           handle_coordinator_command(conn, conn.body_params["arg"] || "")
 
+        cmd_name in ~w(ask-user ask_user) ->
+          handle_ask_user_command(conn, conn.body_params["arg"] || "")
+
         cmd_name in @blocked_http_commands ->
           body =
             Jason.encode!(%{
@@ -222,6 +225,65 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
     body = Jason.encode!(%{output: output, command: "coordinator", active: active})
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  # `/ask-user [on|off|status]` — may the agent block the turn on a question?
+  #
+  # Same shape as the coordinator handler and for the same reasons: `status`
+  # (and a bare command) is a pure READ that emits no event, so the TUI's
+  # reconnect-time re-sync cannot make the status bar announce a transition
+  # that never happened.
+  #
+  # Unlike coordinator, an unrecognised verb does NOT toggle — it reports. This
+  # setting decides whether an unattended run can stall; guessing at the
+  # operator's intent is the wrong failure mode for it.
+  defp handle_ask_user_command(conn, arg) do
+    session_id =
+      OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
+
+    verb = arg |> to_string() |> String.trim() |> String.downcase()
+    current = ask_user_enabled?(session_id)
+
+    {enabled, changed?} =
+      case verb do
+        v when v in ~w(on true 1 yes enable enabled) ->
+          {:ok, on?} = OptimalSystemAgent.Agent.Loop.set_ask_user(session_id, true)
+          {on?, on? != current}
+
+        v when v in ~w(off false 0 no disable disabled) ->
+          {:ok, on?} = OptimalSystemAgent.Agent.Loop.set_ask_user(session_id, false)
+          {on?, on? != current}
+
+        _ ->
+          {current, false}
+      end
+
+    output =
+      cond do
+        enabled and changed? ->
+          "Questions ON — the agent may stop and ask you mid-task. Takes effect " <>
+            "on the next request; the tool list changed, so the prompt cache re-primes once."
+
+        enabled ->
+          "Questions ON — the agent may stop and ask you mid-task."
+
+        changed? ->
+          "Questions OFF — the agent proceeds on its best assumption and states it. " <>
+            "Takes effect on the next request."
+
+        true ->
+          "Questions OFF — the agent proceeds on its best assumption and states it."
+      end
+
+    body = Jason.encode!(%{output: output, command: "ask-user", enabled: enabled})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  defp ask_user_enabled?(session_id) do
+    case OptimalSystemAgent.Agent.Loop.get_ask_user(session_id) do
+      {:ok, on?} -> on?
+      _ -> false
+    end
   end
 
   defp coordinator_active?(session_id) do

@@ -582,6 +582,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "proactive_message"
         | "proactive_mode_changed"
         | "coordinator_mode"
+        | "ask_user_mode"
         | "session_title"
         | "compaction_started"
         | "compaction_progress"
@@ -1847,6 +1848,24 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 Err(e) => return Some(parse_warning("coordinator_mode", e)),
             };
             Some(BackendEvent::CoordinatorMode { active: ev.active })
+        }
+
+        // Whether the agent may block the turn on a question. Defaults to false
+        // on a missing field, which matches the backend default — a parse that
+        // silently read "on" would be the worst possible direction to fail.
+        "ask_user_mode" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                enabled: bool,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("ask_user_mode", e)),
+            };
+            Some(BackendEvent::AskUserMode {
+                enabled: ev.enabled,
+            })
         }
 
         // The session's human-readable title. Emitted twice in the normal case:

@@ -210,6 +210,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
   # `ask_user` blocks the turn on human input. Every exit from that wait must
   # be a model-readable `{:ok, _}` result, never a fatal error and never an
   # unbounded hang.
+  #
+  # These tests exercise the ENABLED path, so each one turns the gate on for its
+  # own session id — asking is off by default now (`Agent.AskUserMode`), and a
+  # disabled session never reaches the wait at all. The disabled path has its
+  # own coverage in `test/optimal_system_agent/agent/ask_user_mode_test.exs`.
   # ---------------------------------------------------------------------------
 
   alias OptimalSystemAgent.Agent.Loop.ToolError
@@ -218,6 +223,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
   # has been published (the ref is registered in the pending-questions table).
   defp start_question(question, options \\ []) do
     sid = "ask-user-exec-#{System.unique_integer([:positive])}"
+    :ok = OptimalSystemAgent.Agent.AskUserMode.put(sid, true)
+    on_exit(fn -> OptimalSystemAgent.Agent.AskUserMode.clear(sid) end)
     ctx = %UseContext{session_id: sid}
 
     task =

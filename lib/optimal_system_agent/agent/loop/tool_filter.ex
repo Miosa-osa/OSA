@@ -60,6 +60,28 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     |> FastPath.select_tools(state)
     |> apply_small_window_budget(state)
     |> repin_discovered(state)
+    |> apply_ask_user_gate(state)
+  end
+
+  # LAST, deliberately — after `repin_discovered/2`.
+  #
+  # `ask_user` is off by default (see `Agent.AskUserMode`) and `Loop.init/1`
+  # already leaves it out of `state.tools`. This pass is what makes that hold
+  # for the rest of the session: `ToolDiscovery.widen/2` appends whatever a
+  # `tool_search` resolved to, and `repin_discovered/2` re-appends the pinned
+  # set after every narrowing pass, so a model that searched for "ask" would
+  # otherwise get the tool back one iteration later — a gate that silently
+  # stops holding is worse than no gate.
+  #
+  # It reads a value PINNED at session start, so it does not oscillate: the
+  # array it produces is the same array on every request of the session, which
+  # is what the cached tool prefix requires. Only an explicit `/ask-user`
+  # toggle changes it, once.
+  defp apply_ask_user_gate(tools, state) do
+    OptimalSystemAgent.Agent.AskUserMode.filter_tools(
+      tools,
+      Map.get(state, :ask_user_enabled, false)
+    )
   end
 
   # Every pass above can only SHRINK the list, which is what made a deferred

@@ -33,6 +33,12 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "permission_mode" =>
       {{:enum, ["ask", "auto-edit", "plan", "overdrive"]},
        ~s(Use "ask" | "auto-edit" | "plan" | "overdrive")},
+    "ask_user" =>
+      {:boolean,
+       "Use true or false (no quotes) — may the agent stop mid-task and ask you a " <>
+         "question? Default false, because an unattended run blocks until someone " <>
+         "answers. Read through the TRUST gate, so an untrusted workspace cannot " <>
+         "turn it on"},
     "context_refs_enabled" => {:boolean, "Use true or false (no quotes)"},
     "context_refs_budget" => {:non_neg_integer, "Use a whole number of tokens, e.g. 30000"},
     "fs_checkpoints_enabled" => {:boolean, "Use true or false (no quotes)"},

@@ -2998,6 +2998,23 @@ impl App {
                     self.announce_a11y(msg);
                 }
             }
+            BackendEvent::AskUserMode { enabled } => {
+                // Unconditional toast, unlike CoordinatorMode above — and for a
+                // reason, not an oversight. The backend emits `ask_user_mode`
+                // ONLY from an explicit set (`handle_ask_user_command`'s status
+                // arm is a pure read that emits nothing), and the TUI sends no
+                // status query on reconnect. So every event here is an operator
+                // action, and an operator who typed `/ask-user off` when it was
+                // already off still deserves to be told it is off.
+                let msg = if enabled {
+                    "Questions on: the agent may stop and ask you mid-task"
+                } else {
+                    "Questions off: the agent proceeds on a stated assumption"
+                };
+                self.toasts
+                    .push(msg.into(), crate::components::toast::ToastLevel::Info);
+                self.announce_a11y(msg);
+            }
         }
         false
     }

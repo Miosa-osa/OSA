@@ -26,6 +26,11 @@ defmodule Mix.Tasks.Osa.Run do
     An unrecognised level is a hard error, not a silent fallback — a benchmark
     run that meant to pin effort must not quietly produce an unpinned number.
   - `--resume` — Resume a previous session by ID
+  - `--ask-user` — Allow the agent to stop and ask a question. OFF by default,
+    here as everywhere else: nothing is attached to a headless run to answer
+    one, so an `ask_user` call blocks the turn for its full five-minute timeout
+    and then continues on the assumption it would have made anyway. Pass this
+    only when a human is actually watching the pipe.
 
   ## Terminal safety
 
@@ -66,7 +71,13 @@ defmodule Mix.Tasks.Osa.Run do
           max_turns: :integer,
           max_budget: :float,
           effort: :string,
-          resume: :string
+          resume: :string,
+          # Off by default like everywhere else, but the flag exists BECAUSE
+          # this is the headless path: there is no channel to answer a question
+          # on, so a blocked `ask_user` here stalls until its 5-minute timeout
+          # with nobody able to shorten it. `--ask-user` is for the case where a
+          # human really is watching a scripted run.
+          ask_user: :boolean
         ],
         aliases: [f: :format, m: :model, p: :provider]
       )
@@ -135,7 +146,8 @@ defmodule Mix.Tasks.Osa.Run do
         model: opts[:model],
         provider: if(opts[:provider], do: String.to_atom(opts[:provider])),
         max_turns: opts[:max_turns],
-        max_budget_usd: opts[:max_budget]
+        max_budget_usd: opts[:max_budget],
+        ask_user: opts[:ask_user]
       ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
