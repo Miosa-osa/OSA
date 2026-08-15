@@ -203,8 +203,42 @@ defmodule OptimalSystemAgent.Providers.OllamaCloudCatalogTest do
       assert Pricing.rates("kimi-k3:cloud") == {3.00, 15.00}
     end
 
-    test "existing GLM cloud pricing is unchanged" do
-      assert Pricing.rates("glm-5.2:cloud") == {0.60, 2.20}
+    # This assertion used to read `== {0.60, 2.20}` and was named "unchanged",
+    # which is how a wrong number survived: {0.60, 2.20} is GLM-**4.7**'s
+    # published rate, carried forward onto two later generations. Z.ai charges
+    # {1.40, 4.40} for both 5.2 and 5.1. Since `glm-5.2:cloud` is OSA's DEFAULT
+    # model, every install under-reported its own spend by 2.4x on input and 2x
+    # on output — and `confidence/1` said `:exact` throughout, because a wrong
+    # figure in an exact-match table never reaches the family guess that would
+    # have warned about it.
+    #
+    # A test that pins a number to "whatever it was" cannot catch that. These
+    # pin each tag to the generation whose rate it is.
+    test "each GLM tag is priced at its OWN generation's published rate" do
+      assert Pricing.rates("glm-5.2:cloud") == {1.40, 4.40}
+      assert Pricing.rates("glm-5.1:cloud") == {1.40, 4.40}
+      assert Pricing.rates("glm-4.7:cloud") == {0.60, 2.20}
+
+      refute Pricing.rates("glm-5.2:cloud") == Pricing.rates("glm-4.7:cloud"),
+             "5.2 and 4.7 are priced identically, which is how the last error looked. " <>
+               "Z.ai has never charged the same rate for two GLM generations."
+    end
+
+    # Every one of these was `nil` — accounted at $0.00 and logged, for tags
+    # whose upstream vendor publishes a rate on its own first-party endpoint.
+    test "no catalog entry silently accounts at zero when a rate exists" do
+      for {tag, rate} <- [
+            {"kimi-k2.6:cloud", {0.95, 4.00}},
+            {"kimi-k2.7-code:cloud", {0.95, 4.00}},
+            {"minimax-m3:cloud", {0.30, 1.20}},
+            {"deepseek-v4-pro:cloud", {0.435, 0.87}},
+            {"deepseek-v4-flash:cloud", {0.14, 0.28}}
+          ] do
+        assert Pricing.rates(tag) == rate, "#{tag} lost its published rate"
+
+        assert Pricing.confidence(tag) == :exact,
+               "#{tag} priced by GUESS — a catalog tag must never reach the family fallback"
+      end
     end
   end
 

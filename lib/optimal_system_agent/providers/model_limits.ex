@@ -108,7 +108,12 @@ defmodule OptimalSystemAgent.Providers.ModelLimits do
     OptimalSystemAgent.Providers.AnthropicModels,
     OptimalSystemAgent.Providers.OpenAIModels,
     OptimalSystemAgent.Providers.GoogleModels,
-    OptimalSystemAgent.Providers.DeepSeekModels
+    OptimalSystemAgent.Providers.DeepSeekModels,
+    # GLM. The `@static_max_output` rows below only ever covered three bare
+    # ids, so `glm-5.2:cloud` — OSA's default — matched none of them and was
+    # clamped by whatever fallback the caller happened to hold. `ZaiModels`
+    # resolves the tagged and vendor-prefixed spellings too.
+    OptimalSystemAgent.Providers.ZaiModels
   ]
 
   defp ssot_max_output(model) do

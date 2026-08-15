@@ -52,7 +52,7 @@
         id: "glm-4.7:cloud",
         name: "GLM-4.7",
         tools: true,
-        note: "previous-generation Z.ai flagship — agentic + coding",
+        note: "RETIRED on Ollama 2026-07-15 — previous-generation Z.ai flagship",
         ctx: 202_752,
         recommended: false
       },
@@ -60,7 +60,7 @@
         id: "glm-5.1:cloud",
         name: "GLM-5.1",
         tools: true,
-        note: "agentic, state-of-the-art coding",
+        note: "200K ctx — same price as 5.2 for a fifth of the window",
         ctx: 202_752,
         recommended: false
       },
@@ -340,7 +340,9 @@
     description: "Grok models",
     group: "bring_your_own",
     base_url: "https://api.x.ai/v1",
-    default_model: "grok-4.5",
+    # Moved from grok-4.5 on 2026-08-15 when Grok 4.6 was added — same 500K
+    # window, same {2.00, 6.00} price, xAI's current flagship.
+    default_model: "grok-4.6",
     models: :dynamic,
     env_var: "XAI_API_KEY",
     requires_key: true,

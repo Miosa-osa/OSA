@@ -40,10 +40,23 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
   3. Record any published shutdown date in `Providers.Retirements`.
   4. `mix compile` + `mix test test/providers`.
 
+  ## Google's published price is not always the price you pay
+
+  Google runs dated INTRODUCTORY rates and does not mark them in the same table
+  cell as the list rate — the expiry is a footnote. `gemini-3.6-flash` was
+  recorded here at its list price of `{1.50, 7.50}` while Google was actually
+  billing `{0.75, 3.75}`, so every Gemini cost OSA reported was 2x high and
+  `Pricing.confidence/1` called it `:exact`. Both current Flash models now
+  carry the rate in force today, and both promos lapse **2027-01-01** — after
+  which these two rows must be doubled. Nothing in the code knows that date;
+  it is a diary entry, not a mechanism.
+
   Sources: https://ai.google.dev/gemini-api/docs/models,
   https://ai.google.dev/gemini-api/docs/pricing,
-  https://ai.google.dev/gemini-api/docs/thinking and
-  https://ai.google.dev/gemini-api/docs/deprecations (all checked 2026-08-01).
+  https://ai.google.dev/gemini-api/docs/thinking,
+  https://ai.google.dev/gemini-api/docs/changelog and
+  https://ai.google.dev/gemini-api/docs/deprecations (checked 2026-08-01,
+  re-checked 2026-08-15 for the 3.7 Flash GA and the introductory rates).
 
   **Not verified against a live API.** No `GOOGLE_API_KEY` / `GEMINI_API_KEY`
   exists in this environment, so `GET /v1beta/models` — which is authoritative
@@ -78,6 +91,41 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
   # Display order: recommended default first, then cheaper/faster, then Pro.
   @models [
     %{
+      id: "gemini-3.7-flash",
+      name: "Gemini 3.7 Flash",
+      # Google's models and pricing pages render the spec table client-side, so
+      # neither figure is in the served HTML for this model. Both were read
+      # from Google's OWN first-party endpoints (Google + Google AI Studio) as
+      # reported by OpenRouter's public endpoints API, which agrees with the
+      # Gemini 3 guide's blanket "1M in / 64k out" for the Flash line and with
+      # every other 3.x Flash entry below. Sourced, but one step less direct
+      # than a vendor page — say so rather than implying a model card.
+      ctx: 1_048_576,
+      max_output: 65_536,
+      thinking: :level,
+      # Not published for 3.7 specifically; the Gemini 3 guide documents this
+      # vocabulary for the family. Inherited deliberately — the alternative is
+      # `thinking: :none`, which would silently disable the effort ladder on
+      # Google's newest model, the exact failure this module was written for.
+      levels: @all_levels,
+      default_level: "medium",
+      vision: true,
+      audio: true,
+      tools: true,
+      # INTRODUCTORY rate, published as running through 2026-12-31. Google's
+      # own page states the list rate of {1.50, 7.50} takes effect 2027-01-01.
+      # The rate actually billed today is recorded; see the note on 3.6 Flash
+      # for why this is not the same as recording the list price.
+      pricing: {0.75, 3.75},
+      # NOT recommended, and `default_model/0` is deliberately left on 3.6
+      # Flash. Moving the default is a behaviour change for every existing
+      # Google user and is an editorial decision, not a catalog one.
+      recommended: false,
+      preview: false,
+      legacy: false,
+      note: "1M ctx — newest Flash (GA 2026-08-13); intro pricing to 2026-12-31"
+    },
+    %{
       id: "gemini-3.6-flash",
       name: "Gemini 3.6 Flash",
       ctx: 1_048_576,
@@ -88,11 +136,21 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
       vision: true,
       audio: true,
       tools: true,
-      pricing: {1.50, 7.50},
+      # CORRECTED 2026-08-15, and the correction halves every reported Gemini
+      # cost. Google runs an introductory rate of {0.75, 3.75} through
+      # 2026-12-31, reverting to the {1.50, 7.50} previously recorded here on
+      # 2027-01-01. The old number was the LIST price, and OSA billed against
+      # it while Google charged half — a 2x over-statement on the default
+      # Google model, reported as `:exact` the whole time.
+      #
+      # The list rate is not recorded as a second field because `rates/1` has
+      # nowhere to put a date-conditional price; when the promo lapses this row
+      # goes back to {1.50, 7.50}. Same schedule applies to 3.7 Flash.
+      pricing: {0.75, 3.75},
       recommended: true,
       preview: false,
       legacy: false,
-      note: "1M ctx — best agentic coding on Gemini. Default."
+      note: "1M ctx — best agentic coding on Gemini. Default. Intro pricing to 2026-12-31"
     },
     %{
       id: "gemini-3.5-flash",

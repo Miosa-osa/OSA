@@ -43,19 +43,34 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # new cloud model's price THERE (leave it nil if the vendor publishes none —
   # an unpriced model accounts at $0.00 and logs, which is honest).
   @static_pricing %{
-    # GLM (Z.ai / Zhipu cloud) — OSA's default provider family
-    "glm-4.7:cloud" => {0.60, 2.20},
+    # GLM (Z.ai / Zhipu cloud) — OSA's default provider family.
+    #
+    # Current GLM ids are NOT listed here: they come from
+    # `Providers.ZaiModels`, the single source of truth for that catalog,
+    # merged in below. Only the two legacy ids that catalog does not carry
+    # survive as hand-written rows, so a config still pinned to one accounts at
+    # the rate it was actually billed rather than at a family guess.
+    # `glm-4.6:cloud` is here rather than in `OllamaCloud` because Ollama no
+    # longer serves that tag, so it has no catalog row to inherit from.
     "glm-4.6:cloud" => {0.60, 2.20},
     "glm-4.6" => {0.60, 2.20},
     "glm-4.5" => {0.60, 2.20},
 
-    # GLM reached through OpenRouter, which publishes its own rate for the
-    # route. Keyed on the FULL gateway id so it applies to that route only —
-    # the bare `glm-5.2` served elsewhere keeps whatever its own catalog says.
-    # Observed on the OpenRouter model page 2026-08-14. Without this row the
-    # route fell to the `glm` family guess of {0.60, 2.20}, which UNDER-billed
-    # input by 5% and OVER-billed output by 11% (net −4.5% across the
-    # or-glm52-full / or-glm52-nospec runs).
+    # GLM reached through OpenRouter, which prices the ROUTE, not the model —
+    # and OpenRouter picks among ~30 upstreams for this id whose rates span
+    # {0.448, 1.408} (StreamLake) to {2.31, 7.26} (Alibaba), a 5x spread. Z.ai's
+    # own endpoint sits at {1.40, 4.40}, the rate `ZaiModels` records for the
+    # bare id.
+    #
+    # This row therefore cannot be "correct" — it can only track whichever
+    # upstream OpenRouter is defaulting to. It is kept, keyed on the FULL
+    # gateway id so it applies to that route alone, because the alternative is
+    # the `glm` family guess. Observed on the OpenRouter model page 2026-08-14;
+    # the default route had already moved to {0.462, 1.452} by 2026-08-15.
+    # Deliberately NOT updated to chase that: the benchmark arms that ran
+    # against it (or-glm52-full / or-glm52-nospec) are costed with this number,
+    # and a rate that changes under them retroactively is worse than one that
+    # is stably approximate.
     "z-ai/glm-5.2" => {0.63, 1.98},
 
     # Anthropic Claude
@@ -95,6 +110,13 @@ defmodule OptimalSystemAgent.Agent.Pricing do
            |> Map.merge(OptimalSystemAgent.Providers.OpenAIModels.pricing())
            |> Map.merge(OptimalSystemAgent.Providers.GoogleModels.pricing())
            |> Map.merge(OptimalSystemAgent.Providers.DeepSeekModels.pricing())
+           # GLM. Until 2026-08-15 there was no Z.ai catalog at all, so
+           # `glm-5.2` — OSA's DEFAULT model — reached the `{"glm", …}` family
+           # substring guess of {0.60, 2.20}. That is GLM-4.7's rate; Z.ai
+           # charges {1.40, 4.40}, so the default model under-billed by 2.4x on
+           # input and 2x on output. Unlike the claude-opus-5 incident this one
+           # under-stated, which is the direction that flatters us.
+           |> Map.merge(OptimalSystemAgent.Providers.ZaiModels.pricing())
            # xAI and Gemini 3.1 Pro bill the WHOLE request at a higher rate once
            # the prompt crosses a threshold (200k for both). These are the
            # sub-threshold rates, so a long-context turn under-accounts by
@@ -222,17 +244,33 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # otherwise fell through to the `@families` substring table and matched
   # "claude-haiku" => {0.80, 4.0}, billing Haiku 4.5 at the retired Haiku 3.5
   # rate instead of its real {1.00, 5.00}.
-  defp ssot_rate(key) do
-    case OptimalSystemAgent.Providers.AnthropicModels.resolve(key) do
-      %{pricing: {_, _} = p} ->
-        p
+  #
+  # `ZaiModels` is consulted here as well as merged above because its
+  # `resolve/1` strips the decorations GLM ids actually arrive with — a vendor
+  # prefix, an Ollama `:cloud` tag, an OpenRouter routing suffix — so a
+  # spelling no exact key covers still lands on a published rate instead of the
+  # `{"glm", {0.60, 2.20}}` family guess. It is tried LAST so nothing that
+  # prices correctly today can move.
+  # `XAIModels` earns its place here for the ALIAS arm specifically. xAI
+  # documents `grok-4.20` and `grok-code-fast-1` as live public ids that serve
+  # `grok-4.20-0309-reasoning` and `grok-build-0.1`. Neither string is a key in
+  # any pricing map and neither is a prefix of the model it names, so both
+  # resolved to `:unknown` and every turn on them was costed at $0.00 — a
+  # silent under-count on ids xAI actively steers users toward.
+  @ssot_price_modules [
+    OptimalSystemAgent.Providers.AnthropicModels,
+    OptimalSystemAgent.Providers.OpenAIModels,
+    OptimalSystemAgent.Providers.XAIModels,
+    OptimalSystemAgent.Providers.ZaiModels
+  ]
 
-      _ ->
-        case OptimalSystemAgent.Providers.OpenAIModels.resolve(key) do
-          %{pricing: {_, _} = p} -> p
-          _ -> nil
-        end
-    end
+  defp ssot_rate(key) do
+    Enum.find_value(@ssot_price_modules, fn mod ->
+      case mod.resolve(key) do
+        %{pricing: {_, _} = p} -> p
+        _ -> nil
+      end
+    end)
   end
 
   # Unexpected model type (number, map, tuple, …) — never guess a price and

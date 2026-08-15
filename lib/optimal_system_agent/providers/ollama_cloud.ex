@@ -59,7 +59,13 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
           id: String.t(),
           name: String.t(),
           ctx: pos_integer(),
-          ctx_source: :probe | :docs,
+          # `:static` is a real third provenance, not an oversight: it labels a
+          # tag whose /api/show `model_info` carries no `context_length` at all
+          # — so the probe CANNOT resolve it — and for which no vendor page
+          # states the figure either. It was missing from this typespec while
+          # `glm-4.7:cloud` used it and the catalog test asserted it, so the
+          # data, the test and the type disagreed three ways.
+          ctx_source: :probe | :docs | :static,
           tools: boolean(),
           thinking: boolean(),
           vision: boolean(),
@@ -75,6 +81,22 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
   # `ctx_source: :probe`). `capabilities` reported by Ollama map 1:1 onto the
   # :tools / :thinking / :vision / :audio flags; the ubiquitous "completion"
   # capability carries no information and is ignored.
+  #
+  # ── 2026-08-15 pass: NOT re-probed ───────────────────────────────────────
+  # The account was at its session usage limit, so `/api/show` could not be
+  # called and no `ctx` below was re-verified. Contexts were instead sanity
+  # checked against ollama.com's own library pages, which agree: the site
+  # renders windows in binary K, so `glm-5.2:cloud` shows "976K" for the
+  # 1,000,000 recorded here and `glm-5.1:cloud` shows "198K" for 202,752.
+  #
+  # The `pricing` values filled in on that pass (kimi-k2.6, kimi-k2.7-code,
+  # minimax-m3, both deepseek-v4 tags) are the UPSTREAM VENDOR's published
+  # per-token rate, read from each vendor's own first-party endpoint as
+  # reported by OpenRouter's public endpoints API. That is the convention this
+  # table already followed — `kimi-k3:cloud`'s {3.00, 15.00} is Moonshot's own
+  # rate to the cent — and it is a per-token estimate of a tag that Ollama
+  # itself bills against a subscription. It is the right number for comparing
+  # models and the wrong one for predicting an Ollama invoice.
   #
   # Order is the picker's display order: flagship first, utility last.
   @models [
@@ -105,7 +127,18 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: {0.60, 2.20},
+      # CORRECTED 2026-08-15 from {0.60, 2.20}, which is GLM-**4.7**'s rate
+      # copied forward across two generations. Z.ai charges {1.40, 4.40} for
+      # GLM-5.2 — stated on its own pricing page and matched to the cent by the
+      # Z.AI first-party endpoint behind OpenRouter.
+      #
+      # This is the single worst number this catalog has carried: `glm-5.2:cloud`
+      # is OSA's DEFAULT model, so every install accounted its own default at
+      # 43% of input and 50% of output cost, and `Pricing.confidence/1`
+      # returned `:exact` throughout because the wrong figure sat in an
+      # exact-match table rather than falling to the family guess. Expect
+      # reported spend on this tag to roughly double.
+      pricing: {1.40, 4.40},
       recommended: true,
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
@@ -125,10 +158,16 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
+      # {0.60, 2.20} is correct HERE — it is GLM-4.7's own published rate. It
+      # was wrong on the 5.x rows above only because it was copied to them.
       pricing: {0.60, 2.20},
       recommended: false,
       requires_subscription: nil,
-      note: "previous-generation Z.ai flagship — agentic + coding"
+      # Ollama RETIRED this tag on 2026-07-15 — its library page states no
+      # models pushed. Kept rather than deleted so a config still pinned to it
+      # resolves a real window and a real price instead of falling through to
+      # the family guess, but the picker now says so before it is chosen.
+      note: "RETIRED on Ollama 2026-07-15 — previous-generation Z.ai flagship"
     },
     %{
       id: "glm-5.1:cloud",
@@ -139,10 +178,12 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: {0.60, 2.20},
+      # CORRECTED 2026-08-15 from {0.60, 2.20} — see `glm-5.2:cloud` above.
+      # Z.ai prices 5.1 identically to 5.2 despite the fifth of the window.
+      pricing: {1.40, 4.40},
       recommended: false,
       requires_subscription: nil,
-      note: "agentic, state-of-the-art coding"
+      note: "200K ctx — same price as 5.2 for a fifth of the window"
     },
     %{
       id: "kimi-k2.7-code:cloud",
@@ -153,7 +194,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      # Moonshot AI's own first-party endpoint rate. See the moduledoc note on
+      # where these came from.
+      pricing: {0.95, 4.00},
       recommended: false,
       requires_subscription: nil,
       note: "Moonshot coding-focused agentic"
@@ -167,7 +210,7 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      pricing: {0.95, 4.00},
       recommended: false,
       requires_subscription: nil,
       note: "multimodal agentic, long-horizon coding"
@@ -181,7 +224,7 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      pricing: {0.30, 1.20},
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, native multimodal + agentic"
@@ -195,7 +238,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # DeepSeek's published rate, already the source of truth in
+      # `Providers.DeepSeekModels` for the un-tagged id.
+      pricing: {0.435, 0.87},
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, frontier MoE, multiple reasoning modes"
@@ -209,7 +254,7 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      pricing: {0.14, 0.28},
       recommended: false,
       requires_subscription: nil,
       note: "1M ctx, 284B MoE / 13B active — fast"

@@ -5,7 +5,17 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
 
   describe "rates/1" do
     test "prices the default GLM cloud model" do
-      assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
+      # CORRECTED 2026-08-15. This asserted {0.60, 2.20} — GLM-**4.7**'s rate,
+      # carried forward two generations onto OSA's own default model. Z.ai
+      # publishes {1.40, 4.40} for GLM-5.2, so every install under-reported its
+      # spend by 2.4x on input and 2x on output, with `confidence/1` answering
+      # `:exact` the whole time because a wrong figure in an exact-match table
+      # never reaches the family guess that would have warned about it.
+      assert {1.40, 4.40} = Pricing.rates("glm-5.2:cloud")
+      assert Pricing.confidence("glm-5.2:cloud") == :exact
+
+      # 4.7 keeps the rate that was always its own.
+      assert {0.60, 2.20} = Pricing.rates("glm-4.7:cloud")
     end
 
     test "matches known families by substring (case-insensitive)" do
@@ -76,14 +86,17 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
     test "a genuinely dotted key still resolves on its own spelling first" do
       # The dashed rewrite is tried LAST; these must not move.
       assert {0.63, 1.98} = Pricing.rates("z-ai/glm-5.2")
-      assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
+      assert {1.40, 4.40} = Pricing.rates("glm-5.2:cloud")
       assert {2.0, 8.0} = Pricing.rates("gpt-4.1")
       assert {0.15, 0.60} = Pricing.rates("gpt-4o-mini")
     end
 
     test "a real colon-tagged id still wins on the full string" do
       # `:cloud` is model identity; `:free`/`:nitro` are OpenRouter routing.
-      assert {0.60, 2.20} = Pricing.rates("glm-5.2:cloud")
+      # The OpenRouter ROUTE and the Ollama Cloud TAG are different products at
+      # different prices, and both must keep their own.
+      assert {1.40, 4.40} = Pricing.rates("glm-5.2:cloud")
+      refute Pricing.rates("glm-5.2:cloud") == Pricing.rates("z-ai/glm-5.2")
       assert Pricing.rates("anthropic/claude-opus-5:floor") == Pricing.rates("claude-opus-5")
     end
 
@@ -129,7 +142,7 @@ defmodule OptimalSystemAgent.Agent.PricingTest do
 
     test "tolerates string-keyed usage maps" do
       usage = %{"input_tokens" => 1_000_000, "output_tokens" => 0}
-      assert Pricing.cost("glm-5.2:cloud", usage) == 0.60
+      assert Pricing.cost("glm-5.2:cloud", usage) == 1.40
     end
   end
 
