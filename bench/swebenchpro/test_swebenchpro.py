@@ -357,7 +357,10 @@ class TestProviderFailureAttribution(unittest.TestCase):
         self.assertEqual(runners.provider_failure("/nonexistent/x.jsonl"), "")
 
     def test_relabel_moves_the_row_out_of_the_model_column(self):
-        import run_bench
+        # NOT `import run_bench`: four directories under bench/ define one and
+        # a bare import resolves to whichever was prepended last. See
+        # `shared.local`.
+        run_bench = shared.local("run_bench")
 
         doc = {
             "instances": [

@@ -80,6 +80,59 @@ sb_diagnose = _load("diagnose")
 sb_airgap = _load("airgap")
 
 
+def local(name: str):
+    """Import `bench/swebenchpro/<name>.py` under an unambiguous alias.
+
+    `import run_bench` is NOT safe anywhere under `bench/`, because
+    `swebench/`, `swebenchpro/`, `terminalbench/` and `recoverybench/` each
+    define a top-level module by that name and none of them is a package. Under
+    a single pytest session every one of those directories ends up on
+    `sys.path` -- each test file prepends its own -- so a bare `import
+    run_bench` resolves to whichever directory was prepended LAST, which is a
+    function of collection order and nothing else.
+
+    Measured 2026-08-15, `python3 -m pytest` from `bench/`:
+    `swebenchpro/test_swebenchpro.py::TestProviderFailureAttribution` failed
+    with `AttributeError: module 'run_bench' has no attribute
+    '_relabel_provider_failures'` -- it had been handed
+    `terminalbench/run_bench.py`. Reversing the order moves the failure to
+    `terminalbench/test_pinning.py` instead; each suite passes alone. An
+    AttributeError is the lucky outcome: two modules that happen to share an
+    attribute name would have produced a silently wrong assertion.
+
+    So the alias is prefixed with the package directory, which cannot collide,
+    exactly as `_load` does for the `swebench_` half.
+    """
+    alias = f"swebenchpro_{name}"
+    if alias in sys.modules:
+        return sys.modules[alias]
+    here = Path(__file__).resolve().parent
+    path = here / f"{name}.py"
+    if not path.exists():
+        raise ImportError(f"bench/swebenchpro/{name}.py not found at {path}")
+    spec = importlib.util.spec_from_file_location(alias, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    # The loaded module imports ITS OWN siblings by bare name -- `run_bench.py`
+    # alone does `import dataset`, `import evaluate`, `import workspace`,
+    # `from runners import ...`, and three of those four basenames also exist in
+    # `bench/swebench`. Loading by absolute path fixes which `run_bench.py` runs
+    # and says nothing about what its body then resolves, so this directory is
+    # pinned at the front of `sys.path` for the exec and the path is restored
+    # afterwards. Restoring matters: leaving it prepended is the same defect in
+    # the other direction.
+    saved = list(sys.path)
+    sys.path.insert(0, str(here))
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        del sys.modules[alias]
+        raise
+    finally:
+        sys.path[:] = saved
+    return mod
+
+
 def osa_runner_class():
     """`bench/swebench/osa_runner.OsaRunner`, imported lazily.
 

@@ -28,7 +28,23 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import report as report_mod  # noqa: E402
+# `report`/`datasets` are ambiguous basenames across bench/ -- see
+# `_localimport` for the measured failure. Never `import report` here.
+import _localimport  # noqa: E402
+
+report_mod = _localimport.load("report")
+
+
+def test_run_bench_is_ours():
+    """The loader must hand back THIS package's runner, not a sibling's.
+
+    Asserted on the file path rather than on an attribute, because an attribute
+    check only catches the collision when the two modules disagree about that
+    name -- and the dangerous case is the one where they agree.
+    """
+    rb = _localimport.load("run_bench")
+    assert Path(rb.__file__).parent == HERE
+    assert hasattr(rb, "artifact_provenance")
 
 
 def _load_osa_agent():
@@ -292,7 +308,7 @@ def test_provenance_reports_build_sidecar_field():
     fact about the artefact and has to be legible as one rather than as a
     missing key that a reader assumes was an oversight.
     """
-    import run_bench
+    run_bench = _localimport.load("run_bench")
 
     out = run_bench.artifact_provenance()
     assert "build" in out
@@ -318,7 +334,7 @@ def test_built_after_head_commit_compares_instants_not_digits():
 
 
 def test_provenance_reports_a_true_verdict_for_the_current_artifact():
-    import run_bench
+    run_bench = _localimport.load("run_bench")
 
     out = run_bench.artifact_provenance()
     if not out.get("present") or not out.get("head_committed_at"):

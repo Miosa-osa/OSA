@@ -20,7 +20,11 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import report as report_mod  # noqa: E402
+# `report`/`datasets` are ambiguous basenames across bench/ -- see
+# `_localimport` for the measured failure. Never `import report` here.
+import _localimport  # noqa: E402
+
+report_mod = _localimport.load("report")
 
 
 def _load_driver():

@@ -13,15 +13,44 @@ happen again -- every one of these tests is a way the probe could have said
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
 
-import airgap  # noqa: E402
+
+def _load(name: str):
+    """Import `bench/swebench/<name>.py` without touching `sys.path`.
+
+    This file used to do `sys.path.insert(0, HERE)`. That is safe when
+    `bench/swebench` is the only suite running and unsafe in a whole-`bench/`
+    pytest session, because it puts this directory AHEAD of
+    `bench/swebenchpro`, which defines its own `runners.py`, `evaluate.py`,
+    `workspace.py` and `run_bench.py`. `swebenchpro/shared.py` deliberately
+    appends this directory at the END for exactly that reason, and a later
+    prepend from here silently undid it -- caught by
+    `swebenchpro`'s own `test_swebench_never_shadows_us_on_the_path`, which
+    fails whenever `swebench/` is collected after `swebenchpro/`.
+
+    `airgap` has no sibling imports of its own, so loading it by absolute path
+    under a prefixed alias removes the need for the path entry entirely. The
+    module stays importable as a plain script (`./airgap.py`) either way.
+    """
+    alias = f"swebench_{name}"
+    if alias in sys.modules:
+        return sys.modules[alias]
+    spec = importlib.util.spec_from_file_location(alias, HERE / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+airgap = _load("airgap")
 
 
 def _blank() -> dict:
