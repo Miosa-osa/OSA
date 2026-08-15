@@ -50,7 +50,10 @@ defmodule OptimalSystemAgent.Test.MockProvider do
         text -> {:ok, %{content: text, tool_calls: []}}
       end
 
-    with_forced_usage(result)
+    case with_forced_usage(result) do
+      {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
+      other -> other
+    end
   end
 
   # Real providers return a `:usage` map; this mock did not, which made it
@@ -65,6 +68,20 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   end
 
   defp with_forced_usage(other), do: other
+
+  # Real providers report a terminal stop/finish reason; this mock did not, so
+  # nothing could test the harness's truncation handling end to end — the exact
+  # gap that let a generation cut off at the output ceiling be delivered as a
+  # final answer. Opt-in via `:mock_provider_stop_reason` (a RAW provider
+  # spelling: "length", "max_tokens", "MAX_TOKENS", "max_output_tokens", …) so
+  # every existing test's response shape is byte-for-byte unchanged when unset.
+  @spec with_forced_stop_reason(map()) :: map()
+  def with_forced_stop_reason(resp) when is_map(resp) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_stop_reason) do
+      r when is_binary(r) and r != "" -> Map.put(resp, :stop_reason, r)
+      _ -> resp
+    end
+  end
 
   defp chat_scripted do
     case Process.get(:mock_provider_call_count, 0) do
@@ -106,7 +123,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
         # `""` means "finish the turn with NO final text" — the silent-child
         # case the delegation result-recovery path exists for.
         if text != "", do: callback.({:text_delta, text})
-        callback.({:done, %{content: text, tool_calls: []}})
+        callback.({:done, with_forced_stop_reason(%{content: text, tool_calls: []})})
         :ok
     end
   end

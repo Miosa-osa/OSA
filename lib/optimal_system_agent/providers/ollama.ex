@@ -179,9 +179,20 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       req = Req.new(req_opts) |> Req.merge(url: "#{url}/api/chat")
 
       case Req.post(req) do
-        {:ok, %{status: 200, body: %{"message" => %{"content" => content} = msg}}} ->
+        {:ok, %{status: 200, body: %{"message" => %{"content" => content} = msg} = resp}} ->
           tool_calls = parse_tool_calls(msg, model)
-          {:ok, %{content: Text.strip_thinking_tokens(content || ""), tool_calls: tool_calls}}
+
+          {:ok,
+           %{
+             content: Text.strip_thinking_tokens(content || ""),
+             tool_calls: tool_calls,
+             # `done_reason` is Ollama's terminal stop reason ("stop" | "length"
+             # | "load" | "unload"). It was never read: a generation that ran out
+             # of `num_predict` came back indistinguishable from one the model
+             # ended itself, so `ReactLoop`'s truncation recovery could not fire
+             # on OSA's DEFAULT provider. See `Providers.StopReason`.
+             stop_reason: resp["done_reason"]
+           }}
 
         {:ok, %{status: status, body: resp_body}} ->
           Logger.warning("Ollama returned #{status}: #{inspect(resp_body)}")
@@ -284,6 +295,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           content: "",
           tool_calls: [],
           usage: %{},
+          # Terminal `done_reason` from the final NDJSON chunk, when one arrives.
+          stop_reason: nil,
           # Split inline <think>…</think> reasoning out of the live stream so
           # the tags + reasoning never leak into the visible answer (GLM cloud
           # models such as glm-5.2:cloud inline reasoning in the content field).
@@ -402,7 +415,18 @@ defmodule OptimalSystemAgent.Providers.Ollama do
               "[Ollama] Cloud stream done: #{byte_size(content)} bytes, #{length(tool_calls)} tool calls, #{usage.total_tokens} tokens"
             )
 
-            callback.({:done, %{content: content, tool_calls: tool_calls, usage: usage}})
+            # `done_reason` — Ollama's terminal stop reason. "length" means the
+            # generation was cut off at `num_predict` and is NOT an answer.
+            callback.(
+              {:done,
+               %{
+                 content: content,
+                 tool_calls: tool_calls,
+                 usage: usage,
+                 stop_reason: resp["done_reason"]
+               }}
+            )
+
             # Wait for port exit
             receive do
               {^port, {:exit_status, _}} -> :ok
@@ -461,7 +485,17 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         # the caller indefinitely on its receive loop).
         flush_think(acc, callback)
         content = Text.strip_thinking_tokens(acc.content)
-        callback.({:done, %{content: content, tool_calls: acc.tool_calls, usage: acc.usage}})
+
+        callback.(
+          {:done,
+           %{
+             content: content,
+             tool_calls: acc.tool_calls,
+             usage: acc.usage,
+             stop_reason: Map.get(acc, :stop_reason)
+           }}
+        )
+
         :ok
 
       {^port, {:exit_status, code}} ->
@@ -503,6 +537,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       content: "",
       tool_calls: [],
       usage: %{},
+      # Terminal `done_reason` from the final NDJSON chunk ("stop" | "length").
+      stop_reason: nil,
       think: ThinkStreamParser.new()
     })
 
@@ -1204,7 +1240,19 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
     # Pass through usage captured from the done:true chunk (prompt_eval_count/eval_count).
     # Keys already normalised to :input_tokens/:output_tokens by process_ndjson_line.
-    callback.({:done, %{content: content, tool_calls: tool_calls, usage: acc.usage}})
+    # `stop_reason` comes from the same chunk's `done_reason` — "length" means
+    # the model was cut off at `num_predict`, which the loop must never deliver
+    # as a final answer.
+    callback.(
+      {:done,
+       %{
+         content: content,
+         tool_calls: tool_calls,
+         usage: acc.usage,
+         stop_reason: Map.get(acc, :stop_reason)
+       }}
+    )
+
     :ok
   end
 
@@ -1294,6 +1342,17 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       {:ok, %{"done" => true} = resp} ->
         input = resp["prompt_eval_count"] || 0
         output = resp["eval_count"] || 0
+
+        # Terminal stop reason. Captured UNCONDITIONALLY — independently of the
+        # token counts, because a done chunk may carry `done_reason` with no
+        # eval fields at all, and "why did it stop" is the more important of
+        # the two facts. `Map.put` rather than `%{acc | ...}` so an older acc
+        # shape (no `:stop_reason` key) still works.
+        acc =
+          case resp["done_reason"] do
+            r when is_binary(r) and r != "" -> Map.put(acc, :stop_reason, r)
+            _ -> acc
+          end
 
         if input > 0 or output > 0 do
           usage = %{input_tokens: input, output_tokens: output, total_tokens: input + output}

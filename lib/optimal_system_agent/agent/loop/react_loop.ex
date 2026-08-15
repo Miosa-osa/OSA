@@ -45,6 +45,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
+  alias OptimalSystemAgent.Providers.StopReason
 
   @cancel_table :osa_cancel_flags
 
@@ -149,6 +150,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   """
   @spec run(map()) :: {String.t(), map()}
   def run(%{iteration: iter, session_id: sid} = state) do
+    # `truncations` is a PER-TURN count — `Observability.turn_end/2` reports it
+    # beside `effort` and `reasoning`, which are per-turn conditions. The loop
+    # state lives in the `Loop` GenServer across turns, so without this the
+    # count would accumulate for the life of the session and the number on a
+    # clean turn would be the previous turn's. Zeroed on turn entry only
+    # (`run/1` recurses with `iteration + 1`).
+    state = if iter == 0, do: Map.put(state, :truncations, 0), else: state
+
     cancelled? =
       try do
         case :ets.lookup(@cancel_table, sid) do
@@ -506,8 +515,92 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
 
+    # Canonicalize the provider's stop reason BEFORE dispatch — see
+    # `canonicalize_stop_reason/2`. Every truncation clause below matches on
+    # OSA's canonical `"max_tokens"`, and without this only Anthropic ever
+    # reached them.
+    {result, state} = canonicalize_stop_reason(result, state, usage)
+
     handle_result(result, state, context)
   end
+
+  # ── Truncation ingest ─────────────────────────────────────────────────────
+  #
+  # Seven providers, seven spellings of "you ran out of output tokens":
+  # Anthropic `max_tokens`, OpenAI-compat `length`, OpenAI Responses
+  # `max_output_tokens`, Ollama `length` (as `done_reason`), Gemini
+  # `MAX_TOKENS`, Bedrock `max_tokens`, Cohere `MAX_TOKENS`. The clauses below
+  # were written against Anthropic's spelling alone, so on OSA's DEFAULT
+  # provider (Ollama) truncation recovery was unreachable — measured on
+  # `bench/terminalbench/runs/osa-tb20-full89-f6981b61`, where `regex-chess`
+  # delivered a mid-sentence fragment as its final answer after a generation
+  # that stopped at exactly the 32,768-token ceiling.
+  #
+  # One place translates the dialect into OSA's canonical `"max_tokens"`; the
+  # provider's own word is preserved in `:stop_reason_raw` so telemetry and
+  # logs can name what actually came back. Pattern matching stays exhaustive
+  # and guard-safe (no function calls in guards) because the value is
+  # normalized before dispatch rather than during it.
+  defp canonicalize_stop_reason({:ok, resp}, state, usage) when is_map(resp) do
+    if StopReason.truncated?(resp) do
+      raw = StopReason.raw(resp) || "unknown"
+      output_tokens = Map.get(usage || %{}, :output_tokens, 0)
+
+      # LOUD, not debug. Every defect found in this arm of the codebase had
+      # been silent; a generation that was cut off is the single condition
+      # under which OSA is most likely to present a wrong answer confidently.
+      Logger.warning(
+        "[loop] TRUNCATED generation — provider stopped at the output ceiling " <>
+          "(stop_reason=#{raw}, output_tokens=#{output_tokens}, " <>
+          "max_tokens=#{max_response_tokens()}, effort=#{Effort.current()}, " <>
+          "iteration=#{state.iteration}, session=#{state.session_id}). " <>
+          "This is NOT a complete answer."
+      )
+
+      Bus.emit(:system_event, %{
+        event: :response_truncated,
+        session_id: state.session_id,
+        reason: :detected,
+        stop_reason: raw,
+        output_tokens: output_tokens,
+        max_tokens: max_response_tokens(),
+        effort: to_string(Effort.current()),
+        iteration: state.iteration
+      })
+
+      resp =
+        resp
+        |> Map.put(:stop_reason, "max_tokens")
+        |> Map.put(:stop_reason_raw, raw)
+
+      # Counted on state so `turn_end` can report it next to `effort` and
+      # `reasoning`, and so the reasoning-only doom-loop guard can tell "the
+      # model stopped calling tools" from "the model was cut off".
+      state =
+        state
+        |> Map.put(:turn_truncated, true)
+        |> Map.put(:truncations, Map.get(state, :truncations, 0) + 1)
+
+      {{:ok, resp}, state}
+    else
+      # A generation that ended on its own clears the flag — the guard must
+      # only excuse the generation that was ACTUALLY cut off, not every
+      # generation after the first truncation of the turn.
+      #
+      # It also RETIRES any bumped output ceiling. `Process.put(:osa_bumped_
+      # max_tokens, …)` is process-scoped and had no expiry, so a single
+      # truncation doubled the ceiling for the rest of the session — every
+      # subsequent generation, truncated or not, billed at up to 64,000 output
+      # tokens. The bump exists to recover a specific cut-off generation; once
+      # the model has produced a complete one, the recovery is over and the
+      # configured ceiling is the right one again.
+      Process.delete(:osa_bumped_max_tokens)
+
+      {{:ok, resp}, Map.put(state, :turn_truncated, false)}
+    end
+  end
+
+  defp canonicalize_stop_reason(result, state, _usage), do: {result, state}
 
   # Max tokens recovery — response was truncated, bump limit and retry.
   #
@@ -564,6 +657,59 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Store bumped max_tokens for this session
     Process.put(:osa_bumped_max_tokens, bumped)
     run(state)
+  end
+
+  # TRUNCATION, CONTINUATION BUDGET EXHAUSTED — the last honest stop.
+  #
+  # The clause above continues a truncated generation twice, doubling the
+  # ceiling each time (32,768 → 64,000, the cap). Past that, continuing again
+  # is an unbounded spend on a generation that has already shown it will not
+  # converge — output tokens are the expensive half, and this is the exact
+  # shape of a runaway.
+  #
+  # But the alternative is NOT to hand the fragment over as the answer. That is
+  # precisely the defect: on `regex-chess` the delivered "final answer" was one
+  # mid-sentence clause — "Let me investigate the en-passant behavior in
+  # python-chess…" — after a 350,880-character thinking block, and the
+  # deliverable was never written. A truncated fragment presented as complete
+  # is worse than no answer, because nothing downstream can tell.
+  #
+  # So the content is delivered MARKED. The marker is appended, never
+  # substituted: the partial text is often most of a real answer and throwing
+  # it away loses genuine work. What must not survive is the impression that it
+  # is finished.
+  defp handle_result({:ok, %{stop_reason: "max_tokens"} = resp}, state, _context)
+       when not is_map_key(resp, :tool_calls) or
+              (is_map_key(resp, :tool_calls) and
+                 (is_nil(:erlang.map_get(:tool_calls, resp)) or
+                    :erlang.map_get(:tool_calls, resp) == [])) do
+    raw = Map.get(resp, :stop_reason_raw, "max_tokens")
+    content = Map.get(resp, :content) || ""
+
+    Logger.error(
+      "[loop] Truncated response after #{state.overflow_retries} continuation attempt(s) " <>
+        "(stop_reason=#{raw}, max_tokens=#{max_response_tokens()}) — delivering it MARKED " <>
+        "as incomplete rather than as a final answer (session: #{state.session_id})"
+    )
+
+    Bus.emit(:system_event, %{
+      event: :response_truncated,
+      session_id: state.session_id,
+      reason: :continuation_budget_exhausted,
+      stop_reason: raw,
+      overflow_retries: state.overflow_retries,
+      max_tokens: max_response_tokens(),
+      iteration: state.iteration
+    })
+
+    marked =
+      String.trim_trailing(content) <>
+        "\n\n[INCOMPLETE: this response was cut off at the output-token limit " <>
+        "(#{max_response_tokens()} tokens, provider stop reason `#{raw}`) after " <>
+        "#{state.overflow_retries} continuation attempt(s). It is a fragment, not a " <>
+        "finished answer, and any task it describes should be assumed unfinished.]"
+
+    finish_turn(marked, state)
   end
 
   # TRUNCATED-MESSAGE tool-call guard (PI primitive — correctness).

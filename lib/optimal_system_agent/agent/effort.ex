@@ -19,6 +19,40 @@ defmodule OptimalSystemAgent.Agent.Effort do
   so persisted settings and old callers keep working.
   """
 
+  ## The `max_response_tokens` column — why it is what it is
+
+  # This column was flat at 32_768 across all five tiers, and a prior audit read
+  # that as deliberate "since the four sibling columns do vary". The history
+  # says otherwise **[measured]**:
+  #
+  #   * `84eced65` (2026-04-30) introduced the ladder with a VARYING column:
+  #     `low: 2_048 · medium: 8_192 · high: 16_384 · max: 32_768`.
+  #   * `50761171` (2026-04-30, same day) raised `low`/`medium`/`high` to
+  #     `32_768` — the value `max` already had — in a 40-line commit message
+  #     about skills, checkpoints, skins and personas that does not mention
+  #     output tokens at all. The other three columns were retuned individually
+  #     in that same hunk; this one was levelled.
+  #   * `ee3b77c0` (2026-07-21) added `ultra` by copying the row.
+  #
+  # So the flat value is the residue of raising the floor to meet the old
+  # ceiling, not a decision that 32,768 is the right ceiling. And 32,768 was
+  # never measured against any model: `Providers.ModelLimits` puts `glm-5.2` —
+  # the model of the reference benchmark run — at **128,000** output tokens.
+  # OSA was clamping it to a quarter of what it can produce.
+  #
+  # It is still not raised to 128k, and deliberately. Output tokens are the
+  # expensive half of a request, and a bigger ceiling on a runaway generation
+  # is real money: the run that exposed this produced a single 350,880-character
+  # thinking block. The ceiling is not the defect — a ceiling that silently
+  # converts a long answer into a fragment presented as complete is. That is
+  # fixed where it belongs, in `ReactLoop`, which now detects every provider's
+  # truncation stop reason, continues the generation, and marks anything it
+  # cannot finish.
+  #
+  # What changes here is only the top of the ladder, where the operator has
+  # explicitly asked for maximum depth and is already paying for 32k–64k
+  # thinking budgets. No tier is lowered, so no existing configuration
+  # regresses; the ladder is monotone non-decreasing again.
   @levels %{
     fast: %{
       thinking_budget: 0,
@@ -60,7 +94,11 @@ defmodule OptimalSystemAgent.Agent.Effort do
       # "autonomous" preset uses :xhigh) aren't capped mid-run. Explicit
       # `:max_iterations` config still wins over this ceiling.
       max_iterations: 2000,
-      max_response_tokens: 32_768,
+      # 32_768 → 48_000. See the note above the ladder: the flat column was an
+      # artefact of `50761171`, not a decision. `:xhigh` runs a 32k thinking
+      # budget, so a 32k OUTPUT ceiling on top of it is the tier most likely to
+      # be cut off mid-answer.
+      max_response_tokens: 48_000,
       tool_budget: 40,
       temperature: 0.8,
       label: "xhigh",
@@ -71,7 +109,11 @@ defmodule OptimalSystemAgent.Agent.Effort do
       # Above :xhigh's 2000 — ultra drives dynamic-workflow orchestration and must
       # not be capped mid-run. Explicit `:max_iterations` config still wins.
       max_iterations: 4000,
-      max_response_tokens: 32_768,
+      # 32_768 → 64_000, matching the ceiling `ReactLoop`'s truncation recovery
+      # already doubles up to. `:ultra` is the tier that drives dynamic-workflow
+      # orchestration; capping its single answer at the same size `:fast` gets
+      # was never a decision anyone made.
+      max_response_tokens: 64_000,
       tool_budget: 48,
       temperature: 0.9,
       label: "Ultra",

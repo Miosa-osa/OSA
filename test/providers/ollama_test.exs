@@ -253,12 +253,23 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       refute_received {:cb, _}
     end
 
-    test "ignores done chunk without crashing" do
+    test "a done chunk emits no callback and captures only the stop reason" do
+      # This used to assert `new_acc == acc` — that the done chunk changed
+      # NOTHING. That assertion encoded the defect: `done_reason` is Ollama's
+      # terminal stop reason, and dropping it is what let a generation cut off
+      # at `num_predict` be delivered as a finished answer. See
+      # `Providers.StopReason` and
+      # `test/providers/provider_truncation_reporting_test.exs`.
+      #
+      # What the test was actually protecting — no callback fires, no content
+      # or tool calls are invented — still holds.
       cb = fn event -> send(self(), {:cb, event}) end
       acc = make_acc()
 
       new_acc = Ollama.process_ndjson_line(~s|{"done":true,"done_reason":"stop"}|, cb, acc)
-      assert new_acc == acc
+
+      assert new_acc.stop_reason == "stop"
+      assert Map.delete(new_acc, :stop_reason) == Map.delete(acc, :stop_reason)
       refute_received {:cb, _}
     end
   end

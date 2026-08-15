@@ -155,11 +155,42 @@ defmodule OptimalSystemAgent.Observability do
         # can be toggled mid-run, and it changes the tool array — a turn that
         # started without the tool can end with it.
         ask_user: ask_user_enabled(state),
-        unobserved_background: unobserved_background_count(state)
+        unobserved_background: unobserved_background_count(state),
+        truncations: truncation_count(state)
       },
       state,
       source: "agent.turn"
     )
+  end
+
+  @doc """
+  How many generations in this turn stopped at the output-token ceiling.
+
+  Recorded next to `effort` and `reasoning` for the same reason they are: it is
+  a condition the turn ran under, and it changes what the answer means. A turn
+  that ends with this above zero produced at least one generation that was cut
+  off mid-sentence — measured on
+  `bench/terminalbench/runs/osa-tb20-full89-f6981b61`, where `regex-chess`
+  delivered such a fragment as its final answer and `schemelike-metacircular-eval`
+  had its last THREE generations truncated at exactly 32,768 tokens while the
+  harness reported a reasoning-only spin.
+
+  Set by `ReactLoop.canonicalize_stop_reason/3` off the provider's own stop
+  reason. `0` on every provider that reported a clean stop — and, until that
+  function existed, `0` was also what a truncation looked like.
+
+  Never raises: any failure reads as `0`.
+  """
+  @spec truncation_count(map()) :: non_neg_integer()
+  def truncation_count(state) do
+    case Map.get(state, :truncations, 0) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  catch
+    _, _ -> 0
   end
 
   @doc """

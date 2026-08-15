@@ -55,26 +55,72 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly do
   `false`) lets a caller flag a turn that errored out even though it may have
   attempted a tool call. Returns `{:ok, state}` to continue or
   `{:halt, message, state}` to stop.
+
+  ## A truncated generation is not a spin
+
+  `state[:turn_truncated]` (set by `ReactLoop` from the provider's stop reason)
+  suppresses the count entirely. This detector asks "did the model stop calling
+  tools?"; a generation cut off at the output-token ceiling never got to the
+  end of its own sentence, let alone to a tool call, so counting it answers a
+  question nobody asked.
+
+  MEASURED, on `bench/terminalbench/runs/osa-tb20-full89-f6981b61`: the three
+  generations that tripped this guard on `schemelike-metacircular-eval` were
+  the three generations that stopped at exactly 32,768 output tokens. The model
+  was writing an interpreter and being cut off; the guard reported it as a
+  reasoning-only spin, halted, and its own advice text was delivered to the
+  grader as the final answer. Two failures compounding — and the first of them
+  was this predicate.
+
+  The streak is left UNCHANGED rather than reset: a truncation is neither
+  progress nor a spin, so it should neither advance the counter nor erase a
+  real spin that was already accumulating around it. Only a genuine tool call
+  resets it — and a generation that called a tool AND was then cut off is
+  forward progress, so that case resets the streak as it always did.
+
+  Like `:turn_errored`, the flag is one-shot: it is cleared on every call, so a
+  caller that forgets to unset it cannot excuse an unbounded run of spins.
   """
   @spec check(list(), map()) :: {:ok, map()} | {:halt, String.t(), map()}
   def check(tool_calls, state) do
     errored? = Map.get(state, :turn_errored, false)
     reasoning_only? = tool_calls == []
+    truncated? = Map.get(state, :turn_truncated, false) == true
 
-    # Always clear the one-shot errored flag — it describes THIS turn only.
-    state = Map.put(state, :turn_errored, false)
+    # Always clear the one-shot flags — both describe THIS generation only.
+    state =
+      state
+      |> Map.put(:turn_errored, false)
+      |> Map.put(:turn_truncated, false)
 
-    if reasoning_only? or errored? do
-      streak = Map.get(state, :reasoning_only_streak, 0) + 1
-      state = Map.put(state, :reasoning_only_streak, streak)
+    cond do
+      # Forward progress outranks everything: a generation that called a tool
+      # resets the streak whether or not it was ALSO cut off afterwards.
+      not (reasoning_only? or errored?) ->
+        {:ok, Map.put(state, :reasoning_only_streak, 0)}
 
-      if streak >= threshold() do
-        handle_trip(streak, errored?, state)
-      else
+      truncated? ->
+        Logger.warning(
+          "[doom] Generation was TRUNCATED at the output ceiling — not counted toward the " <>
+            "reasoning-only streak (streak stays #{Map.get(state, :reasoning_only_streak, 0)}, " <>
+            "session: #{Map.get(state, :session_id)})"
+        )
+
         {:ok, state}
-      end
+
+      true ->
+        count_streak(errored?, state)
+    end
+  end
+
+  defp count_streak(errored?, state) do
+    streak = Map.get(state, :reasoning_only_streak, 0) + 1
+    state = Map.put(state, :reasoning_only_streak, streak)
+
+    if streak >= threshold() do
+      handle_trip(streak, errored?, state)
     else
-      {:ok, Map.put(state, :reasoning_only_streak, 0)}
+      {:ok, state}
     end
   end
 

@@ -78,7 +78,17 @@ defmodule OptimalSystemAgent.Providers.Cohere do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls, usage: extract_usage(resp)}}
+
+          {:ok,
+           %{
+             content: content,
+             tool_calls: tool_calls,
+             usage: extract_usage(resp),
+             # Cohere spells truncation `"MAX_TOKENS"`; `Providers.StopReason`
+             # owns the mapping, so the raw value is published unchanged.
+             # UNVERIFIED live — documented shape, synthetic tests only.
+             stop_reason: resp["finish_reason"]
+           }}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
