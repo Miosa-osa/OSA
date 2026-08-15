@@ -124,7 +124,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Download.Handler do
   defp resolve_path(path) do
     normalized =
       if relative_path?(path) do
-        Path.join("~/.osa/workspace", path)
+        Path.join(Constants.workspace_root(), path)
       else
         path
       end

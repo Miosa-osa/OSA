@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Attendance
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
@@ -415,7 +416,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       # tier forbids stays blocked rather than becoming promptable.
       is_binary(safety_ask) and mode != :plan and
           permission_tier_allows?(state.permission_tier, tool_call.name) ->
-        safety_prompt(tool_call, safety_ask)
+        safety_prompt(tool_call, safety_ask, state)
 
       # Overdrive / bypass (full auto): everything past the circuit-breaker runs
       # — EXCEPT a subagent's structural tool restrictions. A subagent inherits
@@ -446,7 +447,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       # and out-of-workspace guards). Anything else (shell, delete/move, git,
       # risky tools) falls through to tier + ask, unchanged.
       mode == :accept_edits and tool_call.name in @edit_tools ->
-        accept_edits_decision(tool_call)
+        accept_edits_decision(tool_call, state)
 
       true ->
         approve_by_tier(tool_call, state)
@@ -458,7 +459,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # must still go through the interactive prompt (or fail closed on a
   # non-interactive channel) instead of being silently allowed. A saved DENY
   # rule is already handled earlier (step 1b) and never reaches here.
-  defp accept_edits_decision(tool_call) do
+  defp accept_edits_decision(tool_call, state) do
     args = Map.get(tool_call, :arguments) || %{}
     oos_path = Permissions.out_of_scope_write(tool_call.name, args)
     {decision, meta} = Permissions.check_detailed(tool_call.name, args)
@@ -468,19 +469,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       is_binary(oos_path) ->
         reason = "path is outside the workspace and allowed directories: #{oos_path}"
 
-        if interactive_permissions?() do
+        if attended?(state) do
           {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
         else
-          non_interactive_decision(tool_call)
+          non_interactive_decision(tool_call, state)
         end
 
       explicit_ask_rule? ->
         reason = "an ask rule requires confirmation: #{meta.rule} (#{meta.source} settings)"
 
-        if interactive_permissions?() do
+        if attended?(state) do
           {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
         else
-          non_interactive_decision(tool_call)
+          non_interactive_decision(tool_call, state)
         end
 
       true ->
@@ -704,8 +705,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           explicit_ask_rule? = decision == :ask and is_binary(meta.rule)
 
           cond do
-            not interactive_permissions?() ->
-              non_interactive_decision(tool_call)
+            not attended?(state) ->
+              non_interactive_decision(tool_call, state)
 
             explicit_ask_rule? or oos_path != nil ->
               {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
@@ -755,35 +756,69 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # Bypass-immune safety paths prompt even in overdrive; on channels that
   # cannot prompt this fails closed (the explicit test/unattended bypass
   # config in non_interactive_decision/1 is honored).
-  defp safety_prompt(tool_call, reason) do
-    if interactive_permissions?() do
+  defp safety_prompt(tool_call, reason, state) do
+    if attended?(state) do
       {:ask, PermissionBroker.new_request_id(),
        permission_summary(tool_call, "Safety check (not bypassable): #{reason}")}
     else
-      non_interactive_decision(tool_call)
+      non_interactive_decision(tool_call, state)
     end
   end
 
   defp saved_rule_for(tool_call),
     do: Permissions.suggested_rule(tool_call.name, Map.get(tool_call, :arguments) || %{})
 
-  defp interactive_permissions? do
-    Application.get_env(:optimal_system_agent, :interactive_permissions, true)
-  end
+  # "Can a human respond on this session right now" — asked, not re-derived.
+  # This used to be a private `interactive_permissions?/0` reading an app-env
+  # flag, duplicated verbatim here, in `Permissions.AskFlow` and in
+  # `Channels.CLI.Session`, defaulting to `true` and never set by anything
+  # headless. See `Agent.Attendance`.
+  defp attended?(state), do: Attendance.attended?(state)
 
-  # FAIL CLOSED (WS1): a mutating tool that would prompt, on a channel that
-  # cannot prompt, is auto-rejected instead of silently allowed. The explicit
-  # `:non_interactive_permission_bypass` opt-out restores the old auto-allow —
-  # set only in config/test.exs and for deliberately unattended deployments.
-  defp non_interactive_decision(tool_call) do
+  # FAIL CLOSED (WS1): a mutating tool that would prompt, on a session where
+  # nobody can answer, is auto-rejected instead of silently allowed. The
+  # explicit `:non_interactive_permission_bypass` opt-out restores the old
+  # auto-allow — set only in config/test.exs and for deliberately unattended
+  # deployments.
+  #
+  # OBSERVABLE: both outcomes are announced above debug. An auto-ALLOW under the
+  # bypass is the one that matters most — it is a permission decision taken with
+  # no human in it — and it used to be entirely silent.
+  defp non_interactive_decision(tool_call, state) do
+    sid = if is_map(state), do: Map.get(state, :session_id), else: nil
+    why = Attendance.reason(state)
+
     if Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false) do
+      Logger.warning(
+        "[permissions] auto-ALLOWED #{tool_call.name} without asking — unattended session " <>
+          "(#{why}) and :non_interactive_permission_bypass is set"
+      )
+
+      emit_non_interactive(:allow, tool_call.name, sid, why)
       :allow
     else
+      Logger.info(
+        "[permissions] auto-DENIED #{tool_call.name} — unattended session (#{why}), " <>
+          "permissions fail closed"
+      )
+
+      emit_non_interactive(:deny, tool_call.name, sid, why)
+
       {:blocked,
-       "Blocked: #{tool_call.name} requires interactive approval, but this channel " <>
-         "cannot prompt — auto-rejected (permissions fail closed). Save an allow rule " <>
-         "for this tool, or run it from an interactive session."}
+       "Blocked: #{tool_call.name} requires interactive approval, but nobody can answer on " <>
+         "this session (#{why}) — auto-rejected (permissions fail closed). Save an allow " <>
+         "rule for this tool, or run it from an interactive session."}
     end
+  end
+
+  defp emit_non_interactive(outcome, tool, session_id, why) do
+    :telemetry.execute(
+      [:osa, :permissions, :non_interactive],
+      %{count: 1},
+      %{outcome: outcome, tool: tool, session_id: session_id, reason: why}
+    )
+  rescue
+    _ -> :ok
   end
 
   # Enriched permission_required payload (CC parity): kind, old/new content
@@ -997,9 +1032,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp await_permission(tool_call, state, request_id, summary) do
     emit_permission_required(state, request_id, tool_call, summary)
 
-    case PermissionBroker.await(state.session_id, request_id) do
+    case PermissionBroker.await(state.session_id, request_id, state: state) do
       {:ok, %{decision: decision, note: note}} ->
         apply_permission_decision(decision, note, tool_call, state)
+
+      # Belt AND braces. `approve_tool_call/2` already consults `Attendance`
+      # before choosing to prompt, so reaching here means attendance ENDED
+      # between the decision to ask and the wait (or a caller reached the
+      # broker by another route). Either way the answer is the same one the
+      # earlier branch would have given — never a park, never a self-approval.
+      {:error, :unattended} ->
+        non_interactive_decision(tool_call, state)
 
       {:error, :timeout} ->
         {:blocked,

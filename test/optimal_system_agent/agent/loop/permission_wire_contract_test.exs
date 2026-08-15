@@ -12,7 +12,12 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionWireContractTest do
   defp roundtrip(payload) do
     id = PermissionBroker.new_request_id()
     :ok = PermissionBroker.respond(id, payload)
-    {:ok, decision} = PermissionBroker.await("wire-test", id, timeout: 1_000)
+    # `attended: true`: `await/3` refuses to park a session nobody can answer
+    # on (`Agent.Attendance`), and this synthetic id has no channel. What is
+    # under test here is decision-string normalisation, not attendance.
+    {:ok, decision} =
+      PermissionBroker.await("wire-test", id, timeout: 1_000, attended: true)
+
     decision
   end
 

@@ -224,7 +224,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
             {:deny, reason} ->
               # For dangerous tools, prompt the user interactively
-              if interactive_permission_enabled?() and dangerous_tool?(tool_name) do
+              if OptimalSystemAgent.Agent.Attendance.attended?(session_id) and
+                   dangerous_tool?(tool_name) do
                 alias OptimalSystemAgent.Channels.CLI.Permissions
 
                 case Permissions.prompt_permission(tool_name, args) do
@@ -246,10 +247,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
     end
 
     Hook.register(:pre_tool_use, "cli_permission_#{session_id}", hook_fn, priority: 1)
-  end
-
-  defp interactive_permission_enabled? do
-    Application.get_env(:optimal_system_agent, :interactive_permissions, true)
   end
 
   defp dangerous_tool?(tool_name) do

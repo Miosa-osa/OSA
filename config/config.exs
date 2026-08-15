@@ -285,9 +285,24 @@ config :optimal_system_agent,
   # Interactive permission prompts. When true (default), the DEFAULT :ask mode
   # pauses for approval on mutating tools not covered by a saved rule — emitting
   # `permission_required` and parking until the client POSTs to
-  # /api/v1/permissions/respond. Set false for unattended/headless use where no
-  # responder is attached (the test env sets this off).
+  # /api/v1/permissions/respond.
+  #
+  # This is now ONE LAYER of `Agent.Attendance`, not the whole answer. Setting it
+  # false is still a hard veto ("never prompt anywhere"); setting it true no
+  # longer asserts that a human exists, because it is the default and therefore
+  # says nothing. Unattended runs are detected from the session's channel
+  # instead — `mix osa.run` (`channel: :headless`) and the scheduler resolve to
+  # unattended without any flag, which is what stopped them parking for 300s per
+  # prompt with nobody attached. Per-session escape: `OSA_ATTENDED=1`.
   interactive_permissions: true,
+
+  # Cross-call conflict detection for batched tool calls
+  # (`Tools.ConflictScope`). Two calls whose declared, canonicalised target
+  # paths collide are serialised; disjoint ones stay parallel. Set false to
+  # revert to the pure per-call `concurrency_safe?/2` answer — which cannot
+  # express "safe unless you touch my file" and is why two downloads to one path
+  # used to race.
+  cross_call_conflict_detection: true,
 
   # ---------------------------------------------------------------------------
   # Sandbox — Docker container isolation for skill execution

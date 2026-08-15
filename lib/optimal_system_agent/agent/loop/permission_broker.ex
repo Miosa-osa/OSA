@@ -25,6 +25,8 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Attendance
+
   @responses :osa_permission_responses
   @session_allows :osa_permission_session_allows
   @cancel_table :osa_cancel_flags
@@ -63,15 +65,70 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
   Block the caller until a decision for `request_id` arrives, the session is
   cancelled, or `:timeout` (default 5 min) elapses.
 
-  Returns `{:ok, decision}` | `{:error, :timeout}` | `{:error, :cancelled}`.
+  Returns `{:ok, decision}` | `{:error, :timeout}` | `{:error, :cancelled}` |
+  `{:error, :unattended}`.
+
+  ## The wait is gated on someone being there to end it
+
+  This is a five-minute poll behind a dialog that only an attached client can
+  answer. A session with no such client — `mix osa.run`, the scheduler, an MCP
+  dispatch — used to enter it anyway and burn the full ceiling per prompt, with
+  the turn frozen and nothing in the log to say why. `Agent.Attendance` is asked
+  FIRST and an unattended session returns `{:error, :unattended}` immediately;
+  callers map that onto their existing non-interactive decision, which fails
+  closed. Nothing is auto-approved here — the broker never grants, it only
+  reports that no answer can arrive.
+
+  Pass `state:` (loop state) or rely on `session_id`; `attended: true/false`
+  overrides the derivation for tests.
+
+  ## Observability
+
+  A wait that is actually entered is announced at `:info` with its ceiling, and
+  its outcome (answered / timed out / cancelled) is announced with the elapsed
+  time. A turn parked on a human is a thing an operator must be able to SEE.
   """
   @spec await(String.t() | nil, String.t(), keyword()) ::
-          {:ok, decision()} | {:error, :timeout | :cancelled}
+          {:ok, decision()} | {:error, :timeout | :cancelled | :unattended}
   def await(session_id, request_id, opts \\ []) when is_binary(request_id) do
     ensure_table(@responses)
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
-    poll(session_id, request_id, timeout)
+
+    attended? =
+      case Keyword.get(opts, :attended) do
+        v when is_boolean(v) -> v
+        _ -> Attendance.attended?(Keyword.get(opts, :state) || session_id)
+      end
+
+    if attended? do
+      Logger.info(
+        "[permissions] waiting up to #{div(timeout, 1000)}s for a decision on " <>
+          "#{request_id} (session #{inspect(session_id)})"
+      )
+
+      started = System.monotonic_time(:millisecond)
+      result = poll(session_id, request_id, timeout)
+      elapsed = System.monotonic_time(:millisecond) - started
+      log_outcome(result, request_id, elapsed)
+      result
+    else
+      Logger.info(
+        "[permissions] not waiting on #{request_id} — nobody can answer on session " <>
+          "#{inspect(session_id)} (#{Attendance.reason(session_id)})"
+      )
+
+      {:error, :unattended}
+    end
   end
+
+  defp log_outcome({:ok, %{decision: d}}, request_id, ms),
+    do: Logger.info("[permissions] #{request_id} answered #{d} after #{ms}ms")
+
+  defp log_outcome({:error, :timeout}, request_id, ms),
+    do: Logger.warning("[permissions] #{request_id} timed out after #{ms}ms with no response")
+
+  defp log_outcome({:error, reason}, request_id, ms),
+    do: Logger.info("[permissions] #{request_id} ended #{inspect(reason)} after #{ms}ms")
 
   @doc "Remember an \"allow for this session\" grant for `tool`."
   @spec allow_for_session(String.t() | nil, String.t()) :: :ok

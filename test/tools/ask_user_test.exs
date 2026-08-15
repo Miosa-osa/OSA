@@ -215,6 +215,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
   # own session id — asking is off by default now (`Agent.AskUserMode`), and a
   # disabled session never reaches the wait at all. The disabled path has its
   # own coverage in `test/optimal_system_agent/agent/ask_user_mode_test.exs`.
+  #
+  # They also declare the session ATTENDED. `AskUserMode` is the operator's
+  # standing preference; it says nothing about whether a human is attached to
+  # this session right now, and the handler consults `Agent.Attendance` for that
+  # separately (an operator who enables questions in settings and then starts a
+  # headless run must not get a five-minute park per question). The unattended
+  # path is covered in test/agent/attendance_test.exs.
   # ---------------------------------------------------------------------------
 
   alias OptimalSystemAgent.Agent.Loop.ToolError
@@ -224,7 +231,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUserTest do
   defp start_question(question, options \\ []) do
     sid = "ask-user-exec-#{System.unique_integer([:positive])}"
     :ok = OptimalSystemAgent.Agent.AskUserMode.put(sid, true)
-    on_exit(fn -> OptimalSystemAgent.Agent.AskUserMode.clear(sid) end)
+    :ok = OptimalSystemAgent.Agent.Attendance.put_override(sid, true)
+
+    on_exit(fn ->
+      OptimalSystemAgent.Agent.AskUserMode.clear(sid)
+      OptimalSystemAgent.Agent.Attendance.clear(sid)
+    end)
+
     ctx = %UseContext{session_id: sid}
 
     task =

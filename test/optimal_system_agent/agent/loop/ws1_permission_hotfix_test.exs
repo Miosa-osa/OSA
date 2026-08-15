@@ -45,7 +45,13 @@ defmodule OptimalSystemAgent.Agent.Loop.WS1PermissionHotfixTest do
 
   defp legacy_round_trip(body) do
     rid = PermissionBroker.new_request_id()
-    task = Task.async(fn -> PermissionBroker.await("ws1-sess", rid, timeout: 5_000) end)
+    # `attended: true` — see Agent.Attendance; this synthetic session has no
+    # registered channel and the legacy payload mapping is what is under test.
+    task =
+      Task.async(fn ->
+        PermissionBroker.await("ws1-sess", rid, timeout: 5_000, attended: true)
+      end)
+
     Process.sleep(50)
     conn = post_respond(Map.put(body, :request_id, rid))
     assert conn.status == 200

@@ -69,38 +69,20 @@ defmodule OptimalSystemAgent.Tools.PipelineTest do
   end
 
   # ---------------------------------------------------------------------------
-  # parallel/2
+  # parallel/2 — DELETED
+  #
+  # `Pipeline.parallel/2` spawned an unguarded `Task.async` per instruction and
+  # consulted no concurrency decision at all, so two edits to one file would
+  # silently lose one. It had no production callers; this test was its only
+  # caller. Concurrent tool dispatch has one entry point,
+  # `Agent.Loop.ToolOrchestrator.dispatch/3`, which is tested in
+  # test/agent/loop/tool_orchestrator_test.exs.
   # ---------------------------------------------------------------------------
 
-  describe "parallel/2" do
-    test "runs all instructions and collects successes as list" do
-      instructions = [
-        {"tool_a", %{"a" => 1}},
-        {"tool_b", %{"b" => 2}}
-      ]
-
-      assert {:ok, results} = Pipeline.parallel(instructions, executor: &echo_executor/2)
-      assert is_list(results)
-      assert length(results) == 2
-      assert Enum.any?(results, &(&1["a"] == 1))
-      assert Enum.any?(results, &(&1["b"] == 2))
-    end
-
-    test "returns errors when any instruction fails" do
-      instructions = [
-        {"good_tool", %{}},
-        {"bad_tool", %{}}
-      ]
-
-      executor = failing_executor("bad_tool")
-      assert {:error, errors} = Pipeline.parallel(instructions, executor: executor)
-      assert is_list(errors)
-      assert Enum.any?(errors, &(&1 =~ "bad_tool"))
-    end
-
-    test "handles empty list" do
-      assert {:ok, []} = Pipeline.parallel([], executor: &echo_executor/2)
-    end
+  test "parallel/2 no longer exists — there is one concurrent dispatch site" do
+    Code.ensure_loaded!(Pipeline)
+    refute function_exported?(Pipeline, :parallel, 1)
+    refute function_exported?(Pipeline, :parallel, 2)
   end
 
   # ---------------------------------------------------------------------------

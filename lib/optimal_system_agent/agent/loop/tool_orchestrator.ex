@@ -12,7 +12,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
     1. **Per-input** concurrency check (not module-level). A tool can be
        concurrency-safe for some inputs and not others (e.g., `shell_execute`
-       with `cd` mutates the working dir).
+       with `cd` mutates the working dir). Since a per-CALL predicate cannot
+       express "safe unless you touch my file", the per-call answer is combined
+       with `Tools.ConflictScope` — a cross-call comparison of declared,
+       canonicalised paths — at this layer, the only one that sees the batch.
 
     2. **Uniform LegacyAdapter routing** — the orchestrator never branches
        on flat-vs-structured itself; the adapter handles that.
@@ -34,6 +37,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
+  alias OptimalSystemAgent.Tools.ConflictScope
   alias OptimalSystemAgent.Tools.{LegacyAdapter, Registry, UseContext}
 
   require Logger
@@ -195,58 +199,108 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   **serial** (fail-closed). Accepts either a `UseContext` or a raw loop state
   map (the streaming path has only the latter).
 
-  Note this is a property of ONE call, not of a PAIR. Combination safety comes
-  from how callers batch: an unsafe call is a barrier, so everything queued
-  before it drains first and nothing queued after it starts until it is done.
-  That is why no path comparison (or path normalisation) happens here — a
-  mutating tool is unsafe against every other call regardless of which file it
-  names.
+  Note this is a property of ONE call, not of a PAIR — which is exactly what
+  some tools need to say and cannot. Pair safety is `scope_of/2` +
+  `ConflictScope.conflict?/2`; prefer those. This function remains the input to
+  that decision (and the answer for tools with nothing to declare).
   """
   @spec concurrency_safe?(tool_call(), UseContext.t() | map()) :: boolean()
   def concurrency_safe?(tc, %UseContext{} = ctx), do: safe_call?(tc, ctx)
-  def concurrency_safe?(tc, state) when is_map(state), do: safe_call?(tc, build_use_context(state))
+
+  def concurrency_safe?(tc, state) when is_map(state),
+    do: safe_call?(tc, build_use_context(state))
+
+  @doc """
+  What does this ONE call touch — the input to the cross-call comparison.
+
+  Public for the same reason `concurrency_safe?/2` is: `StreamingToolExecutor`
+  is a second dispatch site and must reach the same verdict from the same code,
+  not from a second copy of it. It holds a raw loop state map rather than a
+  `UseContext`; both are accepted.
+
+  Fails closed: any error resolves to a `:barrier`, which conflicts with
+  everything.
+  """
+  @spec scope_of(tool_call(), UseContext.t() | map()) :: ConflictScope.t()
+  def scope_of(tc, %UseContext{} = ctx), do: call_scope(tc, ctx)
+  def scope_of(tc, state) when is_map(state), do: call_scope(tc, build_use_context(state))
 
   # ── Private ───────────────────────────────────────────────────────────
 
+  # Greedy consecutive batching under CROSS-CALL conflict.
+  #
+  # A call joins the batch being accumulated when it conflicts with nothing
+  # already in it; otherwise the batch flushes and the call starts a new one.
+  # Calls are never reordered, so the barrier guarantee is unchanged: everything
+  # queued before a conflicting call drains before it runs, and nothing queued
+  # after it starts until it is done.
+  #
+  # Reduces to the previous behaviour exactly when every scope is `:parallel` or
+  # `:barrier` — a barrier conflicts with everything, so it always flushes and
+  # always lands alone. What is new is `:scoped`: two `download`s to different
+  # paths, or two `file_edit`s to different files, are disjoint and stay
+  # parallel, while two calls to ONE path serialise.
   defp execution_batches(tool_calls, %UseContext{} = ctx) do
-    {batches, safe_acc} =
-      Enum.reduce(tool_calls, {[], []}, fn tc, {batches, safe_acc} ->
-        if safe_call?(tc, ctx) do
-          {batches, [tc | safe_acc]}
-        else
-          batches = flush_safe_batch(batches, safe_acc)
-          {[{:serial, tc} | batches], []}
+    scoped = Enum.map(tool_calls, fn tc -> {tc, call_scope(tc, ctx)} end)
+
+    {batches, acc} =
+      Enum.reduce(scoped, {[], []}, fn {tc, scope}, {batches, acc} ->
+        cond do
+          acc == [] ->
+            {batches, [{tc, scope}]}
+
+          ConflictScope.conflicts_any?(scope, Enum.map(acc, &elem(&1, 1))) ->
+            {flush_batch(batches, acc), [{tc, scope}]}
+
+          true ->
+            {batches, [{tc, scope} | acc]}
         end
       end)
 
     batches
-    |> flush_safe_batch(safe_acc)
+    |> flush_batch(acc)
     |> Enum.reverse()
-    |> tap(&report_serialization(&1, tool_calls, ctx))
+    |> tap(&report_serialization(&1, tool_calls, scoped, ctx))
   end
+
+  defp flush_batch(batches, []), do: batches
+
+  defp flush_batch(batches, [{tc, _scope}]), do: [{:serial, tc} | batches]
+
+  defp flush_batch(batches, acc),
+    do: [{:parallel, acc |> Enum.reverse() |> Enum.map(&elem(&1, 0))} | batches]
 
   # Observability parity with `StreamingToolExecutor`. Only speaks up when a
   # BATCH was actually split — a lone tool call is not "serialised", it is just
   # a tool call, and saying so on every turn would bury the signal.
-  defp report_serialization(batches, tool_calls, %UseContext{} = ctx) do
+  defp report_serialization(batches, tool_calls, scoped, %UseContext{} = ctx) do
     serial = for {:serial, tc} <- batches, do: tc
+    scopes = Map.new(scoped, fn {tc, s} -> {Map.get(tc, :id), s} end)
 
     if length(tool_calls) > 1 and serial != [] do
-      names = serial |> Enum.map(&Map.get(&1, :name)) |> Enum.join(", ")
+      detail =
+        serial
+        |> Enum.map(fn tc ->
+          "#{Map.get(tc, :name)} (#{ConflictScope.describe(Map.get(scopes, Map.get(tc, :id)))})"
+        end)
+        |> Enum.join(", ")
 
       Logger.info(
         "[tool_orchestrator] serialising #{length(serial)} of #{length(tool_calls)} " <>
-          "batched call(s) — not concurrency-safe: #{names}"
+          "batched call(s): #{detail}"
       )
 
       Enum.each(serial, fn tc ->
+        scope = Map.get(scopes, Map.get(tc, :id))
+
         :telemetry.execute(
           [:osa, :tools, :serialized],
           %{count: 1, waiting_on: length(tool_calls) - 1},
           %{
             tool: Map.get(tc, :name),
             session_id: ctx.session_id,
-            reason: :unsafe,
+            reason: serialization_reason(scope),
+            scope: ConflictScope.describe(scope),
             path: :orchestrator
           }
         )
@@ -258,8 +312,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     _ -> :ok
   end
 
-  defp flush_safe_batch(batches, []), do: batches
-  defp flush_safe_batch(batches, safe_acc), do: [{:parallel, Enum.reverse(safe_acc)} | batches]
+  # `:unsafe` is kept verbatim for the per-call barrier case so existing
+  # telemetry consumers keep matching; a PATH collision between two otherwise
+  # parallel-safe calls is the new `:conflict`.
+  defp serialization_reason(%ConflictScope{mode: :scoped}), do: :conflict
+  defp serialization_reason(_), do: :unsafe
 
   defp safe_call?(tc, %UseContext{} = ctx) do
     mod = lookup_module(Map.get(tc, :name))
@@ -269,6 +326,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
       is_nil(mod) -> false
       true -> LegacyAdapter.concurrency_safe?(mod, input, ctx)
     end
+  end
+
+  # Fail closed on every error path: an undecidable call is a barrier.
+  defp call_scope(tc, %UseContext{} = ctx) do
+    ConflictScope.for_call(Map.get(tc, :name), decode_arguments(tc), safe_call?(tc, ctx))
+  rescue
+    _ -> %ConflictScope{mode: :barrier}
+  catch
+    _, _ -> %ConflictScope{mode: :barrier}
   end
 
   defp run_parallel([], _state, _opts), do: []

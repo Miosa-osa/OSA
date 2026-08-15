@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Survey do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Attendance
   alias OptimalSystemAgent.Events.Bus
 
   @cancel_table :osa_cancel_flags
@@ -21,7 +22,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Survey do
   Ask the user interactive questions via the TUI survey dialog.
   Blocks the calling process until the user responds or timeout (120s default).
 
-  Returns `{:ok, answers}` | `{:skipped}` | `{:error, :timeout}` | `{:error, :cancelled}`.
+  Returns `{:ok, answers}` | `{:skipped}` | `{:error, :timeout}` |
+  `{:error, :cancelled}` | `{:error, :unattended}`.
+
+  ## Gated on someone being there
+
+  Same shape as `Loop.PermissionBroker.await/3` and the same defect: a 120 s
+  poll whose only terminator is a human. `Agent.Attendance` is consulted first,
+  and a session nobody is attached to returns `{:error, :unattended}` at once
+  rather than emitting a question into a topic with no readers and then sleeping
+  two minutes. `ask_user`'s handler already maps a non-answer onto an
+  instruction to proceed on a stated assumption, so this costs the model
+  nothing but two minutes it never had.
+
+  `attended: true | false` overrides the derivation for tests.
 
   ## Question format
 
@@ -40,17 +54,49 @@ defmodule OptimalSystemAgent.Agent.Loop.Survey do
   def ask(session_id, survey_id, questions, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 120_000)
 
-    Bus.emit(:system_event, %{
-      event: :ask_user_question,
-      session_id: session_id,
-      data: %{
-        survey_id: survey_id,
-        questions: questions,
-        skippable: Keyword.get(opts, :skippable, true)
-      }
-    })
+    attended? =
+      case Keyword.get(opts, :attended) do
+        v when is_boolean(v) -> v
+        _ -> Attendance.attended?(Keyword.get(opts, :state) || session_id)
+      end
 
-    poll_answer(session_id, survey_id, timeout)
+    if attended? do
+      Bus.emit(:system_event, %{
+        event: :ask_user_question,
+        session_id: session_id,
+        data: %{
+          survey_id: survey_id,
+          questions: questions,
+          skippable: Keyword.get(opts, :skippable, true)
+        }
+      })
+
+      Logger.info(
+        "[survey] waiting up to #{div(timeout, 1000)}s for an answer to #{survey_id} " <>
+          "(session #{inspect(session_id)})"
+      )
+
+      started = System.monotonic_time(:millisecond)
+      result = poll_answer(session_id, survey_id, timeout)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      case result do
+        {:error, :timeout} ->
+          Logger.warning("[survey] #{survey_id} timed out after #{elapsed}ms with no answer")
+
+        _ ->
+          Logger.info("[survey] #{survey_id} resolved #{inspect(result)} after #{elapsed}ms")
+      end
+
+      result
+    else
+      Logger.info(
+        "[survey] not asking #{survey_id} — nobody can answer on session " <>
+          "#{inspect(session_id)} (#{Attendance.reason(session_id)})"
+      )
+
+      {:error, :unattended}
+    end
   end
 
   # --- Private ---

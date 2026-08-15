@@ -12,6 +12,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Download.Constants do
   @max_redirects 3
   def max_redirects, do: @max_redirects
 
+  # Where a RELATIVE download path is rooted. Exported because
+  # `Tools.ConflictScope` must expand a declared target against the same root
+  # the handler uses — two names for one file that expand differently would
+  # compare as distinct, which is precisely the race the scope check exists to
+  # catch.
+  @workspace_root "~/.osa/workspace"
+  def workspace_root, do: @workspace_root
+
   @default_allowed_write_paths ["~", "/tmp"]
   def default_allowed_write_paths, do: @default_allowed_write_paths
 

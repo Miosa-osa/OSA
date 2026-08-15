@@ -166,6 +166,55 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolConcurrencyTest do
     end
   end
 
+  # ── Disjoint edits are no longer a barrier against each other ────────
+
+  describe "cross-call conflict detection" do
+    test "two file_edits to DIFFERENT files run in parallel", %{dir: dir} do
+      # `file_edit` returns `concurrency_safe? false` unconditionally, which made
+      # it a barrier against EVERYTHING — including another edit to an unrelated
+      # file, which cannot race it. `Tools.ConflictScope` compares canonicalised
+      # target paths, so the pair that genuinely cannot interfere now overlaps.
+      # The same-file pair above still serialises; that is the point.
+      a = Path.join(dir, "a.txt")
+      b = Path.join(dir, "b.txt")
+      File.write!(a, "x")
+      File.write!(b, "x")
+      state = %{session_id: "test", tool_executor: OverlapExecutor, test_pid: self()}
+
+      ctx =
+        StreamingToolExecutor.start(state)
+        |> fire([edit_call("e1", a, "x", "y"), edit_call("e2", b, "x", "y")], state)
+
+      _ = StreamingToolExecutor.collect_results(ctx)
+
+      assert event_sequence(4) |> Enum.take(2) |> Enum.map(&elem(&1, 0)) == [:started, :started],
+             "disjoint edits were serialised against each other"
+    end
+
+    test "an edit and a read of the SAME file still serialise", %{dir: dir} do
+      # `file_read` is per-call safe, so without read targets in the comparison
+      # it would batch alongside a write to the very file it is reading.
+      path = Path.join(dir, "shared.txt")
+      File.write!(path, "x")
+      state = %{session_id: "test", tool_executor: OverlapExecutor, test_pid: self()}
+
+      calls = [
+        edit_call("w1", path, "x", "y"),
+        %{id: "r1", name: "file_read", arguments: %{"path" => path}}
+      ]
+
+      ctx = fire(StreamingToolExecutor.start(state), calls, state)
+      _ = StreamingToolExecutor.collect_results(ctx)
+
+      assert event_sequence(4) == [
+               {:started, "w1"},
+               {:finished, "w1"},
+               {:started, "r1"},
+               {:finished, "r1"}
+             ]
+    end
+  end
+
   # ── Parallel reads must stay parallel ────────────────────────────────
 
   describe "concurrency-safe calls" do

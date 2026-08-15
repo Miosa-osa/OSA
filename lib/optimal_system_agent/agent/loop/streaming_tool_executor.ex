@@ -26,13 +26,16 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   `test/agent/loop/streaming_tool_concurrency_test.exs`.
 
   The decision of what may run alongside what is NOT re-implemented here. Each
-  block asks `ToolOrchestrator.concurrency_safe?/2` — the same function
-  `ToolOrchestrator.dispatch/3` uses — and the same barrier semantics are
-  applied incrementally:
+  block asks `ToolOrchestrator.scope_of/2` — the same function
+  `ToolOrchestrator.dispatch/3` uses — and the resulting `Tools.ConflictScope`
+  is compared against every call already in flight:
 
-    * a **safe** call starts as soon as the current barrier (if any) is done;
-    * an **unsafe** call is a barrier — it waits for everything already in
-      flight, and every later call waits for it.
+    * a **parallel-safe** call starts as soon as any live barrier is done;
+    * a **path-scoped** call (two `download`s, two `file_edit`s) waits only for
+      the in-flight calls whose canonicalised targets it collides with — and
+      starts immediately when they are disjoint;
+    * a **barrier** waits for everything already in flight, and every later
+      call waits for it.
 
   The eager-start property is preserved. Safe calls (reads, greps, globs, web
   fetches — the batches we actively want more of) still fire the instant their
@@ -46,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
+  alias OptimalSystemAgent.Tools.ConflictScope
 
   @doc """
   Start a new streaming executor context.
@@ -60,12 +64,12 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       completed: %{},
       # tool_use_ids in order received
       order: [],
-      # The pid of the most recent BARRIER (concurrency-unsafe) call, or nil.
-      # Every later call waits on it before touching anything.
-      barrier: nil,
-      # pids of concurrency-safe calls fired since that barrier. The next
-      # barrier waits on all of them.
-      open: [],
+      # [{pid, ConflictScope.t()}] for every call fired this turn, newest first.
+      # A new call waits on exactly those it conflicts with. Entries are not
+      # pruned: monitoring an already-dead pid returns immediately, so a stale
+      # entry costs one `:noproc` round-trip, and the list is bounded by the
+      # number of tool calls in a single assistant turn.
+      scopes: [],
       # tool_use_id => the tool_call map that was fired. Kept so an ERROR path
       # (idle timeout, dropped connection) can rebuild the assistant message
       # that owns these tool_use ids — without it, already-executed tool results
@@ -86,16 +90,22 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   def tool_block_complete(ctx, tool_call, state) do
     executor = executor_for(state)
 
-    safe? = safe_to_run_alongside?(tool_call, state)
-    barrier = Map.get(ctx, :barrier)
-    open = Map.get(ctx, :open, [])
+    scope = scope_of(tool_call, state)
+    in_flight = Map.get(ctx, :scopes, [])
 
-    # Barrier semantics, applied incrementally — identical to the batching
-    # `ToolOrchestrator.execution_batches/2` performs on a complete list.
+    # Cross-call conflict, applied incrementally — the same decision
+    # `ToolOrchestrator.execution_batches/2` makes on a complete list, reached
+    # from the same code rather than a second copy of it. A `:barrier` conflicts
+    # with everything in flight (the old "unsafe waits on open ++ barrier"); a
+    # `:parallel` call conflicts only with barriers (the old "safe waits on the
+    # barrier", now on ALL live barriers rather than the most recent one, which
+    # is a strict correctness gain); a `:scoped` call waits only on the in-flight
+    # calls whose canonicalised paths it actually collides with.
     predecessors =
-      if safe?,
-        do: List.wrap(barrier),
-        else: Enum.uniq(open ++ List.wrap(barrier))
+      in_flight
+      |> Enum.filter(fn {_pid, s} -> ConflictScope.conflict?(scope, s) end)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.uniq()
 
     if predecessors != [] do
       # Above debug on purpose. Every concurrency defect found in this loop so
@@ -104,10 +114,10 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       # the original bug invisible.
       Logger.info(
         "[streaming_tools] serialising #{tool_call.name} (#{tool_call.id}) behind " <>
-          "#{length(predecessors)} in-flight call(s) — #{if safe?, do: "barrier", else: "unsafe call"}"
+          "#{length(predecessors)} in-flight call(s) — #{ConflictScope.describe(scope)}"
       )
 
-      emit_serialized_telemetry(tool_call, state, safe?, length(predecessors))
+      emit_serialized_telemetry(tool_call, state, scope, length(predecessors))
     end
 
     # Same process-boundary problem as ToolOrchestrator: `Cwd.get/0` reads the
@@ -134,17 +144,11 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
         end
       )
 
-    {barrier, open} =
-      if safe?,
-        do: {barrier, [task.pid | open]},
-        else: {task.pid, []}
-
     %{
       ctx
       | in_flight: Map.put(ctx.in_flight, tool_call.id, task),
         order: ctx.order ++ [tool_call.id],
-        barrier: barrier,
-        open: open,
+        scopes: [{task.pid, scope} | in_flight],
         calls: Map.put(Map.get(ctx, :calls, %{}), tool_call.id, tool_call)
     }
   end
@@ -156,8 +160,8 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   # Fail-closed on any failure: if the decision cannot be made, serialise. The
   # cost of a wrong `false` is latency; the cost of a wrong `true` is a lost
   # file.
-  defp safe_to_run_alongside?(tool_call, state) do
-    ToolOrchestrator.concurrency_safe?(tool_call, state)
+  defp scope_of(tool_call, state) do
+    ToolOrchestrator.scope_of(tool_call, state)
   rescue
     e ->
       Logger.warning(
@@ -165,9 +169,9 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
           "#{Exception.message(e)} — serialising"
       )
 
-      false
+      %ConflictScope{mode: :barrier}
   catch
-    :exit, _ -> false
+    :exit, _ -> %ConflictScope{mode: :barrier}
   end
 
   # Block until each predecessor task process has exited. `Process.monitor/1`
@@ -188,14 +192,23 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
     end)
   end
 
-  defp emit_serialized_telemetry(tool_call, state, safe?, waiting_on) do
+  defp emit_serialized_telemetry(tool_call, state, scope, waiting_on) do
+    reason =
+      case scope do
+        %ConflictScope{mode: :barrier} -> :unsafe
+        %ConflictScope{mode: :scoped} -> :conflict
+        # A parallel-safe call that still had to wait did so behind a barrier.
+        _ -> :barrier
+      end
+
     :telemetry.execute(
       [:osa, :tools, :serialized],
       %{count: 1, waiting_on: waiting_on},
       %{
         tool: Map.get(tool_call, :name),
         session_id: Map.get(state, :session_id),
-        reason: if(safe?, do: :barrier, else: :unsafe),
+        reason: reason,
+        scope: ConflictScope.describe(scope),
         path: :streaming
       }
     )
@@ -287,7 +300,7 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       Task.shutdown(task, :brutal_kill)
     end)
 
-    %{ctx | in_flight: %{}, completed: %{}, order: [], calls: %{}, barrier: nil, open: []}
+    %{ctx | in_flight: %{}, completed: %{}, order: [], calls: %{}, scopes: []}
   end
 
   @doc """

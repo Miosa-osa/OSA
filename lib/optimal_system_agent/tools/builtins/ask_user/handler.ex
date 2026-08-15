@@ -11,7 +11,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
       blocking. See `refuse/2`.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Agent.AskUserMode
+  alias OptimalSystemAgent.Agent.Attendance
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Tools.Builtins.AskUser.Constants
   alias OptimalSystemAgent.Tools.UseContext
@@ -41,10 +44,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
   def execute(%{"question" => question} = params, ctx) do
     session_id = ctx.session_id || params["__session_id__"]
 
-    if AskUserMode.enabled?(session_id) do
-      do_execute(question, params, session_id)
-    else
-      refuse(session_id, question)
+    cond do
+      # THIRD layer, and the one the first two cannot cover. `AskUserMode` is an
+      # operator's standing preference; it says nothing about whether a human is
+      # attached to THIS session at THIS moment. An operator who turns questions
+      # on globally (`"ask_user": true` in settings, which is durable by design)
+      # and then starts a `mix osa.run` gets a tool that is enabled and a session
+      # nobody is watching — and this handler's `receive/after` parks for its
+      # full ceiling per question. Ask `Agent.Attendance`, the same question
+      # every other blocking path now asks.
+      not AskUserMode.enabled?(session_id) ->
+        refuse(session_id, question)
+
+      not Attendance.attended?(session_id) ->
+        refuse(session_id, question, :unattended)
+
+      true ->
+        do_execute(question, params, session_id)
     end
   end
 
@@ -61,11 +77,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Handler do
   # and got a legitimate answer ("nobody is listening, decide for yourself").
   # An error here would count against the doom-loop detector and could abort
   # the turn — the same reasoning that makes a DECLINED question an `{:ok, _}`.
-  defp refuse(session_id, question) do
+  defp refuse(session_id, question, why \\ :disabled) do
+    Logger.info(
+      "[ask_user] question suppressed (#{why}) on session #{inspect(session_id)} — " <>
+        Attendance.reason(session_id)
+    )
+
     Bus.emit(:system_event, %{
       event: :ask_user_suppressed,
       question: question,
-      session_id: session_id
+      session_id: session_id,
+      reason: why
     })
 
     {:ok, AskUserMode.disabled_text()}

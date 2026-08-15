@@ -20,8 +20,27 @@ defmodule OptimalSystemAgent.Tools.Pipeline do
       # Run instructions sequentially, piping output into next input
       Pipeline.pipe(["file_read", {"file_write", %{"content" => "..."}}], executor: executor)
 
-      # Run instructions in parallel, collect results
-      Pipeline.parallel([{"web_search", %{"q" => "elixir"}}, "list_skills"], executor: executor)
+  ## There is no `parallel/2`
+
+  There used to be. It spawned a bare `Task.async` per instruction, awaited them
+  all, and consulted nothing: not `concurrency_safe?/2`, not
+  `Tools.ConflictScope`, not the cancel flag. Handed a list containing two edits
+  to one file, it produced exactly the silent lost-update the loop's other two
+  dispatch sites were fixed to prevent — and it would have done so while the
+  loop's own telemetry showed nothing, since it is not the loop.
+
+  It had **zero production callers**; the only thing that ever invoked it was
+  its own test. So it was not a working feature with a bug, it was a hazard
+  waiting for its first caller, and the caller would have got a third,
+  divergent, unguarded copy of a decision that is hard to get right once.
+
+  It was deleted rather than routed through `Agent.Loop.ToolOrchestrator`,
+  because routing it would have meant inventing the things the orchestrator
+  needs and this module does not have — tool-call ids, a `UseContext`, a loop
+  state, a session to cancel — in order to keep an API nobody called. Concurrent
+  tool dispatch has ONE entry point: `ToolOrchestrator.dispatch/3`, which
+  batches by cross-call conflict, honours the interrupt flag, and reports what
+  it serialised. `pipe/2`, `fallback/2` and `retry/2` are sequential and stay.
   """
 
   alias OptimalSystemAgent.Tools.Instruction
@@ -50,34 +69,6 @@ defmodule OptimalSystemAgent.Tools.Pipeline do
           {:halt, err}
       end
     end)
-  end
-
-  @doc """
-  Run all `instructions` concurrently. Returns `{:ok, [results]}` when all
-  succeed, or `{:error, [reasons]}` listing every failure.
-  """
-  @spec parallel([term()], keyword()) :: {:ok, [any()]} | {:error, [String.t()]}
-  def parallel(instructions, opts \\ []) do
-    executor = Keyword.get(opts, :executor, fn _tool, params -> {:ok, params} end)
-
-    tasks =
-      Enum.map(instructions, fn raw ->
-        Task.async(fn ->
-          case Instruction.normalize(raw) do
-            {:ok, inst} -> executor.(inst.tool, inst.params)
-            err -> err
-          end
-        end)
-      end)
-
-    results = Task.await_many(tasks, 30_000)
-    errors = Enum.filter(results, &match?({:error, _}, &1))
-
-    if errors == [] do
-      {:ok, Enum.map(results, fn {:ok, v} -> v end)}
-    else
-      {:error, Enum.map(errors, fn {:error, e} -> e end)}
-    end
   end
 
   @doc """

@@ -66,7 +66,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Download.Tool do
 
   # ── Execution semantics (per-input) ───────────────────────────────────
   @impl true
-  # Multiple downloads to different paths are safe to run in parallel.
+  # TRUE means "safe against a call that does not touch my target" — NOT "safe
+  # against anything". This predicate sees one call, so it cannot express the
+  # pair property that actually holds here, and the comment that used to sit on
+  # this line ("multiple downloads to *different* paths are safe") asserted one
+  # anyway. Two downloads to ONE path were dispatched concurrently: last write
+  # wins, both calls report success.
+  #
+  # The pair property is enforced a layer up, where the whole batch is visible.
+  # `Tools.ConflictScope` reads this tool's declared `path`, canonicalises it
+  # against the same `~/.osa/workspace` root the handler uses, and serialises
+  # any two calls whose targets collide — while genuinely disjoint downloads
+  # still run in parallel, which is the win that forcing `false` would have
+  # cost. An unresolvable path degrades to a full barrier there.
   def concurrency_safe?(_input, _ctx), do: true
 
   @impl true

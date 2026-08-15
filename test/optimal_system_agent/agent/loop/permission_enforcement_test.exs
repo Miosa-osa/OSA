@@ -165,13 +165,22 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
   end
 
   # ── PermissionBroker park / respond / cancel ────────────────────────
+  #
+  # `attended: true` is passed explicitly because `await/3` now refuses to park
+  # a session nobody can answer on (`Agent.Attendance`) — these synthetic
+  # session ids have no registered channel, and what is under test here is the
+  # park/respond/cancel mechanics, not the attendance derivation. That has its
+  # own tests in test/agent/attendance_test.exs, including the one that proves a
+  # headless session does NOT reach this code path.
 
   describe "PermissionBroker round-trip" do
     test "await resumes when a decision is posted" do
       rid = PermissionBroker.new_request_id()
       sid = "sess-#{unique()}"
 
-      task = Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000) end)
+      task =
+        Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000, attended: true) end)
+
       # Give the poller a moment, then respond.
       Process.sleep(50)
       PermissionBroker.respond(rid, %{"decision" => "allow"})
@@ -184,7 +193,9 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
       sid = "sess-#{unique()}"
       ensure_cancel_table()
 
-      task = Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000) end)
+      task =
+        Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000, attended: true) end)
+
       Process.sleep(50)
       :ets.insert(@cancel_table, {sid, true})
 
@@ -196,7 +207,9 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
       rid = PermissionBroker.new_request_id()
       sid = "sess-#{unique()}"
 
-      task = Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000) end)
+      task =
+        Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000, attended: true) end)
+
       Process.sleep(50)
 
       PermissionBroker.respond(rid, %{"decision" => "clarify", "note" => "use a temp dir instead"})
@@ -309,7 +322,9 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
       rid = PermissionBroker.new_request_id()
       sid = "sess-#{unique()}"
 
-      task = Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000) end)
+      task =
+        Task.async(fn -> PermissionBroker.await(sid, rid, timeout: 5_000, attended: true) end)
+
       Process.sleep(50)
 
       conn = post_respond(%{request_id: rid, decision: "always"})

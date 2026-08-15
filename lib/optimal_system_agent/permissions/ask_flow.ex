@@ -35,14 +35,17 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
   ## Non-interactive channels
 
   Fail closed, matching `ToolExecutor.non_interactive_decision/1`: without a
-  session to prompt, or with `:interactive_permissions` disabled, the call is
-  refused with an honest, actionable message — unless the explicit
-  `:non_interactive_permission_bypass` opt-out is set (config/test.exs and
-  deliberate unattended runs).
+  session to prompt, or on a session `Agent.Attendance` reports nobody is
+  attached to, the call is refused with an honest, actionable message — unless
+  the explicit `:non_interactive_permission_bypass` opt-out is set
+  (config/test.exs and deliberate unattended runs). Attendance is the ONE
+  answer to "can a human respond right now"; this module used to carry its own
+  private copy of an app-env read, one of three that had drifted apart.
   """
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Attendance
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Permissions
@@ -102,8 +105,8 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
       PermissionBroker.session_allowed?(session_id, tool_name) ->
         :allow
 
-      not interactive?() or not is_binary(session_id) ->
-        non_interactive_decision(tool_name, reason)
+      not is_binary(session_id) or not Attendance.attended?(session_id) ->
+        non_interactive_decision(tool_name, reason, session_id)
 
       true ->
         prompt(tool_name, input, session_id, reason)
@@ -125,6 +128,11 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
     case PermissionBroker.await(session_id, request_id) do
       {:ok, %{decision: decision, note: note}} ->
         apply_decision(decision, note, tool_name, input, session_id)
+
+      # Attendance ended between the decision to prompt and the wait itself.
+      # Same answer the earlier branch would have given — never a park.
+      {:error, :unattended} ->
+        non_interactive_decision(tool_name, reason, session_id)
 
       {:error, :timeout} ->
         {:error,
@@ -176,12 +184,38 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
     end
   end
 
-  defp non_interactive_decision(tool_name, reason) do
+  # OBSERVABLE, in both directions. The auto-ALLOW under the explicit bypass is
+  # a permission decision taken with no human in it and used to be silent.
+  defp non_interactive_decision(tool_name, reason, session_id) do
+    why = Attendance.reason(session_id)
+
     if Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false) do
+      Logger.warning(
+        "[permissions] auto-ALLOWED #{tool_name} without asking — unattended session " <>
+          "(#{why}) and :non_interactive_permission_bypass is set"
+      )
+
+      emit_non_interactive(:allow, tool_name, session_id, why)
       :allow
     else
+      Logger.info(
+        "[permissions] auto-DENIED #{tool_name} — unattended session (#{why}), " <>
+          "permissions fail closed"
+      )
+
+      emit_non_interactive(:deny, tool_name, session_id, why)
       {:error, refusal(tool_name, reason)}
     end
+  end
+
+  defp emit_non_interactive(outcome, tool, session_id, why) do
+    :telemetry.execute(
+      [:osa, :permissions, :non_interactive],
+      %{count: 1},
+      %{outcome: outcome, tool: tool, session_id: session_id, reason: why}
+    )
+  rescue
+    _ -> :ok
   end
 
   # Contains "requires interactive approval" so `ToolError.user_decision?/1`
@@ -305,10 +339,6 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
 
   defp binary_or_nil(v) when is_binary(v) and v != "", do: v
   defp binary_or_nil(_), do: nil
-
-  defp interactive? do
-    Application.get_env(:optimal_system_agent, :interactive_permissions, true)
-  end
 
   defp ensure_table do
     case :ets.whereis(@approved_calls) do

@@ -73,10 +73,16 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       # same reason: left behind, a recycled session id would inherit a
       # stranger's "on" and could block on a question its operator never
       # enabled — the exact failure the toggle exists to remove.
-      assert length(expected) == 10, "every per-session cleanup must be wired in"
+      # `:attendance` is the session's channel + attendance override
+      # (`Agent.Attendance`). It joined for the same reason as `:ask_user_mode`
+      # and in the same direction: left behind, a recycled session id would
+      # inherit a stranger's "someone is watching", which is what lets an
+      # unattended run park on a prompt nobody can answer.
+      assert length(expected) == 11, "every per-session cleanup must be wired in"
       assert :compactor_summary in expected
       assert :side_spend in expected
       assert :ask_user_mode in expected
+      assert :attendance in expected
     end
 
     test "the WorldState ledger is covered — it pins rendered payload text" do
@@ -101,10 +107,10 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardownTest do
       assert SessionTeardown.run(:not_a_binary) == []
 
       s = sid()
-      # 10 steps — see the count assertion above for why `:side_spend` and
-      # `:ask_user_mode` joined.
-      assert length(SessionTeardown.run(s)) == 10
-      assert length(SessionTeardown.run(s)) == 10
+      # 11 steps — see the count assertion above for why `:side_spend`,
+      # `:ask_user_mode` and `:attendance` joined.
+      assert length(SessionTeardown.run(s)) == 11
+      assert length(SessionTeardown.run(s)) == 11
     end
   end
 

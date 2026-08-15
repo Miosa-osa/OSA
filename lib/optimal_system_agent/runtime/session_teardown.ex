@@ -26,6 +26,8 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
     * `Agent.Loop.VerificationEvidence.reset/1` — collected evidence.
     * `Tools.Registry.SkillTouch.reset/1` — per-session skill touches.
     * `Agent.CoordinatorMode.clear/1` — coordinator-mode flag.
+    * `Agent.Attendance.clear/1` — the session's channel and attendance
+      override, so a recycled id cannot inherit "someone is watching".
     * `Agent.Loop.PermissionBroker.clear_session/1` — session-scoped allows.
       (Grants are session-scoped by definition, so they must not outlive it —
       this one is a correctness fix as much as a memory one.)
@@ -100,6 +102,11 @@ defmodule OptimalSystemAgent.Runtime.SessionTeardown do
       # session id cannot inherit a stranger's "on" — the direction that would
       # let a run block on a question its operator never enabled.
       {:ask_user_mode, &AskUserMode.clear/1},
+      # The session's channel + attendance override. Cleared for the same reason
+      # as the line above and in the same direction: a recycled session id must
+      # not inherit a stranger's "someone is watching", which is what would let a
+      # later unattended run park on a prompt nobody can answer.
+      {:attendance, &OptimalSystemAgent.Agent.Attendance.clear/1},
       {:permission_broker, &PermissionBroker.clear_session/1},
       {:compactor_summary, &Compactor.forget_session/1},
       # Staged-but-unabsorbed compaction spend. Dropping it loses at most the

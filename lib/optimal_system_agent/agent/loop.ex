@@ -1000,10 +1000,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
         _ -> AskUserMode.enabled?(session_id)
       end
 
+    channel = Keyword.get(opts, :channel, :cli)
+
+    # Publish the channel so every BLOCKING path can ask one question —
+    # `Agent.Attendance.attended?/1`, "can a human respond on this session right
+    # now" — instead of each one re-deriving an answer from a flag nothing sets.
+    # Written here, at the single place a session's channel is decided, so a
+    # tool Task (which has no loop state) and a stateless HTTP request resolve
+    # the same verdict as the loop itself.
+    OptimalSystemAgent.Agent.Attendance.put_channel(session_id, channel)
+
     state = %__MODULE__{
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
-      channel: Keyword.get(opts, :channel, :cli),
+      channel: channel,
       # Resolve provider AND model up front. Carrying `model: nil` is not an
       # absence, it is a value that silently disables both cost accounting and
       # compaction — see `Registry.resolved_default_model/1`.

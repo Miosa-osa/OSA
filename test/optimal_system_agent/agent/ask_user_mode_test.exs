@@ -264,6 +264,13 @@ defmodule OptimalSystemAgent.Agent.AskUserModeTest do
   describe "when enabled, the blocking path is restored" do
     test "a call blocks until an answer arrives", %{session_id: sid} do
       :ok = AskUserMode.put(sid, true)
+      # AskUserMode is the operator's standing preference; `Agent.Attendance` is
+      # the separate question of whether anyone is attached to THIS session right
+      # now, and the handler consults both. Declared here because the synthetic
+      # session has no channel — the unattended path is covered in
+      # test/agent/attendance_test.exs.
+      :ok = OptimalSystemAgent.Agent.Attendance.put_override(sid, true)
+      on_exit(fn -> OptimalSystemAgent.Agent.Attendance.clear(sid) end)
       parent = self()
 
       task =

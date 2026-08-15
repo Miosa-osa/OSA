@@ -232,7 +232,9 @@ defmodule OptimalSystemAgent.Agent.SubagentFlowTest do
       OptimalSystemAgent.Agent.Loop.PermissionBroker.respond(request_id, "allow")
 
       assert {:ok, %{decision: :allow_once}} =
-               OptimalSystemAgent.Agent.Loop.PermissionBroker.await(child, request_id)
+               OptimalSystemAgent.Agent.Loop.PermissionBroker.await(child, request_id,
+                 attended: true
+               )
     end
   end
 
