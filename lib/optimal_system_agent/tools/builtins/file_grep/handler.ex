@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   """
 
   alias OptimalSystemAgent.Tools.Ablation
+  alias OptimalSystemAgent.Tools.Builtins.FileGrep.Backend
   alias OptimalSystemAgent.Tools.Builtins.FileGrep.Constants
   alias OptimalSystemAgent.Tools.UseContext
 
@@ -68,7 +69,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   # ── Stage 3: Execute ──────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"pattern" => pattern} = params, _ctx) do
+  def execute(%{"pattern" => pattern} = params, ctx) do
     # Expand against the SESSION's directory, not the OS process cwd.
     #
     # `Path.expand/1` resolves a relative path against `File.cwd!()`, which is
@@ -89,7 +90,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     path = Path.expand(params["path"] || ".", OptimalSystemAgent.Workspace.Cwd.get())
 
     if File.exists?(path) do
-      do_search(pattern, path, params)
+      do_search(pattern, path, params, ctx)
     else
       # A typo'd or stale path used to return "No matches found." — a silent
       # WRONG answer. The agent concludes the symbol does not exist anywhere and
@@ -102,7 +103,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
   def execute(_, _ctx), do: {:error, "Missing required parameter: pattern"}
 
-  defp do_search(pattern, path, params) do
+  defp do_search(pattern, path, params, ctx) do
     rg_opts = %{
       glob: params["glob"],
       case_insensitive: params["case_insensitive"] == true,
@@ -112,9 +113,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     }
 
     case try_ripgrep(pattern, path, rg_opts) do
-      {:ok, output} -> {:ok, output |> bound_output() |> with_spread_trailer()}
-      :empty -> empty_result(pattern, path, rg_opts)
-      {:fallback, _} -> fallback_grep(pattern, path, rg_opts)
+      {:ok, output} ->
+        {:ok, output |> bound_output() |> with_spread_trailer()}
+
+      :empty ->
+        empty_result(pattern, path, rg_opts, :ripgrep)
+
+      # The substitution is no longer silent. `reason` distinguishes "ripgrep is
+      # not installed on this node" — an environment problem an operator can
+      # fix, and the one that served all 862 calls in the corpus — from "ripgrep
+      # ran and exited badly", which is a different fault with a different fix.
+      # The old code returned `{:fallback, :rg_not_found}` for both and logged
+      # neither.
+      {:fallback, reason} ->
+        if reason == :missing, do: Backend.warn_missing_once(ctx)
+        fallback_grep(pattern, path, rg_opts, {:fallback, reason})
     end
   end
 
@@ -144,15 +157,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   # the matches were real and they are returned, with one sentence saying why
   # they needed asking for twice. If it finds nothing, the answer was honest and
   # says so in terms the model can act on.
-  defp empty_result(pattern, path, opts) do
+  defp empty_result(pattern, path, opts, backend) do
     if Ablation.on?(:grep_coverage) do
-      do_empty_result(pattern, path, opts)
+      do_empty_result(pattern, path, opts, backend)
     else
       {:ok, "No matches found."}
     end
   end
 
-  defp do_empty_result(pattern, path, opts) do
+  defp do_empty_result(pattern, path, opts, backend) do
     case try_ripgrep(pattern, path, opts, unrestricted: true) do
       {:ok, output} ->
         {:ok,
@@ -161,7 +174,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
          |> with_spread_trailer()}
 
       _ ->
-        {:ok, @no_matches_anywhere}
+        # "Nothing found" is the one answer a degraded backend gets wrong, so it
+        # is the one answer that names the engine that produced it.
+        {:ok, @no_matches_anywhere <> Backend.empty_result_note(backend)}
     end
   end
 
@@ -260,13 +275,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     args = if opts[:glob], do: args ++ ["-g", opts[:glob]], else: args
     args = args ++ [pattern, path]
 
-    case System.cmd("rg", args, stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {_output, 1} -> :empty
-      {_, _} -> {:fallback, :rg_not_found}
+    # Establish "is ripgrep installed" BEFORE spawning, rather than inferring it
+    # from a rescued `:enoent`. The old code could not tell the two apart, which
+    # is precisely why a node with no ripgrep at all looked identical to a node
+    # where one search happened to fail — for 862 consecutive calls.
+    case Backend.executable() do
+      nil ->
+        {:fallback, :missing}
+
+      exe ->
+        case System.cmd(exe, args, stderr_to_stdout: true) do
+          {output, 0} -> {:ok, output}
+          # ripgrep exits 1 for "no match". That is a real, trustworthy answer
+          # from a real engine — not a fallback trigger.
+          {_output, 1} -> :empty
+          # 2+ means ripgrep ran and failed. A different fault from absence.
+          {_, _} -> {:fallback, :failed}
+        end
     end
   rescue
-    _ -> {:fallback, :rg_not_found}
+    # Backstop for what the lookup cannot see: the binary removed between
+    # `find_executable/1` and the spawn, an exec-permission error, a bad
+    # interpreter. Rare, and no longer how "not installed" is detected.
+    _ -> {:fallback, :failed}
   end
 
   # ── Private: Elixir fallback ──────────────────────────────────────────
@@ -298,7 +329,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   # missing-path case at the top of this file: a confident wrong answer that
   # sends the agent down a false trail, and the one it is most expensive to
   # recover from because nothing looks broken.
-  defp fallback_grep(pattern, path, opts) do
+  defp fallback_grep(pattern, path, opts, backend) do
     regex_opts = if opts[:case_insensitive], do: "i", else: ""
 
     case Regex.compile(pattern, regex_opts) do
@@ -312,7 +343,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
         {files, cut?} = collect_files(path, opts[:glob])
 
         if Ablation.on?(:grep_coverage) do
-          covered_scan(files, r, opts, path, cut?)
+          covered_scan(files, r, opts, path, cut?, backend)
         else
           case scan(files, r, opts) do
             [] -> {:ok, "No matches found."}
@@ -322,7 +353,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     end
   end
 
-  defp covered_scan(files, r, opts, path, cut?) do
+  defp covered_scan(files, r, opts, path, cut?, backend) do
     case scan(files, r, opts) do
       [] ->
         # Nothing in the ordinary tree. Widen to the directories the walk
@@ -331,8 +362,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
         {pruned, pruned_cut?} = collect_files(path, opts[:glob], pruned_only: true)
 
         case scan(pruned, r, opts) do
-          [] -> {:ok, @no_matches_anywhere <> coverage_note(cut? or pruned_cut?)}
-          lines -> {:ok, emit(lines) <> @pruned_matches_note}
+          [] ->
+            {:ok,
+             @no_matches_anywhere <>
+               coverage_note(cut? or pruned_cut?) <> Backend.empty_result_note(backend)}
+
+          lines ->
+            {:ok, emit(lines) <> @pruned_matches_note}
         end
 
       lines ->

@@ -80,6 +80,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       check_version(),
       check_cli(),
       check_tui(),
+      check_ripgrep(),
       check_api(),
       check_config(),
       check_model(),
@@ -231,6 +232,25 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp check_runtime do
     otp_release = :erlang.system_info(:otp_release) |> to_string()
     {:pass, "Runtime", "OTP #{otp_release}"}
+  end
+
+  # Is `file_grep` running on ripgrep, or on the fallback?
+  #
+  # This row exists because the answer was previously unobservable from any
+  # surface. `System.cmd("rg", …)` raises `:enoent` off the daemon's PATH and
+  # the tool rescued that into a silent fallback: measured across a 118-session
+  # corpus, all 862 `file_grep` calls were served by the fallback and nothing —
+  # no log, no doctor row, no tool result — said so.
+  #
+  # The daemon's PATH is the thing that matters here, and it is NOT the user's
+  # shell PATH: a daemon started from a desktop launcher or a service manager
+  # never reads a shell profile. `osa doctor` runs in the same VM, so this check
+  # reports the PATH the searches will actually use.
+  defp check_ripgrep do
+    {status, detail} = OptimalSystemAgent.Tools.Builtins.FileGrep.Backend.status()
+    {status, "Search backend", detail}
+  rescue
+    _ -> {:optional, "Search backend", "could not determine ripgrep availability"}
   end
 
   defp check_cli do

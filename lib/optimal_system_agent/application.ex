@@ -170,6 +170,19 @@ defmodule OptimalSystemAgent.Application do
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
 
+    # ETS table for the file_grep "ripgrep is missing" warn-once latch. Owned
+    # here for the same reason as :osa_runtime_sessions below: tool execution
+    # happens inside short-lived Tasks, and a table created lazily by the first
+    # search would be destroyed the moment that Task finished — turning
+    # "warn once per session" into "warn on every single call", which is the
+    # noise level the dedupe exists to avoid.
+    :ets.new(:osa_file_grep_backend_warned, [
+      :named_table,
+      :public,
+      :set,
+      write_concurrency: true
+    ])
+
     # ETS table for channel-tracked sessions (SessionManager.track_session/2) —
     # sessions a client has announced but whose Loop has not started yet.
     # It was only ever created LAZILY by the first caller, which is usually a
