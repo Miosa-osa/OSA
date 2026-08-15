@@ -80,6 +80,7 @@ defmodule OptimalSystemAgent.Agent.FastPath do
       intents = classify_intents(message)
 
       if intents == [] do
+        report_selection(tools, tools, [], :no_intent)
         tools
       else
         wanted_names =
@@ -110,9 +111,18 @@ defmodule OptimalSystemAgent.Agent.FastPath do
         cap = Effort.tool_budget()
 
         cond do
-          selected == [] -> tools
-          length(selected) <= cap -> selected
-          true -> Enum.take(selected, cap)
+          selected == [] ->
+            report_selection(tools, tools, intents, :no_match_fallback)
+            tools
+
+          length(selected) <= cap ->
+            report_selection(tools, selected, intents, :intent_match)
+            selected
+
+          true ->
+            capped = Enum.take(selected, cap)
+            report_selection(tools, capped, intents, :intent_match_capped)
+            capped
         end
       end
     else
@@ -122,13 +132,92 @@ defmodule OptimalSystemAgent.Agent.FastPath do
 
   def select_tools(tools, _state), do: tools
 
+  # The only stage in `Loop.ToolFilter.filter/1` that logged NOTHING. Every
+  # other pass either announces its narrowing or is a safety gate whose removals
+  # are re-applied by construction; this one silently dropped the majority of
+  # the toolbox on a keyword guess and left no trace of which tools went or why.
+  # With the intent classifier being what it is (see `classify_intents/1`), a
+  # wrong guess is not rare, and "the model did not call the tool" is
+  # indistinguishable from "the model was never offered the tool".
+  defp report_selection(before, after_tools, intents, source) do
+    dropped = length(before) - length(after_tools)
+
+    :telemetry.execute(
+      [:osa, :fast_path, :tool_selection],
+      %{before: length(before), after: length(after_tools), dropped: max(dropped, 0)},
+      %{intents: intents, reason: source}
+    )
+
+    if dropped > 0 do
+      names =
+        MapSet.difference(MapSet.new(before, &tool_name/1), MapSet.new(after_tools, &tool_name/1))
+
+      key = {source, intents, dropped}
+
+      if Process.get(:osa_fast_path_tools) != key do
+        Process.put(:osa_fast_path_tools, key)
+
+        Logger.info(
+          "[FastPath] fast mode narrowed the toolbox #{length(before)} → " <>
+            "#{length(after_tools)} on intents #{inspect(intents)} (#{source}); withheld: " <>
+            Enum.join(Enum.sort(names), ", ")
+        )
+      end
+    end
+
+    :ok
+  end
+
   defp tool_name(%{name: name}) when is_binary(name), do: name
   defp tool_name(%{name: name}) when is_atom(name), do: Atom.to_string(name)
   defp tool_name(_tool), do: ""
 
-  @doc false
+  @doc """
+  Which coarse intents a user message matches.
+
+  ## Word boundaries, not substrings
+
+  This used `String.contains?/2`, so every keyword matched anywhere inside any
+  longer word. `"code"` fires on *en**code***, *de**code***, *uni**code***,
+  *bar**code***; `"test"` on *la**test***, *con**test***, *pro**test***;
+  `"git"` on *di**git***, *le**git***, *lo**git***; `"ui"` on *b**ui**ld*,
+  *req**ui**re*, *g**ui**de*; `"agent"` on *management*… no, but `"team"` fires
+  on *s**team***, and `"pr"` on *every word containing "pr"* — **pr**int,
+  ap**pr**oach, ex**pr**ession, com**pr**ess.
+
+  On its own a spurious intent only widens the tool set, which is harmless. The
+  damage is at the other end: `select_tools/2` takes the union of the matched
+  intents' tool lists and then **truncates to `Effort.tool_budget()`** in the
+  fixed order those lists are written in. A phantom intent therefore pushes real
+  tools off the end of the cap — a message saying "print the expression" scores
+  `:git` (from "pr") and can lose `file_read` to `diff`. That is the shape this
+  sweep is about: a heuristic correct for the word, applied to every substring
+  of every word, silently removing capability.
+
+  ## The rule
+
+  Tokenize on `[a-z0-9]+` — which also splits `cron_test.exs` into `cron`,
+  `test`, `exs` — then a keyword matches a token when:
+
+    * the token **equals** it, or
+    * the keyword is **4+ characters and the token starts with it**.
+
+  The prefix arm keeps the inflections users actually type (*schedule* →
+  *scheduler*, *test* → *tests*, *commit* → *commits*, *file* → *files*) which a
+  strict equality rule would lose. The length gate is what stops it becoming the
+  old bug again: the damaging keywords are the short ones. `"pr"` and `"ui"` are
+  acronyms, not word stems — a token is either that acronym or it is not — so
+  they match exactly and *print* and *build* no longer score. And a 4+ prefix
+  is specific enough that *encode* still does not start with *code*.
+  """
+  @spec classify_intents(term()) :: [atom()]
   def classify_intents(message) when is_binary(message) do
-    down = String.downcase(message)
+    words =
+      message
+      |> String.downcase()
+      |> then(&Regex.scan(~r/[a-z0-9]+/, &1))
+      |> List.flatten()
+      |> MapSet.new()
 
     [
       {:code, ~w(code bug fix build implement refactor test file module compile error)},
@@ -141,8 +230,19 @@ defmodule OptimalSystemAgent.Agent.FastPath do
       {:notebook, ~w(notebook cell jupyter)}
     ]
     |> Enum.flat_map(fn {intent, keywords} ->
-      if Enum.any?(keywords, &String.contains?(down, &1)), do: [intent], else: []
+      if Enum.any?(keywords, &keyword_hit?(&1, words)), do: [intent], else: []
     end)
+  end
+
+  # 4 characters is the shortest keyword for which a prefix match is safe here.
+  # Below it the keywords are acronyms (`pr`, `ui`, `git`) whose prefixes are
+  # common word openings — matching those is what made `print` score `:git`.
+  @min_prefix_keyword 4
+
+  defp keyword_hit?(keyword, words) do
+    MapSet.member?(words, keyword) or
+      (String.length(keyword) >= @min_prefix_keyword and
+         Enum.any?(words, &String.starts_with?(&1, keyword)))
   end
 
   def classify_intents(_message), do: []

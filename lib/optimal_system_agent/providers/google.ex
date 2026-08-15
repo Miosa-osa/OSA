@@ -27,11 +27,28 @@ defmodule OptimalSystemAgent.Providers.Google do
 
   ## Known gaps (deliberate, not oversights)
 
-    * **No streaming.** This module implements `chat/2` only, so
-      `Registry.chat_stream/3` falls back to a synchronous call and emits the
-      whole answer in one delta. Correct, but the TUI shows nothing until the
-      turn finishes. Adding `streamGenerateContent?alt=sse` is a self-contained
-      follow-up.
+    * **No streaming, and no half-implemented one.** This module implements
+      `chat/2` only. `Registry.stream_capable?/1` sees no `chat_stream/3`,
+      `Registry.chat_stream/3` falls back to the synchronous call and emits the
+      whole answer in one delta, and `Registry.report_stream_downgrade/2` logs
+      the downgrade at `:warning` — so the missing capability is announced
+      rather than inferred from a TUI that sits blank until the turn finishes.
+
+      `streamGenerateContent?alt=sse` is the endpoint that would close this and
+      it is deliberately NOT called anywhere in this module: a reference to it
+      with no parser behind it is worse than its absence, because a partially
+      consumed SSE stream truncates or duplicates model output in a way that is
+      indistinguishable from the model behaving badly. That is the same
+      reasoning `Providers.Bedrock`'s moduledoc gives for its own missing
+      streaming, and it is stated here so the gap reads as a decision with a
+      cost rather than an oversight — the distinction the rest of this sweep
+      turned on.
+
+      Note the asymmetry with `alt=sse`: unlike Bedrock's binary
+      `application/vnd.amazon.eventstream` framing, Gemini's stream is plain
+      SSE carrying the SAME `GenerateContentResponse` shape
+      `extract_content/1` and `extract_tool_calls/1` already handle, so the
+      work is an incremental accumulator, not a new wire format.
     * **Interactions API not adopted.** Migrating is a rewrite of the request,
       response and streaming shapes at once, and `generateContent` is still
       fully supported. Worth noting that Interactions defaults `store: true`,
@@ -128,7 +145,14 @@ defmodule OptimalSystemAgent.Providers.Google do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls, usage: extract_usage(resp)}}
+
+          {:ok,
+           %{
+             content: content,
+             tool_calls: tool_calls,
+             usage: extract_usage(resp),
+             stop_reason: extract_finish_reason(resp)
+           }}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -606,6 +630,18 @@ defmodule OptimalSystemAgent.Providers.Google do
   end
 
   defp extract_usage(_), do: %{}
+
+  # Terminal stop reason for the first candidate. Gemini spells truncation
+  # `"MAX_TOKENS"`; `Providers.StopReason` owns the case-insensitive mapping,
+  # so the RAW value is published unchanged.
+  #
+  # UNVERIFIED against a live Gemini call — implemented against the documented
+  # `candidates[].finishReason` shape and covered by synthetic-payload tests.
+  defp extract_finish_reason(%{"candidates" => [%{"finishReason" => reason} | _]})
+       when is_binary(reason) and reason != "",
+       do: reason
+
+  defp extract_finish_reason(_), do: nil
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()

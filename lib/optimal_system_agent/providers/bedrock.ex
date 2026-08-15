@@ -56,6 +56,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
   alias OptimalSystemAgent.Auth.AwsSigV4
   alias OptimalSystemAgent.Auth.Providers.Bedrock, as: Auth
+  alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.ImageBudget
 
   # A concrete, currently-served cross-region inference profile rather than a
@@ -157,6 +158,9 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     |> put_inference_config(opts)
     |> put_tool_config(opts)
     |> put_reasoning_config(model, opts)
+    # AFTER the system blocks and the tool list both exist — this appends a
+    # marker to each of them and cannot run before they are assembled.
+    |> put_cache_points(model, opts)
     # Every provider gets the image byte-budget, not just Anthropic. Without it
     # an oversized image body is a hard provider error instead of a
     # degraded-but-honest request.
@@ -167,6 +171,8 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   defp do_chat(auth, model, messages, opts) do
     body = build_request_body(messages, model, opts)
     payload = Jason.encode!(body)
+    cache_fp = CacheAttribution.fingerprint(attribution_view(body, model))
+    cache_scope = CacheAttribution.scope(opts)
 
     # The model id goes in the PATH, so it must be percent-encoded for the
     # wire — except that a colon is a legal path character and AWS's own SDKs
@@ -196,11 +202,24 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
     case Req.post(request) do
       {:ok, %{status: 200, body: resp}} ->
+        usage = extract_usage(resp)
+
+        # Diagnostics only — cannot fail the request (see CacheAttribution).
+        # Bedrock is the second route to carry this. Before the `cachePoint`
+        # above there was nothing here to attribute: the cache read it watches
+        # was structurally pinned at 0, so a break could never be observed and
+        # a cache that never warmed could never be reported.
+        CacheAttribution.observe(cache_scope, cache_fp, usage)
+
         {:ok,
          %{
            content: extract_text(resp),
            tool_calls: extract_tool_calls(resp),
-           usage: extract_usage(resp)
+           usage: usage,
+           # Converse's terminal `stopReason` — `"max_tokens"` on truncation.
+           # `Providers.StopReason` owns the mapping; the raw value is published
+           # unchanged. UNVERIFIED live — documented shape, synthetic tests only.
+           stop_reason: resp["stopReason"]
          }}
 
       {:ok, %{status: status, body: resp}} ->
@@ -213,6 +232,38 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     end
   rescue
     e -> {:error, "Bedrock unexpected error: #{Exception.message(e)}"}
+  end
+
+  # `CacheAttribution.fingerprint/1` keys on `:model` / `:system` / `:tools` /
+  # `:messages`. A Converse body carries the model in the URL and its tools one
+  # level down under `toolConfig`, so a raw body would fingerprint as "no model,
+  # no tools" and a tool-schema edit — the single most common real cache break —
+  # would be attributed to "request params changed". This is the same body,
+  # named the way the attributor reads.
+  defp attribution_view(body, model) do
+    %{
+      model: model,
+      system: Map.get(body, "system", []),
+      tools: attribution_tools(get_in(body, ["toolConfig", "tools"]) || []),
+      messages: Map.get(body, "messages", []),
+      inference_config: Map.get(body, "inferenceConfig"),
+      additional_model_request_fields: Map.get(body, "additionalModelRequestFields")
+    }
+  end
+
+  # `tools_fingerprint/1` reads `name` off each tool so it can tell "tool added"
+  # from "this tool's schema changed". Converse nests both a level down inside
+  # `toolSpec`, so unlifted every Bedrock tool would fingerprint with the name
+  # `""` and a schema edit would be reported as a whole tool-set change.
+  # The trailing `cachePoint` marker is a tool-list ENTRY, so it is lifted too —
+  # under its own stable name, which is what makes a marker appearing or
+  # disappearing (the `:below_minimum` boundary) show up as its own cause.
+  defp attribution_tools(tools) do
+    Enum.map(tools, fn
+      %{"toolSpec" => spec} -> Map.put(spec, "name", spec["name"] || "")
+      %{"cachePoint" => cp} -> %{"name" => "__cachePoint__", "cachePoint" => cp}
+      other -> other
+    end)
   end
 
   # ── auth ──────────────────────────────────────────────────────────────────
@@ -630,6 +681,190 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
           Logger.info("[Bedrock] reasoning on for #{model}: budget_tokens=#{n} (#{source})")
       end
     end
+  end
+
+  # ── prompt caching ────────────────────────────────────────────────────────
+
+  @doc """
+  Whether this turn asks Bedrock to cache its static prefix, and why.
+
+  `{[:system | :tools], source}` — the scopes that get a `cachePoint`, and one
+  of `:enabled`, `:disabled_by_config`, `:model_unsupported` or `:below_minimum`.
+
+  ## Why this exists
+
+  **No `cachePoint` appeared anywhere in `lib/`.** Bedrock serves Anthropic
+  models and supports the same prompt cache the native Anthropic path uses —
+  `extract_usage/1` right below even parses `cacheReadInputTokens` and files it
+  under `:cache_read_input_tokens`, and `:bedrock` sits in `Accounting`'s
+  `@disjoint_prompt_slices` on the strength of that. Without a request-side
+  marker that counter reads **0 on every turn, forever**, and the two things
+  that read it — session cost and `Providers.CacheAttribution` — were describing
+  a cache that could not exist.
+
+  This is the same defect as the rest of the sweep pointed at the request rather
+  than a guard: a capability asserted on the response side with no path on the
+  request side, reporting a plausible zero instead of an error. The measured
+  win on the paths that DO carry it is 92.8% of the static prefix served from
+  cache; here it was 0%.
+
+  ## Wire shape
+
+  `cachePoint` is a content block, not a parameter. It marks the END of a
+  cacheable prefix and is legal in three places in a Converse body:
+
+      "system":  [{"text": "…"}, {"cachePoint": {"type": "default"}}]
+      "toolConfig": {"tools": [{"toolSpec": {…}}, {"cachePoint": {"type": "default"}}]}
+      "messages": [{"role": …, "content": [{"text": "…"}, {"cachePoint": …}]}]
+
+  OSA marks **system and tools only**. Those two are the static prefix — the
+  same two scopes `Anthropic.maybe_add_system/2` and its tools-side sibling
+  mark — and they are stable across a session. A marker inside `messages` would
+  have to move every turn, which writes a new cache entry per turn and bills the
+  write premium for a prefix that is never read back.
+
+  ## The minimum is real and silent
+
+  Anthropic models refuse to cache a prefix below roughly 1,024 tokens, and the
+  refusal is not an error: the request succeeds and the marker is ignored. So a
+  marker on a short prefix costs the cache-write premium for nothing. The byte
+  threshold below is `4_500`, deliberately the same figure as
+  `Anthropic.@min_cacheable_tools_bytes` — one recalibrated number, not two
+  drifting ones — and a prefix under it is skipped WITH a line saying so.
+
+  > #### Unverified against a live call {: .warning}
+  >
+  > There are no Bedrock credentials on this machine. Implemented against AWS's
+  > documented Converse `cachePoint` shape and tested against synthetic payloads
+  > through `build_request_body/3`. **No request built by this code has been
+  > sent to Bedrock**, so neither the field name nor the resulting
+  > `cacheReadInputTokens` has been observed. Treat the wire shape as inferred.
+  """
+  @spec cache_point_decision(String.t() | nil, keyword()) :: {[atom()], atom()}
+
+  # ~1,024 tokens of prefix, at the ~4.4 bytes/token this codebase already
+  # assumes elsewhere. Held equal to `Anthropic.@min_cacheable_tools_bytes`.
+  @min_cacheable_bytes 4_500
+
+  @cache_point %{"cachePoint" => %{"type" => "default"}}
+
+  def cache_point_decision(model, opts \\ []) do
+    cond do
+      not cache_point_model?(model) ->
+        {[], :model_unsupported}
+
+      not Application.get_env(:optimal_system_agent, :prompt_caching_enabled, true) ->
+        {[], :disabled_by_config}
+
+      true ->
+        {Keyword.get(opts, :__scopes__, [:system, :tools]), :enabled}
+    end
+  end
+
+  # Only Anthropic models on Bedrock are known to honour `cachePoint` with the
+  # 1,024-token minimum OSA's threshold is calibrated to. Amazon Nova supports
+  # it too but with different minimums, and an unknown family gets nothing:
+  # an ignored marker is cheap, but a marker that splits a prefix the model
+  # would otherwise have cached whole is not. Same asymmetry `reasoning_model?/1`
+  # applies one function up.
+  defp cache_point_model?(model) when is_binary(model) do
+    name = String.downcase(model)
+    String.contains?(name, "anthropic.") or String.contains?(name, "claude")
+  end
+
+  defp cache_point_model?(_), do: false
+
+  defp put_cache_points(body, model, opts) do
+    case cache_point_decision(model, opts) do
+      {[], source} ->
+        report_cache_points(model, [], source)
+        body
+
+      {scopes, source} ->
+        {body, marked} =
+          Enum.reduce(scopes, {body, []}, fn scope, {acc, marked} ->
+            case mark_scope(acc, scope) do
+              {:ok, acc} -> {acc, [scope | marked]}
+              :skip -> {acc, marked}
+            end
+          end)
+
+        marked = Enum.reverse(marked)
+        report_cache_points(model, marked, if(marked == [], do: :below_minimum, else: source))
+        body
+    end
+  end
+
+  defp mark_scope(body, :system) do
+    case Map.get(body, "system") do
+      blocks when is_list(blocks) and blocks != [] ->
+        if serialized_bytes(blocks) >= @min_cacheable_bytes and not marked?(blocks),
+          do: {:ok, Map.put(body, "system", blocks ++ [@cache_point])},
+          else: :skip
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp mark_scope(body, :tools) do
+    case get_in(body, ["toolConfig", "tools"]) do
+      tools when is_list(tools) and tools != [] ->
+        if serialized_bytes(tools) >= @min_cacheable_bytes and not marked?(tools),
+          do: {:ok, put_in(body, ["toolConfig", "tools"], tools ++ [@cache_point])},
+          else: :skip
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp mark_scope(_body, _scope), do: :skip
+
+  defp marked?(list), do: Enum.any?(list, &is_map_key(&1, "cachePoint"))
+
+  defp serialized_bytes(term) do
+    term |> Jason.encode_to_iodata!() |> IO.iodata_length()
+  end
+
+  # The whole point of the fix is that a cache which never warms must be
+  # legible without a request dump. `:below_minimum` and `:model_unsupported`
+  # are reported as loudly as success — they are the arms under which
+  # `cacheReadInputTokens` stays 0, and an unexplained 0 is what this cost us.
+  defp report_cache_points(model, scopes, source) do
+    :telemetry.execute(
+      [:osa, :bedrock, :prompt_cache],
+      %{scopes: length(scopes)},
+      %{model: model, scopes: scopes, reason: source, enabled: scopes != []}
+    )
+
+    key = {model, scopes, source}
+
+    if Process.get(:osa_bedrock_cache_points) != key do
+      Process.put(:osa_bedrock_cache_points, key)
+
+      case {scopes, source} do
+        {[], :below_minimum} ->
+          Logger.info(
+            "[Bedrock] prompt cache NOT marked for #{model}: static prefix is under " <>
+              "#{@min_cacheable_bytes} bytes, below the ~1,024-token minimum Anthropic " <>
+              "models cache. cache_read_input_tokens will stay 0."
+          )
+
+        {[], reason} ->
+          Logger.info(
+            "[Bedrock] prompt cache off for #{model} (#{reason}); " <>
+              "cache_read_input_tokens will stay 0"
+          )
+
+        {marked, _} ->
+          Logger.info(
+            "[Bedrock] prompt cache marked for #{model}: cachePoint on #{Enum.join(marked, "+")}"
+          )
+      end
+    end
+
+    :ok
   end
 
   defp put_tool_config(body, opts) do

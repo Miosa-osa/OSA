@@ -116,11 +116,11 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
   @spec chat(list(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
     case run(messages, opts, nil) do
-      {:ok, %{content: content, tool_calls: calls}} ->
-        {:ok, %{content: content, tool_calls: calls}}
-
-      {:error, reason} ->
-        {:error, error_message(reason)}
+      # Passed through whole rather than reconstructed from two keys. The old
+      # shape rebuilt `%{content:, tool_calls:}` and DROPPED everything else
+      # `finish/2` produced — which is how the usage below stayed invisible.
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, error_message(reason)}
     end
   end
 
@@ -128,8 +128,8 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
   @spec chat_stream(list(), function(), keyword()) :: :ok | {:error, String.t()}
   def chat_stream(messages, callback, opts \\ []) when is_function(callback, 1) do
     case run(messages, opts, callback) do
-      {:ok, %{content: content, tool_calls: calls}} ->
-        callback.({:done, %{content: content, tool_calls: calls}})
+      {:ok, result} ->
+        callback.({:done, result})
         :ok
 
       {:error, reason} ->
@@ -444,7 +444,14 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
 
   defp finish(acc, 0) do
     raw = if acc.text == "", do: acc.stream_text, else: acc.text
-    {:ok, %{content: clean(raw), tool_calls: parse_tool_calls(raw)}}
+
+    {:ok,
+     %{
+       content: clean(raw),
+       tool_calls: parse_tool_calls(raw),
+       usage: reported_usage(),
+       provider_cost_usd: reported_cost()
+     }}
   end
 
   defp finish(acc, status) do
@@ -493,6 +500,106 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     }
 
     :persistent_term.put({__MODULE__, :usage}, usage)
+    report_usage(usage)
+  end
+
+  # ── Usage: written since this provider shipped, read by nothing ───────────
+  #
+  # `remember_usage/1` above has recorded a full usage map — input, output, both
+  # cache slices, AND the CLI's OWN `total_cost_usd`, which is the authoritative
+  # figure for a Max-plan account rather than an OSA-side estimate — on every
+  # turn since this provider shipped. `last_usage/0` is its only reader, and
+  # nothing in `lib/` calls `last_usage/0`. Meanwhile `chat/2` reconstructed its
+  # return value from two keys and discarded the rest, so the agent loop never
+  # saw a token count from this provider at all.
+  #
+  # The consequence is the one `Accounting.report_unaccounted/2` was written for
+  # and could not detect here: every claude_cli turn normalises to zero tokens
+  # and $0.00, `max_budget_usd` is unenforceable, and `$/task` reads 0 — on the
+  # provider the operator actually runs on.
+  #
+  # `:claude_cli` already sits in `Accounting`'s `@disjoint_prompt_slices`, i.e.
+  # the billing convention was configured for a usage map that never arrived.
+  #
+  # The KEY NAMES are the contract: `Loop.Accounting.normalize_usage/1` reads
+  # exactly `:input_tokens`, `:output_tokens`, `:cache_creation_input_tokens`
+  # and `:cache_read_input_tokens`. The CLI happens to emit Anthropic's own
+  # names, so this is a rename into atoms, not arithmetic.
+  @doc """
+  The last turn's usage in the four key names `Loop.Accounting.normalize_usage/1`
+  reads, or `nil` when the CLI reported none.
+
+  Public because it is the contract with the accounting layer, and because
+  `last_usage/0` — the raw CLI map — proved to be a shape nothing was willing
+  to consume.
+  """
+  @spec reported_usage() :: map() | nil
+  def reported_usage do
+    case :persistent_term.get({__MODULE__, :usage}, nil) do
+      %{"usage" => u} when is_map(u) ->
+        %{
+          input_tokens: int(u["input_tokens"]),
+          output_tokens: int(u["output_tokens"]),
+          cache_creation_input_tokens: int(u["cache_creation_input_tokens"]),
+          cache_read_input_tokens: int(u["cache_read_input_tokens"])
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  The CLI's own `total_cost_usd` for the last turn, or `nil`.
+
+  Published as a SEPARATE key from `:usage` on purpose. It is not a token
+  count and must not be priced from OSA's rate card: on a Max-plan account the
+  marginal cost of a turn is not `tokens × list price`, and the CLI is the only
+  party that knows which it was. A consumer that has this number should prefer
+  it over anything derived from `:usage`.
+  """
+  @spec reported_cost() :: float() | nil
+  def reported_cost do
+    case :persistent_term.get({__MODULE__, :usage}, nil) do
+      %{"total_cost_usd" => c} when is_float(c) -> c
+      %{"total_cost_usd" => c} when is_integer(c) -> c * 1.0
+      _ -> nil
+    end
+  end
+
+  defp int(n) when is_integer(n), do: n
+  defp int(_), do: 0
+
+  defp report_usage(usage) do
+    u = usage["usage"] || %{}
+
+    :telemetry.execute(
+      [:osa, :cli_provider, :usage],
+      %{
+        input_tokens: int(u["input_tokens"]),
+        output_tokens: int(u["output_tokens"]),
+        cache_read_input_tokens: int(u["cache_read_input_tokens"]),
+        cache_creation_input_tokens: int(u["cache_creation_input_tokens"]),
+        total_cost_usd: usage["total_cost_usd"] || 0
+      },
+      %{provider: :claude_cli, model: last_resolved_model()}
+    )
+
+    # A CLI turn that reported NO usage is the one worth a line: it is
+    # indistinguishable from a free turn, and that is exactly how this provider
+    # billed $0.00 for its whole life.
+    if u == %{} or map_size(u) == 0 do
+      if Process.get(:osa_claude_cli_unaccounted) != true do
+        Process.put(:osa_claude_cli_unaccounted, true)
+
+        Logger.warning(
+          "[claude_cli] the CLI reported no token usage for this turn — it will account as " <>
+            "0 tokens and $0.00, and max_budget_usd cannot be enforced against it."
+        )
+      end
+    end
+
+    :ok
   end
 
   defp result_error(result) do

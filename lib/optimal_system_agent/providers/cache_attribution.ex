@@ -145,29 +145,28 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
   Always records the current fingerprint, so a break is attributed exactly
   once and the next request diffs against this one.
   """
-  @spec observe(String.t(), fingerprint(), map() | nil) :: :ok | {:break, verdict()}
+  @spec observe(String.t(), fingerprint(), map() | nil) ::
+          :ok | {:break, verdict()} | {:cold, verdict()}
   def observe(key, fp, usage) when is_binary(key) and is_map(fp) do
     if enabled?() do
       now = System.system_time(:millisecond)
       read = cache_read(usage)
       prev = fetch(key)
+      cold_run = next_cold_run(prev, fp, read)
 
-      put(key, {fp, read, now})
+      put(key, {fp, read, now, cold_run})
 
       case prev do
+        {prev_fp, prev_read, prev_at, _}
+        when is_integer(prev_read) and prev_read > 0 and read < prev_read ->
+          report_break(key, prev_fp, fp, prev_read, read, now - prev_at, now)
+
         {prev_fp, prev_read, prev_at}
         when is_integer(prev_read) and prev_read > 0 and read < prev_read ->
-          verdict = attribute(prev_fp, fp, now - prev_at)
-
-          Logger.warning(
-            "[PROMPT CACHE] scope=#{key} cache_read #{prev_read} → #{read} — #{verdict}"
-          )
-
-          put_break(key, verdict, now, prev_read, read)
-          {:break, verdict}
+          report_break(key, prev_fp, fp, prev_read, read, now - prev_at, now)
 
         _ ->
-          :ok
+          maybe_report_cold(key, cold_run, read)
       end
     else
       :ok
@@ -180,6 +179,114 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
   end
 
   def observe(_, _, _), do: :ok
+
+  # ---------------------------------------------------------------------------
+  # A cache that never warmed
+  # ---------------------------------------------------------------------------
+  #
+  # `observe/3` could only ever report a DROP FROM A POSITIVE READ. Read the
+  # guard it replaced: `prev_read > 0 and read < prev_read`. Both halves are
+  # right for the question "what broke the cache", and together they make the
+  # opposite question — "was there ever a cache" — structurally unaskable. A
+  # scope whose `cache_read_input_tokens` is 0 on turn 1 and 0 on every turn
+  # after never satisfies `prev_read > 0`, so it never renders a verdict, never
+  # logs, and never appears in `summary/0`. It reads exactly like a perfectly
+  # stable cache.
+  #
+  # That is not a hypothetical. It is the failure this whole sweep was found
+  # through: prompt caching was dead on the OpenRouter route for months and the
+  # instrument built to catch precisely that said nothing, because the only
+  # thing it could say required the cache to have worked at least once.
+  #
+  # The extra state is one integer per scope: the number of consecutive turns
+  # with a zero read AND an unchanged static prefix. The prefix condition is
+  # what keeps this quiet during normal warm-up — a first turn, or a turn after
+  # the tool set legitimately changed, has no cache to read from and is not a
+  # defect. A prefix that has been byte-stable for `@cold_run_threshold` turns
+  # and has still never been read back is.
+
+  # Three turns. Two is a plausible warm-up on a provider that writes on turn 1
+  # and reads from turn 2; a stable prefix unread on the third consecutive turn
+  # is a configuration fault, not latency.
+  @cold_run_threshold 3
+
+  defp next_cold_run(prev, fp, read) do
+    cond do
+      read > 0 -> 0
+      prefix_of(prev) == nil -> 1
+      prefix_of(prev) == prefix(fp) -> (cold_run_of(prev) || 0) + 1
+      # The prefix genuinely changed, so this turn's miss is explained. Restart
+      # the run rather than counting it against the new prefix.
+      true -> 1
+    end
+  end
+
+  defp prefix(%{system: system, tools: tools, model: model}), do: {model, system, tools}
+  defp prefix(_), do: nil
+
+  defp prefix_of({fp, _read, _at, _run}), do: prefix(fp)
+  defp prefix_of({fp, _read, _at}), do: prefix(fp)
+  defp prefix_of(_), do: nil
+
+  defp cold_run_of({_fp, _read, _at, run}) when is_integer(run), do: run
+  defp cold_run_of(_), do: 0
+
+  defp report_break(key, prev_fp, fp, prev_read, read, gap_ms, now) do
+    verdict = attribute(prev_fp, fp, gap_ms)
+
+    Logger.warning("[PROMPT CACHE] scope=#{key} cache_read #{prev_read} → #{read} — #{verdict}")
+
+    :telemetry.execute(
+      [:osa, :prompt_cache, :break],
+      %{from: prev_read, to: read},
+      %{scope: key, verdict: verdict}
+    )
+
+    put_break(key, verdict, now, prev_read, read)
+    {:break, verdict}
+  end
+
+  defp maybe_report_cold(key, cold_run, read) do
+    cond do
+      cold_run < @cold_run_threshold ->
+        :ok
+
+      # One line per scope at the moment the threshold is crossed, not one per
+      # turn thereafter — a warning repeated every turn is one nobody reads,
+      # which is how the original loss stayed invisible in the first place.
+      rem(cold_run, @cold_run_threshold) != 0 ->
+        :ok
+
+      true ->
+        verdict =
+          "cache_read has been 0 for #{cold_run} consecutive turns with an UNCHANGED static " <>
+            "prefix — the prompt cache is not warming at all on this route. Check that the " <>
+            "request actually carries cache markers (Anthropic `cache_control`, Bedrock " <>
+            "`cachePoint`) and that `prompt_caching_enabled` is on for the path in use."
+
+        Logger.warning("[PROMPT CACHE] scope=#{key} #{verdict}")
+
+        :telemetry.execute(
+          [:osa, :prompt_cache, :cold],
+          %{turns: cold_run, cache_read: read},
+          %{scope: key}
+        )
+
+        put_break(key, verdict, System.system_time(:millisecond), 0, 0)
+        {:cold, verdict}
+    end
+  end
+
+  @doc """
+  Consecutive turns this scope has reported a zero cache read against an
+  unchanged static prefix. `0` means the cache is being read.
+
+  The counterpart to `last_break/1`: that answers "what broke it", this answers
+  "was it ever alive".
+  """
+  @spec cold_run(String.t()) :: non_neg_integer()
+  def cold_run(key) when is_binary(key), do: cold_run_of(fetch(key))
+  def cold_run(_), do: 0
 
   @doc """
   Render the verdict for two fingerprints without touching any state.

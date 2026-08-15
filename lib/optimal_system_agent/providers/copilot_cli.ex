@@ -332,6 +332,7 @@ defmodule OptimalSystemAgent.Providers.CopilotCli do
 
   defp handle_event(%{"type" => "result"} = result, acc, _callback) do
     :persistent_term.put({__MODULE__, :usage}, result["usage"])
+    report_usage(result["usage"])
 
     case result["exitCode"] do
       0 -> acc
@@ -390,7 +391,100 @@ defmodule OptimalSystemAgent.Providers.CopilotCli do
 
   defp finish(acc, 0) do
     raw = if acc.text == "", do: acc.stream_text, else: acc.text
-    {:ok, %{content: clean(raw), tool_calls: ToolCallParsers.parse(raw, "hermes")}}
+
+    {:ok,
+     %{
+       content: clean(raw),
+       tool_calls: ToolCallParsers.parse(raw, "hermes"),
+       usage: reported_usage(),
+       provider_quota: reported_quota()
+     }}
+  end
+
+  # ── Usage: written since this provider shipped, read by nothing ───────────
+  #
+  # Same shape as `ClaudeCli`: the `result` event's usage went to a
+  # `:persistent_term` whose only reader (`last_usage/0`) is called from a test
+  # and from nowhere in `lib/`, so every Copilot turn accounted as zero.
+  #
+  # Copilot is different in ONE way that matters and must not be papered over:
+  # it does not bill in tokens. Its `usage` reports `premiumRequests` — a
+  # fractional count against a monthly quota. There is no token count to map,
+  # and inventing one would be worse than reporting none. So:
+  #
+  #   * `:usage` carries token keys ONLY if the CLI ever sends them (it does not
+  #     today), and is `nil` otherwise — which lets
+  #     `Accounting.report_unaccounted/2` say "no token usage" honestly instead
+  #     of silently pricing a real turn at $0.00.
+  #   * `:provider_quota` carries `premiumRequests` under its own name, because
+  #     that IS the meter for this provider and a consumer showing spend should
+  #     show requests-against-quota rather than a fabricated dollar figure.
+  @doc """
+  The last turn's TOKEN usage in the four key names
+  `Loop.Accounting.normalize_usage/1` reads, or `nil` — which is the honest
+  answer today, because Copilot meters in premium requests. See
+  `reported_quota/0`.
+  """
+  @spec reported_usage() :: map() | nil
+  def reported_usage do
+    case :persistent_term.get({__MODULE__, :usage}, nil) do
+      u when is_map(u) ->
+        tokens = %{
+          input_tokens: int(u["input_tokens"] || u["inputTokens"]),
+          output_tokens: int(u["output_tokens"] || u["outputTokens"]),
+          cache_creation_input_tokens:
+            int(u["cache_creation_input_tokens"] || u["cacheCreationInputTokens"]),
+          cache_read_input_tokens: int(u["cache_read_input_tokens"] || u["cacheReadInputTokens"])
+        }
+
+        if tokens.input_tokens == 0 and tokens.output_tokens == 0, do: nil, else: tokens
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Copilot's own meter for the last turn — `%{premium_requests: float}` — or
+  `nil`. Not a token count and not convertible to one; see `finish/2`.
+  """
+  @spec reported_quota() :: map() | nil
+  def reported_quota do
+    case :persistent_term.get({__MODULE__, :usage}, nil) do
+      %{"premiumRequests" => n} when is_number(n) -> %{premium_requests: n}
+      _ -> nil
+    end
+  end
+
+  defp int(n) when is_integer(n), do: n
+  defp int(_), do: 0
+
+  defp report_usage(usage) do
+    u = if is_map(usage), do: usage, else: %{}
+
+    :telemetry.execute(
+      [:osa, :cli_provider, :usage],
+      %{
+        input_tokens: int(u["input_tokens"] || u["inputTokens"]),
+        output_tokens: int(u["output_tokens"] || u["outputTokens"]),
+        premium_requests: u["premiumRequests"] || 0
+      },
+      %{provider: :copilot_cli, model: last_resolved_model()}
+    )
+
+    if reported_usage() == nil do
+      if Process.get(:osa_copilot_cli_unaccounted) != true do
+        Process.put(:osa_copilot_cli_unaccounted, true)
+
+        Logger.warning(
+          "[copilot_cli] the CLI reports no TOKEN usage (it meters in premiumRequests" <>
+            ": #{inspect(u["premiumRequests"])}). Turns on this provider account as 0 " <>
+            "tokens and $0.00, and max_budget_usd cannot be enforced against them."
+        )
+      end
+    end
+
+    :ok
   end
 
   defp finish(acc, status), do: {:error, with_diagnostics({:cli_exit, status, ""}, acc)}

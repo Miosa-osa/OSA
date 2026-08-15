@@ -24,12 +24,19 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
   """
   use ExUnit.Case, async: false
 
+  require Logger
+
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Observability
+  alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Providers.Bedrock
+  alias OptimalSystemAgent.Providers.CacheAttribution
+  alias OptimalSystemAgent.Providers.ClaudeCli
   alias OptimalSystemAgent.Providers.Cohere
+  alias OptimalSystemAgent.Providers.CopilotCli
+  alias OptimalSystemAgent.Providers.ImageBudget
   alias OptimalSystemAgent.Providers.GoogleModels
   alias OptimalSystemAgent.Providers.Ollama
   alias OptimalSystemAgent.Providers.OpenAICompat
@@ -347,6 +354,7 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
       assert [%{} | _] = body[:tools]
     end
   end
+
   # ── 5. The effort ladder reaches the gateways, not just the vendors ───────
 
   describe "reasoning effort survives an OpenAI-compatible gateway" do
@@ -508,7 +516,9 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     end
 
     test "Google reports one too" do
-      assert reported = Observability.current_reasoning(%{provider: :google, model: "gemini-2.5-flash"})
+      assert reported =
+               Observability.current_reasoning(%{provider: :google, model: "gemini-2.5-flash"})
+
       assert reported =~ ~r/^on:/
     end
 
@@ -550,7 +560,11 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
         %{role: "user", content: "again"}
       ]
 
-      with_model = PromptCache.restructure(messages, {:compat, :openrouter}, model: "anthropic/claude-opus-5")
+      with_model =
+        PromptCache.restructure(messages, {:compat, :openrouter},
+          model: "anthropic/claude-opus-5"
+        )
+
       without_model = PromptCache.restructure(messages, {:compat, :openrouter}, [])
 
       assert without_model == with_model,
@@ -587,6 +601,7 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
         end)
 
       assert log =~ "does not implement chat_stream"
+
       assert log =~ "[warning]",
              "the success case logged at :info and the loss said nothing at all"
     end
@@ -604,7 +619,10 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
       {out, 0} =
         System.cmd(
           "sh",
-          ["-c", ~s(grep -rn "function_exported?" lib --include='*.ex' | grep -vc "Code.ensure_loaded")],
+          [
+            "-c",
+            ~s(grep -rn "function_exported?" lib --include='*.ex' | grep -vc "Code.ensure_loaded")
+          ],
           cd: File.cwd!(),
           stderr_to_stdout: true
         )
@@ -674,6 +692,476 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
 
       assert Accounting.effective_input_tokens(Cohere.extract_usage(resp)) == 120,
              "a number filed under any other key is invisible to pricing"
+    end
+
+    # ── The counter that can only ever read zero ───────────────────────────
+    #
+    # Bedrock's `extract_usage/1` parsed `cacheReadInputTokens` and `:bedrock`
+    # was placed in `Accounting`'s `@disjoint_prompt_slices` on the strength of
+    # it — while NO `cachePoint` existed anywhere in `lib/`. A response-side
+    # parser with no request-side marker does not report a cold cache; it
+    # reports a plausible zero, indefinitely, and every consumer downstream
+    # treats that zero as a measurement.
+    #
+    # This is the class test, not the Bedrock one: it refuses the NEXT provider
+    # that parses a cache counter it cannot populate.
+    test "a provider that parses a cache-read counter also emits a cache marker" do
+      # Request-side markers, by provider wire format. A provider whose response
+      # parser reads a cache slice must name one of these somewhere in its own
+      # source, or the counter is structurally pinned at 0.
+      markers = ~w(cache_control cachePoint cached_content cachedContent implicit)
+
+      # The exemption is the point of the ratchet, not a hole in it: each entry
+      # is a provider where OSA does NOT assemble the cached prefix, so there is
+      # no request-side marker it could emit and the counter it parses is filled
+      # by somebody else. Adding a name here should require writing the reason,
+      # which is the discipline that was missing when Bedrock's counter was
+      # added with no path behind it.
+      #
+      #   claude_cli / copilot_cli — OSA shells out to a vendor CLI. The CLI
+      #     builds and caches its own request; OSA only reads the usage the CLI
+      #     reports back. The counter is populated by a real cache.
+      #   openai_responses — the Responses API caches automatically server-side
+      #     with no request field at all; `cached_tokens` comes back without OSA
+      #     asking for anything.
+      exempt = ~w(claude_cli.ex copilot_cli.ex openai_responses.ex)
+
+      lib = Path.join(File.cwd!(), "lib/optimal_system_agent/providers")
+
+      offenders =
+        lib
+        |> File.ls!()
+        |> Enum.filter(&String.ends_with?(&1, ".ex"))
+        |> Enum.reject(&(&1 in exempt))
+        |> Enum.map(&{&1, File.read!(Path.join(lib, &1))})
+        |> Enum.filter(fn {_name, src} ->
+          # Reads a cache slice back off the wire…
+          # …but says nothing about how the prefix got marked.
+          Regex.match?(~r/cache[_A-Za-z]*[Rr]ead[_A-Za-z]*[Tt]okens|cached_tokens/, src) and
+            not Enum.any?(markers, &String.contains?(src, &1))
+        end)
+        |> Enum.map(&elem(&1, 0))
+
+      assert offenders == [], """
+      #{inspect(offenders)} parse a prompt-cache read counter but reference no
+      request-side cache marker.
+
+      That counter cannot be anything but 0. It is worse than an absent metric:
+      session cost, `CacheAttribution` and the cache readouts all consume it as
+      a measurement, so a capability that was never wired reads exactly like a
+      capability that is working and simply never hits.
+
+      Either mark the prefix on the request (Anthropic `cache_control`, Bedrock
+      `cachePoint`, Gemini `cachedContent`) or stop parsing the counter and let
+      the slice be honestly absent.
+      """
+    end
+
+    # `ImageBudget.cap_for/1` was `:anthropic | :google | :gemini | _` — three
+    # named providers and a 40 MB catch-all for the other ~25, including
+    # providers documented lower than 40 MB. A cap above the provider's real
+    # ceiling makes the eviction trigger unreachable: the guard cannot fire
+    # before the provider rejects the request, so the whole hysteresis mechanism
+    # is inert on every provider it was not written for.
+    test "no provider silently inherits an unknown request-size cap" do
+      providers =
+        [:anthropic, :google, :bedrock, :ollama, :ollama_cloud, :claude_cli, :copilot_cli] ++
+          Registry.compat_providers()
+
+      for provider <- providers do
+        assert {bytes, source} = ImageBudget.cap_for(provider)
+        assert is_integer(bytes) and bytes > 0
+
+        assert source != :unknown_provider,
+               "#{provider} has no entry in ImageBudget.cap_for/1 and fell to the 40 MB " <>
+                 "catch-all. If 40 MB is right for it, say so explicitly — an inherited " <>
+                 "default is indistinguishable from an unconsidered one."
+      end
+    end
+
+    # `image_payload/1` is a table of wire shapes, and a table is exactly the
+    # thing that goes stale: Ollama gained a working image path and the table
+    # did not learn it, so every counter — `images_remaining`, the byte
+    # measurement, the eviction savings — read 0 for that provider while a
+    # multi-MB payload sat in the body.
+    test "every image wire shape OSA sends is visible to the budget" do
+      data = String.duplicate("A", 4096)
+
+      bodies = [
+        {"anthropic",
+         %{
+           messages: [
+             %{
+               "role" => "user",
+               "content" => [%{"type" => "image", "source" => %{"data" => data}}]
+             }
+           ]
+         }},
+        {"openai/compat",
+         %{
+           messages: [
+             %{
+               "role" => "user",
+               "content" => [
+                 %{
+                   "type" => "image_url",
+                   "image_url" => %{"url" => "data:image/png;base64," <> data}
+                 }
+               ]
+             }
+           ]
+         }},
+        {"bedrock converse",
+         %{
+           messages: [
+             %{
+               "role" => "user",
+               "content" => [%{"image" => %{"format" => "png", "source" => %{"bytes" => data}}}]
+             }
+           ]
+         }},
+        {"gemini",
+         %{contents: [%{"role" => "user", "parts" => [%{"inlineData" => %{"data" => data}}]}]}},
+        # Not a block inside `content` at all — a SIBLING of it. Every traversal
+        # in ImageBudget reached images through the content list, so this shape
+        # was invisible to all of them at once.
+        {"ollama", %{messages: [%{"role" => "user", "content" => "look", "images" => [data]}]}}
+      ]
+
+      for {label, body} <- bodies do
+        {_out, outcome} = ImageBudget.run(body, cap_bytes: 100_000_000)
+
+        assert outcome.images_remaining == 1,
+               "#{label}: the budget counted #{outcome.images_remaining} images in a body " <>
+                 "carrying exactly one. A shape it cannot see is a shape it cannot evict."
+
+        assert outcome.body_bytes_before >= byte_size(data),
+               "#{label}: measured #{outcome.body_bytes_before} bytes for a body containing a " <>
+                 "#{byte_size(data)}-byte payload"
+      end
+    end
+
+    # 39 `vision:` flags across four OSA catalogues, reached through each
+    # module's `capability(id, :vision)`, called by nothing. The gate consulted
+    # only the bundled third-party catalog, under provider ids that catalog does
+    # not have (`bedrock`, `ollama_cloud`, `claude_cli`), so it answered "yes,
+    # this model takes images" for every one of them.
+    test "a catalogue flag OSA maintains is a flag OSA reads" do
+      # OllamaCloud is the catalogue that actually carries `vision: false`
+      # entries, so it is the one where a dead flag has a visible cost.
+      refute ImageBudget.vision_capable?(:ollama_cloud, "glm-4.7:cloud"),
+             "OllamaCloud records `vision: false` for this tag. If the gate cannot reach " <>
+               "that, the flag is decoration and an attached image is sent to a model that " <>
+               "cannot see it."
+
+      assert {false, :osa_catalogue} =
+               ImageBudget.vision_decision(:ollama_cloud, "gpt-oss:120b-cloud")
+
+      # A Bedrock inference-profile id names an Anthropic model that OSA's own
+      # Anthropic catalogue knows. The old lookup keyed on the provider string
+      # `"bedrock"`, which exists in no catalog anywhere.
+      assert {true, :osa_catalogue} =
+               ImageBudget.vision_decision(
+                 :bedrock,
+                 "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+               )
+
+      # And the documented fail-open survives: an unknown model keeps its images.
+      assert {true, :unknown_default} =
+               ImageBudget.vision_decision(:ollama, "some-local-tag-nobody-has-heard-of")
+    end
+  end
+
+  # ── 9. Bedrock prompt caching (request shape only — never sent live) ──────
+
+  describe "Bedrock marks a cacheable prefix" do
+    @claude_bedrock "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+    defp cached_body(opts) do
+      Bedrock.build_request_body(
+        [
+          %{role: "system", content: String.duplicate("stable system prefix. ", 500)},
+          %{role: "user", content: "hi"}
+        ],
+        Keyword.get(opts, :model, @claude_bedrock),
+        Keyword.merge([tools: bulky_tools()], opts)
+      )
+    end
+
+    defp bulky_tools do
+      for i <- 1..20,
+          do: %{name: "tool_#{i}", description: String.duplicate("d", 300), parameters: %{}}
+    end
+
+    test "the static prefix carries a cachePoint on both scopes" do
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+
+      body = cached_body([])
+
+      assert %{"cachePoint" => %{"type" => "default"}} = List.last(body["system"])
+      assert %{"cachePoint" => %{"type" => "default"}} = List.last(body["toolConfig"]["tools"])
+    end
+
+    test "the marker is the LAST element, not an interior one" do
+      # cachePoint marks the END of a cacheable prefix. An interior marker
+      # caches a proper subset and silently leaves the rest re-prefilling every
+      # turn — a cache that is on, reports a positive read, and is still mostly
+      # missing.
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+
+      tools = cached_body([])["toolConfig"]["tools"]
+
+      assert Enum.count(tools, &is_map_key(&1, "cachePoint")) == 1
+      assert List.last(tools) |> is_map_key("cachePoint")
+    end
+
+    test "a prefix too small to cache is skipped and SAID to be skipped" do
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+
+      Process.delete(:osa_bedrock_cache_points)
+
+      prev = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: prev) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          body =
+            Bedrock.build_request_body(
+              [%{role: "system", content: "short"}, %{role: "user", content: "hi"}],
+              @claude_bedrock,
+              []
+            )
+
+          refute Enum.any?(body["system"] || [], &is_map_key(&1, "cachePoint")),
+                 "a marker below the ~1,024-token minimum buys a cache-write premium and " <>
+                   "no cache"
+        end)
+
+      assert log =~ "cache_read_input_tokens will stay 0",
+             "the arms under which the counter can only read 0 must name themselves; an " <>
+               "unexplained 0 is exactly what this whole file is about"
+    end
+
+    test "a non-Anthropic Bedrock model gets no cachePoint" do
+      # Same asymmetry `reasoning_decision/2` applies for `reasoning_config`:
+      # a proprietary field on an unrecognised family is a hard error, and a
+      # marker that splits a prefix the model would have cached whole is a
+      # silent loss.
+      assert {[], :model_unsupported} = Bedrock.cache_point_decision("amazon.nova-pro-v1:0", [])
+    end
+
+    test "the kill switch reaches Bedrock, not only the Anthropic-native path" do
+      # `prompt_caching_enabled` had all five of its call sites inside
+      # `anthropic.ex`. Setting it false therefore disabled caching on the one
+      # path that HAD it and left every other path untouched — the flag named a
+      # global policy and enforced a per-module one.
+      Application.put_env(:optimal_system_agent, :prompt_caching_enabled, false)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :prompt_caching_enabled) end)
+
+      assert {[], :disabled_by_config} = Bedrock.cache_point_decision(@claude_bedrock, [])
+
+      body = cached_body([])
+      refute Enum.any?(body["system"], &is_map_key(&1, "cachePoint"))
+      refute Enum.any?(body["toolConfig"]["tools"], &is_map_key(&1, "cachePoint"))
+    end
+  end
+
+  # ── 10. The instrument that could only report a break, never an absence ───
+
+  describe "CacheAttribution reports a cache that never warmed" do
+    setup do
+      CacheAttribution.reset("silent-loss-scope")
+      :ok
+    end
+
+    @fp CacheAttribution.fingerprint(%{
+          model: "claude-opus-5",
+          system: [%{"text" => "stable"}],
+          tools: [],
+          messages: [1, 2]
+        })
+
+    test "a permanently cold cache is named after a bounded number of turns" do
+      # The old guard was `prev_read > 0 and read < prev_read`. Both halves are
+      # correct for "what broke the cache" and together they make "was there
+      # ever a cache" unaskable — a scope reading 0 forever never satisfies
+      # `prev_read > 0`, so it renders no verdict and reads exactly like a
+      # perfectly stable cache. That is the state OpenRouter was in for months.
+      results =
+        for _ <- 1..3 do
+          CacheAttribution.observe("silent-loss-scope", @fp, %{cache_read_input_tokens: 0})
+        end
+
+      assert Enum.any?(results, &match?({:cold, _}, &1)),
+             "three consecutive zero reads against a byte-identical prefix is not warm-up"
+
+      {:cold, verdict} = Enum.find(results, &match?({:cold, _}, &1))
+      assert verdict =~ "cache_read has been 0"
+      assert verdict =~ "cachePoint" or verdict =~ "cache_control"
+    end
+
+    test "it is a warning, not a debug line" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for _ <- 1..3 do
+            CacheAttribution.observe("silent-loss-scope", @fp, %{cache_read_input_tokens: 0})
+          end
+        end)
+
+      assert log =~ "[PROMPT CACHE]"
+      assert log =~ "[warning]"
+    end
+
+    test "a warm cache is never called cold" do
+      for _ <- 1..5 do
+        assert :ok =
+                 CacheAttribution.observe("silent-loss-scope", @fp, %{
+                   cache_read_input_tokens: 12_000
+                 })
+      end
+
+      assert CacheAttribution.cold_run("silent-loss-scope") == 0
+    end
+
+    test "a legitimately changed prefix restarts the run rather than accusing it" do
+      # A turn after the tool set changed HAS no cache to read from. Counting it
+      # would make this instrument cry wolf, which is the failure mode that gets
+      # an instrument ignored.
+      other =
+        CacheAttribution.fingerprint(%{
+          model: "claude-opus-5",
+          system: [%{"text" => "different"}],
+          tools: [],
+          messages: [1, 2]
+        })
+
+      CacheAttribution.observe("silent-loss-scope", @fp, %{cache_read_input_tokens: 0})
+      CacheAttribution.observe("silent-loss-scope", other, %{cache_read_input_tokens: 0})
+
+      assert CacheAttribution.cold_run("silent-loss-scope") == 1
+    end
+
+    test "the break path still works — the new arm did not replace it" do
+      CacheAttribution.observe("silent-loss-scope", @fp, %{cache_read_input_tokens: 9_000})
+
+      assert {:break, verdict} =
+               CacheAttribution.observe("silent-loss-scope", @fp, %{cache_read_input_tokens: 0})
+
+      assert is_binary(verdict)
+    end
+  end
+
+  # ── 11. Real usage, written to a term nothing reads ───────────────────────
+
+  describe "the CLI providers report the tokens they were told" do
+    test "ClaudeCli publishes usage under the four key names Accounting reads" do
+      :persistent_term.put(
+        {ClaudeCli, :usage},
+        %{
+          "usage" => %{
+            "input_tokens" => 1200,
+            "output_tokens" => 340,
+            "cache_read_input_tokens" => 900,
+            "cache_creation_input_tokens" => 12
+          },
+          "total_cost_usd" => 0.0412
+        }
+      )
+
+      usage = ClaudeCli.reported_usage()
+
+      assert %{
+               input_tokens: 1200,
+               output_tokens: 340,
+               cache_read_input_tokens: 900,
+               cache_creation_input_tokens: 12
+             } = usage
+
+      # 1200 + 12 + 900. `:claude_cli` is in `@disjoint_prompt_slices`, so the
+      # cache slices are ADDITIONAL to `input_tokens` rather than carved out of
+      # them — the convention was already configured for a usage map that never
+      # arrived. What matters is that the total is not 0.
+      assert Accounting.effective_input_tokens(usage) == 2112,
+             "a token count filed under any other key prices at $0.00 and makes " <>
+               "max_budget_usd unenforceable"
+
+      assert ClaudeCli.reported_cost() == 0.0412,
+             "the CLI's own total_cost_usd is authoritative on a Max plan — an OSA-side " <>
+               "estimate from a list rate card is not the same number"
+    end
+
+    test "Copilot's premium-request meter is not laundered into a token count" do
+      :persistent_term.put({CopilotCli, :usage}, %{"premiumRequests" => 0.33})
+
+      assert CopilotCli.reported_quota() == %{premium_requests: 0.33}
+
+      assert CopilotCli.reported_usage() == nil,
+             "Copilot bills in premium requests, not tokens. Synthesising a token count " <>
+               "would be a fabricated measurement; reporting nil lets " <>
+               "Accounting.report_unaccounted/2 say so honestly."
+    end
+  end
+
+  # ── 12. A substring where a word was meant ────────────────────────────────
+
+  describe "fast-mode tool selection matches words, not fragments" do
+    test "a keyword does not fire from inside a longer word" do
+      # `String.contains?/2` made "code" match *encode*, "test" match *latest*,
+      # "git" match *digit*, "pr" match *print*. A phantom intent is not
+      # harmless: `select_tools/2` unions the matched intents' tool lists and
+      # then TRUNCATES to `Effort.tool_budget()`, so a false hit pushes real
+      # tools off the end of the cap.
+      assert FastPath.classify_intents("please encode the latest digit into a print expression") ==
+               []
+    end
+
+    test "the words it was written for still match" do
+      assert :code in FastPath.classify_intents("fix the bug in this code")
+      assert :git in FastPath.classify_intents("show me the git diff")
+      assert :search in FastPath.classify_intents("find where this is defined")
+    end
+
+    test "inflections are not the price of dropping fragments" do
+      # The over-correction is as bad as the bug: a strict word-equality rule
+      # loses `scheduler`, `tests`, `commits`, `files` — words users type
+      # constantly — and a lost intent silently narrows the toolbox exactly the
+      # way a phantom one does.
+      assert :schedule in FastPath.classify_intents("fix the scheduler bug in cron_test.exs")
+      assert :code in FastPath.classify_intents("update the failing tests")
+      assert :git in FastPath.classify_intents("squash these commits")
+    end
+
+    test "a narrowed toolbox is announced" do
+      # The only stage of `Loop.ToolFilter.filter/1` that logged nothing at all,
+      # while dropping the majority of the tool surface on a keyword guess.
+      Process.delete(:osa_fast_path_tools)
+      Effort.set(:fast)
+
+      tools =
+        for name <- ~w(file_read file_write shell_execute browser computer_use memory_save) do
+          %{name: name, description: name, parameters: %{}}
+        end
+
+      prev = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: prev) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          FastPath.select_tools(tools, %{
+            messages: [%{role: "user", content: "fix the bug in this code"}]
+          })
+        end)
+
+      assert log =~ "[FastPath]"
+      assert log =~ "withheld"
+
+      assert log =~ "[info]",
+             "a tool the model was never offered looks exactly like a tool it chose not to call"
     end
   end
 end
