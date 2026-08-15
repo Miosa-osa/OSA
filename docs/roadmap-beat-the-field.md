@@ -144,6 +144,49 @@ instance fix.
        today would be schema-valid — `arguments` accepts `{}` — and worthless
        for the trace-export and analysis the flag exists to unlock.
 
+    **Status 2026-08-15: 1–5 are built** (`bench/terminalbench/trajectory.py`,
+    `test_trajectory.py`; all 87 archived trials that wrote a stream produce a
+    valid ATIF-v1.7 document). `SUPPORTS_ATIF` stays **False**, and item 6 is
+    now a measured number instead of a claim. Three corrections to the text
+    above:
+
+    * The 21/21 sample generalises but understates: over the full-89 run,
+      `args` is faithful (`args_bytes == len(args)`) on **181 of 3,796** tool
+      calls (4.8%), all of them `file_edit`. `shell_execute` is clipped at
+      exactly 60 characters on **1,682 of 1,954** (86%).
+    * **The arguments are partly recoverable, and provably so.**
+      `ToolArgMetrics.arg_hash/1` is SHA-256 (first 16 bytes) over a
+      *canonicalised* JSON of the **full** argument map, so a reconstruction can
+      be checked against the digest the agent itself wrote. With
+      `command_output_delta.command` (the complete, unclipped shell command,
+      keyed by `tool_call_id`) plus `file_edit`'s faithful hint, hash-VERIFIED
+      recovery is **2,153 / 3,796 = 56.7%** — `shell_execute` 83.9%, `file_edit`
+      / `dir_list` / `file_glob` 100%, `file_read` 52.7%.
+    * **`file_write` and `task_write` are 756 calls (19.9%) at 0%**, and no
+      host-side reconstruction can ever reach them: the content appears in no
+      event. That, not the clip, is the part only `lib/` can fix.
+
+      The `lib/` requirement, precisely: a **new** `arguments` key (JSON object)
+      on the `:tool_call` event carrying the whole argument map, at the four
+      sites that already compute `args_bytes`/`args_hash`
+      (`tool_executor.ex:297-298, 318-319, 1445-1446, 1473-1474`, forwarded by
+      `osa.run.ex:330-331`), for **every** tool. Never a redefinition of `args`
+      — `ToolArgMetrics`'s own moduledoc records that two published competitor
+      comparisons were artefacts of confusing the two. Keep the digest: it is
+      what lets a *redacted* export prove it corresponds to the real call.
+
+      Does the hash suffice for the contract? For validity yes — `arguments: {}`
+      passes and `args_hash` rides legally in `ToolCall.extra`. For the purpose,
+      no: `harbor/utils/traces_utils.py:664-671` and `:972` serialise
+      `arguments` **verbatim** into SFT training conversations and never read
+      `extra`, so `{}` is not "unknown", it is data teaching zero-argument tool
+      calls. And the secrets constraint that motivated the digest is real — tool
+      arguments carry credentials and file contents, which `--upload --public`
+      would publish — but a 60-character clip is not a security control: it
+      leaks the first 60 characters of every secret, loses the rest of every
+      command, and destroys the analysis at the same time. The redaction
+      decision belongs in a per-tool field policy, not in a display truncation.
+
     Not urgent: submissions are closed on both boards. What is worth knowing now
     is that the 2.1 CI's per-rewarded-trial `trajectory_path` check is **not
     locally verifiable** — `tasks/terminal-bench-2-1/` is an empty placeholder,
