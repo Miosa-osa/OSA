@@ -178,6 +178,44 @@ _TB_ARMS = {
         "in_out_ratio": 169.1,
         "cost_usd_per_task": 3.3357,
     },
+    # ---- the 1.0.99 release gate, 2026-08-16 ------------------------------
+    #
+    # THE FIRST ARM THIS HARNESS HAS EVER RUN ON A HOSTED, PRICED PROVIDER,
+    # and the first with a non-null `cache_hit_rate`. Artefact
+    # `558035ec…`, built with `--from-commit 9203eb62` (`lib` clean at build
+    # AND at launch), `effort=medium` — which on this route actually reaches
+    # the wire as `reasoning_effort`, unlike every Ollama arm above.
+    #
+    # `input_tokens_per_task` is UP against every arm above and that is not a
+    # regression: it is the whole prompt, and 96.1% of it is cache reads billed
+    # at ~0.19x. The figure that fell is `uncached_input_tokens_per_task`,
+    # 4,622,809 -> 240,982. Read the two together or read neither.
+    #
+    # `cost_usd_per_task` here is the ONLY measured-not-derived dollar figure in
+    # this file: OpenRouter's own key-usage counter moved $89.5679 -> $102.0667
+    # over the run, $12.4988 / 8. Do NOT re-derive it from tokens — see the note
+    # on GLM_RATES below for why token-derived dollars are unsound on this
+    # route.
+    "openrouter_1_0_99": {
+        "run": ["probe-10099-9203eb62"],
+        "note": (
+            "openrouter/z-ai/glm-5.2, effort=medium, tb2.1, -k 1, no timeout "
+            "multiplier (driver deadline = task budget - 60s). Controls gated "
+            "clean; harness_fault_rate 0.0; self_inflicted_totals EMPTY — no "
+            "stall detector, no ESSENTIAL context drop, no compaction, no "
+            "circuit breaker, against 224 stall firings on the baseline. The "
+            "single non-solve, cancel-async-tasks, is a task independently "
+            "measured as non-deterministic (repro-cancel-4/5/6 = pass/pass/"
+            "fail, no code change), and it failed 1 of 6 verifier subtests."
+        ),
+        "resolved": 7,
+        "input_tokens_per_task": 6_118_517.8,
+        "uncached_input_tokens_per_task": 240_981.8,
+        "in_out_ratio": 102.2,
+        "cache_hit_rate": 0.9606,
+        "cost_usd_per_task": 1.5624,
+        "cost_basis": "MEASURED from the OpenRouter key usage counter, not derived",
+    },
 }
 
 _TB_TASKS = (
@@ -423,6 +461,30 @@ def _union_over_probe(run_dirs: list[Path], tasks: tuple[str, ...]) -> dict:
 
 #: $/M input, $/M output. Kept here as well as in `bench/report/honesty.py` so
 #: a re-price is explicit at the point of comparison rather than inherited.
+#:
+#: ⚠ **THIS IS GLM-4.7's RATE AND IT IS WRONG FOR GLM-5.2.** `zai_models.ex`
+#: establishes the real first-party rate as `(1.40, 4.40)` with a `0.26`
+#: cached-input tier, confirmed on Z.ai's pricing page and on the Z.AI endpoint
+#: behind OpenRouter — so every `$/task` computed from this constant is **2.4x
+#: low**. It is left in place ONLY so the arms above keep rendering the same
+#: numbers they were published with; nothing new should use it.
+#:
+#: Two further reasons a token-derived dollar is unsound on the OpenRouter
+#: route, both measured on 2026-08-16 and neither fixable with a better
+#: constant:
+#:
+#:   1. `z-ai/glm-5.2` is served by **34 endpoints** spanning $0.386–$2.31/M
+#:      prompt and $0.072–$0.462/M cache-read — a 6x spread — and default
+#:      routing picks among them per request. The model-level price the
+#:      `/models` API advertises ($0.462/$1.452/$0.0858) is just one of them.
+#:   2. Those endpoints run **different quantisations** (fp8, fp4, unknown), so
+#:      the price spread is also a quality spread, and neither is recorded per
+#:      request by anything we log.
+#:
+#: The `openrouter_1_0_99` arm's dollars therefore come from OpenRouter's key
+#: usage counter, read before and after the run. Prefer `reprice.py`, which
+#: keeps the rate table explicit and prices cache reads separately, over
+#: `arm_stats` for anything new.
 GLM_RATES = (0.60, 2.20)
 
 

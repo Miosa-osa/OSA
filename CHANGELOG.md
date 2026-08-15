@@ -9,6 +9,197 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.99] — displays as `v1.0.099`
+
+Measured on a fixed 8-task Terminal-Bench probe against a recorded baseline,
+same tasks, reasoning pinned, both arms priced at one rate table:
+
+| | baseline | 1.0.99 |
+|---|---:|---:|
+| **solved** | **5/8** | **7/8** |
+| uncached input tokens/task | 4,622,809 | **240,982** |
+| in:out ratio | 147.5:1 | **102.2:1** |
+| $/task | $6.61 | **$2.13** |
+| stall detections | 224 | **0** |
+| harness faults | — | **0** |
+
+**Read those intervals before quoting the first row.** 5/8 spans 30.6–86.3%
+and 7/8 spans 52.9–97.8%; they overlap almost entirely. At n=1 over 8 tasks
+this is directional and must not be projected. Four of the six specific fixes
+below were **never exercised** by this probe — the preconditions did not occur.
+And the 96% cache hit rate is the *upstream provider's* implicit cache, not
+OSA's: we send no `cache_control` on that route.
+
+### The pattern, again
+
+1.0.98 documented eleven defects sharing one shape — a guard correct for a
+narrow case, applied one scope too wide, silently disabling a capability. This
+release adds three more, and the shape is now a named test file
+(`silent_capability_loss_test.exs`) with five class-level ratchets that fail on
+the *next* instance rather than this one.
+
+### Fixed — search was answering from 0.9% of the tree
+
+**Every one of 862 `file_grep` calls** in a 118-session corpus was served by a
+pure-Elixir fallback rather than ripgrep: `System.cmd("rg", …)` raises when the
+binary is off the BEAM's PATH and the rescue substituted silently. Proof is in
+the corpus, not the environment — of 50 calls requesting `context_lines`,
+**zero** results contain one, and only the fallback ignores that parameter.
+
+That fallback then scanned `Path.wildcard("**/*") |> Enum.take(500)` — on a real
+workspace, **500 of 54,905 files, 0.9%** — stopping inside `build/`, never
+reaching `src/`, and reporting **"No matches found."** 33% of all greps returned
+no matches; 58 of those were followed within six calls by a shell grep for the
+same token that found it.
+
+The model had been telling us. Sixteen transcripts carry complaints verbatim:
+*"the grep tool seems to have a systemic issue with this repo."* Nobody read
+them.
+
+Fixed: directory pruning, the cap raised to 20,000 **and named when it bites**,
+recursive glob matching, `context_lines` implemented, both backends widening on
+empty with a label — and a missing `rg` now warns once per session and appears
+in `osa doctor` instead of degrading in silence.
+
+### Fixed — a truncated sentence was delivered as the answer
+
+`regex-chess` emitted exactly **32,768 output tokens** after a 350,880-character
+thinking block; the mid-sentence fragment became the final answer and the
+deliverable was never written. `schemelike`'s last three generations were all
+exactly 32,768.
+
+Truncation recovery already existed — written against Anthropic's spelling of
+`stop_reason`. **Ollama, our default provider, never captured one on any of its
+three paths**, and nor did Google, Bedrock or Cohere. The path was unreachable
+on the configuration that runs. Stop reasons are now canonicalised across eight
+providers, a cut-off generation is continued or marked `[INCOMPLETE]`, never
+delivered bare.
+
+The 32,768 ceiling was not a decision: `84eced65` introduced a ladder that
+*varied*, and the same day `50761171` raised the lower three to match `:max`
+inside a commit message about skills and checkpoints that never mentions output
+tokens. `ModelLimits` puts glm-5.2 at **128,000**. Raised the top two rungs only.
+
+### Fixed — we told the model it would be woken, and it wasn't
+
+`shell_execute`'s prompt said *"stop and let the notification wake you"* — true
+in a persistent session, false in a one-shot run that ends when the model
+answers. Ten benchmark tasks ended on *"I'll report results when it completes."*
+On `fix-ocaml-gc` **the notification had already arrived carrying the failure**,
+masked to exit 0 by a `| tail` pipeline.
+
+The gate built to catch this could not: its directive said to poll with
+`bash_output`, whose own prompt said in capitals **DO NOT USE THIS TOOL TO
+WAIT**, while `shell_execute` banned `sleep`. `bash_output` now takes `wait_ms`.
+
+### Fixed — we killed the deliverable
+
+`Loop.fire_session_end/2` reaps the background process group — correct for a
+build, fatal when the running service *is* the deliverable. Three tasks were
+complete and verified live, with a dead port at grade time. The prompt said
+"builds, full suites **and servers**", steering straight into it.
+
+### Fixed — two parallel edits to one file silently lost work
+
+`StreamingToolExecutor` spawned every call with no concurrency check, bypassing
+the orchestrator. On Anthropic, a batched turn ran all calls at once; two
+`file_edit`s on one path raced and **both reported success**. Reproduced, then
+generalised: `ConflictScope` resolves each call to declared reads and writes,
+compares them after symlink and relative-path normalisation, and fails closed on
+anything unresolvable. `file_edit` relaxes from unconditional barrier to
+path-scoped, so edits to *different* files now run in parallel.
+
+### Fixed — the interface lied about its own state
+
+- A turn that ended while an overlay was open **wedged the session permanently**:
+  the overlay parked a `Processing` state on the return stack that outlived the
+  turn, and every later prompt queued behind a turn that had already finished.
+  Interrupt was gated on the same check, so Esc could not recover it.
+- `/clear` cleared the view and not the queue, so a live queued message was left
+  alone at the top of an empty screen looking like a duplicate. `/clear` typed
+  mid-turn was itself queued behind the turn it meant to escape.
+- `/clear` never cleared the model's context: the endpoint is a session *swap*
+  and the TUI dropped the new id, then repopulated from the file the clear had
+  just written.
+- A stale daemon **rewrote the TUI's version everywhere** — status bar, banner,
+  `/version` — so every surface agreed on the wrong build.
+- Guard advice reached the user as OSA's answer. `ReactLoop.run/1` returned one
+  untyped string channel for the model's answer and for every guard, cap and
+  error; `response_type` was parsed in the TUI and bound to `_`.
+- The spin detector fired on a **conversational turn**. Its predicate was
+  `tool_calls == []` while its message asserted "without making progress" — a
+  conclusion it never tested. Third time that one predicate read absence of a
+  signal as presence of a fault.
+
+### Fixed — billing
+
+`glm-5.2:cloud` was priced at **GLM-4.7's rate**, copied forward across two
+generations: `{0.60, 2.20}` against Z.ai's `{1.40, 4.40}`. Every install
+under-reported spend on its own default by 2.4x, and `Pricing.confidence/1`
+reported `:exact` — a wrong number in an exact table never reaches the guess
+path that would have warned.
+
+`grok-4.20` and `grok-code-fast-1` — ids xAI actively steers users toward —
+billed **$0.00 per turn**, because both are *shorter* than the model they serve
+and the prefix match failed in the only direction that mattered. Five Ollama
+tags likewise. Cohere returned no usage at all.
+
+CLI providers now report their own authoritative cost: `claude -p` publishes
+`total_cost_usd`, which **replaces** rate-card pricing rather than adding to it —
+tokens × list price is the wrong number on a subscription.
+
+### Added
+
+- **Grok 4.6** (xAI default moves to it; same window, same price, cached input
+  $0.50 vs $0.30), **Gemini 3.7 Flash**, a first-party `ZaiModels` catalogue.
+  **GLM 5.3 deliberately not added** — Z.ai's docs say *"the API is coming
+  soon"*, there is no model id and no price, and a model with no price is
+  exactly what the guess path mis-bills. A test asserts it stays absent.
+- **Read range subtraction** — held content is tracked as merged line intervals,
+  and a re-read returns only what you do not hold. Ablation-measured:
+  **−17,293 tokens, −40%, zero facts lost.** The same measurement retired the
+  byte-identical suppression it replaces: 0.8%, confirmed by removal.
+- **`/ask-user`, disabled by default** — a long unattended run no longer parks
+  on a question nobody can answer. Off everywhere; the schema leaves the prefix
+  entirely, so the common case gets *smaller*.
+- **`Agent.Attendance`** — one derived answer to "can a human respond right
+  now", replacing three duplicate copies of a flag. `PermissionBroker` and
+  `Survey` fail fast headless instead of polling for 300 and 120 seconds.
+- **`code_symbols` by name** — the definition and its line range, 517 bytes
+  against 1,381 for a search plus a guessed window.
+- **A batch-cadence nudge** in the volatile tail, with a doubling backoff derived
+  from replaying 465 sessions: a flat cooldown spent every nudge by turn 30 and
+  left the region where batching has actually collapsed with nothing.
+
+### Removed
+
+`interrupt_behavior` — declared on ~35 tools with **zero consumers** anywhere.
+Wiring it as declared would have been a regression: the injected default was
+`:block`, copied from neighbours where fail-closed means restrictive, which for
+interruption inverts and would have made ~41 tools including `file_read` and
+`delegate` uninterruptible.
+
+`Tools.Pipeline.parallel/2` — unguarded `Task.async` per instruction, zero
+production callers, a live hazard the moment anything wired it up.
+
+### Known — not fixed
+
+- **OSA still re-sends the entire prefix every turn.** The probe's whole-prompt
+  tokens rose 32%; the provider's implicit cache absorbed it. Context growth is
+  unfixed and is the largest remaining efficiency gap.
+- **Nine tasks in the failure taxonomy have no safe detector**: the model writes
+  a genuine red→green test that measures the wrong property. Six candidate
+  detectors were ruled out on evidence — the best fires on 15 of 49 solves. And
+  our event log stores a write's *path* but not its *content*, so a
+  content-based detector is unmeasurable from our own artefacts.
+- `download` remains per-call concurrency-safe; two downloads to one path race.
+- Bedrock and Google cache/reasoning paths are implemented against documented
+  shapes and **unverified against a live call** — no credentials exist on the
+  build machine.
+- The native Anthropic conversation segment is still uncached (~16 points).
+
+---
+
 ## [1.0.98] — displays as `v1.0.098`
 
 The release where we found out what OSA had actually been doing.
