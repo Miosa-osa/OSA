@@ -37,9 +37,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "driver"))
 
-import datasets as datasets_mod  # noqa: E402
+# `report`/`datasets` are ambiguous basenames across bench/ -- see
+# `_localimport` for the measured failure. Never `import report` here.
+import _localimport  # noqa: E402
 import osa_headless  # noqa: E402
-import report  # noqa: E402
+
+datasets_mod = _localimport.load("datasets")
+report = _localimport.load("report")
 
 
 def _load_osa_agent():
@@ -342,6 +346,104 @@ class TestQuotaIsNotAModelFailure(unittest.TestCase):
         """D2's other half. Exit 0 meant `_classify_exec_error` never ran and a
         quota death was recorded as a legitimate reward-0."""
         self.assertNotEqual(osa_headless._EXIT_CODES["provider_error"], 0)
+
+
+
+class TestJudgeTaskFiltering(unittest.TestCase):
+    """The runner must dispatch the same set the controls measured.
+
+    16 of Harbor-Index's 80 tasks are graded by an LLM-judge ensemble that runs
+    at VERIFY time. `controls.py` has filtered them out since it was written;
+    `run_bench.py` did not, so a full run would have dispatched 80 and reported
+    a rate over a denominator only 64 of which had ever been control-measured --
+    and `controls.py gate` could not have caught it, because it only inspects
+    the tasks a run actually recorded.
+    """
+
+    def setUp(self):
+        self.ds = datasets_mod.get("harbor-index")
+        if not self.ds.present:
+            self.skipTest("harbor-index not on disk")
+        self.rb = _localimport.load("run_bench")
+
+    def test_sixteen_of_eighty_need_a_credential(self):
+        """Pinned, because the number IS the correction to the denominator."""
+        self.assertEqual(len(self.ds.task_names()), 80)
+        self.assertEqual(len(datasets_mod.judge_required_tasks(self.ds)), 16)
+
+    def test_the_runner_and_the_controls_agree_on_what_is_gradeable(self):
+        """The defect was these two disagreeing, so this is the real assertion."""
+        runner_kept, _ = self.rb.filter_judge_tasks(
+            self.ds, self.ds.task_names(), set(), have_key=False
+        )
+        controls_kept = datasets_mod.gradeable_tasks(self.ds, have_judge_key=False)
+        self.assertEqual(sorted(runner_kept), sorted(controls_kept))
+        self.assertEqual(len(runner_kept), 64)
+
+    def test_a_judge_task_is_dropped_when_unnamed(self):
+        kept, dropped = self.rb.filter_judge_tasks(
+            self.ds, ["hle-vowel-marking-system", "usaco-assign-cows-to-barns"],
+            set(), have_key=False,
+        )
+        self.assertEqual(kept, ["usaco-assign-cows-to-barns"])
+        self.assertEqual(dropped, ["hle-vowel-marking-system"])
+
+    def test_a_judge_task_named_by_hand_is_refused_not_dropped(self):
+        """A silent drop of a task the operator asked for is the same class of
+        defect as reporting on a denominator you did not measure."""
+        with self.assertRaises(SystemExit) as cm:
+            self.rb.filter_judge_tasks(
+                self.ds, ["hle-vowel-marking-system"],
+                {"hle-vowel-marking-system"}, have_key=False,
+            )
+        self.assertIn("ANTHROPIC_API_KEY", str(cm.exception))
+
+    def test_nothing_is_dropped_when_the_credential_exists(self):
+        names = self.ds.task_names()
+        kept, dropped = self.rb.filter_judge_tasks(
+            self.ds, list(names), set(), have_key=True
+        )
+        self.assertEqual(kept, list(names))
+        self.assertEqual(dropped, [])
+
+    def test_datasets_without_judged_tasks_are_untouched(self):
+        ds = datasets_mod.get("tb2.0")
+        if not ds.present:
+            self.skipTest("tb2.0 not on disk")
+        kept, dropped = self.rb.filter_judge_tasks(
+            ds, ["build-pmars"], set(), have_key=False
+        )
+        self.assertEqual((kept, dropped), (["build-pmars"], []))
+
+    def test_the_summary_states_the_effective_denominator(self):
+        out = report.build(
+            config={
+                "dataset_key": "harbor-index", "run_id": "t", "dataset_size": 80,
+                "effective_denominator": 64, "have_judge_key": False,
+                "judge_skipped_tasks": ["hle-vowel-marking-system"],
+            },
+            rows=[{
+                "task_name": "harbor-index/usaco-assign-cows-to-barns",
+                "resolved": True, "reward": 1.0, "failure_reason": "",
+                "fault_owner": "resolved", "self_inflicted": {},
+                "tokens_in": None, "tokens_out": None, "tokens_cache": None,
+                "tokens_cache_read": None, "tokens_cache_write": None,
+                "cost_usd": None, "wall_clock_s": None, "agent_setup_s": None,
+                "agent_exec_s": None, "osa_boot_s": None, "turns": None,
+                "tool_calls": None, "write_ops": None,
+                "peak_context_tokens": None, "denials": None,
+                "osa_tool_faults": None, "add_dir_mentions": None,
+                "trial_name": "usaco-assign-cows-to-barns__x",
+            }],
+        )
+        self.assertEqual(out["aggregate"]["effective_denominator"], 64)
+        md = report.summary_md(out)
+        head = md.split("## Headline", 1)[1]
+        self.assertIn("over 64 tasks, not 80", head)
+        self.assertIn("**absences, not failures**", head)
+        self.assertIn("hle-vowel-marking-system", head)
+        # The caveat must precede the cost table, not trail it.
+        self.assertLess(head.index("over 64 tasks"), head.index("## Who failed"))
 
 
 if __name__ == "__main__":

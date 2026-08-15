@@ -44,6 +44,7 @@ Re-download with `datasets.py sync <key>`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -338,6 +339,24 @@ def get(key: str) -> Dataset:
 JUDGE_TASK_PREFIXES: dict[str, tuple[str, ...]] = {
     "harbor-index": ("hle-", "omnimath-", "gaia2-", "widesearch-"),
 }
+
+
+#: The credential the judged verifiers actually need. Harbor-Index's
+#: `job-config.yaml` pins a single Anthropic model (claude-opus-5) voting three
+#: times, so this is the one variable whose presence decides whether those tasks
+#: can be scored at all.
+#:
+#: ONE definition, because `controls.py` and `run_bench.py` disagreeing about it
+#: is the whole bug this guards: the controls would measure 64 tasks, the runner
+#: would dispatch 80, and the gate would compare them without either side
+#: noticing they were talking about different sets.
+JUDGE_CREDENTIAL_ENV = "ANTHROPIC_API_KEY"
+
+
+def have_judge_key(env: dict[str, str] | None = None) -> bool:
+    """Can the LLM-judged verifiers run on this machine?"""
+    src = os.environ if env is None else env
+    return bool(src.get(JUDGE_CREDENTIAL_ENV))
 
 
 def judge_required_tasks(ds: Dataset) -> list[str]:

@@ -237,7 +237,8 @@ def cmd_run(args) -> int:
     if not ds.present:
         raise SystemExit(f"{ds.key} is not on disk. ./datasets.py sync {ds.key}")
 
-    have_judge_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # One definition, shared with run_bench.py. See datasets.have_judge_key.
+    have_judge_key = datasets_mod.have_judge_key()
     tasks = args.tasks or datasets_mod.gradeable_tasks(
         ds, have_judge_key=have_judge_key
     )

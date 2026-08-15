@@ -264,6 +264,46 @@ def select_tasks(args, ds) -> tuple[list[str], int]:
     return chosen, dataset_size
 
 
+def filter_judge_tasks(
+    ds, chosen: list[str], explicit: set[str], *, have_key: bool
+) -> tuple[list[str], list[str]]:
+    """Drop the tasks whose VERIFIER cannot run here. Returns (kept, dropped).
+
+    16 of Harbor-Index's 80 tasks are scored by an LLM-judge ensemble that runs
+    at verify time and needs a model credential (`datasets.JUDGE_TASK_PREFIXES`,
+    sourced from the upstream `job-config.yaml`). Without it the verifier
+    crashes rather than scoring zero, so those tasks are **absences, not
+    failures** -- scoring them 0 understates the rate and dispatching them burns
+    budget on a result nothing can grade.
+
+    `controls.py` has filtered them since it was written; this runner did not.
+    That is not a rounding error: the controls would validate 64 tasks, the
+    runner would dispatch 80, and the run would report over a denominator it had
+    never measured, with `controls.py gate` unable to see the difference because
+    it only inspects the tasks a run actually recorded.
+
+    An EXPLICITLY named task is never dropped silently -- see the caller.
+    """
+    if not ds or have_key:
+        return chosen, []
+    required = set(datasets_mod.judge_required_tasks(ds))
+    if not required:
+        return chosen, []
+    blocked = sorted(set(chosen) & required)
+    named = sorted(set(blocked) & explicit)
+    if named:
+        raise SystemExit(
+            f"{len(named)} task(s) you named are graded by an LLM judge at "
+            f"VERIFY time and cannot be scored without "
+            f"${datasets_mod.JUDGE_CREDENTIAL_ENV}: {', '.join(named)}.\n"
+            "Set the credential, or drop them from --tasks. They are not "
+            "dropped for you, because a run that quietly loses a task you asked "
+            "for reports on a set you did not choose."
+        )
+    drop = set(blocked)
+    return [t for t in chosen if t not in drop], blocked
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -384,6 +424,11 @@ def main() -> int:
             f"  ./datasets.py sync {ds.key}"
         )
 
+    # Captured BEFORE --probe overwrites it: an operator who names a task by
+    # hand is making a different request from one who takes a probe set, and the
+    # judge filter below treats them differently.
+    explicit_tasks = set(args.tasks or [])
+
     if args.probe:
         probe = probeset_mod.get(args.dataset_key)
         args.tasks = list(probe.tasks)
@@ -392,6 +437,49 @@ def main() -> int:
 
     tasks_dir = local_tasks_dir(ds)
     chosen, dataset_size = select_tasks(args, ds)
+
+    # ---------------------------------------------------------------- judge
+    # DROP THE TASKS THIS MACHINE CANNOT GRADE, AND SAY THE DENOMINATOR ALOUD.
+    #
+    # 16 of Harbor-Index's 80 tasks are scored by an LLM-judge ensemble that
+    # runs at VERIFY time and needs a model credential (see
+    # `datasets.JUDGE_TASK_PREFIXES`, sourced from the upstream
+    # `job-config.yaml`). Without it their verifier crashes rather than scoring
+    # zero, so they are not failures -- they are absences.
+    #
+    # `controls.py` has known this since it was written and filtered them out of
+    # its own sweep. `run_bench.py` did not. The consequence is not a rounding
+    # error: the controls would validate 64 tasks, the runner would dispatch 80,
+    # and every one of the extra 16 would land in the results as an unscored
+    # trial against a denominator of 80 -- a rate measured over one set and
+    # reported over another, with the gate unable to see the difference because
+    # it only checks the tasks the run actually recorded.
+    #
+    # An explicitly named task is NOT silently dropped. Someone who typed
+    # `--tasks hle-vowel-marking-system` has asked a question this machine
+    # cannot answer, and the honest reply is to refuse. See
+    # `filter_judge_tasks`, which is where the rule lives so it can be tested
+    # without launching a run.
+    have_key = datasets_mod.have_judge_key()
+    judge_required = sorted(datasets_mod.judge_required_tasks(ds)) if ds else []
+    chosen, judge_skipped = filter_judge_tasks(
+        ds, chosen, explicit_tasks, have_key=have_key
+    )
+
+    # THE EFFECTIVE DENOMINATOR, STATED BEFORE ANYTHING IS SPENT.
+    # `dataset_size` is what the task set HAS; `len(chosen)` is what this run
+    # can actually score. Printing the second only at the end, after the money
+    # is gone, is how a partial run gets quoted as a full one.
+    if ds is not None:
+        log(f"denominator: {len(chosen)} of {dataset_size} {ds.key} task(s) "
+            f"will be dispatched and are scoreable here")
+    if judge_skipped:
+        log(f"  {len(judge_skipped)} task(s) EXCLUDED: their verifier calls an "
+            f"LLM judge and ${datasets_mod.JUDGE_CREDENTIAL_ENV} is unset, so "
+            f"they cannot be graded at all — they are absences, not failures.")
+        log(f"  excluded: {', '.join(judge_skipped)}")
+        log(f"  ANY RATE FROM THIS RUN IS OVER {len(chosen)}, NOT "
+            f"{dataset_size}. Say so when quoting it.")
 
     # Refuse to ship host-generated bytecode into a grading container.
     #
@@ -449,7 +537,28 @@ def main() -> int:
         "dataset_size": dataset_size,
         "dataset_notes": list(ds.notes) if ds else [],
         "probe_set": probeset_mod.get(args.dataset_key).name if args.probe else None,
+        # WHETHER THERE IS ANYTHING TO COMPARE THIS PROBE AGAINST.
+        # `probeset.PROBE_SETS["harbor-index"].baseline is None`: this set has
+        # never been run, so the FIRST run establishes the baseline and can
+        # support no improvement claim at all. That is a property of the
+        # artefact, so it is recorded in the artefact rather than left in a
+        # module docstring the reader of the results file will never open.
+        "probe_has_baseline": (
+            probeset_mod.get(args.dataset_key).baseline is not None
+            if args.probe
+            else None
+        ),
         "tasks_requested": chosen,
+        # THE DENOMINATOR, RECORDED. `dataset_size` is what the set has;
+        # `effective_denominator` is what this run could score. They differ
+        # whenever a judged task is dropped, and a results file that carries
+        # only the first invites a rate to be quoted over a set that was never
+        # attempted. `report.py` prints the gap under the headline.
+        "effective_denominator": len(chosen),
+        "have_judge_key": have_key,
+        "judge_required_tasks": judge_required,
+        "judge_skipped_tasks": judge_skipped,
+        "judge_credential_env": datasets_mod.JUDGE_CREDENTIAL_ENV,
         "difficulty_filter": args.difficulty,
         "n_concurrent": args.n_concurrent,
         # Timeouts convert possible solves into guaranteed fails, so the

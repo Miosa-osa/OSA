@@ -917,6 +917,16 @@ def build(*, config: dict, rows: list[dict]) -> dict[str, Any]:
         # counted from disk.
         "is_full_dataset_run": bool(declared_size) and n_tasks == declared_size,
         "dataset_size": config.get("dataset_size"),
+        # WHAT THIS RUN COULD SCORE, as distinct from what the set contains.
+        # On Harbor-Index 16 of 80 tasks are graded by an LLM judge that needs a
+        # credential at VERIFY time; without it they cannot be scored at all, so
+        # the runner drops them and records the gap here. `is_full_dataset_run`
+        # already goes false, but "not full" does not tell a reader WHICH 64 or
+        # why, and a rate over 64 quoted against a board that ran 80 is the
+        # error this pair of fields exists to make impossible.
+        "effective_denominator": config.get("effective_denominator"),
+        "judge_skipped_tasks": config.get("judge_skipped_tasks") or [],
+        "have_judge_key": config.get("have_judge_key"),
         "dataset_key": config.get("dataset_key"),
         "dataset_label": config.get("dataset_label"),
         "dataset_status": config.get("dataset_status"),
@@ -1069,6 +1079,17 @@ def summary_md(results: dict) -> str:
             "time, so token and cost figures across runs are paired. This is "
             "**not** a pass-rate measurement; see the cost table below.",
         ]
+        if cfg.get("probe_has_baseline") is False:
+            # The Harbor-Index probe set records `baseline=None`. A first run
+            # therefore IS the baseline, and "paired against previous runs"
+            # above would be read as if there were previous runs.
+            lines += [
+                ">",
+                "> ⚠ **This probe set has no baseline.** Nothing has been run "
+                "against it before, so this run establishes one. Every figure "
+                "below is absolute and **no improvement or regression can be "
+                "claimed from it** — there is nothing to pair against yet.",
+            ]
     lines += [
         f"- **Agent**: `{cfg.get('agent')}`   **Model**: `{cfg.get('model') or 'from OSA config'}`",
         # Effort and the timeout multiplier are conditions of the measurement,
@@ -1098,6 +1119,27 @@ def summary_md(results: dict) -> str:
         f"({(a['accuracy'] or 0) * 100:.1f}%)**",
         "",
     ]
+    if a.get("judge_skipped_tasks"):
+        # Directly under the headline for the same reason the void block is: a
+        # reader who stops at the percentage must not stop before the sentence
+        # that says what it is a percentage OF.
+        skipped = a["judge_skipped_tasks"]
+        lines += [
+            f"> **This rate is over {a.get('effective_denominator')} tasks, not "
+            f"{_fmt(a['dataset_size'])}.** {len(skipped)} task(s) are graded by "
+            "an LLM-judge ensemble that runs at VERIFY time and needs a model "
+            "credential this machine does not have, so their verifier cannot "
+            "run at all. They were not dispatched and are **absences, not "
+            "failures** — scoring them 0 would understate the rate and "
+            "dispatching them would have burned the budget for an ungradeable "
+            "result.",
+            ">",
+            "> Not comparable to any published Harbor-Index row, which are over "
+            "the full set.",
+            ">",
+            f"> Excluded: {', '.join(f'`{t}`' for t in skipped)}",
+            "",
+        ]
     if a.get("n_void"):
         # Printed HERE, directly under the headline, and not in a footnote.
         # A reader who stops after the headline must not stop before this.
