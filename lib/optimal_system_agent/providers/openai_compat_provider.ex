@@ -191,25 +191,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     # Model IDs are the provider's own and do not match upstream vendor naming
     # (`claude-opus-5`, not `claude-opus-5-20260219`). The live list is public
     # and needs no key: GET https://api.uncensored.com/api/v1/models
+    #
+    # `available_models` comes from `UncensoredModels` rather than a hand-picked
+    # list beside it, because that catalog is also the gateway's RATE CARD: a
+    # model the picker offers but the rate card does not carry is a turn billed
+    # at the upstream vendor's price, and two hand-maintained lists is exactly
+    # how that gap opens. It is a `{module, function}` pair rather than a literal
+    # so the retirement filter runs against today's date — see
+    # `available_models/1` and `UncensoredModels.offerable_ids/0`.
     uncensored: %{
       default_url: "https://api.uncensored.com/api/v1",
       default_model: "claude-opus-5",
       auth_style: :x_api_key,
-      available_models: [
-        "claude-opus-5",
-        "claude-opus-4.8",
-        "claude-sonnet-4.6",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gemini-3.1-pro-preview",
-        "grok-4-6",
-        "grok-4.5",
-        "kimi-k3",
-        "deepseek-v4-pro",
-        "glm-5.2",
-        "qwen3-coder",
-        "hermes-3-llama-3.1-405b"
-      ]
+      available_models: {OptimalSystemAgent.Providers.UncensoredModels, :offerable_ids}
     },
 
     # LM Studio — local, OpenAI-compatible server (no key needed)
@@ -303,7 +297,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   @doc "Return available models for a given provider."
   def available_models(provider) do
     config = get_config!(provider)
-    Map.get(config, :available_models, [config.default_model])
+
+    # A `{module, function}` list is resolved at CALL time, not at compile
+    # time. Every hand-written list above is editorial — a human decided what
+    # is worth offering, and pruned the models too close to retirement to be a
+    # safe fresh pick. A list derived from a live catalog gets no such pass, and
+    # baking the filter in at compile time would freeze "retiring soon" to the
+    # build date, which is the expiring-assertion shape the retirement ratchet
+    # exists to catch.
+    case Map.get(config, :available_models, [config.default_model]) do
+      {mod, fun} -> apply(mod, fun, [])
+      list when is_list(list) -> list
+    end
   end
 
   @doc """

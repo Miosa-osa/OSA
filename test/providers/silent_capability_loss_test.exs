@@ -1308,8 +1308,11 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     end
 
     @cached_system [
-      %{"type" => "text", "text" => String.duplicate("static base. ", 400),
-        "cache_control" => %{"type" => "ephemeral"}},
+      %{
+        "type" => "text",
+        "text" => String.duplicate("static base. ", 400),
+        "cache_control" => %{"type" => "ephemeral"}
+      },
       %{"type" => "text", "text" => "volatile tail: 12:04:11"}
     ]
 
@@ -1551,7 +1554,14 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
       OptimalSystemAgent.Providers.GoogleModels,
       OptimalSystemAgent.Providers.DeepSeekModels,
       OptimalSystemAgent.Providers.MistralModels,
-      OptimalSystemAgent.Providers.OllamaCloud
+      OptimalSystemAgent.Providers.OllamaCloud,
+      # A RESELLER's rate card, and the reason the ratchet had to learn about
+      # namespaced ids at all. api.uncensored.com relists the catalogs above
+      # under their own vendor ids at its own margin, so `claude-opus-5` there
+      # billed Anthropic's {5.00, 25.00} against a real {6.00, 30.00} — and,
+      # like the three defects this describe block was written for, said
+      # `:exact` while doing it.
+      OptimalSystemAgent.Providers.UncensoredModels
     ]
 
     # The last date on which every catalog's `:pricing` is, by definition, the
@@ -1580,8 +1590,15 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     # `:free`/`:nitro` are routing directives, not identity. Ids that already
     # carry a `:` tag (`glm-5.2:cloud`) are left alone — a second colon is not
     # a spelling anything emits.
+    #
+    # An id that ALREADY carries a `/` segment is a namespaced reseller key
+    # (`uncensored/claude-opus-5`), not a bare model id, and is not re-prefixed:
+    # `vendor/uncensored/claude-opus-5` is a string nothing emits, and
+    # `lookup_keys/1` would strip it down to the bare `claude-opus-5` and answer
+    # with the upstream VENDOR's rate — turning a spelling no gateway sends into
+    # a failure this ratchet cannot act on.
     defp gateway_spellings(id) do
-      base = [id, "vendor/" <> id]
+      base = if String.contains?(id, "/"), do: [id], else: [id, "vendor/" <> id]
       if String.contains?(id, ":"), do: base, else: base ++ Enum.map(base, &(&1 <> ":free"))
     end
 

@@ -171,6 +171,13 @@ defmodule OptimalSystemAgent.Agent.Pricing do
            # threshold, and a blended rate would be wrong for every turn.
            |> Map.merge(OptimalSystemAgent.Providers.XAIModels.pricing())
            |> Map.merge(OptimalSystemAgent.Providers.MistralModels.pricing())
+           # api.uncensored.com RESELLS the ids above under their own names at
+           # its own margin, so `claude-opus-5` on that gateway is not the same
+           # price as `claude-opus-5` on Anthropic. Its rows are namespaced
+           # `uncensored/<id>` and cannot collide with the vendor rows they sit
+           # beside; `qualify/2` composes that key from the provider. Merged
+           # last for no reason other than that it is the only reseller here.
+           |> Map.merge(OptimalSystemAgent.Providers.UncensoredModels.pricing())
 
   # Ordered family fallbacks — first substring match wins. Checked only when
   # there is no exact hit. Keep specific families before generic ones.
@@ -190,6 +197,51 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     {"gpt-3.5", {0.50, 1.50}},
     {"deepseek", {0.27, 1.10}}
   ]
+
+  # ── Resellers: the same id, a different price ────────────────────────────
+  #
+  # Every lookup in this module is keyed by MODEL ID, which assumes an id names
+  # one price. A reselling gateway breaks that assumption: api.uncensored.com
+  # serves `claude-opus-5` at {6.00, 30.00} while Anthropic serves the same id
+  # at {5.00, 25.00}, and OSA billed the vendor's number at `:exact` for both.
+  #
+  # Rather than thread a provider argument through `rates/confidence/cost` and
+  # every caller of them, the provider is folded into the KEY, once, here. The
+  # reseller's catalog is namespaced `uncensored/<id>`, `lookup_keys/1` already
+  # tries the full string before it strips a prefix, and everything downstream —
+  # the exact table, the cache-read column, `confidence/2` — works unchanged.
+  #
+  # A provider absent from this map is returned untouched, which is every
+  # provider but one: a first-party endpoint charging its own vendor's published
+  # rate needs no qualification, and adding one that does not resell would make
+  # its models unpriceable.
+  @reseller_prefixes %{uncensored: "uncensored/"}
+
+  @doc """
+  The pricing key for `model` as served by `provider`.
+
+  Identity for every provider that sells its own models. For a RESELLER — a
+  gateway relisting other vendors' model ids at its own margin — this returns
+  the namespaced key that reaches the reseller's own rate card instead of the
+  vendor's.
+
+  Callers that price a turn must pass the model through this first, or a
+  reseller's turn is billed at the upstream vendor's list rate and reported
+  `:exact`. `Agent.Loop.Accounting` is the only such caller today.
+  """
+  @spec qualify(String.t() | atom() | nil, atom() | nil) :: String.t() | atom() | nil
+  def qualify(model, provider) when is_binary(model) do
+    case Map.fetch(@reseller_prefixes, provider) do
+      {:ok, prefix} -> prefix <> model
+      :error -> model
+    end
+  end
+
+  def qualify(model, _provider), do: model
+
+  @doc false
+  @spec reseller_prefixes() :: %{atom() => String.t()}
+  def reseller_prefixes, do: @reseller_prefixes
 
   @doc """
   Return `{input_rate, output_rate}` (USD per 1M tokens) for a model, or `nil`
@@ -313,11 +365,28 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     end
   end
 
+  # A key that names a RESELLER (`uncensored/claude-opus-5`) is answered from
+  # the exact map alone. The SSOT resolvers below are deliberately
+  # decoration-tolerant — `ZaiModels.resolve/1` strips a vendor prefix and a
+  # routing suffix before matching — and they cannot tell a reseller namespace
+  # from a vendor prefix. Left unguarded they answered
+  # `uncensored/glm-5.2:free` with Z.ai's own {1.40, 4.40} instead of the
+  # gateway's {1.68, 5.28}, at `:exact`, which is the entire defect the
+  # namespace exists to prevent. (Found by the class ratchet in
+  # `silent_capability_loss_test.exs` on its first run against this catalog.)
+  #
+  # A reseller model this catalog does NOT carry still reaches the vendor rate:
+  # `lookup_keys/1` also yields the bare id, which carries no prefix and is
+  # resolved normally.
   defp exact_rate(key) do
     case Map.fetch(@pricing, key) do
       {:ok, rate} -> rate
-      :error -> ssot_rate(key)
+      :error -> if reseller_key?(key), do: nil, else: ssot_rate(key)
     end
+  end
+
+  defp reseller_key?(key) do
+    Enum.any?(@reseller_prefixes, fn {_provider, prefix} -> String.starts_with?(key, prefix) end)
   end
 
   # Exact-key lookup happens above; this catches DATED SNAPSHOT ids that the
@@ -509,10 +578,16 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # NOTHING, while `do_cost/3` applied `input * 0.1` to everything. On grok-4.6
   # that under-billed cache reads by 2.5x; on deepseek-v4-flash it OVER-bills
   # them by 5x. Both silent, both `:exact`.
+  # `UncensoredModels` is safe to consult here only because its `model/1` is
+  # exact-match on the NAMESPACED id and never answers for a bare vendor id.
+  # `catalog_cache_read/1` walks `lookup_keys/1`, which includes the bare id, so
+  # a prefix-tolerant reseller catalog would hand Anthropic's own turns this
+  # gateway's resale cache rate.
   @cache_read_modules [
     OptimalSystemAgent.Providers.XAIModels,
     OptimalSystemAgent.Providers.ZaiModels,
-    OptimalSystemAgent.Providers.DeepSeekModels
+    OptimalSystemAgent.Providers.DeepSeekModels,
+    OptimalSystemAgent.Providers.UncensoredModels
   ]
 
   @doc """
@@ -527,7 +602,9 @@ defmodule OptimalSystemAgent.Agent.Pricing do
           {number(), :published | :multiplier} | nil
   def cache_read_rate(model, at \\ nil)
   def cache_read_rate(nil, _at), do: nil
-  def cache_read_rate(model, at) when is_atom(model), do: cache_read_rate(Atom.to_string(model), at)
+
+  def cache_read_rate(model, at) when is_atom(model),
+    do: cache_read_rate(Atom.to_string(model), at)
 
   def cache_read_rate(model, at) when is_binary(model) do
     at = at || DateTime.utc_now()
@@ -834,14 +911,20 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # local tag is untouched: `qwen2.5:7b` keeps its `:7b` (not a routing
   # suffix), `ollama/llama3` still matches on its prefix, and a `:cloud` tag is
   # still excluded as hosted.
+  #
+  # A reseller-namespaced key is excluded outright, for the same reason it is
+  # kept away from the SSOT resolvers: this heuristic reads the id's SHAPE, and
+  # a gateway that sells `uncensored/qwen3-30b-a3b` for money is not hosting it
+  # on the user's laptop for free.
   defp ollama_local?(key) do
     bare = strip_routing_suffix(key)
 
-    String.starts_with?(bare, "ollama/") or
-      (String.contains?(bare, ":") and
-         (String.contains?(bare, "llama") or String.contains?(bare, "qwen") or
-            String.contains?(bare, "mistral") or String.contains?(bare, "gemma") or
-            String.contains?(bare, "phi")) and not String.contains?(bare, "cloud"))
+    not reseller_key?(key) and
+      (String.starts_with?(bare, "ollama/") or
+         (String.contains?(bare, ":") and
+            (String.contains?(bare, "llama") or String.contains?(bare, "qwen") or
+               String.contains?(bare, "mistral") or String.contains?(bare, "gemma") or
+               String.contains?(bare, "phi")) and not String.contains?(bare, "cloud")))
   end
 
   defp get_tok(usage, key) do

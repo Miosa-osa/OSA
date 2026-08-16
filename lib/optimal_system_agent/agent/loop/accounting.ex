@@ -329,10 +329,19 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   every token in the same usage map OSA would price again, so adding the two
   double-bills the turn — which is why this is a replacement and the telemetry
   below names which of the two produced the number.
+
+  The rate-card branch prices `Pricing.qualify(model, provider)`, not the bare
+  model: a reselling gateway serves other vendors' model ids at its own margin,
+  so the id alone does not name a price. Identity for every provider that is
+  not a reseller.
   """
   @spec turn_cost(map(), map(), keyword()) :: float()
   def turn_cost(state, norm, opts \\ []) do
-    estimate = Pricing.cost(Map.get(state, :model), norm)
+    estimate =
+      Pricing.cost(
+        Pricing.qualify(Map.get(state, :model), Map.get(state, :provider)),
+        norm
+      )
 
     case provider_cost(opts) do
       nil ->
@@ -358,7 +367,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   defp report_cost_source(state, reported, estimate) do
     :telemetry.execute(
       [:osa, :accounting, :provider_cost],
-      %{provider_cost_usd: reported, rate_card_estimate_usd: estimate, delta_usd: reported - estimate},
+      %{
+        provider_cost_usd: reported,
+        rate_card_estimate_usd: estimate,
+        delta_usd: reported - estimate
+      },
       %{provider: Map.get(state, :provider), model: Map.get(state, :model)}
     )
 
@@ -487,7 +500,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       # over the rate card, and is never added to it.
       cost =
         provider_cost(opts) ||
-          Pricing.cost(Keyword.get(opts, :model), norm)
+          Pricing.cost(
+            Pricing.qualify(Keyword.get(opts, :model), Keyword.get(opts, :provider)),
+            norm
+          )
 
       kind = Keyword.get(opts, :kind, :compaction)
 
