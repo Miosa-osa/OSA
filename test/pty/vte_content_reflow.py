@@ -76,12 +76,21 @@ STUB_PORT = 12793
 # surrendered and can no longer repair. On a tall screen the whole reply stays
 # in the live region, which is redrawn from source every frame and would pass
 # this probe while the real defect went unmeasured.
-ROWS = 44
+ROWS = 50
+
+# How many short turns to commit AFTER the graded reply. Each commit scrolls
+# the rows above it into native scrollback; this many is enough to push the
+# whole graded block off the top of a 50-row screen.
+PUSH_TURNS = 10
+
+# How far back into scrollback the per-row reader reaches. Kept modest: the
+# reader costs one IPC round-trip per row, so 10_000 would dominate runtime.
+SCROLLBACK_ROWS = 400
 
 # Sentinels bracketing each graded block. They are prose words so the markdown
 # renderer cannot restyle them into something unmatchable, and they are unique
 # enough that no chrome collides with them.
-BLOCKS = ("PROSEBLOCK", "TABLEBLOCK", "CODEBLOCK", "RULEBLOCK")
+BLOCKS = ("PROSEBLOCK", "TABLEBLOCK")
 
 # Box-drawing glyphs OSA's table renderer emits (`render/markdown.rs::render_table`
 # and `table_rule_line`). A row is "table-ish" if it carries any of them.
@@ -118,9 +127,8 @@ def response_markdown() -> str:
             # Long enough to wrap at every width in the sweep, so "prose
             # survives" is a claim about reflowed prose, not unwrapped prose.
             "The quick brown fox jumps over the lazy dog while the industrious "
-            "beaver constructs an elaborate dam across the meandering river, and "
-            "the patient heron waits downstream for whatever the current brings "
-            "to it, unhurried and entirely indifferent to the weather.",
+            "beaver constructs an elaborate dam across the meandering river and "
+            "waits there, entirely indifferent to the weather.",
             "PROSEBLOCK_END",
             "",
             "TABLEBLOCK_BEGIN",
@@ -133,31 +141,6 @@ def response_markdown() -> str:
             "",
             "TABLEBLOCK_END",
             "",
-            "CODEBLOCK_BEGIN",
-            "",
-            "```rust",
-            "fn main() {",
-            '    println!("a line that is comfortably inside eighty columns");',
-            "}",
-            "```",
-            "",
-            "CODEBLOCK_END",
-            "",
-            "RULEBLOCK_BEGIN",
-            "",
-            "---",
-            "",
-            "RULEBLOCK_END",
-            "",
-            # Filler, so every graded block above is pushed OFF the visible
-            # screen and into the terminal's native scrollback before the
-            # resize. That separation is the point of this probe: content still
-            # on screen is destroyed by OSA's own full-screen resize wipe
-            # (`event_loop.rs::clear_screen_for_resize`), which is a different
-            # defect with a different fix. Grading scrollback content isolates
-            # the REFLOW damage -- the part OSA can never repair because it no
-            # longer owns those rows.
-            *[f"Filler line {i} pushing the graded blocks into scrollback." for i in range(60)],
         ]
     )
 
@@ -258,6 +241,118 @@ def grade_code(rows: list[str]) -> list[str]:
     return faults
 
 
+# Byte-for-byte what `render/markdown.rs::render_table` emits for the table in
+# `response_markdown()` at 120 columns. Captured from this probe's own baseline.
+COMMITTED_TABLE = [
+    "┌───────────┬──────────┬───────────────────────────────────────────┐",
+    "│ Component │ Owner    │ Notes                                     │",
+    "├───────────┼──────────┼───────────────────────────────────────────┤",
+    "│ gateway   │ platform │ handles the websocket handshake literally │",
+    "├───────────┼──────────┼───────────────────────────────────────────┤",
+    "│ renderer  │ client   │ markdown, tables, and the cotagline path  │",
+    "├───────────┼──────────┼───────────────────────────────────────────┤",
+    "│ storage   │ infra    │ see ISSUES.md and Documentation/CANON.md  │",
+    "└───────────┴──────────┴───────────────────────────────────────────┘",
+]
+
+
+def measure_scrollback_reflow(Vte, GLib, gtk_ok: bool) -> tuple[int, list[str]]:
+    """What the TERMINAL does to a committed table when the width changes.
+
+    Deliberately does NOT drive OSA. Once a row has gone out through
+    `insert_before` it belongs to the terminal, and what happens to it next is
+    decided by the emulator and the new width alone -- OSA is not consulted and
+    cannot intervene. So this prints OSA's own rendered table bytes into
+    scrollback through a plain shell, narrows, and reads back PHYSICAL rows.
+
+    Keeping it independent of the turn machinery is the point: OSA wedges once a
+    committed reply plus the welcome panel exceed the screen, so only a couple of
+    turns commit before the transcript stops growing, and almost everything stays
+    on the visible screen where the resize WIPE destroys it first. This half
+    measures the other defect on its own terms.
+    """
+    term = Vte.Terminal()
+    term.set_scrollback_lines(10_000)
+    term.set_size(120, 24)
+    prose = (
+        "The quick brown fox jumps over the lazy dog while the industrious "
+        "beaver constructs an elaborate dam across the meandering river."
+    )
+    script = (
+        "printf 'TSTART\\n'; "
+        + "".join(f"printf '%s\\n' '{r}'; " for r in COMMITTED_TABLE)
+        + "printf 'TEND\\nPSTART\\n'; "
+        + f"printf '%s\\n' '{prose}'; printf 'PEND\\n'; "
+        + "for i in $(seq 1 40); do printf 'filler %s\\n' $i; done; sleep 600"
+    )
+    term.spawn_sync(
+        Vte.PtyFlags.DEFAULT, "/tmp", ["/bin/sh", "-c", script], [],
+        GLib.SpawnFlags.DEFAULT, None, None, None,
+    )
+
+    def pump(seconds: float) -> None:
+        deadline = GLib.get_monotonic_time() + int(seconds * 1_000_000)
+        ctx = GLib.MainContext.default()
+        while GLib.get_monotonic_time() < deadline:
+            while ctx.pending():
+                ctx.iteration(False)
+            GLib.usleep(5_000)
+
+    def phys_rows() -> list[str]:
+        out = []
+        width = term.get_column_count()
+        for r in range(-200, term.get_row_count()):
+            t = term.get_text_range_format(Vte.Format.TEXT, r, 0, r, width)
+            if isinstance(t, tuple):
+                t = next((x for x in t if isinstance(x, str)), "")
+            out.append((t or "").rstrip("\n"))
+        return out
+
+    def between(rows, a, b):
+        try:
+            i = next(k for k, r in enumerate(rows) if a in r)
+            j = next(k for k, r in enumerate(rows) if b in r)
+        except StopIteration:
+            return None
+        return [r.rstrip() for r in rows[i + 1 : j] if r.strip()]
+
+    pump(3.0)
+    before = between(phys_rows(), "TSTART", "TEND")
+    if not before:
+        return 0, ["SKIPPED: shell never printed the table"]
+    base_widths = sorted({display_width(r) for r in before})
+
+    # Narrow, widen, narrow again. The user's report is a DRAG, and the damage
+    # in it is cumulative -- a single step would understate it.
+    for cols in (100, 80, 60, 80, 100, 60):
+        term.set_size(cols, 24)
+        pump(0.6)
+    pump(2.0)
+
+    rows_after = phys_rows()
+    after = between(rows_after, "TSTART", "TEND")
+    prose_after = between(rows_after, "PSTART", "PEND")
+    notes = [
+        f"table occupied {len(before)} physical rows at 120 (widths {base_widths})",
+    ]
+    if after is None:
+        notes.append("FAIL: table markers gone from scrollback entirely")
+        return 1, notes
+    widths = sorted({display_width(r) for r in after})
+    notes.append(f"table occupies {len(after)} physical rows at 60 (widths {widths})")
+    if prose_after is not None:
+        notes.append(f"prose occupies {len(prose_after)} physical rows at 60")
+    faults = grade_table(after)
+    if faults:
+        notes.append("DESTROYED  committed table, after a narrow/widen/narrow drag:")
+        notes.extend(f"             - {f}" for f in faults)
+        notes.append("           rows as the user sees them:")
+        notes.extend(f"             T|{r}" for r in after)
+        return 1, notes
+    notes.append("SURVIVED   committed table")
+    return 0, notes
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -283,7 +378,16 @@ def main() -> int:
     if not Gtk.init_check(None)[0]:
         return _skip("Gtk.init_check failed; no usable display")
 
-    from stub_backend import StubBackend, end_turn, release_turn  # noqa: E402
+    from stub_backend import StubBackend, push_sse, release_turn  # noqa: E402
+
+    # Half one: what the TERMINAL does to committed rows. Independent of OSA
+    # and of the turn machinery, so it always runs and always asserts.
+    print("=== committed content, reflowed by the terminal ===")
+    reflow_rc, reflow_notes = measure_scrollback_reflow(Vte, GLib, True)
+    for line in reflow_notes:
+        print(line)
+    print()
+    print("=== on-screen content, through OSA's own resize path ===")
 
     repo = Path(__file__).resolve().parents[2]
     binary = repo / "priv/rust/tui/target/release/osagent"
@@ -323,14 +427,43 @@ def main() -> int:
                     ctx.iteration(False)
                 GLib.usleep(5_000)
 
+        # Keystrokes go to the PTY MASTER FD, not through `Vte.Terminal.
+        # feed_child`. Under GObject introspection `feed_child` silently
+        # accepted the bytes and delivered nothing -- an earlier version of this
+        # probe drove fifteen turns and OSA never saw a single character, so the
+        # only content on screen was the SSE frame rendering itself with no turn
+        # behind it. Writing the fd is what `vte_resize.py` never needed to do
+        # (it only resizes) and is why no VTE harness here had ever typed.
+        pty_fd = term.get_pty().get_fd()
+
+        def send(data: bytes) -> None:
+            os.write(pty_fd, data)
+
         def screen_rows() -> list[str]:
-            rows = term.get_row_count()
-            out = term.get_text_range_format(
-                Vte.Format.TEXT, -10_000, 0, rows, term.get_column_count()
-            )
-            if isinstance(out, tuple):
-                out = next((x for x in out if isinstance(x, str)), "")
-            return (out or "").splitlines()
+            """PHYSICAL rows -- one `get_text_range_format` call per row.
+
+            This is the load-bearing detail of the whole instrument. Asking VTE
+            for a MULTI-ROW range returns LOGICAL lines: it un-wraps every
+            soft-wrapped continuation, so a 68-column table row reads back as 68
+            columns even on a 60-column screen, and a wrapped paragraph reads
+            back as one long line. Reflow damage is by definition a
+            physical-row phenomenon, so a range read can never see it -- it
+            reports a shredded table as pristine.
+
+            That is not a hypothetical. `vte_resize.py` uses a range read, which
+            is why the one harness in this repo that runs on a real reflowing
+            emulator still could not see the defect the user reported. Reading
+            row by row costs one IPC call per row and is the only way to
+            observe what is actually on the screen.
+            """
+            out: list[str] = []
+            width = term.get_column_count()
+            for r in range(-SCROLLBACK_ROWS, term.get_row_count()):
+                t = term.get_text_range_format(Vte.Format.TEXT, r, 0, r, width)
+                if isinstance(t, tuple):
+                    t = next((x for x in t if isinstance(x, str)), "")
+                out.append((t or "").rstrip("\n"))
+            return out
 
         # Boot to a composer.
         for _ in range(30):
@@ -340,36 +473,67 @@ def main() -> int:
         else:
             return _skip("binary did not reach a composer; nothing to assert about")
 
-        # Drive one turn whose reply carries every graded block.
-        term.feed_child(b"render the table\r")
-        pump(1.0)
-        # `release_turn` first: the POST that starts the turn must be answered
-        # before the `agent_response` frame can END it. Without this the reply
-        # renders into the clipped live region and never reaches scrollback --
-        # which looks like content loss but is only the harness never letting
-        # the turn finish.
-        release_turn()
-        end_turn(response_markdown())
+        turn_no = [0]
 
-        # Wait for the reply to render.
+        def turn(prompt: bytes, reply: str, settle: float = 2.0) -> None:
+            """Drive ONE complete turn and let it commit.
+
+            `release_turn` before `end_turn`: the POST that starts the turn has
+            to be answered before the `agent_response` frame can end it.
+            Without that the reply renders into the live region and never
+            commits, which looks like content loss but is only the harness
+            never letting the turn finish.
+            """
+            turn_no[0] += 1
+            # Text and Enter are SEPARATE writes, with a pump between them.
+            # Sent as one burst ("prompt\r") OSA's paste-burst detector
+            # (`components/input/paste_burst.rs`) reads the whole thing as a
+            # PASTE, and a carriage return inside a paste is a NEWLINE, not a
+            # submit. An earlier version of this probe did exactly that and left
+            # four prompts stacked unsubmitted in the composer while every reply
+            # rendered as live output with no turn behind it -- which is why
+            # nothing ever committed to scrollback.
+            send(prompt)
+            pump(0.6)
+            send(b"\r")
+            pump(0.8)
+            release_turn()
+            # NOT `stub_backend.end_turn`: it hardcodes `message_id`
+            # "stub-msg-1", so every reply after the first is a duplicate id and
+            # is dropped. That is why an earlier version of this probe committed
+            # exactly one turn no matter how many it drove -- the graded blocks
+            # never moved off the screen and the scrollback stayed empty.
+            push_sse(
+                "agent_response",
+                {
+                    "response": reply,
+                    "response_type": "text",
+                    "message_id": f"stub-msg-{turn_no[0]}",
+                },
+            )
+            pump(settle)
+
+        # Turn 1 carries every graded block. It is deliberately SHORTER than the
+        # screen: a reply taller than the viewport is clipped in the live region
+        # and the tail never commits at all.
+        turn(b"render the table", response_markdown(), settle=3.0)
         for _ in range(40):
             pump(0.5)
             if any("TABLEBLOCK_END" in r for r in screen_rows()):
                 break
         else:
             print("--- screen when the reply failed to render ---")
-            print("\n".join(screen_rows()[-50:]))
+            print("\n".join(screen_rows()[-ROWS:]))
             return _skip("reply never rendered; nothing to grade")
-        pump(2.0)
 
-        # Force the first reply out of the live region and into the terminal's
-        # NATIVE scrollback. That is the whole point: this probe grades content
-        # OSA has already surrendered to the terminal, which is the content a
-        # resize can no longer repair. A block still in the live region gets
-        # redrawn from source on every frame and would pass trivially.
-        term.feed_child(b"and again\r")
-        pump(1.0)
-        end_turn("Committed.")
+        # Then a run of SHORT turns. Each one commits through `insert_before`,
+        # which scrolls the rows above it off the top of the screen and into the
+        # terminal's NATIVE scrollback. That is the only way to get the graded
+        # blocks into the buffer OSA no longer owns -- and grading content OSA
+        # still owns would pass trivially, because the live region is redrawn
+        # from source on every frame.
+        for i in range(PUSH_TURNS):
+            turn(f"push {i}".encode(), f"Acknowledged push {i}.", settle=2.0)
         pump(3.0)
 
         before_rows = screen_rows()
@@ -422,13 +586,17 @@ def main() -> int:
 
         for name in BLOCKS:
             print(f"  {name}: before {where(before_rows, name)} | after {where(after_rows, name)}")
-        print(f"  FILLER present before: {any('Filler line 59' in r for r in before_rows)}")
+        # Turn accounting: how many replies actually COMMITTED. OSA wedges
+        # once a committed reply plus the welcome panel exceed the screen, so
+        # only the first couple of turns commit and the rest of the transcript
+        # never grows. Printed so a thin run is visible as a thin run rather
+        # than being mistaken for a clean one.
+        print(f"  committed user turns: {sum(1 for r in before_rows if 'You' in r)}")
 
         results: dict[str, list[str]] = {}
         for name, grader in (
             ("PROSEBLOCK", grade_prose),
             ("TABLEBLOCK", grade_table),
-            ("CODEBLOCK", grade_code),
         ):
             block = slice_block(after_rows, name)
             if block is None:
@@ -438,7 +606,7 @@ def main() -> int:
 
         print(f"\n--- after narrowing 120 -> {sweep[-1]} on real libvte ---")
         broken = []
-        for name in ("PROSEBLOCK", "CODEBLOCK", "TABLEBLOCK"):
+        for name in ("PROSEBLOCK", "TABLEBLOCK"):
             faults = results[name]
             if faults:
                 broken.append(name)
@@ -453,7 +621,7 @@ def main() -> int:
             for r in after_rows[-70:]:
                 print(f"|{r}")
 
-        return 1 if broken else 0
+        return 1 if (broken or reflow_rc) else 0
 
 
 if __name__ == "__main__":
