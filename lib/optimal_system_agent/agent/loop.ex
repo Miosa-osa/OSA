@@ -1706,8 +1706,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
     _ = SessionPersistence.flush_spend(state.session_id, state)
 
     if turn_in_flight?(state) do
+      Logger.info(
+        "[loop] session #{state.session_id}: clean exit MID-TURN (status " <>
+          "#{inspect(Map.get(state, :status))}) — keeping the crash checkpoint and " <>
+          "durable step log so the turn can be restored"
+      )
+
       save_unsaved_turn(state, hook_reason)
     else
+      Logger.info(
+        "[loop] session #{state.session_id}: clean exit at an idle boundary — " <>
+          "clearing the crash checkpoint and durable step log"
+      )
+
       Checkpoint.clear_checkpoint(state.session_id)
       DurableLog.clear(state.session_id)
     end
@@ -1716,7 +1727,28 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :ok
   end
 
-  defp turn_in_flight?(%{status: :processing}), do: true
+  # A turn is in flight unless the loop is idle.
+  #
+  # This was `%{status: :processing}` — a status a real user turn NEVER carries.
+  # `TurnPipeline.reset_per_turn_fields/1` stamps `:thinking` at the top of
+  # every turn (turn_pipeline.ex) and the turn ends back at `:idle`;
+  # `:processing` is written in exactly one place in the whole tree, the
+  # synthetic background-task turn in `handle_cast(:poke, …)` above. So for
+  # every real turn this answered "no turn in flight", and `end_session/2` took
+  # the branch that DELETES `Checkpoint` and `DurableLog` — the two markers
+  # `init/1` reads back to restore an interrupted turn, and precisely the
+  # recovery evidence the comment above says is only safe to clear at a genuine
+  # idle boundary. A `/clear`, a `SessionManager.stop_session/1`, or an
+  # application stop landing mid-turn threw the turn's work away silently.
+  #
+  # Restated over the real domain: `:idle` is the only status that means no
+  # turn. Anything else — `:thinking`, `:processing`, or a status added later —
+  # is in flight. That direction fails safe: an unrecognised status keeps the
+  # recovery markers instead of discarding a turn, which is the asymmetry that
+  # matters (a stale checkpoint is cleared at the next turn boundary; a deleted
+  # one is gone).
+  defp turn_in_flight?(%{status: :idle}), do: false
+  defp turn_in_flight?(%{status: status}) when is_atom(status), do: true
   defp turn_in_flight?(_), do: false
 
   # Best-effort durable save of a turn that never reached `:post_response`.
