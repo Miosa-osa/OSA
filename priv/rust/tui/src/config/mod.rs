@@ -171,6 +171,17 @@ pub struct Config {
     /// the animated star spinner + braille feed. Toggled via `/a11y`.
     #[serde(default)]
     pub a11y: bool,
+    /// Print the conversation to the primary screen when OSA exits.
+    ///
+    /// ON by default, because that is today's behaviour: OSA used to commit the
+    /// transcript into the terminal's own scrollback, so quitting left it there
+    /// to scroll back through, copy a command out of, or paste into a ticket.
+    /// Owning the viewport is what keeps the user's pre-launch shell history
+    /// safe across a resize, but it also means the alternate screen takes the
+    /// session with it on the way out. This puts it back. Set false for a clean
+    /// terminal on exit.
+    #[serde(default = "default_exit_transcript")]
+    pub exit_transcript: bool,
     /// Lean view: hide tool calls and tool results from the printed
     /// conversation, leaving the model's prose (and its reasoning, which is live
     /// chrome and unaffected). Toggled via `/lean`.
@@ -194,6 +205,10 @@ pub struct Config {
     pub skip_permissions: bool,
 }
 
+fn default_exit_transcript() -> bool {
+    true
+}
+
 fn default_theme() -> String {
     "dark".to_string()
 }
@@ -213,6 +228,7 @@ impl Default for Config {
             request_timeout_secs: default_request_timeout_secs(),
             goal_max_cycles: default_goal_max_cycles(),
             a11y: false,
+            exit_transcript: default_exit_transcript(),
             lean: false,
             sidebar_enabled: false,
             profile_dir: default_profile_dir(),

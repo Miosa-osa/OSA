@@ -137,6 +137,7 @@ impl App {
                 // back on screen, so it clears with the rest. Leaving it would
                 // resurrect the whole conversation on the next resize.
                 self.committed.clear();
+                crate::app::exit_dump::clear();
                 self.attachments.clear();
                 // ...including everything that can PUT A MESSAGE BACK.
                 //

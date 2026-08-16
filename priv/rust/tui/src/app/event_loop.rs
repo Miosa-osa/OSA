@@ -1433,6 +1433,10 @@ impl App {
             //     of nothing but hidden tools leaves that lane empty.
             for msg in self.chat.drain_hidden() {
                 if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(&msg) {
+                    crate::app::exit_dump::record(
+                        crate::app::exit_dump::role_of(entry.role),
+                        entry.text.clone(),
+                    );
                     self.transcript_log.push(entry);
                 }
             }
@@ -1488,6 +1492,12 @@ impl App {
                     if let Some(entry) =
                         crate::dialogs::transcript_viewer::entry_from_message(&msg)
                     {
+                        // Same choke point, so the exit dump and the re-layout
+                        // store cannot drift apart.
+                        crate::app::exit_dump::record(
+                            crate::app::exit_dump::role_of(entry.role),
+                            entry.text.clone(),
+                        );
                         self.transcript_log.push(entry);
                     }
                     // Parse the markdown ONCE for this message. `height(w)` on

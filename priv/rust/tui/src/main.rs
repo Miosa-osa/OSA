@@ -123,6 +123,9 @@ fn compute_viewport_height(term_rows: u16) -> u16 {
 fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     // Load config
     let cfg = config::Config::load(&cli)?;
+    // Applied to a process global, not threaded through `App`: `restore_terminal`
+    // and the panic hook both need it and neither has an `&App`.
+    app::exit_dump::set_enabled(cfg.exit_transcript);
 
     // Setup terminal — NO alt screen. Bracketed paste keeps the Ctrl+V / paste
     // flow working, and mouse capture lets the user click into the composer and
@@ -325,6 +328,25 @@ fn restore_terminal() -> Result<()> {
     if app::alt_screen::is_active() {
         let _ = execute!(stdout, LeaveAlternateScreen);
     }
+    // Leave the conversation behind on the primary screen.
+    //
+    // Placed HERE, in the one function every exit path funnels through —
+    // `/exit`, Ctrl-D, Ctrl-C, a signal, and the panic hook — rather than at the
+    // clean-quit site. A crash that eats the user's session is worse than a
+    // resize that shreds a table, and this codebase has already shipped one
+    // defect of that family: the CLI called `System.halt(0)` and skipped its own
+    // transcript save, leaving 1,684 of 3,029 spend files with no transcript.
+    //
+    // After `LeaveAlternateScreen`, so the rows land on the primary screen the
+    // shell prompt will follow them onto; before raw mode is dropped, so the
+    // `\r` terminators still mean what they say. The width is read now, not at
+    // commit time — the dump is laid out for the terminal the user is actually
+    // looking at.
+    // Through `frame_size::probe`, not a bare `crossterm::terminal::size` — the
+    // repo keeps exactly one call site so a frame is laid out against one size,
+    // and a guard test walks the tree to keep it that way. It caught this.
+    let dump_width = app::frame_size::probe().cols;
+    app::exit_dump::print_to(&mut stdout, dump_width);
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, DisableMouseCapture);
     // U-T11: stop focus reporting (paired with EnableFocusChange in setup) so the

@@ -1,4 +1,5 @@
 pub mod alt_screen;
+pub mod exit_dump;
 pub mod assistant_stream;
 pub mod attachment;
 pub mod commands;
