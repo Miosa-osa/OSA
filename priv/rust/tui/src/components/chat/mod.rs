@@ -125,6 +125,21 @@ pub struct Chat {
     /// the one-line "N tool calls hidden" receipt at turn end — total silence
     /// while a 60-turn task runs would read as a hang.
     hidden_count: usize,
+    /// Monotonic count of blocks that have reached the user's screen.
+    ///
+    /// Bumped at the two — and only two — places a block is queued for
+    /// scrollback, so it is an exact answer to "has anything become visible?"
+    /// rather than a flag each caller has to remember to set.
+    emitted: u64,
+    /// Value of `emitted` at the moment the CURRENT turn's user message was
+    /// pushed. Everything after it is this turn's output.
+    ///
+    /// The mark is taken inside [`Chat::add_user_message`] rather than by the
+    /// app, because every submit path in the TUI — typed prompt, queued
+    /// message, slash command, resumed draft — opens its turn by echoing the
+    /// user's line through that one function. Anchoring it there means a new
+    /// submit path cannot be added that forgets to arm it.
+    turn_output_mark: u64,
 }
 
 impl Chat {
@@ -154,7 +169,23 @@ impl Chat {
             lean: false,
             hidden: Vec::new(),
             hidden_count: 0,
+            emitted: 0,
+            turn_output_mark: 0,
         }
+    }
+
+    /// Whether the current turn has put ANYTHING on the user's screen since
+    /// their message opened it — assistant prose, a tool cell, a system line.
+    ///
+    /// The one question that separates "the turn answered" from "the turn
+    /// ended and the screen is exactly as the user left it". A turn for which
+    /// this is false, and which then renders nothing at its end, is
+    /// indistinguishable from a keypress the app threw away.
+    ///
+    /// A tool cell hidden by the lean view counts: the user chose to hide it,
+    /// and the "N tool calls hidden" receipt tells them it happened.
+    pub fn turn_produced_output(&self) -> bool {
+        self.emitted > self.turn_output_mark || self.hidden_count > 0
     }
 
     // ── Lean view (`/lean`) ───────────────────────────────────────────
@@ -261,6 +292,7 @@ impl Chat {
             self.hidden.push(msg);
             return;
         }
+        self.emitted += 1;
         if self.scrollback_started {
             self.scrollback.push(Message::new_tool_call(ToolCallData {
                 name: String::new(),
@@ -317,6 +349,7 @@ impl Chat {
         msg.set_raw_mode(self.raw_view);
         if self.agent_flow_open && !header {
             self.scrollback_started = true;
+            self.emitted += 1;
             self.scrollback.push(msg);
             self.has_messages = true;
         } else {
@@ -361,6 +394,9 @@ impl Chat {
         }
         self.turn_started = true;
         self.push_scrollback_block(Message::new(MessageType::User, content.to_string(), None));
+        // Arm the per-turn output mark AFTER the echo, so the user's own line
+        // never counts as the turn answering them. See `turn_produced_output`.
+        self.turn_output_mark = self.emitted;
     }
 
     pub fn add_agent_message(&mut self, content: &str, signal: Option<&Signal>) {

@@ -2470,6 +2470,144 @@ def test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever(
         release_turn()
 
 
+def test_a_turn_that_answers_nothing_says_so_instead_of_vanishing(
+    backend: StubBackend,
+) -> None:
+    """Reproduce the owner's screenshot: two prompts, no turn, no error.
+
+    The report, verbatim from a live v1.0.101 session on grok-4.6 minutes after
+    three back-to-back compactions::
+
+        ✻ Worked for 3m 2s · 86 tool uses
+        ─────
+        ❯  You                                     11:14 AM
+        ┃what the fuck were you doing earlier
+        ─────
+        ❯  You                                     11:14 AM
+        ┃excuse me
+        ─────
+        ◈ ❯ Paste an error and ask OSA to fix it…
+
+    Two consecutive messages were accepted and rendered into scrollback, and
+    neither produced anything at all: no spinner, no `Waiting for response…`,
+    no error, no recap. The composer returned to its idle placeholder both
+    times. Read as "the app is ignoring me", which is what it looks like.
+
+    The mechanism is NOT a dropped keystroke and NOT the message queue — both
+    of those render differently, and this test proves the first half on the
+    wire: the prompt DOES become a `POST /api/v1/orchestrate`. What follows is
+    a turn that ends with an EMPTY `agent_response`.
+
+    Every step of that end is individually reasonable and collectively silent.
+    `AssistantStream::finalize` returns `Emit("")`; `commit_assistant_chunk`
+    calls `clean_for_commit`, which reports "nothing to render" for empty text
+    and returns without touching the chat; `handle_agent_response` then runs
+    full turn teardown — `activity.stop()`, `land_idle_including_parked()` —
+    so the spinner goes down and the composer returns to Idle. `turn_recap` is
+    gated on substantive work, so a turn that called no tools and took no time
+    prints no `✻ Worked for` line either. The net effect is that the screen
+    after the turn is byte-identical to the screen before it.
+
+    That is the defect, and it is the same class as the `/compact` echo: an
+    action that leaves the screen unchanged is indistinguishable from a
+    keypress the app threw away, so the user repeats it. Here they repeated it
+    once and then asked the agent what was wrong with it.
+
+    The fix is not to guess at content. It is that a turn which produced NO
+    visible output must say that it produced none — silence is never an
+    acceptable rendering of "your message was processed".
+
+    Asserted in both directions, because a notice that fires on every turn
+    would be worse than the bug: a turn that DID answer must not gain a line
+    claiming it did not.
+    """
+    with PtySession(backend.base_url, cols=120, rows=30) as s:
+        s.boot()
+
+        # --- half one: the request genuinely leaves the TUI ------------------
+        #
+        # This is the fact no screenshot can establish. "Queued", "sent" and
+        # "discarded" all render identically on the reported screen, and only
+        # the wire separates them.
+        mark = post_mark()
+        s.write(b"WEDGE-PROBE-ONE")
+        s.pump(SETTLE)
+        s.write(b"\r")
+        waited = 0.0
+        while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+            s.pump(0.25)
+            waited += 0.25
+        sent = [b for _p, b in posts_since(mark, "/api/v1/orchestrate")]
+        if not any("WEDGE-PROBE-ONE" in b for b in sent):
+            raise AssertionError(
+                "the prompt never became a request. If this fails the defect is "
+                "on the TUI side of the wire (queued or dropped), not in what "
+                "the backend answered.\n"
+                f"POSTs: {[p for p, _ in posts_since(mark)] or 'none'}\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # --- half two: the turn ends having said nothing ---------------------
+        #
+        # An `agent_response` carrying no text. This is what the backend
+        # broadcasts when the turn terminates without the model producing an
+        # answer: `loop.ex` puts `response` on the wire verbatim and has no
+        # empty guard, so `""` reaches the client exactly like this.
+        end_turn("")
+
+        if not s.wait_for_text("no answer", 8.0):
+            raise AssertionError(
+                "a turn ended without producing one byte of output and the "
+                "screen says nothing about it — the state after the turn is "
+                "identical to the state before it. This is the reported "
+                "wedge: the user's message was accepted, a request went out, "
+                "and the only honest report of the outcome was silence.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # --- half three: the session is not wedged ---------------------------
+        #
+        # The notice must be a report, not a tombstone. The very next message
+        # has to reach the wire, or the fix would have documented the wedge
+        # instead of removing it.
+        mark2 = post_mark()
+        s.write(b"WEDGE-PROBE-TWO")
+        s.pump(SETTLE)
+        s.write(b"\r")
+        waited = 0.0
+        while waited < 10.0:
+            if any(
+                "WEDGE-PROBE-TWO" in b
+                for _p, b in posts_since(mark2, "/api/v1/orchestrate")
+            ):
+                break
+            s.pump(0.25)
+            waited += 0.25
+        else:
+            raise AssertionError(
+                "after an empty turn the next message never reached the "
+                "backend. The session is inert — exactly the state the report "
+                "describes, and the one no notice can excuse.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # --- half four: a turn that DID answer gains no such line ------------
+        end_turn("here is a real answer")
+        if not s.wait_for_text("here is a real answer", 8.0):
+            raise AssertionError(
+                f"the healthy path broke.\n--- rendered screen ---\n{s.dump()}"
+            )
+        s.pump(0.6)
+        after = "\n".join(s.lines())
+        if after.count("no answer") > 1:
+            raise AssertionError(
+                "a turn that answered was also reported as answering nothing. "
+                "The notice must fire only when there was genuinely no output, "
+                "or it becomes noise on every turn.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
 def _wait_post(s, mark, path, needle=None, timeout=10.0):
     """Pump until a POST to `path` (optionally containing `needle`) is recorded."""
     waited = 0.0
@@ -2721,6 +2859,7 @@ TESTS = [
     test_the_queued_row_advertises_the_key_that_delivers,
     test_a_split_alt_enter_does_not_interrupt,
     test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever,
+    test_a_turn_that_answers_nothing_says_so_instead_of_vanishing,
     test_goal_is_anchored_on_the_backend_not_graded_in_the_client,
     test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan,
 ]

@@ -309,75 +309,101 @@ impl App {
         // it as a styled dim line instead of raw agent text — and when the
         // turn produced NO output at all, restore the interrupted prompt into
         // the composer for editing (CC auto-restore on user-cancel).
-        if interrupted {
-            let remaining = self.assistant_stream.take();
-            let had_output = self.agent_header_sent || !remaining.trim().is_empty();
-            // Close any open chunk flow first: the interrupt notice is its own
-            // block, so the last settled chunk must give up its separator row.
-            self.chat.end_agent_chunk_flow();
-            if !remaining.trim().is_empty() {
-                if self.agent_header_sent {
-                    self.chat.add_agent_continuation(&remaining);
-                } else {
-                    self.chat.add_agent_message(&remaining, signal.as_ref());
-                    self.agent_header_sent = true;
+        // Asked BEFORE anything this frame renders, so it reports what the turn
+        // had already shown the user rather than what it is about to.
+        let produced_output = self.chat.turn_produced_output();
+
+        match classify_turn_ending(interrupted, response_type, finalized, produced_output) {
+            TurnEnding::Interrupted => {
+                let remaining = self.assistant_stream.take();
+                let had_output = self.agent_header_sent || !remaining.trim().is_empty();
+                // Close any open chunk flow first: the interrupt notice is its
+                // own block, so the last settled chunk must give up its
+                // separator row.
+                self.chat.end_agent_chunk_flow();
+                if !remaining.trim().is_empty() {
+                    if self.agent_header_sent {
+                        self.chat.add_agent_continuation(&remaining);
+                    } else {
+                        self.chat.add_agent_message(&remaining, signal.as_ref());
+                        self.agent_header_sent = true;
+                    }
+                }
+                self.chat.add_system_message(
+                    "Interrupted \u{00b7} What should OSA do instead?",
+                    "warning",
+                );
+                if !had_output && self.input.is_empty() && self.message_queue.is_empty() {
+                    if let Some(prev) = self.last_submitted_prompt.take() {
+                        self.input.insert_str(&prev);
+                    }
                 }
             }
-            self.chat.add_system_message(
-                "Interrupted \u{00b7} What should OSA do instead?",
-                "warning",
-            );
-            if !had_output && self.input.is_empty() && self.message_queue.is_empty() {
-                if let Some(prev) = self.last_submitted_prompt.take() {
-                    self.input.insert_str(&prev);
-                }
+            TurnEnding::SystemAuthored(text) => {
+                // The backend says this text was written by a loop guard, a
+                // control-flow stop, or an error - NOT by the model.
+                //
+                // A user typed "ok how about now" and got the doom-loop guard's
+                // internal advice ("3 consecutive generations produced no tool
+                // calls... call a concrete tool to move forward") rendered under
+                // the agent header as if it were the answer. The text was
+                // addressed to the model; the user was never its audience.
+                //
+                // `add_system_message` renders a left rule in faint style with
+                // no agent header and no agent glyph, which is exactly the
+                // distinction that was missing. The text itself is unchanged -
+                // only the attribution is corrected.
+                self.chat.end_agent_chunk_flow();
+                self.chat.add_system_message(&text, "warning");
             }
-        } else if is_system_authored(response_type) && finalized.is_some() {
-            // The backend says this text was written by a loop guard, a
-            // control-flow stop, or an error - NOT by the model.
-            //
-            // A user typed "ok how about now" and got the doom-loop guard's
-            // internal advice ("3 consecutive generations produced no tool
-            // calls... call a concrete tool to move forward") rendered under the
-            // agent header as if it were the answer. The text was addressed to
-            // the model; the user was never its audience.
-            //
-            // `add_system_message` renders a left rule in faint style with no
-            // agent header and no agent glyph, which is exactly the distinction
-            // that was missing. The text itself is unchanged - only the
-            // attribution is corrected.
-            self.chat.end_agent_chunk_flow();
-            self.chat
-                .add_system_message(&finalized.unwrap_or_default(), "warning");
-        } else if let Some(final_text) = finalized {
-            // `final_text` is the backend's message, which has already REPLACED
-            // the streamed accumulation (falling back to it only when the final
-            // carried no text). It is never the two concatenated: appending the
-            // final onto the deltas is exactly what welded a superseded answer
-            // to its replacement.
-            //
-            // `agent_header_sent` is deliberately NOT reset afterwards: it is
-            // reset only when the user submits a new prompt (submit_prompt).
-            // Resetting it per response meant a turn that produced more than one
-            // agent_response event (e.g. text → subagent/tool → more text)
-            // emitted a second "◈ OSA" header, visually splitting one answer
-            // into chunks.
-            // `final_text` is what is LEFT of that message: `finalize` has
-            // already subtracted the blocks that settled into native scrollback
-            // while the reply streamed, so completion reveals only the last,
-            // still-unfinished block — never a wholesale re-appearance of text
-            // the user has been reading all along. It is empty when the reply
-            // ended exactly on a block boundary, and then completion reveals
-            // nothing at all, which is the point.
-            crate::app::assistant_stream::commit_assistant_chunk(
-                &mut self.chat,
-                &mut self.agent_header_sent,
-                &final_text,
-                signal.as_ref(),
-            );
-            // The message is over: drop the block separator the last chunk was
-            // still carrying so the answer does not end on a spare row.
-            self.chat.end_agent_chunk_flow();
+            TurnEnding::Answered(final_text) => {
+                // `final_text` is the backend's message, which has already
+                // REPLACED the streamed accumulation (falling back to it only
+                // when the final carried no text). It is never the two
+                // concatenated: appending the final onto the deltas is exactly
+                // what welded a superseded answer to its replacement.
+                //
+                // `agent_header_sent` is deliberately NOT reset afterwards: it
+                // is reset only when the user submits a new prompt
+                // (submit_prompt). Resetting it per response meant a turn that
+                // produced more than one agent_response event (e.g. text →
+                // subagent/tool → more text) emitted a second "◈ OSA" header,
+                // visually splitting one answer into chunks.
+                // `final_text` is what is LEFT of that message: `finalize` has
+                // already subtracted the blocks that settled into native
+                // scrollback while the reply streamed, so completion reveals
+                // only the last, still-unfinished block — never a wholesale
+                // re-appearance of text the user has been reading all along.
+                crate::app::assistant_stream::commit_assistant_chunk(
+                    &mut self.chat,
+                    &mut self.agent_header_sent,
+                    &final_text,
+                    signal.as_ref(),
+                );
+                // The message is over: drop the block separator the last chunk
+                // was still carrying so the answer does not end on a spare row.
+                self.chat.end_agent_chunk_flow();
+            }
+            TurnEnding::AlreadyRendered => {
+                // The reply ended exactly on a block boundary: every byte of it
+                // has already settled into native scrollback. Completion reveals
+                // nothing, which is the point — the user watched it arrive.
+                self.chat.end_agent_chunk_flow();
+            }
+            TurnEnding::Silent => {
+                // The turn is over and the user has nothing to show for it. Say
+                // so.
+                //
+                // Nothing is invented about WHY: the TUI does not know whether
+                // the model returned empty, a guard stopped the turn without
+                // text, or the backend finished a turn it never really ran. It
+                // knows the two things the user actually needs — that the turn
+                // ended, and that their message did reach the backend — and it
+                // says only those.
+                self.chat.end_agent_chunk_flow();
+                self.chat.add_system_message(EMPTY_TURN_NOTICE, "warning");
+                self.announce_a11y(EMPTY_TURN_NOTICE);
+            }
         }
 
         // Lean view receipt. The mode's whole risk is that it looks like
@@ -2378,6 +2404,95 @@ pub(crate) fn is_system_authored(response_type: &str) -> bool {
     )
 }
 
+/// What a turn's END owes the screen.
+///
+/// This exists because the turn-end render used to be an `if / else if / else
+/// if` chain with an IMPLICIT final else that did nothing, and that hole was a
+/// live wedge. REPORTED on v1.0.101, minutes after three back-to-back
+/// compactions: two consecutive messages were accepted, echoed into scrollback
+/// and produced nothing at all — no spinner, no error, no recap. The composer
+/// returned to its idle placeholder both times, so the screen after the turn
+/// was byte-identical to the screen before it, which is exactly what a dropped
+/// keystroke looks like. The user's reading was "the app is ignoring me".
+///
+/// The turn had in fact been dispatched — `POST /api/v1/orchestrate` genuinely
+/// left the TUI — and ended with an `agent_response` carrying no text. Every
+/// step of rendering that was individually reasonable and collectively silent:
+/// `AssistantStream::finalize` returned `Emit("")`, `commit_assistant_chunk`
+/// asked `clean_for_commit`, which correctly reports "nothing to render" for
+/// empty text and returns without touching the chat, and the turn teardown then
+/// ran normally. `turn_recap` is gated on substantive work, so no `✻ Worked
+/// for` line appeared either.
+///
+/// Making the outcome a value, matched exhaustively, is the point. The
+/// precedent is `AppState::Connecting`, which fell through a catch-all in the
+/// key handler and silently dropped every keystroke; the fix there was to make
+/// the match exhaustive so the COMPILER refuses a new unrouted state, rather
+/// than to add one more arm to a catch-all. A wedge that requires someone to
+/// notice a missing clause will come back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TurnEnding {
+    /// The user stopped it. Renders the interrupt notice (and restores the
+    /// prompt when the turn produced nothing).
+    Interrupted,
+    /// A loop guard, a control-flow stop or an error wrote this text — not the
+    /// model. Renders as system chrome, never under the agent header.
+    SystemAuthored(String),
+    /// The model answered, and this is what is left to commit.
+    Answered(String),
+    /// This frame carried no authoritative text, but the turn already put
+    /// output on the user's screen — chunks that settled into scrollback as
+    /// they streamed, tool cells, a system line. There is nothing further to
+    /// render, and nothing to report: the user watched it happen.
+    AlreadyRendered,
+    /// The turn ended and the user has NOTHING to show for it. This is the
+    /// reported wedge. It must never render as nothing — silence here is
+    /// indistinguishable from the app having discarded the message.
+    Silent,
+}
+
+/// Decide what a turn end owes the screen. Pure, so the decision is testable
+/// without a terminal, an App or a backend.
+///
+/// `produced_output` answers "has this turn put anything in front of the user
+/// since their message opened it" (`Chat::turn_produced_output`). It is what
+/// separates a turn that streamed an answer and then closed on an empty final
+/// — routine, and correctly silent — from a turn that did nothing at all.
+pub(crate) fn classify_turn_ending(
+    interrupted: bool,
+    response_type: &str,
+    finalized: Option<String>,
+    produced_output: bool,
+) -> TurnEnding {
+    if interrupted {
+        return TurnEnding::Interrupted;
+    }
+    match finalized {
+        // Real text. Attribution decides which surface renders it.
+        Some(text) if !text.trim().is_empty() => {
+            if is_system_authored(response_type) {
+                TurnEnding::SystemAuthored(text)
+            } else {
+                TurnEnding::Answered(text)
+            }
+        }
+        // No text on this frame. Whether that is fine or is the defect depends
+        // entirely on whether the turn spoke earlier — never on the frame.
+        _ if produced_output => TurnEnding::AlreadyRendered,
+        _ => TurnEnding::Silent,
+    }
+}
+
+/// What the user is told when a turn ends having produced nothing.
+///
+/// Three facts, in the order they answer the user's questions: that the turn is
+/// over (so the absent spinner is explained), that their message was genuinely
+/// delivered (so they know the keypress was not dropped — the wedge's whole
+/// misreading), and how to send it again without retyping it.
+pub(crate) const EMPTY_TURN_NOTICE: &str = "\u{26a0} Turn ended with no answer \u{2014} \
+     the backend completed it without sending any text. Your message was delivered; \
+     \u{2191} recalls it to send again.";
+
 /// Whether to warn that the backend daemon is a different build from this TUI.
 ///
 /// The daemon outlives the TUI. `bin/osa` already self-repairs a stale one on
@@ -2477,6 +2592,106 @@ pub(crate) fn update_notice_line(update: &crate::client::types::HealthUpdate) ->
 /// dialog would fire a message the user is still being asked about.
 pub(crate) fn queue_may_drain(state: AppState, turn_done: bool) -> bool {
     state == AppState::Idle && turn_done
+}
+
+#[cfg(test)]
+mod turn_ending_tests {
+    use super::{classify_turn_ending, TurnEnding};
+
+    /// The reported wedge, as a value. A turn that produced nothing and ends
+    /// with nothing is `Silent` — and `Silent` is the one variant whose arm
+    /// cannot be "render nothing", because that is the bug.
+    #[test]
+    fn a_turn_that_produced_nothing_and_ends_with_nothing_is_silent() {
+        assert_eq!(
+            classify_turn_ending(false, "agent", Some(String::new()), false),
+            TurnEnding::Silent
+        );
+        // Whitespace is not an answer either — it renders as nothing.
+        assert_eq!(
+            classify_turn_ending(false, "agent", Some("   \n ".into()), false),
+            TurnEnding::Silent
+        );
+        // And a frame that carried no final at all.
+        assert_eq!(
+            classify_turn_ending(false, "agent", None, false),
+            TurnEnding::Silent
+        );
+    }
+
+    /// The other direction, which matters just as much: a turn that streamed
+    /// its answer and closed on a block boundary is the COMMON case, and must
+    /// not be accused of saying nothing. A notice on every turn would be worse
+    /// than the bug it replaced.
+    #[test]
+    fn an_empty_final_after_real_output_is_not_silent() {
+        assert_eq!(
+            classify_turn_ending(false, "agent", Some(String::new()), true),
+            TurnEnding::AlreadyRendered
+        );
+        assert_eq!(
+            classify_turn_ending(false, "agent", None, true),
+            TurnEnding::AlreadyRendered
+        );
+    }
+
+    #[test]
+    fn a_real_answer_is_answered_whether_or_not_the_turn_spoke_before() {
+        assert_eq!(
+            classify_turn_ending(false, "agent", Some("hello".into()), false),
+            TurnEnding::Answered("hello".into())
+        );
+        assert_eq!(
+            classify_turn_ending(false, "agent", Some("hello".into()), true),
+            TurnEnding::Answered("hello".into())
+        );
+    }
+
+    /// Attribution is preserved: guard/control/error text still renders as
+    /// system chrome rather than under the agent header.
+    #[test]
+    fn harness_authored_text_keeps_its_attribution() {
+        for rt in ["system", "guard", "control", "error"] {
+            assert_eq!(
+                classify_turn_ending(false, rt, Some("stopped".into()), false),
+                TurnEnding::SystemAuthored("stopped".into()),
+                "{rt} must not render as the model speaking"
+            );
+        }
+    }
+
+    /// A guard that stops a turn with NO text is the same wedge wearing a
+    /// different response_type: the old chain rendered `add_system_message("")`,
+    /// which is nothing at all.
+    #[test]
+    fn harness_authored_text_that_is_empty_is_still_silence() {
+        assert_eq!(
+            classify_turn_ending(false, "system", Some(String::new()), false),
+            TurnEnding::Silent
+        );
+    }
+
+    #[test]
+    fn an_interrupt_outranks_everything() {
+        assert_eq!(
+            classify_turn_ending(true, "agent", Some("ignored".into()), true),
+            TurnEnding::Interrupted
+        );
+        assert_eq!(
+            classify_turn_ending(true, "system", None, false),
+            TurnEnding::Interrupted
+        );
+    }
+
+    /// The notice must carry the fact the wedge turned on: that the message was
+    /// delivered. Without it the line is just a nicer way of saying nothing.
+    #[test]
+    fn the_notice_says_the_message_was_delivered_and_how_to_resend() {
+        let n = super::EMPTY_TURN_NOTICE;
+        assert!(n.contains("no answer"), "{n}");
+        assert!(n.contains("delivered"), "{n}");
+        assert!(n.contains('\u{2191}'), "must name the recall key: {n}");
+    }
 }
 
 #[cfg(test)]

@@ -144,6 +144,16 @@ the TUI stays in `Processing`. Both release on demand and both carry a ceiling.
 - **`test_a_queued_message_does_not_make_the_interrupt_harder_to_reach`** — a
   queued message must never cost the user access to the stop gesture, which
   rules out the tempting "first Esc means send-now when something is queued".
+- **`test_a_turn_that_answers_nothing_says_so_instead_of_vanishing`** — a
+  message was accepted, echoed into scrollback, and produced nothing: no
+  spinner, no error, no recap, composer back to its idle placeholder. Reported
+  twice in a row on a live v1.0.101 session. The harness is what separates the
+  three readings that render identically — the test asserts on the WIRE that
+  `POST /api/v1/orchestrate` really left the TUI (so it was neither queued nor
+  dropped), then ends the turn with an empty `agent_response` and requires the
+  screen to say so. Both directions: a turn that DID answer must not also gain
+  a "no answer" line, and the very next message must still reach the backend,
+  since a notice that documented a wedge would be no better than the wedge.
 
 Measured against a binary with both defects restored: the three new
 behaviour tests fail (`Ctrl+C` on the splash did not exit within 5s; the typed

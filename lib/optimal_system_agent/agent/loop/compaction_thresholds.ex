@@ -79,7 +79,68 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   @spec operative_window(pos_integer()) :: pos_integer()
   def operative_window(context_window)
       when is_integer(context_window) and context_window > 0 do
-    min(context_window, context_ceiling())
+    min(context_window, model_ceiling(context_window))
+  end
+
+  # The ceiling scales WITH the model instead of being one constant for all of
+  # them. A flat 200,000 gave a 500k model and a 1M model the same live window,
+  # which is not a property of either model — an operator who selects a 500k
+  # model is paying for 500k and gets 40% of it.
+  #
+  # The brake the flat number existed for is still here and still binds: the
+  # measured failure was `compact_at` = 967,000 on a 1M window, i.e. compaction
+  # unreachable, with cumulative input quadratic in turn count. A share of the
+  # window bounds that the same way a constant does, because the share is < 1.
+  #
+  #   window     flat 200k    share 1.0 (default)   compact_at
+  #   128,000    128,000      128,000               95,000   (unchanged)
+  #   200,000    200,000      200,000               167,000  (unchanged)
+  #   500,000    200,000      500,000               167,000 -> 467,000
+  #   1,000,000  200,000      1,000,000             167,000 -> 967,000
+  #
+  # The default share is 1.0: a model's whole window is live. That is the
+  # operator's call and they made it explicitly — someone who selects a 500k
+  # model is paying for 500k, and a harness that silently uses 40% of it is
+  # deciding how much of their purchase to use on their behalf.
+  #
+  # The cost this reopens is real and worth stating rather than burying: input
+  # is re-sent every turn, so cumulative session cost is quadratic in turn
+  # count, and compaction is the only brake on that term. Against a harness
+  # compacting near 167k, a 1M window that compacts at 967k accumulates roughly
+  # (967/167)^2 ~= 33x. `OSA_CONTEXT_CEILING_SHARE` reinstates the brake
+  # proportionally (0.5 gives 500k -> 250k, 1M -> 500k) and
+  # `OSA_CONTEXT_CEILING` pins an absolute value, for an operator who wants the
+  # older behaviour back.
+  @context_ceiling_share 1.0
+
+  defp model_ceiling(context_window) do
+    case Application.get_env(:optimal_system_agent, :compaction_context_ceiling) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        max(@context_ceiling, trunc(context_window * ceiling_share()))
+    end
+  end
+
+  # Share of the operative window at which auto-compact fires. 0.85 leaves 15%
+  # for the summarization round-trip and the model's output — proportional, so
+  # the headroom grows with the window instead of staying a fixed 33k that is
+  # 26% of a 128k model and 3.3% of a 1M one.
+  @compact_at_share 0.85
+
+  defp compact_at_share do
+    case Application.get_env(:optimal_system_agent, :compaction_compact_at_share) do
+      f when is_float(f) and f > 0.0 and f < 1.0 -> f
+      _ -> @compact_at_share
+    end
+  end
+
+  defp ceiling_share do
+    case Application.get_env(:optimal_system_agent, :compaction_context_ceiling_share) do
+      f when is_float(f) and f > 0.0 and f <= 1.0 -> f
+      _ -> @context_ceiling_share
+    end
   end
 
   @doc """
@@ -106,7 +167,31 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   @spec compact_at(pos_integer()) :: pos_integer()
   def compact_at(cw) when is_integer(cw) and cw > 0 do
     cw = operative_window(cw)
-    reserve_based = effective_window(cw) - @autocompact_buffer
+
+    # Subtract the reserve directly rather than via `effective_window/1`, which
+    # would clamp a value that is already clamped. A flat ceiling made
+    # `operative_window/1` idempotent so the double application was invisible; a
+    # ceiling that is a SHARE of the window is not idempotent, and applying it
+    # twice shrank a 500k model to 200k (compact_at 167,000 instead of 217,000)
+    # — silently reproducing the exact flat-constant behaviour this change
+    # exists to remove.
+    # Two bounds, whichever binds first:
+    #
+    #   * the reserve math — leave room for the summary round-trip and output.
+    #     It is an ABSOLUTE subtraction, so on a small window it dominates
+    #     (128k -> 95k) and on a large one it barely bites (1M -> 967k, i.e.
+    #     96.7%, which is why compaction was effectively unreachable there).
+    #   * a share of the window — proportional, so it is the one that binds on
+    #     big models and expresses the rule an operator actually reasons about:
+    #     "I get most of my window, then it compacts."
+    #
+    # Both are per-model by construction. Every model at or below ~235k is
+    # unchanged, because the reserve subtraction is still the smaller number.
+    reserve_based =
+      min(
+        cw - output_reserve() - @autocompact_buffer,
+        trunc(cw * compact_at_share())
+      )
 
     if reserve_based > div(cw, 2) do
       reserve_based

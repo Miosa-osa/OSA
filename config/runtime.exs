@@ -643,7 +643,6 @@ config :optimal_system_agent,
   # being billed for. That is a cost/recalltradeoff only the operator can make,
   # and until now it was reachable only from application config, i.e. not at all
   # inside an installed release. Unset keeps the 200,000 default.
-  compaction_context_ceiling: parse_int.(System.get_env("OSA_CONTEXT_CEILING"), 200_000),
 
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.
@@ -702,4 +701,38 @@ openrouter_base_url = System.get_env("OPENROUTER_BASE_URL")
 
 if is_binary(openrouter_base_url) and openrouter_base_url != "" do
   config :optimal_system_agent, openrouter_url: openrouter_base_url
+end
+
+# ── Compaction window ceiling ────────────────────────────────────────────
+# `CompactionThresholds` derives every threshold from a ceiling that scales
+# WITH the model (a share of its real window, floored at 200k), because a flat
+# constant gave a 500k model and a 1M model the same live window — which is a
+# property of neither. Setting this pins an absolute value for every model and
+# disables the per-model share; at or above a model's real window it disables
+# the clamp for that model entirely. Only set when the operator asks for it.
+case System.get_env("OSA_CONTEXT_CEILING") do
+  nil ->
+    :ok
+
+  raw ->
+    case Integer.parse(raw) do
+      {n, _} when n > 0 -> config :optimal_system_agent, compaction_context_ceiling: n
+      _ -> :ok
+    end
+end
+
+# The share of a model's window kept live before auto-compact fires. Bounds the
+# quadratic input cost the same way a constant does, because it is < 1.
+case System.get_env("OSA_CONTEXT_CEILING_SHARE") do
+  nil ->
+    :ok
+
+  raw ->
+    case Float.parse(raw) do
+      {f, _} when f > 0.0 and f <= 1.0 ->
+        config :optimal_system_agent, compaction_context_ceiling_share: f
+
+      _ ->
+        :ok
+    end
 end

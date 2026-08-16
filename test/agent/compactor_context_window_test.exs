@@ -89,18 +89,36 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
     end
 
     test "the clamped ladder is where those numbers come from" do
-      # Pins the ceiling itself, so a change to @context_ceiling shows up here
-      # as an explicit diff rather than as six mysterious failures above.
-      assert CompactionThresholds.operative_window(@million) == 200_000
-      assert CompactionThresholds.warn_at(@million) == 147_000
-      assert CompactionThresholds.compact_at(@million) == 167_000
-      assert CompactionThresholds.block_at(@million) == 177_000
+      # Pins the ladder itself, so a change to the ceiling rule shows up here as
+      # an explicit diff rather than as six mysterious failures above.
+      #
+      # The ceiling used to be a flat 200,000 for every model, which gave a 1M
+      # model and a 500k model the same live window and compacted both at
+      # 167,000 — 16.7% of what the operator was paying for on the 1M model.
+      # It is now the model's own window, with auto-compact at a SHARE of it
+      # (0.85), so the headroom scales instead of staying a fixed 33k that is
+      # 26% of a 128k model and 3.3% of a 1M one.
+      assert CompactionThresholds.operative_window(@million) == @million
+      assert CompactionThresholds.warn_at(@million) == 830_000
+      assert CompactionThresholds.compact_at(@million) == 850_000
+      assert CompactionThresholds.block_at(@million) == 977_000
 
-      # And it is a no-op at or below the ceiling — the clamp cannot regress a
-      # model that was already working.
+      # The ordering the whole ladder depends on still holds by construction.
+      assert CompactionThresholds.warn_at(@million) <
+               CompactionThresholds.compact_at(@million)
+
+      assert CompactionThresholds.compact_at(@million) <
+               CompactionThresholds.block_at(@million)
+
+      # And every model at or below the old flat ceiling is untouched, so this
+      # cannot regress a configuration that was already working — on those the
+      # absolute reserve subtraction is still the smaller of the two bounds.
       for cw <- [@thirty_two_k, 128_000, 200_000] do
         assert CompactionThresholds.operative_window(cw) == cw
       end
+
+      assert CompactionThresholds.compact_at(128_000) == 95_000
+      assert CompactionThresholds.compact_at(200_000) == 167_000
     end
 
     test "the 128k hardcoded default is gone — 11% of 1M is not treated as 86% of 128k", %{
