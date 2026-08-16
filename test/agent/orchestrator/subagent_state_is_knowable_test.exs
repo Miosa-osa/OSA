@@ -127,8 +127,31 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.SubagentStateIsKnowableTest do
 
     # And it does not count against the cap it is waiting behind, or the queue
     # would deadlock on itself.
-    refute Orchestrator.live_agent_count() > 1,
+    #
+    # Asserted as a DELTA, not an absolute. `RunStore` is a global ETS table and
+    # the full suite leaves `:running` rows behind from other tests, so an
+    # absolute count is not a property of this test — measuring the change the
+    # queued row makes is.
+    before_count = Orchestrator.live_agent_count()
+    probe = "knowable-probe-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    RunStore.start_run(%{
+      agent_id: probe,
+      parent_session_id: parent,
+      role: "probe",
+      task: "t",
+      phase: :queued
+    })
+
+    assert Orchestrator.live_agent_count() == before_count,
            "queued rows must not consume the slots they are queued for"
+
+    RunStore.set_phase(probe, :working, "now admitted")
+
+    assert Orchestrator.live_agent_count() == before_count + 1,
+           "once admitted it must count, or the cap enforces nothing"
+
+    RunStore.complete(probe, %{agent_id: probe, status: :completed, summary: "done"})
 
     # Liveness is answerable, and never claims death for a run that is merely
     # waiting.
