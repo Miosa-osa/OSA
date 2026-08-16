@@ -831,6 +831,9 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
       assert d.content =~ "/tmp/osa-tests/"
       assert d.content =~ "NEVER in the directory that holds the deliverable"
       assert d.content =~ "PYTHONDONTWRITEBYTECODE=1"
+
+      assert d.content =~ "/tmp/osa-build/",
+             "compiled output must not be sent to the TEST directory — see pytorch-model-cli"
     end
 
     test "the small directive says it too, without growing into the large one",
@@ -862,6 +865,66 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationAdequacyTest do
                L.discriminating_evidence(sid)
 
       refute L.needs_discriminating_test?(sid)
+    end
+  end
+
+  # ===========================================================================
+  # A build is not a test, wherever its output lands
+  # ===========================================================================
+  #
+  # Replays `pytorch-model-cli` from `runs/osa-tb20-full89-9b57ee7d` — reward
+  # 0.0, a pass in the baseline, and the gate emitted NO event on it at all.
+  # The session compiled into the scratch directory the directive names, the
+  # ledger read the object files as tests, and a failed compile + a source edit
+  # + a later `nm` formed a perfect red -> fix -> green triple whose "test" was
+  # `lodepng.o`. The adequacy clause was discharged by a build.
+  describe "does not accept compiler output as a discriminating test" do
+    test "an object file under the scratch test directory is not a test artefact" do
+      refute L.test_artifact_path?("/tmp/osa-tests/lodepng.o")
+      refute L.test_artifact_path?("/tmp/osa-tests/cli_tool.o")
+      refute L.test_artifact_path?("/tmp/osa-tests/black.png")
+      refute L.test_artifact_path?("/app/tests/fixture.bin")
+
+      assert L.test_artifact_path?("/tmp/osa-tests/check_polyglot.py"),
+             "the location the directive prescribes must still work for a real test"
+
+      assert L.test_artifact_path?("/tmp/osa-tests/reference.py")
+      assert L.test_artifact_path?("/app/tests/test_x.py")
+    end
+
+    test "compile red -> source fix -> `nm` green is not evidence", %{session_id: sid} do
+      # Verbatim shape from the trial (indices 24, 26, 29).
+      authored(sid, "/app/cli_tool.c")
+      sh(sid, "cd /app && gcc -O2 -c lodepng.cpp -o /tmp/osa-tests/lodepng.o", false)
+      edit(sid, "/app/cli_tool.c")
+      sh(sid, "nm /tmp/osa-tests/lodepng.o 2>&1 | grep -i lodepng_load_file", true)
+
+      assert L.discriminating_evidence(sid) == nil,
+             "a compiler output file is not a test and `nm` is not a test run"
+
+      assert L.needs_discriminating_test?(sid)
+    end
+
+    test "and the gate speaks up on the trial it was silent on", %{session_id: sid} do
+      authored(sid, "/app/cli_tool.c")
+      sh(sid, "cd /app && gcc -O2 -c lodepng.cpp -o /tmp/osa-tests/lodepng.o", false)
+      edit(sid, "/app/cli_tool.c")
+      sh(sid, "nm /tmp/osa-tests/lodepng.o 2>&1 | grep -i lodepng", true)
+      # Its oracle: a PyTorch reference the session wrote itself, run once, green.
+      L.record(sid, %{
+        tool: "file_write",
+        args: %{"path" => "/tmp/osa-tests/reference.py", "content" => "import torch"},
+        success: true
+      })
+
+      sh(sid, "python3 /tmp/osa-tests/reference.py 2>&1 | tail -3", true)
+      sh(sid, "cd /app && ./cli_tool weights.json image.png && cat cli_tool.c > /dev/null", true)
+
+      assert {:inadequate_test, :large} =
+               G.triaged(sid, 0, "**Verified:** the C tool matches PyTorch exactly")
+
+      assert L.oracle_provenance(sid) == :self_authored,
+             "the only re-runnable check is a reference the session wrote"
     end
   end
 

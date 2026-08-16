@@ -753,7 +753,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     ~r/^tests?\.(py|sh|bash|js|ts|exs|rb)$/i
   ]
 
-  # `osa-tests` is the scratch directory the gate's own directive now names.
+  # `osa-tests` is the scratch directory the gate's own directive names.
   #
   # It has to be here or the gate would not recognise the evidence it asked
   # for: the directive says "put the test in `/tmp/osa-tests/` when the project
@@ -761,24 +761,59 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   # path matches none of the basename patterns above. A gate that refuses the
   # location it prescribed is the same defect as a gate that refuses the
   # red -> green cycle it prescribed.
-  @test_dir_segments ~w(test tests spec specs __tests__ testing osa-tests)
+  #
+  # It is a TEST directory, not a scratch directory. Build output goes to
+  # `/tmp/osa-build/` — see `VerificationGate.@scratch_build_dir` and the
+  # `pytorch-model-cli` note on `test_artifact_path?/1` for what happened when
+  # the two shared a path.
+  @scratch_test_dir_segment "osa-tests"
+  @test_dir_segments ~w(test tests spec specs __tests__ testing) ++
+                       [@scratch_test_dir_segment]
 
   @doc """
   True when `path` is a test artefact by convention — `test_*.py`, `*_test.go`,
-  `*.spec.ts`, `run_tests.sh`, anything under a `test/`, `tests/`, `spec/` or
-  `__tests__/` directory.
+  `*.spec.ts`, `run_tests.sh`, or a **source file** under a `test/`, `tests/`,
+  `spec/`, `__tests__/` or `#{@scratch_test_dir_segment}/` directory.
 
   Convention, not content analysis, on purpose: the gate's directive tells the
   model exactly this rule, so satisfying it honestly is cheap and unambiguous.
   Naming a file `test_x.py` is not the part we are trying to make expensive —
   making it *discriminate* is.
+
+  ## The directory rule requires a code file, and that is load-bearing
+
+  It did not, and the result was measured live on `pytorch-model-cli`
+  (`runs/osa-tb20-full89-9b57ee7d`, reward 0.0, a pass in the baseline). The
+  session compiled into the scratch directory the directive names — as the
+  directive tells it to — and the ledger read the object files as tests:
+
+      24  FAIL  gcc -O2 -c lodepng.cpp -o /tmp/osa-tests/lodepng.o …
+      26  ok    file_edit /app/cli_tool.c          <- a SOURCE fix
+      29  ok    nm /tmp/osa-tests/lodepng.o | grep -i lodepng_load_file
+
+  `discriminating_evidence/1` returned
+  `%{artifact: {:file, "/tmp/osa-tests/lodepng.o"}, failed_at: 24, fixed_at: 26,
+  passed_at: 29}` — a textbook red -> fix -> green triple whose "test" is a
+  **compiler output file** and whose "green run" is `nm`. The adequacy clause was
+  discharged by a build, which is the exact distinction `@test_patterns` and
+  `@build_patterns` were split apart to preserve: a test asserts behaviour, a
+  build only asserts it compiles. The gate then emitted no event at all on an
+  episode that ended "**Verified:** the C tool matches PyTorch exactly in every
+  case" against a PyTorch reference the model had written itself.
+
+  A `.o`, `.a`, `.so`, a stripped binary or a `.png` fixture is not a test
+  wherever it sits. `code_file?/1` is the same predicate the gate already uses
+  to decide what a test could exercise, so requiring it here costs nothing and
+  keeps `#{@scratch_test_dir_segment}/check_polyglot.py` — the case the segment
+  was added for — working.
   """
   @spec test_artifact_path?(String.t()) :: boolean()
   def test_artifact_path?(path) when is_binary(path) do
     base = Path.basename(path)
 
     Enum.any?(@test_basename_patterns, &Regex.match?(&1, base)) or
-      Enum.any?(Path.split(Path.dirname(path)), &(String.downcase(&1) in @test_dir_segments))
+      (code_file?(path) and
+         Enum.any?(Path.split(Path.dirname(path)), &(String.downcase(&1) in @test_dir_segments)))
   end
 
   def test_artifact_path?(_), do: false

@@ -262,6 +262,23 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # a file placed here still counts as a test artefact.
   @scratch_test_dir "/tmp/osa-tests/"
 
+  # Build output goes somewhere ELSE, and this separation is not cosmetic.
+  #
+  # The first version of this directive said "send anything your test compiles
+  # to the same scratch directory (`-o /tmp/osa-tests/bin`)". On
+  # `pytorch-model-cli` the model did exactly that, and the evidence ledger —
+  # which treats everything under a test directory as a test artefact — read
+  # `lodepng.o` as a test, paired a failed compile with a later `nm` against a
+  # source edit, and declared the adequacy clause satisfied by a build. The gate
+  # then said nothing at all on an episode that verified its C tool against a
+  # PyTorch reference it had written itself, and the task went from pass to 0.0.
+  #
+  # `test_artifact_path?/1` now also requires a code file, so the two could
+  # share a directory safely. They still do not: a directory whose meaning is
+  # "these are tests" should not be where object files land, and the instruction
+  # is no harder to follow with two names than with one.
+  @scratch_build_dir "/tmp/osa-build/"
+
   # The explicit, auditable escape. A task can genuinely have no runnable test
   # (documentation, a config value, a change with no harness in the image). The
   # automatic half of the escape is `code_file?/1` — a docs-only change never
@@ -775,9 +792,11 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "`#{@scratch_test_dir}` — NEVER in the directory that holds the deliverable. " <>
       "Some tasks are graded on the exact contents of a directory, and one stray " <>
       "`test_x.py`, `__pycache__` or compiled binary there fails the whole task with " <>
-      "the real work untouched and unread. Send anything your test compiles to the " <>
-      "same scratch directory (`-o #{@scratch_test_dir}bin`, `--target-dir`), and run " <>
-      "Python with `PYTHONDONTWRITEBYTECODE=1` so it leaves no cache next to the code."
+      "the real work untouched and unread. Send anything your test COMPILES to " <>
+      "`#{@scratch_build_dir}` instead (`-o #{@scratch_build_dir}x.o`, `--target-dir`) — " <>
+      "keep object files and binaries out of both the deliverable and the test " <>
+      "directory — and run Python with `PYTHONDONTWRITEBYTECODE=1` so it leaves no " <>
+      "cache next to the code."
   end
 
   # ---------------------------------------------------------------------------
@@ -883,9 +902,10 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
         "then fix the source until it passes.\n" <>
         "  3. Keep it OUT of the deliverable. Write it to the project's own test " <>
         "directory or to `#{@scratch_test_dir}`, never beside the files the task asked " <>
-        "you to produce, and send compiled output and `__pycache__` there too. A task " <>
-        "graded on the contents of a directory fails on a stray test file before anyone " <>
-        "looks at your code.\n" <>
+        "you to produce; send compiled output to `#{@scratch_build_dir}`; and run Python " <>
+        "with `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` lands next to the code. A " <>
+        "task graded on the contents of a directory fails on a stray test file before " <>
+        "anyone looks at your work.\n" <>
         "  4. Test what the TASK asked for, in the direction it asked for it — not what " <>
         "your implementation happens to do. If the task names a tool or file as the " <>
         "ground truth, use that one.\n" <>
