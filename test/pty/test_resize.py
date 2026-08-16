@@ -29,6 +29,8 @@ from stub_backend import (  # noqa: E402
     CLEARED_SESSION_ID,
     StubBackend,
     end_turn,
+    get_mark,
+    gets_since,
     hold_health,
     hold_turn,
     post_mark,
@@ -538,6 +540,101 @@ def _open_provider_surface(s: PtySession) -> str:
             break
     s.pump(SETTLE)
     return "\n".join(s.lines())
+
+
+def test_choosing_ollama_states_the_wait_and_fetches_its_catalog_once(
+    backend: StubBackend,
+) -> None:
+    """Switching to Ollama takes ONE Enter, and says so while it works.
+
+    The report: on xAI/grok-4.6, opening `/model`, choosing Ollama and pressing
+    Enter "doesn't switch it" — until, after several presses and a delay, it
+    suddenly does.
+
+    `ollama_local` ships `models: :dynamic`, so choosing it must fetch its
+    catalog before any model can be listed. The picker used to return that
+    fetch as an action while leaving itself on the PROVIDER list, so for the
+    whole round-trip the screen was byte-identical to the one before the
+    keypress. There is no way to tell that from a dropped key, so the user
+    pressed Enter again — and each press started another fetch, whose late
+    reply reset the cursor and filter once the list finally rendered.
+
+    Both halves are asserted here, and they need different instruments:
+
+      * the SCREEN must say a fetch is running (a rendered fact);
+      * the WIRE must carry exactly one fetch (a fact no screenshot can hold,
+        because duplicate fetches render identically).
+    """
+    with PtySession(backend.base_url, cols=110, rows=34) as s:
+        s.boot()
+
+        s.write(b"/model")
+        s.pump(SETTLE)
+        for _ in range(2):
+            s.write(b"\r")
+            s.pump(SETTLE)
+            if "Ollama Local" in "\n".join(s.lines()):
+                break
+        s.pump(SETTLE)
+
+        if "Ollama Local" not in "\n".join(s.lines()):
+            raise AssertionError(
+                "/model did not open a picker listing Ollama Local.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # Walk down to the Ollama Local row.
+        for _ in range(40):
+            if "\u25b6 Ollama Local" in "\n".join(s.lines()) or "> Ollama Local" in "\n".join(
+                s.lines()
+            ):
+                break
+            s.write(b"\x1b[B")
+            s.pump(0.05)
+        s.pump(SETTLE)
+
+        # From here on, count catalog fetches on the wire.
+        mark = get_mark()
+
+        # ONE Enter — then keep pressing, exactly as the reporter did.
+        s.write(b"\r")
+        s.pump(0.3)
+
+        # Mid-fetch: the screen must SAY something is happening. This is the
+        # assertion the shipped build could not pass — it rendered the
+        # unchanged provider list here.
+        mid = "\n".join(s.lines())
+        if "Loading models" not in mid:
+            raise AssertionError(
+                "the catalog fetch was invisible — the screen gave no sign a "
+                "keypress had been received, which is why it was pressed "
+                f"again.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        # The impatient presses. None may start another fetch.
+        for _ in range(3):
+            s.write(b"\r")
+            s.pump(0.2)
+
+        # Let the fetch land.
+        s.pump(SETTLE + 2.0)
+
+        fetches = gets_since(mark, "/onboarding/models")
+        if len(fetches) != 1:
+            raise AssertionError(
+                f"expected exactly ONE catalog fetch, saw {len(fetches)}. "
+                "Repeated Enter during the wait queued duplicate requests, "
+                "whose late replies reset the cursor and filter under the "
+                f"user.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        # And the wait resolves into the model list, on the same screen.
+        after = "\n".join(s.lines())
+        if "Models" not in after or "Loading models" in after:
+            raise AssertionError(
+                "the fetch never resolved into a model list.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
 
 
 def test_one_lone_escape_closes_a_dialog(backend: StubBackend) -> None:
@@ -2379,6 +2476,7 @@ TESTS = [
     test_small_viewport,
     test_narrow_terminal_still_dispatches,
     test_provider_surface,
+    test_choosing_ollama_states_the_wait_and_fetches_its_catalog_once,
     test_one_lone_escape_closes_a_dialog,
     test_provider_picker_shows_account_plan_and_a_limit_meter,
     test_a_provider_with_no_reported_quota_says_so_instead_of_drawing_zero,

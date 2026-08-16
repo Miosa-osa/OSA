@@ -87,9 +87,20 @@ pub enum ModelPickerAction {
 
 // ── Internal enums ───────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerMode {
     Providers,
+    /// A dynamic-catalog provider was chosen and its model list is being
+    /// fetched. This mode exists because the fetch used to be invisible: the
+    /// dialog stayed on the provider list, unchanged, for the whole round-trip.
+    /// A keypress that produces no visible change is indistinguishable from a
+    /// keypress that was dropped, so people pressed Enter again — and each
+    /// press started ANOTHER fetch, whose late reply reset the cursor and
+    /// filter out from under them once the list finally appeared.
+    ///
+    /// Owning the screen while the fetch runs fixes both halves: the wait is
+    /// stated, and Enter has somewhere to land that is explicitly a no-op.
+    LoadingModels,
     Models,
     KeyEntry,
     /// An account sign-in is in flight. Owns the screen while it runs so the
@@ -579,6 +590,7 @@ impl ModelPicker {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
         match self.mode {
             PickerMode::Providers => self.handle_providers_key(key),
+            PickerMode::LoadingModels => self.handle_loading_models_key(key),
             PickerMode::Models => self.handle_models_key(key),
             PickerMode::KeyEntry => self.handle_key_entry_key(key),
             PickerMode::AccountLogin => self.handle_account_login_key(key),
@@ -678,6 +690,23 @@ impl ModelPicker {
             } else {
                 // Dynamic catalog — fetch from backend (which falls back to the
                 // provider's configured key), stay open.
+                //
+                // Move to LoadingModels FIRST. This used to return the action
+                // while leaving `mode` on Providers, so the screen did not
+                // change at all for the length of the round-trip and Enter
+                // silently re-entered this same branch, firing a duplicate
+                // fetch per press. Claiming the screen here makes the wait
+                // visible and makes further Enters inert.
+                //
+                // The stale list is cleared rather than left on display: it
+                // belongs to the PREVIOUS provider, and showing another
+                // provider's models under this one's title is worse than
+                // showing none.
+                self.models = Vec::new();
+                self.models_cursor = 0;
+                self.models_scroll = 0;
+                self.filter.clear();
+                self.mode = PickerMode::LoadingModels;
                 return Some(ModelPickerAction::LoadProviderModels {
                     provider: p.id.clone(),
                     base_url: self.models_base_url.clone(),
@@ -996,6 +1025,20 @@ impl ModelPicker {
         self.mode = PickerMode::KeyEntry;
     }
 
+    /// Keys while a model list is in flight.
+    ///
+    /// Esc backs out to the provider list; everything else is deliberately
+    /// swallowed. In particular Enter must NOT re-trigger the fetch — doing so
+    /// is what turned one impatient keypress into a queue of duplicate
+    /// responses, each of which reset the cursor and filter when it landed.
+    fn handle_loading_models_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        if key.code == KeyCode::Esc {
+            self.mode = PickerMode::Providers;
+            self.filter.clear();
+        }
+        None
+    }
+
     fn handle_models_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return None;
@@ -1241,12 +1284,33 @@ impl ModelPicker {
     }
 
     /// Push a freshly-loaded dynamic model list and switch to Models mode.
+    /// Apply a fetched model list, but ONLY while a fetch is actually awaited.
+    ///
+    /// This resets the cursor and the filter, so applying it unconditionally
+    /// let a late or duplicate reply reorder the list under a user who had
+    /// already started navigating it — and, after Esc, drag them back into a
+    /// screen they had left. A reply that no longer answers a live question is
+    /// dropped rather than allowed to move the selection.
     pub fn set_provider_models(&mut self, models: Vec<OnboardingModel>) {
+        if self.mode != PickerMode::LoadingModels {
+            return;
+        }
         self.models = models;
         self.models_cursor = 0;
         self.models_scroll = 0;
         self.filter.clear();
         self.mode = PickerMode::Models;
+    }
+
+    /// The in-flight model fetch failed. Return to the provider list so the
+    /// dialog cannot sit on "Loading…" for ever; the caller surfaces the
+    /// reason as a toast. Ignored unless a fetch was actually awaited, for the
+    /// same reason `set_provider_models` is.
+    pub fn fail_provider_models(&mut self) {
+        if self.mode == PickerMode::LoadingModels {
+            self.mode = PickerMode::Providers;
+            self.filter.clear();
+        }
     }
 
     // ── Scroll helpers ───────────────────────────────────────────────────────
@@ -1327,6 +1391,7 @@ impl ModelPicker {
 
         match self.mode {
             PickerMode::Providers => self.draw_providers(frame, inner, &theme),
+            PickerMode::LoadingModels => self.draw_loading_models(frame, inner, &theme),
             PickerMode::Models => self.draw_models(frame, inner, &theme),
             PickerMode::KeyEntry => self.draw_key_entry(frame, inner, &theme),
             PickerMode::AccountLogin => self.draw_account_login(frame, inner, &theme),
@@ -1737,6 +1802,50 @@ impl ModelPicker {
                     Rect::new(area.x, y, area.width, 1),
                 );
             }
+        }
+    }
+
+    /// The waiting screen for a dynamic provider's catalog.
+    ///
+    /// Deliberately carries the SAME title as `draw_models`, so the transition
+    /// when the list lands reads as the same screen filling in rather than a
+    /// third place the dialog can be. It says which provider is being read and
+    /// that Esc goes back, because the one thing the user must not conclude is
+    /// that nothing happened.
+    fn draw_loading_models(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+        let mut cy = inner.y;
+
+        let title = Paragraph::new(format!("Models · {}", self.models_provider))
+            .style(theme.dialog_title())
+            .alignment(Alignment::Center);
+        frame.render_widget(title, Rect::new(inner.x, cy, inner.width, 1));
+        cy += 2;
+
+        let sep = "─".repeat(inner.width as usize);
+        frame.render_widget(
+            Paragraph::new(sep.as_str()).style(Style::default().fg(theme.colors.dim)),
+            Rect::new(inner.x, cy, inner.width, 1),
+        );
+
+        let body_h = inner.height.saturating_sub(cy - inner.y + 1);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("Loading models from {}…", self.models_provider),
+                Style::default().fg(theme.colors.secondary),
+            ))
+            .alignment(Alignment::Center),
+            Rect::new(inner.x, cy + body_h / 2, inner.width, 1),
+        );
+
+        if inner.height >= 2 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Esc to go back",
+                    Style::default().fg(theme.colors.muted),
+                ))
+                .alignment(Alignment::Center),
+                Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            );
         }
     }
 
@@ -3011,4 +3120,201 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+#[cfg(test)]
+mod dynamic_catalog_wait_tests {
+    //! Regression coverage for the reported defect: switching from xAI to
+    //! Ollama "wouldn't take" until Enter had been pressed several times.
+    //!
+    //! `ollama_local` ships `models: :dynamic`, so choosing it starts an HTTP
+    //! fetch for its catalog. That fetch used to leave the dialog sitting on
+    //! the PROVIDER list, visually unchanged, for its whole duration — so the
+    //! keypress looked dropped, and each retry queued another fetch whose late
+    //! reply reset the cursor and the filter once the list finally rendered.
+    //!
+    //! What these assert is the property the screen could not previously
+    //! express: one Enter is enough, the wait is visible, and a reply that no
+    //! longer answers a live question never moves the selection.
+    use super::*;
+    use crate::client::types::{DetectedProvidersResponse, OllamaLocalStatus, OnboardingModel};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ollama_local_provider() -> OnboardingProvider {
+        OnboardingProvider {
+            id: "ollama_local".to_string(),
+            name: "Ollama Local".to_string(),
+            description: "Private — needs a local GPU".to_string(),
+            group: "bring_your_own".to_string(),
+            requires_key: serde_json::Value::Bool(false),
+            base_url: Some("http://localhost:11434".to_string()),
+            // The field that makes this provider take the fetch path at all.
+            models: serde_json::Value::String("dynamic".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// A picker parked on the Ollama Local row, with the local daemon reported
+    /// reachable so the provider counts as ready (otherwise Enter opens the
+    /// key screen and never reaches the catalog fetch under test).
+    fn picker_on_ollama_row() -> ModelPicker {
+        let detected = DetectedProvidersResponse {
+            detected: vec![],
+            ollama_local: Some(OllamaLocalStatus {
+                reachable: true,
+                url: "http://localhost:11434".to_string(),
+                model_count: 3,
+            }),
+        };
+        let mut picker = ModelPicker::new_provider_first(
+            vec![ollama_local_provider()],
+            Some(detected),
+            // Switching AWAY from xAI, as reported.
+            "xai".to_string(),
+            "grok-4.6".to_string(),
+        );
+        // Row 0 is "Default (recommended)"; row 1 is the only real provider.
+        picker.prov_cursor = 1;
+        picker
+    }
+
+    fn models() -> Vec<OnboardingModel> {
+        vec![
+            OnboardingModel {
+                id: "qwen3:8b".to_string(),
+                name: "Qwen3 8B".to_string(),
+                ctx: 32_768,
+                tools: true,
+                recommended: true,
+                note: None,
+            },
+            OnboardingModel {
+                id: "llama3:70b".to_string(),
+                name: "Llama 3 70B".to_string(),
+                ctx: 8_192,
+                tools: true,
+                recommended: false,
+                note: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn choosing_a_dynamic_provider_claims_the_screen_while_its_catalog_loads() {
+        let mut picker = picker_on_ollama_row();
+
+        let action = picker.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(action, Some(ModelPickerAction::LoadProviderModels { .. })),
+            "Enter on a ready dynamic provider must start the catalog fetch"
+        );
+        assert_eq!(
+            picker.mode,
+            PickerMode::LoadingModels,
+            "the fetch must be visible on screen — staying on the provider list \
+             is what made the keypress look dropped"
+        );
+    }
+
+    #[test]
+    fn a_second_enter_while_loading_does_not_queue_a_second_fetch() {
+        let mut picker = picker_on_ollama_row();
+        let _ = picker.handle_key(key(KeyCode::Enter));
+
+        // The impatient presses from the report.
+        for _ in 0..3 {
+            assert!(
+                picker.handle_key(key(KeyCode::Enter)).is_none(),
+                "Enter during the wait must not start another fetch"
+            );
+            assert_eq!(picker.mode, PickerMode::LoadingModels);
+        }
+    }
+
+    #[test]
+    fn the_catalog_lands_on_the_models_screen_and_one_enter_selects() {
+        let mut picker = picker_on_ollama_row();
+        let _ = picker.handle_key(key(KeyCode::Enter));
+
+        picker.set_provider_models(models());
+        assert_eq!(picker.mode, PickerMode::Models);
+
+        let action = picker.handle_key(key(KeyCode::Enter));
+        match action {
+            Some(ModelPickerAction::SelectModel {
+                provider,
+                runtime_provider,
+                model,
+                ..
+            }) => {
+                // Provider and model must move TOGETHER: a session left on
+                // provider ollama with an xAI model id (or the reverse) is the
+                // same symptom as no switch at all.
+                assert_eq!(provider, "ollama_local");
+                assert_eq!(runtime_provider, "ollama");
+                assert_eq!(model, "qwen3:8b");
+            }
+            other => panic!("expected a model selection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_duplicate_reply_cannot_reset_a_selection_already_being_made() {
+        let mut picker = picker_on_ollama_row();
+        let _ = picker.handle_key(key(KeyCode::Enter));
+        picker.set_provider_models(models());
+
+        // The user moves to the second model.
+        let _ = picker.handle_key(key(KeyCode::Down));
+        assert_eq!(picker.models_cursor, 1);
+
+        // A duplicate reply from a queued fetch arrives late.
+        picker.set_provider_models(models());
+
+        assert_eq!(
+            picker.models_cursor, 1,
+            "a late duplicate reply must not yank the cursor back to the top"
+        );
+        match picker.handle_key(key(KeyCode::Enter)) {
+            Some(ModelPickerAction::SelectModel { model, .. }) => {
+                assert_eq!(model, "llama3:70b", "Enter must select the row shown");
+            }
+            other => panic!("expected a model selection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn esc_leaves_the_wait_and_a_late_reply_does_not_drag_the_user_back() {
+        let mut picker = picker_on_ollama_row();
+        let _ = picker.handle_key(key(KeyCode::Enter));
+
+        assert!(picker.handle_key(key(KeyCode::Esc)).is_none());
+        assert_eq!(picker.mode, PickerMode::Providers);
+
+        picker.set_provider_models(models());
+        assert_eq!(
+            picker.mode,
+            PickerMode::Providers,
+            "a reply to an abandoned fetch must not reopen the models screen"
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_returns_to_the_providers_list_instead_of_hanging() {
+        let mut picker = picker_on_ollama_row();
+        let _ = picker.handle_key(key(KeyCode::Enter));
+
+        picker.fail_provider_models();
+
+        assert_eq!(
+            picker.mode,
+            PickerMode::Providers,
+            "a failed fetch must not strand the dialog on \"Loading…\""
+        );
+    }
 }

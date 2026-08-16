@@ -1626,6 +1626,11 @@ impl App {
                     match result {
                         Ok(resp) => picker.set_provider_models(resp.models),
                         Err(e) => {
+                            // Hand the screen back to the provider list first.
+                            // Without this the dialog stays on "Loading…" for
+                            // ever after a failed fetch — a dead end whose only
+                            // exit is Esc, with the toast already gone.
+                            picker.fail_provider_models();
                             self.toasts.push(
                                 format!("Failed to load models: {}", e),
                                 crate::components::toast::ToastLevel::Error,

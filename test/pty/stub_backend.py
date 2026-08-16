@@ -63,7 +63,17 @@ _ONBOARDING_STATUS = {
     "needs_onboarding": False,
     "needs_bootstrap": False,
     "system_info": {},
-    "detected": {"detected": [], "ollama_local": {"reachable": False, "url": "", "model_count": 0}},
+    "detected": {
+        "detected": [],
+        # Reachable, so `ollama_local` below is READY and Enter drills into its
+        # dynamic catalog instead of opening a key screen. That drill-in is the
+        # path the model-switch report is about.
+        "ollama_local": {
+            "reachable": True,
+            "url": "http://127.0.0.1:11434",
+            "model_count": 3,
+        },
+    },
     "providers": [
         {
             "id": "openai_codex",
@@ -125,6 +135,20 @@ _ONBOARDING_STATUS = {
                 "account": None,
                 "plan": None,
             },
+            "models": "dynamic",
+        },
+        {
+            # The provider from the report: local Ollama, whose catalog is
+            # `:dynamic` (it is whatever the daemon has pulled), so selecting
+            # it must go to the network before any model can be listed.
+            "id": "ollama_local",
+            "name": "Ollama Local",
+            "description": "Private — needs a local GPU",
+            "group": "bring_your_own",
+            "requires_key": False,
+            "tab": "keys",
+            "order": 5,
+            "base_url": "http://127.0.0.1:11434",
             "models": "dynamic",
         },
     ],
@@ -238,6 +262,10 @@ _TURN_GATE.set()
 #: Longest a gated request will ever be held, whatever the test forgets to do.
 GATE_CEILING = 30.0
 
+#: How long `/onboarding/models` takes to answer. Long enough that a test can
+#: read the screen mid-fetch, short enough not to pad the suite.
+CATALOG_DELAY = 1.5
+
 
 def hold_health() -> None:
     """Stop `/health` answering, so the TUI stays on the connect splash."""
@@ -313,6 +341,26 @@ def posts_since(mark: int, path: str | None = None) -> list[tuple[str, str]]:
     """POSTs recorded after `mark`, optionally filtered to one path."""
     tail = POSTS[mark:]
     return [p for p in tail if path is None or p[0] == path]
+
+
+#: Every GET the stub received, as `path`, oldest first.
+#:
+#: POSTs alone could not answer the model-switch report. Choosing a provider
+#: whose catalog is `:dynamic` issues a GET, and the defect was that ONE
+#: keypress could issue SEVERAL of them — a fact about the wire that no
+#: screenshot can show, since the duplicates rendered identically.
+GETS: list[str] = []
+
+
+def get_mark() -> int:
+    """Current length of `GETS`, to bracket a later `gets_since`."""
+    return len(GETS)
+
+
+def gets_since(mark: int, path: str | None = None) -> list[str]:
+    """GETs recorded after `mark`, optionally filtered to one path."""
+    tail = GETS[mark:]
+    return [g for g in tail if path is None or g == path]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -397,6 +445,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"tools": []})
         if path == "/api/v1/sessions/recent":
             return self._json({"sessions": []})
+        GETS.append(path)
         if path == "/api/v1/sessions":
             return self._json({"sessions": []})
         if path == "/api/v1/permission-rules":
@@ -410,6 +459,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/auth/cli/claude":
             return self._json(dict(CLAUDE_CLI_STATE))
         if path == "/onboarding/models":
+            # Deliberately SLOW. A dynamic catalog is a real network round-trip
+            # (for Ollama, a local daemon that may be cold), and the reported
+            # defect lived entirely inside that window: the dialog showed no
+            # sign of the fetch, so the keypress read as dropped. An instant
+            # stub closes the window and hides the very thing under test.
+            time.sleep(CATALOG_DELAY)
             # The shape the real backend answers with. Note the STATUS: 200.
             # The shipped defect answered 401 here for every provider once
             # setup was complete, and the TUI surfaced it verbatim as
