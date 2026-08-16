@@ -180,10 +180,51 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   # effect was that a configured MCP server left NO trace anywhere the model
   # could see: it could not use what it had no evidence existed.
   #
-  # This block is the evidence. It names every server and every tool it offers,
+  # This block is the evidence. It names every server and the tools it offers,
   # so the model can go straight to `tool_search` with an exact name or a
   # `server:` enumeration. Schemas stay deferred — only the catalog is cheap
-  # (one line per tool) and always present.
+  # and always present.
+  #
+  # ## Why the catalog itself needs a ceiling
+  #
+  # Virtualization removed the SCHEMAS from the prefix but left the NAMES, so
+  # the catalog is still O(total MCP tools) with no upper bound: a config gains
+  # a server and every request gets longer, forever. MEASURED against the
+  # operator's own 13-server config (7 servers reachable, 387 real tools
+  # harvested over stdio):
+  #
+  #   * declared as native schemas   — 288,444 B ≈ **72,111 tok**
+  #   * virtualized, every name      —   8,079 B ≈ **2,020 tok**
+  #   * virtualized, this ceiling    —   1,669 B ≈ **417 tok**
+  #
+  # The distribution is why a per-SERVER cap beats a global one, and why the
+  # cap sits at 40 rather than lower: six of the seven servers contribute
+  # 915 B of names between them, `github` a further 488 B across 26 tools, and
+  # `claude_flow` alone contributes 6,476 B across 333. Nearly the entire cost
+  # is one outlier. So the cap is set above every ordinary server and below the
+  # outlier — that keeps exact names for everything small enough to browse,
+  # which is what lets the model emit `select:mcp__github__create_issue` with
+  # no round-trip, and collapses only the server no prefix could usefully
+  # enumerate anyway. Lowering it to 25 would have bought 122 tok and cost
+  # `github` its names, which is the wrong trade.
+  #
+  # A collapsed server keeps its name, its exact tool count, and the
+  # `server:<name>` instruction already documented below, so nothing becomes
+  # undiscoverable; it costs one extra `tool_search` round-trip. Below the cap
+  # the rendering is byte-for-byte what it was.
+  @default_names_per_server 40
+
+  defp names_per_server do
+    case Application.get_env(
+           :optimal_system_agent,
+           :mcp_catalog_names_per_server,
+           @default_names_per_server
+         ) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_names_per_server
+    end
+  end
+
   defp build_mcp_catalog do
     catalog = Registry.mcp_catalog()
 
@@ -198,10 +239,18 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
     else
       total = deferred_catalog |> Enum.map(fn {_s, e} -> length(e) end) |> Enum.sum()
 
+      cap = names_per_server()
+
       servers =
         Enum.map_join(deferred_catalog, "\n", fn {server, entries} ->
-          tools = Enum.map_join(entries, ", ", & &1.tool)
-          "- **#{server}** (#{length(entries)} tools): #{tools}"
+          count = length(entries)
+
+          if count > cap do
+            "- **#{server}** (#{count} tools): names not listed — " <>
+              "`tool_search server:#{server}` to enumerate"
+          else
+            "- **#{server}** (#{count} tools): #{Enum.map_join(entries, ", ", & &1.tool)}"
+          end
         end)
 
       """
