@@ -208,6 +208,13 @@ pub(crate) struct Bands {
     pub hint: u16,
     /// Status line + permission/shell line.
     pub status: u16,
+    /// Rows the `agents` band may NOT be shed below, because something is
+    /// running and the row is the only evidence of it. `AGENTS_FLOOR` while a
+    /// subagent is live, 0 otherwise — see [`AGENTS_FLOOR`].
+    ///
+    /// A floor, not a claim: it never appears in [`Bands::reserved`], so a band
+    /// asking for nothing still gets nothing.
+    pub agents_floor: u16,
 }
 
 /// `hint` and `status` default to the rows they have always occupied (1 and 2),
@@ -226,6 +233,7 @@ impl Default for Bands {
             input: 0,
             hint: HINT_ROWS,
             status: STATUS_ROWS,
+            agents_floor: 0,
         }
     }
 }
@@ -241,6 +249,25 @@ pub(crate) const STREAM_FLOOR: u16 = 1;
 /// Rows the composer keeps no matter what. Below this there is no interactive
 /// surface left and OSA is a picture of a terminal.
 pub(crate) const INPUT_FLOOR: u16 = 1;
+
+/// Rows the agents band keeps **while a subagent is actually running**.
+///
+/// Measured, on a real terminal (`test/pty`): at 100x20 with four running
+/// subagents and a twelve-item plan, the roster was shed to nothing while the
+/// plan kept its header and rows. The subagents were alive and there was no
+/// roster on screen — which is the complaint this whole thread started from:
+/// not being able to tell whether a subagent was alive.
+///
+/// The ladder itself is right. "A roster of who is working" IS less important
+/// than the plan, per row, and the plan is the better use of the tenth row. What
+/// is not right is going from "fewer roster rows" to "no evidence a subagent
+/// exists". So the band keeps ONE row — the header, `Running 4 agents…` —
+/// exactly as the composer keeps [`INPUT_FLOOR`].
+///
+/// Costs at most one row, and only while something is running: the floor is
+/// applied from [`Bands::agents_floor`], which `measure_bands` sets to 0
+/// whenever the roster has nothing live to report.
+pub(crate) const AGENTS_FLOOR: u16 = 1;
 
 /// A band, for the arbiter to name when it sheds one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,6 +403,19 @@ impl Bands {
 /// * the composer survives to [`INPUT_FLOOR`] on any viewport;
 /// * at any size where everything fits, the result is the input unchanged — so
 ///   normal terminals see byte-identical layout to before the arbiter existed.
+/// The rows a band may not be shed below.
+///
+/// The composer's floor is unconditional: below it there is no interactive
+/// surface. The roster's is conditional on something actually running — see
+/// [`AGENTS_FLOOR`] — so an idle roster still sheds to nothing.
+pub(crate) fn band_floor(b: &Bands, band: Band) -> u16 {
+    match band {
+        Band::Input => INPUT_FLOOR,
+        Band::Agents => b.agents_floor.min(b.agents),
+        _ => 0,
+    }
+}
+
 pub(crate) fn fit_bands(want: Bands, area_h: u16) -> Bands {
     let mut b = want.capped();
     for band in SHED_ORDER {
@@ -384,10 +424,7 @@ pub(crate) fn fit_bands(want: Bands, area_h: u16) -> Bands {
             break;
         }
         let excess = claimed - area_h;
-        let floor = match band {
-            Band::Input => INPUT_FLOOR,
-            _ => 0,
-        };
+        let floor = band_floor(&b, band);
         let cur = b.get(band);
         let take = excess.min(cur.saturating_sub(floor));
         b.set(band, cur - take);
@@ -2307,6 +2344,15 @@ impl App {
             survey,
             popup: self.input.popup_desired_height(),
             input: self.input.desired_height(w),
+            // Keep one roster row alive while a subagent is. Not while the band
+            // merely has rows to draw — a roster of finished agents is history,
+            // and history loses to the plan like everything else on the ladder.
+            // See `AGENTS_FLOOR` for the measurement that motivated it.
+            agents_floor: if agents > 0 && self.agents.running_count() > 0 {
+                AGENTS_FLOOR
+            } else {
+                0
+            },
             ..Bands::default()
         }
         .capped()
@@ -4184,16 +4230,14 @@ mod render_tests {
                         "explorer",
                         "test-model",
                         format!("investigating subject number {i}"),
-                        Some("background".to_string()),
-                    );
+                        Some("background".to_string()), None,);
                     agents.agent_progress(
                         &format!("agent-{i}"),
                         "reading files",
                         i as u32,
                         100,
                         "",
-                        vec!["file_read: a.rs".into(), "file_grep: foo".into()],
-                    );
+                        vec!["file_read: a.rs".into(), "file_grep: foo".into()], None,);
                 }
                 agents.set_bg_summary(bg);
                 for_each_size(|frame, area| {
@@ -4218,16 +4262,14 @@ mod render_tests {
                     "explorer",
                     "test-model",
                     format!("investigating a fairly long subject line number {i}"),
-                    Some("batch-1".to_string()),
-                );
+                    Some("batch-1".to_string()), None,);
                 agents.agent_progress(
                     &format!("agent-{i}"),
                     "reading files",
                     i as u32,
                     100,
                     "",
-                    Vec::new(),
-                );
+                    Vec::new(), None,);
             }
             let bg_rows = vec![
                 crate::components::agents::BgTerminalRow {

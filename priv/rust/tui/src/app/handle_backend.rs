@@ -1719,9 +1719,10 @@ impl App {
                 model,
                 subject,
                 batch_id,
+                elapsed_ms,
             } => {
                 self.agents
-                    .agent_started(&agent_name, &role, &model, &subject, batch_id);
+                    .agent_started(&agent_name, &role, &model, &subject, batch_id, elapsed_ms);
                 // Short human label, never the raw `agent:session-…:osa-x` key.
                 let short = crate::components::agents::short_agent_label(&agent_name);
                 let display = if role.is_empty() {
@@ -1739,6 +1740,7 @@ impl App {
                 tokens_used,
                 subject,
                 recent_actions,
+                elapsed_ms,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1747,6 +1749,7 @@ impl App {
                     tokens_used,
                     &subject,
                     recent_actions,
+                    elapsed_ms,
                 );
                 // Codex-style live naming: during orchestration the leader spinner
                 // otherwise shows a generic flavor verb while sub-agents do the
@@ -1846,8 +1849,10 @@ impl App {
                 task,
                 ..
             } => {
+                // Fleet nodes have no `RunStore` row, so there is no backend age
+                // to anchor to — `None` leaves the local anchor in place.
                 self.agents
-                    .agent_started(&node_id, &agent_type, "", &task, None);
+                    .agent_started(&node_id, &agent_type, "", &task, None, None);
                 self.recompute_layout();
             }
             BackendEvent::FleetNodeProgress {
@@ -1864,6 +1869,9 @@ impl App {
                     tokens_used,
                     "",
                     recent_actions,
+                    // Fleet nodes have no run row and so no backend age; the
+                    // local anchor stands.
+                    None,
                 );
                 self.recompute_layout();
             }
@@ -1957,6 +1965,9 @@ impl App {
                     "",
                     format!("background: {}", label),
                     Some("background".to_string()),
+                    // `background_agent_started` fires at launch and carries no
+                    // age; the phase and progress frames that follow supply one.
+                    None,
                 );
                 self.toasts.push(
                     format!("Background agent \"{}\" started", label),
@@ -2131,9 +2142,10 @@ impl App {
                 display_name,
                 phase,
                 detail,
+                elapsed_ms,
             } => {
                 self.agents
-                    .agent_phase(&agent_id, &display_name, &phase, &detail);
+                    .agent_phase(&agent_id, &display_name, &phase, &detail, elapsed_ms);
             }
             BackendEvent::BackgroundAgentStalled {
                 agent_id,

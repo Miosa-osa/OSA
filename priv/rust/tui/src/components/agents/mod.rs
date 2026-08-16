@@ -782,6 +782,15 @@ impl Agents {
         self.active = true;
     }
 
+    /// A subagent started, or was re-announced.
+    ///
+    /// `elapsed_ms` is the run's age by the BACKEND's clock. It is the only
+    /// thing allowed to set `started_at` on a row that already exists: an
+    /// `agent_started` frame is not proof that work is beginning now — a
+    /// reconnect, a replay or a late panel open delivers one for an agent that
+    /// has been running for minutes — and restamping the local clock on it was
+    /// what produced "17 seconds of work and 99 tool uses". With no age
+    /// reported, an existing row KEEPS the anchor it already had.
     pub fn agent_started(
         &mut self,
         name: impl Into<String>,
@@ -789,6 +798,7 @@ impl Agents {
         model: impl Into<String>,
         subject: impl Into<String>,
         batch_id: Option<String>,
+        elapsed_ms: Option<u64>,
     ) {
         let name = name.into();
         let subject = subject.into();
@@ -804,15 +814,22 @@ impl Agents {
             entry.recent_actions.clear();
             entry.tool_uses = 0;
             entry.tokens_used = 0;
-            entry.started_at = std::time::Instant::now();
             entry.finished_at = None;
+            // Backend age first, so a re-announcement lands on the real start.
+            // Only a row with NO backend age and no work behind it falls back to
+            // "now" — a genuine fresh start, where now IS the start.
+            let had_work = entry.tool_uses > 0 || entry.phase.is_some();
+            entry.anchor_elapsed(elapsed_ms);
+            if elapsed_ms.is_none() && !had_work {
+                entry.started_at = std::time::Instant::now();
+            }
             entry.last_activity = std::time::Instant::now();
             entry.result_summary = None;
             if batch_id.is_some() {
                 entry.batch_id = batch_id;
             }
         } else {
-            self.entries.push(AgentEntry {
+            let mut entry = AgentEntry {
                 name,
                 role: role.into(),
                 model: model.into(),
@@ -829,7 +846,11 @@ impl Agents {
                 result_summary: None,
                 cost_usd: None,
                 phase: None,
-            });
+            };
+            // A row created from a frame about an agent that has been running
+            // for a while starts with the age the backend reports, not zero.
+            entry.anchor_elapsed(elapsed_ms);
+            self.entries.push(entry);
         }
         self.active = true;
     }
@@ -842,9 +863,14 @@ impl Agents {
         tokens: u32,
         subject: impl Into<String>,
         recent: Vec<String>,
+        elapsed_ms: Option<u64>,
     ) {
         let subject = subject.into();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            // Every progress frame re-states the run's true age, so a row the
+            // panel adopted mid-flight converges on the backend's clock rather
+            // than counting from whenever this process first saw it.
+            entry.anchor_elapsed(elapsed_ms);
             entry.last_activity = std::time::Instant::now();
             // A signal from a row we had given up on (Unknown) or that the
             // backend flagged as stalled means it is demonstrably alive again.
@@ -938,7 +964,14 @@ impl Agents {
     /// Creates the row if it does not exist yet: for a background agent the
     /// first phase can arrive before `orchestrator_agent_started`, because the
     /// queue wait happens before the run is even set up.
-    pub fn agent_phase(&mut self, name: &str, display_name: &str, phase: &str, detail: &str) {
+    pub fn agent_phase(
+        &mut self,
+        name: &str,
+        display_name: &str,
+        phase: &str,
+        detail: &str,
+        elapsed_ms: Option<u64>,
+    ) {
         let now = std::time::Instant::now();
         let parsed = AgentPhase {
             name: phase.to_string(),
@@ -961,12 +994,13 @@ impl Agents {
             if changed {
                 entry.phase = Some(parsed);
             }
+            entry.anchor_elapsed(elapsed_ms);
             entry.last_activity = now;
             if entry.status == AgentStatus::Unknown {
                 entry.status = AgentStatus::Running;
             }
         } else {
-            self.entries.push(AgentEntry {
+            let mut entry = AgentEntry {
                 name: name.to_string(),
                 role: String::new(),
                 model: String::new(),
@@ -983,7 +1017,9 @@ impl Agents {
                 result_summary: None,
                 cost_usd: None,
                 phase: Some(parsed),
-            });
+            };
+            entry.anchor_elapsed(elapsed_ms);
+            self.entries.push(entry);
             self.active = true;
         }
     }
@@ -1175,7 +1211,7 @@ mod tests {
     #[test]
     fn clear_scratchpad_drops_notes_but_keeps_agents() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_started("worker-1", "researcher", "", "scan modules", None, None);
         a.scratchpad_activity("agent:s1:1", "findings.md", "write", 2100);
         assert_eq!(a.scratchpad_len(), 1);
 
@@ -1197,7 +1233,7 @@ mod tests {
     #[test]
     fn panel_renders_worker_status_and_scratchpad_line() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_started("worker-1", "researcher", "", "scan modules", None, None);
         a.scratchpad_activity("agent:s1:2", "findings.md", "write", 2100);
 
         let text = render_text(&a, 80, 12);
@@ -1227,7 +1263,7 @@ mod tests {
     #[test]
     fn append_renders_appended_verb() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         a.scratchpad_activity("lead", "notes.md", "append", 300);
         let text = render_text(&a, 80, 10);
         assert!(text.contains("appended"), "expected 'appended': {:?}", text);
@@ -1236,7 +1272,7 @@ mod tests {
     #[test]
     fn scratchpad_section_absent_when_empty() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         let text = render_text(&a, 80, 8);
         assert!(
             !text.contains("scratchpad"),
@@ -1248,7 +1284,7 @@ mod tests {
     #[test]
     fn completed_summary_populates_entry_and_renders_dim_line() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_started("worker-1", "researcher", "", "scan modules", None, None);
         a.agent_completed(
             "worker-1",
             Some(3),
@@ -1277,7 +1313,7 @@ mod tests {
     #[test]
     fn completed_without_summary_renders_no_extra_line() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_started("worker-1", "researcher", "", "scan modules", None, None);
         a.agent_completed("worker-1", Some(1), Some(100), None);
 
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
@@ -1291,7 +1327,7 @@ mod tests {
     #[test]
     fn blank_summary_is_treated_as_none() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         a.agent_completed("worker-1", Some(0), Some(0), Some("   \n  ".to_string()));
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(
@@ -1303,7 +1339,7 @@ mod tests {
     #[test]
     fn failed_summary_renders_in_error_style() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         a.agent_failed(
             "worker-1",
             "timeout",
@@ -1329,7 +1365,7 @@ mod tests {
     #[test]
     fn summary_line_is_width_truncated() {
         let mut a = Agents::new();
-        a.agent_started("w", "", "", "s", None);
+        a.agent_started("w", "", "", "s", None, None);
         let long = "abcdefghijklmnopqrstuvwxyz0123456789 ".repeat(6);
         a.agent_completed("w", Some(1), Some(1), Some(long));
         // Narrow panel: the summary line must fit (ellipsis), no panic, no wrap.
@@ -1352,8 +1388,8 @@ mod tests {
         // adds one. Empty roster is never zero — `main` always exists.
         let mut a = Agents::new();
         assert_eq!(a.roster_count(), 1, "main-only roster is 1 row");
-        a.agent_started("w1", "researcher", "", "scan", None);
-        a.agent_started("w2", "coder", "", "build", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
+        a.agent_started("w2", "coder", "", "build", None, None);
         assert_eq!(a.roster_count(), 3, "main + 2 workers");
     }
 
@@ -1363,7 +1399,7 @@ mod tests {
         // both guard on is_active(), which flips true the moment an agent is tracked.
         let mut a = Agents::new();
         assert!(!a.is_active(), "fresh panel is inactive");
-        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
         assert!(a.is_active(), "tracking a worker activates the panel");
     }
 
@@ -1373,7 +1409,7 @@ mod tests {
         // even with live workers present.
         let mut a = Agents::new();
         assert!(!a.is_cancellable(0), "empty: main not cancellable");
-        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
         assert!(
             !a.is_cancellable(0),
             "with workers: main STILL not cancellable"
@@ -1384,7 +1420,7 @@ mod tests {
     fn worker_cancellable_while_running_not_after_terminal() {
         // `x` on a running worker stops it; a completed/failed worker is inert (E).
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
         assert!(
             a.is_cancellable(1),
             "running worker at roster idx 1 is cancellable"
@@ -1392,7 +1428,7 @@ mod tests {
         a.agent_completed("w1", Some(1), Some(10), None);
         assert!(!a.is_cancellable(1), "completed worker is not cancellable");
 
-        a.agent_started("w2", "coder", "", "build", None);
+        a.agent_started("w2", "coder", "", "build", None, None);
         a.agent_failed("w2", "boom", Some(0), Some(0), None);
         assert!(!a.is_cancellable(2), "failed worker is not cancellable");
     }
@@ -1402,8 +1438,8 @@ mod tests {
         // Enter/x routing depends on this offset (C/D/I): roster idx 0 = `main`
         // (no backend id, no worker transcript → None); idx 1 maps to entries[0].
         let mut a = Agents::new();
-        a.agent_started("worker-alpha", "researcher", "", "scan modules", None);
-        a.agent_started("worker-beta", "coder", "", "write code", None);
+        a.agent_started("worker-alpha", "researcher", "", "scan modules", None, None);
+        a.agent_started("worker-beta", "coder", "", "write code", None, None);
 
         assert_eq!(a.agent_id_at(0), None, "main has no backend agent id");
         assert_eq!(
@@ -1431,7 +1467,7 @@ mod tests {
     fn is_cancellable_saturates_below_zero_and_above_end() {
         // Defensive: no panic / no wraparound at the roster edges.
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         assert!(!a.is_cancellable(0));
         assert!(a.is_cancellable(1));
         assert!(!a.is_cancellable(99), "way out of range → false, no panic");
@@ -1440,12 +1476,12 @@ mod tests {
     #[test]
     fn summary_clears_when_agent_restarts_and_on_new_turn() {
         let mut a = Agents::new();
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         a.agent_completed("worker-1", Some(1), Some(1), Some("done stuff".to_string()));
         assert!(a.entries[0].result_summary.is_some());
 
         // Re-running the same agent (resume/new wave) clears the stale summary.
-        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_started("worker-1", "", "", "work", None, None);
         assert_eq!(a.entries[0].result_summary, None);
 
         a.agent_completed("worker-1", Some(1), Some(1), Some("done again".to_string()));
@@ -1463,7 +1499,7 @@ mod tests {
         // "+K more agents" line. The full-screen dashboard still lists them all.
         let mut a = Agents::new();
         for i in 0..20 {
-            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None);
+            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None, None);
         }
         let text = render_text(&a, 80, 40);
         // First cap agents (0..=7) are visible.
@@ -1493,7 +1529,7 @@ mod tests {
         // Below the cap there is no overflow line at all.
         let mut a = Agents::new();
         for i in 0..3 {
-            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None);
+            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None, None);
         }
         let text = render_text(&a, 80, 20);
         assert!(
@@ -1506,7 +1542,7 @@ mod tests {
     fn long_activity_truncates_with_ellipsis() {
         // (1) Long node activity/name still truncates with `…`, never wraps/overflows.
         let mut a = Agents::new();
-        a.agent_started("w", "", "", "x".repeat(300), None);
+        a.agent_started("w", "", "", "x".repeat(300), None, None);
         let text = render_text(&a, 40, 8);
         assert!(text.contains('\u{2026}'), "activity truncated: {text:?}");
     }
@@ -1516,7 +1552,7 @@ mod tests {
         // (2) running > cap (a backend race) must render `cap/cap`, never `30/16`;
         // the ">=25 large fleet" dim warning is preserved.
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         a.set_fleet_summary(30, 0, 16, 30, true);
         let text = render_text(&a, 100, 12);
         assert!(text.contains("16/16 agents"), "clamped gauge: {text:?}");
@@ -1531,7 +1567,7 @@ mod tests {
     fn header_fleet_gauge_zero_cap_no_slash_zero() {
         // (2) cap == 0 must not render an odd `N/0`; show a plain count instead.
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         a.set_fleet_summary(4, 0, 0, 4, false);
         let text = render_text(&a, 100, 12);
         assert!(
@@ -1554,7 +1590,7 @@ mod tests {
         assert!(a.is_active(), "scratchpad activity activates the panel");
         assert!(!a.has_entries(), "…but there are no worker rows to browse");
         // Once a real worker exists, both the hint and the enter-gate fire.
-        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
         assert!(
             a.is_active() && a.has_entries(),
             "worker present → gate + hint agree"
@@ -1577,9 +1613,9 @@ mod tests {
         // row silent past the stale window stops claiming to be running.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("done-1", "", "", "s", None);
+        a.agent_started("done-1", "", "", "s", None, None);
         a.agent_completed("done-1", Some(1), Some(10), None);
-        a.agent_started("live-1", "", "", "s", None); // fresh running row stays
+        a.agent_started("live-1", "", "", "s", None, None); // fresh running row stays
 
         let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
         for e in a.entries.iter_mut() {
@@ -1624,7 +1660,7 @@ mod tests {
         let mut a = Agents::new();
         for i in 0..50 {
             let name = format!("w{i}");
-            a.agent_started(name.clone(), "", "", "s", None);
+            a.agent_started(name.clone(), "", "", "s", None, None);
             a.agent_completed(&name, Some(1), Some(1), None);
         }
         let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
@@ -1666,15 +1702,14 @@ mod tests {
         // `◯` worker glyph, and the right-hand token/elapsed column.
         let mut a = Agents::new();
         a.set_main_row("orchestrating the fleet", 625, 107_300);
-        a.agent_started("worker-1", "researcher", "", "scanning modules", None);
+        a.agent_started("worker-1", "researcher", "", "scanning modules", None, None);
         a.agent_progress(
             "worker-1",
             "reading entry.rs",
             4,
             4213,
             "scanning modules",
-            vec![],
-        );
+            vec![], None,);
 
         let lines = render_lines(&a, 70, 12);
         let joined = lines.join("\n");
@@ -1739,7 +1774,7 @@ mod tests {
         // In FleetSelect focus the selected roster row swaps `◯` → `●`.
         let mut a = Agents::new();
         a.set_main_row("working", 5, 100);
-        a.agent_started("w1", "coder", "", "building", None);
+        a.agent_started("w1", "coder", "", "building", None, None);
         // Roster index 1 == entries[0] selected.
         a.set_roster_selected(Some(1));
         let lines = render_lines(&a, 60, 10);
@@ -1760,8 +1795,8 @@ mod tests {
         // the pad must be computed by CHAR width — a byte-len pad shorted the rule
         // and left a ragged gap before the edge.
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "s1", Some("alpha".to_string()));
-        a.agent_started("w2", "coder", "", "s2", Some("beta".to_string()));
+        a.agent_started("w1", "researcher", "", "s1", Some("alpha".to_string()), None);
+        a.agent_started("w2", "coder", "", "s2", Some("beta".to_string()), None);
 
         let w = 72u16;
         let lines = render_lines(&a, w, 14);
@@ -1781,7 +1816,7 @@ mod tests {
     fn done_row_shows_frozen_elapsed() {
         // A completed worker renders `Done · <elapsed>` (frozen), not a live timer.
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
         a.agent_completed("w1", Some(3), Some(1200), Some("found 4 paths".to_string()));
         let lines = render_lines(&a, 70, 10);
         let joined = lines.join("\n");
@@ -1801,8 +1836,8 @@ mod tests {
         // (ratatui clips), and the ellipsis marks the truncation.
         let mut a = Agents::new();
         a.set_main_row("x".repeat(200), 30, 500);
-        a.agent_started("w1", "researcher", "", "y".repeat(200), None);
-        a.agent_progress("w1", "z".repeat(200), 2, 100, "", vec![]);
+        a.agent_started("w1", "researcher", "", "y".repeat(200), None, None);
+        a.agent_progress("w1", "z".repeat(200), 2, 100, "", vec![], None);
         let w = 32u16;
         let lines = render_lines(&a, w, 10);
         assert!(
@@ -1853,17 +1888,16 @@ mod tests {
         for w in [60u16, 80u16] {
             let mut a = Agents::new();
             a.set_main_row("orchestrating the fleet", 0, 5_000); // ↓5.0k
-            a.agent_started("w1", "researcher", "", "scanning modules", None);
+            a.agent_started("w1", "researcher", "", "scanning modules", None, None);
             a.agent_progress(
                 "w1",
                 "reading entry.rs",
                 4,
                 4_200,
                 "scanning modules",
-                vec![],
-            ); // ↓4.2k
-            a.agent_started("w2", "coder", "", "building the crate", None);
-            a.agent_progress("w2", "compiling render.rs", 7, 5_100, "building", vec![]); // ↓5.1k
+                vec![], None,); // ↓4.2k
+            a.agent_started("w2", "coder", "", "building the crate", None, None);
+            a.agent_progress("w2", "compiling render.rs", 7, 5_100, "building", vec![], None); // ↓5.1k
 
             let cells = render_cells(&a, w, 12);
 
@@ -1911,18 +1945,17 @@ mod tests {
         let w = 70u16;
         let mut a = Agents::new();
         a.set_main_row("orchestrating", 0, 5_000); // ↓5.0k
-        a.agent_started("w1", "researcher", "", "scanning modules", None);
+        a.agent_started("w1", "researcher", "", "scanning modules", None, None);
         a.agent_progress(
             "w1",
             "reading entry.rs",
             4,
             4_200,
             "scanning modules",
-            vec![],
-        ); // ↓4.2k
+            vec![], None,); // ↓4.2k
            // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
-        a.agent_started("w2", "研究者", "", "x".repeat(120), None);
-        a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![]); // ↓3.3k
+        a.agent_started("w2", "研究者", "", "x".repeat(120), None, None);
+        a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![], None); // ↓3.3k
 
         let cells = render_cells(&a, w, 12);
         let rows: Vec<&Vec<String>> = cells
@@ -1959,8 +1992,8 @@ mod tests {
         // 12 tools and 40k tokens finished the turn displaying `0 tools · 0 tok`
         // — the panel destroyed the only real numbers it had.
         let mut a = Agents::new();
-        a.agent_started("worker-1", "researcher", "", "scan", None);
-        a.agent_progress("worker-1", "grep", 12, 40_000, "", vec![]);
+        a.agent_started("worker-1", "researcher", "", "scan", None, None);
+        a.agent_progress("worker-1", "grep", 12, 40_000, "", vec![], None);
 
         // No usage on the wire → the accumulated counters survive untouched.
         a.agent_completed("worker-1", None, None, Some("done".into()));
@@ -1974,8 +2007,8 @@ mod tests {
 
         // And a REAL zero from the wire is still honoured — `None` means absent,
         // not "ignore the backend".
-        a.agent_started("worker-2", "researcher", "", "scan", None);
-        a.agent_progress("worker-2", "grep", 5, 900, "", vec![]);
+        a.agent_started("worker-2", "researcher", "", "scan", None, None);
+        a.agent_progress("worker-2", "grep", 5, 900, "", vec![], None);
         a.agent_completed("worker-2", Some(0), Some(0), None);
         let e2 = a.entries.iter().find(|e| e.name == "worker-2").unwrap();
         assert_eq!(
@@ -1990,11 +2023,103 @@ mod tests {
         // FIX 1, failure path — a crash is exactly when the accumulated work
         // matters most, and it was being wiped the same way.
         let mut a = Agents::new();
-        a.agent_started("worker-1", "coder", "", "build", None);
-        a.agent_progress("worker-1", "bash", 7, 12_345, "", vec![]);
+        a.agent_started("worker-1", "coder", "", "build", None, None);
+        a.agent_progress("worker-1", "bash", 7, 12_345, "", vec![], None);
         a.agent_failed("worker-1", "boom", None, None, None);
         let e = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!((e.tool_uses, e.tokens_used), (7, 12_345));
+    }
+
+    // ── elapsed is the BACKEND's clock, not the panel's ─────────────────────
+    //
+    // The report: a subagent showing "17 seconds of work and 99 tool uses".
+    // Both numbers were true. `tool_uses` is the backend's accumulated counter;
+    // elapsed came from `Instant::now()` stamped locally and RESTAMPED on every
+    // `agent_started`, so any re-announcement — a reconnect, a replay, a panel
+    // opened after work began — zeroed one clock and left the other running.
+
+    #[test]
+    fn a_re_announced_agent_does_not_restart_its_clock() {
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scan", None, None);
+        // This agent has been working for five minutes and has the tool count
+        // to prove it.
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
+            e.started_at = Instant::now() - Duration::from_secs(300);
+        }
+        a.agent_progress("w1", "grep", 99, 0, "", vec![], None);
+
+        // A reconnect replays `agent_started` for an agent already running. The
+        // backend reports its real age; the row must adopt it, not reset.
+        a.agent_started("w1", "researcher", "", "scan", None, Some(300_000));
+
+        let e = a.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert!(
+            e.elapsed_secs() >= 299,
+            "a replayed start rebased elapsed to {}s beside a real tool count of {} \
+             — the two-clocks defect",
+            e.elapsed_secs(),
+            e.tool_uses
+        );
+    }
+
+    #[test]
+    fn a_row_adopted_mid_flight_starts_at_the_age_the_backend_reports() {
+        // The panel opened (or the client connected) after work began. Without
+        // a backend age this row could only ever start counting from zero.
+        let mut a = Agents::new();
+        a.agent_started("late", "coder", "", "build", None, Some(420_000));
+        let e = a.entries.iter().find(|e| e.name == "late").unwrap();
+        assert!(
+            (419..=421).contains(&e.elapsed_secs()),
+            "expected ~420s from the backend's reported age, got {}s",
+            e.elapsed_secs()
+        );
+    }
+
+    #[test]
+    fn an_absent_age_leaves_the_anchor_alone_rather_than_resetting_it() {
+        use std::time::{Duration, Instant};
+        // Absent is NOT zero. An older backend, or a path with no run row, says
+        // nothing about the age — and a frame that says nothing must not be
+        // allowed to discard a measurement we already have.
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None, None);
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
+            e.started_at = Instant::now() - Duration::from_secs(200);
+        }
+        a.agent_progress("w1", "grep", 7, 0, "", vec![], None);
+        a.agent_phase("w1", "w1", "awaiting_model", "thinking", None);
+
+        let e = a.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert!(
+            e.elapsed_secs() >= 199,
+            "an age-less frame reset elapsed to {}s",
+            e.elapsed_secs()
+        );
+    }
+
+    #[test]
+    fn a_finished_agents_elapsed_stays_frozen() {
+        // A late frame must not un-freeze a terminal row's elapsed.
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None, Some(60_000));
+        a.agent_completed("w1", Some(3), Some(0), None);
+        let before = a
+            .entries
+            .iter()
+            .find(|e| e.name == "w1")
+            .unwrap()
+            .elapsed_secs();
+        a.agent_progress("w1", "grep", 4, 0, "", vec![], Some(999_000));
+        let after = a
+            .entries
+            .iter()
+            .find(|e| e.name == "w1")
+            .unwrap()
+            .elapsed_secs();
+        assert_eq!(before, after, "a terminal row's elapsed must not move");
     }
 
     #[test]
@@ -2005,7 +2130,7 @@ mod tests {
         // `Failed · stalled` row for it.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("queued-1", "researcher", "", "scan modules", None);
+        a.agent_started("queued-1", "researcher", "", "scan modules", None, None);
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "queued-1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 150);
         }
@@ -2041,7 +2166,7 @@ mod tests {
         );
 
         // And it recovers: any later signal proves it is alive.
-        a.agent_progress("queued-1", "grep pattern", 1, 10, "", vec![]);
+        a.agent_progress("queued-1", "grep pattern", 1, 10, "", vec![], None);
         let e = a.entries.iter().find(|e| e.name == "queued-1").unwrap();
         assert_eq!(
             e.status,
@@ -2056,7 +2181,7 @@ mod tests {
         // never by being relabelled with an outcome nobody reported.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("ghost", "", "", "s", None);
+        a.agent_started("ghost", "", "", "s", None, None);
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "ghost") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::UNKNOWN_REAP_SECS + 5);
         }
@@ -2070,8 +2195,8 @@ mod tests {
         // positive backend observation — distinct from `Unknown` (we lost the
         // signal) and from `Failed` (it ended badly).
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "scan", None);
-        a.agent_progress("w1", "grep", 3, 500, "", vec![]);
+        a.agent_started("w1", "researcher", "", "scan", None, None);
+        a.agent_progress("w1", "grep", 3, 500, "", vec![], None);
         a.agent_stalled("w1", 14 * 60 * 1000);
 
         let e = a.entries.iter().find(|e| e.name == "w1").unwrap();
@@ -2105,7 +2230,7 @@ mod tests {
         // read as "4 subagents".
         let mut a = Agents::new();
         for n in ["a", "b", "c", "live"] {
-            a.agent_started(n, "", "", "s", None);
+            a.agent_started(n, "", "", "s", None, None);
         }
         a.agent_completed("a", None, None, None);
         a.agent_completed("b", None, None, None);
@@ -2125,7 +2250,7 @@ mod tests {
         // to fall through to the `N agents completed` tally.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
         }
@@ -2152,13 +2277,12 @@ mod tests {
         // described the panel and not the agent.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         a.agent_phase(
             "w1",
             "explorer",
             "awaiting_model",
-            "waiting for the first response from glm-4.7",
-        );
+            "waiting for the first response from glm-4.7", None,);
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
         }
@@ -2187,7 +2311,7 @@ mod tests {
         // to `Running`.
         use std::time::{Duration, Instant};
         let mut a = Agents::new();
-        a.agent_started("w1", "", "", "s", None);
+        a.agent_started("w1", "", "", "s", None, None);
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
         }
@@ -2198,8 +2322,7 @@ mod tests {
             "w1",
             "explorer",
             "starting",
-            "creating an isolated worktree",
-        );
+            "creating an isolated worktree", None,);
         assert_eq!(
             a.entries[0].status,
             AgentStatus::Running,
@@ -2213,7 +2336,7 @@ mod tests {
         // phase can arrive before any `agent_started`. The roster must show it
         // rather than drop the frame on the floor.
         let mut a = Agents::new();
-        a.agent_phase("bg1", "explorer", "queued", "16 of 16 slots busy");
+        a.agent_phase("bg1", "explorer", "queued", "16 of 16 slots busy", None);
         assert_eq!(a.entry_count(), 1, "the queued agent is visible");
         let text = render_text(&a, 100, 12);
         assert!(
@@ -2243,7 +2366,7 @@ mod tests {
     #[test]
     fn an_unknown_cost_renders_as_a_dash_never_as_zero() {
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "unpriced", None);
+        a.agent_started("w1", "researcher", "", "unpriced", None, None);
         a.agent_completed("w1", Some(3), Some(1000), None);
         a.set_agent_cost("w1", None);
 
@@ -2273,7 +2396,7 @@ mod tests {
     #[test]
     fn a_known_cost_is_shown_and_is_not_wiped_by_a_later_silent_frame() {
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "priced", None);
+        a.agent_started("w1", "researcher", "", "priced", None, None);
         // A sub-cent price is the realistic shape for a short subagent run, and
         // it is exactly the case that must not collapse to "$0.00".
         a.set_agent_cost("w1", Some(0.0043));

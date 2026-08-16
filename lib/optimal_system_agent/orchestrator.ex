@@ -279,6 +279,11 @@ defmodule OptimalSystemAgent.Orchestrator do
       batch_id: batch_id,
       wave: wave,
       model: to_string(model),
+      # Age of the RUN, not of this frame. The run row is created at DISPATCH,
+      # so a subagent that waited behind the concurrency cap reports the wait it
+      # actually did rather than restarting the clock when it finally starts —
+      # and a re-announced agent (reconnect, replay) does not reset to zero.
+      elapsed_ms: run_elapsed_ms(subagent_id),
       description: task_preview
     })
 
@@ -1363,6 +1368,38 @@ defmodule OptimalSystemAgent.Orchestrator do
   #
   # Logged at `info` and mirrored into telemetry: every defect found in this
   # area was invisible because the code that knew never said anything.
+  # How long this run has existed, by the BACKEND's clock, in milliseconds.
+  #
+  # Every frame that describes a running subagent carries this, because the only
+  # start the TUI otherwise had was `Instant::now()` stamped when its own panel
+  # first heard of the agent — a clock local to that process, restamped on every
+  # `agent_started`. A reconnect, a replay, or a panel opened after work began
+  # rebased elapsed to zero while the tool count stayed real, and the panel
+  # reported "17s · 99 tools": two true numbers from two different clocks.
+  #
+  # Sent as an AGE rather than a start timestamp on purpose: an age is immune to
+  # clock skew between the backend and whatever machine the TUI runs on, and the
+  # client can recover an anchor exactly (`Instant::now() - elapsed_ms`).
+  #
+  # `nil` when there is no run row (a foreground/fleet path that never registered
+  # one). Absent is not zero — a client must keep its own anchor rather than
+  # reset to "just started".
+  @doc false
+  @spec run_elapsed_ms(String.t()) :: non_neg_integer() | nil
+  def run_elapsed_ms(agent_id) when is_binary(agent_id) do
+    case RunStore.get(agent_id) do
+      %{started_at: %DateTime{} = t} ->
+        max(DateTime.diff(DateTime.utc_now(), t, :millisecond), 0)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def run_elapsed_ms(_), do: nil
+
   @doc false
   @spec emit_phase(String.t(), String.t(), String.t(), atom(), String.t()) :: :ok
   def emit_phase(parent_id, subagent_id, display_name, phase, detail) do
@@ -1386,7 +1423,8 @@ defmodule OptimalSystemAgent.Orchestrator do
       agent_name: subagent_id,
       display_name: display_name,
       phase: to_string(phase),
-      detail: detail
+      detail: detail,
+      elapsed_ms: run_elapsed_ms(subagent_id)
     }
 
     emit_event(parent_id, Map.put(payload, :event, "background_agent_phase"))
@@ -2244,6 +2282,11 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: tool_count,
           tokens_used: forwarder_tokens(subagent_id),
           recent_actions: recent_actions(subagent_id),
+          # The backend's own clock for this run — see `run_elapsed_ms/1`. It
+          # rides on every progress frame so a client that connected late, or
+          # reconnected, learns the real age alongside the tool count instead of
+          # pairing a real count with a freshly-zeroed local timer.
+          elapsed_ms: run_elapsed_ms(subagent_id),
           description: ""
         })
 
@@ -2273,6 +2316,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: new_count,
           tokens_used: forwarder_tokens(subagent_id),
           recent_actions: recent_actions(subagent_id),
+          elapsed_ms: run_elapsed_ms(subagent_id),
           description: ""
         })
 

@@ -2593,6 +2593,105 @@ def test_goal_is_anchored_on_the_backend_not_graded_in_the_client(
         reset_goal_state()
 
 
+def test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan(
+    backend: StubBackend,
+) -> None:
+    """A running subagent must leave evidence on screen even under band pressure.
+
+    The complaint that started this thread was not being able to tell whether a
+    subagent was alive. The agents band is the SECOND band shed when vertical
+    space is tight (`SHED_ORDER`: toast, then agents, then checklist), so the
+    plan band — which outranks it — can take the rows the roster needed.
+
+    Measured, not reasoned about. On a real 100x20 terminal with four running
+    subagents and a twelve-item plan, the roster was shed to NOTHING while the
+    plan kept its header and its rows. Four subagents were running and the
+    screen said nothing about them. Reproduced at every height from 20 rows
+    down; at 24 there was still room for both.
+
+    The ladder is not wrong — per row, the plan IS the better use of the tenth
+    row. What was wrong is that "fewer roster rows" degraded to "no evidence a
+    subagent exists". The band now keeps one row, its header, exactly as the
+    composer keeps `INPUT_FLOOR`.
+
+    This asserts the floor holds under the pressure that broke it.
+    """
+    with PtySession(backend.base_url, cols=100, rows=20) as s:
+        s.boot()
+
+        # Four subagents, launched and working: names, roles, real tool counts.
+        for k in range(4):
+            push_sse(
+                "orchestrator_agent_started",
+                {
+                    # `parse_system_event` reads the sub-event name from the
+                    # BODY, exactly as `Orchestrator.emit_event/2` writes it.
+                    "event": "orchestrator_agent_started",
+                    "agent_name": f"agent:pty:osa-w{k}",
+                    "display_name": f"w{k}",
+                    "role": "researcher",
+                    "model": "glm-4.7",
+                    "description": "map the module tree",
+                    "elapsed_ms": 42000,
+                },
+            )
+            push_sse(
+                "orchestrator_agent_progress",
+                {
+                    "event": "orchestrator_agent_progress",
+                    "agent_name": f"agent:pty:osa-w{k}",
+                    "current_action": "file_grep",
+                    "tool_uses": 9,
+                    "tokens_used": 1200,
+                    "elapsed_ms": 45000,
+                },
+            )
+        s.pump(SETTLE * 2)
+        if "Running" not in "\n".join(s.lines()):
+            raise AssertionError(
+                "the roster was never visible with nothing competing for rows, "
+                "so this test cannot say anything about band pressure.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+        # Now the plan — a higher-priority band, big enough to want every row.
+        push_sse(
+            "task_checklist_show",
+            {
+                "event": "task_checklist_show",
+                "data": {
+                    "tasks": [
+                        {
+                            "id": f"t{i}",
+                            "subject": f"plan step number {i}",
+                            "status": "pending",
+                            "active_form": f"doing plan step number {i}",
+                        }
+                        for i in range(12)
+                    ]
+                },
+            },
+        )
+        s.pump(SETTLE * 2)
+
+        screen = "\n".join(s.lines())
+        if "Running" not in screen:
+            raise AssertionError(
+                "four running subagents left NO roster on screen because the "
+                "plan band won the rows. The user cannot tell they are alive — "
+                "the reported complaint, reproduced.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        # The plan is still there too: the floor costs one row, not the feature
+        # that outranks it.
+        if "Plan" not in screen:
+            raise AssertionError(
+                "keeping a roster row cost the plan its whole band. The floor is "
+                "one row, not a re-ordering of the ladder.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -2623,6 +2722,7 @@ TESTS = [
     test_a_split_alt_enter_does_not_interrupt,
     test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever,
     test_goal_is_anchored_on_the_backend_not_graded_in_the_client,
+    test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan,
 ]
 
 

@@ -51,8 +51,20 @@ pub struct AgentEntry {
     pub tool_uses: u32,
     pub tokens_used: u32,
     pub batch_id: Option<String>,
-    /// When this agent entry was first created — drives the dashboard "elapsed"
-    /// column for running agents.
+    /// When this agent's RUN started — drives the dashboard "elapsed" column.
+    ///
+    /// Anchored to the backend's clock whenever the backend says how old the run
+    /// is (`elapsed_ms` on the started / progress / phase frames), by
+    /// subtracting that age from the local `Instant` at receipt. That keeps the
+    /// value skew-free while making it independent of when THIS process first
+    /// heard about the agent.
+    ///
+    /// It used to be `Instant::now()` stamped on every `agent_started`, which is
+    /// a clock local to the TUI process and reset on re-announcement. A
+    /// reconnect, a replay, or a panel opened after work began rebased it to
+    /// zero while `tool_uses` — accumulated on the backend — stayed real: the
+    /// reported "17 seconds of work and 99 tool uses". Both numbers were true
+    /// about different clocks. See [`AgentEntry::anchor_elapsed`].
     pub started_at: std::time::Instant,
     /// Set when the agent reaches a terminal state (Completed/Failed) so its
     /// elapsed time freezes instead of ticking forever.
@@ -135,6 +147,28 @@ impl AgentEntry {
     pub fn elapsed_secs(&self) -> u64 {
         let end = self.finished_at.unwrap_or_else(std::time::Instant::now);
         end.saturating_duration_since(self.started_at).as_secs()
+    }
+
+    /// Move `started_at` onto the backend's clock, given the run's age in
+    /// milliseconds at the moment the frame was emitted.
+    ///
+    /// `None` — an older backend, or a path with no run row — leaves the anchor
+    /// alone. Absent is not zero, and a frame that says nothing about the age
+    /// must not be allowed to reset a measurement we already have; that
+    /// silent reset is the whole defect.
+    ///
+    /// A terminal row is never re-anchored: its elapsed is frozen, and a late
+    /// frame must not un-freeze it.
+    pub fn anchor_elapsed(&mut self, elapsed_ms: Option<u64>) {
+        if self.finished_at.is_some() {
+            return;
+        }
+        let Some(ms) = elapsed_ms else { return };
+        if let Some(anchor) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_millis(ms))
+        {
+            self.started_at = anchor;
+        }
     }
 
     /// A still-"running" agent that hasn't sent any signal for `secs` seconds.

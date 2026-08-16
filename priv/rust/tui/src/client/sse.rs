@@ -725,6 +725,8 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 phase: String,
                 #[serde(default)]
                 detail: String,
+                #[serde(default)]
+                elapsed_ms: Option<u64>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -742,6 +744,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 display_name: ev.display_name,
                 phase: ev.phase,
                 detail: ev.detail,
+                elapsed_ms: ev.elapsed_ms,
             })
         }
 
@@ -1007,6 +1010,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 description: String,
                 #[serde(default)]
                 batch_id: Option<String>,
+                #[serde(default)]
+                elapsed_ms: Option<u64>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentStarted {
@@ -1015,6 +1020,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 model: ev.model,
                 subject: ev.description,
                 batch_id: ev.batch_id,
+                elapsed_ms: ev.elapsed_ms,
             })
         }
 
@@ -1032,6 +1038,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 description: String,
                 #[serde(default)]
                 recent_actions: Vec<String>,
+                #[serde(default)]
+                elapsed_ms: Option<u64>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -1041,6 +1049,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tokens_used: ev.tokens_used,
                 subject: ev.description,
                 recent_actions: ev.recent_actions,
+                elapsed_ms: ev.elapsed_ms,
             })
         }
 

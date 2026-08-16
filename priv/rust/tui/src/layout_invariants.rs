@@ -933,8 +933,7 @@ mod panel_invariants {
                 "researcher",
                 "",
                 &format!("scan module {i}"),
-                None,
-            );
+                None, None,);
         }
         a
     }
@@ -1046,8 +1045,7 @@ mod panel_invariants {
                 "explorer",
                 "",
                 &format!("scan module {i}"),
-                None,
-            );
+                None, None,);
             a.agent_progress(
                 &format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}"),
                 "dir_list",
@@ -1059,8 +1057,7 @@ mod panel_invariants {
                     "dir_list".into(),
                     "file_glob: /w/codex".into(),
                     "dir_list: /w/codex".into(),
-                ],
-            );
+                ], None,);
         }
         a
     }
@@ -1188,7 +1185,7 @@ mod panel_invariants {
         a.set_main_row("shipping the fleet view", 40, 678);
         for i in 0..2 {
             let name = format!("agent:session-1785550977551-3f4a8179a573:osa-verifier-{i}");
-            a.agent_started(&name, "goal-verifier-skeptic", "", "verify the goal", Some(batch.to_string()));
+            a.agent_started(&name, "goal-verifier-skeptic", "", "verify the goal", Some(batch.to_string()), None);
             a.agent_progress(
                 &name,
                 "dir_list: /Users/rhl/.osa/workspace/src",
@@ -1199,8 +1196,7 @@ mod panel_invariants {
                     "dir_list".into(),
                     "file_read".into(),
                     "file_read: /Users/rhl/.osa/backend.log".into(),
-                ],
-            );
+                ], None,);
         }
         a
     }
@@ -1218,8 +1214,7 @@ mod panel_invariants {
                     "goal-verifier-skeptic",
                     "",
                     "verify the goal",
-                    Some((*batch).to_string()),
-                );
+                    Some((*batch).to_string()), None,);
             }
         }
         a
@@ -1446,7 +1441,7 @@ mod panel_invariants {
         a.set_main_row("", 231, 2_800);
         for i in 0..2 {
             let name = format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}");
-            a.agent_started(&name, "explorer", "", "compare the two agents", Some("batch:207491".into()));
+            a.agent_started(&name, "explorer", "", "compare the two agents", Some("batch:207491".into()), None);
             a.agent_progress(
                 &name,
                 "dir_list",
@@ -1457,8 +1452,7 @@ mod panel_invariants {
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/exec-server".into(),
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/sandboxing".into(),
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/hooks".into(),
-                ],
-            );
+                ], None,);
         }
         a
     }
@@ -1610,7 +1604,7 @@ mod panel_invariants {
         let mut a = Agents::new();
         a.set_workspace_root("/Users/rhl/projects/osa");
         a.set_main_row("", 40, 2_800);
-        a.agent_started("agent:x:osa-explorer", "explorer", "", "scan", None);
+        a.agent_started("agent:x:osa-explorer", "explorer", "", "scan", None, None);
         a.agent_progress(
             "agent:x:osa-explorer",
             "dir_list",
@@ -1620,8 +1614,7 @@ mod panel_invariants {
             vec![
                 "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/beta".into(),
                 "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/alpha".into(),
-            ],
-        );
+            ], None,);
         for w in [48u16, 72, 100] {
             let reserved = a.height().max(1);
             let buf = render_to_buffer(|f| a.draw(f, f.area()), w, reserved);
@@ -3474,8 +3467,8 @@ mod turn_completion_invariants {
 
         let mut agents = Agents::new();
         agents.task_started("task-1");
-        agents.agent_started("explorer", "research", "glm", "map the tree", None);
-        agents.agent_started("reviewer", "review", "glm", "review the diff", None);
+        agents.agent_started("explorer", "research", "glm", "map the tree", None, None);
+        agents.agent_started("reviewer", "review", "glm", "review the diff", None, None);
 
         let mut tb = ThinkingBox::new();
         tb.update("weighing two approaches to the parser rewrite");

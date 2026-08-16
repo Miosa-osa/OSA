@@ -136,6 +136,19 @@ pub enum BackendEvent {
         model: String,
         subject: String,
         batch_id: Option<String>,
+        /// Age of the RUN by the backend's clock at the moment this frame was
+        /// emitted (`Orchestrator.run_elapsed_ms/1`).
+        ///
+        /// This is what makes elapsed survive a reconnect. The panel's own
+        /// `Instant` starts when the panel first hears of an agent and used to
+        /// be restamped on every `agent_started`, so a re-announced or
+        /// late-observed agent showed a freshly-zeroed timer beside a real,
+        /// accumulated tool count — the reported "17s · 99 tool uses".
+        ///
+        /// `None` from an older backend, or a path with no run row. Absent is
+        /// NOT zero: a client must keep whatever anchor it already had rather
+        /// than reset to "just started".
+        elapsed_ms: Option<u64>,
     },
     OrchestratorAgentProgress {
         agent_name: String,
@@ -145,6 +158,8 @@ pub enum BackendEvent {
         subject: String,
         /// Last few tool actions, newest first (empty from older backends).
         recent_actions: Vec<String>,
+        /// Backend-clock age of the run — see `OrchestratorAgentStarted`.
+        elapsed_ms: Option<u64>,
     },
     OrchestratorAgentCompleted {
         agent_name: String,
@@ -279,6 +294,8 @@ pub enum BackendEvent {
         /// Human detail ("3 of 16 slots busy", "waiting for the first response
         /// from glm-4.7"). May be empty.
         detail: String,
+        /// Backend-clock age of the run — see `OrchestratorAgentStarted`.
+        elapsed_ms: Option<u64>,
     },
 
     // === Multi-agent workflow (Claude Code parity) ===

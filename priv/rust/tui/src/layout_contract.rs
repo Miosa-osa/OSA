@@ -325,8 +325,13 @@ fn the_composer_is_never_shed() {
 }
 
 /// **Bands are shed in priority order.** A band may only be holding rows if
-/// every lower-priority band has already been reduced to nothing — the ladder in
-/// `SHED_ORDER`, asserted rather than commented.
+/// every lower-priority band has already been reduced to its FLOOR — the ladder
+/// in `SHED_ORDER`, asserted rather than commented.
+///
+/// Floor, not zero, because two bands have one: the composer (`INPUT_FLOOR` —
+/// below it there is no interactive surface) and, while a subagent is actually
+/// running, the roster (`AGENTS_FLOOR` — below it there is no evidence the
+/// subagent exists). Everything else sheds to nothing.
 ///
 /// Without this, "it fits" could be satisfied by shedding the survey the user is
 /// answering while a stale toast keeps its row.
@@ -352,12 +357,13 @@ fn bands_are_shed_from_the_lowest_priority_up() {
             let got = band_of(&fitted, *band);
             if got < asked {
                 for lower in &SHED_ORDER[..i] {
+                    let floor = crate::app::event_loop::band_floor(&fitted, *lower);
                     assert_eq!(
                         band_of(&fitted, *lower),
-                        0,
+                        floor,
                         "at {h} rows {band:?} was reduced ({asked} → {got}) while the \
                          lower-priority {lower:?} still holds \
-                         {} rows ({fitted:?})",
+                         {} rows above its floor of {floor} ({fitted:?})",
                         band_of(&fitted, *lower)
                     );
                 }
