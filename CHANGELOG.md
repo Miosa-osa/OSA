@@ -11,7 +11,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [1.0.102] — displays as `v1.0.102`
 
-Eleven commits, no benchmark claim. Every fix below came from an operator using
+Thirteen commits, no benchmark claim. Every fix below came from an operator using
 the product and saying something was wrong, and in every case the mechanism was
 different from what the symptom suggested.
 
@@ -175,6 +175,42 @@ settings already existed and defaulted sensibly; neither was reachable from wher
 the person affected by them actually stands — inside an installed release. An
 operator watching compaction misbehave had no way to stop it.
 
+### Fixed — the goal freeze had no exit
+
+`create_goal` refuses while a goal is live, which is correct and ported from
+Codex: it stops a model trading a hard objective for an easy one at t=n. But
+every exit was closed to the one entity that hits the wall. `:completed` is
+reachable only through the skeptic panel, and pause/resume/clear belong to the
+user — so an agent whose work legitimately changed direction was deadlocked
+until a human typed `/goal clear`. Under `overdrive`, unattended, there is no
+human to type it.
+
+`update_goal(blocked)` looked like an exit and was not: the streak counts goal
+*turns*, and `turn_count` only advances when `iteration == 0`. Goal-continuation
+re-entry increments `iteration`, so **inside one unattended autonomous turn the
+blocked streak is pinned at 1/3 forever**. The exit existed on paper and was
+unreachable in exactly the situation that needed it.
+
+Abandonment is **not** distinguishable from swapping from inside the tracker —
+`create_goal(X)` with a live goal is byte-identical either way, which is why
+Codex's rule is blunt. So it is priced rather than detected:
+`update_goal(abandoned)` is one call, terminal, and **the successor goal inherits
+`turn_count`, `verify_run_count` and `abandoned_count`.** Re-anchoring was only
+ever worth the fresh lifetime budget and clean stall slate a new snapshot handed
+out; carrying them forward means abandoning redirects a run without refilling
+it. The same carry was applied to superseding a `:blocked` goal, which had the
+identical hole.
+
+An abandoned goal is **recorded, not erased** — status, a history line, a ledger
+entry under that goal's own id — because one that left no trace is
+indistinguishable from one quietly swapped. The refusal now names the exits in
+order with their cost, and deliberately does **not** suggest asking the user,
+since `ask_user` is off by default; a test asserts it never does.
+
+Reported, not fixed: the continuation prompt tells the model the three blocked
+turns count "any automatic goal continuations". The harness does not count them.
+Prompt and enforcement disagree.
+
 ### Known — not fixed
 
 **TUI resize destroys the transcript.** An outside user called OSA unusable over
@@ -194,9 +230,38 @@ What is now established, and it is two defects rather than one:
 
 `test/pty/vte_content_reflow.py` is the first instrument in this repo that can
 watch the failure happen, driving the release binary inside the library GNOME
-Terminal and Tilix use. Its stated limit: it cannot yet drive committed rows into
-native scrollback, so it measures the wipe and not the reflow — and it cannot see
-OSC-8 at all.
+Terminal and Tilix use. It now reproduces the reported screenshot exactly across
+a 120→100→80→60→80→100→60 drag — rule rows at two distinct widths inside one
+table, bordered rows at three, and cells torn mid-word across the border.
+
+**The reason nobody could see it before was the reader.** `get_text_range_format`
+over a multi-row range returns *logical* lines: VTE un-wraps soft-wrapped
+continuations, so a 68-column table row reads back as 68 columns on a 60-column
+screen. Reflow damage is by definition a physical-row phenomenon, so a range read
+reports a shredded table as pristine — which is how the one harness already
+running on a real reflowing emulator still could not see the defect. Reading one
+row per call fixes it.
+
+Three further harness faults were found, each of which had silently produced
+green nonsense: `feed_child` delivers nothing under introspection (fifteen turns
+were "driven" and OSA never saw a character); text-plus-Enter in one write trips
+OSA's paste-burst detector so `\r` becomes a newline and prompts stack up
+unsubmitted; and the stub hardcoded one `message_id`, so **every reply after the
+first was dropped as a duplicate**.
+
+Still unmeasured: OSC-8 hyperlinks, because the reader returns text with escapes
+already consumed.
+
+**And a third defect, found while building the harness, which may outrank both.**
+Measured on a 50-row terminal: turns 1–4 commit, turns 5–8 commit nothing —
+**OSA stops accepting input after 4 committed turns**, no header, no reply, the
+session dead to further typing. A session that stops responding after four
+exchanges explains "unusable" better than a shredded table does. It is
+reproducible but **not diagnosed**, measured through the stub, and given the
+duplicate-`message_id` fault above, the instrument itself is a live suspect. It
+also blocks the resize work: elasticity is a claim about re-laying-out a
+transcript across repeated resizes, and no transcript longer than four turns can
+currently be built to test against.
 
 Two findings that shape the fix:
 
