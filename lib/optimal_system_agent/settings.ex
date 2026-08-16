@@ -352,11 +352,10 @@ defmodule OptimalSystemAgent.Settings do
   """
   @spec project_trusted?() :: boolean()
   def project_trusted? do
-    OptimalSystemAgent.Workspace.Trust.trusted?(OptimalSystemAgent.Workspace.Cwd.get())
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
+    # Resolved through the shared boundary so there is exactly ONE fail-closed
+    # definition of "is this workspace trusted" — see
+    # `OptimalSystemAgent.Workspace.ProjectResource`.
+    OptimalSystemAgent.Workspace.ProjectResource.trusted?()
   end
 
   # A silently ignored config file is its own bug: say plainly that the rules

@@ -10,9 +10,17 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoaderTest do
     # A .git at the root makes ancestor discovery stop here (deterministic scope).
     File.mkdir_p!(Path.join(root, ".git"))
 
+    # Project-scoped skills are workspace-supplied config and stay inert until
+    # trust is accepted (Workspace.ProjectResource). These tests exercise
+    # DISCOVERY semantics, not the trust gate, so the fixture repo is trusted
+    # explicitly — see test/security/untrusted_project_resources_test.exs for
+    # what happens when it is not.
+    OptimalSystemAgent.Workspace.Trust.accept(root)
+
     prev = Application.get_env(:optimal_system_agent, :skills_dir)
 
     on_exit(fn ->
+      OptimalSystemAgent.Workspace.Trust.forget(root)
       File.rm_rf(root)
 
       if prev do

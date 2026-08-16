@@ -289,6 +289,15 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
     end)
   end
 
+  # Every root — project, user and bundled alike — goes through the ONE
+  # workspace-trust boundary (`Workspace.ProjectResource`), which classifies by
+  # where the directory actually lives rather than by the `:local`/`:repo`/
+  # `:user`/`:bundled` label this function attaches. A checked-out repo's
+  # `.osa/skills/<name>/SKILL.md` outranks the bundled skill of the same name
+  # (`@scope_rank`: local 0 < bundled 3), so an untrusted clone could REPLACE a
+  # bundled skill's instructions — the body becomes a subagent's whole
+  # `system_prompt` in `UseSkill` — and inject its own entries into the
+  # model-facing listing. Withheld until the workspace is trusted.
   defp scope_roots(cwd) do
     project = project_roots(cwd)
 
@@ -302,7 +311,12 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
         path -> [{:bundled, path}]
       end
 
-    project ++ user ++ bundled
+    OptimalSystemAgent.Workspace.ProjectResource.admit(project ++ user ++ bundled, :skills,
+      cwd: cwd,
+      why:
+        "A SKILL.md body becomes a subagent's entire system prompt, and a project skill " <>
+          "outranks the bundled skill of the same name, so it can replace trusted instructions."
+    )
   end
 
   defp project_roots(cwd) do

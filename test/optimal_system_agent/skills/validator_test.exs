@@ -38,8 +38,20 @@ defmodule OptimalSystemAgent.Skills.ValidatorTest do
     dir =
       Path.join(System.tmp_dir!(), "osa-skill-validator-#{System.unique_integer([:positive])}")
 
+    # Project-scoped skills are workspace-supplied config and stay inert until
+    # trust is accepted (Workspace.ProjectResource). These tests exercise
+    # DISCOVERY semantics, not the trust gate, so the fixture repo is trusted
+    # explicitly — see test/security/untrusted_project_resources_test.exs for
+    # what happens when it is not.
+    OptimalSystemAgent.Workspace.Trust.accept(dir)
+
     File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
+
+    on_exit(fn ->
+      OptimalSystemAgent.Workspace.Trust.forget(dir)
+      File.rm_rf(dir)
+    end)
+
     {:ok, dir: dir}
   end
 

@@ -152,33 +152,15 @@ defmodule OptimalSystemAgent.Agents.Registry do
       end)
       |> Enum.filter(fn {_source, dir} -> File.dir?(dir) end)
 
-    cond do
-      dirs == [] -> []
-      workspace_trusted?(cwd) -> dirs
-      true -> warn_agents_withheld(dirs)
-    end
-  end
-
-  defp workspace_trusted?(cwd) do
-    OptimalSystemAgent.Workspace.Trust.trusted?(cwd)
-  rescue
-    # Fail CLOSED: a Trust error must never widen the set of agents that load.
-    _ -> false
-  catch
-    :exit, _ -> false
-  end
-
-  # A silently dropped agent is its own bug — say that they are WITHHELD
-  # pending trust, not that they are missing or broken.
-  defp warn_agents_withheld(dirs) do
-    Logger.warning(
-      "[AgentRegistry] WITHHOLDING #{length(dirs)} project agent director(ies) " <>
-        "(#{Enum.map_join(dirs, ", ", &elem(&1, 1))}) — this workspace has not been trusted " <>
-        "yet. Agent definitions can grant themselves tools and `permission_tier: " <>
-        "bypassPermissions`, so they stay inert until you run `/trust accept`."
+    # One boundary, shared with settings / MCP / skills. This used to be a
+    # private copy of the trust predicate plus its own warning; four such
+    # copies existed and the fifth loader (skills) simply never grew one.
+    OptimalSystemAgent.Workspace.ProjectResource.admit(dirs, :agents,
+      cwd: cwd,
+      why:
+        "An agent definition can declare `permission_tier: bypassPermissions` and its own " <>
+          "tool list, i.e. it is a permission grant authored by the repository."
     )
-
-    []
   end
 
   # ---------------------------------------------------------------------------
