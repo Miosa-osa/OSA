@@ -2185,6 +2185,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # to :error, so a slow or broken Ollama can never stall a request path — the
   # caller just falls back to the static table / config default.
   #
+  # That sentence was aspirational until the connect bound below existed: the
+  # probe measured 5017ms against an unreachable host while claiming 3s, which
+  # is longer than the `GenServer.call` it runs inside is willing to wait. It is
+  # true now, and `ContextProbeFitsInsideACallTest` keeps it true — it asserts
+  # the probe finishes with real headroom under the 5000ms call default, not
+  # merely under it.
+  #
   # The failure is cached PERMANENTLY only when the daemon actually answered and
   # the answer contained no context length (a definitive "this model does not
   # report one"). Transport failures get a short TTL instead — see
@@ -2196,7 +2203,24 @@ defmodule OptimalSystemAgent.Providers.Registry do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
     opts =
-      [json: %{name: model}, receive_timeout: @probe_timeout_ms, retry: false] ++
+      # `connect_options` is load-bearing, not belt-and-braces. `receive_timeout`
+      # bounds only the wait for a RESPONSE; establishing the connection and
+      # checking one out of the pool fall back to Finch's own 5s default. So the
+      # "3s" budget above measured 5017ms against a black-holed host — and this
+      # probe runs inside `Loop.handle_call({:swap_provider, ...})`, whose
+      # callers use the 5000ms `GenServer.call` default. The caller gave up 17ms
+      # before the server finished, and the server then completed the swap: a
+      # model change that lands and reports failure.
+      #
+      # A refused connection returns instantly and never showed this. A remote
+      # Ollama, a loaded machine or a half-open socket does not get refused — it
+      # hangs, which is exactly the configuration this probe exists for.
+      [
+        json: %{name: model},
+        receive_timeout: @probe_timeout_ms,
+        connect_options: [timeout: @probe_timeout_ms],
+        retry: false
+      ] ++
         probe_auth_headers()
 
     case Req.post("#{url}/api/show", opts) do

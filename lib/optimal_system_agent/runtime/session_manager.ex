@@ -322,6 +322,28 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     # point, and means the choice is applied to the Loop the first turn will use.
     _ = ensure_loop(session_id)
 
+    # Resolve the context window HERE, before the call — not inside it.
+    #
+    # `Loop.handle_call({:swap_provider, ...})` calls
+    # `Registry.effective_context_window/2` itself, and `session_routes.ex`
+    # calls `forget_context_window/1` immediately before this, so the cache is
+    # cold by construction and that lookup always probes a live Ollama. A probe
+    # inside the callback is real work happening in a call that also owes
+    # someone an answer: the caller's budget is the `GenServer.call` default
+    # (5000ms) and the ETS override that makes the swap real is written only
+    # after the probe returns. Overrun means the caller gives up while the
+    # server completes the swap — a model change that LANDS and reports failure.
+    #
+    # `effective_context_window/2` memoises into `:osa_context_cache`, so doing
+    # it here leaves the callback's own lookup an ETS hit. The slow part now
+    # happens in the caller's own process, where taking a while is just latency
+    # and cannot desynchronise anyone.
+    #
+    # Note the `rescue` below cannot help with that: a call timeout is an
+    # `:exit`, not an exception, so an overrun crashed this function's caller
+    # rather than returning `{:error, _}`.
+    _ = warm_context_window(provider, model)
+
     case lookup_loop(session_id) do
       {:ok, pid, _owner} -> GenServer.call(pid, {:swap_provider, provider, model})
       :error -> {:error, :not_found}
@@ -329,6 +351,27 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   rescue
     e -> {:error, e}
   end
+
+  # Best-effort: a failed warm just leaves the callback to do what it always
+  # did, so this can never make a swap fail that would otherwise have worked.
+  defp warm_context_window(provider, model) when is_binary(model) and model != "" do
+    provider_atom =
+      case provider do
+        p when is_atom(p) -> p
+        p when is_binary(p) -> String.to_existing_atom(p)
+        _ -> nil
+      end
+
+    if provider_atom do
+      OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider_atom)
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp warm_context_window(_, _), do: nil
 
   @doc """
   Forget runtime tracking for a session, and release its per-session state.
