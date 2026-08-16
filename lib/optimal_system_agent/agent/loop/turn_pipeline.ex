@@ -479,7 +479,18 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # One-per-turn budget for the announcement backstop in `ReactLoop`
       # (`docs/research/failure-taxonomy.md` §7): a turn that ends on "let me
       # write it now" gets exactly one chance to actually write it.
-      announcement_continues: 0
+      announcement_continues: 0,
+      # Per-turn budget for post-compaction continuations
+      # (`ReactLoop.max_compaction_continues/0`). Compaction resuming the turn
+      # is the point — but the budget has to be per-turn, or the first long turn
+      # in a session spends it and every later turn stops dead at its first fold,
+      # which is the exact stop this feature exists to remove.
+      compaction_continues: 0,
+      # A fresh user turn is not "just compacted". Left set, the first text-only
+      # answer of the next turn would spend a continuation on a fold that
+      # happened in a previous turn.
+      just_compacted: false,
+      just_compacted_overflow: false
     })
   end
 

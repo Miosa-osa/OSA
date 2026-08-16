@@ -147,7 +147,7 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
       task_list =
         Enum.map(tasks, fn task ->
           status = Map.get(task, :status, :pending)
-          subject = Map.get(task, :subject, "?")
+          subject = task_subject(task)
 
           icon =
             case status do
@@ -166,6 +166,42 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
       nil
     end
   end
+
+  @doc """
+  The human-readable name of a task, from whichever shape it arrives in.
+
+  `Agent.Tasks.get_tasks/1` returns `%Tasks.Tracker.Task{}` structs, whose name
+  field is `:title`. This function read `:subject` — the key used by the
+  Bus/SSE *event* payloads (`Tracker.serialize_task/1`), never by the struct —
+  and defaulted to `"?"`. So the post-compaction restore has been re-injecting
+  the plan as a column of question marks:
+
+      ## Active Tasks
+      - [ ] ?
+      - [ ] ?
+
+  Structurally present, semantically empty: the checklist survived the fold and
+  said nothing about what the agent was doing, which is precisely the "where was
+  I" signal a continuation depends on. Both spellings are accepted so either
+  shape works, and an unnamed task is now labelled as unnamed rather than
+  silently rendered as one.
+  """
+  @spec task_subject(map()) :: String.t()
+  def task_subject(task) when is_map(task) do
+    [:title, :subject, "title", "subject"]
+    |> Enum.find_value(fn key ->
+      case Map.get(task, key) do
+        v when is_binary(v) and v != "" -> v
+        _ -> nil
+      end
+    end)
+    |> case do
+      nil -> "(unnamed task)"
+      name -> name
+    end
+  end
+
+  def task_subject(_), do: "(unnamed task)"
 
   # ── Current workspace ───────────────────────────────────────────────
 

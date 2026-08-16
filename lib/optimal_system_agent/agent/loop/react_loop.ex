@@ -332,6 +332,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               # nowhere; they now stage into `Accounting`'s side ledger and are
               # billed to this session here. A no-op when nothing was staged.
               %{state | messages: compacted}
+              |> refresh_tokens_after_fold(changed?)
               |> Map.put(:just_compacted, changed?)
               |> Map.put(:just_compacted_overflow, false)
               |> Accounting.absorb_side_spend()
@@ -1193,11 +1194,34 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # Post-compaction auto-continue (opencode parity): a turn that just crossed a
       # compaction boundary and then produced no tool calls gets one synthetic
       # "continue or ask" turn so a long task doesn't stall at the boundary. The
-      # flag is cleared here so it fires exactly once.
-      just_compacted?(state) and ProactiveCompaction.continuation_enabled?() ->
+      # flag is cleared here so it fires exactly once PER COMPACTION — and the
+      # per-turn budget below bounds how many compactions may buy one.
+      just_compacted?(state) and ProactiveCompaction.continuation_enabled?() and
+          compaction_continues_left?(state) ->
+        spent = Map.get(state, :compaction_continues, 0) + 1
+
+        Logger.info(
+          "[loop] Post-compaction continue: resuming the turn across the fold " <>
+            "(#{spent}/#{max_compaction_continues()}, iteration #{state.iteration})"
+        )
+
+        Observability.emit(
+          :system_event,
+          %{
+            event: :compaction_continue,
+            continues_spent: spent,
+            max_continues: max_compaction_continues(),
+            overflow: Map.get(state, :just_compacted_overflow, false),
+            iteration: state.iteration
+          },
+          state,
+          source: "agent.compaction"
+        )
+
         cont =
           ProactiveCompaction.continuation_message(
-            overflow: Map.get(state, :just_compacted_overflow, false)
+            overflow: Map.get(state, :just_compacted_overflow, false),
+            session_id: state.session_id
           )
 
         state =
@@ -1208,8 +1232,42 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           }
           |> Map.put(:just_compacted, false)
           |> Map.put(:just_compacted_overflow, false)
+          |> Map.put(:compaction_continues, spent)
 
         run(state)
+
+      # Budget spent. End the turn on the model's own answer rather than
+      # continuing it again — and SAY that the budget is what ended it, so a
+      # turn that stopped mid-task is distinguishable from one that finished.
+      just_compacted?(state) and ProactiveCompaction.continuation_enabled?() ->
+        spent = Map.get(state, :compaction_continues, 0)
+
+        Logger.warning(
+          "[loop] Post-compaction continue EXHAUSTED — the turn has crossed " <>
+            "#{spent} compaction boundary/ies and will not be continued again " <>
+            "(iteration #{state.iteration}). If the task is unfinished, the next " <>
+            "user turn resumes it from the compacted history."
+        )
+
+        Observability.emit(
+          :system_event,
+          %{
+            event: :compaction_continue_exhausted,
+            continues_spent: spent,
+            max_continues: max_compaction_continues(),
+            iteration: state.iteration,
+            answer_preview: String.slice(to_string(content), 0, 200)
+          },
+          state,
+          source: "agent.compaction"
+        )
+
+        state =
+          state
+          |> Map.put(:just_compacted, false)
+          |> Map.put(:just_compacted_overflow, false)
+
+        finish_turn(content, state)
 
       true ->
         finish_turn(content, state)
@@ -1308,6 +1366,62 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp just_compacted?(state), do: Map.get(state, :just_compacted, false) == true
+
+  # Per-turn budget for post-compaction continuations.
+  #
+  # Compaction is supposed to be invisible to the work, so the turn resumes
+  # across the fold — but "resumes across every fold, forever" is a different
+  # failure with the same shape as the one it fixes. A session sitting just over
+  # the threshold can re-cross it on each iteration, and each crossing used to
+  # buy another synthetic turn with no counter of its own; the only thing that
+  # ended such a turn was `max_iterations`, which on high effort is in the
+  # hundreds. Three is enough for a genuinely long task to fold, resume, and
+  # fold again; past that the turn is not making progress the fold caused.
+  @default_max_compaction_continues 3
+
+  defp max_compaction_continues do
+    case Application.get_env(
+           :optimal_system_agent,
+           :compaction_max_continues,
+           @default_max_compaction_continues
+         ) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_max_compaction_continues
+    end
+  end
+
+  defp compaction_continues_left?(state),
+    do: Map.get(state, :compaction_continues, 0) < max_compaction_continues()
+
+  # Re-estimate `last_input_tokens` from the freshly-folded history.
+  #
+  # `ProactiveCompaction.should_compact?/2` reads `last_input_tokens` in
+  # preference to any local estimate, and that field is written in exactly one
+  # place: `Accounting.maybe_put_last_input/2`, which writes only when the
+  # provider reported a POSITIVE input count. A provider that reports no usage
+  # at all (`Providers.Cohere`, `Providers.Replicate`, several OpenAI-compat and
+  # local servers — the loop already warns about this for budget enforcement)
+  # therefore leaves the PRE-compaction occupancy figure standing forever. The
+  # threshold check then re-answers "yes" on the next iteration, and the one
+  # after, each time buying a full summarizer round-trip to fold a history that
+  # is already folded: a compaction loop that fires every iteration, bounded
+  # only by the global iteration cap.
+  #
+  # `TurnPipeline.compact_and_refresh_tokens/1` already does exactly this at the
+  # turn boundary (finding #8) — for the same reason and against the same field.
+  # This is the missing half: the mid-turn fold.
+  @spec refresh_tokens_after_fold(map(), boolean()) :: map()
+  defp refresh_tokens_after_fold(state, false), do: state
+
+  defp refresh_tokens_after_fold(state, true) do
+    Map.put(
+      state,
+      :last_input_tokens,
+      OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+    )
+  rescue
+    _ -> state
+  end
 
   # Usable context window for the state's model+provider, in tokens.
   #

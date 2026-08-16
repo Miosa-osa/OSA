@@ -45,6 +45,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   alias OptimalSystemAgent.Agent.ContextEngine.Router, as: Compactor
   alias OptimalSystemAgent.Agent.CompactRestore
   alias OptimalSystemAgent.Agent.CompactionEvents
+  alias OptimalSystemAgent.Agent.CompactionSafety
   alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
   # NOTE: `Compactor` above is aliased to `ContextEngine.Router`, so the real
   # `Agent.Compactor` (which owns the bounded summarizer call) needs its own
@@ -282,7 +283,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
                 msg -> [clamp_restore_message(msg, restore_max_tokens())]
               end
 
-            compacted = [summary_msg | restore] ++ recent
+            # Still-in-flight work (grok `reminder.rs` parity). `Compactor`'s
+            # pipeline has appended this since it landed; THIS path — the
+            # threshold-triggered mid-turn fold, i.e. the one that actually runs
+            # during long autonomous work — never did, though this module's own
+            # `continuation_message/1` docs describe the two composing. So the
+            # fold that happens while background shells are running and
+            # sub-agents are out erased exactly the state a continuation needs:
+            # what is still running, and what tool to poll it with.
+            #
+            # Ordered restore-then-reminder, matching those docs: the reminder
+            # is the `role: "system"` statement of *what* is active, and the
+            # continuation turn injected later by `ReactLoop` is the `role:
+            # "user"` instruction to act on it.
+            reminder =
+              case CompactionSafety.build_reminder_message(session_id) do
+                nil -> []
+                msg -> [msg]
+              end
+
+            compacted = [summary_msg | restore ++ reminder] ++ recent
             after_tokens = Compactor.estimate_tokens(compacted)
 
             fire_compact_hook(:post_compact, %{
@@ -741,7 +761,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # the caller must only splice it in at a genuine stall boundary, not on
   # every compaction.
 
-  @continue_text "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+  @continue_text "Continue from where you left off — carry on with the next concrete step rather than re-planning or recapping. If the task is genuinely finished, say so; if you are unsure how to proceed, stop and ask."
+
+  # Enough to re-orient, not enough to re-inflate the window we just shrank.
+  @max_plan_items_in_continuation 10
 
   @overflow_prefix "The previous request exceeded the provider's context window. The conversation was compacted (older messages summarized, and any large media attachments were removed) to free up space. If you were in the middle of a multi-step task, resume it using the summary above; if the user was asking about attachments that are no longer in view, explain that they were too large and ask them to resend if still needed.\n\n"
 
@@ -763,6 +786,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
       variant for the reactive `ContextCollapse` / media-overflow recovery
       path; use the plain variant for the proactive threshold-crossing path.
 
+    * `:session_id` (string) — when given, the open items on the session's
+      plan (`Agent.Tasks`, `:pending` / `:in_progress`) are stated ahead of
+      the continue instruction.
+
+  ## Why the plan is stated, not the compaction narrated
+
+  A bare "continue if you have next steps" asks a model whose history was just
+  rewritten to work out, unaided, what its next step *was*. The open plan is the
+  cheapest possible statement of where it left off, so it is quoted here
+  verbatim rather than described. The message stays about the TASK; the fact
+  that a compaction happened is already carried by the compact-boundary message
+  at the head of the rebuilt history and does not need repeating.
+
   This composes with — does NOT replace — `CompactionSafety.build_reminder_message/1`.
   The reminder is a `role: "system"` message describing *what* is still
   active (background tasks, TODOs, subagents); this is a `role: "user"`
@@ -780,12 +816,48 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         @continue_text
       end
 
+    text = open_plan_preamble(Keyword.get(opts, :session_id)) <> text
+
     %{
       role: "user",
       content: text,
       synthetic: true,
       metadata: %{compaction_continue: true, overflow: overflow?}
     }
+  end
+
+  # The open items on the session plan, as one short block. "" when there is no
+  # plan, no session, or nothing open — never a header with nothing under it.
+  @spec open_plan_preamble(term()) :: String.t()
+  defp open_plan_preamble(session_id) when is_binary(session_id) and session_id != "" do
+    open =
+      session_id
+      |> safe_tasks()
+      |> Enum.filter(&(Map.get(&1, :status) in [:pending, :in_progress]))
+      |> Enum.take(@max_plan_items_in_continuation)
+      |> Enum.map(&CompactRestore.task_subject/1)
+
+    case open do
+      [] ->
+        ""
+
+      items ->
+        "You are mid-task. These items are still open on your plan:\n" <>
+          Enum.map_join(items, "\n", &("- " <> &1)) <> "\n\n"
+    end
+  end
+
+  defp open_plan_preamble(_), do: ""
+
+  defp safe_tasks(session_id) do
+    case OptimalSystemAgent.Agent.Tasks.get_tasks(session_id) do
+      list when is_list(list) -> list
+      _ -> []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
 
   @doc """

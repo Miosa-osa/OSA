@@ -105,7 +105,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompactionCCTest do
       assert msg.role == "user"
       assert msg.synthetic == true
       assert msg.metadata == %{compaction_continue: true, overflow: false}
-      assert msg.content =~ "Continue if you have next steps"
+      assert msg.content =~ "Continue from where you left off"
       refute msg.content =~ "exceeded the provider's context window"
     end
 
@@ -117,11 +117,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompactionCCTest do
       assert msg.metadata == %{compaction_continue: true, overflow: true}
       assert msg.content =~ "exceeded the provider's context window"
       assert msg.content =~ "media attachments were removed"
-      assert msg.content =~ "Continue if you have next steps"
+      assert msg.content =~ "Continue from where you left off"
 
       # overflow explanation must come BEFORE the generic continue text
       overflow_pos = :binary.match(msg.content, "context window") |> elem(0)
-      continue_pos = :binary.match(msg.content, "Continue if you have next steps") |> elem(0)
+      continue_pos = :binary.match(msg.content, "Continue from where you left off") |> elem(0)
       assert overflow_pos < continue_pos
     end
 
