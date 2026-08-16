@@ -629,6 +629,13 @@ config :optimal_system_agent,
   # Set OSA_THINKING_ENABLED=false to restore the old behaviour.
   thinking_enabled: System.get_env("OSA_THINKING_ENABLED") != "false",
 
+  # Escape hatch for the automatic (threshold-triggered) fold. The flag itself
+  # already existed and defaulted on, readable only from app config -- so an
+  # operator hitting a compaction loop had no way to stop it without editing a
+  # config file inside an installed release. `ProactiveCompaction` reads this
+  # key; `/compact` is unaffected and stays available.
+  proactive_compaction_enabled: System.get_env("OSA_PROACTIVE_COMPACTION") != "false",
+
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.
   working_dir:
