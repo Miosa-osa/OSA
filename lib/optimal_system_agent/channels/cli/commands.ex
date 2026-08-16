@@ -1788,9 +1788,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  def cmd_exit(_args, _session_id) do
-    Renderer.print_goodbye()
-    System.halt(0)
+  # Third exit site. Routes through the same flush-then-halt path as `exit` /
+  # `quit` / Ctrl-D in `Channels.CLI` — a shutdown that persists the transcript
+  # on two of three exits is a defect that only looks fixed.
+  def cmd_exit(_args, session_id) do
+    OptimalSystemAgent.Channels.CLI.exit_cli(session_id)
   end
 
   # ── Parsing & Suggestions ────────────────────────────────────────────

@@ -1549,6 +1549,41 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, {:ok, :none, %{}}, state}
   end
 
+  # Synchronous durable save, for shutdown paths only.
+  #
+  # Identical work to `handle_cast({:persist_session, _})` below, but the
+  # caller waits for it. `Channels.CLI` exits via `System.halt/1`, which skips
+  # `terminate/2` entirely, so the async cast path had no chance to run and the
+  # transcript was dropped while the (synchronous) spend flush survived — a
+  # session's bill outliving its transcript. See
+  # `SessionPersistence.flush_sync/2` for the measurement and the bound.
+  #
+  # Spend is flushed here too so the two records land together: writing one and
+  # not the other is the exact asymmetry this fixes.
+  @impl true
+  def handle_call({:persist_session_sync, session_id}, _from, state) do
+    _ = OptimalSystemAgent.Agent.SessionPersistence.flush_spend(session_id, state)
+
+    result =
+      case OptimalSystemAgent.Agent.SessionPersistence.save_from_state(session_id, state) do
+        :ok ->
+          :ok
+
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          notify_persistence_failure(session_id, state, reason)
+          {:error, reason}
+
+        other ->
+          notify_persistence_failure(session_id, state, {:unexpected, other})
+          {:error, other}
+      end
+
+    {:reply, result, state}
+  end
+
   # Durable session save, serialized by THIS process' mailbox.
   #
   # `SessionPersistence.auto_save/1` (the :post_response hook) used to reach in

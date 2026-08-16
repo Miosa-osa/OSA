@@ -126,8 +126,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
     case LineEditor.readline(prompt, history) do
       :eof ->
-        Renderer.print_goodbye()
-        System.halt(0)
+        exit_cli(session_id)
 
       :interrupt ->
         if Session.agent_active?(session_id) do
@@ -148,8 +147,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         else
           case input do
             x when x in ["exit", "quit"] ->
-              Renderer.print_goodbye()
-              System.halt(0)
+              exit_cli(session_id)
 
             "clear" ->
               IO.write(IO.ANSI.clear() <> IO.ANSI.home())
@@ -181,6 +179,27 @@ defmodule OptimalSystemAgent.Channels.CLI do
     e ->
       Logger.warning("CLI loop error: #{Exception.message(e)}")
       loop(session_id)
+  end
+
+  # ── Exit ─────────────────────────────────────────────────────────────
+  #
+  # `System.halt/1` stops the VM immediately: no `terminate/2`, no supervisor
+  # shutdown, nothing queued in any mailbox gets serviced. The turn-end spend
+  # flush is synchronous and in the loop's own process, so it survived that;
+  # the transcript save is a cast the loop never got to run, so it did not.
+  # The result on this machine was 1,684 spend files with no sibling
+  # transcript — every session where the user hit a defect was discarded on the
+  # way out, which is why "OSA sometimes stops early" had no evidence to look
+  # at.
+  #
+  # Flush first, then halt. Bounded inside `flush_sync/2` so a mid-turn exit
+  # cannot hang the shutdown.
+  @doc false
+  @spec exit_cli(String.t()) :: no_return()
+  def exit_cli(session_id) do
+    _ = OptimalSystemAgent.Agent.SessionPersistence.flush_sync(session_id)
+    Renderer.print_goodbye()
+    System.halt(0)
   end
 
   defp sanitize_input(input) do

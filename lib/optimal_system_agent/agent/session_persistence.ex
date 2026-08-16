@@ -668,6 +668,70 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   end
 
+  # How long a shutdown may wait for the loop to write its transcript. Bounded
+  # on purpose: `exit` must not hang because a turn is mid-flight. 5s is the
+  # same order as the `:sys` default this module already deals with, and a save
+  # is a few hundred KB of JSON under an O_EXCL lock — an order of magnitude
+  # under it in the normal case.
+  @shutdown_flush_timeout_ms 5_000
+
+  @doc """
+  Persist a live Loop's transcript and spend SYNCHRONOUSLY, for shutdown paths.
+
+  `auto_save/1` is fire-and-forget by construction — it casts, and the write
+  happens later in the loop's own time. That is right at a turn boundary and
+  wrong at process exit: `Channels.CLI` ends the OS process with
+  `System.halt/1`, which runs no `terminate/2` and gives no queued cast a
+  chance to be serviced. The turn-end spend flush survives that (it is
+  synchronous, in the loop's own process) but the transcript did not, so the
+  bill outlived the conversation it billed for: **1,684 of 3,029 spend files on
+  this machine have no sibling transcript**, including live CLI sessions.
+
+  So this is a `call`, not a `cast`: it is still serialized by the loop's
+  mailbox and still writes the loop's own state (never a scraped snapshot),
+  but the caller does not proceed until the bytes are down.
+
+  Bounded, and honest about the bound. A loop that is mid-turn is blocked in
+  its own `handle_call` and cannot service this until the turn ends, so the
+  call times out and the transcript is NOT written. That is the deliberate
+  trade — a shutdown that hangs behind a long tool call is worse than one that
+  loses a mid-turn transcript, and a mid-turn exit still leaves the crash
+  checkpoint and durable step log, which is the recovery path built for exactly
+  that case. The timeout is logged rather than swallowed.
+
+  Returns `:ok` when there is no live loop for the id — nothing to flush is not
+  a failure.
+  """
+  @spec flush_sync(String.t() | nil, timeout()) :: :ok | {:error, term()}
+  def flush_sync(session_id, timeout \\ @shutdown_flush_timeout_ms)
+
+  def flush_sync(session_id, timeout) when is_binary(session_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] ->
+        try do
+          case GenServer.call(pid, {:persist_session_sync, session_id}, timeout) do
+            :ok -> :ok
+            {:ok, _} -> :ok
+            other -> other
+          end
+        catch
+          :exit, reason ->
+            Logger.warning(
+              "[session_persist] #{session_id}: shutdown flush did not complete " <>
+                "(#{inspect(reason)}) — the transcript for this session may be missing. " <>
+                "A mid-turn exit is the expected cause; the crash checkpoint still holds the turn."
+            )
+
+            {:error, reason}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  def flush_sync(_, _), do: :ok
+
   @doc """
   Persist a live Loop's state. Called by the Loop itself from
   `handle_cast({:persist_session, id}, state)` so the save is serialized by the
