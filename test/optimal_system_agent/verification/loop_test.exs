@@ -34,6 +34,10 @@ defmodule OptimalSystemAgent.Verification.LoopTest do
     end
   end
 
+  setup do
+    OptimalSystemAgent.Test.VerificationGateHelper.allow_commands(["exit 0", "exit 3"])
+  end
+
   describe "test result delivery" do
     test "a passing test command reaches :passed on the first iteration" do
       loop_id = "vloop-pass-#{System.unique_integer([:positive])}"

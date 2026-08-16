@@ -42,6 +42,8 @@ defmodule OptimalSystemAgent.Verification.VerifyLoopHandlerTest do
   end
 
   test "returns the loop_id of the loop it actually started, not the newest key in the registry" do
+    OptimalSystemAgent.Test.VerificationGateHelper.allow_commands(["sleep 5"])
+
     task_id = "task-#{System.unique_integer([:positive])}"
 
     {:ok, json} =

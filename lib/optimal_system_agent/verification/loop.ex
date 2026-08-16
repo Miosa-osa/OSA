@@ -42,6 +42,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Verification.Confidence
   alias OptimalSystemAgent.Verification.Checkpoint
+  alias OptimalSystemAgent.Verification.WorkspaceFingerprint
   alias OptimalSystemAgent.Providers.Registry, as: Providers
 
   @default_max_iterations 5
@@ -62,7 +63,8 @@ defmodule OptimalSystemAgent.Verification.Loop do
             steering_guidance: nil,
             started_at: nil,
             task_ref: nil,
-            task: nil
+            task: nil,
+            last_failure_fingerprint: :unknown
 
   # A loop that has reported a verdict is DONE. Anything arriving afterwards is
   # a late message from a task the loop already stopped waiting on, and must not
@@ -118,6 +120,45 @@ defmodule OptimalSystemAgent.Verification.Loop do
     test_command = Keyword.fetch!(opts, :test_command)
     loop_id = Keyword.fetch!(opts, :loop_id)
 
+    case gate_fix_command(test_command) do
+      :allow -> init_allowed(opts, loop_id, test_command)
+      {:refused, reason} -> refuse_start(loop_id, test_command, reason)
+    end
+  end
+
+  # `test_command` is MODEL-AUTHORED — the `verify_loop` tool takes it straight
+  # from tool input — and `spawn_test_task/1` hands it to `OS.Shell.cmd/2` once
+  # per iteration, unattended.
+  #
+  # It used to go there with no gate at all, which made this the widest hole in
+  # the loop and an outright contradiction of its sibling: `apply_fix/1` runs
+  # every model-authored command through `DangerousCommands` and `Permissions`
+  # and documents at length why an unattended loop must not be a hole the model
+  # runs whatever it likes through — while the command the model chose FIRST,
+  # and which runs up to `max_iterations` times, skipped both.
+  #
+  # This is also the gate-authorship boundary from `docs/research/prime-agent.md`
+  # §6.5, which OSA held only by accident. Prime Agent's gates are authorable
+  # ONLY from outside the session (`--autonomous-gate`); `/autonomous` accepts
+  # `on|off|status` and nothing else, so the agent has no surface to write its
+  # own success criterion. OSA does expose that surface, so the operator's own
+  # permission rules have to be what stands behind it. Refusing at `init/1`
+  # rather than at the first iteration means a refused loop never starts, never
+  # checkpoints, and reports the refusal through the tool's existing
+  # start-failure path.
+  defp refuse_start(loop_id, test_command, reason) do
+    Logger.warning(
+      "[Verification.Loop] #{loop_id} REFUSED to start — test command #{inspect(test_command)}: #{reason}"
+    )
+
+    {:stop,
+     {:refused_test_command,
+      "The verification loop was not started: its test command was #{reason}. " <>
+        "This loop runs unattended, so its command is held to the same permission " <>
+        "rules as any other shell it would run."}}
+  end
+
+  defp init_allowed(opts, loop_id, test_command) do
     state = %__MODULE__{
       loop_id: loop_id,
       team_id: Keyword.get(opts, :team_id),
@@ -232,6 +273,32 @@ defmodule OptimalSystemAgent.Verification.Loop do
 
   def handle_info(:overall_timeout, state), do: {:noreply, state}
 
+  # The no-op gate. `diagnose_and_fix/2` has already run: it asked a model for
+  # a fix and applied whatever survived the permission gate. If the worktree is
+  # byte-identical to what it was when this iteration FAILED, then nothing was
+  # applied, and re-running `test_command` is a full test run with a result
+  # known in advance. Escalate to a human instead of burning the remaining
+  # iterations proving the same failure.
+  #
+  # `unchanged?/2` is false whenever either side is `:unknown`, so a workspace
+  # this cannot fingerprint (not a git repo, git missing, read too large) takes
+  # the normal path. See `WorkspaceFingerprint` for why that asymmetry is the
+  # only safe one.
+  def handle_info(:schedule_next_iteration, %{status: :running} = state) do
+    current = WorkspaceFingerprint.capture(nil)
+
+    if WorkspaceFingerprint.unchanged?(current, state.last_failure_fingerprint) do
+      Logger.warning(
+        "[Verification.Loop] #{state.loop_id} workspace unchanged since iteration " <>
+          "#{state.iteration} failed — refusing to re-run `#{state.test_command}`"
+      )
+
+      {:noreply, escalate(state, :workspace_unchanged)}
+    else
+      {:noreply, spawn_test_task(state)}
+    end
+  end
+
   def handle_info(:schedule_next_iteration, state) do
     {:noreply, spawn_test_task(state)}
   end
@@ -312,6 +379,10 @@ defmodule OptimalSystemAgent.Verification.Loop do
         Logger.warning("[Verification.Loop] #{state.loop_id} max iterations reached — escalating")
         escalate(state, :max_iterations_reached)
       else
+        # Snapshot the worktree AS IT FAILED, before any fix is applied. The
+        # `:schedule_next_iteration` gate compares against this, so the
+        # comparison spans exactly the window a fix had to change something.
+        state = %{state | last_failure_fingerprint: WorkspaceFingerprint.capture(nil)}
         diagnose_and_fix(state, output)
       end
     end
@@ -362,6 +433,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
       task_id: state.task_id,
       team_id: state.team_id,
       reason: reason,
+      detail: escalation_detail(reason, state),
       iteration: state.iteration,
       confidence: Confidence.score(state.confidence),
       results_history: state.results_history
@@ -378,6 +450,14 @@ defmodule OptimalSystemAgent.Verification.Loop do
 
     %{state | status: status} |> abandon_task()
   end
+
+  # A bare `:workspace_unchanged` reason is ambiguous to anything downstream —
+  # it reads like a transient error worth retrying, which is exactly wrong.
+  # Carry the sentence that says the re-run was withheld on purpose.
+  defp escalation_detail(:workspace_unchanged, state),
+    do: WorkspaceFingerprint.refusal_message(state.test_command)
+
+  defp escalation_detail(_reason, _state), do: nil
 
   defp diagnose_and_fix(state, failure_output) do
     case call_llm_for_fix(state, failure_output) do

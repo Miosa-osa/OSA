@@ -84,12 +84,55 @@ defmodule OptimalSystemAgent.Verification.LoopSafetyTest do
     end
   end
 
+  describe "the model-authored test command is gated too" do
+    # `test_command` arrives from `verify_loop` tool input and
+    # `spawn_test_task/1` ran it through `OS.Shell.cmd/2` once per iteration
+    # with no circuit breaker and no permission check — while `apply_fix/1`,
+    # two functions away, gated every model-authored command and documented at
+    # length why an unattended loop must not be a hole. The command the model
+    # chose FIRST, and which runs up to `max_iterations` times, was the ungated
+    # one.
+
+    test "a loop whose test command has no allow rule never starts" do
+      Process.flag(:trap_exit, true)
+
+      loop_id = "vloop-ungated-#{System.unique_integer([:positive])}"
+
+      # Deliberately harmless: what is asserted is that the DEFAULT is refusal,
+      # not that this particular string is dangerous. No allow rule is
+      # installed, so `check_detailed/2` answers `:ask`, which an unattended
+      # loop can only resolve as a refusal.
+      assert {:error, {:refused_test_command, message}} =
+               Loop.start_link(
+                 loop_id: loop_id,
+                 test_command: "echo not-granted",
+                 max_iterations: 5,
+                 timeout_ms: 30_000
+               )
+
+      assert message =~ "was not started"
+
+      # Not merely refused at the first iteration — never registered at all, so
+      # nothing checkpointed and nothing ran.
+      assert Loop.get_state(loop_id) == {:error, :not_found}
+    end
+
+    test "the circuit breaker refuses a test command that no allow rule can re-enable" do
+      assert {:refused, reason} = Loop.gate_fix_command("dd if=/dev/zero of=/dev/sda")
+      assert reason =~ "circuit breaker"
+    end
+  end
+
   describe "a terminated loop refuses late results" do
     test "a result arriving after an :overall_timeout escalation cannot flip the verdict" do
       loop_id = "vloop-late-#{System.unique_integer([:positive])}"
 
       marker =
         Path.join(System.tmp_dir!(), "osa_vloop_late_#{System.unique_integer([:positive])}")
+
+      # A multi-statement command has no `shell_execute(...)` specifier that
+      # matches it, so this test grants the unscoped rule.
+      OptimalSystemAgent.Test.VerificationGateHelper.allow_commands([:any])
 
       # The command outlives the overall timeout, so `escalate/2` fires while the
       # task is still running — the exact race. It then exits 0, which the old
@@ -117,6 +160,8 @@ defmodule OptimalSystemAgent.Verification.LoopSafetyTest do
     end
 
     test "an escalated loop ignores a stray late result message" do
+      OptimalSystemAgent.Test.VerificationGateHelper.allow_commands(["exit 3"])
+
       loop_id = "vloop-stray-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
