@@ -433,6 +433,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(_LOGIN)
         if path == "/api/v1/sessions":
             return self._json({"session_id": "pty-stub-session", "id": "pty-stub-session"})
+        if path.endswith("/steer"):
+            # `POST /sessions/:id/steer` — the real backend parks the text in an
+            # ETS queue the busy loop can still read and folds it in at the next
+            # ReAct step boundary, answering 202. The stub only has to accept it
+            # and record it: what the tests need to see is that the queued text
+            # reached the wire WHILE the original turn was still outstanding,
+            # which is a fact about the request, not about the model.
+            return self._json({"status": "steered"}, 202)
         if path == "/api/v1/orchestrate":
             # Recorded ABOVE, then held: a test can see the turn start while it
             # is still in flight, which is the whole point — Esc only means

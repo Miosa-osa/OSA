@@ -1307,6 +1307,37 @@ impl App {
                 self.cancel_processing();
                 false
             }
+            // Alt+Enter — deliver the queued message(s) into the RUNNING turn.
+            //
+            // The key the queued row advertises. Chosen against three
+            // constraints, in this order:
+            //
+            // 1. **It must not make interrupt harder to reach.** That is the
+            //    constraint everything else here yields to, so Esc keeps its
+            //    single meaning during a turn and this gets its own key.
+            // 2. **It must not be a printable character** (`is_typed_text`
+            //    would route it to the composer first, and a shortcut that eats
+            //    a typed character is its own bug class — see `keys.rs`).
+            // 3. **Its degraded form must be harmless.** Alt-chords reach
+            //    crossterm as `ESC` + byte; if the two ever arrive in separate
+            //    reads this parses as Esc then Enter. Esc arms the interrupt —
+            //    and Enter, being non-Esc, immediately `reset()`s the tracker
+            //    and disarms the affordance at the top of this handler, then
+            //    falls through to a composer that is empty. Net effect:
+            //    nothing. Pinned by `esc_then_enter_is_not_an_interrupt`.
+            //
+            // Alt+V (voice) is the existing precedent for an Alt-chord here.
+            //
+            // Gated on a non-empty queue so the key is live exactly when the
+            // row that advertises it is on screen — an advertised key that
+            // works in states where it is not advertised is the same class of
+            // mismatch as one that does not work where it is.
+            (KeyCode::Enter, m)
+                if m.contains(KeyModifiers::ALT) && !self.message_queue.is_empty() =>
+            {
+                self.send_queued_now();
+                false
+            }
             // WS5 — pop queued messages into the composer for editing (CC
             // messageQueueManager.popAllEditable): ↑ on an EMPTY composer while
             // items are queued recalls them instead of navigating input history.

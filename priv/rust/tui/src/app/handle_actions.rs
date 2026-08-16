@@ -109,7 +109,10 @@ impl App {
             }
             Err(e) => {
                 self.health_retry_count += 1;
-                warn!("Health check failed (attempt {}): {}", self.health_retry_count, e);
+                warn!(
+                    "Health check failed (attempt {}): {}",
+                    self.health_retry_count, e
+                );
 
                 // Auto-start backend on first failure
                 if !self.backend_spawn_attempted {
@@ -119,7 +122,10 @@ impl App {
 
                 // Give up after 12 retries (60s total)
                 if self.health_retry_count >= 12 {
-                    error!("Backend unreachable after {} attempts", self.health_retry_count);
+                    error!(
+                        "Backend unreachable after {} attempts",
+                        self.health_retry_count
+                    );
                     self.transition(AppState::Idle);
                     // Name the most common real cause (HTTP port already in use, so
                     // the backend crashed on start) and point at a single next step.
@@ -186,7 +192,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Ok(resp))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -205,7 +213,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Ok(resp))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -379,7 +389,11 @@ impl App {
         // called no tools does not gain a line saying so.
         let hidden = self.chat.take_hidden_count();
         if hidden > 0 {
-            let noun = if hidden == 1 { "tool call" } else { "tool calls" };
+            let noun = if hidden == 1 {
+                "tool call"
+            } else {
+                "tool calls"
+            };
             self.chat.add_system_message(
                 &format!("{hidden} {noun} hidden \u{00b7} ctrl+o for the full transcript"),
                 "info",
@@ -460,8 +474,7 @@ impl App {
             Ok(resp) => {
                 match resp.kind.as_str() {
                     "error" => {
-                        self.chat
-                            .add_system_message(&resp.output, "error");
+                        self.chat.add_system_message(&resp.output, "error");
                     }
                     "prompt" => {
                         // Feed output back as a prompt (used by custom
@@ -480,8 +493,7 @@ impl App {
                     }
                     _ => {
                         if !resp.output.is_empty() {
-                            self.chat
-                                .add_system_message(&resp.output, "info");
+                            self.chat.add_system_message(&resp.output, "info");
                         }
                     }
                 }
@@ -655,6 +667,85 @@ impl App {
         self.submit_input(&next);
     }
 
+    /// Deliver every queued message into the RUNNING turn, without ending it.
+    ///
+    /// The gap this closes: until now the only two mid-turn paths were interrupt
+    /// (destroys the work in flight) and waiting for the boundary. Neither is
+    /// what a user wants on realising mid-turn that they have something to add,
+    /// and the queued row spent several releases advertising an `esc to send
+    /// now` key that did not exist — the press armed the interrupt, and the next
+    /// one killed the turn.
+    ///
+    /// The mechanism is `POST /sessions/:id/steer`, which is already the
+    /// product's explicit gesture for injecting into a live turn: the backend
+    /// parks the text in an ETS queue (`Agent.Loop.Steer`) that a busy loop can
+    /// still read, and `ReactLoop.inject_pending_steer/1` drains it at the next
+    /// ReAct step boundary — not mid-stream, which is neither possible nor
+    /// desirable. `Steer.to_messages/1` labels it "[User steer — a mid-turn
+    /// directive from the user…]", so the model reads it as a new instruction
+    /// from the user rather than as a continuation of its own reasoning.
+    ///
+    /// What this is NOT: a reopening of implicit mid-turn steering. Plain text
+    /// typed mid-turn still queues (see `submit_input` for why automatic
+    /// steering was removed — it "read as the agent lurching off course
+    /// mid-thought"). This is a deliberate, separately-keyed action on a message
+    /// the user has already seen sitting in the queue.
+    ///
+    /// Ordering is guaranteed by awaiting each steer in sequence inside ONE
+    /// task: the backend queue is FIFO by insertion, so parallel requests could
+    /// land out of order.
+    pub(crate) fn send_queued_now(&mut self) {
+        if self.message_queue.is_empty() {
+            return;
+        }
+
+        // No live turn to fold into. Not an error and not a place to invent a
+        // second delivery mechanism: the queue's own contract already covers it
+        // — the message runs at the boundary, which is now.
+        if !self.turn_is_active() {
+            self.maybe_dequeue_message();
+            return;
+        }
+
+        let items = std::mem::take(&mut self.message_queue);
+        let count = items.len();
+        self.input.set_queued_items(Vec::new());
+        self.activity.set_queued(0);
+        self.recompute_layout();
+
+        let client = self.client.clone();
+        let session_id = self.session_id.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            for (i, text) in items.iter().enumerate() {
+                if let Err(e) = client.steer_session(&session_id, text).await {
+                    // Hand back everything from the failure onwards. The items
+                    // before it are genuinely delivered and must not be sent
+                    // twice.
+                    let _ = tx.send(Event::Backend(BackendEvent::SendNowFailed {
+                        undelivered: items[i..].to_vec(),
+                        error: e.to_string(),
+                    }));
+                    return;
+                }
+            }
+            let _ = tx.send(Event::Backend(BackendEvent::SendNowDelivered { count }));
+        });
+    }
+
+    /// Put undelivered messages back at the FRONT of the queue, oldest first.
+    ///
+    /// They were the oldest items when they were taken, so they are the oldest
+    /// items now; appending would silently reorder the user's messages behind
+    /// anything typed while the request was in flight.
+    pub(super) fn restore_undelivered_queue(&mut self, mut undelivered: Vec<String>) {
+        undelivered.append(&mut self.message_queue);
+        self.message_queue = undelivered;
+        self.input.set_queued_items(self.message_queue.clone());
+        self.activity.set_queued(self.message_queue.len());
+        self.recompute_layout();
+    }
+
     /// WS5 — CC messageQueueManager.popAllEditable: move every queued message
     /// back into the composer (oldest first, joined by newlines, any current
     /// draft appended last) so a mistyped queued message can be edited before
@@ -732,7 +823,8 @@ impl App {
         // real size via context_pressure / note_input_tokens). Backstop for
         // submit paths that don't drain the composer first (commands, queue).
         self.status.set_pending_input_tokens(0);
-        self.sidebar.set_context(self.status.display_context_ratio());
+        self.sidebar
+            .set_context(self.status.display_context_ratio());
         // Fresh turn — clear any prior goal-verification indicator so it never
         // lingers into unrelated work.
         self.status.set_goal_verification(None);
@@ -957,7 +1049,9 @@ impl App {
             id,
             summary,
             // Preserve the real turn start so the timer is accurate on bring-back.
-            started_at: self.processing_start.unwrap_or_else(std::time::Instant::now),
+            started_at: self
+                .processing_start
+                .unwrap_or_else(std::time::Instant::now),
             done: false,
         });
         self.refresh_bg_indicators();
@@ -982,10 +1076,7 @@ impl App {
     /// and we say so instead of pretending there's something to resume.
     pub(crate) fn foreground_task(&mut self) {
         // Newest running task first.
-        let idx = self
-            .bg_tasks
-            .iter()
-            .rposition(|t| !t.done);
+        let idx = self.bg_tasks.iter().rposition(|t| !t.done);
         let Some(idx) = idx else {
             // Nothing running. If completed ones exist, their output already
             // landed in chat; otherwise there was never anything backgrounded.
@@ -1023,7 +1114,10 @@ impl App {
             format!("Foregrounded [{}] {}", task.id, task.summary),
             crate::components::toast::ToastLevel::Info,
         );
-        self.announce_a11y(&format!("brought background turn [{}] to the foreground", task.id));
+        self.announce_a11y(&format!(
+            "brought background turn [{}] to the foreground",
+            task.id
+        ));
     }
 
     /// Mark the most recent still-running background turn as complete. Called
@@ -1226,11 +1320,11 @@ impl App {
             };
 
             let id = session.id.clone();
-            let terminal = |state: &str| {
-                matches!(state, "connected" | "failed" | "cancelled")
-            };
+            let terminal = |state: &str| matches!(state, "connected" | "failed" | "cancelled");
             let done = terminal(&session.state);
-            let _ = tx.send(Event::Backend(BackendEvent::AccountLoginUpdate(Ok(session))));
+            let _ = tx.send(Event::Backend(BackendEvent::AccountLoginUpdate(Ok(
+                session,
+            ))));
             if done || id.is_empty() {
                 return;
             }
@@ -1455,12 +1549,15 @@ impl App {
     fn try_spawn_backend(&self) {
         let candidates: Vec<Option<std::path::PathBuf>> = vec![
             // From binary location: target/release/osagent → ../../.. = priv/rust/tui → ../../../ = root
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| {
-                    p.parent()?.parent()?.parent()?.parent()?.parent()?.parent()
-                        .map(|p| p.to_path_buf())
-                }),
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()
+                    .map(|p| p.to_path_buf())
+            }),
             // Stored project root
             std::fs::read_to_string(osa_home_dir().join(".osa/project_root"))
                 .ok()
@@ -1514,8 +1611,10 @@ impl App {
                 return;
             }
         }
-        warn!("Could not find project root to auto-start backend. \
-               Run from the project directory or create ~/.osa/project_root");
+        warn!(
+            "Could not find project root to auto-start backend. \
+               Run from the project directory or create ~/.osa/project_root"
+        );
     }
 
     pub(super) fn start_sse(&mut self) {
@@ -1548,13 +1647,8 @@ impl App {
                 return;
             }
 
-            let sse = crate::client::SseClient::with_cancel(
-                session_id,
-                base_url,
-                token,
-                tx,
-                cancel,
-            );
+            let sse =
+                crate::client::SseClient::with_cancel(session_id, base_url, token, tx, cancel);
             sse.connect();
         });
     }
@@ -1598,7 +1692,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Ok(messages))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -1803,9 +1899,7 @@ impl App {
             crate::voice::VoiceProvider::Local(_) => {
                 tokio::spawn(async move {
                     let provider = crate::voice::VoiceProvider::local_or_unavailable();
-                    let result = provider
-                        .transcribe_with_progress(buffer, Some(&tx))
-                        .await;
+                    let result = provider.transcribe_with_progress(buffer, Some(&tx)).await;
                     let event = match result {
                         Ok(text) => crate::event::VoiceEvent::TranscriptionReady(text),
                         Err(e) => crate::event::VoiceEvent::TranscriptionError(e.to_string()),
@@ -1917,10 +2011,8 @@ impl App {
                 );
             }
             None => {
-                self.chat.add_system_message(
-                    "No active goal. Set one with /goal <text>.",
-                    "info",
-                );
+                self.chat
+                    .add_system_message("No active goal. Set one with /goal <text>.", "info");
             }
         }
     }
@@ -1978,7 +2070,10 @@ impl App {
         let last_reply = self.chat.last_agent_message().unwrap_or_default();
         if Self::reply_signals_done(&last_reply) {
             self.chat.add_system_message(
-                &format!("Goal achieved in {} cycle(s). Auto-continue stopped.", self.goal_cycle),
+                &format!(
+                    "Goal achieved in {} cycle(s). Auto-continue stopped.",
+                    self.goal_cycle
+                ),
                 "info",
             );
             self.clear_goal(false);
@@ -2089,7 +2184,10 @@ pub(crate) fn join_queued_for_composer(items: &[String], current: &str) -> Strin
 /// value this build has not heard of must not have every answer hidden behind
 /// system chrome.
 pub(crate) fn is_system_authored(response_type: &str) -> bool {
-    matches!(response_type.trim(), "system" | "guard" | "control" | "error")
+    matches!(
+        response_type.trim(),
+        "system" | "guard" | "control" | "error"
+    )
 }
 
 /// Whether to warn that the backend daemon is a different build from this TUI.
@@ -2166,7 +2264,6 @@ pub(crate) fn update_notice_line(update: &crate::client::types::HealthUpdate) ->
         )
     }
 }
-
 
 /// Whether a queued message may be auto-submitted now.
 ///
@@ -2326,7 +2423,10 @@ mod update_notice_tests {
     fn notice_line_drops_arrow_when_latest_unknown() {
         let line = update_notice_line(&upd(true, None));
         assert!(line.contains("Update available"));
-        assert!(!line.contains("\u{2192}"), "no arrow without a known latest");
+        assert!(
+            !line.contains("\u{2192}"),
+            "no arrow without a known latest"
+        );
         assert!(line.contains("/update"));
     }
 }
@@ -2338,7 +2438,9 @@ mod interrupt_steer_tests {
     #[test]
     fn recognizes_both_interrupt_markers() {
         assert!(is_interrupt_marker("[Request interrupted by user]"));
-        assert!(is_interrupt_marker("[Request interrupted by user for tool use]"));
+        assert!(is_interrupt_marker(
+            "[Request interrupted by user for tool use]"
+        ));
     }
 
     #[test]
@@ -2384,7 +2486,9 @@ mod goal_done_tests {
     fn not_done_when_sentinel_is_mid_reply() {
         // Intermediate turns that merely mention a standalone DONE line must
         // NOT stop the goal loop prematurely.
-        assert!(!App::reply_signals_done("Running: echo DONE\nNow building..."));
+        assert!(!App::reply_signals_done(
+            "Running: echo DONE\nNow building..."
+        ));
         assert!(!App::reply_signals_done(
             "Step 1: DONE\nStep 2: still working on the migration"
         ));

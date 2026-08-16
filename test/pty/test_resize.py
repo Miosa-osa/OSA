@@ -1887,10 +1887,10 @@ def test_the_queued_message_row_does_not_promise_a_key_that_interrupts(
                     "14-minute fan-out was indistinguishable from the app "
                     f"ignoring the keystroke).\n--- rendered screen ---\n{s.dump()}"
                 )
-            if "esc esc" not in screen:
+            if "esc" in screen.split("sends when this turn ends")[1][:80]:
                 raise AssertionError(
-                    "the row names a gesture that is not the real one. One Esc "
-                    "only arms; it takes two, and the hint has to say so.\n"
+                    "the row names Esc beside a queued message. Esc ends the "
+                    "turn; the send-now key is alt+enter.\n"
                     f"--- rendered screen ---\n{s.dump()}"
                 )
     finally:
@@ -1898,26 +1898,25 @@ def test_the_queued_message_row_does_not_promise_a_key_that_interrupts(
 
 
 def test_the_queued_row_hint_is_true_end_to_end(backend: StubBackend) -> None:
-    """`esc esc interrupts and runs it now` — both halves, on the wire.
+    """A queued message is never lost when the turn ends instead.
 
-    A truthful-looking sentence is not a truthful one. This drives the exact
-    gesture the row now prints and asserts both of its claims actually happen:
+    This began life pinning a printed hint (`esc esc interrupts and runs it
+    now`). That sentence is gone from the row — alt+enter now delivers into the
+    live turn, and the interrupt keeps its own surface — but the BEHAVIOUR it
+    described is still the queue's fallback contract and still has to hold:
 
-      1. **interrupts** — `POST /api/v1/sessions/<id>/cancel` goes out;
-      2. **runs it now** — a SECOND `POST /api/v1/orchestrate` follows,
-         carrying the QUEUED text.
+      1. **the turn ends** — `POST /api/v1/sessions/<id>/cancel` goes out;
+      2. **the queued message then runs anyway** — a SECOND
+         `POST /api/v1/orchestrate` follows, carrying the QUEUED text.
 
-    (2) is the one that could not be assumed. The queue drains only through
-    `maybe_dequeue_message`, which is gated on `Idle && turn_done`; whether an
-    interrupt actually reaches that state — and does so without the user
-    pressing anything else — is a property of the cancel teardown, not of the
-    hint. If it ever stops being true, the row goes back to lying and this test
-    is what says so.
+    (2) is the half that could not be assumed. The queue drains only through
+    `maybe_dequeue_message`, gated on `Idle && turn_done`; whether an interrupt
+    actually reaches that state — without the user pressing anything else — is a
+    property of the cancel teardown. A user who interrupts rather than using
+    send-now must not silently lose what they typed.
 
-    Deliberately uses the SLOW gesture (a 2.5s gap). The hint makes no promise
-    about timing, so neither may the test; and the in-turn interrupt arm is
-    untimed precisely so that a user reading this row at their own pace gets
-    the behaviour it describes.
+    Deliberately uses the SLOW gesture (a 2.5s gap), since the in-turn interrupt
+    arm is untimed.
     """
     hold_turn()
     try:
@@ -1951,7 +1950,7 @@ def test_the_queued_row_hint_is_true_end_to_end(backend: StubBackend) -> None:
                 waited += 0.25
             if not posts_since(mark, "/api/v1/sessions/pty-stub-session/cancel"):
                 raise AssertionError(
-                    "`esc esc interrupts` is false: no cancel request went out.\n"
+                    "the interrupt did not fire: no cancel request went out.\n"
                     f"--- rendered screen ---\n{s.dump()}"
                 )
 
@@ -1973,9 +1972,9 @@ def test_the_queued_row_hint_is_true_end_to_end(backend: StubBackend) -> None:
                     break
             if not ran:
                 raise AssertionError(
-                    "`and runs it now` is false: the turn was interrupted but "
-                    "the queued message never became a request, so the row is "
-                    "promising something the product does not do.\n"
+                    "the turn was interrupted and the queued message never "
+                    "became a request \u2014 text the user typed was silently "
+                    "dropped.\n"
                     f"POSTs since the interrupt: "
                     f"{[p for p, _ in posts_since(mark)] or 'none'}\n"
                     f"--- rendered screen ---\n{s.dump()}"
@@ -2033,6 +2032,214 @@ def test_a_queued_message_does_not_make_the_interrupt_harder_to_reach(
         release_turn()
 
 
+#: The wire path the send-now feature rides. The real backend parks the text in
+#: an ETS queue a busy loop can still read and folds it in at the next ReAct
+#: step boundary; nothing about that needs a model to be exercised here.
+STEER_PATH = "/api/v1/sessions/pty-stub-session/steer"
+CANCEL_PATH = "/api/v1/sessions/pty-stub-session/cancel"
+
+
+def test_alt_enter_delivers_a_queued_message_into_the_live_turn(
+    backend: StubBackend,
+) -> None:
+    """The feature, asserted on the wire and on the turn's survival.
+
+    Until now the only two mid-turn paths were interrupt (destroys the work) and
+    waiting for the boundary, and the queued row spent several releases
+    advertising a send-now key that did not exist. This is the real one:
+    Alt+Enter hands the queued message to `POST /sessions/:id/steer`, which the
+    backend folds into the RUNNING loop at its next step boundary.
+
+    Three facts, and the third is the one a screen assertion cannot reach:
+
+      1. the queued text arrives at the steer endpoint;
+      2. it arrives WHILE the original turn is still outstanding — the whole
+         claim is "into this turn", so a delivery after the turn ended would be
+         the old boundary behaviour wearing a new label;
+      3. the original turn SURVIVES — no cancel goes out. "Without interrupting"
+         is the entire difference between this and the key it replaces, and it
+         is provable only by the absence of a request.
+
+    (2) is enforced by the stub still holding `POST /api/v1/orchestrate` open
+    for the whole test: the long poll has not returned, so the turn is alive by
+    construction at the moment the steer is recorded.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            turn_mark = _start_held_turn(s)
+
+            s.write(b"DELIVER-INTO-THIS-TURN")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("DELIVER-INTO-THIS-TURN", 5.0):
+                raise AssertionError(
+                    f"the message was not queued.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            mark = post_mark()
+            # Alt+Enter, as a terminal sends it: ESC then CR.
+            s.write(b"\x1b\r")
+
+            waited, sent = 0.0, []
+            while waited < 8.0:
+                s.pump(0.25)
+                waited += 0.25
+                sent = [
+                    body
+                    for _, body in posts_since(mark, STEER_PATH)
+                    if "DELIVER-INTO-THIS-TURN" in body
+                ]
+                if sent:
+                    break
+            if not sent:
+                raise AssertionError(
+                    "alt+enter did not deliver the queued message: no POST to "
+                    f"{STEER_PATH} carrying it.\n"
+                    f"POSTs since the keypress: "
+                    f"{[p for p, _ in posts_since(mark)] or 'none'}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # 3. The turn survived. No cancel, and the original long poll is
+            #    still outstanding (the stub is still holding it).
+            if posts_since(mark, CANCEL_PATH):
+                raise AssertionError(
+                    "send-now interrupted the turn. Delivering WITHOUT ending "
+                    "the turn is the entire point of the feature; if it "
+                    "cancels, it is the old `esc to send now` with a new key."
+                )
+            if not posts_since(turn_mark, "/api/v1/orchestrate"):
+                raise AssertionError("harness error: no turn was ever started")
+
+            # And the queue is empty on screen — the row must not keep
+            # advertising a message that has already gone.
+            s.pump(SETTLE)
+            if "DELIVER-INTO-THIS-TURN" in "\n".join(
+                line for line in s.lines() if "sends when this turn ends" in line
+            ):
+                raise AssertionError(
+                    "the message is still shown as queued after being sent.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_the_queued_row_advertises_the_key_that_delivers(backend: StubBackend) -> None:
+    """The row names alt+enter, and names no key that ends the turn.
+
+    Third check of one invariant that this file has now caught two violations
+    of: the screen must not name a key whose behaviour differs from the words
+    beside it. Here the wrong outcome would be especially quiet — the row could
+    name Esc, which *does* eventually run the message, by destroying the turn
+    first.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            _start_held_turn(s)
+            s.write(b"QUEUED-FOR-THE-HINT")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("QUEUED-FOR-THE-HINT", 5.0):
+                raise AssertionError(
+                    f"nothing queued.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            row = next(
+                (
+                    line
+                    for line in s.lines()
+                    if "sends when this turn ends" in line
+                ),
+                None,
+            )
+            if row is None:
+                raise AssertionError(
+                    "the queued row lost its explanation entirely.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "alt+enter" not in row:
+                raise AssertionError(
+                    f"the row does not name the key that delivers: {row!r}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "esc" in row:
+                raise AssertionError(
+                    "the row names Esc beside a queued message. Esc ends the "
+                    "turn; printing it here is what made a destructive key read "
+                    f"as a benign one: {row!r}\n--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_a_split_alt_enter_does_not_interrupt(backend: StubBackend) -> None:
+    """The degraded form of the chosen chord must be harmless.
+
+    Alt-chords reach crossterm as `ESC` + byte. If the two ever arrive in
+    separate reads — which is what this test forces, with a deliberate gap
+    between them — it parses as Esc then Enter rather than Alt+Enter. Esc arms
+    the interrupt, so the question that decides whether Alt+Enter was a safe
+    choice at all is what the Enter does next.
+
+    It disarms: `handle_processing_key` resets the Esc tracker and clears the
+    armed affordance on every non-Esc key. So the degraded chord leaves no armed
+    interrupt behind, and the Enter falls through to an empty composer, which
+    submits nothing. Net effect: nothing happens — the message stays queued and
+    the turn stays alive.
+
+    Without this, the feature would have shipped a chord whose failure mode is
+    "silently arm the key that kills the turn", which is the defect this whole
+    series of fixes is about.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            _start_held_turn(s)
+            s.write(b"STILL-QUEUED-AFTER-SPLIT")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("STILL-QUEUED-AFTER-SPLIT", 5.0):
+                raise AssertionError(
+                    f"nothing queued.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            mark = post_mark()
+            # Force the split: two writes with a pump between them, so the
+            # child's reads cannot coalesce them into one Alt+Enter.
+            s.write(b"\x1b")
+            s.pump(0.5)
+            s.write(b"\r")
+            s.pump(SETTLE * 2)
+
+            if posts_since(mark, CANCEL_PATH):
+                raise AssertionError(
+                    "a split alt+enter interrupted the turn. The chord's "
+                    "degraded form must be harmless, or the send-now key is a "
+                    "way to kill a turn by accident."
+                )
+            # The armed affordance must be gone too — a latent arm is what
+            # turns the NEXT stray Esc into a kill.
+            if "esc again to interrupt" in "\n".join(s.lines()):
+                raise AssertionError(
+                    "the interrupt is still armed after a split alt+enter. The "
+                    "Enter must disarm it, or the chord leaves a loaded key "
+                    f"behind.\n--- rendered screen ---\n{s.dump()}"
+                )
+            if not s.wait_for_text("STILL-QUEUED-AFTER-SPLIT", 2.0):
+                raise AssertionError(
+                    "the queued message vanished on a split alt+enter.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -2057,6 +2264,9 @@ TESTS = [
     test_the_queued_message_row_does_not_promise_a_key_that_interrupts,
     test_the_queued_row_hint_is_true_end_to_end,
     test_a_queued_message_does_not_make_the_interrupt_harder_to_reach,
+    test_alt_enter_delivers_a_queued_message_into_the_live_turn,
+    test_the_queued_row_advertises_the_key_that_delivers,
+    test_a_split_alt_enter_does_not_interrupt,
 ]
 
 

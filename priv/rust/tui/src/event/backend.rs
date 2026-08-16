@@ -707,4 +707,22 @@ pub enum BackendEvent {
     /// Fired 3s after cancel request if the SSE stream hasn't delivered a response.
     /// Forces the UI back to Idle to prevent getting stuck.
     CancelTimeout,
+
+    // === Send-now (queued message delivered into the running turn) ===
+    /// Every queued message reached `POST /sessions/:id/steer`. Carries how many,
+    /// for the confirmation.
+    SendNowDelivered {
+        count: usize,
+    },
+    /// Delivery failed part-way. Carries the messages that did NOT reach the
+    /// backend, oldest first, so the app can put them back on the queue.
+    ///
+    /// A queued message is text the user typed and was promised would run. It
+    /// must never be dropped because a request failed, and the failure must be
+    /// visible rather than inferred from the queue quietly emptying — so the
+    /// undelivered remainder travels back here rather than being logged.
+    SendNowFailed {
+        undelivered: Vec<String>,
+        error: String,
+    },
 }

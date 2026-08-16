@@ -526,3 +526,73 @@ mod overlay_dialog_lost_is_complete {
         );
     }
 }
+
+// ── the row's key and the handler's key must be the same key ────────────────
+//
+// The queued-message row has advertised a wrong key twice. Both times the
+// mismatch was invisible to the suite, because the hint is a string in one file
+// and the routing is a match arm in another and nothing tied them together.
+// This ties them together.
+#[cfg(test)]
+mod the_advertised_send_now_key_is_routed {
+    /// The hint names Alt+Enter; `handle_processing_key` must route Alt+Enter,
+    /// gated on there being something queued, to `send_queued_now`.
+    #[test]
+    fn processing_routes_alt_enter_to_send_queued_now() {
+        let src = include_str!("update.rs");
+        let handler = src
+            .split("fn handle_processing_key")
+            .nth(1)
+            .expect("handle_processing_key exists");
+
+        assert!(
+            handler.contains("KeyCode::Enter, m")
+                && handler.contains("KeyModifiers::ALT")
+                && handler.contains("send_queued_now"),
+            "the queued row advertises alt+enter as send-now; Processing must \
+             route it. A hint naming a key nothing handles is exactly the \
+             defect that shipped twice."
+        );
+        assert!(
+            handler.contains("!self.message_queue.is_empty()"),
+            "send-now must be gated on a non-empty queue, so the key is live \
+             exactly where the row that advertises it is on screen"
+        );
+    }
+
+    /// The hint text and the routed key are checked against each other rather
+    /// than each against a hardcoded literal, so renaming the chord in one
+    /// place fails here instead of shipping a mismatch.
+    #[test]
+    fn the_hint_and_the_handler_agree() {
+        let hint = crate::components::input::QUEUED_HINT_FULL;
+        let handler = include_str!("update.rs")
+            .split("fn handle_processing_key")
+            .nth(1)
+            .expect("handle_processing_key exists")
+            .to_string();
+
+        let names_alt_enter_in_hint = hint.contains("alt+enter");
+        let routes_alt_enter =
+            handler.contains("KeyCode::Enter, m") && handler.contains("KeyModifiers::ALT");
+        assert_eq!(
+            names_alt_enter_in_hint, routes_alt_enter,
+            "the queued row says {hint:?} but the Processing handler routes a \
+             different key (or none). These must move together."
+        );
+    }
+
+    /// Esc must NOT be named on that row any more. It is not the send-now key,
+    /// it ends the turn, and printing it beside a queued message is what made a
+    /// destructive key read as a benign one.
+    #[test]
+    fn the_row_does_not_name_the_interrupt() {
+        for hint in [
+            crate::components::input::QUEUED_HINT_FULL,
+            crate::components::input::QUEUED_HINT_MID,
+            crate::components::input::QUEUED_HINT_SHORT,
+        ] {
+            assert!(!hint.contains("esc"), "{hint:?}");
+        }
+    }
+}

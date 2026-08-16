@@ -3145,6 +3145,33 @@ impl App {
                     self.enter_overlay(AppState::PlanReview);
                 }
             }
+            BackendEvent::SendNowDelivered { count } => {
+                // Confirmed only once the backend has it. An optimistic toast
+                // fired at keypress would say "sent" for a request that 404'd.
+                let what = if count == 1 {
+                    "Sent into this turn".to_string()
+                } else {
+                    format!("{count} messages sent into this turn")
+                };
+                self.toasts
+                    .push(what, crate::components::toast::ToastLevel::Info);
+            }
+            BackendEvent::SendNowFailed { undelivered, error } => {
+                // The user's text is never dropped because a request failed,
+                // and the failure is SAID rather than left to be inferred from
+                // the queue quietly emptying. Back on the queue, it keeps its
+                // original contract: it runs when this turn ends.
+                let n = undelivered.len();
+                self.restore_undelivered_queue(undelivered);
+                tracing::warn!("send-now failed: {error}");
+                self.toasts.push(
+                    format!(
+                        "Could not send into this turn \u{2014} {n} message(s) back \
+                         in the queue, and will run when it ends"
+                    ),
+                    crate::components::toast::ToastLevel::Warning,
+                );
+            }
             BackendEvent::CancelTimeout => {
                 // Safety net: if the backend cancel response never came via SSE,
                 // force the UI back to idle so the user isn't stuck.

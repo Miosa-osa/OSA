@@ -31,44 +31,43 @@ use super::{AppAction, Component, ComponentAction};
 
 /// The trailing hint on the FIRST queued-message row, in full.
 ///
-/// It used to read `— sends when this turn ends · esc to send now`, and the
-/// second half was **not wired to anything**. There is no send-now key, in this
-/// state or any other: `maybe_dequeue_message` is called from five
-/// turn-completion sites and from no key handler at all, and `queue_may_drain`
-/// requires `Idle && turn_done` — so a queued message cannot run until the turn
-/// has ENDED, by finishing or by being interrupted.
+/// HISTORY, because this row has been wrong twice and the shape of the mistake
+/// is the same both times: naming a key whose behaviour differs from the words
+/// beside it.
 ///
-/// What "esc to send now" actually described was the side effect of the
-/// interrupt chord: Esc-Esc cancels the turn, `turn_done` is set on that path,
-/// and the queue then drains. The label named the consequence and hid the
-/// mechanism — and the mechanism is "destroy the work in flight". A user
-/// reported precisely the resulting experience: "I click it, it didn't do it.
-/// If I press it again it doesn't do it, and then if I do it too many times it
-/// just turns off the conversation."
+/// It first read `— sends when this turn ends · esc to send now`, and the
+/// second half was not wired to anything at all. There was no send-now key in
+/// any state: `maybe_dequeue_message` is called from five turn-completion sites
+/// and from no key handler, and `queue_may_drain` requires `Idle && turn_done`,
+/// so no keystroke could run a queued message while the turn was alive. What
+/// the label was describing was the side effect of the interrupt chord —
+/// Esc-Esc ends the turn, and the queue then drains. It named the consequence
+/// and hid the mechanism, and the mechanism destroys the work in flight. A user
+/// reported the result exactly: "I click it, it didn't do it. If I press it
+/// again it doesn't do it, and then if I do it too many times it just turns off
+/// the conversation."
 ///
-/// So the hint now says what the key does, cost first, and says that it takes
-/// two presses. Both halves are load-bearing:
+/// It was then corrected to describe Esc-Esc honestly. That was true, but it
+/// was true about a destructive key, because there was nothing better to offer.
 ///
-/// * **"esc esc"** — one press only arms; the spinner's affordance flips to
-///   "esc again to interrupt". A hint that said "esc" was the reason the first
-///   press read as the app ignoring the keystroke.
-/// * **"interrupts"** before "runs it now" — the destructive half is what the
-///   user is actually agreeing to, so it leads.
-///
-/// Deliberately NOT offered here: a real mid-turn send. `/steer` is the
-/// product's explicit gesture for injecting into a running turn, and plain
-/// mid-turn text was moved OFF that path on purpose (see `submit_input`) —
-/// automatic steering "read as the agent lurching off course mid-thought".
-/// Naming `/steer` on this row would be another near-miss promise anyway: it
-/// injects text you retype, not the message already queued here.
+/// Now there is. Alt+Enter delivers the queued message into the RUNNING turn
+/// via the mid-turn steer path (`App::send_queued_now`), so this row finally
+/// names a key that does the benign thing the user was reaching for. The
+/// interrupt keeps its own key and its own surface — the spinner's "esc to
+/// interrupt" — so no row advertises two meanings for one press.
 pub const QUEUED_HINT_FULL: &str =
-    "  \u{2014} sends when this turn ends \u{00b7} esc esc interrupts and runs it now";
+    "  \u{2014} sends when this turn ends \u{00b7} alt+enter to send it into this turn now";
+
+/// Mid-width form. Same key, fewer words — never a different key, and never a
+/// key mentioned without saying what it does.
+pub const QUEUED_HINT_MID: &str =
+    "  \u{2014} sends when this turn ends \u{00b7} alt+enter sends it now";
 
 /// The narrow-terminal fallback: the trigger, with no key named.
 ///
 /// Naming a key that does not fit its explanation is how this went wrong the
 /// first time, so the short form names none. "Sends when this turn ends" is the
-/// half that answered the earlier report (a queued message during a 14-minute
+/// half that answered an earlier report (a queued message during a 14-minute
 /// fan-out was indistinguishable from the app ignoring the keystroke), and it
 /// survives to a much narrower terminal on its own.
 pub const QUEUED_HINT_SHORT: &str = "  \u{2014} sends when this turn ends";
@@ -2773,6 +2772,8 @@ impl Component for InputComponent {
                     // losing the whole row's explanation to a longer sentence.
                     let hint = if fits(QUEUED_HINT_FULL) {
                         Some(QUEUED_HINT_FULL)
+                    } else if fits(QUEUED_HINT_MID) {
+                        Some(QUEUED_HINT_MID)
                     } else if fits(QUEUED_HINT_SHORT) {
                         Some(QUEUED_HINT_SHORT)
                     } else {
@@ -5015,23 +5016,41 @@ mod queued_affordance {
         }
     }
 
-    /// When a key IS named, the row must name the real gesture — two presses,
-    /// and the cost stated before the benefit.
+    /// When a key IS named, the row must name the key that is WIRED.
+    ///
+    /// Alt+Enter is `App::send_queued_now` — it delivers the queued message
+    /// into the running turn over the mid-turn steer path, without ending it.
+    /// The interrupt keeps its own key on its own surface (the spinner's "esc
+    /// to interrupt"), so this row never advertises two meanings for one press.
     #[test]
-    fn the_named_gesture_is_the_one_that_actually_runs() {
+    fn the_named_key_is_the_one_that_delivers() {
         let row = queued_row_text(vec!["check the god files"], 140);
         assert!(
-            row.contains("esc esc"),
-            "one Esc only arms the interrupt; a hint saying `esc` is why the \
-             first press read as the app ignoring the keystroke: {row:?}"
+            row.contains("alt+enter"),
+            "the row must name the send-now key: {row:?}"
         );
-        let i = row.find("interrupts").expect("names the cost");
-        let j = row.find("runs it now").expect("names the effect");
         assert!(
-            i < j,
-            "the destructive half is what the user is agreeing to, so it must \
-             come first: {row:?}"
+            !row.contains("esc"),
+            "the interrupt lives on the spinner, not on this row \u{2014} naming \
+             it here is what made a destructive key look like a benign one: {row:?}"
         );
+    }
+
+    /// Every width that names a key must name the SAME key. A mid-tier that
+    /// abbreviated to a different chord would be the original defect again,
+    /// just narrower.
+    #[test]
+    fn every_tier_that_names_a_key_names_alt_enter() {
+        for width in [40usize, 55, 60, 70, 80, 100, 120, 200] {
+            let row = queued_row_text(vec!["check the god files"], width as u16);
+            if row.contains("alt") || row.contains("enter") || row.contains("esc") {
+                assert!(
+                    row.contains("alt+enter"),
+                    "at width {width} the row names a key that is not the wired \
+                     one: {row:?}"
+                );
+            }
+        }
     }
 
     /// Narrow terminals keep the trigger and drop the key, rather than losing
@@ -5043,7 +5062,10 @@ mod queued_affordance {
             row.contains("sends when this turn ends"),
             "the short form must survive where the long one does not: {row:?}"
         );
-        assert!(!row.contains("esc"), "no key may be named part-way: {row:?}");
+        assert!(
+            !row.contains("alt") && !row.contains("esc"),
+            "no key may be named part-way: {row:?}"
+        );
     }
 
     #[test]
