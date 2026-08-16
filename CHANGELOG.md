@@ -9,55 +9,138 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased]
+## [1.0.104] — displays as `v1.0.104`
 
-### Fixed — a resize re-renders the transcript instead of surrendering it
+**TUI resize is fixed.** A dragged terminal no longer shreds the transcript.
 
-Committed rows leave through `insert_before` into the terminal's native
-scrollback, where OSA no longer owns them. On a width change the terminal
-re-wraps those raw rows with no idea that some of them were a table, which is
-what shredded a committed markdown table into rules of two different widths with
-a doubled left border while the prose beside it re-wrapped fine.
+Proven by control, not assertion: the same probe, the same 120→100→80→60→80→100→60
+drag, graded on real libvte —
 
-The resize path now rebuilds the transcript **from source**: it purges the
-projection, rebuilds the inline viewport at a known origin, and re-renders every
-retained `Message` at the settled width. Tables are laid out again at the width
-the terminal actually has, rather than preserved as border rows frozen at a width
-it no longer has.
+| build | table |
+|---|---|
+| `v1.0.103` | **DESTROYED** — rule rows at widths 9 and 60, cells torn mid-word |
+| `v1.0.104` | **SURVIVED** |
 
-Measured on real libvte (`test/pty/vte_content_reflow.py`), across a
-120→100→80→60→80→100→60 drag: the committed table grades `DESTROYED` on 1.0.103
-(rule rows at widths 9 and 60 inside one table) and `SURVIVED` here.
+Corroborated on a second emulator (pyte) and against the contributed branch as
+authored, before any of the fixes below.
 
-The replay bottom-aligns. A rebuild at row 0 followed by `insert_before` leaves
-the live region on the row the replay ends on — the bottom once the conversation
-overflows the screen, but the TOP before it does, which left the composer on row
-9 of a 30-row screen with twenty dead rows beneath it. Blank rows are emitted
-*ahead* of the transcript so the chrome sits against the last transcript row and
-still occupies the screen's last rows, which is where a real resize has anchored
-it since 1.0.75.
+### Read this before upgrading
 
-### Known — a resize now destroys scrollback from before OSA launched
+**Your shell history from before OSA started is destroyed on the first resize.**
+Measured: 40 marker lines printed by the shell, then a 120→100→80→100→120 drag —
 
-Own this before upgrading. The rebuild purges the terminal's scroll history
-(`ESC[3J`), and that history is not OSA's alone: it includes whatever was in the
-terminal **before OSA started**.
+| build | pre-launch lines still addressable |
+|---|---|
+| `v1.0.103` | 40 / 40 |
+| `v1.0.104` | **0 / 40** |
 
-Measured, 40 marker lines printed by the shell and then `exec`-ing the binary,
-across a 120→100→80→100→120 drag on real libvte:
+The conversation survives and reflows correctly; anything the terminal was
+holding from before launch does not. This is inherent to the approach: the fix
+purges the terminal's projection (`ESC[3J`) and replays OSA's own retained
+messages at the settled width, and that purge cannot distinguish OSA's rows from
+the shell's. An alternate-screen design would avoid it at the cost of native
+scrolling and selection; this trade was taken deliberately.
 
-| build | pre-launch shell lines still addressable |
-| --- | --- |
-| 1.0.103 | 40 / 40 |
-| this build | 0 / 40 |
+### How it works
 
-So: your own conversation survives a resize and reflows correctly, and your
-shell history from before you ran `osa` does not. The alternate-screen design
-avoids this tradeoff and remains the standing alternative; this ships the replay
-because the transcript corruption was the reported defect.
+The root cause was established first, and it is not what "resize breaks the
+layout" suggests: `drain_scrollback()` is a `mem::take`, so each finalized
+message was rendered through `insert_before` and then **dropped**. The only copy
+of the transcript lived in the terminal's own scrollback, where the terminal
+re-wraps raw rows with no idea that some of them form a table. **The re-layout
+was never wrong — there was nothing left to lay out.**
 
-Also lost on resize, for the same reason and already true in 1.0.103: the
-welcome banner, which is not a retained `Message` and so is not replayed.
+So: retain the messages (1.0.103), then on a real resize purge the stale
+projection and replay them re-rendered at the new width, all inside one
+synchronized update so the user sees a completed frame rather than the cleared
+intermediate.
+
+### Fixed — the replayed transcript was anchored to the top
+
+Contributed in #108 and found by the PTY suite, not by eye. `purge_scrollback()`
+homes to (0,0), the rebuild anchors there, and `insert_before` leaves the
+viewport on the row the replay *ends* on. Once a conversation overflows the
+screen that row **is** `rows - inline_h`, so the two coincide and it looks
+correct — which is why manual testing passed. Before it overflows they diverge:
+composer on row 8 of a 20-row screen, eleven dead rows beneath it.
+
+Blank rows are now emitted **ahead** of the transcript, never between it and the
+chrome, so the chrome sits against the content *and* fills to the bottom. Padding
+collapses to 0 for any transcript taller than the screen. The boundary arithmetic
+saturates on both subtractions and an exhaustive test asserts
+`pad + content + inline_h == rows` across every geometry in the padded range.
+
+### Fixed — three more instruments that graded a working product as broken
+
+This is the fourth instance of the same class in two days, and the pattern is now
+documented in `test/pty/README.md`.
+
+`ESC[3J` makes VTE drop scrollback **without restarting the ring's row
+numbering**, so the `Gtk.Adjustment` is left stale — reporting `upper=116` while
+`get_cursor_position()` returns row **277**. Every "visible" row therefore sat
+inside the purged span and read as empty, which the grader reported as a
+destroyed table. Two graders carried matching flaws that only surfaced once OSA
+began re-rendering committed content at the new width.
+
+One PTY assertion was also a **stale assumption**, and the counts settle it:
+across its own drag they are identical before and after (`composer_top` 3→3,
+`composer` 4→4). The extras are that test's own `❯  You` headers and separators.
+It had been green on `main` only because `main`'s resize **wiped the transcript
+off the screen**, leaving nothing for its ambiguous markers to collide with. It
+now uses the detector that excludes the two markers the file already documents as
+ambiguous; three unambiguous markers stay pinned at one apiece.
+
+### Fixed — recency was an independent path into the prompt
+
+`recall_hybrid/2` unioned in the 100 most recent memories **unconditionally**, so
+the long-term memory block was in practice the most recently *saved* memories
+rather than the relevant ones. Measured on a real 60-entry store across 8 realistic
+prompts, with a live local embedder:
+
+| | before | after |
+|---|---:|---:|
+| tokens/turn | 285.1 | **159.5** (−44%) |
+| entries sharing **zero** keywords | 75% | **14.3%** |
+
+Two prompts the store has no bearing on returned **6/6 unrelated entries** — 260
+and 407 tokens of pure noise, now 43 and 59. And the scoring was worse than the
+0.35 floor suggests: `accessed_at` is bumped on every recall, so once an entry is
+injected its recency term saturates at 1.0 and a zero-relevance `:decision` entry
+scores a clean **0.50**. Injection was self-reinforcing.
+
+The fix is narrow — **no rebalanced weights, `min_score` untouched**. The broad
+pool is gathered only when a query embedding exists (its own docstring says it
+exists to feed **vector KNN** results that keyword search missed, not to inject
+recency), and a candidate arriving *solely* through it must show evidence:
+non-zero keyword overlap, or cosine ≥ `:memory_semantic_floor` (0.55). Keyword-pool
+candidates are exempt, so the standing guarantee that `recall_hybrid` never
+returns less than `recall/2` holds.
+
+The floor is calibrated on measured data: true matches sit at cosine 0.55–0.84,
+while the best candidate for unanswerable queries peaked at 0.43–0.50. Getting it
+wrong is bounded and one-directional — the lexical limb is unconditional, so a bad
+floor costs the semantic bonus and falls back to the keyword answer; it cannot
+drop a lexically relevant memory.
+
+### Known — not fixed
+
+- **Pre-launch shell scrollback is destroyed on resize.** Stated above.
+- **Each drag step re-renders every retained message**, so a long transcript pays
+  a full markdown re-parse per step. Held up at 11 turns; **not measured near the
+  2,000-message retention cap.**
+- The welcome banner is not replayed after a resize — already the case on
+  `v1.0.103`.
+- **OSC-8 hyperlink survival across a resize is still unmeasured.** Closing it
+  needs a reader using VTE's per-cell `hyperlink_uri` attribute. Links are not
+  expected to be a cost, but that is an expectation, not a measurement.
+- `accessed_at` is bumped on every recall, so a memory that gets injected becomes
+  likelier to be injected again. Real second-order defect, left alone because it
+  deserves its own measurement.
+- Nothing in this release is verified against a live inference provider. The
+  embedding side **is** real — the local 768-dim embedder was live, so the cosine
+  numbers are measured. Token counts are OSA's own estimator, comparable to each
+  other rather than exact. Whether the retained memories improve model *output* is
+  unmeasured; relevance signal and cost were measured, not answer quality.
 
 ---
 
