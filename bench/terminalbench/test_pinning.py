@@ -738,7 +738,9 @@ def test_the_detector_reads_the_same_corpus_from_any_cwd(cwd_name):
     rc, out = _species_rows(cwd)
     assert rc == 0, out
     # The measured reference numbers, which only appear if the logs were read.
-    assert out.count("announced_next_action") == 9, out
+    # 10 of 34 model failures, and the count is asserted here because it only
+    # appears if the event logs were actually read.
+    assert out.count("announced_next_action") == 10, out
     assert "0 detector hits landed on a SOLVED trial" in out
     assert "87/89 trials had an event log" in out
 
@@ -779,16 +781,34 @@ def test_the_announcement_verbs_mirror_the_elixir_guardrail():
         ex_courtesy.replace(" ", "")
 
 
-def test_the_added_verbs_are_present_and_the_excluded_ones_are_not():
+def test_the_detector_matches_a_shape_not_a_vocabulary():
+    """The allow-list leaked twice, both times found by a human on a real
+    session and never by replay: "I'll examine" (large-scale-text-editing on
+    osa-tb20-full89-9b57ee7d) and "I'll map" (a user's v1.0.099 session, Plan
+    0/5, nothing checked). An allow-list can only enumerate the wordings
+    someone already thought of."""
     mod = _load_failure_species()
-    for verb in ("examine", "inspect", "explore", "analyze", "analyse", "look", "read"):
+    for verb in ("map", "examine", "draft", "triage", "frobnicate"):
         assert mod.ANNOUNCEMENT_RE.search(f"I'll {verb} the files first."), verb
-    # `check` and `review` are deliberate exclusions -- see the note on
-    # `Guardrails.@announcement_pattern`.
-    assert not mod.ANNOUNCEMENT_RE.search(
-        mod.COURTESY_RE.sub("", "I'll check that and get back to you."))
-    assert not mod.ANNOUNCEMENT_RE.search(
-        mod.COURTESY_RE.sub("", "I'll review it once CI is green."))
-    # The sign-off form of the one risky added verb is scrubbed.
-    assert not mod.ANNOUNCEMENT_RE.search(
-        mod.COURTESY_RE.sub("", "Done. I'll look into it if it recurs."))
+        assert mod.ANNOUNCEMENT_RE.search(f"I will {verb} the files first."), verb
+
+
+def test_the_stop_list_is_specific_not_general():
+    mod = _load_failure_species()
+
+    def fires(text):
+        return bool(mod.ANNOUNCEMENT_RE.search(mod.COURTESY_RE.sub("", text)))
+
+    for signoff in (
+        "Wrote /app/x.py; PASS. Let me know if you want numbers.",
+        "Green. I'll look into it if it recurs.",
+        "All 29 tests pass. I'll let you know if anything else turns up.",
+        "Done. I'll be happy to explain the regex.",
+        "Applied cleanly. I'll check that for you if it regresses.",
+    ):
+        assert not fires(signoff), signoff
+
+    # NOT the general rule "...for you": `cancel-async-tasks` is a measured
+    # model failure whose entire answer announces unstarted work and ends in
+    # that phrase.
+    assert fires("Run `/add-dir /app`, then I'll create the function for you.")

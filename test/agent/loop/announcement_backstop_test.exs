@@ -123,39 +123,59 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
              )
     end
 
-    test "the added investigation verbs all fire" do
-      for verb <- ~w(examine inspect explore analyze analyse look read) do
+    test "I'll map — the verb nobody thought of, on a real user session" do
+      # v1.0.099, Grok 4.6, reported from a screenshot: the turn ended on this
+      # sentence with `Plan 0/5` and nothing checked. Nothing was mapped.
+      #
+      # This is the SECOND live miss of the old allow-list (`I'll examine` was
+      # the first), and `map` had occurred to no one. Adding `map` would only
+      # have bought a third. The list was the wrong shape.
+      assert Guardrails.announcement_only?(
+               "This is the \"I have 40 tmux panes and none of them survive a " <>
+                 "reboot\" problem. I'll map what you already built, then look at " <>
+                 "Conductor, Atlas, and the rest of that space."
+             )
+    end
+
+    test "any verb fires — the pattern is a shape, not a vocabulary" do
+      # Including verbs that were never on any list and never will be. The
+      # point of the change is that this test needs no maintenance.
+      for verb <- ~w(map examine inspect explore analyze look read draft
+                     sketch enumerate benchmark reconcile triage transcribe
+                     frobnicate) do
         assert Guardrails.announcement_only?("I'll #{verb} the files first."),
                "expected \"I'll #{verb}\" to read as an announcement"
+        assert Guardrails.announcement_only?("I will #{verb} the files first."),
+               "expected \"I will #{verb}\" to read as an announcement"
       end
     end
 
-    test "check and review stay OUT of the i'll branch" do
-      # Deliberate exclusions, not oversights.
-      #
-      # `check` is this repo's own documented over-firing hazard:
-      # `deliverable_task?/1` omits it from the mutating verbs on purpose, and
-      # `TextOnlyTurnTerminationTest`'s fixture is literally "Let me check the
-      # configuration: …" as a COMPLETE answer that must cost one round trip.
-      # `review` is the idiomatic offer "I'll review it and get back to you".
-      #
-      # Both are still reachable via the `let me ` branch, which is gated by the
-      # loop's other conjuncts — this only keeps them off the unconditional
-      # `i'll` branch.
-      refute Guardrails.announcement_only?("I'll check that and get back to you.")
-      refute Guardrails.announcement_only?("I'll review it once CI is green.")
-    end
+    test "the stop-list carries the risk, and it is specific not general" do
+      # Sign-off idioms: the work is finished and more is being offered.
+      for signoff <- [
+            "Wrote /app/x.py; the smoke test prints PASS. Let me know if you want numbers.",
+            "Fixed in /app/main.py and the suite is green. I'll look into it if it recurs.",
+            "All 29 tests pass. I'll let you know if anything else turns up.",
+            "Done -- /app/out.txt matches the flag. I'll be happy to explain the regex.",
+            "The migration applied cleanly. I'll check that for you if it regresses."
+          ] do
+        refute Guardrails.announcement_only?(signoff),
+               "sign-off must not read as an announcement: #{signoff}"
+      end
 
-    test "\"I'll look into it\" is a sign-off, not an announcement" do
-      # `look` is the one added verb whose future tense commonly CLOSES a
-      # finished answer. Handled in `@courtesy_pattern`, the mechanism that
-      # already exists for this, rather than by withholding the verb.
-      refute Guardrails.announcement_only?(
-               "Fixed in /app/main.py and the suite is green. I'll look into it if it recurs."
+      # …but a scrub must not disarm a real announcement that carries one.
+      assert Guardrails.announcement_only?(
+               "Let me write the implementation now. Let me know if that's wrong."
              )
 
-      # …while the announcing use of the same verb still fires.
-      assert Guardrails.announcement_only?("I'll look at both files to see what differs.")
+      # And the stop-list is deliberately NOT the general rule "…for you".
+      # `cancel-async-tasks` is a measured model failure whose whole answer is
+      # an announcement of unstarted work ending in exactly that phrase; a
+      # general rule would have swallowed it.
+      assert Guardrails.announcement_only?(
+               "I need access to `/app` to write the file. Run `/add-dir /app` in " <>
+                 "your session, then I'll create the function for you."
+             )
     end
 
     test "a courtesy sign-off is not an announcement" do

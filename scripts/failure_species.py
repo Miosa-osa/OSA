@@ -62,36 +62,47 @@ GUARD_PREFIXES = (
 #: `len(final) < N` rule fires on solved trials at every threshold tested from
 #: 200 to 600 characters. The wording carries the signal, not the brevity.
 #:
-#: The `i'll ...` branch shipped with action verbs and no INVESTIGATION verbs,
-#: so `i'll examine` fell through while `let me examine` matched on the other
-#: branch. Measured on `runs/osa-tb20-full89-9b57ee7d`:
-#: `large-scale-text-editing` was one turn, ZERO tool calls, 2.16 s, and the
-#: entire episode was "I'll examine both files to understand the transformation
-#: needed." -- 64 characters, a deliverable task, the `announced_unstarted_task`
-#: shape exactly, unable to fire because the wording did not match.
+#: THERE IS NO VERB LIST, on purpose. There used to be one and it leaked twice,
+#: both times found by a human looking at a real session and never by replay:
+#: `large-scale-text-editing` on `runs/osa-tb20-full89-9b57ee7d` ("I'll examine
+#: both files ...", one turn, ZERO tool calls, 2.16 s) and a user's v1.0.099
+#: session ("I'll map what you already built ...", Plan 0/5, nothing checked).
+#: An allow-list can only enumerate the wordings someone already thought of;
+#: the `let me ` branch never had one and never leaked. So the `i'll` branch is
+#: now symmetric with it and the risk lives in `COURTESY_RE` below.
 #:
-#: The added verbs were replayed across every run on disk carrying a
-#: `results.json` (180 trials: 94 solves, 52 model failures) before being
-#: committed to. Result: no candidate verb follows "I'll" ANYWHERE in that
-#: corpus, so both counts are unchanged -- `announced_next_action` stays at 9
-#: model failures and 0 solves. `check` and `review` are deliberately excluded;
-#: see the note on `Guardrails.@announcement_pattern` for why.
-ANNOUNCEMENT_RE = re.compile(
-    r"(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop"
-    r"|examine|inspect|explore|analyze|analyse|look|read)|now let)",
-    re.IGNORECASE,
-)
+#: Replayed across every run on disk with a `results.json` -- 180 trials, 94
+#: solves, 52 model failures -- plus both live misses:
+#:
+#:                        pooled failures  pooled solves  reference run
+#:     verb allow-list           9              0           9 of 34
+#:     shape + stop-list        11              0          10 of 34
+#:
+#: Strictly dominant. The reason it costs no solve is measurable and worth
+#: keeping: across all 94 solves, NO answer shorter than the 500-char ceiling
+#: contains "I'll" or "I will" at all -- every solve-side "I'll" sits in a
+#: 735-1910 character answer.
+ANNOUNCEMENT_RE = re.compile(r"(let me |i'll |i will |now let)", re.IGNORECASE)
+
 ANNOUNCEMENT_MAX_CHARS = 500
 
-#: "Let me know if ..." is a sign-off, not an announcement. It matches the
-#: pattern above and so would count as one; scrubbed before matching (length is
-#: still measured on the original). Mirrors `Guardrails.@courtesy_pattern`.
+#: The stop-list, and the half that carries the risk of the verb-free pattern.
 #:
-#: "I'll look into it" is the same case for the one added verb whose future
-#: tense reads naturally as closing a finished answer. Scrubbing it here keeps
-#: "I'll look at both files" firing while "Done. I'll look into it." does not.
+#: Every entry is a SIGN-OFF idiom: a first-person future phrase meaning "the
+#: work is finished and I am offering more", not "I am about to act". Scrubbed
+#: before matching, while length is still measured on the original.
+#:
+#: Deliberately specific rather than general. A bare "...for you" rule would
+#: have been tempting and wrong: `cancel-async-tasks` fails with "...then I'll
+#: create the function for you", an announcement of unstarted work that such a
+#: rule would have swallowed. Mirrors `Guardrails.@courtesy_pattern`.
 COURTESY_RE = re.compile(
-    r"\blet me know\b|\bi'?ll look into (it|this|that)\b", re.IGNORECASE
+    r"\blet me know\b"
+    r"|\bi'?ll let you know\b"
+    r"|\bi'?ll be (happy|glad) to\b"
+    r"|\bi'?ll (look|check|dig|follow) (into|up on) (it|this|that)\b"
+    r"|\bi'?ll (check|verify|confirm) that for you\b",
+    re.IGNORECASE,
 )
 
 #: The *unstarted* variant of the same species, and the one the shipped backstop

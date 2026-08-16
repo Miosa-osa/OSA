@@ -138,71 +138,83 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   # The regex and the ceiling below are that detector's, verbatim, so the
   # measured precision is the same predicate and not a re-derivation of it.
   #
-  # ## The `examine` gap, and how the verb list was chosen
+  # ## Why there is no verb list
   #
-  # The `i'll …` branch shipped with an action-verb list and no INVESTIGATION
-  # verbs at all, so `i'll examine` fell through while `let me examine` matched
-  # on the other branch. Measured on `osa-tb20-full89-9b57ee7d`:
-  # `large-scale-text-editing` was one turn, zero tool calls, 2.16 s, and the
-  # whole episode was
+  # There used to be one, and it leaked twice — both times found by a HUMAN
+  # looking at a real session, never by replay:
   #
-  #     I'll examine both files to understand the transformation needed.
+  #   * `large-scale-text-editing` on `osa-tb20-full89-9b57ee7d` — one turn,
+  #     zero tool calls, 2.16 s, and the entire episode was "I'll examine both
+  #     files to understand the transformation needed." `examine` was not in
+  #     the list.
+  #   * A user's interactive session on v1.0.099 (Grok 4.6) ending "I'll map
+  #     what you already built, then look at Conductor, Atlas, and the rest of
+  #     that space." — `Plan 0/5`, nothing checked, turn over. `map` was not in
+  #     the list either, and `map` had not occurred to anyone.
   #
-  # 64 characters, a deliverable task, no tool ever called — precisely the
-  # `:unstarted_task` shape below, which could not fire because the wording did
-  # not match.
+  # Adding `map` would have bought a third miss. The list was the wrong SHAPE:
+  # an allow-list of action verbs can only ever enumerate the wordings someone
+  # already thought of, and a model picks its verb freely. Note the `let me `
+  # branch never had a verb list and never leaked.
   #
-  # Widening a language predicate is dangerous in one direction only: a verb
-  # that also reads as a SIGN-OFF on finished work ("I'll check that for you")
-  # would burn turns on sessions that were working. So the candidates were
-  # replayed before being committed to, across every run on disk with a
-  # `results.json` (180 trials: 94 solves, 52 model failures) rather than the
-  # reference run alone.
+  # So the `i'll` branch is now symmetric with it: match the SHAPE — a
+  # first-person statement of intent — and carry the risk in a stop-list of
+  # sign-off idioms instead, where each entry is a phrase whose meaning is
+  # "the work is finished and I am offering more", not "I am about to act".
+  # A stop-list is the safe direction to be incomplete in: a missing entry
+  # costs a false positive on one wording, while a missing allow-list verb
+  # costs the entire detector on that wording.
   #
-  # What the replay actually says: **no candidate verb follows "I'll" anywhere
-  # in the corpus**, so the numbers are unchanged in both directions —
-  # `announced_next_action` stays at 9 model failures and 0 solves. The corpus
-  # confirms the widening is free; it cannot, by itself, argue that any given
-  # verb is safe. The include/exclude line below is therefore drawn on the
-  # sign-off risk of each verb, and stated so it can be argued with:
+  # ## Replayed before committing, on every run on disk
   #
-  #   * INCLUDED — `examine`, `inspect`, `explore`, `analyze`/`analyse`,
-  #     `look`, `read`. Investigation verbs. "I'll examine X" has no idiomatic
-  #     reading as a report of completed work.
-  #   * EXCLUDED — `check`. This is the repo's own documented over-firing
-  #     hazard: `deliverable_task?/1` deliberately omits it as a mutating verb,
-  #     and `TextOnlyTurnTerminationTest`'s fixture is literally "Let me check
-  #     the configuration: …" as a COMPLETE answer that must cost one round
-  #     trip. Adding it to the `i'll` branch would relitigate a decision that
-  #     was already measured.
-  #   * EXCLUDED — `review`. "I'll review it and get back to you" is an
-  #     idiomatic offer, and `review` appears in solve finals as a noun.
+  # 180 trials — 94 solves, 52 model failures — plus both live misses above
+  # and a hand-built sign-off set. Same acceptance bar as always: it must not
+  # fire on a solve.
   #
-  # Verbs already covered by the `let me ` branch are unaffected either way.
-  @announcement_pattern ~r/(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop|examine|inspect|explore|analyze|analyse|look|read)|now let)/i
+  #                      pooled failures   pooled solves   reference run
+  #   verb allow-list          9                0           9 of 34
+  #   this (shape + stop)     11                0          10 of 34
+  #
+  # Strictly dominant: it loses nothing, catches both live misses, and picks up
+  # two real failures the list missed — `cancel-async-tasks` ("…then I'll
+  # create the function for you") and `hf-model-inference` ("I'll run the full
+  # test suite the moment the download completes").
+  #
+  # The reason it does not cost a single solve is not luck, and it is the
+  # measurement worth remembering: across all 94 solves, **no answer shorter
+  # than the 500-character ceiling contains "I'll" or "I will" at all**. Every
+  # solve-side "I'll" sits in a 735–1910 character answer. Brevity and
+  # first-person intent almost never co-occur in finished work, which is the
+  # same conjunction the ceiling was calibrated on in the first place.
+  @announcement_pattern ~r/(let me |i'll |i will |now let)/i
   @announcement_max_chars 500
 
-  # "Let me know if …" is a sign-off, not an announcement: the work is done and
-  # the model is offering follow-up. It matches `let me ` and so counts as an
-  # announcement under the pattern above — a hole the reference run happens not
-  # to exercise, because a solve that ends "Done. Let me know if you want the
-  # benchmark numbers too." would have fired the shipped detector.
+  # ── The stop-list ──────────────────────────────────────────────────────
   #
-  # Scrubbed BEFORE matching (length is still measured on the original), so the
-  # phrase can no longer be the thing that makes an answer an announcement,
-  # while "Let me write it now. Let me know if that's wrong." still fires on its
-  # first clause. This can only SHRINK the fire set, so the measured
-  # 0-of-49-solves carries over unchanged; replayed to confirm it also keeps all
-  # 9 measured failures.
+  # This is where the risk of the verb-free pattern above is carried, and it is
+  # the half that has to be right.
   #
-  # `look` is the one verb added above whose future tense has a common sign-off
-  # reading — "I'll look into it" closes a finished answer rather than opening
-  # an action. That idiom is scrubbed here, in the mechanism that already
-  # exists for exactly this, rather than by withholding the verb: "I'll look at
-  # both files" still fires, "Done. I'll look into it if it recurs." no longer
-  # can. Like the clause above, a scrub can only SHRINK the fire set, so the
-  # measured 0-of-49-solves carries over unchanged.
-  @courtesy_pattern ~r/\blet me know\b|\bi'?ll look into (it|this|that)\b/i
+  # Every entry is a SIGN-OFF idiom: a first-person future phrase whose meaning
+  # is "the work is finished and I am offering more", not "I am about to act".
+  # "Let me know if …" is the original case — it matches `let me ` and would
+  # otherwise make a completed answer look like an announcement.
+  #
+  # Scrubbed BEFORE matching, while length is still measured on the ORIGINAL
+  # string. So a sign-off can no longer be the thing that makes an answer an
+  # announcement, while "Let me write it now. Let me know if that's wrong."
+  # still fires on its first clause. A scrub can only ever SHRINK the fire set,
+  # which is why the measured 0-of-94-solves survives every addition here.
+  #
+  # Deliberately specific rather than general. "…for you" as a bare rule would
+  # have been tempting and would have been wrong: `cancel-async-tasks` fails
+  # with "Run `/add-dir /app` in your session, then I'll create the function
+  # for you" — an announcement of unstarted work that a `for you` rule would
+  # have silently swallowed. Each idiom is listed whole for that reason.
+  #
+  # Being incomplete HERE is the cheap direction to be wrong in: a missing
+  # entry costs one false positive on one wording, whereas the missing
+  # allow-list verb it replaced cost the entire detector on that wording.
+  @courtesy_pattern ~r/\blet me know\b|\bi'?ll let you know\b|\bi'?ll be (happy|glad) to\b|\bi'?ll (look|check|dig|follow) (into|up on) (it|this|that)\b|\bi'?ll (check|verify|confirm) that for you\b/i
 
   @doc """
   Returns true when a text-only answer reads as an announcement of the next
