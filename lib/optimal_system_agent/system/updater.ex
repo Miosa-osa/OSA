@@ -206,7 +206,19 @@ defmodule OptimalSystemAgent.System.Updater do
 
       state = %{state | seen_versions: seen}
 
-      if latest_version && version_newer?(latest_version, current_version) do
+      # A version we cannot parse is a failed check, not a clean "no update".
+      # It surfaces as `{:error, …}`, which `check_now/0`'s caller already
+      # prints and halts on, instead of being folded into the silent no-update
+      # branch below. `latest_version` may also be nil here (verified metadata
+      # that names no version); that is likewise a check which produced no
+      # answer, and it takes the same error path rather than the reassuring one.
+      newer? =
+        case version_newer(latest_version, current_version) do
+          {:ok, result} -> result
+          {:error, reason} -> throw({:version_check_failed, reason})
+        end
+
+      if newer? do
         update_info = %{
           version: latest_version,
           current_version: current_version,
@@ -256,6 +268,14 @@ defmodule OptimalSystemAgent.System.Updater do
     e ->
       Logger.error("[Updater] Check failed: #{Exception.message(e)}")
       {:error, Exception.message(e)}
+  catch
+    {:version_check_failed, reason} ->
+      msg =
+        "Could not determine whether an update is available: #{inspect(reason)}. " <>
+          "This is NOT the same as being up to date."
+
+      Logger.error("[Updater] #{msg}")
+      {:error, msg}
   end
 
   @doc """
@@ -539,24 +559,61 @@ defmodule OptimalSystemAgent.System.Updater do
     _ -> "0.0.0"
   end
 
-  defp version_newer?(new_str, current_str) do
-    with {:ok, new_ver} <- Version.parse(normalize_version(new_str)),
-         {:ok, cur_ver} <- Version.parse(normalize_version(current_str)) do
-      Version.compare(new_ver, cur_ver) == :gt
-    else
-      _ -> false
+  # `{:ok, boolean}` or `{:error, reason}` — NEVER a bare false for a version we
+  # could not parse.
+  #
+  # This used to be a predicate with `else -> false`, which made "there is no
+  # newer release" and "I could not read one of these version strings" the same
+  # answer, and the answer it gave was the reassuring one. That is not a
+  # hypothetical: this project's tags are the padded display form (`v1.0.099`),
+  # semver forbids leading zeros, so `Version.parse("1.0.099")` returns `:error`
+  # — and every check on such an install silently reported "up to date" forever.
+  # Both halves are fixed: `normalize_version/1` strips the padding, and an
+  # unparseable input now propagates as an error the caller must handle.
+  defp version_newer(new_str, current_str) do
+    with {:ok, new_ver} <- parse(new_str),
+         {:ok, cur_ver} <- parse(current_str) do
+      {:ok, Version.compare(new_ver, cur_ver) == :gt}
+    end
+  end
+
+  defp parse(str) do
+    normalized = normalize_version(str)
+
+    case Version.parse(normalized) do
+      {:ok, v} -> {:ok, v}
+      :error -> {:error, {:unparseable_version, str}}
     end
   end
 
   defp normalize_version(v) do
-    v = String.trim_leading(v, "v")
-    parts = String.split(v, ".")
+    parts =
+      v
+      |> to_string()
+      |> String.trim()
+      |> String.trim_leading("v")
+      |> String.split(".")
 
-    case length(parts) do
-      1 -> v <> ".0.0"
-      2 -> v <> ".0"
-      _ -> v
-    end
+    padded =
+      case length(parts) do
+        1 -> parts ++ ["0", "0"]
+        2 -> parts ++ ["0"]
+        _ -> parts
+      end
+
+    # Strip the display zero-padding from each numeric component so the padded
+    # tag (1.0.099), the normalized build stamp (1.0.99) and 1.0.100 all compare
+    # against one another correctly. Pre-release / build suffixes are left
+    # alone, since they are not numeric components.
+    padded
+    |> Enum.map(fn part ->
+      if part != "" and String.match?(part, ~r/^\d+$/) do
+        Integer.to_string(String.to_integer(part))
+      else
+        part
+      end
+    end)
+    |> Enum.join(".")
   end
 
   defp schedule_check(interval) do

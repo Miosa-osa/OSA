@@ -1526,16 +1526,25 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("\n  #{@bold}OSA#{@reset} #{@dim}v#{version}#{hash}#{@reset}")
 
-    # Version-check: compare against the latest known release tag.
+    # Version-check: three outcomes, printed as three different sentences.
+    # "I could not find out" used to render as the green tick, which is how an
+    # install with nothing authoritative to compare against reported itself as
+    # current indefinitely.
     case ReleaseNotes.version_status() do
-      %{update_available: true, latest: latest} ->
+      %{status: :update_available, latest: latest} ->
         IO.puts(
           "  #{@yellow}↑#{@reset} #{@bold}v#{latest}#{@reset} #{@dim}available — run#{@reset} " <>
             "#{@cyan}osa update#{@reset} #{@dim}to upgrade, then#{@reset} #{@cyan}/release-notes#{@reset}"
         )
 
-      %{latest: latest} ->
+      %{status: :current, latest: latest} ->
         IO.puts("  #{@green}✓#{@reset} #{@dim}up to date (latest v#{latest})#{@reset}")
+
+      %{status: :unknown} ->
+        IO.puts(
+          "  #{@yellow}?#{@reset} #{@dim}could not check for updates — nothing local knows what " <>
+            "has been published. Run#{@reset} #{@cyan}osa update check#{@reset}#{@dim}.#{@reset}"
+        )
 
       _ ->
         :ok

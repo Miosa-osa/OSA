@@ -122,10 +122,31 @@ defmodule OptimalSystemAgent.CLI.Update do
   # Private
   # ---------------------------------------------------------------------------
 
+  # Start the minimal dependencies for the HTTP check — INCLUDING the updater
+  # process itself.
+  #
+  # `Updater` lives under the OpenComputers supervisor, which is not in the
+  # default application tree (it is BYOC-only). On an ordinary install nothing
+  # started it, so `check_now/0` hit its `:exit` catch and every `osa update
+  # check` reported `Check failed: :not_running` — leaving the only
+  # network-backed, GitHub-Releases-truth check in the product unreachable from
+  # the command named after it. It is started here with `enabled: false` so this
+  # short-lived CLI process performs the one check it was asked for and does not
+  # also install a 24-hour polling timer it will never live to fire.
   defp ensure_started do
-    # Start minimal dependencies for the HTTP check
     Application.ensure_all_started(:req)
     Application.ensure_all_started(:jason)
+
+    unless Process.whereis(Updater) do
+      case Updater.start_link(enabled: false) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        # Not fatal on its own: check_now/0 still reports {:error, :not_running},
+        # which the callers below print and halt on rather than treating as
+        # "up to date".
+        {:error, _reason} -> :ok
+      end
+    end
   end
 
   defp current_version do

@@ -885,6 +885,36 @@ _update_after_pull() {
   return 0
 }
 
+# ── "Up to date with your branch" is not "up to date with OSA" ──────────────
+#
+# Prints the caveat that belongs with the FINAL line of a source update, after
+# the build, where it is actually read. Silent when the checkout is on the
+# default branch (the two statements coincide) or when it is level with it.
+#
+# Args: <branch> <default_branch> <default_ref|""> <behind_default>
+_update_stale_branch_notice() {
+  _sbn_branch="$1"; _sbn_default="$2"; _sbn_ref="$3"; _sbn_behind="${4:-0}"
+
+  [ "$_sbn_branch" = "$_sbn_default" ] && return 0
+
+  if [ -z "$_sbn_ref" ]; then
+    # We are off the default branch and could not resolve it, so we cannot say
+    # whether this checkout is current with the project. Say that, rather than
+    # letting the tick above stand as if we had checked.
+    echo -e "  ${YELLOW}!${RESET} On branch ${BOLD}${_sbn_branch}${RESET}; ${BOLD}origin/${_sbn_default}${RESET} could not be resolved," >&2
+    echo -e "    ${DIM}so this only means your branch has nothing new — not that you have the latest OSA.${RESET}" >&2
+    echo -e "    ${DIM}Fetch it with: ${RESET}${CYAN}git -C '$ROOT' fetch origin ${_sbn_default}${RESET}" >&2
+    return 0
+  fi
+
+  [ "${_sbn_behind}" -gt 0 ] 2>/dev/null || return 0
+
+  echo -e "  ${YELLOW}!${RESET} ${BOLD}This is not the latest OSA.${RESET} Branch ${BOLD}${_sbn_branch}${RESET} is ${BOLD}${_sbn_behind}${RESET} commit(s) behind ${BOLD}${_sbn_ref}${RESET}."
+  echo -e "    ${DIM}Your branch has nothing new to pull; the project does.${RESET}"
+  echo -e "    ${DIM}Get the latest: ${RESET}${CYAN}git -C '$ROOT' checkout ${_sbn_default} && osa update${RESET}"
+  echo -e "    ${DIM}Or without touching this tree: ${RESET}${CYAN}osa update --staged --ref ${_sbn_ref}${RESET}"
+}
+
 do_update_source() {
   # ── Resumption point for a re-exec'd update (see
   # _update_reexec_if_updater_changed). The pull, the stash and the reapply are
@@ -979,6 +1009,28 @@ do_update_source() {
   head_rev="$(_ug rev-parse --short HEAD 2>/dev/null || echo '?')"
   target_rev="$(_ug rev-parse --short "$upstream" 2>/dev/null || echo '?')"
 
+  # ── How far behind the PROJECT are we, as opposed to behind this branch?
+  #
+  # These are different questions and only one of them is what the comparison
+  # above answers. A checkout parked on a feature branch whose upstream has no
+  # new commits is "up to date with the branch" and can simultaneously be forty
+  # commits behind main — which is exactly what happened: a user read the final
+  # green tick, concluded nothing had been published, and was wrong. The
+  # earlier "⚠ On branch X (not main)" line does not save it, because it is
+  # printed BEFORE a build that takes a minute and is gone from attention by
+  # the time the result lands.
+  #
+  # `rev-list --count` is one cheap plumbing call against refs we already
+  # fetched, so establishing the fact costs nothing.
+  local behind_default=0 default_ref=""
+  if [ "$branch" != "$default_branch" ]; then
+    if _ug rev-parse --verify --quiet "refs/remotes/origin/${default_branch}^{commit}" >/dev/null 2>&1; then
+      default_ref="origin/${default_branch}"
+      behind_default="$(_ug rev-list --count "HEAD..${default_ref}" 2>/dev/null || echo 0)"
+      [ -n "$behind_default" ] || behind_default=0
+    fi
+  fi
+
   # ── Already current: no rebase, no stash, but still verify the build really
   # matches the tree (a stale binary self-heals here instead of lying forever).
   if [ "${behind:-0}" -eq 0 ]; then
@@ -997,11 +1049,32 @@ do_update_source() {
     if [ -n "$pre_tui" ] && [ "$pre_tui" != "$(_norm_version "$old_ver")" ]; then
       echo -e "${GREEN}✓${RESET} ${BOLD}Updated to v${old_ver}${RESET} ${DIM}(rebuilt from stale v${pre_tui} artifacts; the checkout was already current)${RESET}"
       print_release_notes "$old_ver"
+      _update_stale_branch_notice "$branch" "$default_branch" "$default_ref" "$behind_default"
+    elif [ "${behind_default:-0}" -gt 0 ]; then
+      # The branch has nothing new AND the project does. That is not a success,
+      # so it does not get a success glyph.
+      #
+      # Every fact that changes the meaning is on this ONE line, because the
+      # TUI's `/update` takes the first terminal outcome line as the result and
+      # stops reading — a caveat on the following line would never reach it.
+      echo -e "${YELLOW}⚠${RESET} ${BOLD}Not the latest OSA${RESET} — branch ${BOLD}${branch}${RESET} has no new commits but is ${BOLD}${behind_default}${RESET} commit(s) behind ${BOLD}${default_ref}${RESET} ${DIM}(v${old_ver}, HEAD ${head_rev})${RESET}"
+      [ "${ahead:-0}" -gt 0 ] && \
+        echo -e "  ${DIM}You have ${ahead} local commit(s) not on ${upstream}; they were left untouched.${RESET}"
+      _update_stale_branch_notice "$branch" "$default_branch" "$default_ref" "$behind_default"
     elif [ "${ahead:-0}" -gt 0 ]; then
       echo -e "${GREEN}✓${RESET} Up to date with ${BOLD}${upstream}${RESET} ${DIM}(${target_rev})${RESET} — v${old_ver}"
       echo -e "  ${DIM}You have ${ahead} local commit(s) not on ${upstream}; they were left untouched.${RESET}"
+      _update_stale_branch_notice "$branch" "$default_branch" "$default_ref" "$behind_default"
     else
-      echo -e "${GREEN}✓${RESET} Already up to date: ${BOLD}v${old_ver}${RESET} ${DIM}(HEAD ${head_rev} == ${upstream} ${target_rev})${RESET}"
+      if [ -n "$default_ref" ]; then
+        # On a feature branch that is level with the default branch: genuinely
+        # current with the project, but say WHICH branch was checked so the
+        # green tick is a claim the user can audit.
+        echo -e "${GREEN}✓${RESET} Already up to date: ${BOLD}v${old_ver}${RESET} ${DIM}(HEAD ${head_rev} == ${upstream} ${target_rev}; level with ${default_ref})${RESET}"
+      else
+        echo -e "${GREEN}✓${RESET} Already up to date: ${BOLD}v${old_ver}${RESET} ${DIM}(HEAD ${head_rev} == ${upstream} ${target_rev})${RESET}"
+        _update_stale_branch_notice "$branch" "$default_branch" "$default_ref" "$behind_default"
+      fi
     fi
     _update_finish
     return 0

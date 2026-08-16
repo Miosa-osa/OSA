@@ -98,7 +98,7 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
         name: "HealthUpdate",
         derive: :deserialize,
         doc:
-          "Update-availability signal carried on `GET /health`. Understated, never\nauto-installs (Codex parity). `latest_version` is `null` when unknown or\nwhen already up to date.",
+          "Update-availability signal carried on `GET /health`. Understated, never\nauto-installs (Codex parity).\n\nThree outcomes, and `latest_version` is what separates the two negative\nones — they are NOT the same fact and a caller must not merge them:\n\n  * update available — `available: true`, `latest_version` = the new version.\n  * up to date — `available: false`, `latest_version` = the CURRENT version.\n  * could not check — `available: false`, `latest_version` = `null`. The\n    checker has not run, is disabled, failed, or its answer went stale.",
         fields: [
           f("available", :bool, default: true),
           f("current_version", :string, default: true),

@@ -739,6 +739,12 @@ defmodule OptimalSystemAgent.Channels.HTTP do
                           {:ok, desc} ->
                             %{status: "ok", check: desc}
 
+                          # Distinct from both "ok" and "error": the check could
+                          # not be performed. Omitting this clause would raise
+                          # into the rescue and drop every check.
+                          {:warn, desc, reason} ->
+                            %{status: "warn", check: desc, reason: reason}
+
                           {:error, desc, reason} ->
                             %{status: "error", check: desc, reason: reason}
                         end)

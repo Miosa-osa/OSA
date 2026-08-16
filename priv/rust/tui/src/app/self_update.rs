@@ -299,6 +299,20 @@ pub(crate) fn parse_update_result(line: &str) -> Option<ParsedUpdate> {
     let trimmed = clean.trim();
     let lower = trimmed.to_ascii_lowercase();
 
+    // Checked BEFORE the up-to-date arm on purpose. A source checkout parked on
+    // a feature branch reports "no new commits on this branch" and "you have the
+    // latest OSA" with the same green tick, and the reassuring reading wins — a
+    // user read it on a branch 40 commits behind main and concluded nothing had
+    // been published. The launcher now emits a single self-contained line for
+    // that state; pass it through verbatim so the count and the ref survive.
+    if lower.contains("not the latest osa") {
+        return Some(ParsedUpdate {
+            message: trimmed.to_string(),
+            level: NoticeLevel::Info,
+            updated: false,
+        });
+    }
+
     if lower.contains("already up to date") || lower.contains("already up-to-date") {
         let msg = match last_version(trimmed) {
             Some(v) => format!("OSA is already up to date ({}).", v),
@@ -395,6 +409,35 @@ mod tests {
         assert!(!p.updated);
         // The rev "abc123" is not a semver core, so the version wins.
         assert_eq!(p.message, "OSA is already up to date (v1.0.13).");
+    }
+
+    /// The case that bit a user: a source checkout on a stale feature branch.
+    /// Its branch had nothing to pull, so the old launcher printed a green
+    /// "Already up to date" and the TUI faithfully repeated it — while `main`
+    /// was 40 commits ahead with a published release on it.
+    #[test]
+    fn stale_branch_is_not_reported_as_up_to_date() {
+        let line = "\u{1b}[33m\u{26a0}\u{1b}[0m Not the latest OSA — branch \
+                    fix/bootstrap has no new commits but is 40 commit(s) behind \
+                    origin/main (v1.0.099, HEAD 71123e0f)";
+        let p = parse_update_result(line).expect("recognised as a terminal outcome");
+        assert!(!p.updated);
+        // The facts that change the meaning must survive into the message.
+        assert!(p.message.contains("40 commit(s) behind"));
+        assert!(p.message.contains("origin/main"));
+        // And it must NOT be rendered as the reassuring outcome.
+        assert!(!p.message.to_ascii_lowercase().contains("already up to date"));
+    }
+
+    /// A line that says both things only counts as the branch case — the
+    /// up-to-date arm must not win by appearing later in the sentence.
+    #[test]
+    fn stale_branch_wins_over_an_up_to_date_substring() {
+        let line = "Not the latest OSA — branch x is up to date with origin/x but is 3 \
+                    commit(s) behind origin/main";
+        let p = parse_update_result(line).expect("recognised");
+        assert!(!p.updated);
+        assert!(p.message.contains("3 commit(s) behind"));
     }
 
     #[test]

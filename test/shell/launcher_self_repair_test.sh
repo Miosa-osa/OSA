@@ -588,5 +588,86 @@ grep -q "Updated v" <<<"$OUT"; assert_not "does not invent an upgrade that did n
 kill_daemon
 
 echo ""
+echo '══ 4. a stale feature branch is never reported as "up to date" ══'
+#
+# The case that actually reached a user. Their checkout sat on
+# `fix/bootstrap-ritual-and-role-allowlist`, ~40 commits behind main. That
+# branch had nothing to pull, so `osa update` printed a green
+# "✓ Already up to date: v1.0.99" and they concluded, reasonably and wrongly,
+# that nothing had been published. The "⚠ On branch X (not main)" line does
+# exist — but it is printed BEFORE a build that takes a minute, and the final
+# green tick is the line people actually read.
+
+BR_ORIGIN="$TMP/br-origin"; BR_CLONE="$TMP/br-clone"
+make_tree "$BR_ORIGIN" "1.0.99"
+git -C "$BR_ORIGIN" init --quiet -b main
+git -C "$BR_ORIGIN" config user.email test@example.com
+git -C "$BR_ORIGIN" config user.name Test
+git -C "$BR_ORIGIN" add -A >/dev/null
+git -C "$BR_ORIGIN" commit --quiet -m "v1.0.99"
+# The feature branch forks here and then never moves.
+git -C "$BR_ORIGIN" branch feature/stale
+# main advances with the release the user was looking for.
+for i in 1 2 3; do
+  echo "main work $i" > "$BR_ORIGIN/main_$i.txt"
+  git -C "$BR_ORIGIN" add -A >/dev/null
+  git -C "$BR_ORIGIN" commit --quiet -m "main $i"
+done
+echo "1.0.100" > "$BR_ORIGIN/VERSION"
+git -C "$BR_ORIGIN" add -A >/dev/null
+git -C "$BR_ORIGIN" commit --quiet -m "v1.0.100"
+
+git clone --quiet "$BR_ORIGIN" "$BR_CLONE"
+git -C "$BR_CLONE" checkout --quiet feature/stale
+git -C "$BR_CLONE" branch --set-upstream-to=origin/feature/stale >/dev/null 2>&1
+export OSA_TEST_TREE="$BR_CLONE"
+rm -f "$TMP/healthy"
+
+br_update() { ( cd "$BR_CLONE" && timeout 120 "$BR_CLONE/bin/osa" update ) 2>&1; }
+
+echo "-- on a branch that is level with its upstream but behind main"
+OUT="$(br_update)"; RC=$?
+grep -q "Not the latest OSA" <<<"$OUT"
+assert "the FINAL line says this is not the latest OSA" $?
+grep -q "4 commit(s) behind" <<<"$OUT"
+assert "and says how far behind the default branch it is" $?
+grep -q "origin/main" <<<"$OUT"
+assert "and names the branch it is behind" $?
+grep -qE "✓.*Already up to date" <<<"$OUT"
+assert_not "never prints a green tick for this state" $?
+grep -q "checkout main" <<<"$OUT"
+assert "tells the user how to actually get the latest" $?
+assert "still exits 0 (nothing failed, the report was just honest)" \
+  "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+kill_daemon
+
+echo "-- the same checkout, once it is on main, reports a real update"
+# Park main back at the fork point so there is genuinely something to pull —
+# the clone fetched main at full length, so it starts out already current.
+git -C "$BR_CLONE" checkout --quiet main
+git -C "$BR_CLONE" reset --hard --quiet origin/feature/stale
+OUT="$(br_update)"
+grep -q "Not the latest OSA" <<<"$OUT"
+assert_not "no stale-branch caveat on the default branch" $?
+grep -q "new commit(s) on" <<<"$OUT"
+assert "finds the commits that were there the whole time" $?
+kill_daemon
+
+echo "-- a feature branch LEVEL with main still gets a clean green tick"
+# The negative direction: the caveat must not fire merely because the user is
+# on a branch, or it becomes noise everyone learns to ignore.
+git -C "$BR_CLONE" checkout --quiet -b feature/current
+git -C "$BR_CLONE" push --quiet origin feature/current >/dev/null 2>&1
+git -C "$BR_CLONE" branch --set-upstream-to=origin/feature/current >/dev/null 2>&1
+OUT="$(br_update)"
+grep -q "Already up to date" <<<"$OUT"
+assert "a branch level with main is genuinely up to date" $?
+grep -q "level with origin/main" <<<"$OUT"
+assert "and says which ref that claim was checked against" $?
+grep -q "Not the latest OSA" <<<"$OUT"
+assert_not "no false caveat when the branch really is current" $?
+kill_daemon
+
+echo ""
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

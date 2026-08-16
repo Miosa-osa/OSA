@@ -2201,11 +2201,22 @@ defmodule OptimalSystemAgent.Onboarding do
     # Update-check UX: surface a pending release in doctor output.
     checks =
       case update_check() do
-        %{update_available: true, latest: latest} ->
+        %{status: :update_available, latest: latest} ->
           [{:error, "Update available: v#{latest}", "Run `osa update` to upgrade"} | checks]
 
-        %{current: current} ->
+        %{status: :current, current: current} ->
           [{:ok, "OSA up to date (v#{current})"} | checks]
+
+        # Not the same statement as "up to date", and doctor of all places must
+        # not round it off to one. Nothing local is authoritative about what has
+        # been published (a packaged install only carries its own changelog), so
+        # say that and point at the check that does reach the network.
+        %{current: current} ->
+          [
+            {:warn, "Could not check for updates (running v#{current})",
+             "Nothing local knows the published releases — run `osa update check`"}
+            | checks
+          ]
       end
 
     Enum.reverse(checks)
@@ -2220,6 +2231,7 @@ defmodule OptimalSystemAgent.Onboarding do
           current: String.t(),
           latest: String.t(),
           update_available: boolean(),
+          status: :update_available | :current | :unknown,
           hint: String.t() | nil
         }
   def update_check do
@@ -2228,8 +2240,18 @@ defmodule OptimalSystemAgent.Onboarding do
     Map.put(status, :hint, hint)
   rescue
     _ ->
+      # A raise means the check did not happen. `:unknown`, not `:current` —
+      # reporting a crashed check as "up to date" is the exact failure mode this
+      # three-way status exists to make unrepresentable.
       current = safe_current_version()
-      %{current: current, latest: current, update_available: false, hint: nil}
+
+      %{
+        current: current,
+        latest: current,
+        update_available: false,
+        status: :unknown,
+        hint: nil
+      }
   end
 
   @doc """

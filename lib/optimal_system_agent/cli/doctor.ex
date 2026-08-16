@@ -147,9 +147,20 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp onboarding_checks do
     OptimalSystemAgent.Onboarding.doctor_checks()
     |> Enum.map(fn
-      {:ok, label} -> {:pass, "Workspace", label}
-      {:error, label, hint} -> {:fail, "Workspace", "#{label} — #{hint}"}
-      {:error, label} -> {:fail, "Workspace", label}
+      {:ok, label} ->
+        {:pass, "Workspace", label}
+
+      # "Could not check" is neither a pass nor a failure of the install, but it
+      # must not be silently dropped either — an unmatched shape here would
+      # raise into the rescue below and take the WHOLE check list with it.
+      {:warn, label, hint} ->
+        {:optional, "Workspace", "#{label} — #{hint}"}
+
+      {:error, label, hint} ->
+        {:fail, "Workspace", "#{label} — #{hint}"}
+
+      {:error, label} ->
+        {:fail, "Workspace", label}
     end)
   rescue
     _ -> []

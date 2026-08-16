@@ -63,49 +63,114 @@ defmodule OptimalSystemAgent.ReleaseNotes do
   end
 
   @doc """
-  Compare the running version against the latest known release tag.
+  Compare the running version against the latest release this install can see.
 
-  Returns `%{current, latest, update_available}`. `latest` comes from git tags
-  when available (a source checkout), otherwise the newest changelog entry with
-  a real version number. Never performs a network install.
+  Returns `%{current, latest, update_available, status, source}` where `status`
+  is one of:
+
+    * `:update_available` — a strictly newer release is known.
+    * `:current` — an authoritative source was consulted and says we are newest.
+    * `:unknown` — **we could not find out.** No git tags, an unparseable
+      version, or only the bundled changelog to go on.
+
+  `:unknown` exists because it used to be indistinguishable from `:current`, and
+  reporting the reassuring one is how this function told a user on a fresh
+  install that they were up to date while a newer release sat on GitHub. Three
+  separate defects fed that single lie:
+
+    1. `Version.parse/1` rejects a leading zero in a component, and this
+       project's tags are the padded display form (`v1.0.099`). Every compare
+       involving one raised `:error`, which the old `else -> false` turned into
+       "no update". Fixed by `normalize_semver/1`, which strips the padding.
+    2. `git tag --sort=-v:refname` sorts `v1.0.4` ABOVE `v1.0.099`, so "the
+       first tag git prints" was not the newest tag. We now take the maximum
+       under our own comparison instead of trusting git's ordering.
+    3. On a packaged install there are no git tags, so `latest` fell back to the
+       BUNDLED changelog — a file that ships inside the release and therefore
+       can never describe anything newer than the release you are already
+       running. It cannot ever answer "yes", so it must not be allowed to answer
+       "no" either. That case is now `:unknown`.
+
+  Never performs a network install, and never performs network I/O at all.
   """
   @spec version_status() :: %{
           current: String.t(),
           latest: String.t(),
-          update_available: boolean()
+          update_available: boolean(),
+          status: :update_available | :current | :unknown,
+          source: :git_tags | :changelog | :none
         }
   def version_status do
     current = current_version()
-    latest = latest_release_tag() || latest_changelog_version() || current
+
+    {source, latest} =
+      case latest_release_tag() do
+        nil -> {:changelog, latest_changelog_version()}
+        tag -> {:git_tags, tag}
+      end
+
+    status = classify(source, latest, current)
 
     %{
       current: current,
-      latest: latest,
-      update_available: version_newer?(latest, current)
+      latest: latest || current,
+      update_available: status == :update_available,
+      status: status,
+      source: if(latest, do: source, else: :none)
     }
   end
 
-  # Newest semver git tag (e.g. "v0.4.6" -> "0.4.6"). nil when git/tags absent.
+  # Git tags are authoritative for a checkout: the tag list really does name
+  # every published release, so "nothing newer" is a fact we can assert.
+  #
+  # The bundled changelog is not. It travels inside the artifact, so the newest
+  # entry it can possibly contain is the release running right now. Concluding
+  # ":current" from it is circular — it would say "up to date" forever, on every
+  # machine, no matter what had been published. It may only ever ESCALATE to
+  # :update_available (a source checkout whose changelog is ahead of the built
+  # version); otherwise the honest answer is that we did not check.
+  defp classify(_source, nil, _current), do: :unknown
+
+  defp classify(source, latest, current) do
+    cond do
+      not parseable?(latest) or not parseable?(current) -> :unknown
+      version_newer?(latest, current) -> :update_available
+      source == :git_tags -> :current
+      true -> :unknown
+    end
+  end
+
+  defp parseable?(v), do: match?({:ok, _}, parse_semver(v))
+
+  # The newest semver git tag (e.g. "v0.4.6" -> "0.4.6"), or nil when git or the
+  # tag list is unavailable.
+  #
+  # We deliberately do NOT ask git to order them. `--sort=-v:refname` puts
+  # `v1.0.4` ahead of `v1.0.099` on this repo's real tag list, so taking git's
+  # first line picked a two-year-old release as "latest" and every comparison
+  # against it said "up to date". Sorting is ours to do, under the same
+  # normalization every other compare here uses.
   defp latest_release_tag do
-    case OptimalSystemAgent.Git.cmd(["tag", "--list", "v*", "--sort=-v:refname"],
-           stderr_to_stdout: true
-         ) do
+    case OptimalSystemAgent.Git.cmd(["tag", "--list", "v*"], stderr_to_stdout: true) do
       {out, 0} ->
         out
         |> String.split("\n", trim: true)
         |> Enum.map(&String.trim/1)
-        |> Enum.find_value(fn tag ->
-          case Regex.run(~r/^v?(\d+\.\d+\.\d+.*)$/, tag) do
-            [_, v] -> v
-            _ -> nil
-          end
-        end)
+        |> Enum.filter(&Regex.match?(~r/^v?\d+\.\d+\.\d+/, &1))
+        |> Enum.map(&String.trim_leading(&1, "v"))
+        |> Enum.filter(&parseable?/1)
+        |> Enum.max_by(&parse_semver!/1, Version, fn -> nil end)
 
       _ ->
         nil
     end
   rescue
     _ -> nil
+  end
+
+  defp parse_semver!(v) do
+    {:ok, parsed} = parse_semver(v)
+    parsed
   end
 
   defp latest_changelog_version do
@@ -115,6 +180,8 @@ defmodule OptimalSystemAgent.ReleaseNotes do
   end
 
   # true when `a` is a strictly-newer semver than `b`. Non-semver -> false.
+  # Callers that need to tell "older" from "cannot tell" must check
+  # `version_status/0`'s `:status`, not this predicate.
   @doc false
   def version_newer?(a, b) do
     with {:ok, va} <- parse_semver(a),
@@ -125,9 +192,41 @@ defmodule OptimalSystemAgent.ReleaseNotes do
     end
   end
 
+  @doc """
+  Parse a version string that may be in this project's PADDED display form.
+
+  Tags and changelog headings are written `v1.0.099` so they sort readably for a
+  human, but semver forbids leading zeros and `Version.parse("1.0.099")` returns
+  `:error`. Strip the padding per numeric component so the padded tag, the
+  normalized build stamp (`1.0.99`) and `1.0.100` all compare correctly against
+  one another.
+  """
+  @spec normalize_semver(String.t()) :: String.t()
+  def normalize_semver(v) when is_binary(v) do
+    {core, suffix} =
+      case Regex.run(~r/^([^-+]*)(.*)$/, String.trim(v) |> String.trim_leading("v")) do
+        [_, c, s] -> {c, s}
+        _ -> {v, ""}
+      end
+
+    core
+    |> String.split(".")
+    |> Enum.map(fn part ->
+      if part != "" and String.match?(part, ~r/^\d+$/) do
+        Integer.to_string(String.to_integer(part))
+      else
+        part
+      end
+    end)
+    |> Enum.join(".")
+    |> Kernel.<>(suffix)
+  end
+
+  def normalize_semver(v), do: to_string(v)
+
   defp parse_semver(v) when is_binary(v) do
     case Regex.run(~r/^v?(\d+\.\d+\.\d+)/, String.trim(v)) do
-      [_, core] -> Version.parse(core)
+      [_, core] -> Version.parse(normalize_semver(core))
       _ -> :error
     end
   end

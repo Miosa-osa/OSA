@@ -35,6 +35,12 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
   # Fire the first refresh a few seconds after boot so the first /health after a
   # cold start can report, without competing with boot-critical work.
   @boot_delay 5_000
+  # A cached answer older than this stops being evidence. Two refresh periods,
+  # so a single missed tick (a suspended laptop, a transient git/network
+  # failure) does not flip the chip, but a checker that has actually stopped
+  # working degrades to "could not check" within days instead of asserting an
+  # arbitrarily old "up to date" forever.
+  @max_cache_age 2 * @refresh_interval
 
   # ── Public API ───────────────────────────────────────────────────────
 
@@ -46,8 +52,29 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
   Cheap, non-blocking read of the cached update signal for the /health body.
 
   Reads application env only — no GenServer call, no git, no network — so it is
-  safe on every health request and total (never raises). Absent cache (checker
-  hasn't run, or was disabled) reports `available: false`.
+  safe on every health request and total (never raises).
+
+  ## The three outcomes, and how they are spelled on the wire
+
+  The schema carries three fields, and `latest_version` is what separates the
+  two `available: false` cases:
+
+    * update available — `available: true`, `latest_version` = the new version.
+    * up to date — `available: false`, `latest_version` = **the current
+      version** (non-null). Something authoritative was consulted and said so.
+    * could not check — `available: false`, `latest_version` = **null**.
+
+  Before this distinction existed, `latest_version` was null for both of the
+  bottom two and the TUI could only render "current" — so a check that never
+  ran, was disabled, crashed, or went stale looked exactly like a confirmed
+  up-to-date install. A caller that cannot tell those apart cannot warn anyone.
+
+  ## Staleness
+
+  A cached answer older than `@max_cache_age` is downgraded to "could not
+  check". The refresh timer runs daily; a machine that suspended, lost the
+  network, or whose checker died would otherwise keep serving a week-old
+  "up to date" as though it were freshly established fact.
   """
   @spec health_update() :: %{
           available: boolean(),
@@ -57,16 +84,33 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
   def health_update do
     case Application.get_env(:optimal_system_agent, @cache_key) do
       %{available: available, current_version: current} = cached ->
-        %{
-          available: available == true,
-          current_version: to_string(current),
-          latest_version: normalize_latest(Map.get(cached, :latest_version))
-        }
+        if fresh?(cached) do
+          %{
+            available: available == true,
+            current_version: to_string(current),
+            latest_version: normalize_latest(Map.get(cached, :latest_version))
+          }
+        else
+          unknown(to_string(current))
+        end
 
       _ ->
-        %{available: false, current_version: current_version(), latest_version: nil}
+        unknown(current_version())
     end
+  rescue
+    _ -> unknown(current_version())
   end
+
+  # "Could not check" — never "up to date".
+  defp unknown(current),
+    do: %{available: false, current_version: to_string(current), latest_version: nil}
+
+  defp fresh?(%{checked_at: at}) when is_integer(at),
+    do: System.system_time(:millisecond) - at <= @max_cache_age
+
+  # A cache written before this field existed carries no timestamp; treat it as
+  # unprovable rather than assuming it is fresh.
+  defp fresh?(_), do: false
 
   @doc """
   Recompute the cached signal now (gated + guarded) and store it in app env.
@@ -80,7 +124,7 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
           latest_version: String.t() | nil
         }
   def refresh do
-    result = compute()
+    result = Map.put(compute(), :checked_at, System.system_time(:millisecond))
     Application.put_env(:optimal_system_agent, @cache_key, result)
     result
   end
@@ -163,9 +207,16 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
   end
 
   # Local (no network) compare via the existing CC-parity status line.
+  #
+  # `Onboarding.update_check/0` now reports a three-way `:status`, and the two
+  # negative outcomes are NOT the same fact: `:current` means the tag list was
+  # read and nothing newer exists; `:unknown` means there was nothing
+  # authoritative to read (a packaged install with only its own bundled
+  # changelog, or an unparseable version). Collapsing them is what let a
+  # packaged install report "up to date" indefinitely.
   defp from_onboarding(current) do
     case Onboarding.update_check() do
-      %{update_available: true, latest: latest} = st ->
+      %{status: :update_available, latest: latest} = st ->
         cur = Map.get(st, :current) || current
 
         %{
@@ -173,6 +224,12 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
           current_version: to_string(cur),
           latest_version: to_string(latest)
         }
+
+      %{status: :current} = st ->
+        cur = to_string(Map.get(st, :current) || current)
+        # latest_version == current_version is how the wire says "confirmed
+        # up to date", as distinct from null = "could not check".
+        %{available: false, current_version: cur, latest_version: cur}
 
       %{current: cur} ->
         none(to_string(cur))
@@ -184,6 +241,7 @@ defmodule OptimalSystemAgent.System.UpdateChecker do
     _ -> none(current)
   end
 
+  # "Could not check." Null `latest_version` is the wire spelling.
   defp none(current),
     do: %{available: false, current_version: to_string(current), latest_version: nil}
 

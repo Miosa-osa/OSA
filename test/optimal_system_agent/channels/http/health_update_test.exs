@@ -43,7 +43,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.HealthUpdateTest do
     Application.put_env(:optimal_system_agent, @cache_key, %{
       available: true,
       current_version: "0.4.6",
-      latest_version: "0.5.0"
+      latest_version: "0.5.0",
+      checked_at: System.system_time(:millisecond)
     })
 
     body = get_health()
@@ -53,5 +54,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.HealthUpdateTest do
              "current_version" => "0.4.6",
              "latest_version" => "0.5.0"
            }
+  end
+
+  test "an up-to-date install and an unchecked one are different on the wire" do
+    # `available: false` is the same in both; `latest_version` is what tells
+    # them apart. A consumer that cannot distinguish them cannot warn anyone,
+    # which is exactly how a failed or never-run check reads as "you're current".
+    Application.put_env(:optimal_system_agent, @cache_key, %{
+      available: false,
+      current_version: "1.0.100",
+      latest_version: "1.0.100",
+      checked_at: System.system_time(:millisecond)
+    })
+
+    assert get_health()["update"] == %{
+             "available" => false,
+             "current_version" => "1.0.100",
+             "latest_version" => "1.0.100"
+           }
+
+    Application.delete_env(:optimal_system_agent, @cache_key)
+
+    unchecked = get_health()["update"]
+    assert unchecked["available"] == false
+    assert unchecked["latest_version"] == nil
   end
 end
