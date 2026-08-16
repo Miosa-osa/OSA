@@ -10,8 +10,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool do
       model to the objective. Codex's handler builds its update with
       `objective: None` hardcoded.
 
-    * `status` accepts only `complete` and `blocked`. Everything else is refused
-      with Codex's own message — pause and resume belong to the user.
+    * Everything outside the accepted status set is refused with Codex's own
+      message — pause and resume belong to the user.
+
+  One status is added on purpose. Codex accepts only `complete` and `blocked`,
+  which between them leave an agent whose work legitimately changed direction
+  with no reachable exit: `complete` is adjudicated by a panel, `blocked` needs
+  three consecutive TOP-LEVEL turns (unreachable inside one unattended
+  autonomous turn), and clearing the goal is the user's. `abandoned` is that
+  exit — terminal, permanently recorded, and budget-carrying, so it redirects a
+  run without refilling it. See `GoalTracker.abandon/1`.
 
   One property is deliberately stronger here. In Codex, `complete` writes
   `complete` to the database and the goal is over; the only thing between a
@@ -53,7 +61,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool do
               "work remains; this schedules an independent review panel rather than ending " <>
               "the goal. Set to `blocked` only after the same blocking condition has recurred " <>
               "for at least three consecutive goal turns and you are at an impasse. After a " <>
-              "previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
+              "previously blocked goal is resumed, the resumed run starts a fresh blocked " <>
+              "audit. Set to `abandoned` only when this objective is no longer the work at " <>
+              "all — the direction changed, not the difficulty; it ends the goal permanently, " <>
+              "records it as abandoned, and lets a new goal be anchored, but the successor " <>
+              "inherits the turns and verification rounds already spent."
         }
       },
       "required" => ["status"]

@@ -88,17 +88,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
            "independent review panel finds it met."}
 
       {:error, {:goal_active, snap}} ->
-        {:error,
-         "cannot create a new goal because this session has an unfinished goal; " <>
-           "complete the existing goal first.\n\nActive objective: #{snap.goal}\n" <>
-           "Status: #{snap.status}. Turns spent: #{snap.turn_count}.\n\n" <>
-           "The objective cannot be edited or replaced while it is live. Keep working " <>
-           "toward it, or call #{Constants.update_tool_name()} if it is genuinely met or blocked."}
+        {:error, goal_active_refusal(snap)}
     end
   rescue
     e ->
       Logger.warning("[create_goal] anchor failed: #{inspect(e)}")
       {:error, "Failed to anchor goal: #{Exception.message(e)}"}
+  end
+
+  # A refusal that names only what is forbidden is how the deadlock got missed:
+  # the agent that hit this wall had three exits and could see none of them. Say
+  # what to do, in the order it should be tried, and price each one — an
+  # affordance that hides its mechanism is the defect this codebase spent the
+  # week removing.
+  #
+  # `ask_user` is off by default, so "ask the user" is deliberately NOT offered
+  # here: suggesting a tool that is not loaded is how an unattended run parks on
+  # a question nobody will answer.
+  defp goal_active_refusal(snap) do
+    update = Constants.update_tool_name()
+
+    "cannot create a new goal because this session has an unfinished goal; " <>
+      "complete the existing goal first.\n\nActive objective: #{snap.goal}\n" <>
+      "Status: #{snap.status}. Turns spent: #{snap.turn_count}. " <>
+      "Verification rounds: #{snap.verify_run_count}/#{GoalTracker.max_runs()}.\n\n" <>
+      "The objective cannot be edited or replaced while it is live — that freeze is " <>
+      "what stops a hard goal being quietly traded for an easy one.\n\n" <>
+      "Ways out, in order:\n" <>
+      "  1. Keep working toward it. This is almost always the right one.\n" <>
+      "  2. #{update}(status: \"complete\") if it is genuinely met. That is a claim, not " <>
+      "a verdict — an independent review panel decides, and an early claim just spends " <>
+      "a verification round.\n" <>
+      "  3. #{update}(status: \"blocked\") if the SAME blocker has recurred across " <>
+      "#{GoalTracker.blocked_threshold()} consecutive goal turns and you cannot progress " <>
+      "without external input. Not because the work is hard or slow.\n" <>
+      "  4. #{update}(status: \"abandoned\") if this objective is no longer the work at " <>
+      "all — the direction genuinely changed, not the difficulty. It ends the goal " <>
+      "permanently, records it as abandoned against the objective above, and lets you " <>
+      "anchor the new work. The successor inherits the turns and verification rounds " <>
+      "already spent, so abandoning redirects this run without refilling its budget."
   end
 
   defp criteria_echo(opts) do
@@ -116,8 +144,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
       {:ok, input}
     else
       {:error,
-       "#{Constants.update_tool_name()} can only mark the existing goal complete or blocked; " <>
-         "pause, resume, and objective changes are controlled by the user", -32_602}
+       "#{Constants.update_tool_name()} can only mark the existing goal complete or blocked, " <>
+         "or abandon it outright; pause, resume, and objective changes are controlled by the " <>
+         "user", -32_602}
     end
   end
 
@@ -182,6 +211,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
     end
   rescue
     e -> {:error, "Failed to record blocked claim: #{Exception.message(e)}"}
+  end
+
+  defp apply_status("abandoned", sid) do
+    case GoalTracker.abandon(sid) do
+      {:ok, snap} ->
+        {:ok,
+         "Goal abandoned (#{snap.goal_id}). It is over — it did not complete, and that is now " <>
+           "permanently recorded against its objective in the progress ledger.\n\n" <>
+           "Abandoned objective: #{snap.goal}\n\n" <>
+           "You may now anchor the new work with #{Constants.create_tool_name()}. The " <>
+           "successor goal inherits the #{snap.turn_count} turn(s) and " <>
+           "#{snap.verify_run_count}/#{GoalTracker.max_runs()} verification round(s) already " <>
+           "spent: abandoning changes what this run is working on, not how much budget it " <>
+           "has left.\n\n" <>
+           "Tell the user plainly that the previous objective was abandoned and why — a " <>
+           "goal that ends without being met must never read as one that was achieved."}
+
+      {:error, :not_live} ->
+        {:error, "There is no live goal to abandon."}
+    end
+  rescue
+    e -> {:error, "Failed to abandon goal: #{Exception.message(e)}"}
   end
 
   defp apply_status(other, _sid),

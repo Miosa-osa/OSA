@@ -26,6 +26,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Constants do
   # "update_goal can only mark the existing goal complete or blocked; pause,
   # resume, budget-limited, and usage-limited status changes are controlled by
   # the user or system".
-  @model_statuses ~w(complete blocked)
+  #
+  # `abandoned` is the one deliberate addition to Codex's pair. Codex's set left
+  # an agent whose work legitimately changed direction with no reachable exit at
+  # all — `complete` is a claim the panel adjudicates, `blocked` needs three
+  # consecutive top-level turns, and pause/resume/clear are the user's. Under an
+  # unattended `overdrive` run that is a deadlock. See `GoalTracker.abandon/1`
+  # for what it costs, which is what keeps it from being the easy-goal loophole.
+  @model_statuses ~w(complete blocked abandoned)
   def model_statuses, do: @model_statuses
 end

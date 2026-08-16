@@ -155,7 +155,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalAuthoringTest do
     test "update_goal exposes no parameter that can reach the objective", %{ctx: ctx} do
       params = OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool.parameters()
       assert Map.keys(params["properties"]) == ["status"]
-      assert params["properties"]["status"]["enum"] == ["complete", "blocked"]
+
+      # `abandoned` was added after this file landed (see `goal_abandon_test.exs`
+      # for why, and for what it costs). It is a way to END the live goal, never
+      # a way to rewrite it — which is what this test guards, and which the
+      # `status`-only property set above still enforces.
+      assert params["properties"]["status"]["enum"] == ["complete", "blocked", "abandoned"]
 
       # And anything outside the enum is refused with Codex's message.
       assert {:error, msg, -32_602} = Handler.validate_update(%{"status" => "active"}, ctx)

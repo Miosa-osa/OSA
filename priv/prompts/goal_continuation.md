@@ -50,4 +50,10 @@ Blocked audit:
 - Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call `update_goal` with status "blocked".
 - Never use status "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
 
-Do not call `update_goal` unless the goal is complete or the strict blocked audit above is satisfied. Do not mark a goal complete merely because you are stopping work.
+Abandonment:
+- If the objective above is no longer the work at all — the requested direction changed, or it rests on a premise that turned out to be false — call `update_goal` with status "abandoned", then anchor the new work with `create_goal`. Do not silently start working on something else while this goal is still live; a new goal cannot be created while it is.
+- Never abandon a goal because it is hard, slow, uncertain, or looks unwinnable. That is what the blocked audit is for, and what continuing to work is for.
+- Abandoning is permanent and recorded against this objective, and the goal you anchor next inherits the turns and verification rounds already spent. There is no fresh budget to be won by trading this objective for an easier one.
+- Say plainly in your answer that the goal was abandoned and why. A goal that ended without being met must never read as one that was achieved.
+
+Do not call `update_goal` unless the goal is complete, the strict blocked audit above is satisfied, or the objective is genuinely being abandoned. Do not mark a goal complete merely because you are stopping work.

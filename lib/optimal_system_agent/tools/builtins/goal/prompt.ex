@@ -38,12 +38,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Prompt do
 
   @spec update_goal_short() :: String.t()
   def update_goal_short do
-    "Mark the active goal `complete` or `blocked` — the only two statuses you may " <>
-      "set, and the only thing this tool changes. `complete` is a claim, not a " <>
-      "verdict: it schedules an independent review panel rather than ending the " <>
-      "goal. `blocked` takes effect only after the same blocker has recurred for " <>
-      "three consecutive goal turns, and never merely because work is hard, slow, " <>
-      "or uncertain."
+    "Move the active goal to `complete`, `blocked`, or `abandoned` — the only " <>
+      "statuses you may set, and the only thing this tool changes. `complete` is a " <>
+      "claim, not a verdict: it schedules an independent review panel rather than " <>
+      "ending the goal. `blocked` takes effect only after the same blocker has " <>
+      "recurred for three consecutive goal turns, and never merely because work is " <>
+      "hard, slow, or uncertain. `abandoned` is the exit when the direction changed " <>
+      "rather than the difficulty: it ends the goal permanently and on the record, " <>
+      "and the next goal inherits the budget already spent."
   end
 
   @doc """
@@ -90,8 +92,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Prompt do
       themselves grounds to refuse the goal as met. Write the honest bar: an easy
       one does not end the loop sooner, it just fails the audit.
 
-      Fails while an unfinished goal already exists. Complete or clear that one
-      first.
+      Fails while an unfinished goal already exists. If your work has genuinely
+      moved to a different objective, end the live one first with
+      `#{update}` — `blocked` if you are at a real impasse, `abandoned` if it is
+      simply no longer the work. The refusal itself names those exits and what
+      each costs.
       """
   end
 
@@ -109,6 +114,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Prompt do
       Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
       Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
       Do not mark a goal complete merely because you are stopping work.
+      Set status to `abandoned` only when the objective itself is no longer the work — the requested direction changed, or the goal rests on a premise that turned out to be false. Never because the objective is hard, slow, uncertain, or looks unwinnable; that is what `blocked` audits and what continuing to work is for. Abandoning ends the goal permanently and records it as abandoned against its objective, and the goal you anchor next inherits the turns and verification rounds this one already spent — so there is no budget to be won by trading a hard objective for an easy one. Say plainly, in your answer to the user, that the goal was abandoned and why.
       You cannot use this tool to pause or resume a goal, or to edit its objective or acceptance criteria; those are controlled by the user.
 
       `complete` is a claim, not a verdict. It schedules an independent read-only

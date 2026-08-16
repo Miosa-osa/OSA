@@ -122,9 +122,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   @table :osa_goal_tracker
 
-  @type status :: :active | :paused | :completed | :off_track | :blocked
+  @type status :: :active | :paused | :completed | :off_track | :blocked | :abandoned
   @type phase :: :idle | :planning | :executing
-  @type pause_reason :: :no_progress | :run_cap | :off_track | :user | :blocked | nil
+  @type pause_reason ::
+          :no_progress | :run_cap | :off_track | :user | :blocked | :abandoned | nil
 
   defmodule Snapshot do
     @moduledoc "Persisted per-session goal-tracker state."
@@ -142,6 +143,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             pause_reason: OptimalSystemAgent.Agent.Loop.GoalTracker.pause_reason(),
             blocked_claims: non_neg_integer(),
             blocked_claim_turn: non_neg_integer() | nil,
+            abandoned_count: non_neg_integer(),
             history: [String.t()],
             updated_at: DateTime.t() | nil
           }
@@ -158,6 +160,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               pause_reason: nil,
               blocked_claims: 0,
               blocked_claim_turn: nil,
+              abandoned_count: 0,
               history: [],
               updated_at: nil
   end
@@ -307,7 +310,23 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   and `turn_count` and handing the run a fresh budget in the bargain.
 
   Returns `{:error, {:goal_active, snap}}` while a goal is `:active`/`:off_track`.
-  A `:paused`, `:blocked` or `:completed` goal may be superseded.
+  A `:paused`, `:blocked`, `:abandoned` or `:completed` goal may be superseded.
+
+  ## The budget does not reset across a model-reachable terminal
+
+  Two of the terminals a goal can reach are ones the MODEL puts it in:
+  `:blocked` (`claim_blocked/1`) and `:abandoned` (`abandon/1`). Superseding
+  either one carries `turn_count`, `verify_run_count` and `abandoned_count`
+  forward into the successor.
+
+  That carry is what keeps the exits from being the loophole the freeze exists
+  to stop. The danger in re-anchoring was never the new objective by itself — it
+  was that a fresh snapshot handed the run a fresh lifetime budget and a clean
+  stall slate, so a model that could not finish a hard goal had an incentive to
+  end it and start again. Carrying the counters removes the incentive: ending a
+  goal redirects the run, it cannot refill it. `:completed` (earned through the
+  panel) and `:paused` (the user's or the system's call, and it halts the loop
+  anyway) start clean, as does the user's own `start/3`.
   """
   @spec anchor_new(String.t(), String.t(), keyword()) ::
           {:ok, Snapshot.t()} | {:error, {:goal_active, Snapshot.t()}}
@@ -320,8 +339,93 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       when status in [:active, :off_track] and is_binary(existing) and existing != "" ->
         {:error, {:goal_active, snap}}
 
+      %Snapshot{status: status} = prior when status in [:blocked, :abandoned] ->
+        {:ok, carry_budget(start(session_id, goal, opts), prior)}
+
       _ ->
         {:ok, start(session_id, goal, opts)}
+    end
+  end
+
+  defp carry_budget(%Snapshot{} = snap, %Snapshot{} = prior) do
+    snap = %{
+      snap
+      | turn_count: prior.turn_count,
+        verify_run_count: prior.verify_run_count,
+        abandoned_count: prior.abandoned_count
+    }
+
+    put(snap)
+
+    log(
+      session_id_of(snap),
+      tag(
+        snap,
+        "[goal-tracker] successor goal inherits the spent budget: " <>
+          "#{snap.turn_count} turn(s), #{snap.verify_run_count}/#{max_runs()} " <>
+          "verification round(s)"
+      )
+    )
+
+    snap
+  end
+
+  defp session_id_of(%Snapshot{session_id: sid}), do: sid
+
+  @doc """
+  Record the model's decision to ABANDON the live goal: this work is no longer
+  the objective, and the objective will not be met.
+
+  ## Why this exists, given that the freeze is the point
+
+  Codex's `create_goal` refuses outright while a goal is unfinished, and that
+  bluntness is deliberate — from inside a tracker, abandoning a goal and
+  swapping in an easier one are the same API call with different intent, so it
+  forbids both. The cost is that an agent whose work legitimately changed
+  direction had NO model-reachable exit: `claim_complete/1` cannot reach
+  `:completed` by design, `claim_blocked/1` needs three consecutive goal turns
+  (and `turn_count` only advances at the start of a new TOP-LEVEL turn, so
+  inside one unattended autonomous turn the streak is pinned at 1), and
+  `pause/2` / `resume/1` / `reset/1` belong to the user. Under `overdrive` with
+  nobody at the keyboard, that is a deadlock: the real work cannot be anchored
+  and no human is coming to type `/goal clear`.
+
+  The two intents stay indistinguishable from in here. What separates them is
+  not detection but PRICE, and this sets one that only the honest case will pay:
+
+    * it is terminal for that goal — `continue?/1` and `goal_loop?/1` both go
+      false, so the run stops driving an objective it just conceded;
+    * it is permanently recorded, against the objective it gave up on, in the
+      snapshot history and in the `ProgressLedger` `## Log` under the goal's own
+      id. An abandoned goal that left no trace would be indistinguishable from
+      one that was quietly swapped, which is the thing worth being able to audit
+      afterwards;
+    * and the successor inherits the spent budget (see `anchor_new/3`). Swapping
+      for an easier objective bought a fresh run cap and a clean stall slate;
+      after this it buys nothing at all.
+
+  Returns `{:ok, snap}`, or `{:error, :not_live}` when there is no live goal.
+  """
+  @spec abandon(String.t()) :: {:ok, Snapshot.t()} | {:error, :not_live}
+  def abandon(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{status: status, goal: goal} = snap when status in [:active, :off_track] ->
+        snap = %{
+          snap
+          | status: :abandoned,
+            phase: :idle,
+            pause_reason: :abandoned,
+            abandoned_count: snap.abandoned_count + 1,
+            updated_at: DateTime.utc_now()
+        }
+
+        snap = transition(snap, "goal ABANDONED — #{goal}")
+        put(snap)
+        emit(snap, :abandoned)
+        {:ok, snap}
+
+      _ ->
+        {:error, :not_live}
     end
   end
 
@@ -806,12 +910,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   @spec blocked?(String.t()) :: boolean()
   def blocked?(session_id), do: status(session_id) == :blocked
 
+  @spec abandoned?(String.t()) :: boolean()
+  def abandoned?(session_id), do: status(session_id) == :abandoned
+
   @doc """
   `true` when the loop should keep autonomously driving this goal: no
   tracker entry (never blocks an untracked session), `:active`, or
   `:off_track` (a redirect, not a hard stop — the re-plan nudge is already
   queued via `Steer`). `false` for `:paused` (stall/run-cap/manual halt —
-  requires `resume/1`) and `:completed` (goal achieved).
+  requires `resume/1`), `:completed` (goal achieved), `:blocked` (an impasse
+  the model declared and the harness counted) and `:abandoned` (the model
+  conceded the objective — see `abandon/1`).
+
+  Deliberately a whitelist. A new status must opt IN to driving the loop; the
+  failure mode of a blacklist here is a terminal state that silently keeps
+  spending an unattended run.
   """
   @spec continue?(String.t()) :: boolean()
   def continue?(session_id) when is_binary(session_id) do
@@ -1021,9 +1134,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     _ -> nil
   end
 
-  @statuses [:active, :paused, :completed, :off_track, :blocked]
+  @statuses [:active, :paused, :completed, :off_track, :blocked, :abandoned]
   @phases [:idle, :planning, :executing]
-  @pause_reasons [:no_progress, :run_cap, :off_track, :user, :blocked]
+  @pause_reasons [:no_progress, :run_cap, :off_track, :user, :blocked, :abandoned]
 
   defp encode(%Snapshot{} = snap) do
     %{
@@ -1040,6 +1153,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
       "blocked_claims" => snap.blocked_claims,
       "blocked_claim_turn" => snap.blocked_claim_turn,
+      "abandoned_count" => snap.abandoned_count,
       "history" => snap.history,
       "updated_at" => snap.updated_at && DateTime.to_iso8601(snap.updated_at)
     }
@@ -1063,6 +1177,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),
       blocked_claims: non_neg_int(Map.get(map, "blocked_claims")),
       blocked_claim_turn: int_or_nil(Map.get(map, "blocked_claim_turn")),
+      abandoned_count: non_neg_int(Map.get(map, "abandoned_count")),
       history: string_list(Map.get(map, "history")),
       updated_at: decode_datetime(Map.get(map, "updated_at"))
     }
