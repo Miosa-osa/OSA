@@ -103,6 +103,61 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
       refute Guardrails.announcement_only?(:done)
     end
 
+    test "large-scale-text-editing: \"I'll examine\" — the verb the list lacked" do
+      # Measured on `bench/terminalbench/runs/osa-tb20-full89-9b57ee7d`:
+      # ONE turn, ZERO tool calls, 2.16 seconds, and the entire episode was the
+      # sentence below. The task was never attempted.
+      #
+      # The `i'll …` branch shipped with action verbs and no INVESTIGATION verbs
+      # at all, so this fell through — while the very same sentence phrased
+      # "Let me examine both files…" matched on the other branch. The
+      # `:unstarted_task` shape exists for exactly this episode and could not
+      # fire, because the wording did not match.
+      assert Guardrails.announcement_only?(
+               "I'll examine both files to understand the transformation needed."
+             )
+
+      # The `let me ` branch always covered it. The gap was narrow and specific.
+      assert Guardrails.announcement_only?(
+               "Let me examine both files to understand the transformation needed."
+             )
+    end
+
+    test "the added investigation verbs all fire" do
+      for verb <- ~w(examine inspect explore analyze analyse look read) do
+        assert Guardrails.announcement_only?("I'll #{verb} the files first."),
+               "expected \"I'll #{verb}\" to read as an announcement"
+      end
+    end
+
+    test "check and review stay OUT of the i'll branch" do
+      # Deliberate exclusions, not oversights.
+      #
+      # `check` is this repo's own documented over-firing hazard:
+      # `deliverable_task?/1` omits it from the mutating verbs on purpose, and
+      # `TextOnlyTurnTerminationTest`'s fixture is literally "Let me check the
+      # configuration: …" as a COMPLETE answer that must cost one round trip.
+      # `review` is the idiomatic offer "I'll review it and get back to you".
+      #
+      # Both are still reachable via the `let me ` branch, which is gated by the
+      # loop's other conjuncts — this only keeps them off the unconditional
+      # `i'll` branch.
+      refute Guardrails.announcement_only?("I'll check that and get back to you.")
+      refute Guardrails.announcement_only?("I'll review it once CI is green.")
+    end
+
+    test "\"I'll look into it\" is a sign-off, not an announcement" do
+      # `look` is the one added verb whose future tense commonly CLOSES a
+      # finished answer. Handled in `@courtesy_pattern`, the mechanism that
+      # already exists for this, rather than by withholding the verb.
+      refute Guardrails.announcement_only?(
+               "Fixed in /app/main.py and the suite is green. I'll look into it if it recurs."
+             )
+
+      # …while the announcing use of the same verb still fires.
+      assert Guardrails.announcement_only?("I'll look at both files to see what differs.")
+    end
+
     test "a courtesy sign-off is not an announcement" do
       # "Let me know if …" matches the announcement pattern and is the opposite
       # of an announcement: the work is done and follow-up is being offered.
@@ -168,6 +223,26 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
                Guardrails.announcement_continue(
                  @path_tracing_answer,
                  [%{role: "user", content: @path_tracing_task}]
+               )
+    end
+
+    test "large-scale-text-editing is the unstarted shape, end to end" do
+      # The whole point of widening the verb list. Measured on
+      # `runs/osa-tb20-full89-9b57ee7d`: one turn, zero tool calls, 2.16 s.
+      # `announced_unstarted_task` is the species this episode is, and before
+      # the widening `announcement_continue/2` returned `:stop` for it — the
+      # session ended having never touched the task.
+      assert {:continue, :unstarted_task} =
+               Guardrails.announcement_continue(
+                 "I'll examine both files to understand the transformation needed.",
+                 [
+                   %{
+                     role: "user",
+                     content:
+                       "Rewrite /app/input.txt into /app/output.txt applying the " <>
+                         "transformation described in /app/spec.md"
+                   }
+                 ]
                )
     end
 

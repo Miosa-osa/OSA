@@ -137,7 +137,49 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   # which fires on 9 of 34 model failures and **0 of 49 solves** on that run.
   # The regex and the ceiling below are that detector's, verbatim, so the
   # measured precision is the same predicate and not a re-derivation of it.
-  @announcement_pattern ~r/(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop)|now let)/i
+  #
+  # ## The `examine` gap, and how the verb list was chosen
+  #
+  # The `i'll …` branch shipped with an action-verb list and no INVESTIGATION
+  # verbs at all, so `i'll examine` fell through while `let me examine` matched
+  # on the other branch. Measured on `osa-tb20-full89-9b57ee7d`:
+  # `large-scale-text-editing` was one turn, zero tool calls, 2.16 s, and the
+  # whole episode was
+  #
+  #     I'll examine both files to understand the transformation needed.
+  #
+  # 64 characters, a deliverable task, no tool ever called — precisely the
+  # `:unstarted_task` shape below, which could not fire because the wording did
+  # not match.
+  #
+  # Widening a language predicate is dangerous in one direction only: a verb
+  # that also reads as a SIGN-OFF on finished work ("I'll check that for you")
+  # would burn turns on sessions that were working. So the candidates were
+  # replayed before being committed to, across every run on disk with a
+  # `results.json` (180 trials: 94 solves, 52 model failures) rather than the
+  # reference run alone.
+  #
+  # What the replay actually says: **no candidate verb follows "I'll" anywhere
+  # in the corpus**, so the numbers are unchanged in both directions —
+  # `announced_next_action` stays at 9 model failures and 0 solves. The corpus
+  # confirms the widening is free; it cannot, by itself, argue that any given
+  # verb is safe. The include/exclude line below is therefore drawn on the
+  # sign-off risk of each verb, and stated so it can be argued with:
+  #
+  #   * INCLUDED — `examine`, `inspect`, `explore`, `analyze`/`analyse`,
+  #     `look`, `read`. Investigation verbs. "I'll examine X" has no idiomatic
+  #     reading as a report of completed work.
+  #   * EXCLUDED — `check`. This is the repo's own documented over-firing
+  #     hazard: `deliverable_task?/1` deliberately omits it as a mutating verb,
+  #     and `TextOnlyTurnTerminationTest`'s fixture is literally "Let me check
+  #     the configuration: …" as a COMPLETE answer that must cost one round
+  #     trip. Adding it to the `i'll` branch would relitigate a decision that
+  #     was already measured.
+  #   * EXCLUDED — `review`. "I'll review it and get back to you" is an
+  #     idiomatic offer, and `review` appears in solve finals as a noun.
+  #
+  # Verbs already covered by the `let me ` branch are unaffected either way.
+  @announcement_pattern ~r/(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop|examine|inspect|explore|analyze|analyse|look|read)|now let)/i
   @announcement_max_chars 500
 
   # "Let me know if …" is a sign-off, not an announcement: the work is done and
@@ -152,7 +194,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   # first clause. This can only SHRINK the fire set, so the measured
   # 0-of-49-solves carries over unchanged; replayed to confirm it also keeps all
   # 9 measured failures.
-  @courtesy_pattern ~r/\blet me know\b/i
+  #
+  # `look` is the one verb added above whose future tense has a common sign-off
+  # reading — "I'll look into it" closes a finished answer rather than opening
+  # an action. That idiom is scrubbed here, in the mechanism that already
+  # exists for exactly this, rather than by withholding the verb: "I'll look at
+  # both files" still fires, "Done. I'll look into it if it recurs." no longer
+  # can. Like the clause above, a scrub can only SHRINK the fire set, so the
+  # measured 0-of-49-solves carries over unchanged.
+  @courtesy_pattern ~r/\blet me know\b|\bi'?ll look into (it|this|that)\b/i
 
   @doc """
   Returns true when a text-only answer reads as an announcement of the next

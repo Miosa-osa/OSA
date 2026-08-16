@@ -61,8 +61,24 @@ GUARD_PREFIXES = (
 #: reason. Note that length ALONE is not a discriminator: a bare
 #: `len(final) < N` rule fires on solved trials at every threshold tested from
 #: 200 to 600 characters. The wording carries the signal, not the brevity.
+#:
+#: The `i'll ...` branch shipped with action verbs and no INVESTIGATION verbs,
+#: so `i'll examine` fell through while `let me examine` matched on the other
+#: branch. Measured on `runs/osa-tb20-full89-9b57ee7d`:
+#: `large-scale-text-editing` was one turn, ZERO tool calls, 2.16 s, and the
+#: entire episode was "I'll examine both files to understand the transformation
+#: needed." -- 64 characters, a deliverable task, the `announced_unstarted_task`
+#: shape exactly, unable to fire because the wording did not match.
+#:
+#: The added verbs were replayed across every run on disk carrying a
+#: `results.json` (180 trials: 94 solves, 52 model failures) before being
+#: committed to. Result: no candidate verb follows "I'll" ANYWHERE in that
+#: corpus, so both counts are unchanged -- `announced_next_action` stays at 9
+#: model failures and 0 solves. `check` and `review` are deliberately excluded;
+#: see the note on `Guardrails.@announcement_pattern` for why.
 ANNOUNCEMENT_RE = re.compile(
-    r"(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop)|now let)",
+    r"(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop"
+    r"|examine|inspect|explore|analyze|analyse|look|read)|now let)",
     re.IGNORECASE,
 )
 ANNOUNCEMENT_MAX_CHARS = 500
@@ -70,7 +86,13 @@ ANNOUNCEMENT_MAX_CHARS = 500
 #: "Let me know if ..." is a sign-off, not an announcement. It matches the
 #: pattern above and so would count as one; scrubbed before matching (length is
 #: still measured on the original). Mirrors `Guardrails.@courtesy_pattern`.
-COURTESY_RE = re.compile(r"\blet me know\b", re.IGNORECASE)
+#:
+#: "I'll look into it" is the same case for the one added verb whose future
+#: tense reads naturally as closing a finished answer. Scrubbing it here keeps
+#: "I'll look at both files" firing while "Done. I'll look into it." does not.
+COURTESY_RE = re.compile(
+    r"\blet me know\b|\bi'?ll look into (it|this|that)\b", re.IGNORECASE
+)
 
 #: The *unstarted* variant of the same species, and the one the shipped backstop
 #: could not see. `path-tracing` in
@@ -131,6 +153,32 @@ def coding_task(task_name: str) -> bool:
             and (CODING_CONTEXT_RE.search(text) or ARTEFACT_RE.search(text))
         )
     return False
+
+
+def resolve_trial_dir(run_dir: Path, trial_dir: str) -> Path:
+    """`trial_dir` from results.json, made cwd-independent.
+
+    Harbor records `trial_dir` as `runs/<run-id>/harbor/...`, i.e. relative to
+    `bench/terminalbench` and NOT to wherever this script was invoked from. The
+    docstring above tells you to run it from the repo root, where every one of
+    those paths resolves to something that does not exist -- `load_events`
+    then returns `[]` for all 89 trials, every detector sees an empty episode,
+    and the script prints "0 trials matched a species" and exits 0. A broken
+    corpus is indistinguishable from a clean run, and the acceptance test that
+    is supposed to be the whole point of this file passes vacuously.
+
+    That is the same class as the `:/lib` pathspec bug in
+    `run_bench.py:artifact_provenance` -- a guard that reported success
+    unconditionally from the day it was written.
+
+    The anchor is derived from `run_dir` itself, which the caller had to name
+    correctly for `results.json` to be found at all: `<anchor>/runs/<run-id>`.
+    """
+    p = Path(trial_dir)
+    if p.is_absolute() or p.exists():
+        return p
+    anchor = run_dir.resolve().parent.parent
+    return anchor / p
 
 
 def load_events(trial_dir: Path) -> list[dict]:
@@ -247,12 +295,15 @@ def main() -> int:
 
     tasks = json.loads(results.read_text())["tasks"]
     fired_on_solve = 0
+    n_with_events = 0
     rows = []
     for t in tasks:
         d = t.get("trial_dir")
         if not d:
             continue
-        ep = episode(load_events(Path(d)))
+        events = load_events(resolve_trial_dir(run, d))
+        n_with_events += bool(events)
+        ep = episode(events)
         name = t["task_name"].split("/")[-1]
         outcome = "solved" if t.get("resolved") else (t.get("fault_owner") or "?")
         hits = detect(ep, name)
@@ -268,7 +319,17 @@ def main() -> int:
 
     n_hit = len({r[2] for r in rows if r[0] != "-"})
     print(f"\n{n_hit} trials matched a species; "
-          f"{fired_on_solve} detector hits landed on a SOLVED trial.")
+          f"{fired_on_solve} detector hits landed on a SOLVED trial "
+          f"({n_with_events}/{len(tasks)} trials had an event log).")
+
+    # Zero readable event logs is a broken corpus, not a clean run. Said out
+    # loud and failed on, because the silent version of this reads exactly like
+    # a pass -- see `resolve_trial_dir`.
+    if tasks and not n_with_events:
+        print(f"no trial under {run} has an agent/osa-events.jsonl -- every "
+              f"detector saw an empty episode, so this run proves nothing.",
+              file=sys.stderr)
+        return 3
     if fired_on_solve:
         print("A detector firing on a solve violates the acceptance test above.",
               file=sys.stderr)
