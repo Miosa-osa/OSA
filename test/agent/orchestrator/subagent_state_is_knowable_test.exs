@@ -83,6 +83,30 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.SubagentStateIsKnowableTest do
   test "the stretch before the first tool call is narrated, not silent", %{parent: parent} do
     Application.put_env(:optimal_system_agent, :mock_provider_sleep_ms, 500)
 
+    # The stretch under test is the one BETWEEN ADMISSION and the first tool
+    # call — `:starting`, then `:awaiting_model`. Reaching it requires a free
+    # slot, and this test never guaranteed one.
+    #
+    # `live_agent_count/0` counts `:running` rows in the global RunStore ETS
+    # table, which the rest of the suite leaves behind by the thousand — the
+    # same hazard the cap assertion below already documents. When that residue
+    # reaches the default cap of 16, the dispatched agent stays `:queued` for
+    # the whole 20s budget and `phases` comes back `["queued"]`. MEASURED: green
+    # at seed 0 and at 17 other seeds, and failing at `--seed 314159` on a full
+    # suite run, on a clean tree, with exactly that value.
+    #
+    # Note what that failure is NOT. `["queued"]` is the property HOLDING: the
+    # agent named its own state, which is the entire point of this file. It is
+    # the test that was wrong — it asserted on a stretch it had not ensured the
+    # agent would enter. So the assertions below are untouched and the slot is
+    # made real instead, which is the mirror of the cap of 1 the next test sets
+    # to force the opposite path. `on_exit` in `setup` already unsets this.
+    Application.put_env(
+      :optimal_system_agent,
+      :max_fleet_agents,
+      Orchestrator.live_agent_count() + 2
+    )
+
     {:ok, _id} = Orchestrator.run_background(parent, config())
 
     phases = collect_phases(20_000)
