@@ -321,6 +321,18 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     worktree_info =
       if isolation == :worktree do
+        # A worktree is a COPY of the repo. On a large tree with no reflink
+        # support this is the single longest step on the dispatch path and it
+        # used to log only on SUCCESS — i.e. after the minutes had already
+        # passed in silence.
+        emit_phase(
+          parent_id,
+          subagent_id,
+          display_name,
+          :starting,
+          "creating an isolated worktree"
+        )
+
         # FastWorktree picks the fastest CoW tier the filesystem supports
         # (btrfs/reflink/copy) and falls back to a plain checkout. repo_dir is
         # the agent's resolved cwd (the user's project), NOT File.cwd! which
@@ -418,6 +430,18 @@ defmodule OptimalSystemAgent.Orchestrator do
            {Loop, subagent_opts}
          ) do
       {:ok, pid} ->
+        # The Loop is up and about to make its first provider call. On a real
+        # model this is where the minutes go: system prompt assembly plus
+        # time-to-first-token, with no tool activity to report yet. Naming it is
+        # the difference between "state unknown" and "waiting for the model".
+        emit_phase(
+          parent_id,
+          subagent_id,
+          display_name,
+          :awaiting_model,
+          "waiting for the first response from #{model}"
+        )
+
         # Execute the task (blocking call)
         result =
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
@@ -763,153 +787,337 @@ defmodule OptimalSystemAgent.Orchestrator do
       role: role
     })
 
+    # Register the run at DISPATCH, not at admission.
+    #
+    # `RunStore.start_run/1` used to be called inside `run_subagent/1`, i.e.
+    # after `await_background_slot/1` returned. So for the entire time an agent
+    # sat in the admission queue — up to the full 1h budget — `RunStore.get/1`
+    # answered `nil`, and every consumer read that `nil` as its own kind of
+    # "no":
+    #
+    #   * `task_wait` treats an unknown id as terminal, so joining a queued
+    #     agent returned "no run found" instantly instead of waiting for it;
+    #   * `task_output` / `task_stop` reported it as nonexistent;
+    #   * the stall watcher's `RunStore.get/1` fell through to its "row is gone,
+    #     nothing to watch" clause and exited on its FIRST 30-second poll —
+    #     permanently, so the agent was never watched for the rest of its life.
+    #
+    # The row is born `:queued` and `live_agent_count/0` excludes that phase, so
+    # registering early cannot make queued agents count against the very cap
+    # they are queued behind.
+    RunStore.start_run(%{
+      agent_id: subagent_id,
+      parent_session_id: parent_id,
+      role: role,
+      task: Map.get(config, :task, ""),
+      resumed_from: Map.get(config, :resumed_from),
+      phase: :queued,
+      phase_detail: "waiting for a concurrency slot"
+    })
+
     start_stall_watcher(parent_id, subagent_id, display_name, role)
 
-    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
-      # Concurrency admission. `:max_fleet_agents` (default 16) was enforced ONLY
-      # on the `fleet` path — `run_background/2`, which is where the `delegate`
-      # tool's `background: true` lands, had no ceiling whatsoever, so a model
-      # could start unlimited concurrent subagent Loops (each with its own
-      # provider connection, context window and spend) with nothing joined to
-      # them to even notice.
-      #
-      # This QUEUES rather than refuses, exactly like Fleet's dispatcher: the
-      # agent id was already returned to the caller and is already in flight in
-      # the TUI, and `run_background/2`'s `{:ok, id}` contract is pattern-matched
-      # by callers outside this module. Waiting here keeps the contract and still
-      # bounds live concurrency.
-      await_background_slot(subagent_id)
+    # The wall clock the USER experiences starts here, at dispatch — not at
+    # admission. See `dispatched_at` in the completion payload below.
+    dispatched_at = System.monotonic_time(:millisecond)
 
-      start_time = System.monotonic_time(:millisecond)
-
-      # Guard the ENTIRE subagent run (not just the inner Loop): run_subagent's
-      # setup phase (Worktree.create, Tier.model_for, File ops) is unguarded and
-      # can raise/exit. If it does, the parent's BackgroundNotifier would wait
-      # forever and the RunStore entry would stick on :running. Convert any
-      # raise/exit into an {:error, reason} so the failure branch below always
-      # notifies the parent and reaps the run.
-      result =
-        try do
-          run_subagent(Map.put(config, :agent_id, subagent_id))
-        rescue
-          e ->
-            Logger.error(
-              "[Orchestrator] Background subagent #{subagent_id} crashed: #{Exception.message(e)}"
-            )
-
-            {:error, Exception.message(e)}
-        catch
-          :exit, reason ->
-            Logger.error(
-              "[Orchestrator] Background subagent #{subagent_id} exited: #{inspect(reason)}"
-            )
-
-            {:error, {:exit, reason}}
+    {:ok, runner_pid} =
+      Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+        # Concurrency admission. `:max_fleet_agents` (default 16) was enforced ONLY
+        # on the `fleet` path — `run_background/2`, which is where the `delegate`
+        # tool's `background: true` lands, had no ceiling whatsoever, so a model
+        # could start unlimited concurrent subagent Loops (each with its own
+        # provider connection, context window and spend) with nothing joined to
+        # them to even notice.
+        #
+        # This QUEUES rather than refuses, exactly like Fleet's dispatcher: the
+        # agent id was already returned to the caller and is already in flight in
+        # the TUI, and `run_background/2`'s `{:ok, id}` contract is pattern-matched
+        # by callers outside this module. Waiting here keeps the contract and still
+        # bounds live concurrency.
+        # Narrate the wait itself. `await_background_slot/1` can block for up to an
+        # hour and used to emit nothing at all, so a queued agent was
+        # indistinguishable from a wedged one from the outside.
+        if not background_slot_available?() do
+          emit_phase(parent_id, subagent_id, display_name, :queued, queue_detail())
         end
 
-      duration_ms = System.monotonic_time(:millisecond) - start_time
+        await_background_slot(subagent_id)
 
-      # If the run raised before it could mark itself terminal, reap the RunStore
-      # entry so GET /runs never sticks on :running.
-      case result do
-        {:error, reason} ->
-          case RunStore.get(subagent_id) do
-            %{status: :running} ->
-              RunStore.complete(subagent_id, %{
-                agent_id: subagent_id,
-                status: :failed,
-                summary: "background agent failed: #{inspect(reason)}",
-                duration_ms: duration_ms
-              })
+        # Admitted. Everything from here to the first tool call — worktree
+        # creation, hooks, prompt assembly, the model's first response — used to
+        # be one unbroken silence. `run_subagent/1` narrates each step.
+        emit_phase(parent_id, subagent_id, display_name, :starting, "preparing the workspace")
 
-            _ ->
-              :ok
+        start_time = System.monotonic_time(:millisecond)
+
+        # Guard the ENTIRE subagent run (not just the inner Loop): run_subagent's
+        # setup phase (Worktree.create, Tier.model_for, File ops) is unguarded and
+        # can raise/exit. If it does, the parent's BackgroundNotifier would wait
+        # forever and the RunStore entry would stick on :running. Convert any
+        # raise/exit into an {:error, reason} so the failure branch below always
+        # notifies the parent and reaps the run.
+        result =
+          try do
+            run_subagent(Map.put(config, :agent_id, subagent_id))
+          rescue
+            e ->
+              Logger.error(
+                "[Orchestrator] Background subagent #{subagent_id} crashed: #{Exception.message(e)}"
+              )
+
+              {:error, Exception.message(e)}
+          catch
+            :exit, reason ->
+              Logger.error(
+                "[Orchestrator] Background subagent #{subagent_id} exited: #{inspect(reason)}"
+              )
+
+              {:error, {:exit, reason}}
           end
 
-        _ ->
-          :ok
-      end
+        duration_ms = System.monotonic_time(:millisecond) - start_time
 
-      # WS7 — structured usage + output-file for the <task-notification> the
-      # parent model receives (CC enqueueAgentNotification parity).
-      final_run = RunStore.get(subagent_id)
+        # How long the agent existed AS THE USER SAW IT, from the moment
+        # `delegate` returned its id. `duration_ms` deliberately starts at
+        # admission, so for a queued agent the two differ by the whole queue wait
+        # — and it was `duration_ms` alone that got reported. An agent the user
+        # watched sit on screen for four minutes reported "17s", because the
+        # minutes it spent queued were measured by nobody and belonged to no
+        # interval. Both numbers are now stated, and they mean different things.
+        elapsed_ms = System.monotonic_time(:millisecond) - dispatched_at
 
-      usage = reported_usage(final_run, duration_ms)
+        # If the run raised before it could mark itself terminal, reap the RunStore
+        # entry so GET /runs never sticks on :running.
+        case result do
+          {:error, reason} ->
+            case RunStore.get(subagent_id) do
+              %{status: :running} ->
+                RunStore.complete(subagent_id, %{
+                  agent_id: subagent_id,
+                  status: :failed,
+                  summary: "background agent failed: #{inspect(reason)}",
+                  duration_ms: duration_ms
+                })
 
-      output_file = RunStore.transcript_path_for(subagent_id)
+              _ ->
+                :ok
+            end
 
-      # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
-      # the persisted spend record) and was already being appended to the
-      # FOREGROUND delegate result — but a background run rode no event
-      # carrying it, so the panel could only ever show a whole-task estimate.
-      # `nil` when no spend was recorded: unknown and zero are different facts
-      # and the TUI renders them differently.
-      cost_usd = reported_cost_usd(subagent_id)
+          _ ->
+            :ok
+        end
 
-      case result do
-        {:ok, response} ->
-          Bus.emit(:system_event, %{
-            event: :background_agent_completed,
-            session_id: parent_id,
-            agent_id: subagent_id,
-            display_name: display_name,
-            role: role,
-            result: String.slice(response, 0, 500),
-            duration_ms: duration_ms
-          })
+        # WS7 — structured usage + output-file for the <task-notification> the
+        # parent model receives (CC enqueueAgentNotification parity).
+        final_run = RunStore.get(subagent_id)
 
-          Phoenix.PubSub.broadcast(
-            OptimalSystemAgent.PubSub,
-            "osa:session:#{parent_id}",
-            {:osa_event,
-             %{
-               type: :background_agent_completed,
-               agent_id: subagent_id,
-               display_name: display_name,
-               role: role,
-               result: String.slice(response, 0, 500),
-               duration_ms: duration_ms,
-               usage: usage,
-               cost_usd: cost_usd,
-               output_file: output_file
-             }}
-          )
+        usage = reported_usage(final_run, duration_ms)
 
-          emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :completed)
+        output_file = RunStore.transcript_path_for(subagent_id)
 
-        {:error, reason} ->
-          Bus.emit(:system_event, %{
-            event: :background_agent_failed,
-            session_id: parent_id,
-            agent_id: subagent_id,
-            display_name: display_name,
-            role: role,
-            error: inspect(reason),
-            duration_ms: duration_ms
-          })
+        # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
+        # the persisted spend record) and was already being appended to the
+        # FOREGROUND delegate result — but a background run rode no event
+        # carrying it, so the panel could only ever show a whole-task estimate.
+        # `nil` when no spend was recorded: unknown and zero are different facts
+        # and the TUI renders them differently.
+        cost_usd = reported_cost_usd(subagent_id)
 
-          Phoenix.PubSub.broadcast(
-            OptimalSystemAgent.PubSub,
-            "osa:session:#{parent_id}",
-            {:osa_event,
-             %{
-               type: :background_agent_failed,
-               agent_id: subagent_id,
-               display_name: display_name,
-               role: role,
-               error: inspect(reason),
-               duration_ms: duration_ms,
-               usage: usage,
-               cost_usd: cost_usd,
-               output_file: output_file
-             }}
-          )
+        case result do
+          {:ok, response} ->
+            Bus.emit(:system_event, %{
+              event: :background_agent_completed,
+              session_id: parent_id,
+              agent_id: subagent_id,
+              display_name: display_name,
+              role: role,
+              result: String.slice(response, 0, 500),
+              duration_ms: duration_ms
+            })
 
-          emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :failed)
+            Phoenix.PubSub.broadcast(
+              OptimalSystemAgent.PubSub,
+              "osa:session:#{parent_id}",
+              {:osa_event,
+               %{
+                 type: :background_agent_completed,
+                 agent_id: subagent_id,
+                 display_name: display_name,
+                 role: role,
+                 result: String.slice(response, 0, 500),
+                 duration_ms: duration_ms,
+                 elapsed_ms: elapsed_ms,
+                 usage: usage,
+                 cost_usd: cost_usd,
+                 output_file: output_file
+               }}
+            )
+
+            emit_agent_finished(
+              parent_id,
+              subagent_id,
+              display_name,
+              duration_ms,
+              nil,
+              :completed
+            )
+
+          {:error, reason} ->
+            Bus.emit(:system_event, %{
+              event: :background_agent_failed,
+              session_id: parent_id,
+              agent_id: subagent_id,
+              display_name: display_name,
+              role: role,
+              error: inspect(reason),
+              duration_ms: duration_ms
+            })
+
+            Phoenix.PubSub.broadcast(
+              OptimalSystemAgent.PubSub,
+              "osa:session:#{parent_id}",
+              {:osa_event,
+               %{
+                 type: :background_agent_failed,
+                 agent_id: subagent_id,
+                 display_name: display_name,
+                 role: role,
+                 error: inspect(reason),
+                 duration_ms: duration_ms,
+                 elapsed_ms: elapsed_ms,
+                 usage: usage,
+                 cost_usd: cost_usd,
+                 output_file: output_file
+               }}
+            )
+
+            emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :failed)
+        end
+      end)
+
+    watch_runner(parent_id, subagent_id, display_name, role, runner_pid)
+
+    {:ok, subagent_id}
+  end
+
+  # ── The runner's death is a FACT, not an absence of signal ───────────────
+  #
+  # `run_background/2` discarded the pid `Task.Supervisor.start_child/2` handed
+  # back, so nothing anywhere was joined to, linked to, or monitoring the
+  # process that runs a background subagent. The `try/rescue/catch` around
+  # `run_subagent/1` covers faults raised INSIDE the task and nothing else: a
+  # `Process.exit(pid, :kill)`, a supervisor shutdown, an OOM kill or any other
+  # exit signal delivered from outside kills the task between its `START` and
+  # the terminal broadcast at the bottom of its body. When that happened:
+  #
+  #   * no `:background_agent_completed` / `_failed` was ever broadcast, so the
+  #     parent's `BackgroundNotifier` waited for a result that could not come;
+  #   * the RunStore row stayed `:running` until the next BOOT, when
+  #     `reconcile_stale_running/1` finally cleaned it up;
+  #   * the transcript showed a `START` and then nothing — no `STOP`, ever;
+  #   * and the TUI, having no signal to go on, could only say what it says when
+  #     it has no signal: "no recent signal".
+  #
+  # A monitor converts that silence into an event. `Process.monitor/1` fires
+  # immediately with `:noproc` if the target is already dead, so this needs no
+  # timeout and cannot itself wedge — which is the whole point: the state
+  # resolves because something OBSERVED it, not because a clock ran out.
+  #
+  # It never terminates anything. It only reports, and only when the task died
+  # without leaving a terminal row behind — a task that completed normally has
+  # already written its own outcome and this exits silently.
+  @doc false
+  @spec watch_runner(String.t(), String.t(), String.t(), String.t(), pid() | any()) :: :ok
+  def watch_runner(parent_id, subagent_id, display_name, role, runner_pid)
+      when is_pid(runner_pid) do
+    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      ref = Process.monitor(runner_pid)
+
+      receive do
+        {:DOWN, ^ref, :process, _pid, reason} ->
+          # A clean exit means the task ran to the end of its body and has
+          # already broadcast its own terminal event.
+          if reason != :normal do
+            report_runner_death(parent_id, subagent_id, display_name, role, reason)
+          else
+            # Even a `:normal` exit is only trustworthy if a terminal row
+            # exists. A task killed while `:brutal_kill`-shutting-down its
+            # supervisor can report `:normal`; the row is the evidence.
+            case RunStore.get(subagent_id) do
+              %{status: :running} ->
+                report_runner_death(parent_id, subagent_id, display_name, role, :normal)
+
+              _ ->
+                :ok
+            end
+          end
       end
     end)
 
-    {:ok, subagent_id}
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def watch_runner(_parent_id, _subagent_id, _display_name, _role, _pid), do: :ok
+
+  defp report_runner_death(parent_id, subagent_id, display_name, role, reason) do
+    # Re-check under the monitor's own ordering: the task may have broadcast its
+    # result microseconds before dying, in which case there is nothing to report
+    # and reporting anyway would fabricate a failure for a run that succeeded.
+    case RunStore.get(subagent_id) do
+      %{status: :running} ->
+        Logger.error(
+          "[Orchestrator] Background subagent #{subagent_id} runner died without " <>
+            "recording an outcome (reason: #{inspect(reason)}) — reporting it as failed " <>
+            "so the parent is not left waiting on a process that no longer exists"
+        )
+
+        RunStore.complete(subagent_id, %{
+          agent_id: subagent_id,
+          status: :failed,
+          summary: "background agent runner died: #{inspect(reason)}",
+          duration_ms: nil
+        })
+
+        error = "runner process died without reporting a result (#{inspect(reason)})"
+
+        payload = %{
+          event: :background_agent_failed,
+          session_id: parent_id,
+          agent_id: subagent_id,
+          display_name: display_name,
+          role: role,
+          error: error,
+          duration_ms: nil
+        }
+
+        Bus.emit(:system_event, payload)
+
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{parent_id}",
+          {:osa_event,
+           payload
+           |> Map.delete(:event)
+           |> Map.merge(%{
+             type: :background_agent_failed,
+             output_file: RunStore.transcript_path_for(subagent_id)
+           })}
+        )
+
+        emit_agent_finished(parent_id, subagent_id, display_name, nil, nil, :failed)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """
@@ -1109,9 +1317,92 @@ defmodule OptimalSystemAgent.Orchestrator do
   @spec live_agent_count() :: non_neg_integer()
   def live_agent_count do
     RunStore.list(limit: 100_000)
-    |> Enum.count(fn run -> Map.get(run, :status) == :running end)
+    |> Enum.count(fn run ->
+      # `:queued` rows are registered at DISPATCH so that every lookup path
+      # (`task_wait`, `task_output`, `task_stop`, the stall watcher) can see an
+      # agent that exists but has not been admitted yet. They must not count
+      # against the cap they are queued behind, or the queue would deadlock on
+      # itself the moment the cap filled.
+      Map.get(run, :status) == :running and Map.get(run, :phase) != :queued
+    end)
   rescue
     _ -> 0
+  end
+
+  # Human detail for the `:queued` phase — what the agent is actually waiting
+  # behind, in the operator's own units.
+  defp queue_detail do
+    "#{live_agent_count()} of #{delegate_concurrency_cap()} slots busy"
+  rescue
+    _ -> "waiting for a concurrency slot"
+  end
+
+  # ── Dispatch-phase narration ────────────────────────────────────────────
+  #
+  # Measured on the dispatch path with a mock provider, a trivial task and a
+  # temp-dir workspace — the best case this code has — the parent received
+  # `background_agent_started` at 17ms, `orchestrator_agent_started` at 22ms,
+  # and then NOTHING for 7.2 seconds until the child's first tool call. On a
+  # real repo (worktree isolation copies the tree), with a real model's
+  # time-to-first-token and a cold provider connection, that same gap is
+  # minutes. It is the single largest silence in the system and it is entirely
+  # normal — the agent is healthy and working the whole time.
+  #
+  # Nothing observed it, so nothing could report it, so the TUI fell back to the
+  # only thing it could compute locally: 90 seconds without a frame, therefore
+  # "state unknown · last signal 4m ago". That message was accurate about the
+  # UI's ignorance and told the user nothing about the agent.
+  #
+  # Each transition now emits. The states are named for what the agent IS doing,
+  # not for what we failed to hear:
+  #
+  #   :queued         — admitted to nothing yet; waiting behind the cap.
+  #   :starting       — admitted; setting up (worktree, hooks, agent memory).
+  #   :awaiting_model — the Loop is up and the first provider call is out.
+  #   :working        — has run at least one tool (set by `RunStore.progress/3`).
+  #
+  # Logged at `info` and mirrored into telemetry: every defect found in this
+  # area was invisible because the code that knew never said anything.
+  @doc false
+  @spec emit_phase(String.t(), String.t(), String.t(), atom(), String.t()) :: :ok
+  def emit_phase(parent_id, subagent_id, display_name, phase, detail) do
+    RunStore.set_phase(subagent_id, phase, detail)
+
+    Logger.info(
+      "[Orchestrator] #{subagent_id} phase=#{phase}" <>
+        if(detail == "", do: "", else: " (#{detail})")
+    )
+
+    :telemetry.execute(
+      [:osa, :subagent, :phase],
+      %{count: 1},
+      %{agent_id: subagent_id, parent_session_id: parent_id, phase: phase, detail: detail}
+    )
+
+    payload = %{
+      agent_id: subagent_id,
+      # `agent_name` is the key every `orchestrator_agent_*` frame uses to find
+      # its roster row; carrying both means one frame serves both lookups.
+      agent_name: subagent_id,
+      display_name: display_name,
+      phase: to_string(phase),
+      detail: detail
+    }
+
+    emit_event(parent_id, Map.put(payload, :event, "background_agent_phase"))
+
+    Bus.emit(
+      :system_event,
+      payload
+      |> Map.put(:event, :background_agent_phase)
+      |> Map.put(:session_id, parent_id)
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc false
@@ -1549,6 +1840,17 @@ defmodule OptimalSystemAgent.Orchestrator do
     Process.sleep(stall_poll_interval_ms())
 
     case RunStore.get(subagent_id) do
+      # A queued agent is not stalled — it has been admitted to nothing yet, and
+      # its fingerprint cannot change until it starts. Keep watching, and reset
+      # the change clock so the queue wait is never counted against the stall
+      # threshold. (Before the row was created at dispatch this clause was
+      # reached as `nil` and fell into the catch-all below, killing the watcher
+      # on its first poll and leaving the agent unwatched for the rest of its
+      # life — the one component that could have explained the silence was the
+      # first thing the silence took out.)
+      %{status: :running, phase: :queued} ->
+        watch_for_stall(parent_id, subagent_id, display_name, role, last_print, now_ms())
+
       %{status: :running} = run ->
         print = progress_fingerprint(run)
         phase = if run.tool_count > 0, do: :working, else: :starting
@@ -1567,6 +1869,18 @@ defmodule OptimalSystemAgent.Orchestrator do
               now_ms() - last_change_at,
               run
             )
+
+            # Keep watching after reporting.
+            #
+            # The watcher used to RETURN here, so a run got at most one stall
+            # report in its entire lifetime and was then unobserved forever
+            # after — including a run that recovered and stalled again, and
+            # including one that never came back at all. Continuing costs one
+            # poll every 30s and means the observation keeps up with reality.
+            # The change clock is reset to NOW so the next report cannot come
+            # until another full threshold has elapsed — one report per
+            # threshold period, not one per 30-second poll.
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, now_ms())
 
           true ->
             watch_for_stall(parent_id, subagent_id, display_name, role, print, last_change_at)
@@ -1933,6 +2247,17 @@ defmodule OptimalSystemAgent.Orchestrator do
           description: ""
         })
 
+        # The THIRD silence, and the one the brief names first: a tool that runs
+        # for minutes (a build, a test suite, a large grep) emits nothing between
+        # its start and its end. Without this the row's phase would still read
+        # `awaiting_model` — set when the PREVIOUS tool finished — for the whole
+        # time a tool was actually running, which is a confident wrong answer
+        # rather than an honest unknown.
+        #
+        # "Running a tool", "waiting on the model" and "died" are three different
+        # facts. All three are now stated as themselves.
+        emit_phase(parent_id, subagent_id, role, :working, action)
+
         forwarder_loop(subagent_id, parent_id, role, tool_count)
 
       # Tool call END — increment counter
@@ -1950,6 +2275,19 @@ defmodule OptimalSystemAgent.Orchestrator do
           recent_actions: recent_actions(subagent_id),
           description: ""
         })
+
+        # A finished tool means the agent has gone back to the model, and it
+        # will emit nothing again until the NEXT tool starts.
+        #
+        # This is the same silence as the dispatch path, in the middle of a run:
+        # the dispatch-phase fix labelled the gap before the first tool call, and
+        # the timing probe immediately caught these — 5-second voids between
+        # consecutive tools on a mock provider that answers instantly. On a real
+        # model, with reasoning, that inter-tool gap is minutes, and it is the
+        # "it appears alive but idle" the user described AFTER the slow start
+        # resolved. It is also by far the most common state a long-running
+        # subagent is in.
+        emit_phase(parent_id, subagent_id, role, :awaiting_model, "thinking after #{tool_name}")
 
         forwarder_loop(subagent_id, parent_id, role, new_count)
 

@@ -156,10 +156,7 @@ impl SseClient {
 
                     warn!(
                         "SSE disconnected (attempt {}/{}), retrying in {}s: {:?}",
-                        attempt,
-                        MAX_RECONNECTS,
-                        backoff_secs,
-                        e
+                        attempt, MAX_RECONNECTS, backoff_secs, e
                     );
 
                     tokio::select! {
@@ -178,10 +175,7 @@ impl SseClient {
 
     /// Single connection attempt. Returns Ok(()) on clean close, Err on failure.
     async fn connect_once(&self) -> std::result::Result<(), SseError> {
-        let url = format!(
-            "{}/api/v1/stream/{}",
-            self.base_url, self.session_id
-        );
+        let url = format!("{}/api/v1/stream/{}", self.base_url, self.session_id);
 
         // No total-request timeout for SSE long-polling — the stream is
         // intentionally long-lived. Duration::from_secs(0) is NOT "no
@@ -190,7 +184,10 @@ impl SseClient {
         // Omitting .timeout() leaves reqwest at its default (no timeout).
         let http = HttpClient::builder()
             .build()
-            .map_err(|e| SseError::Disconnected { err: e.into(), connected: false })?;
+            .map_err(|e| SseError::Disconnected {
+                err: e.into(),
+                connected: false,
+            })?;
 
         let mut req = http
             .get(&url)
@@ -201,15 +198,13 @@ impl SseClient {
             req = req.header("Authorization", format!("Bearer {}", self.token));
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SseError::Disconnected { err: e.into(), connected: false })?;
+        let resp = req.send().await.map_err(|e| SseError::Disconnected {
+            err: e.into(),
+            connected: false,
+        })?;
 
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SseError::AuthFailed);
         }
         if !status.is_success() {
@@ -226,11 +221,10 @@ impl SseClient {
 
         // Read the stream line by line
         let byte_stream = resp.bytes_stream();
-        let stream_reader = tokio_util::io::StreamReader::new(
-            byte_stream.map(|result| {
+        let stream_reader =
+            tokio_util::io::StreamReader::new(byte_stream.map(|result| {
                 result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }),
-        );
+            }));
         let mut lines = tokio::io::BufReader::with_capacity(MAX_LINE_BYTES, stream_reader).lines();
 
         let mut event_type = String::new();
@@ -715,6 +709,42 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        // Dispatch-phase narration. The backend now names what a subagent is
+        // doing for the whole stretch before it has tool activity to report,
+        // instead of leaving the panel to infer from silence.
+        "background_agent_phase" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent_id: String,
+                #[serde(default)]
+                agent_name: String,
+                #[serde(default)]
+                display_name: String,
+                #[serde(default)]
+                phase: String,
+                #[serde(default)]
+                detail: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_agent_phase", e)),
+            };
+            // The backend sends both keys with the same value; prefer whichever
+            // is populated so the roster lookup by name always resolves.
+            let agent_id = if ev.agent_id.is_empty() {
+                ev.agent_name
+            } else {
+                ev.agent_id
+            };
+            Some(BackendEvent::BackgroundAgentPhase {
+                agent_id,
+                display_name: ev.display_name,
+                phase: ev.phase,
+                detail: ev.detail,
+            })
+        }
+
         // Multi-agent workflow events (Claude Code parity). Emitted directly on
         // the session topic with a `type` field (no `event` wrapper), so parse the
         // frame data directly like the background_agent_* arms above. All new
@@ -799,7 +829,10 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("task_notification", e)),
             };
-            Some(BackendEvent::TaskNotification { count: ev.count, summary: ev.summary })
+            Some(BackendEvent::TaskNotification {
+                count: ev.count,
+                summary: ev.summary,
+            })
         }
 
         // The authoritative turn-end edge. Carries no payload — its arrival IS
@@ -1311,9 +1344,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
-        "task_checklist_hide" => {
-            Some(BackendEvent::TaskChecklistHide)
-        }
+        "task_checklist_hide" => Some(BackendEvent::TaskChecklistHide),
 
         "swarm_started" => {
             #[derive(serde::Deserialize)]
@@ -1893,10 +1924,12 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
         // Multi-agent workflow events may also arrive wrapped as a system_event
         // (with an `event` field). Delegate to the top-level parser, which builds
         // them from the same frame data.
-        "agent_finished" | "agent_message" | "background_command_completed"
-        | "turn_recap" | "provider_retry" | "error" => {
-            parse_sse_event(base.event.as_str(), data)
-        }
+        "agent_finished"
+        | "agent_message"
+        | "background_command_completed"
+        | "turn_recap"
+        | "provider_retry"
+        | "error" => parse_sse_event(base.event.as_str(), data),
 
         other if !other.is_empty() => Some(BackendEvent::ParseWarning {
             message: format!("[sse] unknown system_event: {}", other),
@@ -1993,7 +2026,9 @@ mod tests {
         server.abort();
 
         let Ok(result) = outcome else {
-            panic!("connect_once never returned — the read is parked forever on a half-open stream");
+            panic!(
+                "connect_once never returned — the read is parked forever on a half-open stream"
+            );
         };
         match result {
             Err(SseError::Disconnected { connected, err }) => {
@@ -2074,7 +2109,8 @@ mod tests {
         }
 
         // A frame missing `phase` (older backend) defaults to a done round.
-        let legacy = br#"{"event":"goal_verifier_round","verdict":"complete","refuted_count":0,"total":3}"#;
+        let legacy =
+            br#"{"event":"goal_verifier_round","verdict":"complete","refuted_count":0,"total":3}"#;
         match parse_sse_event("goal_verifier_round", legacy) {
             Some(BackendEvent::GoalVerification { phase, verdict, .. }) => {
                 assert_eq!(phase, "done");
@@ -2092,7 +2128,10 @@ mod tests {
         // `Agent.CompactionEvents` broadcasts on `osa:session:<id>`.
         let started = br#"{"type":"system_event","event":"compaction_started","session_id":"s1","trigger":"manual","tokens_before":84000}"#;
         match parse_sse_event("compaction_started", started) {
-            Some(BackendEvent::CompactionStarted { trigger, tokens_before }) => {
+            Some(BackendEvent::CompactionStarted {
+                trigger,
+                tokens_before,
+            }) => {
                 assert_eq!(trigger, "manual");
                 assert_eq!(tokens_before, 84_000);
             }
@@ -2101,7 +2140,10 @@ mod tests {
 
         let progress = br#"{"type":"system_event","event":"compaction_progress","session_id":"s1","chunk_index":6,"chunk_total":10}"#;
         match parse_sse_event("compaction_progress", progress) {
-            Some(BackendEvent::CompactionProgress { chunk_index, chunk_total }) => {
+            Some(BackendEvent::CompactionProgress {
+                chunk_index,
+                chunk_total,
+            }) => {
                 assert_eq!(chunk_index, 6);
                 assert_eq!(chunk_total, 10);
             }
@@ -2129,7 +2171,10 @@ mod tests {
 
         let failed = br#"{"type":"system_event","event":"compaction_failed","session_id":"s1","reason":"summarizer timeout","duration_ms":90000}"#;
         match parse_sse_event("compaction_failed", failed) {
-            Some(BackendEvent::CompactionFailed { reason, duration_ms }) => {
+            Some(BackendEvent::CompactionFailed {
+                reason,
+                duration_ms,
+            }) => {
                 assert_eq!(reason, "summarizer timeout");
                 assert_eq!(duration_ms, 90_000);
             }
@@ -2148,7 +2193,10 @@ mod tests {
         // An index past the total is clamped, never rendered as >100%.
         let over = br#"{"type":"system_event","event":"compaction_progress","session_id":"s1","chunk_index":99,"chunk_total":8}"#;
         match parse_sse_event("compaction_progress", over) {
-            Some(BackendEvent::CompactionProgress { chunk_index, chunk_total }) => {
+            Some(BackendEvent::CompactionProgress {
+                chunk_index,
+                chunk_total,
+            }) => {
                 assert_eq!(chunk_index, 8);
                 assert_eq!(chunk_total, 8);
             }
@@ -2162,7 +2210,12 @@ mod tests {
         // crucially NO file contents.
         let data = br#"{"type":"system_event","event":"scratchpad_activity","session_id":"s1","agent":"agent:s1:2","entry":"findings.md","action":"write","bytes":2100}"#;
         match parse_sse_event("scratchpad_activity", data) {
-            Some(BackendEvent::ScratchpadActivity { agent, entry, action, bytes }) => {
+            Some(BackendEvent::ScratchpadActivity {
+                agent,
+                entry,
+                action,
+                bytes,
+            }) => {
                 assert_eq!(agent, "agent:s1:2");
                 assert_eq!(entry, "findings.md");
                 assert_eq!(action, "write");
@@ -2187,7 +2240,11 @@ mod tests {
         // Success frame WITH a summary → OrchestratorAgentCompleted carrying it.
         let ok = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w1","status":"completed","tool_uses":3,"tokens_used":1200,"summary":"Found 4 dead paths"}"#;
         match parse_sse_event("orchestrator_agent_completed", ok) {
-            Some(BackendEvent::OrchestratorAgentCompleted { agent_name, summary, .. }) => {
+            Some(BackendEvent::OrchestratorAgentCompleted {
+                agent_name,
+                summary,
+                ..
+            }) => {
                 assert_eq!(agent_name, "w1");
                 assert_eq!(summary.as_deref(), Some("Found 4 dead paths"));
             }
@@ -2197,7 +2254,11 @@ mod tests {
         // Failure frame carries the error summary on the same field.
         let fail = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w2","status":"failed","error":"boom","summary":"boom: join timeout"}"#;
         match parse_sse_event("orchestrator_agent_completed", fail) {
-            Some(BackendEvent::OrchestratorAgentFailed { agent_name, summary, .. }) => {
+            Some(BackendEvent::OrchestratorAgentFailed {
+                agent_name,
+                summary,
+                ..
+            }) => {
                 assert_eq!(agent_name, "w2");
                 assert_eq!(summary.as_deref(), Some("boom: join timeout"));
             }
@@ -2222,7 +2283,11 @@ mod tests {
     fn parses_background_agent_usage_and_distinguishes_absent_from_zero() {
         let with_usage = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000,"usage":{"total_tokens":40123,"tool_uses":12,"duration_ms":91000},"output_file":"/tmp/x.md"}"#;
         match parse_sse_event("background_agent_completed", with_usage) {
-            Some(BackendEvent::BackgroundAgentCompleted { total_tokens, tool_uses, .. }) => {
+            Some(BackendEvent::BackgroundAgentCompleted {
+                total_tokens,
+                tool_uses,
+                ..
+            }) => {
                 assert_eq!(total_tokens, Some(40123));
                 assert_eq!(tool_uses, Some(12));
             }
@@ -2233,7 +2298,11 @@ mod tests {
         // relies on this distinction to leave the panel's counters alone.
         let legacy = br#"{"type":"background_agent_completed","agent_id":"agent:s1:1","role":"researcher","result":"ok","duration_ms":91000}"#;
         match parse_sse_event("background_agent_completed", legacy) {
-            Some(BackendEvent::BackgroundAgentCompleted { total_tokens, tool_uses, .. }) => {
+            Some(BackendEvent::BackgroundAgentCompleted {
+                total_tokens,
+                tool_uses,
+                ..
+            }) => {
                 assert_eq!(total_tokens, None, "absent usage must not decode as 0");
                 assert_eq!(tool_uses, None, "absent usage must not decode as 0");
             }
@@ -2243,7 +2312,11 @@ mod tests {
         // The failure broadcast carries the same map.
         let failed = br#"{"type":"background_agent_failed","agent_id":"agent:s1:2","role":"coder","error":"boom","duration_ms":50,"usage":{"total_tokens":7,"tool_uses":2,"duration_ms":50}}"#;
         match parse_sse_event("background_agent_failed", failed) {
-            Some(BackendEvent::BackgroundAgentFailed { total_tokens, tool_uses, .. }) => {
+            Some(BackendEvent::BackgroundAgentFailed {
+                total_tokens,
+                tool_uses,
+                ..
+            }) => {
                 assert_eq!((total_tokens, tool_uses), (Some(7), Some(2)));
             }
             other => panic!("unexpected: {:?}", other),
@@ -2291,7 +2364,11 @@ mod tests {
     fn agent_finished_carries_its_status() {
         let failed = br#"{"type":"agent_finished","display_name":"explorer","duration_ms":1200,"status":"failed"}"#;
         match parse_sse_event("agent_finished", failed) {
-            Some(BackendEvent::AgentFinished { status, display_name, .. }) => {
+            Some(BackendEvent::AgentFinished {
+                status,
+                display_name,
+                ..
+            }) => {
                 assert_eq!(status, "failed");
                 assert_eq!(display_name, "explorer");
             }
@@ -2364,7 +2441,8 @@ mod tests {
         }
 
         // A blank title must never blank out a good one.
-        let blank = br#"{"type":"system_event","event":"session_title","session_id":"s1","title":"   "}"#;
+        let blank =
+            br#"{"type":"system_event","event":"session_title","session_id":"s1","title":"   "}"#;
         assert!(parse_sse_event("session_title", blank).is_none());
 
         let missing = br#"{"type":"system_event","event":"session_title","session_id":"s1"}"#;

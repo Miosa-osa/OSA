@@ -3,13 +3,16 @@ mod render;
 
 use ratatui::prelude::*;
 
-use crate::event::Event;
 use crate::event::backend::SpawningAgent;
+use crate::event::Event;
 
 use super::{Component, ComponentAction};
-use entry::{AgentEntry, MainRow, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 pub use entry::AgentStatus;
 pub use entry::BgTerminalRow;
+use entry::{
+    AgentEntry, AgentPhase, MainRow, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState,
+    WaveInfo,
+};
 
 // ─── Batch grouping ──────────────────────────────────────────────────────────
 
@@ -17,7 +20,6 @@ pub(super) struct BatchGroup {
     pub batch_id: Option<String>,
     pub entries: Vec<usize>, // indices into Agents.entries
 }
-
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -257,7 +259,10 @@ pub fn short_batch_label(batch_id: &str) -> Option<String> {
 /// label matches the `explorer` shown on that worker's roster row.
 pub fn short_agent_label(name: &str) -> String {
     let trimmed = name.trim().trim_start_matches('@');
-    let tail = trimmed.rsplit(':').find(|s| !s.trim().is_empty()).unwrap_or(trimmed);
+    let tail = trimmed
+        .rsplit(':')
+        .find(|s| !s.trim().is_empty())
+        .unwrap_or(trimmed);
     let tail = tail.trim();
     let tail = tail.strip_prefix("osa-").unwrap_or(tail);
     if tail.is_empty() {
@@ -361,13 +366,23 @@ impl Agents {
         total_spawned: u32,
         warn: bool,
     ) {
-        self.fleet = Some(FleetCounts { running, queued, cap, total_spawned, warn });
+        self.fleet = Some(FleetCounts {
+            running,
+            queued,
+            cap,
+            total_spawned,
+            warn,
+        });
     }
 
     /// Feed the synthetic `main` root row from live session state (top-level
     /// action, turn elapsed, session output tokens). Rendered as roster index 0.
     pub fn set_main_row(&mut self, activity: impl Into<String>, elapsed_secs: u64, tokens: u32) {
-        self.main_row = Some(MainRow { activity: activity.into(), elapsed_secs, tokens });
+        self.main_row = Some(MainRow {
+            activity: activity.into(),
+            elapsed_secs,
+            tokens,
+        });
     }
 
     /// Tell the panel where "here" is, so trail rows can print paths the way the
@@ -402,10 +417,19 @@ impl Agents {
         action: &str,
         bytes: u64,
     ) {
-        let verb = if action == "append" { "appended" } else { "wrote" };
+        let verb = if action == "append" {
+            "appended"
+        } else {
+            "wrote"
+        };
         self.scratchpad.insert(
             0,
-            ScratchpadNote { agent: agent.into(), entry: entry.into(), action: verb, bytes },
+            ScratchpadNote {
+                agent: agent.into(),
+                entry: entry.into(),
+                action: verb,
+                bytes,
+            },
         );
         self.scratchpad.truncate(SCRATCHPAD_CAP);
         self.active = true;
@@ -439,7 +463,11 @@ impl Agents {
     pub fn entry_summary_at(&self, idx: usize) -> Option<String> {
         let idx = idx.checked_sub(1)?;
         self.entries.get(idx).map(|e| {
-            let who = if e.subject.is_empty() { &e.name } else { &e.subject };
+            let who = if e.subject.is_empty() {
+                &e.name
+            } else {
+                &e.subject
+            };
             let action = match e.status {
                 AgentStatus::Completed => "done".to_string(),
                 AgentStatus::Failed if e.current_action.is_empty() => "failed".to_string(),
@@ -490,7 +518,10 @@ impl Agents {
     /// report that the agent ended, and dropping them would understate the fleet
     /// exactly as badly as `entry_count` overstates it.
     pub fn running_count(&self) -> usize {
-        self.entries.iter().filter(|e| !e.status.is_terminal()).count()
+        self.entries
+            .iter()
+            .filter(|e| !e.status.is_terminal())
+            .count()
     }
 
     /// True if any agent has ever been tracked this session — gates opening the
@@ -587,7 +618,11 @@ impl Agents {
             // MUST mirror `draw_tree`'s `has_batches` exactly: a rule only exists
             // once there are two groups to separate (see the note there).
             let has_batches = groups.len() > 1 && groups.iter().any(|g| g.batch_id.is_some());
-            if has_batches { groups.len() as u16 } else { 0 }
+            if has_batches {
+                groups.len() as u16
+            } else {
+                0
+            }
         };
         let synth_lines = if matches!(self.synthesis, SynthesisState::Synthesizing { .. }) {
             1u16
@@ -690,9 +725,7 @@ impl Agents {
                 .finished_at
                 .map(|t| t.elapsed().as_secs() < Self::RETAIN_SECS)
                 .unwrap_or(true),
-            AgentStatus::Unknown => {
-                e.last_activity.elapsed().as_secs() < Self::UNKNOWN_REAP_SECS
-            }
+            AgentStatus::Unknown => e.last_activity.elapsed().as_secs() < Self::UNKNOWN_REAP_SECS,
             _ => true,
         });
         // Panel goes idle once nothing is left to show.
@@ -742,6 +775,7 @@ impl Agents {
                     last_activity: std::time::Instant::now(),
                     result_summary: None,
                     cost_usd: None,
+                    phase: None,
                 });
             }
         }
@@ -794,6 +828,7 @@ impl Agents {
                 last_activity: std::time::Instant::now(),
                 result_summary: None,
                 cost_usd: None,
+                phase: None,
             });
         }
         self.active = true;
@@ -891,6 +926,68 @@ impl Agents {
         }
     }
 
+    /// The BACKEND reported what this agent is doing (`background_agent_phase`).
+    ///
+    /// A phase is a signal like any other, so it revives an `Unknown` row and
+    /// refreshes `last_activity` — an agent that just told us it is waiting on
+    /// the model is demonstrably being tracked, and the panel has no business
+    /// calling that unknown. It does NOT clear `Stalled`: a stall is a positive
+    /// backend measurement of no-progress and only progress or a terminal event
+    /// may overturn it.
+    ///
+    /// Creates the row if it does not exist yet: for a background agent the
+    /// first phase can arrive before `orchestrator_agent_started`, because the
+    /// queue wait happens before the run is even set up.
+    pub fn agent_phase(&mut self, name: &str, display_name: &str, phase: &str, detail: &str) {
+        let now = std::time::Instant::now();
+        let parsed = AgentPhase {
+            name: phase.to_string(),
+            detail: detail.to_string(),
+            since: now,
+        };
+
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            if entry.status.is_terminal() {
+                return;
+            }
+            // Only restamp `since` when the phase actually CHANGED, so "queued
+            // for 4m" keeps counting from when queueing began rather than
+            // resetting on every repeat of the same phase.
+            let changed = entry
+                .phase
+                .as_ref()
+                .map(|p| p.name != parsed.name || p.detail != parsed.detail)
+                .unwrap_or(true);
+            if changed {
+                entry.phase = Some(parsed);
+            }
+            entry.last_activity = now;
+            if entry.status == AgentStatus::Unknown {
+                entry.status = AgentStatus::Running;
+            }
+        } else {
+            self.entries.push(AgentEntry {
+                name: name.to_string(),
+                role: String::new(),
+                model: String::new(),
+                subject: display_name.to_string(),
+                status: AgentStatus::Spawning,
+                current_action: String::new(),
+                recent_actions: Vec::new(),
+                tool_uses: 0,
+                tokens_used: 0,
+                batch_id: Some("background".to_string()),
+                started_at: now,
+                finished_at: None,
+                last_activity: now,
+                result_summary: None,
+                cost_usd: None,
+                phase: Some(parsed),
+            });
+            self.active = true;
+        }
+    }
+
     /// The BACKEND reported no progress for this agent (`background_agent_stalled`).
     /// Non-terminal: the row keeps its counters and its live clock, and any
     /// later progress event revives it. `stalled_ms` comes from the backend's
@@ -969,12 +1066,7 @@ impl Agents {
         self.collapsed = !self.collapsed;
     }
 
-    pub fn swarm_started(
-        &mut self,
-        id: impl Into<String>,
-        pattern: impl Into<String>,
-        count: u32,
-    ) {
+    pub fn swarm_started(&mut self, id: impl Into<String>, pattern: impl Into<String>, count: u32) {
         self.swarm = Some(SwarmInfo {
             id: id.into(),
             pattern: pattern.into(),
@@ -1110,10 +1202,22 @@ mod tests {
 
         let text = render_text(&a, 80, 12);
         // Worker subject is visible (the running row).
-        assert!(text.contains("scan modules"), "missing worker row: {:?}", text);
+        assert!(
+            text.contains("scan modules"),
+            "missing worker row: {:?}",
+            text
+        );
         // The shared-scratchpad section header + the compact write line.
-        assert!(text.contains("scratchpad"), "missing scratchpad section: {:?}", text);
-        assert!(text.contains("findings.md"), "missing entry name: {:?}", text);
+        assert!(
+            text.contains("scratchpad"),
+            "missing scratchpad section: {:?}",
+            text
+        );
+        assert!(
+            text.contains("findings.md"),
+            "missing entry name: {:?}",
+            text
+        );
         // Compact byte size (2100 → 2.1k), not raw bytes.
         assert!(text.contains("2.1k"), "missing compact size: {:?}", text);
         // Past-tense verb, not the raw action token.
@@ -1134,23 +1238,39 @@ mod tests {
         let mut a = Agents::new();
         a.agent_started("worker-1", "", "", "work", None);
         let text = render_text(&a, 80, 8);
-        assert!(!text.contains("scratchpad"), "unexpected scratchpad section: {:?}", text);
+        assert!(
+            !text.contains("scratchpad"),
+            "unexpected scratchpad section: {:?}",
+            text
+        );
     }
 
     #[test]
     fn completed_summary_populates_entry_and_renders_dim_line() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "researcher", "", "scan modules", None);
-        a.agent_completed("worker-1", Some(3), Some(1200), Some("Found 4 dead code paths".to_string()));
+        a.agent_completed(
+            "worker-1",
+            Some(3),
+            Some(1200),
+            Some("Found 4 dead code paths".to_string()),
+        );
 
         // Entry carries the summary + the terminal row reserves one extra line.
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
-        assert_eq!(entry.result_summary.as_deref(), Some("Found 4 dead code paths"));
+        assert_eq!(
+            entry.result_summary.as_deref(),
+            Some("Found 4 dead code paths")
+        );
         assert_eq!(Agents::entry_rows(entry), 3);
 
         let text = render_text(&a, 80, 12);
         // The dim `⎿ <summary>` line is visible under the finished row.
-        assert!(text.contains("Found 4 dead code paths"), "missing summary line: {:?}", text);
+        assert!(
+            text.contains("Found 4 dead code paths"),
+            "missing summary line: {:?}",
+            text
+        );
         assert!(text.contains('\u{23bf}'), "missing ⎿ glyph: {:?}", text);
     }
 
@@ -1174,20 +1294,36 @@ mod tests {
         a.agent_started("worker-1", "", "", "work", None);
         a.agent_completed("worker-1", Some(0), Some(0), Some("   \n  ".to_string()));
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
-        assert_eq!(entry.result_summary, None, "whitespace-only summary must be dropped");
+        assert_eq!(
+            entry.result_summary, None,
+            "whitespace-only summary must be dropped"
+        );
     }
 
     #[test]
     fn failed_summary_renders_in_error_style() {
         let mut a = Agents::new();
         a.agent_started("worker-1", "", "", "work", None);
-        a.agent_failed("worker-1", "timeout", Some(2), Some(500), Some("join timeout after 300ms".to_string()));
+        a.agent_failed(
+            "worker-1",
+            "timeout",
+            Some(2),
+            Some(500),
+            Some("join timeout after 300ms".to_string()),
+        );
 
         let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(entry.status, AgentStatus::Failed);
-        assert_eq!(entry.result_summary.as_deref(), Some("join timeout after 300ms"));
+        assert_eq!(
+            entry.result_summary.as_deref(),
+            Some("join timeout after 300ms")
+        );
         let text = render_text(&a, 80, 12);
-        assert!(text.contains("join timeout after 300ms"), "missing failed summary: {:?}", text);
+        assert!(
+            text.contains("join timeout after 300ms"),
+            "missing failed summary: {:?}",
+            text
+        );
     }
 
     #[test]
@@ -1198,7 +1334,11 @@ mod tests {
         a.agent_completed("w", Some(1), Some(1), Some(long));
         // Narrow panel: the summary line must fit (ellipsis), no panic, no wrap.
         let text = render_text(&a, 40, 10);
-        assert!(text.contains('\u{2026}'), "expected ellipsis truncation: {:?}", text);
+        assert!(
+            text.contains('\u{2026}'),
+            "expected ellipsis truncation: {:?}",
+            text
+        );
     }
 
     // ── FleetView roster: inline `← for agents` navigation invariants ─────────
@@ -1234,7 +1374,10 @@ mod tests {
         let mut a = Agents::new();
         assert!(!a.is_cancellable(0), "empty: main not cancellable");
         a.agent_started("w1", "researcher", "", "scan", None);
-        assert!(!a.is_cancellable(0), "with workers: main STILL not cancellable");
+        assert!(
+            !a.is_cancellable(0),
+            "with workers: main STILL not cancellable"
+        );
     }
 
     #[test]
@@ -1242,7 +1385,10 @@ mod tests {
         // `x` on a running worker stops it; a completed/failed worker is inert (E).
         let mut a = Agents::new();
         a.agent_started("w1", "researcher", "", "scan", None);
-        assert!(a.is_cancellable(1), "running worker at roster idx 1 is cancellable");
+        assert!(
+            a.is_cancellable(1),
+            "running worker at roster idx 1 is cancellable"
+        );
         a.agent_completed("w1", Some(1), Some(10), None);
         assert!(!a.is_cancellable(1), "completed worker is not cancellable");
 
@@ -1260,13 +1406,24 @@ mod tests {
         a.agent_started("worker-beta", "coder", "", "write code", None);
 
         assert_eq!(a.agent_id_at(0), None, "main has no backend agent id");
-        assert_eq!(a.agent_id_at(1).as_deref(), Some("worker-alpha"), "idx 1 → entries[0]");
-        assert_eq!(a.agent_id_at(2).as_deref(), Some("worker-beta"), "idx 2 → entries[1]");
+        assert_eq!(
+            a.agent_id_at(1).as_deref(),
+            Some("worker-alpha"),
+            "idx 1 → entries[0]"
+        );
+        assert_eq!(
+            a.agent_id_at(2).as_deref(),
+            Some("worker-beta"),
+            "idx 2 → entries[1]"
+        );
         assert_eq!(a.agent_id_at(3), None, "past the end → None");
 
         assert_eq!(a.entry_summary_at(0), None, "main has no worker summary");
         let s1 = a.entry_summary_at(1).expect("worker-alpha summary");
-        assert!(s1.contains("scan modules"), "summary names the worker subject: {s1:?}");
+        assert!(
+            s1.contains("scan modules"),
+            "summary names the worker subject: {s1:?}"
+        );
         assert!(a.entry_summary_at(3).is_none(), "past the end → None");
     }
 
@@ -1313,12 +1470,22 @@ mod tests {
         assert!(text.contains("subj0"), "first agent visible: {text:?}");
         assert!(text.contains("subj7"), "8th (cap) agent visible: {text:?}");
         // Agents beyond the cap are collapsed away, not drawn inline.
-        assert!(!text.contains("subj9"), "past-cap agent hidden inline: {text:?}");
-        assert!(!text.contains("subj19"), "last agent hidden inline: {text:?}");
+        assert!(
+            !text.contains("subj9"),
+            "past-cap agent hidden inline: {text:?}"
+        );
+        assert!(
+            !text.contains("subj19"),
+            "last agent hidden inline: {text:?}"
+        );
         // The dim overflow summary counts the remainder (20 - 8 = 12).
         assert!(text.contains("12 more agent"), "overflow summary: {text:?}");
         // height() reserves for the capped rows + the summary line, not all 20.
-        assert!(a.height() <= 30, "inline panel height stays bounded: {}", a.height());
+        assert!(
+            a.height() <= 30,
+            "inline panel height stays bounded: {}",
+            a.height()
+        );
     }
 
     #[test]
@@ -1329,7 +1496,10 @@ mod tests {
             a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None);
         }
         let text = render_text(&a, 80, 20);
-        assert!(!text.contains("more agent"), "no overflow line under cap: {text:?}");
+        assert!(
+            !text.contains("more agent"),
+            "no overflow line under cap: {text:?}"
+        );
     }
 
     #[test]
@@ -1350,7 +1520,10 @@ mod tests {
         a.set_fleet_summary(30, 0, 16, 30, true);
         let text = render_text(&a, 100, 12);
         assert!(text.contains("16/16 agents"), "clamped gauge: {text:?}");
-        assert!(!text.contains("30/16"), "impossible ratio never shown: {text:?}");
+        assert!(
+            !text.contains("30/16"),
+            "impossible ratio never shown: {text:?}"
+        );
         assert!(text.contains("large fleet"), "warn hint retained: {text:?}");
     }
 
@@ -1361,7 +1534,10 @@ mod tests {
         a.agent_started("w1", "", "", "s", None);
         a.set_fleet_summary(4, 0, 0, 4, false);
         let text = render_text(&a, 100, 12);
-        assert!(text.contains("4 agents"), "plain count when cap=0: {text:?}");
+        assert!(
+            text.contains("4 agents"),
+            "plain count when cap=0: {text:?}"
+        );
         assert!(!text.contains("4/0"), "never renders N/0: {text:?}");
     }
 
@@ -1379,7 +1555,10 @@ mod tests {
         assert!(!a.has_entries(), "…but there are no worker rows to browse");
         // Once a real worker exists, both the hint and the enter-gate fire.
         a.agent_started("w1", "researcher", "", "scan", None);
-        assert!(a.is_active() && a.has_entries(), "worker present → gate + hint agree");
+        assert!(
+            a.is_active() && a.has_entries(),
+            "worker present → gate + hint agree"
+        );
     }
 
     #[test]
@@ -1409,8 +1588,14 @@ mod tests {
             }
         }
         a.prune_stale();
-        assert!(a.entries.iter().all(|e| e.name != "done-1"), "stale finished row reaped");
-        assert!(a.entries.iter().any(|e| e.name == "live-1"), "fresh running row kept");
+        assert!(
+            a.entries.iter().all(|e| e.name != "done-1"),
+            "stale finished row reaped"
+        );
+        assert!(
+            a.entries.iter().any(|e| e.name == "live-1"),
+            "fresh running row kept"
+        );
 
         // Silence the live runner past the stale threshold → Unknown, NOT Failed.
         // The panel may only report a failure the backend actually reported.
@@ -1419,8 +1604,15 @@ mod tests {
         }
         a.prune_stale();
         let live = a.entries.iter().find(|e| e.name == "live-1").unwrap();
-        assert_eq!(live.status, AgentStatus::Unknown, "silent runner is unknown, not failed");
-        assert!(live.finished_at.is_none(), "a silent agent has not finished");
+        assert_eq!(
+            live.status,
+            AgentStatus::Unknown,
+            "silent runner is unknown, not failed"
+        );
+        assert!(
+            live.finished_at.is_none(),
+            "a silent agent has not finished"
+        );
     }
 
     #[test]
@@ -1475,17 +1667,33 @@ mod tests {
         let mut a = Agents::new();
         a.set_main_row("orchestrating the fleet", 625, 107_300);
         a.agent_started("worker-1", "researcher", "", "scanning modules", None);
-        a.agent_progress("worker-1", "reading entry.rs", 4, 4213, "scanning modules", vec![]);
+        a.agent_progress(
+            "worker-1",
+            "reading entry.rs",
+            4,
+            4213,
+            "scanning modules",
+            vec![],
+        );
 
         let lines = render_lines(&a, 70, 12);
         let joined = lines.join("\n");
 
         // The `main` root row: `● main` + its activity + compact meta.
         let main_line = lines.iter().find(|l| l.contains("main")).expect("main row");
-        assert!(main_line.contains('\u{25cf}'), "main uses ● glyph: {main_line:?}");
-        assert!(main_line.contains("orchestrating the fleet"), "main activity: {main_line:?}");
+        assert!(
+            main_line.contains('\u{25cf}'),
+            "main uses ● glyph: {main_line:?}"
+        );
+        assert!(
+            main_line.contains("orchestrating the fleet"),
+            "main activity: {main_line:?}"
+        );
         // 107_300 → "107.3k", arrow ↓.
-        assert!(main_line.contains("\u{2193}107.3k"), "main ↓tokens column: {main_line:?}");
+        assert!(
+            main_line.contains("\u{2193}107.3k"),
+            "main ↓tokens column: {main_line:?}"
+        );
         // ONE turn clock: `main.elapsed_secs` IS the turn elapsed the activity
         // status line already renders next to the interrupt hint, so the inline
         // roster root must NOT render it a second time (625s → "10m 25s").
@@ -1499,15 +1707,29 @@ mod tests {
             .iter()
             .find(|l| l.contains("researcher"))
             .expect("worker row");
-        assert!(worker_line.contains('\u{25cb}'), "unselected worker uses ◯: {worker_line:?}");
-        assert!(worker_line.contains("reading entry.rs"), "worker activity: {worker_line:?}");
-        assert!(worker_line.contains("\u{2193}4.2k"), "worker ↓tokens: {worker_line:?}");
+        assert!(
+            worker_line.contains('\u{25cb}'),
+            "unselected worker uses ◯: {worker_line:?}"
+        );
+        assert!(
+            worker_line.contains("reading entry.rs"),
+            "worker activity: {worker_line:?}"
+        );
+        assert!(
+            worker_line.contains("\u{2193}4.2k"),
+            "worker ↓tokens: {worker_line:?}"
+        );
         // Tree connector present.
-        assert!(worker_line.contains('\u{2514}') || worker_line.contains('\u{251c}'),
-            "worker row has a tree connector: {worker_line:?}");
+        assert!(
+            worker_line.contains('\u{2514}') || worker_line.contains('\u{251c}'),
+            "worker row has a tree connector: {worker_line:?}"
+        );
 
         // No row overflows the width (TestBackend is exactly 70 wide).
-        assert!(lines.iter().all(|l| l.chars().count() == 70), "all rows padded to width");
+        assert!(
+            lines.iter().all(|l| l.chars().count() == 70),
+            "all rows padded to width"
+        );
         // Nothing wrapped the activity onto a stray line (sanity on total content).
         assert!(joined.contains("researcher"), "role rendered: {joined:?}");
     }
@@ -1521,8 +1743,14 @@ mod tests {
         // Roster index 1 == entries[0] selected.
         a.set_roster_selected(Some(1));
         let lines = render_lines(&a, 60, 10);
-        let worker = lines.iter().find(|l| l.contains("coder")).expect("worker row");
-        assert!(worker.contains('\u{25cf}'), "selected worker uses ● glyph: {worker:?}");
+        let worker = lines
+            .iter()
+            .find(|l| l.contains("coder"))
+            .expect("worker row");
+        assert!(
+            worker.contains('\u{25cf}'),
+            "selected worker uses ● glyph: {worker:?}"
+        );
     }
 
     #[test]
@@ -1543,7 +1771,10 @@ mod tests {
             .expect("batch 1 header");
         // The separator reaches the last column (`─` fill, not blank).
         let last = sep.chars().nth((w - 1) as usize).unwrap();
-        assert_eq!(last, '\u{2500}', "separator fills to the right edge: {sep:?}");
+        assert_eq!(
+            last, '\u{2500}',
+            "separator fills to the right edge: {sep:?}"
+        );
     }
 
     #[test]
@@ -1554,8 +1785,14 @@ mod tests {
         a.agent_completed("w1", Some(3), Some(1200), Some("found 4 paths".to_string()));
         let lines = render_lines(&a, 70, 10);
         let joined = lines.join("\n");
-        assert!(joined.contains("Done \u{00b7}"), "Done · elapsed line: {joined:?}");
-        assert!(joined.contains("found 4 paths"), "result summary line: {joined:?}");
+        assert!(
+            joined.contains("Done \u{00b7}"),
+            "Done · elapsed line: {joined:?}"
+        );
+        assert!(
+            joined.contains("found 4 paths"),
+            "result summary line: {joined:?}"
+        );
     }
 
     #[test]
@@ -1568,8 +1805,14 @@ mod tests {
         a.agent_progress("w1", "z".repeat(200), 2, 100, "", vec![]);
         let w = 32u16;
         let lines = render_lines(&a, w, 10);
-        assert!(lines.iter().all(|l| l.chars().count() == w as usize), "no row exceeds width");
-        assert!(lines.join("\n").contains('\u{2026}'), "long content truncated with …");
+        assert!(
+            lines.iter().all(|l| l.chars().count() == w as usize),
+            "no row exceeds width"
+        );
+        assert!(
+            lines.join("\n").contains('\u{2026}'),
+            "long content truncated with …"
+        );
     }
 
     // ── FleetView roster: right-aligned meta column ────────────────────────────
@@ -1611,7 +1854,14 @@ mod tests {
             let mut a = Agents::new();
             a.set_main_row("orchestrating the fleet", 0, 5_000); // ↓5.0k
             a.agent_started("w1", "researcher", "", "scanning modules", None);
-            a.agent_progress("w1", "reading entry.rs", 4, 4_200, "scanning modules", vec![]); // ↓4.2k
+            a.agent_progress(
+                "w1",
+                "reading entry.rs",
+                4,
+                4_200,
+                "scanning modules",
+                vec![],
+            ); // ↓4.2k
             a.agent_started("w2", "coder", "", "building the crate", None);
             a.agent_progress("w2", "compiling render.rs", 7, 5_100, "building", vec![]); // ↓5.1k
 
@@ -1628,16 +1878,27 @@ mod tests {
             assert_eq!(rows.len(), 3, "expected main + 2 worker rows at w={w}");
 
             // Every row's `↓` sits in the identical column.
-            let cols: Vec<usize> = rows.iter().map(|r| arrow_col(r).expect("↓ present")).collect();
+            let cols: Vec<usize> = rows
+                .iter()
+                .map(|r| arrow_col(r).expect("↓ present"))
+                .collect();
             assert!(
                 cols.iter().all(|c| *c == cols[0]),
                 "meta ↓ column must line up across rows at w={w}: {cols:?}"
             );
             // Equal-width metas → the ↓ sits 5 columns in from the right edge
             // (`↓X.Xk`), and the token digit 'k' is the last cell.
-            assert_eq!(cols[0], w as usize - 5, "↓ is 5 cols from the edge at w={w}");
+            assert_eq!(
+                cols[0],
+                w as usize - 5,
+                "↓ is 5 cols from the edge at w={w}"
+            );
             for r in &rows {
-                assert_eq!(r[w as usize - 1], "k", "meta ends flush at the right edge at w={w}");
+                assert_eq!(
+                    r[w as usize - 1],
+                    "k",
+                    "meta ends flush at the right edge at w={w}"
+                );
             }
         }
     }
@@ -1651,8 +1912,15 @@ mod tests {
         let mut a = Agents::new();
         a.set_main_row("orchestrating", 0, 5_000); // ↓5.0k
         a.agent_started("w1", "researcher", "", "scanning modules", None);
-        a.agent_progress("w1", "reading entry.rs", 4, 4_200, "scanning modules", vec![]); // ↓4.2k
-        // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
+        a.agent_progress(
+            "w1",
+            "reading entry.rs",
+            4,
+            4_200,
+            "scanning modules",
+            vec![],
+        ); // ↓4.2k
+           // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
         a.agent_started("w2", "研究者", "", "x".repeat(120), None);
         a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![]); // ↓3.3k
 
@@ -1666,8 +1934,14 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 2, "ascii worker + wide-glyph worker rows");
 
-        let cols: Vec<usize> = rows.iter().map(|r| arrow_col(r).expect("↓ present")).collect();
-        assert_eq!(cols[0], cols[1], "wide-glyph row keeps the meta column aligned: {cols:?}");
+        let cols: Vec<usize> = rows
+            .iter()
+            .map(|r| arrow_col(r).expect("↓ present"))
+            .collect();
+        assert_eq!(
+            cols[0], cols[1],
+            "wide-glyph row keeps the meta column aligned: {cols:?}"
+        );
         // The wide-glyph row still occupies exactly the pane width (no overflow),
         // and its meta is flush-right.
         for r in &rows {
@@ -1693,7 +1967,10 @@ mod tests {
         let e = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
         assert_eq!(e.status, AgentStatus::Completed);
         assert_eq!(e.tool_uses, 12, "absent usage must not zero the tool count");
-        assert_eq!(e.tokens_used, 40_000, "absent usage must not zero the token count");
+        assert_eq!(
+            e.tokens_used, 40_000,
+            "absent usage must not zero the token count"
+        );
 
         // And a REAL zero from the wire is still honoured — `None` means absent,
         // not "ignore the backend".
@@ -1701,7 +1978,11 @@ mod tests {
         a.agent_progress("worker-2", "grep", 5, 900, "", vec![]);
         a.agent_completed("worker-2", Some(0), Some(0), None);
         let e2 = a.entries.iter().find(|e| e.name == "worker-2").unwrap();
-        assert_eq!((e2.tool_uses, e2.tokens_used), (0, 0), "an explicit 0 is applied");
+        assert_eq!(
+            (e2.tool_uses, e2.tokens_used),
+            (0, 0),
+            "an explicit 0 is applied"
+        );
     }
 
     #[test]
@@ -1737,15 +2018,36 @@ mod tests {
 
         // On screen: the row says what it knows and no more.
         let text = render_text(&a, 80, 12);
-        assert!(text.contains("state unknown"), "unknown row text missing: {text:?}");
-        assert!(text.contains("last signal"), "unknown row lacks the age: {text:?}");
-        assert!(!text.contains("stalled"), "must not claim a stall it never saw: {text:?}");
-        assert!(!text.contains("Failed"), "must not claim a failure: {text:?}");
+        // With no phase ever reported the row still admits the gap — but it
+        // says the agent is STILL BEING WATCHED rather than leaving the state
+        // open-ended. "state unknown · last signal 4m ago" named our ignorance
+        // and implied nothing would ever change; this names the gap and the
+        // fact that something is still looking.
+        assert!(
+            text.contains("no update for"),
+            "unknown row text missing: {text:?}"
+        );
+        assert!(
+            text.contains("still being watched"),
+            "an indeterminate row must say what happens next: {text:?}"
+        );
+        assert!(
+            !text.contains("stalled"),
+            "must not claim a stall it never saw: {text:?}"
+        );
+        assert!(
+            !text.contains("Failed"),
+            "must not claim a failure: {text:?}"
+        );
 
         // And it recovers: any later signal proves it is alive.
         a.agent_progress("queued-1", "grep pattern", 1, 10, "", vec![]);
         let e = a.entries.iter().find(|e| e.name == "queued-1").unwrap();
-        assert_eq!(e.status, AgentStatus::Running, "a signal revives an Unknown row");
+        assert_eq!(
+            e.status,
+            AgentStatus::Running,
+            "a signal revives an Unknown row"
+        );
     }
 
     #[test]
@@ -1778,7 +2080,10 @@ mod tests {
         assert_eq!(e.tool_uses, 3, "the stall keeps the work it had done");
 
         let text = render_text(&a, 80, 12);
-        assert!(text.contains("no progress for 14m"), "stall row text: {text:?}");
+        assert!(
+            text.contains("no progress for 14m"),
+            "stall row text: {text:?}"
+        );
 
         // A terminal event still wins — a stalled agent that later completes is
         // completed.
@@ -1786,7 +2091,11 @@ mod tests {
         assert_eq!(a.entries[0].status, AgentStatus::Completed);
         // And a stall report can never resurrect a finished row.
         a.agent_stalled("w1", 99 * 60 * 1000);
-        assert_eq!(a.entries[0].status, AgentStatus::Completed, "terminal is terminal");
+        assert_eq!(
+            a.entries[0].status,
+            AgentStatus::Completed,
+            "terminal is terminal"
+        );
     }
 
     #[test]
@@ -1822,15 +2131,103 @@ mod tests {
         }
         a.prune_stale();
         let text = render_text(&a, 80, 12);
-        assert!(!text.contains("completed"), "never claims completion: {text:?}");
-        assert!(text.contains("no recent signal"), "header states the truth: {text:?}");
+        assert!(
+            !text.contains("completed"),
+            "never claims completion: {text:?}"
+        );
+        // With no phase ever reported the header still admits it does not know
+        // — but it says the row is still being tracked rather than leaving the
+        // state open-ended, which was the whole complaint.
+        assert!(
+            text.contains("awaiting an update"),
+            "header states the truth: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_quiet_agent_reports_its_phase_instead_of_our_ignorance() {
+        // The bug, stated as a test: an agent waiting on a model goes quiet for
+        // longer than the panel's local silence threshold. It is healthy. The
+        // panel used to answer "state unknown · last signal 2m ago", which
+        // described the panel and not the agent.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        a.agent_phase(
+            "w1",
+            "explorer",
+            "awaiting_model",
+            "waiting for the first response from glm-4.7",
+        );
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
+        }
+        a.prune_stale();
+        assert_eq!(
+            a.entries[0].status,
+            AgentStatus::Unknown,
+            "silence still demotes the row — we are not pretending it reported"
+        );
+
+        let text = render_text(&a, 100, 12);
+        assert!(
+            text.contains("waiting on the model"),
+            "the row says what the AGENT is doing: {text:?}"
+        );
+        assert!(
+            !text.contains("state unknown"),
+            "never describes our ignorance when the backend told us: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_phase_revives_a_row_the_panel_had_given_up_on() {
+        // Resolution: an `Unknown` row is not a dead end. Any later word from
+        // the backend — including a phase, not just tool progress — returns it
+        // to `Running`.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
+        }
+        a.prune_stale();
+        assert_eq!(a.entries[0].status, AgentStatus::Unknown);
+
+        a.agent_phase(
+            "w1",
+            "explorer",
+            "starting",
+            "creating an isolated worktree",
+        );
+        assert_eq!(
+            a.entries[0].status,
+            AgentStatus::Running,
+            "a phase is a signal: the row is demonstrably being tracked again"
+        );
+    }
+
+    #[test]
+    fn a_phase_can_create_the_row_before_the_run_is_set_up() {
+        // A background agent is queued BEFORE its run is started, so its first
+        // phase can arrive before any `agent_started`. The roster must show it
+        // rather than drop the frame on the floor.
+        let mut a = Agents::new();
+        a.agent_phase("bg1", "explorer", "queued", "16 of 16 slots busy");
+        assert_eq!(a.entry_count(), 1, "the queued agent is visible");
+        let text = render_text(&a, 100, 12);
+        assert!(
+            text.contains("queued"),
+            "a queued agent says it is queued: {text:?}"
+        );
     }
 
     /// Flatten the `/agents` DASHBOARD render (not the inline tree) — the
     /// per-agent cost column lives there.
     fn render_dashboard_text(agents: &Agents, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| agents.draw_dashboard(f, f.area(), 0, &[], 0)).unwrap();
+        term.draw(|f| agents.draw_dashboard(f, f.area(), 0, &[], 0))
+            .unwrap();
         term.backend()
             .buffer()
             .content()
@@ -1890,7 +2287,13 @@ mod tests {
         );
 
         let text = render_dashboard_text(&a, 100, 16);
-        assert!(text.contains("$0.0043"), "sub-cent costs keep their precision: {text:?}");
-        assert!(!text.contains("$0.00 "), "a sub-cent cost must not collapse to zero: {text:?}");
+        assert!(
+            text.contains("$0.0043"),
+            "sub-cent costs keep their precision: {text:?}"
+        );
+        assert!(
+            !text.contains("$0.00 "),
+            "a sub-cent cost must not collapse to zero: {text:?}"
+        );
     }
 }

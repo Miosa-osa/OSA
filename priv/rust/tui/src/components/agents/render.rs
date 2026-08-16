@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SynthesisState, SwarmStatus};
+use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SwarmStatus, SynthesisState};
 use super::Agents;
 
 /// Braille spinner frames for running agents.
@@ -72,7 +72,11 @@ impl Agents {
             // the "N agents completed" tally while agents were still out there
             // with an undetermined state — the loudest possible version of the
             // bug this whole pass exists to remove.
-            let in_flight = self.entries.iter().filter(|e| !e.status.is_terminal()).count();
+            let in_flight = self
+                .entries
+                .iter()
+                .filter(|e| !e.status.is_terminal())
+                .count();
             let total = self.entries.len();
 
             // DETAIL-PER-SURFACE (Codex placement rule): three surfaces used to
@@ -96,11 +100,29 @@ impl Agents {
                 }
             } else if in_flight > 0 {
                 // Nothing is confirmed running, but these have not ended either.
-                format!(
-                    "{} agent{} \u{2014} no recent signal",
-                    in_flight,
-                    if in_flight == 1 { "" } else { "s" }
-                )
+                //
+                // `N agents — no recent signal` was the line the user read as
+                // "so then what the fuck happened?", and they were right to: it
+                // reported the panel's ignorance as though it were the fleet's
+                // condition, and it named no outcome and no next step. When the
+                // backend has told us what those agents are doing — queued,
+                // starting, waiting on a model — the header says so instead.
+                match dominant_phase(&self.entries) {
+                    Some(label) => format!(
+                        "{} agent{} \u{00b7} {}",
+                        in_flight,
+                        if in_flight == 1 { "" } else { "s" },
+                        label
+                    ),
+                    // Genuinely no word from the backend. Say that it is still
+                    // being watched, so the state reads as pending rather than
+                    // abandoned.
+                    None => format!(
+                        "{} agent{} \u{2014} awaiting an update",
+                        in_flight,
+                        if in_flight == 1 { "" } else { "s" }
+                    ),
+                }
             } else if total > 0 {
                 format!(
                     "{} agent{} completed",
@@ -252,10 +274,7 @@ impl Agents {
                     theme.faint(),
                     area.width as usize,
                 );
-                frame.render_widget(
-                    Paragraph::new(line),
-                    Rect::new(area.x, y, area.width, 1),
-                );
+                frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
                 y += 1;
             }
         }
@@ -392,10 +411,7 @@ impl Agents {
                     theme.faint(),
                     area.width as usize,
                 );
-                frame.render_widget(
-                    Paragraph::new(row1),
-                    Rect::new(area.x, y, area.width, 1),
-                );
+                frame.render_widget(Paragraph::new(row1), Rect::new(area.x, y, area.width, 1));
                 y += 1;
 
                 // Rows 2+: action trail. Running agents show the last up-to-3
@@ -411,7 +427,9 @@ impl Agents {
                     AgentStatus::Completed => vec![(
                         format!(
                             "Done \u{00b7} {}",
-                            crate::components::status_bar::fmt_elapsed_compact(entry.elapsed_secs()),
+                            crate::components::status_bar::fmt_elapsed_compact(
+                                entry.elapsed_secs()
+                            ),
                         ),
                         theme.task_done(),
                     )],
@@ -423,15 +441,37 @@ impl Agents {
                         };
                         vec![(msg, theme.error_text())]
                     }
-                    // The panel lost the signal. It says exactly that, and how
-                    // long ago — it does not guess an outcome.
-                    AgentStatus::Unknown => vec![(
-                        format!(
-                            "state unknown \u{00b7} last signal {}m ago",
-                            entry.silent_mins()
-                        ),
-                        theme.faint(),
-                    )],
+                    // A quiet agent. What we say depends on whether the BACKEND
+                    // ever told us what it was doing.
+                    //
+                    // The old line was `state unknown · last signal 4m ago` in
+                    // every case. It was true and it was useless: it described
+                    // the panel's ignorance, offered no way to tell a healthy
+                    // agent from a dead one, and implied nothing would ever
+                    // change. Almost every occurrence was a perfectly healthy
+                    // agent waiting on a model or queued behind the concurrency
+                    // cap — silences that are normal, expected, and now named.
+                    //
+                    // With a phase we state the agent's own condition and how
+                    // long it has held. Without one we still say we don't know,
+                    // but we also say what happens next, because "unknown
+                    // forever" was the actual complaint.
+                    AgentStatus::Unknown => match entry.phase.as_ref() {
+                        Some(p) => vec![(
+                            match p.mins() {
+                                Some(m) => format!("{} \u{00b7} {}m", p.describe(), m),
+                                None => p.describe(),
+                            },
+                            theme.faint(),
+                        )],
+                        None => vec![(
+                            format!(
+                                "no update for {}m \u{00b7} still being watched",
+                                entry.silent_mins()
+                            ),
+                            theme.faint(),
+                        )],
+                    },
                     // The BACKEND measured the stall; `current_action` already
                     // carries its wording ("no progress for 14m").
                     AgentStatus::Stalled => {
@@ -487,10 +527,21 @@ impl Agents {
                         }
                         rows.truncate(super::TRAIL_MAX_ROWS);
                         if rows.is_empty() {
-                            let msg = if entry.current_action.is_empty() {
-                                "Starting\u{2026}".to_string()
-                            } else {
+                            // No tool activity yet. `Starting…` was the same
+                            // word for a five-second spawn and a four-minute
+                            // wait on a cold model, which is exactly the stretch
+                            // the user could not account for. The phase says
+                            // which it is, and how long it has been that way.
+                            let msg = if !entry.current_action.is_empty() {
                                 entry.current_action.clone()
+                            } else {
+                                match entry.phase.as_ref() {
+                                    Some(p) => match p.mins() {
+                                        Some(m) => format!("{} \u{00b7} {}m", p.describe(), m),
+                                        None => p.describe(),
+                                    },
+                                    None => "Starting\u{2026}".to_string(),
+                                }
                             };
                             rows.push((msg, theme.faint()));
                         }
@@ -586,14 +637,15 @@ impl Agents {
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", spin), theme.spinner()),
                     Span::styled(
-                        format!("Synthesizing {} agent output{}…", count, if count == 1 { "" } else { "s" }),
+                        format!(
+                            "Synthesizing {} agent output{}…",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        ),
                         theme.spinner(),
                     ),
                 ]);
-                frame.render_widget(
-                    Paragraph::new(line),
-                    Rect::new(area.x, y, area.width, 1),
-                );
+                frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
             }
         }
 
@@ -609,10 +661,7 @@ impl Agents {
                 let swarm_line = Line::from(vec![
                     Span::styled("Swarm: ", theme.faint()),
                     Span::styled(&*swarm.pattern, theme.tool_name()),
-                    Span::styled(
-                        format!("  {} agents  ", swarm.agent_count),
-                        theme.faint(),
-                    ),
+                    Span::styled(format!("  {} agents  ", swarm.agent_count), theme.faint()),
                     Span::styled(status_str, status_style),
                 ]);
 
@@ -706,7 +755,11 @@ impl Agents {
         }
         // Live fleet gauge `<running>/<cap> agents` (Part 4.2) from `fleet_summary`.
         if let Some(ref f) = self.fleet {
-            title = format!("{}· {} ", title.trim_end(), fmt_fleet_gauge(f.running, f.cap));
+            title = format!(
+                "{}· {} ",
+                title.trim_end(),
+                fmt_fleet_gauge(f.running, f.cap)
+            );
             if f.warn {
                 title = format!("{}· large fleet ", title.trim_end());
             }
@@ -725,7 +778,12 @@ impl Agents {
 
         // Busiest agent's token count anchors the relative progress micro-bar so a
         // row's fill reflects its real share of activity (not a fabricated %).
-        let max_tokens = self.entries.iter().map(|e| e.tokens_used).max().unwrap_or(0);
+        let max_tokens = self
+            .entries
+            .iter()
+            .map(|e| e.tokens_used)
+            .max()
+            .unwrap_or(0);
 
         let mut lines: Vec<Line> = Vec::new();
 
@@ -772,13 +830,21 @@ impl Agents {
         // predicate is silently absent from the dashboard while still occupying
         // a selection index, so the cursor lands on an invisible row.
         let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 6] = [
-            ("Working", &|e: &AgentEntry| e.status == AgentStatus::Running),
+            ("Working", &|e: &AgentEntry| {
+                e.status == AgentStatus::Running
+            }),
             ("Ready", &|e: &AgentEntry| e.status == AgentStatus::Spawning),
             ("No progress reported", &|e: &AgentEntry| {
                 e.status == AgentStatus::Stalled
             }),
-            ("State unknown", &|e: &AgentEntry| e.status == AgentStatus::Unknown),
-            ("Completed", &|e: &AgentEntry| e.status == AgentStatus::Completed),
+            // Not "State unknown": for most rows here the backend HAS said what
+            // the agent is doing and the row prints it. The group label names
+            // the shared fact — these are not reporting in — without asserting
+            // that nothing is known about any of them.
+            ("Quiet", &|e: &AgentEntry| e.status == AgentStatus::Unknown),
+            ("Completed", &|e: &AgentEntry| {
+                e.status == AgentStatus::Completed
+            }),
             ("Failed", &|e: &AgentEntry| e.status == AgentStatus::Failed),
         ];
 
@@ -880,11 +946,7 @@ impl Agents {
                     theme.agent_name()
                 };
                 let status = if row.done { "done" } else { "running" };
-                let meta = format!(
-                    "  {} · {}",
-                    fmt_elapsed(row.elapsed_secs),
-                    status,
-                );
+                let meta = format!("  {} · {}", fmt_elapsed(row.elapsed_secs), status,);
                 let spans = vec![
                     Span::styled(marker, theme.plan_selected()),
                     Span::styled(format!("{} ", icon), icon_style),
@@ -935,7 +997,9 @@ impl Agents {
                 "Cost: task est. {} — no per-agent cost reported yet",
                 fmt_cost(cost)
             ),
-            (None, _) => "Cost: not reported by backend (no per-task or per-agent estimate)".to_string(),
+            (None, _) => {
+                "Cost: not reported by backend (no per-task or per-agent estimate)".to_string()
+            }
         };
         lines.push(Line::from(Span::styled(cost_note, theme.faint())));
 
@@ -973,6 +1037,33 @@ impl Agents {
 /// backend race) clamps to `cap/cap` rather than e.g. `18/16`, and `cap == 0`
 /// (unknown / unbounded — no denominator to divide by) shows a plain `N agents`
 /// instead of an odd `N/0`. The separate ">=25 large fleet" hint is unaffected.
+/// One clause summarising what the quiet, still-in-flight agents are doing,
+/// for the roster header.
+///
+/// Reports the phase held by the most non-terminal rows, so a fleet where six
+/// agents are queued and one is starting reads "6 queued" rather than a list.
+/// `None` when no row carries a backend-reported phase — the honest case where
+/// the panel really has not been told anything, which the caller renders as
+/// "awaiting an update" rather than as a claim about the agents.
+fn dominant_phase(entries: &[AgentEntry]) -> Option<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for e in entries.iter().filter(|e| !e.status.is_terminal()) {
+        if let Some(p) = e.phase.as_ref() {
+            *counts.entry(p.name.as_str()).or_insert(0) += 1;
+        }
+    }
+    let (name, n) = counts.into_iter().max_by_key(|&(_, n)| n)?;
+    let label = match name {
+        "queued" => "queued",
+        "starting" => "starting up",
+        "awaiting_model" => "waiting on the model",
+        "working" => "running tools",
+        other => other,
+    };
+    Some(format!("{} {}", n, label))
+}
+
 fn fmt_fleet_gauge(running: u32, cap: u32) -> String {
     if cap == 0 {
         format!("{} agent{}", running, if running == 1 { "" } else { "s" })

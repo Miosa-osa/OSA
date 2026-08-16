@@ -4,14 +4,19 @@
 pub enum AgentStatus {
     Spawning,
     Running,
-    /// The backend has sent nothing for this agent in a long while and we do
-    /// NOT know why. Silence is not death: a background subagent emits
-    /// `started` BEFORE it waits for a concurrency slot and emits nothing at
-    /// all while queued, so a perfectly healthy agent can be silent for
-    /// minutes. This state says exactly that — "we lost the signal" — instead
-    /// of inventing a failure. It is NOT terminal: any later progress event
-    /// returns the row to `Running`, and a terminal event still decides
-    /// Completed/Failed.
+    /// The backend has sent nothing for this agent in a long while.
+    ///
+    /// Silence is not death, and it is usually not even a problem: a subagent
+    /// waiting on a model, running a long build, or queued behind the
+    /// concurrency cap is silent and perfectly healthy. So this state never
+    /// invents a failure, and it is NOT terminal — any later signal returns the
+    /// row to `Running` and only a terminal event decides Completed/Failed.
+    ///
+    /// It is also no longer the whole story on screen. The row carries the last
+    /// [`AgentPhase`] the backend reported, so a quiet agent describes ITSELF
+    /// ("waiting on the model · 4m") instead of describing our ignorance of it.
+    /// `Unknown` now means only "not heard from lately"; what it is doing is a
+    /// separate, usually-answerable question.
     Unknown,
     /// The BACKEND reported this agent as making no progress
     /// (`background_agent_stalled`, phase-aware). Unlike `Unknown` this is a
@@ -70,6 +75,58 @@ pub struct AgentEntry {
     /// same claim as `Some(0.0)`. It renders as `—`; rendering it as `$0.00`
     /// would be the panel asserting a measurement nobody made.
     pub cost_usd: Option<f64>,
+    /// The last phase the BACKEND reported for this agent (`background_agent_phase`):
+    /// what it is doing during the stretch before it has tool activity to show.
+    ///
+    /// This is the difference between describing the agent and describing our
+    /// ignorance of it. A row that has gone quiet but whose last reported phase
+    /// was `awaiting_model` is not in an unknown state — it is waiting for a
+    /// model, which is the single most common reason a healthy subagent says
+    /// nothing for minutes. `None` only when no phase was ever reported (an
+    /// older backend, or a foreground/fleet path that does not emit them).
+    pub phase: Option<AgentPhase>,
+}
+
+/// A backend-reported phase, kept as a parsed enum so rendering decisions are
+/// made on a known set rather than on string matching at the draw site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentPhase {
+    /// `queued` | `starting` | `awaiting_model` | `working` | anything future.
+    pub name: String,
+    /// Human detail; may be empty.
+    pub detail: String,
+    /// When this phase was received, so the row can say how long it has held.
+    pub since: std::time::Instant,
+}
+
+impl AgentPhase {
+    /// The clause shown to the user, in the present tense and about the AGENT.
+    /// Never about the panel.
+    pub fn describe(&self) -> String {
+        let base = match self.name.as_str() {
+            "queued" => "queued, not started yet",
+            "starting" => "starting up",
+            "awaiting_model" => "waiting on the model",
+            "working" => "running tools",
+            other => other,
+        };
+        if self.detail.is_empty() {
+            base.to_string()
+        } else {
+            format!("{} \u{00b7} {}", base, self.detail)
+        }
+    }
+
+    /// Whole minutes in this phase, or `None` under a minute (where a duration
+    /// is noise rather than information).
+    pub fn mins(&self) -> Option<u64> {
+        let m = self.since.elapsed().as_secs() / 60;
+        if m >= 1 {
+            Some(m)
+        } else {
+            None
+        }
+    }
 }
 
 impl AgentEntry {
@@ -179,4 +236,3 @@ impl Default for SynthesisState {
         Self::Idle
     }
 }
-

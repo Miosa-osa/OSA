@@ -14,9 +14,15 @@ pub struct SpawningAgent {
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     // === SSE Connection Lifecycle ===
-    SseConnected { session_id: String },
-    SseDisconnected { error: Option<String> },
-    SseReconnecting { attempt: u32 },
+    SseConnected {
+        session_id: String,
+    },
+    SseDisconnected {
+        error: Option<String>,
+    },
+    SseReconnecting {
+        attempt: u32,
+    },
     SseAuthFailed,
 
     // === Streaming ===
@@ -37,7 +43,9 @@ pub enum BackendEvent {
         session_id: String,
         message_id: Option<String>,
     },
-    ThinkingDelta { text: String },
+    ThinkingDelta {
+        text: String,
+    },
 
     // === Agent Response ===
     //
@@ -95,7 +103,10 @@ pub enum BackendEvent {
     },
 
     // === LLM ===
-    LlmRequest { iteration: u32, max_iterations: Option<u32> },
+    LlmRequest {
+        iteration: u32,
+        max_iterations: Option<u32>,
+    },
     LlmResponse {
         duration_ms: u64,
         input_tokens: u64,
@@ -103,10 +114,14 @@ pub enum BackendEvent {
     },
 
     // === Signal ===
-    SignalClassified { signal: Signal },
+    SignalClassified {
+        signal: Signal,
+    },
 
     // === Orchestrator ===
-    OrchestratorTaskStarted { task_id: String },
+    OrchestratorTaskStarted {
+        task_id: String,
+    },
     OrchestratorAgentsSpawning {
         agent_count: usize,
         agents: Vec<SpawningAgent>,
@@ -152,8 +167,12 @@ pub enum BackendEvent {
         wave_number: u32,
         total_waves: u32,
     },
-    OrchestratorSynthesizing { agent_count: usize },
-    OrchestratorTaskCompleted { task_id: String },
+    OrchestratorSynthesizing {
+        agent_count: usize,
+    },
+    OrchestratorTaskCompleted {
+        task_id: String,
+    },
 
     // === Fleet (full-power background nodes → CC FleetView roster) ===
     /// A full-power fleet node was spawned (Part 3.2 of FLEETVIEW_DESIGN). Drives
@@ -241,6 +260,25 @@ pub enum BackendEvent {
         phase: String,
         stalled_ms: u64,
         message: String,
+    },
+    /// What a subagent is doing during the stretch before it has any tool
+    /// activity to report — queued behind the concurrency cap, setting up its
+    /// worktree, or waiting on the model's first response.
+    ///
+    /// This is the frame that makes silence legible. Between dispatch and the
+    /// first tool call the backend emitted nothing at all (measured: 7.2s in the
+    /// best case, minutes on a real repo with a real model), so the panel had
+    /// only its own 90-second local timer to go on and could say nothing truer
+    /// than "state unknown". A phase is a positive statement from the side that
+    /// can actually see the run.
+    BackgroundAgentPhase {
+        agent_id: String,
+        display_name: String,
+        /// `queued` | `starting` | `awaiting_model` | `working`.
+        phase: String,
+        /// Human detail ("3 of 16 slots busy", "waiting for the first response
+        /// from glm-4.7"). May be empty.
+        detail: String,
     },
 
     // === Multi-agent workflow (Claude Code parity) ===
@@ -339,9 +377,16 @@ pub enum BackendEvent {
         agent_count: u32,
         result_preview: String,
     },
-    SwarmFailed { swarm_id: String, reason: String },
-    SwarmCancelled { swarm_id: String },
-    SwarmTimeout { swarm_id: String },
+    SwarmFailed {
+        swarm_id: String,
+        reason: String,
+    },
+    SwarmCancelled {
+        swarm_id: String,
+    },
+    SwarmTimeout {
+        swarm_id: String,
+    },
 
     // === Swarm Intelligence ===
     SwarmIntelligenceStarted {
@@ -349,7 +394,10 @@ pub enum BackendEvent {
         intelligence_type: String,
         task: String,
     },
-    SwarmIntelligenceRound { swarm_id: String, round: u32 },
+    SwarmIntelligenceRound {
+        swarm_id: String,
+        round: u32,
+    },
 
     // === Goal Verification (independent skeptic panel) ===
     /// The harness-owned goal verifier ran (or is running) a skeptic-panel
@@ -367,7 +415,10 @@ pub enum BackendEvent {
         total: u32,
         gaps: Vec<String>,
     },
-    SwarmIntelligenceConverged { swarm_id: String, round: u32 },
+    SwarmIntelligenceConverged {
+        swarm_id: String,
+        round: u32,
+    },
 
     // === Shared scratchpad (multi-agent coordination surface) ===
     /// An agent wrote or appended to the shared file-based scratchpad during a
@@ -450,9 +501,17 @@ pub enum BackendEvent {
         outcome: String,
         duration_ms: u64,
     },
-    HookBlocked { hook_name: String, reason: String },
-    BudgetWarning { utilization: f64, message: String },
-    BudgetExceeded { message: String },
+    HookBlocked {
+        hook_name: String,
+        reason: String,
+    },
+    BudgetWarning {
+        utilization: f64,
+        message: String,
+    },
+    BudgetExceeded {
+        message: String,
+    },
 
     // === Retry / Error visibility (WS1 item 8) ===
     /// Provider call failed and the backend is retrying after `delay_ms`.
@@ -463,10 +522,15 @@ pub enum BackendEvent {
         reason: String,
     },
     /// Turn-fatal backend error (`llm_error` / `context_overflow`).
-    TurnError { kind: String, reason: String },
+    TurnError {
+        kind: String,
+        reason: String,
+    },
 
     // === Parse Warnings ===
-    ParseWarning { message: String },
+    ParseWarning {
+        message: String,
+    },
 
     // === HTTP Response Results ===
     HealthResult(Result<HealthResponse, String>),
@@ -486,7 +550,10 @@ pub enum BackendEvent {
     /// MCP server list fetch. The `bool` is `open`: `true` opens the `/mcp`
     /// dialog (an explicit `/mcp` request), `false` is a quiet background
     /// refresh that only updates the status-bar chip count.
-    McpServersLoaded(Result<crate::client::types::McpServersResponse, String>, bool),
+    McpServersLoaded(
+        Result<crate::client::types::McpServersResponse, String>,
+        bool,
+    ),
     CostLoaded(Result<crate::client::types::CostResponse, String>),
     SkillsBrowserLoaded(Result<Vec<crate::client::types::SkillEntry>, String>),
     MemoriesLoaded(Result<crate::client::types::MemoriesResponse, String>),

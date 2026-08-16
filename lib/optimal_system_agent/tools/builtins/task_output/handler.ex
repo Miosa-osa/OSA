@@ -77,6 +77,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
   defp format_run(run) do
     """
     Agent #{run.agent_id} is #{run.status}.
+    - Liveness: #{liveness_line(run.agent_id)}
+    - Doing: #{phase_line(run)}
     - Role: #{run.role}
     - Parent: #{run.parent_session_id}
     - Tools: #{run.tool_count}
@@ -85,4 +87,63 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
     """
     |> String.trim()
   end
+
+  # `run.status` is a STORED field, not a probe: a run whose process vanished
+  # without writing a terminal status reports `:running` forever, so this tool
+  # used to describe a dead agent as working and there was no way for anyone —
+  # model or user — to tell. `RunStore.liveness/1` adjudicates against the
+  # cross-process ownership lease, which is heartbeated by the owner and checked
+  # against the OS pid AND its start time, so a recycled pid cannot pass for a
+  # live one.
+  defp liveness_line(agent_id) do
+    case RunStore.liveness(agent_id) do
+      {:alive, facts} ->
+        "confirmed alive (a live process holds this run's lease)#{silence_note(facts)}"
+
+      {:dead, _facts} ->
+        "DEAD — the process that owned this run is gone and it never recorded a " <>
+          "result. Its output is not coming. Re-dispatch it if the work still matters."
+
+      {:finished, facts} ->
+        "finished (#{facts.status})"
+
+      {:unknown, facts} ->
+        "unknown — no ownership lease could be read for this run" <> silence_note(facts)
+    end
+  rescue
+    _ -> "unknown"
+  end
+
+  # Silence is reported from the BACKEND's own clock (`last_progress_at`), not
+  # from when a UI last happened to receive a frame, and it is never presented
+  # as evidence of death — a subagent inside a long build or a long generation
+  # is silent and perfectly healthy.
+  defp silence_note(%{silent_ms: ms}) when is_integer(ms) and ms >= 60_000 do
+    ", last did something #{div(ms, 60_000)}m ago"
+  end
+
+  defp silence_note(%{silent_ms: ms}) when is_integer(ms) do
+    ", last did something #{div(ms, 1000)}s ago"
+  end
+
+  defp silence_note(_), do: ""
+
+  # What the agent is doing right now, for the whole stretch before it has any
+  # tool activity to report — which on a real repo and a real model is minutes.
+  defp phase_line(run) do
+    detail = Map.get(run, :phase_detail)
+
+    case Map.get(run, :phase) do
+      nil -> "not reported"
+      :queued -> "queued, not started yet" <> paren(detail)
+      :starting -> "starting up" <> paren(detail)
+      :awaiting_model -> "waiting on the model" <> paren(detail)
+      :working -> "running tools" <> paren(detail)
+      other -> to_string(other) <> paren(detail)
+    end
+  end
+
+  defp paren(nil), do: ""
+  defp paren(""), do: ""
+  defp paren(d), do: " (#{d})"
 end

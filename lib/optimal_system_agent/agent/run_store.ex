@@ -94,7 +94,25 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           # runs are safe to re-dispatch. Optional: populated only when a caller
           # passes `:posture` to `start_run/1` (or persists it in the messages
           # meta), so it defaults to nil and the resumer stays safe-by-default.
-          posture: atom() | nil
+          posture: atom() | nil,
+          # WHAT the run is doing right now, for the whole stretch before it has
+          # any tool activity to report. `status` only distinguishes running from
+          # finished; between dispatch and the first tool call — which is minutes
+          # on a real repo with a real model — every observer saw `:running` with
+          # a zero tool count and no way to tell queueing from worktree setup
+          # from waiting on the model's first token. See `Orchestrator.emit_phase/5`.
+          phase: atom() | nil,
+          # Human detail for `phase` ("3 of 16 slots busy", "copying worktree").
+          phase_detail: String.t() | nil,
+          # When `phase` last changed, so a reader can state how long the run has
+          # been in its current phase without inventing a clock of its own.
+          phase_at: DateTime.t() | nil,
+          # When the run last reported ANY progress (a tool call, via
+          # `progress/3`); `nil` until the first one. This is the backend-side
+          # answer to "when did it last do something". Before this field the only
+          # timestamp on a run was `started_at`, so the TUI's own 90-second
+          # silence guess was the only signal that existed anywhere.
+          last_progress_at: DateTime.t() | nil
         }
 
   @doc "Start or replace a run record."
@@ -130,7 +148,16 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         worktree_snapshot_ref: nil,
         # W3/D3 — optional coordinator posture (see @type). Additive: absent
         # callers leave it nil and nothing changes.
-        posture: Map.get(attrs, :posture)
+        posture: Map.get(attrs, :posture),
+        # A run is born in a phase. `:queued` is the one that matters: the row
+        # now exists from DISPATCH rather than from admission, so a background
+        # agent waiting for a concurrency slot is a row anyone can look up
+        # instead of a `nil` that `task_wait` read as "no such run, treat as
+        # terminal" and the stall watcher read as "nothing to watch, exit".
+        phase: Map.get(attrs, :phase),
+        phase_detail: Map.get(attrs, :phase_detail),
+        phase_at: started_at,
+        last_progress_at: nil
       }
 
     :ets.insert(@table, {agent_id, run})
@@ -165,6 +192,14 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   def progress(agent_id, action, tool_count \\ 0) do
     update(agent_id, fn run ->
       run
+      # A tool call is proof the run is past every setup phase and doing work.
+      # Recording the moment is what lets any reader distinguish "silent for 20
+      # seconds" from "silent for 20 minutes" from the backend's own clock
+      # rather than from when a UI last happened to receive a frame.
+      |> Map.put(:last_progress_at, DateTime.utc_now())
+      |> Map.put(:phase, :working)
+      |> Map.put(:phase_detail, action)
+      |> Map.put(:phase_at, DateTime.utc_now())
       |> Map.put(:tool_count, max(run.tool_count, tool_count))
       # Newest-first ring of the last 5 actions (CC recentActivities parity);
       # consecutive duplicates collapse so start/end pairs don't double up.
@@ -175,6 +210,102 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     end)
 
     append(agent_id, "PROGRESS tools=#{tool_count}\n\n#{action}")
+  end
+
+  @doc """
+  Record what a run is doing right now, for the stretch before it has any tool
+  activity to report.
+
+  A no-op when the row does not exist, so a caller may narrate a phase without
+  first proving the run was registered. Terminal rows are never re-phased — a
+  completed run is not "starting".
+  """
+  @spec set_phase(String.t(), atom(), String.t()) :: :ok
+  def set_phase(agent_id, phase, detail \\ "")
+      when is_binary(agent_id) and is_atom(phase) do
+    update(agent_id, fn run ->
+      if Map.get(run, :status) == :running do
+        run
+        |> Map.put(:phase, phase)
+        |> Map.put(:phase_detail, detail)
+        |> Map.put(:phase_at, DateTime.utc_now())
+      else
+        run
+      end
+    end)
+  end
+
+  @doc """
+  The honest answer to "is this agent alive?".
+
+  Every liveness question in the product was previously answered from a STORED
+  status field: a run whose process vanished without a terminal transition kept
+  reporting `:running` forever, and `task_output` would cheerfully describe a
+  corpse as working. Meanwhile this module already maintained the evidence that
+  can actually settle it — the cross-process ownership lease, heartbeated by the
+  owner and validated against the OS pid *and* its start time so a recycled pid
+  cannot impersonate a dead owner — and nothing outside this file ever read it.
+
+  Returns one of:
+
+    * `{:alive, %{}}`     — a live process holds the lease. The run is genuinely
+      running somewhere, whether or not it has said anything recently.
+    * `{:dead, %{}}`      — the lease expired and its owner is not alive. The
+      process that was running this is gone and it never wrote a terminal
+      status: this is the "START with no STOP" shape.
+    * `{:finished, %{}}`  — the row reached a terminal status normally.
+    * `{:unknown, %{}}`   — no lease file, or a lease we cannot adjudicate
+      (held by another host, unreadable). Stated as unknown, never guessed.
+
+  The map carries `:silent_ms` (since the last recorded progress, or since the
+  run started when there has been none) and `:phase`, so a caller can say what
+  the run is doing as well as whether it is there.
+  """
+  @spec liveness(String.t()) :: {:alive | :dead | :finished | :unknown, map()}
+  def liveness(agent_id) when is_binary(agent_id) do
+    run = get(agent_id)
+
+    facts = %{
+      phase: run && Map.get(run, :phase),
+      phase_detail: run && Map.get(run, :phase_detail),
+      status: run && Map.get(run, :status),
+      silent_ms: silent_ms(run)
+    }
+
+    cond do
+      is_nil(run) ->
+        {:unknown, facts}
+
+      Map.get(run, :status) != :running ->
+        {:finished, facts}
+
+      true ->
+        case lease_state(agent_id) do
+          # We hold it ourselves: this BEAM is the one running it.
+          {:mine, _} -> {:alive, facts}
+          {:held, _} -> {:alive, facts}
+          # Expired AND the owner is not alive — `lease_state/1` only returns
+          # `:expired` after the OS-level pid + pid-start-time check says so.
+          {:expired, _} -> {:dead, facts}
+          {:free, _} -> {:unknown, facts}
+        end
+    end
+  rescue
+    _ -> {:unknown, %{phase: nil, phase_detail: nil, status: nil, silent_ms: nil}}
+  end
+
+  # Milliseconds since this run last demonstrably did something. Falls back to
+  # the run's own start when it has never reported progress — which is the
+  # normal state of a healthy agent that has not reached its first tool call.
+  defp silent_ms(nil), do: nil
+
+  defp silent_ms(run) do
+    ref = Map.get(run, :last_progress_at) || Map.get(run, :started_at)
+
+    case ref do
+      %DateTime{} = t -> DateTime.diff(DateTime.utc_now(), t, :millisecond)
+      _ -> nil
+    end
   end
 
   @doc """

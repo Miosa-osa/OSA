@@ -165,8 +165,10 @@ impl App {
                 // restart, mirroring the same commands enter_overdrive sends.
                 let mode = self.status.permission_mode();
                 self.spawn_backend_command("permission_mode", mode.backend_token());
-                let dangerous =
-                    matches!(mode, crate::components::status_bar::PermissionMode::BypassPermissions);
+                let dangerous = matches!(
+                    mode,
+                    crate::components::status_bar::PermissionMode::BypassPermissions
+                );
                 self.spawn_backend_command("dangerous_mode", if dangerous { "on" } else { "off" });
                 // Coordinator state is backend-authoritative (sticky per-session
                 // store), the opposite direction from permission mode. Query it on
@@ -471,7 +473,10 @@ impl App {
                         // SSE reconnect/replay the same ToolCallStart can arrive
                         // twice; without this guard `bg_shell_count` drifted up
                         // (one completion event can only decrement it once).
-                        if self.counted_bg_shells.insert(bg_shell_signature(&name, &args)) {
+                        if self
+                            .counted_bg_shells
+                            .insert(bg_shell_signature(&name, &args))
+                        {
                             self.bg_shell_count += 1;
                             self.refresh_bg_indicators();
                         }
@@ -546,12 +551,19 @@ impl App {
                 // Take this call's hook runs. Removing rather than reading is
                 // what keeps the map bounded and what stops a second call from
                 // inheriting the first's bracket.
-                let call_hooks = self.hook_runs_for_call.remove(&pending_key).unwrap_or_default();
+                let call_hooks = self
+                    .hook_runs_for_call
+                    .remove(&pending_key)
+                    .unwrap_or_default();
                 if self.hook_runs_current_call.as_deref() == Some(pending_key.as_str()) {
                     self.hook_runs_current_call = None;
                 }
-                self.activity
-                    .tool_end_with_id(&name, duration_ms, success, tool_call_id.as_deref());
+                self.activity.tool_end_with_id(
+                    &name,
+                    duration_ms,
+                    success,
+                    tool_call_id.as_deref(),
+                );
                 self.activity.set_phase(ProcessingPhase::Waiting);
                 // Item 3 — after a tool completes we're blocked on the model to
                 // resume streaming; name that wait instead of a flavor verb.
@@ -604,7 +616,8 @@ impl App {
                     // patterns, Listed 4 dirs` row. The run is still broken by
                     // assistant prose, a non-foldable tool, a permission prompt
                     // and turn end, all handled at their own sites.
-                    self.collapse.add_with_hooks(&kind, &args, success, call_hooks);
+                    self.collapse
+                        .add_with_hooks(&kind, &args, success, call_hooks);
                     self.sync_live_tool_summary();
                     debug!(
                         "Tool call end (collapsed): {} ({}ms, success={})",
@@ -633,10 +646,7 @@ impl App {
                     // own detail explains any block, so blocked hooks stay in
                     // the completed numerator and only `failed` gets its own
                     // number. Zero runs render nothing at all.
-                    crate::components::chat::message::append_hook_bracket(
-                        &mut lines,
-                        call_hooks,
-                    );
+                    crate::components::chat::message::append_hook_bracket(&mut lines, call_hooks);
                     if !lines.is_empty() {
                         use crate::components::chat::message::ToolCallData;
                         self.chat.add_tool_message_rich(ToolCallData {
@@ -667,11 +677,8 @@ impl App {
                     if !results.is_empty() {
                         let (res, _succ) = results.remove(0);
                         if built_tool_message && !res.is_empty() {
-                            self.chat.update_last_tool_result(
-                                &name,
-                                tool_call_id.as_deref(),
-                                &res,
-                            );
+                            self.chat
+                                .update_last_tool_result(&name, tool_call_id.as_deref(), &res);
                         }
                         self.chat.finalize_tool(&name, tool_call_id.as_deref());
                     }
@@ -716,7 +723,10 @@ impl App {
                 }
                 debug!("Tool result: {} (success={})", name, success);
             }
-            BackendEvent::LlmRequest { iteration, max_iterations } => {
+            BackendEvent::LlmRequest {
+                iteration,
+                max_iterations,
+            } => {
                 self.activity.set_iteration(iteration as u32);
                 self.activity.set_max_iterations(max_iterations);
                 self.status.set_iteration(iteration as u32);
@@ -753,7 +763,11 @@ impl App {
                 // a 0-100 percentage. If it's absent/zero but the token counts are
                 // present, derive the ratio from estimated/max so the meter still
                 // reflects real usage instead of sticking at 0%.
-                let mut ratio = if utilization > 1.0 { utilization / 100.0 } else { utilization };
+                let mut ratio = if utilization > 1.0 {
+                    utilization / 100.0
+                } else {
+                    utilization
+                };
                 if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }
@@ -775,7 +789,8 @@ impl App {
                 subject,
                 active_form,
             } => {
-                self.tasks.add(task_id.clone(), subject.clone(), String::new());
+                self.tasks
+                    .add(task_id.clone(), subject.clone(), String::new());
                 self.task_checklist.add(task_id, subject, Some(active_form));
                 self.recompute_layout();
             }
@@ -798,17 +813,23 @@ impl App {
                 self.task_checklist.clear();
                 for task in tasks {
                     let status = match task.status.as_str() {
-                        "completed" => crate::components::task_checklist::ChecklistStatus::Completed,
-                        "in_progress" => crate::components::task_checklist::ChecklistStatus::InProgress,
+                        "completed" => {
+                            crate::components::task_checklist::ChecklistStatus::Completed
+                        }
+                        "in_progress" => {
+                            crate::components::task_checklist::ChecklistStatus::InProgress
+                        }
                         "failed" => crate::components::task_checklist::ChecklistStatus::Failed,
                         _ => crate::components::task_checklist::ChecklistStatus::Pending,
                     };
                     let id = task.id.clone();
-                    self.task_checklist.add(task.id, task.subject, task.active_form);
+                    self.task_checklist
+                        .add(task.id, task.subject, task.active_form);
                     self.task_checklist.update(&id, status);
                 }
                 self.task_checklist.show();
-                self.activity.set_active_verb(self.task_checklist.current_active_form());
+                self.activity
+                    .set_active_verb(self.task_checklist.current_active_form());
                 self.recompute_layout();
             }
             BackendEvent::TaskChecklistHide => {
@@ -840,8 +861,7 @@ impl App {
                     self.header.set_tool_count(tools.len());
                     // Refresh the capability-gate: commands whose required tools are
                     // now present become visible; those still missing stay hidden.
-                    self.available_tools =
-                        tools.iter().map(|t| t.name.clone()).collect();
+                    self.available_tools = tools.iter().map(|t| t.name.clone()).collect();
                     self.refresh_command_completions();
                     self.sidebar.set_tool_count(tools.len());
                     // Identity for the welcome/banner comes off the STATUS BAR —
@@ -851,8 +871,7 @@ impl App {
                     // copy and printed "anthropic / llama3.2:latest" while the bar
                     // showed the real model).
                     let (provider, model) = self.identity();
-                    self.chat
-                        .set_welcome_info(&provider, &model, tools.len());
+                    self.chat.set_welcome_info(&provider, &model, tools.len());
 
                     // Emit the OSA welcome BANNER (bordered box + ASCII logo) into
                     // the terminal scrollback once, after tools load so the count
@@ -919,14 +938,13 @@ impl App {
             },
             BackendEvent::ContextLoaded(result) => match result {
                 Ok(stats) => {
-                    self.context_stats =
-                        Some(crate::dialogs::context_breakdown::ContextStats {
-                            system_tokens: stats.system_tokens,
-                            conversation_tokens: stats.conversation_tokens,
-                            tool_result_tokens: stats.tool_result_tokens,
-                            max_tokens: stats.max_tokens,
-                            used_tokens: stats.used_tokens,
-                        });
+                    self.context_stats = Some(crate::dialogs::context_breakdown::ContextStats {
+                        system_tokens: stats.system_tokens,
+                        conversation_tokens: stats.conversation_tokens,
+                        tool_result_tokens: stats.tool_result_tokens,
+                        max_tokens: stats.max_tokens,
+                        used_tokens: stats.used_tokens,
+                    });
                     if self.state.can_transition_to(AppState::ContextBreakdown) {
                         self.enter_overlay(AppState::ContextBreakdown);
                     }
@@ -940,8 +958,7 @@ impl App {
             },
             BackendEvent::TrustLoaded(result) => match result {
                 Ok(status) => {
-                    let risks: Vec<String> =
-                        status.risks.iter().map(|r| r.label.clone()).collect();
+                    let risks: Vec<String> = status.risks.iter().map(|r| r.label.clone()).collect();
                     self.trust_dialog = Some(crate::dialogs::trust::TrustDialog::new(
                         status.path.clone(),
                         risks,
@@ -1034,8 +1051,7 @@ impl App {
                             toggleable: s.toggleable,
                         })
                         .collect();
-                    self.mcp_servers =
-                        Some(crate::dialogs::mcp_servers::McpServers::new(servers));
+                    self.mcp_servers = Some(crate::dialogs::mcp_servers::McpServers::new(servers));
                     // Only an explicit `/mcp` opens the dialog; the background
                     // chip refresh just updates the count above.
                     if open && self.state.can_transition_to(AppState::Mcp) {
@@ -1135,8 +1151,7 @@ impl App {
                             priority: t.priority,
                         })
                         .collect();
-                    self.tasks_panel =
-                        Some(crate::dialogs::tasks_panel::TasksPanel::new(tasks));
+                    self.tasks_panel = Some(crate::dialogs::tasks_panel::TasksPanel::new(tasks));
                     if self.state.can_transition_to(AppState::Tasks) {
                         self.enter_overlay(AppState::Tasks);
                     }
@@ -1171,8 +1186,9 @@ impl App {
                             })
                             .collect(),
                     };
-                    self.metrics_dashboard =
-                        Some(crate::dialogs::metrics_dashboard::MetricsDashboard::new(data));
+                    self.metrics_dashboard = Some(
+                        crate::dialogs::metrics_dashboard::MetricsDashboard::new(data),
+                    );
                     if self.state.can_transition_to(AppState::Metrics) {
                         self.enter_overlay(AppState::Metrics);
                     }
@@ -1219,8 +1235,9 @@ impl App {
                             current: b.current,
                         })
                         .collect();
-                    self.sandbox_picker =
-                        Some(crate::dialogs::sandbox_picker::SandboxPicker::new(backends, mode));
+                    self.sandbox_picker = Some(crate::dialogs::sandbox_picker::SandboxPicker::new(
+                        backends, mode,
+                    ));
                     if self.state.can_transition_to(AppState::Sandbox) {
                         self.enter_overlay(AppState::Sandbox);
                     }
@@ -1240,7 +1257,11 @@ impl App {
                             crate::dialogs::channels_panel::ChannelEntry {
                                 name: ch.name,
                                 connected,
-                                status: if connected { "connected".into() } else { "not connected".into() },
+                                status: if connected {
+                                    "connected".into()
+                                } else {
+                                    "not connected".into()
+                                },
                                 kind: ch
                                     .module
                                     .and_then(|m| m.rsplit('.').next().map(|s| s.to_lowercase()))
@@ -1419,13 +1440,12 @@ impl App {
                 Ok(resp) => {
                     let current_provider = self.header.provider().to_string();
                     let current_model = self.header.model_name().to_string();
-                    let picker =
-                        crate::dialogs::model_picker::ModelPicker::new_provider_first(
-                            resp.providers,
-                            resp.detected,
-                            current_provider,
-                            current_model,
-                        );
+                    let picker = crate::dialogs::model_picker::ModelPicker::new_provider_first(
+                        resp.providers,
+                        resp.detected,
+                        current_provider,
+                        current_model,
+                    );
                     self.model_picker = Some(picker);
                     self.enter_overlay(AppState::ModelPicker);
                     // Ordered AFTER the picker exists, not fired alongside the
@@ -1449,10 +1469,11 @@ impl App {
                     );
                     let current_provider = self.header.provider().to_string();
                     let current_model = self.header.model_name().to_string();
-                    self.model_picker = Some(crate::dialogs::model_picker::ModelPicker::new_fallback(
-                        current_provider,
-                        current_model,
-                    ));
+                    self.model_picker =
+                        Some(crate::dialogs::model_picker::ModelPicker::new_fallback(
+                            current_provider,
+                            current_model,
+                        ));
                     self.enter_overlay(AppState::ModelPicker);
                     self.load_provider_usage();
                 }
@@ -1520,13 +1541,15 @@ impl App {
                             crate::app::open_in_browser(&url);
                         }
 
-                        if let Some(crate::dialogs::model_picker::ModelPickerAction::SaveKeyAndSwitch {
-                            provider,
-                            runtime_provider,
-                            api_key,
-                            model,
-                            base_url,
-                        }) = action
+                        if let Some(
+                            crate::dialogs::model_picker::ModelPickerAction::SaveKeyAndSwitch {
+                                provider,
+                                runtime_provider,
+                                api_key,
+                                model,
+                                base_url,
+                            },
+                        ) = action
                         {
                             self.exit_overlay();
                             self.model_picker = None;
@@ -1675,7 +1698,9 @@ impl App {
                 self.agents.on_agents_spawning(&agents);
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorTaskAppraised { estimated_cost_usd, .. } => {
+            BackendEvent::OrchestratorTaskAppraised {
+                estimated_cost_usd, ..
+            } => {
                 // Record the task-level cost estimate so the agents dashboard can
                 // surface it. There is no per-agent cost signal from the backend,
                 // so this whole-task figure is the only cost we can honestly show.
@@ -1683,16 +1708,41 @@ impl App {
                     self.agents.set_estimated_cost(estimated_cost_usd);
                 }
             }
-            BackendEvent::OrchestratorAgentStarted { agent_name, role, model, subject, batch_id } => {
-                self.agents.agent_started(&agent_name, &role, &model, &subject, batch_id);
+            BackendEvent::OrchestratorAgentStarted {
+                agent_name,
+                role,
+                model,
+                subject,
+                batch_id,
+            } => {
+                self.agents
+                    .agent_started(&agent_name, &role, &model, &subject, batch_id);
                 // Short human label, never the raw `agent:session-…:osa-x` key.
                 let short = crate::components::agents::short_agent_label(&agent_name);
-                let display = if role.is_empty() { short } else { format!("{}/{}", short, role) };
+                let display = if role.is_empty() {
+                    short
+                } else {
+                    format!("{}/{}", short, role)
+                };
                 self.sidebar.set_current_agent(display);
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorAgentProgress { agent_name, current_action, tool_uses, tokens_used, subject, recent_actions } => {
-                self.agents.agent_progress(&agent_name, &current_action, tool_uses, tokens_used, &subject, recent_actions);
+            BackendEvent::OrchestratorAgentProgress {
+                agent_name,
+                current_action,
+                tool_uses,
+                tokens_used,
+                subject,
+                recent_actions,
+            } => {
+                self.agents.agent_progress(
+                    &agent_name,
+                    &current_action,
+                    tool_uses,
+                    tokens_used,
+                    &subject,
+                    recent_actions,
+                );
                 // Codex-style live naming: during orchestration the leader spinner
                 // otherwise shows a generic flavor verb while sub-agents do the
                 // real work. Surface the running sub-agent by name + subject on the
@@ -1715,7 +1765,13 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, summary, .. } => {
+            BackendEvent::OrchestratorAgentCompleted {
+                agent_name,
+                tool_uses,
+                tokens_used,
+                summary,
+                ..
+            } => {
                 // The orchestrator frame always carries both counters, so they
                 // are authoritative here (unlike the background path, whose
                 // `usage` map may be absent entirely).
@@ -1731,12 +1787,22 @@ impl App {
                 // finished sub-agent until some unrelated event overwrites it.
                 self.activity.set_active_verb(None);
             }
-            BackendEvent::OrchestratorAgentFailed { agent_name, error, tool_uses, tokens_used, summary } => {
+            BackendEvent::OrchestratorAgentFailed {
+                agent_name,
+                error,
+                tool_uses,
+                tokens_used,
+                summary,
+            } => {
                 // Fall back to the (truncated) error text when the backend sent no
                 // dedicated summary, so a failed row still previews what went wrong.
                 let fail_summary = summary.or_else(|| {
                     let e = error.trim();
-                    if e.is_empty() { None } else { Some(e.chars().take(140).collect()) }
+                    if e.is_empty() {
+                        None
+                    } else {
+                        Some(e.chars().take(140).collect())
+                    }
                 });
                 self.agents.agent_failed(
                     &agent_name,
@@ -1747,7 +1813,10 @@ impl App {
                 );
                 self.sidebar.set_current_agent("");
             }
-            BackendEvent::OrchestratorWaveStarted { wave_number, total_waves } => {
+            BackendEvent::OrchestratorWaveStarted {
+                wave_number,
+                total_waves,
+            } => {
                 self.agents.wave_started(wave_number, total_waves);
                 self.recompute_layout();
             }
@@ -1766,8 +1835,14 @@ impl App {
             // === Fleet events → Agents component (CC FleetView roster) ===
             // Full-power background nodes drive the same roster mutation API as
             // orchestrator workers, so they appear inline identically.
-            BackendEvent::FleetNodeStarted { node_id, agent_type, task, .. } => {
-                self.agents.agent_started(&node_id, &agent_type, "", &task, None);
+            BackendEvent::FleetNodeStarted {
+                node_id,
+                agent_type,
+                task,
+                ..
+            } => {
+                self.agents
+                    .agent_started(&node_id, &agent_type, "", &task, None);
                 self.recompute_layout();
             }
             BackendEvent::FleetNodeProgress {
@@ -1787,18 +1862,33 @@ impl App {
                 );
                 self.recompute_layout();
             }
-            BackendEvent::FleetNodeCompleted { node_id, summary, status } => {
+            BackendEvent::FleetNodeCompleted {
+                node_id,
+                summary,
+                status,
+            } => {
                 self.agents.fleet_node_completed(&node_id, &status, summary);
                 self.recompute_layout();
             }
-            BackendEvent::FleetSummary { running, queued, cap, total_spawned, warn } => {
+            BackendEvent::FleetSummary {
+                running,
+                queued,
+                cap,
+                total_spawned,
+                warn,
+            } => {
                 self.agents
                     .set_fleet_summary(running, queued, cap, total_spawned, warn);
                 self.recompute_layout();
             }
 
             // === Swarm events → Agents component ===
-            BackendEvent::SwarmStarted { swarm_id, pattern, agent_count, .. } => {
+            BackendEvent::SwarmStarted {
+                swarm_id,
+                pattern,
+                agent_count,
+                ..
+            } => {
                 self.agents.swarm_started(&swarm_id, &pattern, agent_count);
                 self.recompute_layout();
             }
@@ -1832,8 +1922,9 @@ impl App {
                             text: transcript,
                         },
                     ];
-                    self.transcript =
-                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(&entries));
+                    self.transcript = Some(
+                        crate::dialogs::transcript_viewer::TranscriptViewer::open(&entries),
+                    );
                     self.transcript_override = Some(entries);
                 }
                 Err(e) => {
@@ -1850,7 +1941,11 @@ impl App {
             // announces the lifecycle transition, and completion/failure also
             // drop a short system note into chat with the result/error preview.
             BackendEvent::BackgroundAgentStarted { agent_id, role } => {
-                let label = if role.is_empty() { "background".to_string() } else { role.clone() };
+                let label = if role.is_empty() {
+                    "background".to_string()
+                } else {
+                    role.clone()
+                };
                 self.agents.agent_started(
                     agent_id.clone(),
                     role,
@@ -1873,15 +1968,28 @@ impl App {
                 tool_uses,
                 cost_usd,
             } => {
-                let label = if role.is_empty() { "background".to_string() } else { role };
+                let label = if role.is_empty() {
+                    "background".to_string()
+                } else {
+                    role
+                };
                 let panel_summary: Option<String> = {
-                    let first = result.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                    if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
+                    let first = result
+                        .trim()
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("");
+                    if first.is_empty() {
+                        None
+                    } else {
+                        Some(first.chars().take(140).collect())
+                    }
                 };
                 // Real usage from the wire. `None` (legacy frame / absent key)
                 // leaves the counters accumulated from progress events intact —
                 // passing 0 here erased them.
-                self.agents.agent_completed(&agent_id, tool_uses, total_tokens, panel_summary);
+                self.agents
+                    .agent_completed(&agent_id, tool_uses, total_tokens, panel_summary);
                 // Same non-destructive rule for the price. It rides its own
                 // setter so an absent cost cannot clobber a known one.
                 self.agents.set_agent_cost(&agent_id, cost_usd);
@@ -1892,7 +2000,10 @@ impl App {
                 let note = if preview.is_empty() {
                     format!("\u{23fa} Teammate @{} finished \u{00b7} {}", label, elapsed)
                 } else {
-                    format!("\u{23fa} Teammate @{} finished \u{00b7} {} \u{2014} {}", label, elapsed, preview)
+                    format!(
+                        "\u{23fa} Teammate @{} finished \u{00b7} {} \u{2014} {}",
+                        label, elapsed, preview
+                    )
                 };
                 // One terminal row per teammate. `AgentFinished` announces the
                 // same agent from the orchestrator's side with its own clock,
@@ -1918,10 +2029,22 @@ impl App {
                 tool_uses,
                 cost_usd,
             } => {
-                let label = if role.is_empty() { "background".to_string() } else { role };
+                let label = if role.is_empty() {
+                    "background".to_string()
+                } else {
+                    role
+                };
                 let panel_summary: Option<String> = {
-                    let first = error.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                    if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
+                    let first = error
+                        .trim()
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("");
+                    if first.is_empty() {
+                        None
+                    } else {
+                        Some(first.chars().take(140).collect())
+                    }
                 };
                 self.agents.agent_failed(
                     &agent_id,
@@ -1936,7 +2059,10 @@ impl App {
                 let preview: String = error.trim().chars().take(200).collect();
                 let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
                 self.chat.add_system_message(
-                    &format!("\u{23fa} Teammate @{} failed \u{00b7} {} \u{2014} {}", label, elapsed, preview),
+                    &format!(
+                        "\u{23fa} Teammate @{} failed \u{00b7} {} \u{2014} {}",
+                        label, elapsed, preview
+                    ),
                     "error",
                 );
                 self.toasts.push(
@@ -1950,7 +2076,12 @@ impl App {
             // === Multi-agent workflow (Claude Code parity) ===
             // Teammate/sub-agent lifecycle + inbound messages + background-command
             // completion + turn recap, decoded from the session SSE stream.
-            BackendEvent::AgentFinished { display_name, duration_ms, status, .. } => {
+            BackendEvent::AgentFinished {
+                display_name,
+                duration_ms,
+                status,
+                ..
+            } => {
                 let name = if display_name.is_empty() {
                     "agent".to_string()
                 } else {
@@ -1986,6 +2117,19 @@ impl App {
             // A stall is NOT a completion: the row stays live, the chat note is a
             // warning, and — via `BackgroundNotifier` on the backend — the model
             // is told too, so the screen is no longer the only thing that knows.
+            // Purely a roster update: it changes what the row SAYS, not what the
+            // transcript contains. A phase is routine (every subagent passes
+            // through several), so pushing a chat line or a toast per transition
+            // would bury the actual work under lifecycle noise.
+            BackendEvent::BackgroundAgentPhase {
+                agent_id,
+                display_name,
+                phase,
+                detail,
+            } => {
+                self.agents
+                    .agent_phase(&agent_id, &display_name, &phase, &detail);
+            }
             BackendEvent::BackgroundAgentStalled {
                 agent_id,
                 display_name,
@@ -2019,12 +2163,22 @@ impl App {
                 self.recompute_layout();
             }
             BackendEvent::AgentMessage { from, text } => {
-                let who = if from.is_empty() { "agent".to_string() } else { from };
-                self.chat
-                    .add_system_message(&format!("\u{203a} Message from @{}: {}", who, text), "info");
+                let who = if from.is_empty() {
+                    "agent".to_string()
+                } else {
+                    from
+                };
+                self.chat.add_system_message(
+                    &format!("\u{203a} Message from @{}: {}", who, text),
+                    "info",
+                );
                 self.recompute_layout();
             }
-            BackendEvent::BackgroundCommandCompleted { exit_code, command, task_id } => {
+            BackendEvent::BackgroundCommandCompleted {
+                exit_code,
+                command,
+                task_id,
+            } => {
                 if self.bg_shell_count > 0 {
                     self.bg_shell_count -= 1;
                 }
@@ -2043,8 +2197,10 @@ impl App {
                 } else {
                     command.clone()
                 };
-                let note =
-                    format!("Background command '{}' completed (exit code {})", label, exit_code);
+                let note = format!(
+                    "Background command '{}' completed (exit code {})",
+                    label, exit_code
+                );
                 let (severity, level) = if exit_code == 0 {
                     ("info", crate::components::toast::ToastLevel::Success)
                 } else {
@@ -2058,7 +2214,10 @@ impl App {
                 // WS6: the backend just folded completed background task(s) into
                 // the agent's context — show why the agent is about to pivot.
                 let note = if summary.trim().is_empty() {
-                    format!("\u{2699} Reacting to {} completed background task(s)", count)
+                    format!(
+                        "\u{2699} Reacting to {} completed background task(s)",
+                        count
+                    )
                 } else {
                     format!(
                         "\u{2699} Reacting to {} completed background task(s) \u{2014} {}",
@@ -2111,7 +2270,11 @@ impl App {
                 // produced still in context.
                 self.maybe_dequeue_message();
             }
-            BackendEvent::TurnRecap { elapsed_ms, tool_calls, tools_used } => {
+            BackendEvent::TurnRecap {
+                elapsed_ms,
+                tool_calls,
+                tools_used,
+            } => {
                 // Only surface the recap when the turn did substantive, user-visible
                 // work — a real tool ran (shell/file/web/dir/git/…) OR the turn took
                 // a noticeable amount of wall-clock time. `tool_calls` is the
@@ -2137,8 +2300,10 @@ impl App {
                     .take()
                     .unwrap_or(elapsed_ms / 1000);
                 if tool_count > 0 || elapsed_secs >= crate::util::RECAP_ELAPSED_THRESHOLD_SECS {
-                    let mut text =
-                        format!("\u{273b} Worked for {}", crate::util::fmt_elapsed(elapsed_secs));
+                    let mut text = format!(
+                        "\u{273b} Worked for {}",
+                        crate::util::fmt_elapsed(elapsed_secs)
+                    );
                     if tool_count > 0 {
                         text.push_str(&format!(
                             " \u{00b7} {} tool use{}",
@@ -2166,21 +2331,28 @@ impl App {
                 tokio::spawn(async move {
                     if client.try_refresh_token().await {
                         // Signal the app to restart SSE with refreshed token
-                        let _ = tx.send(crate::event::Event::Backend(BackendEvent::SseDisconnected {
-                            error: Some("token_refreshed".into()),
-                        }));
+                        let _ = tx.send(crate::event::Event::Backend(
+                            BackendEvent::SseDisconnected {
+                                error: Some("token_refreshed".into()),
+                            },
+                        ));
                     } else {
                         // Refresh failed — tell user to login manually
-                        let _ = tx.send(crate::event::Event::Backend(BackendEvent::SseDisconnected {
-                            error: Some("auth_failed".into()),
-                        }));
+                        let _ = tx.send(crate::event::Event::Backend(
+                            BackendEvent::SseDisconnected {
+                                error: Some("auth_failed".into()),
+                            },
+                        ));
                     }
                 });
             }
             BackendEvent::ParseWarning { message } => {
                 warn!("SSE parse warning: {}", message);
             }
-            BackendEvent::AutoModePaused { blocked_count, message } => {
+            BackendEvent::AutoModePaused {
+                blocked_count,
+                message,
+            } => {
                 // The auto-mode guardian paused for human review. Surface a clear
                 // status note telling the user how many dangerous actions were
                 // blocked and how to proceed (/resume or approve).
@@ -2195,12 +2367,15 @@ impl App {
                     format!("auto-mode paused: {} — /resume or approve", message)
                 };
                 self.chat.add_system_message(&note, "warning");
-                self.toasts.push(
-                    note,
-                    crate::components::toast::ToastLevel::Warning,
-                );
+                self.toasts
+                    .push(note, crate::components::toast::ToastLevel::Warning);
             }
-            BackendEvent::HookRun { hook_name, hook_event, outcome, duration_ms } => {
+            BackendEvent::HookRun {
+                hook_name,
+                hook_event,
+                outcome,
+                duration_ms,
+            } => {
                 self.status.note_hook_run(&outcome);
                 // Attach the run to the call it wrapped so the row for that call
                 // (or the group row that folds it) can carry a `[hooks: …]`
@@ -2217,11 +2392,19 @@ impl App {
                 // toast per hook would bury the turn under its own plumbing.
                 if outcome == "crashed" || outcome == "timed_out" {
                     self.toasts.push(
-                        format!("Hook {} {} on {}", hook_name, outcome.replace('_', " "), hook_event),
+                        format!(
+                            "Hook {} {} on {}",
+                            hook_name,
+                            outcome.replace('_', " "),
+                            hook_event
+                        ),
                         crate::components::toast::ToastLevel::Warning,
                     );
                 }
-                debug!("Hook {} on {}: {} ({}ms)", hook_name, hook_event, outcome, duration_ms);
+                debug!(
+                    "Hook {} on {}: {} ({}ms)",
+                    hook_name, hook_event, outcome, duration_ms
+                );
             }
             BackendEvent::HookBlocked { hook_name, reason } => {
                 self.toasts.push(
@@ -2229,7 +2412,10 @@ impl App {
                     crate::components::toast::ToastLevel::Warning,
                 );
             }
-            BackendEvent::BudgetWarning { utilization, message } => {
+            BackendEvent::BudgetWarning {
+                utilization,
+                message,
+            } => {
                 self.toasts.push(
                     format!("Budget {}%: {}", (utilization * 100.0) as u32, message),
                     crate::components::toast::ToastLevel::Warning,
@@ -2241,12 +2427,20 @@ impl App {
                     crate::components::toast::ToastLevel::Error,
                 );
             }
-            BackendEvent::ProviderRetry { attempt, max_attempts, delay_ms, reason } => {
+            BackendEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+                delay_ms,
+                reason,
+            } => {
                 // Surface "Retrying in Ns…" so a mid-turn network drop is
                 // visible instead of a silent stall (WS1 item 8).
                 let secs = ((delay_ms + 999) / 1000).max(1);
                 let note = if reason.is_empty() {
-                    format!("Retrying in {}s\u{2026} (attempt {}/{})", secs, attempt, max_attempts)
+                    format!(
+                        "Retrying in {}s\u{2026} (attempt {}/{})",
+                        secs, attempt, max_attempts
+                    )
                 } else {
                     format!(
                         "Retrying in {}s\u{2026} (attempt {}/{}) \u{2014} {}",
@@ -2258,15 +2452,14 @@ impl App {
                 // the stall is visible on the status line (with a countdown),
                 // not just as a one-shot scrollback note. Cleared automatically
                 // when the turn resumes (tokens/stream/non-Waiting phase).
-                self.activity.set_retry(Some(
-                    crate::components::activity::RetryState {
+                self.activity
+                    .set_retry(Some(crate::components::activity::RetryState {
                         attempt,
                         max_attempts,
                         reason: reason.clone(),
                         resume_at: std::time::Instant::now()
                             + std::time::Duration::from_millis(delay_ms),
-                    },
-                ));
+                    }));
             }
             BackendEvent::TurnError { kind, reason } => {
                 // Red error line for turn-fatal failures (llm_error /
@@ -2286,9 +2479,8 @@ impl App {
                             providers: resp.providers,
                             system_info: resp.system_info,
                         };
-                        self.onboarding = Some(
-                            crate::dialogs::onboarding::OnboardingWizard::new(data),
-                        );
+                        self.onboarding =
+                            Some(crate::dialogs::onboarding::OnboardingWizard::new(data));
                         if self.state.can_transition_to(AppState::Onboarding) {
                             self.enter_overlay(AppState::Onboarding);
                         }
@@ -2387,7 +2579,11 @@ impl App {
             },
 
             // === Swarm Intelligence events ===
-            BackendEvent::SwarmIntelligenceStarted { swarm_id, intelligence_type, .. } => {
+            BackendEvent::SwarmIntelligenceStarted {
+                swarm_id,
+                intelligence_type,
+                ..
+            } => {
                 self.agents.swarm_started(&swarm_id, &intelligence_type, 0);
                 // U-B5 — drive the live status-bar swarm chip.
                 self.status.set_swarm(Some(intelligence_type.clone()));
@@ -2401,7 +2597,8 @@ impl App {
                 // round on the status-bar swarm chip so the swarm's progress is
                 // actually visible ("✻ swarm · round N").
                 debug!("SI round {}: {}", round, swarm_id);
-                self.status.set_swarm(Some(format!("swarm \u{00b7} round {}", round)));
+                self.status
+                    .set_swarm(Some(format!("swarm \u{00b7} round {}", round)));
             }
             BackendEvent::SwarmIntelligenceConverged { round, .. } => {
                 self.status.set_swarm(None);
@@ -2456,15 +2653,19 @@ impl App {
             // UI simply froze. These four arms give it the same treatment any
             // other long step gets: a named spinner verb, the one turn timer,
             // and a factual line when it lands.
-            BackendEvent::CompactionStarted { trigger, tokens_before } => {
+            BackendEvent::CompactionStarted {
+                trigger,
+                tokens_before,
+            } => {
                 // `/compact` can be invoked while the agent is otherwise idle, in
                 // which case no turn is running and the spinner row is down.
                 // Start it so the indicator (and its elapsed timer) exists at all.
                 if !self.activity.is_active() {
                     self.activity.start();
                 }
-                self.activity
-                    .set_waiting_reason(Some(crate::components::activity::WaitingReason::Compacting));
+                self.activity.set_waiting_reason(Some(
+                    crate::components::activity::WaitingReason::Compacting,
+                ));
                 // No details line yet — on purpose. Nothing measured has happened,
                 // and only `CompactionProgress` may draw a bar.
                 self.activity.set_details(None, 1);
@@ -2476,10 +2677,16 @@ impl App {
                 self.recompute_layout();
             }
 
-            BackendEvent::CompactionProgress { chunk_index, chunk_total } => {
+            BackendEvent::CompactionProgress {
+                chunk_index,
+                chunk_total,
+            } => {
                 // Measured work only — see `activity::progress_bar`.
                 self.activity.set_details(
-                    Some(crate::components::activity::progress_bar(chunk_index, chunk_total)),
+                    Some(crate::components::activity::progress_bar(
+                        chunk_index,
+                        chunk_total,
+                    )),
                     1,
                 );
                 self.recompute_layout();
@@ -2498,19 +2705,55 @@ impl App {
                 // than sent as a third number, so the line can never contradict
                 // itself.
                 let folded = messages_before.saturating_sub(messages_after);
+
+                // Two different mechanisms report through this one event, and
+                // saying "messages folded" for both made the honest one read as
+                // a lie. REPORTED LIVE on grok-4.6:
+                //
+                //     compacted 104.6k to 74.5k tokens ... 0 messages folded, 0 seconds
+                //
+                // That was the prune tier (`Compactor` `:micro_compact`, opencode's
+                // `prune`): it erases stale tool OUTPUT in place, inside messages it
+                // keeps, so it folds zero messages BY CONSTRUCTION and needs no
+                // summariser call — hence 0s. The 30k it reclaimed was real. Only
+                // the label was wrong, and the user reasonably read "0 messages, 0
+                // seconds" as "nothing happened".
+                //
+                // The two mechanisms have disjoint signatures — a fold always
+                // reduces the message count, a prune never does — so the phrasing
+                // is derived from the same measured numbers as everything else
+                // here rather than trusting a separate self-description.
+                let what = if folded > 0 {
+                    format!("{folded} messages folded")
+                } else {
+                    "tool output pruned in place, no messages folded".to_string()
+                };
+
+                // `fmt_elapsed(ms / 1000)` renders every sub-second run as "0s",
+                // which is the other half of what read as "nothing happened". A
+                // prune is genuinely instant; say that instead of claiming zero.
+                let took = if duration_ms < 1000 {
+                    "instant".to_string()
+                } else {
+                    crate::util::fmt_elapsed(duration_ms / 1000)
+                };
+
                 let line = format!(
-                    "\u{2713} Compacted {} \u{2192} {} tokens ({} messages folded) \u{00B7} {}",
+                    "\u{2713} Compacted {} \u{2192} {} tokens ({}) \u{00B7} {}",
                     crate::components::status_bar::compact_tokens(tokens_before),
                     crate::components::status_bar::compact_tokens(tokens_after),
-                    folded,
-                    crate::util::fmt_elapsed(duration_ms / 1000),
+                    what,
+                    took,
                 );
                 self.chat.add_system_message(&line, "info");
                 self.announce_a11y(&line);
                 self.recompute_layout();
             }
 
-            BackendEvent::CompactionFailed { reason, duration_ms } => {
+            BackendEvent::CompactionFailed {
+                reason,
+                duration_ms,
+            } => {
                 self.activity.set_waiting_reason(None);
                 self.activity.set_details(None, 1);
                 // Say the history is intact. A running indicator that just
@@ -2527,12 +2770,22 @@ impl App {
             }
 
             // === Shared scratchpad activity → Agents panel ===
-            BackendEvent::ScratchpadActivity { agent, entry, action, bytes } => {
+            BackendEvent::ScratchpadActivity {
+                agent,
+                entry,
+                action,
+                bytes,
+            } => {
                 // Feed the visual panel (dim, capped recent-writes section).
-                self.agents.scratchpad_activity(&agent, &entry, &action, bytes);
+                self.agents
+                    .scratchpad_activity(&agent, &entry, &action, bytes);
                 // Screen-reader path: announce a plain-text note instead of the
                 // glyph-decorated panel line (no-op for sighted users).
-                let verb = if action == "append" { "appended" } else { "wrote" };
+                let verb = if action == "append" {
+                    "appended"
+                } else {
+                    "wrote"
+                };
                 self.announce_a11y(&format!(
                     "@{} {} {} to the shared scratchpad ({} bytes)",
                     agent, verb, entry, bytes
@@ -2561,7 +2814,8 @@ impl App {
             BackendEvent::ClassifyResult(result) => match result {
                 Ok(resp) => {
                     self.status.set_signal(resp.signal.clone());
-                    self.sidebar.set_signal_info(&resp.signal.mode, &resp.signal.genre);
+                    self.sidebar
+                        .set_signal_info(&resp.signal.mode, &resp.signal.genre);
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -2595,7 +2849,10 @@ impl App {
             },
             BackendEvent::TaskProgressResult(result) => match result {
                 Ok(progress) => {
-                    debug!("Task progress: {} status={}", progress.task_id, progress.status);
+                    debug!(
+                        "Task progress: {} status={}",
+                        progress.task_id, progress.status
+                    );
                     self.tasks.update(&progress.task_id, &progress.status);
                 }
                 Err(e) => {
@@ -2609,11 +2866,8 @@ impl App {
                 Ok(tasks) => {
                     self.tasks.clear();
                     for t in &tasks {
-                        self.tasks.add(
-                            t.task_id.clone(),
-                            t.task.clone(),
-                            String::new(),
-                        );
+                        self.tasks
+                            .add(t.task_id.clone(), t.task.clone(), String::new());
                         if t.status != "pending" {
                             self.tasks.update(&t.task_id, &t.status);
                         }
@@ -2655,7 +2909,10 @@ impl App {
             },
             BackendEvent::SwarmStatusResult(result) => match result {
                 Ok(status) => {
-                    let msg = format!("Swarm {} [{}]: {}", status.id, status.pattern, status.status);
+                    let msg = format!(
+                        "Swarm {} [{}]: {}",
+                        status.id, status.pattern, status.status
+                    );
                     self.chat.add_system_message(&msg, "info");
                 }
                 Err(e) => {
@@ -2783,10 +3040,7 @@ impl App {
                         .onboarding
                         .as_ref()
                         .and_then(|w| w.selected_provider_id());
-                    let wiz_model = self
-                        .onboarding
-                        .as_ref()
-                        .and_then(|w| w.selected_model_id());
+                    let wiz_model = self.onboarding.as_ref().and_then(|w| w.selected_model_id());
                     let prov = resp
                         .provider
                         .clone()
@@ -2824,7 +3078,9 @@ impl App {
                             if resp.status == "ok" {
                                 wizard.set_verify_success(resp.latency_ms.unwrap_or(0));
                             } else {
-                                let msg = resp.message.unwrap_or_else(|| resp.error.unwrap_or_else(|| "Unknown error".into()));
+                                let msg = resp.message.unwrap_or_else(|| {
+                                    resp.error.unwrap_or_else(|| "Unknown error".into())
+                                });
                                 wizard.set_verify_failed(msg);
                             }
                         }
@@ -2875,7 +3131,10 @@ impl App {
                     }
                 }
             }
-            BackendEvent::PlanProposed { plan, request_id: _ } => {
+            BackendEvent::PlanProposed {
+                plan,
+                request_id: _,
+            } => {
                 // Show the plan review dialog — backend paused for user approval.
                 let mut review = crate::dialogs::plan_review::PlanReview::new();
                 review.set_plan(plan);
@@ -2912,23 +3171,32 @@ impl App {
                     // and the queue sits there until some later turn ends.
                     self.maybe_dequeue_message();
                 }
-            },
+            }
 
             // Survey events
-            BackendEvent::AskUserQuestion { survey_id, questions, skippable } => {
-                use crate::dialogs::survey::{SurveyDialog, SurveyQuestion, SurveyOption};
-                let qs: Vec<SurveyQuestion> = questions.into_iter().map(|q| {
-                    SurveyQuestion {
+            BackendEvent::AskUserQuestion {
+                survey_id,
+                questions,
+                skippable,
+            } => {
+                use crate::dialogs::survey::{SurveyDialog, SurveyOption, SurveyQuestion};
+                let qs: Vec<SurveyQuestion> = questions
+                    .into_iter()
+                    .map(|q| SurveyQuestion {
                         text: q.text,
                         header: q.header,
                         multi_select: q.multi_select,
-                        options: q.options.into_iter().map(|o| SurveyOption {
-                            label: o.label,
-                            description: o.description,
-                        }).collect(),
+                        options: q
+                            .options
+                            .into_iter()
+                            .map(|o| SurveyOption {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
                         skippable: q.skippable,
-                    }
-                }).collect();
+                    })
+                    .collect();
                 self.survey = Some(SurveyDialog::new(survey_id, qs, skippable));
                 // Item 5 — waiting on the user's answer → pulse the pending cue.
                 self.activity.set_pending_user(true);
@@ -2948,7 +3216,10 @@ impl App {
             }
 
             // === Proactive Mode ===
-            BackendEvent::ProactiveMessage { message, message_type } => {
+            BackendEvent::ProactiveMessage {
+                message,
+                message_type,
+            } => {
                 let level = match message_type.as_str() {
                     "alert" | "work_failed" => crate::components::toast::ToastLevel::Warning,
                     "work_complete" => crate::components::toast::ToastLevel::Success,
@@ -2966,11 +3237,13 @@ impl App {
                 self.toasts.push(preview, level);
             }
             BackendEvent::ProactiveModeChanged { enabled } => {
-                let msg = if enabled { "Proactive mode: ON" } else { "Proactive mode: OFF" };
-                self.toasts.push(
-                    msg.into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                let msg = if enabled {
+                    "Proactive mode: ON"
+                } else {
+                    "Proactive mode: OFF"
+                };
+                self.toasts
+                    .push(msg.into(), crate::components::toast::ToastLevel::Info);
                 self.sidebar.set_proactive(enabled);
             }
             BackendEvent::CoordinatorMode { active } => {
@@ -3001,10 +3274,8 @@ impl App {
                     } else {
                         "Coordinator mode off: full tool access"
                     };
-                    self.toasts.push(
-                        msg.into(),
-                        crate::components::toast::ToastLevel::Info,
-                    );
+                    self.toasts
+                        .push(msg.into(), crate::components::toast::ToastLevel::Info);
                     self.announce_a11y(msg);
                 }
             }
@@ -3206,9 +3477,7 @@ impl App {
 fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEntry>) {
     use crate::client::types::CommandEntry;
     for &(name, desc) in crate::app::commands::BUILTIN_SLASH_COMMANDS {
-        let already = commands
-            .iter()
-            .any(|c| c.name.eq_ignore_ascii_case(name));
+        let already = commands.iter().any(|c| c.name.eq_ignore_ascii_case(name));
         if !already {
             commands.push(CommandEntry {
                 name: name.to_string(),
@@ -3276,7 +3545,10 @@ mod handle_backend_tests {
         // Paths are not ids.
         assert_eq!(humanize_task_hint("read src/app/mod.rs", any), None);
         // An empty subject is not an improvement.
-        assert_eq!(humanize_task_hint("complete abc", |_| Some("  ".to_string())), None);
+        assert_eq!(
+            humanize_task_hint("complete abc", |_| Some("  ".to_string())),
+            None
+        );
     }
 
     #[test]
