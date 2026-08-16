@@ -85,6 +85,7 @@ class PtySession:
         rows: int = 30,
         binary: Path | None = None,
         history: int = 4000,
+        env: dict[str, str | None] | None = None,
     ) -> None:
         self.binary = Path(binary) if binary else DEFAULT_BIN
         if not self.binary.exists():
@@ -95,6 +96,14 @@ class PtySession:
         self.base_url = base_url
         self.cols = cols
         self.rows = rows
+        # Environment applied LAST, over the harness defaults below. A value of
+        # `None` UNSETS the variable, which is the only way to reach the
+        # hyperlink path: the defaults set `NO_COLOR=""`, and
+        # `components::osc8::supports_hyperlinks` treats a *present* `NO_COLOR`
+        # as a hard opt-out regardless of its value — so every OSC 8 escape is
+        # suppressed for every existing test here, by design. Empty by default,
+        # so a session that passes nothing is byte-identical to before.
+        self.env_overrides: dict[str, str | None] = dict(env or {})
         # HistoryScreen keeps rows that scroll off the top. Stranded chrome very
         # often ends up there (the viewport scrolls past the copy it abandoned),
         # so counting only the visible screen would miss real strandings.
@@ -126,6 +135,11 @@ class PtySession:
             # Never let a harness run touch the developer's real state.
             env["HOME"] = os.environ.get("OSA_PTY_HOME", env.get("HOME", "/tmp"))
             env["NO_COLOR"] = ""
+            for key, value in self.env_overrides.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
             os.execve(str(self.binary), [str(self.binary)], env)
             os._exit(127)  # unreachable
         self.pid, self.fd = pid, fd

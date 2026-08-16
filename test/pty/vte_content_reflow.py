@@ -36,9 +36,14 @@ CANNOT, and this bounds every claim made from it:
   that produced it. It cannot see colour, and it cannot see OSC 8 hyperlinks --
   `get_text_range_format(Vte.Format.TEXT, ...)` returns text with escapes
   already consumed, so "links still work after a resize" is NOT a claim this
-  instrument can make. Proving that needs a reader that exposes VTE's hyperlink
-  attribute per cell (`Vte.Terminal.hyperlink_check_event` / the `hyperlink_uri`
-  cell attribute), which this probe does not yet use.
+  instrument can make. That claim now belongs to `osc8_resize_probe.py`, which
+  reads per-cell URIs through `osc8_reader.py`. It does NOT use VTE's own
+  attribute: on VTE 0.76 the HTML export emits no anchors and
+  `hyperlink_check_event` cannot be driven by a synthesized `GdkEvent` (proven
+  by `match_check_event` failing at the same coordinates), so there is no
+  accessor left and the attribute is modelled from the byte stream instead.
+  The consequence for THIS probe is unchanged: a link inside REFLOWED
+  scrollback is nobody's measurement yet.
 * The two halves measure two different defects and the fix for one is not the
   fix for the other: the drive half sees OSA's own resize WIPE of content it
   still owns, and `measure_scrollback_reflow` sees the terminal's reflow of rows
