@@ -2142,9 +2142,19 @@ defmodule OptimalSystemAgent.Onboarding do
       source = Path.join(prompts_dir, filename)
       dest = Path.join(osa_dir(), filename)
 
-      if File.exists?(source) and not File.exists?(dest) do
-        File.cp!(source, dest)
-        Logger.debug("[Onboarding] Seeded #{filename} → #{dest}")
+      cond do
+        filename == "BOOTSTRAP.md" and
+            OptimalSystemAgent.Agent.Context.user_known?(osa_dir()) ->
+          # First-meet file. Once USER.md has a name the ritual is done —
+          # copying it back is how a known user gets asked their name again.
+          :ok
+
+        File.exists?(source) and not File.exists?(dest) ->
+          File.cp!(source, dest)
+          Logger.debug("[Onboarding] Seeded #{filename} → #{dest}")
+
+        true ->
+          :ok
       end
     end)
 
@@ -2172,8 +2182,13 @@ defmodule OptimalSystemAgent.Onboarding do
       end
 
     # Check workspace files
+    # BOOTSTRAP.md is a first-meet ritual, not a required workspace file. Once
+    # the agent deletes it (or USER.md has a name), it must stay gone — reseeding
+    # it on every serve is how known users get asked their name again.
+    required_workspace = @workspace_templates -- ["BOOTSTRAP.md"]
+
     missing =
-      @workspace_templates
+      required_workspace
       |> Enum.reject(&File.exists?(Path.join(osa_dir(), &1)))
 
     checks =

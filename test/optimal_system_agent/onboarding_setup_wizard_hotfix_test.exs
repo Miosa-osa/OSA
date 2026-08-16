@@ -147,4 +147,45 @@ defmodule OptimalSystemAgent.OnboardingSetupWizardHotfixTest do
       assert recommended.id == "glm-5.2:cloud"
     end
   end
+
+  describe "seed_workspace/0 does not resurrect BOOTSTRAP.md for a known user" do
+    test "skips BOOTSTRAP.md when USER.md already has a Name line", %{osa_home: osa_home} do
+      File.write!(Path.join(osa_home, "USER.md"), "- **Name:** Roberto\n")
+      refute File.exists?(Path.join(osa_home, "BOOTSTRAP.md"))
+
+      Onboarding.seed_workspace()
+
+      refute File.exists?(Path.join(osa_home, "BOOTSTRAP.md")),
+             "known-user seed must not copy BOOTSTRAP.md back"
+    end
+
+    test "still seeds BOOTSTRAP.md on a true first run", %{osa_home: osa_home} do
+      File.rm(Path.join(osa_home, "USER.md"))
+      File.rm(Path.join(osa_home, "BOOTSTRAP.md"))
+
+      Onboarding.seed_workspace()
+
+      assert File.exists?(Path.join(osa_home, "BOOTSTRAP.md"))
+    end
+  end
+
+  describe "doctor_checks/0 does not treat a missing BOOTSTRAP.md as an error" do
+    test "a named USER.md without BOOTSTRAP.md is not a missing workspace file", %{
+      osa_home: osa_home
+    } do
+      File.write!(Path.join(osa_home, "USER.md"), "- **Name:** Roberto\n")
+      File.write!(Path.join(osa_home, "IDENTITY.md"), "- **Name:** OSA\n")
+      File.write!(Path.join(osa_home, "SOUL.md"), "ok\n")
+      File.write!(Path.join(osa_home, "HEARTBEAT.md"), "ok\n")
+      File.write!(Path.join(osa_home, ".env"), "OSA_DEFAULT_PROVIDER=ollama\n")
+      File.rm(Path.join(osa_home, "BOOTSTRAP.md"))
+
+      checks = Onboarding.doctor_checks()
+
+      missing =
+        Enum.find(checks, fn row -> match?({:error, "Missing workspace files", _}, row) end)
+
+      refute missing
+    end
+  end
 end

@@ -186,8 +186,11 @@ defmodule OptimalSystemAgent.CLI.Doctor.InspectionTest do
       refute Regex.match?(re, "## Profile\n- Name: Ada\n")
     end
 
-    test "the mirror is declared, so its existence is discoverable" do
-      assert Inspection.mirrors_private_gate?()
+    test "the BOOTSTRAP.md gate is no longer a private copy" do
+      refute Inspection.mirrors_private_gate?()
+
+      assert Regex.source(Inspection.user_known_regex()) ==
+               Regex.source(OptimalSystemAgent.Agent.Context.user_known_regex())
     end
   end
 

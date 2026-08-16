@@ -29,10 +29,8 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
   hot path, so it re-stats files rather than trusting a cache: a report that
   agrees with a stale cache instead of the disk would defeat its own purpose.
 
-  Where a gate is private (`Agent.Context`'s `user_known?/1`, the BOOTSTRAP.md
-  switch) the condition is re-evaluated here against the same file and the same
-  regex, and labelled as a mirror. That is a real duplication risk and it is
-  named rather than hidden — see `mirrors_private_gate?/0`.
+  Where a gate is private (`Agent.Context`'s `user_known?/1` used to be)
+  the condition is now delegated to that function rather than re-implemented.
 
   ## Reporting rules
 
@@ -45,15 +43,25 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       "not there". Those need opposite fixes and used to look identical.
   """
 
+  alias OptimalSystemAgent.Agent.Context
   alias OptimalSystemAgent.Settings
   alias OptimalSystemAgent.Tools.Registry.SkillLoader
 
   @app :optimal_system_agent
   @separator "────────────────────────────────────────────────────────────"
 
-  # Mirrors `Agent.Context`'s private `user_known?/1`. Kept adjacent to the
-  # comment that says so, so the coupling is visible at the point of use.
-  @user_known_re ~r/-\s*\*\*Name:\*\*\s*\S+/
+  @doc """
+  Kept so existing `osa doctor --config` tests still compile.
+
+  The BOOTSTRAP.md gate is no longer a private copy — `user_known_regex/0`
+  and `user_known?/1` now come from `Agent.Context`.
+  """
+  @spec mirrors_private_gate?() :: boolean()
+  def mirrors_private_gate?, do: false
+
+  @doc "The regex `Agent.Context.user_known?/1` uses to decide the BOOTSTRAP.md gate."
+  @spec user_known_regex() :: Regex.t()
+  def user_known_regex, do: Context.user_known_regex()
 
   @doc "Print the full inspection report."
   @spec run() :: :ok
@@ -125,20 +133,6 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
         )
       ]
   end
-
-  @doc """
-  True while this module re-implements a gate that lives privately elsewhere.
-
-  Exists so a test can assert the duplication is still accurate rather than
-  letting it rot into a confidently-wrong report — the worst possible outcome
-  for a diagnostic. See `test/cli/doctor_inspection_test.exs`.
-  """
-  @spec mirrors_private_gate?() :: boolean()
-  def mirrors_private_gate?, do: true
-
-  @doc "The regex `Agent.Context.user_known?/1` uses to decide the BOOTSTRAP.md gate."
-  @spec user_known_regex() :: Regex.t()
-  def user_known_regex, do: @user_known_re
 
   # ── Section 1: static prompt tier ─────────────────────────────────────
 
@@ -418,7 +412,7 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     dir = bootstrap_dir()
     path = Path.join(dir, "BOOTSTRAP.md")
     user_md = Path.join(dir, "USER.md")
-    known? = user_known?(user_md)
+    known? = Context.user_known?(dir)
 
     cond do
       not File.exists?(path) ->
@@ -985,13 +979,6 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     case File.stat(path) do
       {:ok, %{size: s}} -> "#{s} bytes"
       _ -> "size unknown"
-    end
-  end
-
-  defp user_known?(user_md) do
-    case File.read(user_md) do
-      {:ok, content} -> Regex.match?(@user_known_re, content)
-      _ -> false
     end
   end
 
