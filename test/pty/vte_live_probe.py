@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scrollback_prelude  # noqa: E402
 import term_env  # noqa: E402
+import vte_reader  # noqa: E402
 
 STUB_PORT = 12795
 
@@ -109,13 +110,11 @@ def main() -> int:
                 GLib.usleep(5_000)
 
         def text() -> str:
-            rows = term.get_row_count()
-            out = term.get_text_range_format(
-                Vte.Format.TEXT, -20_000, 0, rows, term.get_column_count()
-            )
-            if isinstance(out, tuple):
-                out = next((x for x in out if isinstance(x, str)), "")
-            return out or ""
+            # Whole ring, read through `vte_reader`. A `-20_000 .. row_count`
+            # range does NOT mean "scrollback plus screen": VTE row indices are
+            # absolute over the ring, so it reads the first screenful of the
+            # session and nothing after it, forever. See `vte_reader`.
+            return "\n".join(vte_reader.buffer_rows(term, Vte))
 
         def send(s: str) -> None:
             term.feed_child(s.encode())

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scrollback_prelude  # noqa: E402
 import term_env  # noqa: E402
+import vte_reader  # noqa: E402
 
 STUB_PORT = 12796
 MARKER = "❯"
@@ -64,20 +65,16 @@ def run_case(Vte, GLib, repo, binary, backend, name, interrupt_turn, submit_firs
             GLib.usleep(5_000)
 
     def text():
-        rows = term.get_row_count()
-        out = term.get_text_range_format(
-            Vte.Format.TEXT, -20_000, 0, rows, term.get_column_count()
-        )
-        if isinstance(out, tuple):
-            out = next((x for x in out if isinstance(x, str)), "")
-        return out or ""
+        # Whole ring. NOT `-20_000 .. row_count` — VTE row indices are absolute
+        # over the ring, so that range pins the reader to the first screenful of
+        # the session for the whole run. See `vte_reader`.
+        return "\n".join(vte_reader.buffer_rows(term, Vte))
 
     def visible_only():
-        rows = term.get_row_count()
-        out = term.get_text_range_format(Vte.Format.TEXT, 0, 0, rows, term.get_column_count())
-        if isinstance(out, tuple):
-            out = next((x for x in out if isinstance(x, str)), "")
-        return out or ""
+        # The visible screen is the LAST `page_size` rows of the ring, not rows
+        # `0 .. row_count`. Those are the first screenful, which stops being the
+        # visible screen the moment anything scrolls.
+        return "\n".join(vte_reader.screen_rows(term, Vte))
 
     for _ in range(30):
         pump(1.5)

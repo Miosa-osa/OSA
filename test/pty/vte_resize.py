@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scrollback_prelude  # noqa: E402  (needs the sys.path line above)
 import term_env  # noqa: E402
+import vte_reader  # noqa: E402
 
 STUB_PORT = 12791
 # Each singleton band, as a substring that appears exactly once on a healthy
@@ -81,13 +82,17 @@ def main() -> int:
         # Deep scrollback: stranded copies land here, and a short buffer would
         # quietly discard the evidence this test exists to find.
         term.set_scrollback_lines(10_000)
-        # 50 rows, not 30. The scrollback prelude below occupies ~24 of them and
-        # the inline live region needs its own; on a 30-row screen the two do
-        # not both fit and the binary never reaches a composer at all. (That is
-        # itself a real defect — OSA wedges on startup when the screen it
-        # inherits leaves too little room for the inline viewport — but it is a
-        # startup fault, not a resize one, and giving this harness room is the
-        # correct way to keep it measuring the thing it is named after.)
+        # 50 rows, not 30: the scrollback prelude below occupies ~24 of them
+        # and the inline live region needs its own, so this leaves the drag a
+        # real transcript to move instead of an empty screen.
+        #
+        # It is NOT, as this comment used to claim, that "OSA wedges on startup
+        # when the screen leaves too little room for the inline viewport". That
+        # was the range reader `vte_reader` documents: it only ever returned the
+        # first screenful of the session, which the prelude had already filled,
+        # so the composer was on screen and unreadable. Measured with the ring
+        # reader, OSA reaches a composer with the same 12-line prelude at both
+        # 30 and 24 rows.
         term.set_size(120, 50)
 
         # The child must NOT inherit the harness's own terminal identity. This
@@ -134,18 +139,17 @@ def main() -> int:
                 GLib.usleep(5_000)
 
         def visible_and_scrollback() -> str:
-            """Everything VTE holds — screen plus scrollback."""
-            rows = term.get_row_count()
-            # `get_text_range_format` is the non-deprecated reader and, unlike
-            # `get_text_range`, still returns content when no attributes array
-            # is passed. Negative start rows reach into scrollback, which is
-            # exactly where stranded chrome lands.
-            out = term.get_text_range_format(
-                Vte.Format.TEXT, -10_000, 0, rows, term.get_column_count()
-            )
-            if isinstance(out, tuple):
-                out = next((x for x in out if isinstance(x, str)), "")
-            return out or ""
+            """Everything VTE holds — screen plus scrollback.
+
+            Read through `vte_reader`, not with a `-10_000 .. row_count` range.
+            VTE row indices are ABSOLUTE over the ring (row 0 is the first line
+            the session ever emitted, negative rows are empty), so that range
+            reads the FIRST SCREENFUL of the session and nothing after it, for
+            the whole run — see `vte_reader`'s module docstring for what that
+            cost. Stranded chrome lands wherever the ring currently is, which is
+            exactly what this reader follows.
+            """
+            return "\n".join(vte_reader.buffer_rows(term, Vte))
 
         # Poll rather than sleep a fixed 6s: startup here spans a backend
         # handshake and a provider probe and is not reliably done in any one

@@ -39,13 +39,10 @@ CANNOT, and this bounds every claim made from it:
   instrument can make. Proving that needs a reader that exposes VTE's hyperlink
   attribute per cell (`Vte.Terminal.hyperlink_check_event` / the `hyperlink_uri`
   cell attribute), which this probe does not yet use.
-* As written it grades content that is still on the VISIBLE SCREEN, not content
-  in native scrollback. Driving the stub so a reply overflows the screen and
-  commits into scrollback does not work yet -- the reply renders into the live
-  region, is clipped at the screen bottom, and the trailing filler never
-  appears. So this measures OSA's own resize WIPE, which is real and severe, and
-  does NOT yet measure the terminal's reflow of committed rows. Those are two
-  different defects and the fix for one is not the fix for the other.
+* The two halves measure two different defects and the fix for one is not the
+  fix for the other: the drive half sees OSA's own resize WIPE of content it
+  still owns, and `measure_scrollback_reflow` sees the terminal's reflow of rows
+  OSA has surrendered. Read the grades separately.
 
 Requirements: `python3-gi`, `gir1.2-vte-2.91`, a reachable X display, and a
 release build at `priv/rust/tui/target/release/osagent`. Any missing piece is
@@ -68,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import term_env  # noqa: E402
+import vte_reader  # noqa: E402
 
 STUB_PORT = 12793
 
@@ -265,11 +263,13 @@ def measure_scrollback_reflow(Vte, GLib, gtk_ok: bool) -> tuple[int, list[str]]:
     cannot intervene. So this prints OSA's own rendered table bytes into
     scrollback through a plain shell, narrows, and reads back PHYSICAL rows.
 
-    Keeping it independent of the turn machinery is the point: OSA wedges once a
-    committed reply plus the welcome panel exceed the screen, so only a couple of
-    turns commit before the transcript stops growing, and almost everything stays
-    on the visible screen where the resize WIPE destroys it first. This half
-    measures the other defect on its own terms.
+    Keeping it independent of the turn machinery is the point: it needs a
+    committed table in native scrollback and nothing else, so it does not
+    inherit whatever the drive half is currently able to prove. (It was
+    introduced under a different justification -- "OSA wedges once a committed
+    reply plus the welcome panel exceed the screen, so only a couple of turns
+    commit". That was the old reader, not OSA; see `vte_reader` and
+    `turn_ceiling_probe.py`. The independence is still worth having.)
     """
     term = Vte.Terminal()
     term.set_scrollback_lines(10_000)
@@ -299,14 +299,12 @@ def measure_scrollback_reflow(Vte, GLib, gtk_ok: bool) -> tuple[int, list[str]]:
             GLib.usleep(5_000)
 
     def phys_rows() -> list[str]:
-        out = []
-        width = term.get_column_count()
-        for r in range(-200, term.get_row_count()):
-            t = term.get_text_range_format(Vte.Format.TEXT, r, 0, r, width)
-            if isinstance(t, tuple):
-                t = next((x for x in t if isinstance(x, str)), "")
-            out.append((t or "").rstrip("\n"))
-        return out
+        # Whole ring, one row per call. `range(-200, row_count)` was WRONG in
+        # both directions: VTE rows are absolute over the ring, negative indices
+        # are empty, and `row_count` is the screen HEIGHT, not the bottom of the
+        # buffer — so it read the first screenful of the session and nothing
+        # after it. See `vte_reader`.
+        return vte_reader.buffer_rows(term, Vte)
 
     def between(rows, a, b):
         try:
@@ -440,30 +438,26 @@ def main() -> int:
             os.write(pty_fd, data)
 
         def screen_rows() -> list[str]:
-            """PHYSICAL rows -- one `get_text_range_format` call per row.
+            """The tail of the RING as PHYSICAL rows, one call per row.
 
-            This is the load-bearing detail of the whole instrument. Asking VTE
-            for a MULTI-ROW range returns LOGICAL lines: it un-wraps every
-            soft-wrapped continuation, so a 68-column table row reads back as 68
-            columns even on a 60-column screen, and a wrapped paragraph reads
-            back as one long line. Reflow damage is by definition a
-            physical-row phenomenon, so a range read can never see it -- it
-            reports a shredded table as pristine.
+            Two load-bearing details, and this probe got the first right and the
+            second wrong until the reader moved into `vte_reader`.
 
-            That is not a hypothetical. `vte_resize.py` uses a range read, which
-            is why the one harness in this repo that runs on a real reflowing
-            emulator still could not see the defect the user reported. Reading
-            row by row costs one IPC call per row and is the only way to
-            observe what is actually on the screen.
+            One: asking VTE for a MULTI-ROW range returns LOGICAL lines. It
+            un-wraps every soft-wrapped continuation, so a 68-column table row
+            reads back as 68 columns even on a 60-column screen. Reflow damage
+            is by definition a physical-row phenomenon, so a range read reports
+            a shredded table as pristine.
+
+            Two: VTE row indices are ABSOLUTE over the ring. `row_count` is the
+            screen HEIGHT, not the bottom of the buffer, and negative rows are
+            empty -- so `range(-400, row_count)` reads the FIRST SCREENFUL of
+            the session and nothing after it, for the whole run. Under that
+            reader OSA looked like it stopped committing after four turns on a
+            50-row screen. It had not; the window had simply filled. See
+            `vte_reader`.
             """
-            out: list[str] = []
-            width = term.get_column_count()
-            for r in range(-SCROLLBACK_ROWS, term.get_row_count()):
-                t = term.get_text_range_format(Vte.Format.TEXT, r, 0, r, width)
-                if isinstance(t, tuple):
-                    t = next((x for x in t if isinstance(x, str)), "")
-                out.append((t or "").rstrip("\n"))
-            return out
+            return vte_reader.buffer_rows(term, Vte, limit=SCROLLBACK_ROWS)
 
         # Boot to a composer.
         for _ in range(30):
@@ -586,11 +580,6 @@ def main() -> int:
 
         for name in BLOCKS:
             print(f"  {name}: before {where(before_rows, name)} | after {where(after_rows, name)}")
-        # Turn accounting: how many replies actually COMMITTED. OSA wedges
-        # once a committed reply plus the welcome panel exceed the screen, so
-        # only the first couple of turns commit and the rest of the transcript
-        # never grows. Printed so a thin run is visible as a thin run rather
-        # than being mistaken for a clean one.
         print(f"  committed user turns: {sum(1 for r in before_rows if 'You' in r)}")
 
         results: dict[str, list[str]] = {}

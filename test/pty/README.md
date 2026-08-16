@@ -220,14 +220,14 @@ to it. The other harnesses exist to cover what it cannot see.
 |----------------------|-------------|---------------------------|---------------------------------|
 | `test_resize.py`     | pyte model  | pyte                      | no — pyte never reflows         |
 | `tmux_resize.py`     | tmux 3.4    | `capture-pane -S`         | yes                             |
-| `vte_resize.py`      | libvte 7600 | `get_text_range_format`   | yes                             |
+| `vte_resize.py`      | libvte 7600 | `vte_reader` (ring rows)  | yes                             |
 | `wezterm_resize.py`  | WezTerm     | `wezterm cli get-text`    | yes                             |
 | `ghostty_resize.py`  | Ghostty 1.2 | **nothing — no API**      | **no** — see below              |
 | `reflow_matrix.py`   | all of them | DSR cursor query only     | n/a — measures reflow itself    |
 
-### Two things every emulator harness needs
+### Three things every emulator harness needs
 
-Both were missing, and both made these tests pass while the bug shipped.
+All three were missing, and each made these tests pass while the bug shipped.
 
 1. **Strip the outer terminal's identity** (`term_env.py`). OSA picks its resize
    branch from `$TMUX` / `$TERM`. This repo is developed inside tmux, and
@@ -241,6 +241,25 @@ Both were missing, and both made these tests pass while the bug shipped.
    region never moves, the remembered top row is trivially correct, and the
    assertion cannot fail whichever branch it took. Measured: WezTerm passes
    **both** branches with no prelude, and separates them cleanly with one.
+
+3. **Read the terminal in the coordinate system it actually uses**
+   (`vte_reader.py`). Every VTE harness here read the screen with some spelling
+   of `get_text_range_format(TEXT, -20_000, 0, row_count, cols)`, commented
+   "negative start rows reach into scrollback". They do not. **VTE row indices
+   are absolute over the whole ring**: row 0 is the first line the session ever
+   emitted, negative rows are empty, `row_count` is the screen HEIGHT, and the
+   visible screen is the *last* `page_size` rows. So that range is not
+   "scrollback plus screen" — it is the first screenful of the session and
+   nothing after it, for the whole run.
+
+   That reader invented a product defect. Driving OSA through 12 turns on a
+   50-row terminal and counting committed replies gives 1, 2, 3, 4, 4, 4, 4,
+   4 …, and the ceiling tracks the screen height (24 rows → 1, 40 → 3, 50 → 4,
+   60 → 5) — which reads as damning evidence of viewport height math. It is the
+   reader's window filling up. The `POST /api/v1/orchestrate` count over the
+   same run is 12 of 12, and with the ring reader the transcript grows through
+   25 turns at every height tested. `turn_ceiling_probe.py` asserts exactly
+   that, so the claim cannot rot back.
 
 ### Ghostty
 

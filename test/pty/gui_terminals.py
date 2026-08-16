@@ -74,7 +74,11 @@ BANDS = {
 DRAG_WIDTHS = (1100, 1000, 900, 820, 900, 1000, 1100, 1200)
 
 # Chosen tall enough that 12 wrapped prelude lines plus the inline live region
-# fit. OSA wedges on startup when the screen it inherits has too little room.
+# fit, so the drag has a transcript to move rather than an empty screen. (The
+# note this replaces claimed OSA "wedges on startup when the screen it inherits
+# has too little room". It does not: measured on real libvte, it reaches a
+# composer and survives 20 turns at 24 rows with the same 12-line prelude. That
+# reading came from the range reader `vte_reader` documents.)
 WINDOW_W, WINDOW_H = 1200, 900
 
 
