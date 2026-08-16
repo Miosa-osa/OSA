@@ -314,6 +314,107 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
     end
   end
 
+  describe "a conversation is not a one-shot run" do
+    # The `:interrupted_task` arm was measured on benchmark episodes, where the
+    # session IS the turn. In a chat, `messages` is the whole history, so after
+    # the first tool call of the session `talked_only?/1` is false forever and
+    # the arm degenerates to bare wording matching.
+    #
+    # Measured on the only genuine interactive corpus on this machine: 21 human
+    # sessions in `~/.osa/sessions` (2026-07-18..07-26), 59 text-only turn
+    # endings, 4 matches for `announcement_only?/1`, of which exactly one
+    # reached `{:continue, _}` — the one below.
+
+    # Same fixtures as the benchmark shapes above; re-declared here because
+    # module attributes are positional and the loop-clause block that also
+    # binds them comes later in the file.
+    @worked_one_shot [
+      %{role: "user", content: "implement the pipeline schedule in /app/pipeline_parallel.py"},
+      %{role: "tool", content: "use_cache True"}
+    ]
+    @unstarted_one_shot [%{role: "user", content: @path_tracing_task}]
+
+    # Verbatim shape of `session-1784994863394`, turn 3. Two turns earlier the
+    # user asked "okay I see so waht do u see" and OSA ran `dir_list`; that is
+    # the tool result that made the session not `talked_only?`.
+    @chat_that_listed_a_directory [
+      %{role: "user", content: "okay I see so waht do u see"},
+      %{role: "tool", content: "dir\t-\tCode\ndir\t-\tProjects"},
+      %{role: "assistant", content: "Here's what's on your Desktop: Code/, Projects/, Archive/."},
+      %{role: "user", content: "I see okay can u make a nice html"}
+    ]
+
+    # The answer is a clarifying question. It matches the wording predicate on
+    # "I'll just guess", and it is the correct thing to say.
+    @clarifying_question "A nice HTML page for what? I need a bit more direction — " <>
+                           "otherwise I'll just guess and make something random."
+
+    test "a clarifying question is not an interrupted task" do
+      assert Guardrails.announcement_only?(@clarifying_question),
+             "the wording predicate does match — the fix is the second conjunct, not the first"
+
+      # The old whole-session reading: an earlier turn ran a tool, so the chat
+      # is not `talked_only?` and the question would be nudged.
+      refute Guardrails.talked_only?(@chat_that_listed_a_directory)
+
+      # The turn-scoped reading: THIS turn has done nothing, and no nudge can
+      # supply the direction the model asked the human for.
+      assert :stop =
+               Guardrails.announcement_continue(
+                 @clarifying_question,
+                 @chat_that_listed_a_directory
+               )
+    end
+
+    test "work earlier in the SAME turn still counts" do
+      # The distinction is the turn boundary, not the tool call. Same session,
+      # but the tool ran after the current user message.
+      in_turn =
+        @chat_that_listed_a_directory ++
+          [%{role: "tool", content: "file\t2.5K\tindex.html"}]
+
+      assert {:continue, :interrupted_task} =
+               Guardrails.announcement_continue(
+                 "I have enough understanding. Let me write the page now.",
+                 in_turn
+               )
+    end
+
+    test "the loop's own nudge does not move the turn boundary" do
+      # Both synthetic user messages open with `[`. If either were treated as a
+      # real turn boundary it would hide the work it is reacting to, and the
+      # exhausted-budget path would silently become a `:stop`.
+      for synthetic <- [
+            "[System: your answer announced what you were about to do rather than " <>
+              "reporting what you did, and you called no tools — so nothing happened.]",
+            "[VERIFICATION REQUIRED 1/2] You changed `x.py`, but there is no evidence " <>
+              "that anything ran."
+          ] do
+        nudged = @worked_one_shot ++ [%{role: "user", content: synthetic}]
+
+        assert {:continue, :interrupted_task} =
+                 Guardrails.announcement_continue(
+                   "I have enough understanding. Let me write the implementation now.",
+                   nudged
+                 ),
+               "a synthetic `role: user` message must not hide the turn's work: #{synthetic}"
+      end
+    end
+
+    test "a one-shot run is unchanged — the turn is the session" do
+      # Every benchmark shape in this file goes through the same code path; the
+      # head user message is the only real one, so the turn is the whole list.
+      assert {:continue, :interrupted_task} =
+               Guardrails.announcement_continue(
+                 "I have enough understanding. Let me write the implementation now.",
+                 @worked_one_shot
+               )
+
+      assert {:continue, :unstarted_task} =
+               Guardrails.announcement_continue(@path_tracing_answer, @unstarted_one_shot)
+    end
+  end
+
   describe "the loop's per-turn budget" do
     # `reset_per_turn_fields/1` is the single place the loop declares what is
     # per-turn. A counter added to the loop without an entry there leaks across

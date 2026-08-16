@@ -301,13 +301,62 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   def announcement_continue(content, messages) when is_binary(content) and is_list(messages) do
     cond do
       not announcement_only?(content) -> :stop
-      not talked_only?(messages) -> {:continue, :interrupted_task}
+      not talked_only?(current_turn(messages)) -> {:continue, :interrupted_task}
       unstarted_task_announcement?(content, messages) -> {:continue, :unstarted_task}
       true -> :stop
     end
   end
 
   def announcement_continue(_content, _messages), do: :stop
+
+  # ── Why `:interrupted_task` asks about the TURN, not the session ─────────
+  #
+  # "The session did real work and then announced the next step" was measured
+  # on one-shot benchmark episodes, where the session IS the turn: one user
+  # message at the head, then iterations until `[DONE]`. `talked_only?/1` over
+  # the whole message list therefore meant "this task has done no work yet".
+  #
+  # A conversation is not that shape. `messages` there is the whole chat, so
+  # after the FIRST tool call of the session `talked_only?/1` is false forever
+  # and this arm degenerates to bare wording matching — the thing
+  # `continue_on_text_only` is off by default to prevent. Measured on the only
+  # genuine interactive corpus on this machine (21 human sessions in
+  # `~/.osa/sessions`, 2026-07-18..07-26, 59 text-only turn endings): one
+  # over-fire, and it is the worst possible one. The user asked for something
+  # under-specified, OSA correctly answered with a clarifying question
+  # ("A nice HTML page for what? I need a bit more direction — otherwise I'll
+  # just guess and make something random."), and because an earlier turn of
+  # that chat had listed a directory, the session was not `talked_only?` and
+  # the answer was nudged with "DO THE THING NOW". The nudge cannot produce
+  # the missing direction — only the human can — so it buys a full-context
+  # round trip to make the model guess, which is precisely what it declined
+  # to do.
+  #
+  # Scoping to the current turn restores the measured semantics exactly. In a
+  # one-shot run the turn IS the session, so every benchmark shape is
+  # unchanged (`torch-pipeline-parallelism`: 29 iterations of tool calls, all
+  # after the single user message, still `:interrupted_task`). In a chat it
+  # means what the sentence always claimed: this turn did work, then stopped
+  # one step short.
+  #
+  # The boundary is the last REAL user message. The loop's own nudge and the
+  # verification gate are injected with `role: "user"` and would otherwise
+  # move the boundary past the work they are reacting to — hiding the tool
+  # calls from the very predicate that must see them, and silently converting
+  # an exhausted-budget continuation into a `:stop`. Both synthetic shapes
+  # open with `[`; real user text does not.
+  defp current_turn(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.take_while(&(not real_user_message?(&1)))
+    |> Enum.reverse()
+  end
+
+  defp real_user_message?(%{role: "user", content: text}) when is_binary(text) do
+    not String.starts_with?(String.trim_leading(text), "[")
+  end
+
+  defp real_user_message?(_), do: false
 
   defp unstarted_task_announcement?(content, messages) do
     String.length(content) < @unstarted_max_chars and
