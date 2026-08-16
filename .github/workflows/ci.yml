@@ -26,16 +26,34 @@ concurrency:
 env:
   # Kept in lockstep with release.yml — a suite that passes on a toolchain the
   # release never uses is not a gate.
+  #
+  # DO NOT bump these casually. release.yml documents why: OTP 27 has Mix
+  # release bugs and erlexec is pinned to 2.0.6 (the last pre-OTP-27 release).
+  #
+  # Note the gap this lane exists to cover: development happens on Elixir
+  # 1.19.x / OTP 28, and the shipped artifact is built on 1.17.3 / OTP 26.2.5.
+  # A locally green suite therefore says nothing about the toolchain users
+  # actually receive. That is not a flaw in this pin — it is the reason the
+  # pin has to stay matched to release.yml rather than to the dev machine.
   ELIXIR_VERSION: "1.17.3"
   OTP_VERSION: "26.2.5"
 
 jobs:
   elixir:
     name: Elixir suite
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04, not -22.04: the 22.04 images begin deprecation on
+    # 2026-09-17 with brownout windows that TERMINATE the job, and are fully
+    # unsupported on 2027-04-17 (actions/runner-images#14254). Nothing ships
+    # from this lane, so moving it early costs nothing and buys a gate that
+    # will not start failing for reasons unrelated to the code.
+    #
+    # The pinned toolchain survives the move: OTP 26.2.5 has a prebuilt for
+    # ubuntu-24.04 on builds.hex.pm and setup-beam lists 24.3-29 as supported
+    # there, so this is NOT a silent OTP 27 bump.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: erlef/setup-beam@v1
         with:
@@ -43,14 +61,21 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          # The image version is part of the key on purpose. `runner.os` is
+          # just "Linux" for both 22.04 and 24.04, so without this a `_build`
+          # produced on the old image — including natively compiled NIFs like
+          # erlexec and exqlite, linked against that image's glibc and openssl
+          # — would be restored onto the new one. That fails as a link error
+          # deep in a dep, which reads like a code defect rather than a stale
+          # cache. Bump `ubuntu-24.04` here whenever `runs-on` changes.
+          key: ${{ runner.os }}-ubuntu-24.04-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+            ${{ runner.os }}-ubuntu-24.04-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
       - name: Fetch dependencies
         run: mix deps.get
@@ -80,17 +105,64 @@ jobs:
       # A unique port, for the same reason every local run needs one: the
       # default 9089 is a developer's live daemon, and a suite that binds it
       # fails in a way that looks like a code defect.
+      #
+      # `tee` under `pipefail` so the log survives the run WITHOUT weakening the
+      # gate: mix's exit status still propagates, the step still fails.
       - name: Run test suite
-        run: mix test
+        run: |
+          set -o pipefail
+          mix test 2>&1 | tee mix-test.log
         env:
           OSA_HTTP_PORT: "19087"
 
+      # Why this exists: eight consecutive red runs went undiagnosed, and by
+      # the time anyone looked the raw step logs were no longer retrievable in
+      # full through the API — the failing test names survived only as run
+      # annotations. Two things are needed to act on a red suite and neither
+      # was reachable: the SEED (ExUnit randomises test order per run, and the
+      # failures here rotate between runs, which is the signature of an
+      # order-dependent test rather than a flaky one) and the full failure
+      # text. Both are pinned here as a summary plus a downloadable artifact.
+      - name: Report the failures
+        if: failure()
+        run: |
+          {
+            echo '## Elixir suite failed'
+            echo
+            echo 'Toolchain: Elixir ${{ env.ELIXIR_VERSION }} / OTP ${{ env.OTP_VERSION }}'
+            echo '(local development runs 1.19.x / OTP 28 — a green local run does'
+            echo 'not reproduce this lane).'
+            echo
+            echo '```'
+            grep -E '^Running ExUnit with seed:|^Randomized with seed|tests?, [0-9]+ failures?' mix-test.log || true
+            echo '```'
+            echo
+            echo '### Failing tests'
+            echo
+            echo '```'
+            grep -E '^\s+[0-9]+\) (test|property) ' mix-test.log || echo '(could not parse — see the artifact)'
+            echo '```'
+            echo
+            echo 'Reproduce the exact order with `mix test --seed <seed above>`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: elixir-test-log
+          path: mix-test.log
+          if-no-files-found: warn
+
   rust:
     name: Rust TUI suite
-    runs-on: ubuntu-22.04
+    # See the Elixir job for why 24.04. The apt list below was checked against
+    # noble: all eight packages resolve there under the SAME names (the t64
+    # transition renamed the libasound2 RUNTIME package, not `libasound2-dev`).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -108,15 +180,18 @@ jobs:
             libasound2-dev libonig-dev
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             priv/rust/tui/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
+          # Image version in the key — see the Elixir job. A `target/` built
+          # against 22.04's libssl/libasound restored onto 24.04 fails at link
+          # time, not compile time, which is the confusing kind of failure.
+          key: ${{ runner.os }}-ubuntu-24.04-cargo-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-ubuntu-24.04-cargo-
 
       # Advisory for the same reason as the Elixir side: `cargo fmt --check`
       # currently exits 1 on this tree. Visible in the log, promoted to
@@ -143,7 +218,7 @@ jobs:
   # point at instead of a list that must be edited whenever a job is added.
   ci:
     name: CI
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [elixir, rust]
     if: always()
     steps:

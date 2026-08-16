@@ -37,10 +37,14 @@ concurrency:
 
 jobs:
   pty-layout:
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04: the 22.04 images begin deprecation on 2026-09-17 with
+    # brownout windows that terminate the job outright, and are fully
+    # unsupported on 2027-04-17 (actions/runner-images#14254). The apt list
+    # below resolves unchanged on noble — verified package by package.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -58,16 +62,20 @@ jobs:
             libasound2-dev libonig-dev
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             priv/rust/tui/target
-          key: pty-cargo-${{ runner.os }}-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
-          restore-keys: pty-cargo-${{ runner.os }}-
+          # The image version is in the key deliberately: `runner.os` is "Linux"
+          # for both 22.04 and 24.04, so without it a `target/` linked against
+          # the old image's libssl/libasound would be restored onto the new one
+          # and fail at link time. Bump it whenever `runs-on` changes.
+          key: pty-cargo-${{ runner.os }}-ubuntu-24.04-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
+          restore-keys: pty-cargo-${{ runner.os }}-ubuntu-24.04-
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -76,5 +84,21 @@ jobs:
 
       # `run.sh` builds the release binary itself, so the harness runs against
       # exactly what a user would run — not a debug build with different timing.
+      #
+      # `tee` under `pipefail`: the harness's exit status still propagates, so
+      # the gate is unchanged. The capture exists because this suite's failure
+      # output IS a screen dump — the evidence is the rendered terminal, and
+      # when this lane last went red (test_height_resize, v1.0.83) that dump
+      # was only ever in the step log, which is no longer fully retrievable.
       - name: Run the PTY layout harness
-        run: ./test/pty/run.sh
+        run: |
+          set -o pipefail
+          ./test/pty/run.sh 2>&1 | tee pty-layout.log
+
+      - name: Upload the screen dumps
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pty-layout-log
+          path: pty-layout.log
+          if-no-files-found: warn

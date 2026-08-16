@@ -26,9 +26,25 @@ env:
 jobs:
   # ── Linux x64: OTP release (ERTS-bundled) + Rust TUI ─────────────────
   build-linux-x64:
+    # DELIBERATELY still ubuntu-22.04, unlike every other job in the repo.
+    #
+    # This is the only lane whose runner choice is visible to users. A binary
+    # links against the glibc of the machine that built it and will not start
+    # on anything older: 22.04 is glibc 2.35, 24.04 is 2.39. Moving this job to
+    # 24.04 would silently drop support for Ubuntu 22.04 (still LTS until 2027),
+    # Debian 12 (2.36) and RHEL 9 (2.34) — a product decision, not a CI fix, so
+    # it is not made here as a side effect of a maintenance pass.
+    #
+    # It cannot stay forever. ubuntu-22.04 begins deprecation on 2026-09-17,
+    # with brownout windows that terminate the job, and is fully unsupported on
+    # 2027-04-17 (actions/runner-images#14254). Before then, pick one:
+    #   * accept the higher floor and move to ubuntu-24.04; or
+    #   * keep the floor and build inside a `container: ubuntu:22.04` on a
+    #     supported runner, which decouples the glibc floor from the image
+    #     GitHub happens to offer — the durable answer.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
@@ -37,7 +53,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Cache deps + build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps
@@ -115,7 +131,7 @@ jobs:
           cp priv/rust/tui/target/release/osagent "dist/osagent-tui-linux-x64"
           chmod +x "dist/osagent-tui-linux-x64"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: osa-linux-x64
           path: dist/*
@@ -125,9 +141,17 @@ jobs:
   # Secondary target. Publishing does NOT block on it (see publish.needs)
   # so a flaky mac build never holds the Linux release hostage.
   build-macos-arm64:
-    runs-on: macos-14  # Apple Silicon (M1/M2)
+    # macos-15, not macos-14: the macOS 14 images entered deprecation on
+    # 2026-07-06, have brownout windows through October that terminate the job,
+    # and are fully unsupported on 2026-11-02 (actions/runner-images#13518).
+    # This lane has produced no binary for sixteen releases already; leaving it
+    # pinned to a retiring image would make that permanent.
+    #
+    # erlef/setup-beam lists macOS-15 (x86_64 + arm64) as supported for OTP
+    # 25-29, so the OTP 26.2.5 pin above survives the move.
+    runs-on: macos-15  # Apple Silicon (arm64)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
@@ -136,13 +160,19 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Cache deps + build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps
             _build
-          key: macos-arm64-${{ hashFiles('mix.lock') }}
-          restore-keys: macos-arm64-
+          # `macos-15` is in the key because the runner image moved (14 -> 15).
+          # `_build` holds natively compiled NIFs (erlexec, exqlite) linked
+          # against the SDK of the image that built them; restoring a macos-14
+          # `_build` here would either fail to link or, worse, ship a mismatched
+          # object inside the release tarball. A cold cache costs a few minutes
+          # once; the alternative is a corrupt artifact.
+          key: macos-15-arm64-${{ hashFiles('mix.lock') }}
+          restore-keys: macos-15-arm64-
 
       - name: Install Elixir deps
         run: |
@@ -197,7 +227,7 @@ jobs:
           cp priv/rust/tui/target/release/osagent "dist/osagent-tui-macos-arm64"
           chmod +x "dist/osagent-tui-macos-arm64"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: osa-macos-arm64
           path: dist/*
@@ -207,9 +237,12 @@ jobs:
   # Secondary target. Publishing does NOT block on it (see publish.needs)
   # so a flaky Windows build never holds the Linux release hostage.
   build-windows-x64:
+    # `windows-latest` is a floating label (currently windows-2025); setup-beam
+    # supports OTP 21-29 on both windows-2022 and windows-2025, so there is no
+    # retirement cliff here to pin away from.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
@@ -218,7 +251,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Cache deps + build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps
@@ -286,7 +319,7 @@ jobs:
           Pop-Location
           Copy-Item priv\rust\tui\target\release\osagent.exe dist\osagent-tui-windows-x64.exe -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: osa-windows-x64
           path: dist/*
@@ -305,12 +338,14 @@ jobs:
     # attaches whatever artifacts did get produced.
     needs: [build-linux-x64, build-macos-arm64, build-windows-x64]
     if: always()
-    runs-on: ubuntu-22.04
+    # Safe to move to 24.04 ahead of the build jobs: this one ships no compiled
+    # artifact, it only downloads, checksums and publishes. No glibc floor.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write  # required to create the GitHub Release
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -333,7 +368,7 @@ jobs:
           ls -la
 
       - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "OSA ${{ github.ref_name }}"
