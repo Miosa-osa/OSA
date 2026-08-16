@@ -9,6 +9,226 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.102] — displays as `v1.0.102`
+
+Eleven commits, no benchmark claim. Every fix below came from an operator using
+the product and saying something was wrong, and in every case the mechanism was
+different from what the symptom suggested.
+
+**Read this before upgrading: TUI resize is still broken and is not fixed here.**
+See *Known — not fixed* at the bottom. It is the whole content of 1.0.103.
+
+### Fixed — compaction was inflating the context, not shrinking it
+
+A live v1.0.101 session, unprompted:
+
+```
+✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
+✓ Compacted ~4.1k  → ~7.8k tokens (tool output pruned in place) · 1m 10s
+✓ Compacted ~6.1k  → ~71.8k tokens (1 messages folded) · 1m 4s
+```
+
+**~65,000 tokens added by an operation whose only purpose is removal**, then
+re-firing — because the fold had pushed the total past the very threshold that
+triggers folding. Compaction was causing the condition that triggers compaction.
+
+The restore block re-injects touched file bodies on a 50k-character budget, and
+it was bounded on **one** of the two compaction paths:
+
+```elixir
+# ProactiveCompaction — clamped
+msg -> [clamp_restore_message(msg, restore_max_tokens())]
+
+# Compactor — appended raw
+restore_msg -> final_messages ++ [restore_msg]
+```
+
+`Compactor` is the path behind `/compact` and the prune tier, which is exactly
+what the session logged. Measured: a 260k-character restore estimates at
+**65,004 tokens** — the observed inflation, to the digit. The bound now lives on
+the builder, so a caller cannot omit it by forgetting.
+
+Found by the new test, one scale down: the clamp **overshot its own ceiling** —
+4,019 against 4,000, and 519 against 500 — because it sliced to the budget and
+*then* appended its truncation notice. A bound exceeded by the text it appends,
+landing in a window that was just compacted.
+
+### Fixed — the compact point is the model's window, not a constant
+
+A flat 200,000-token ceiling clamped the window every threshold derives from, so
+a 500k model and a 1M model got the same live window and both compacted at
+167,000 — 33% and 16.7% of what the operator is paying for.
+
+| window | operative | compact_at |
+|---:|---:|---:|
+| 128,000 | unchanged | 95,000 |
+| 200,000 | unchanged | 167,000 |
+| **500,000** | 200,000 → **500,000** | 167,000 → **425,000** |
+| **1,000,000** | 200,000 → **1,000,000** | 167,000 → **850,000** |
+
+Auto-compact now fires at a **share** of the window (0.85) rather than after an
+absolute subtraction. The share is what makes it per-model: the old reserve math
+subtracted a fixed 33k, which is 26% of a 128k window and 3.3% of a 1M one, so
+it dominated on small models and barely bit on large ones. Both bounds are kept
+and the smaller wins, which is why every model at or below ~235k is bit-identical
+to before.
+
+The cost this reopens is stated in the source rather than buried: input is
+re-sent every turn, so cumulative session cost is quadratic in turn count and
+compaction is the only brake. `OSA_CONTEXT_CEILING_SHARE` reinstates a
+proportional brake; `OSA_CONTEXT_CEILING` pins an absolute one.
+
+Found while making the change: `operative_window/1` is documented **idempotent**,
+which a flat ceiling made true for free. A share is not, and `compact_at/1`
+clamped and then called `effective_window/1`, which clamped again — silently
+reproducing the exact flat-constant behaviour the change exists to remove.
+
+### Fixed — the arrow was between two different conversations
+
+`tokens_before` measured only the slice being folded; `tokens_after` measured the
+whole rebuilt conversation. That is why one run ended at 6.7k and the next began
+at 4.1k with nothing in between — same conversation, whole versus older-only.
+Both sides now measure the same thing, and a pass that cannot reduce declines
+instead of printing a success tick.
+
+The meter and the banner were one fact with two writers — the bar self-healed
+from every response, the banner only from a pressure event, hence `6% remaining`
+sitting above `15% ctx`. The event now carries the thresholds and the TUI derives
+both from the committed total, so the contradiction is unrepresentable.
+
+**`/compact` did not echo — and neither did any slash command.** Fixed at the
+single dispatch point rather than per command. `/lean` was **not** at fault: it
+suppresses only tool calls, and compaction is chrome plus a system line — but
+nothing asserted that on a real screen, so now something does.
+
+Compaction **does** reach the provider; the display-only hypothesis was tested on
+the assembled request and refuted.
+
+### Fixed — a corrupt settings file granted full auto-approval
+
+`harden_if_unparseable/1` pinned only the legacy `permission_mode` key, while
+`Permissions.default_mode/0` reads the newer `permissions.defaultMode` **first**.
+Measured: a valid layer setting `defaultMode: bypassPermissions` plus one corrupt
+layer yields **`:overdrive`** — full auto-approval with the deny list gone. The
+fail-closed pin missed the spelling that wins. Both are pinned now.
+
+And `osa doctor` was **confirming the mode that was not in effect**: its
+"effective keys" section reads the raw layers, so with a corrupt layer present it
+printed the `bypassPermissions` the operator configured while `merged/0` returned
+`"ask"`. An operator reads doctor as confirmation the permissive mode is live,
+while the pin has quietly taken their deny rules away. Doctor now leads with a
+`:malformed` row naming the broken file and what the pin forces — wired through
+`Settings.unparseable_sources/0`, which had **zero callers**: a function that
+reports broken settings and was never called, sitting next to a fail-open.
+
+### Fixed — a vendor's dated rate card reached through the reseller's namespace
+
+Fourth pricing defect of this cycle, same shape as the other three. The dated
+peak/off-peak schedules are keyed on the vendor's bare id and are consulted
+*before* the exact table, walking a lookup that strips the reseller namespace.
+`exact_rate/1` has carried a reseller guard since the namespace was introduced;
+the dated mechanisms never did.
+
+```
+uncensored/deepseek-v4-pro    published {1.84, 3.66} → billed {0.66, 1.98}  (2.8x under)
+                              cache read 0.13        → billed 0.022         (5.9x under)
+```
+
+All four reported `confidence: :exact`. A new ratchet asserts catalog == billed
+across all 82 gateway ids, plus the reverse so the guard cannot become a no-op.
+
+### Fixed — the suite is green under CI's own configuration
+
+CI runs an unseeded `mix test`; every local verification used `--seed 0`. Seven
+failures separated into four kinds:
+
+- **Two were the clock, not the seed.** DeepSeek's new pricing took effect at
+  16:00Z and CI's last green run finished at 15:55Z. Probing past that boundary
+  is what exposed the reseller defect above.
+- **Three were tests over-asserting.** One undid `set_session(k, v)` with
+  `set_session(k, nil)` — which is not an undo, it writes a shadowing nil; there
+  was no way to express the undo, so one was added. One read the developer's real
+  `~/.osa/rules`. One asserted "this checkout has git tags", which a CI checkout
+  does not fetch.
+- **One was CI configuring itself into failure**: `mix test | tee mix-test.log`
+  wrote a growing untracked file into the checkout, and the no-op gate hashes
+  untracked bytes — CI failing a test by writing into its subject. Also,
+  setup-beam matches versions by *prefix*, so the pinned `26.2.5` resolved to
+  `26.2.5.21`.
+- **One was a clock inside a threshold.** A memory saved by an unrelated test
+  scored **0.3499976** against a 0.35 cutoff — one part in a hundred thousand —
+  so elapsed time decided it. The recall path unions in the 100 most recent
+  memories unconditionally, with no relevance gate.
+
+```
+mix test --seed 0                      9,732 tests, 0 failures
+mix test --seed 987654                 9,732 tests, 0 failures
+mix test --seed 214827 --max-cases 8   9,732 tests, 0 failures   (CI's exact command)
+cargo test                             1,470 passed
+test/pty/                              31/31
+```
+
+### Added — escape hatches that should have existed
+
+`OSA_PROACTIVE_COMPACTION=false` and `OSA_CONTEXT_CEILING` / `_SHARE`. Both
+settings already existed and defaulted sensibly; neither was reachable from where
+the person affected by them actually stands — inside an installed release. An
+operator watching compaction misbehave had no way to stop it.
+
+### Known — not fixed
+
+**TUI resize destroys the transcript.** An outside user called OSA unusable over
+it. This release does not fix it; 1.0.103 is that fix and nothing else.
+
+What is now established, and it is two defects rather than one:
+
+- On a real terminal outside a multiplexer, OSA **wipes the screen on resize and
+  rebuilds**. Measured in real libvte: prose partially survives, **bordered
+  tables and code fences are absent from the transcript entirely** — gone, not
+  shredded. The wipe is deliberate and its cost is written in the source.
+- That wipe exists to prevent a *worse* defect: erasing on VTE scrolls content
+  into history rather than clearing it, depositing one stacked copy per drag
+  step. The source names the symptom as "the cascade of horizontal rules a
+  bordered markdown table produced" — which is exactly the user's screenshot.
+  One defect was traded for another.
+
+`test/pty/vte_content_reflow.py` is the first instrument in this repo that can
+watch the failure happen, driving the release binary inside the library GNOME
+Terminal and Tilix use. Its stated limit: it cannot yet drive committed rows into
+native scrollback, so it measures the wipe and not the reflow — and it cannot see
+OSC-8 at all.
+
+Two findings that shape the fix:
+
+- **Hyperlinks are not a cost.** The recorded blocker — that ratatui 0.29 cannot
+  carry OSC-8 out of band — is obsolete, not because the library changed but
+  because OSA already solved it: `render/cells.rs` lays lines out at true visible
+  width and attaches escapes to the following cell, so the width math never sees
+  them. An owned scrollback keeps links.
+- **grok-build does not solve this.** Their minimal pager uses OSA's exact shape
+  and *concedes* the reflow — a compile-time guard forbids re-emission, and its
+  resize test asserts only that nothing panicked. Elasticity lives only in their
+  full pager, which owns its scrollback. The patterns worth copying are
+  consequences of owning it, not substitutes.
+
+Elastic resize requires owning the scrollback. OSA already has two of the three
+pieces: it wipes on resize, and it retains the transcript. The missing piece is
+re-rendering that retained transcript at the new width and re-emitting after the
+wipe.
+
+Also still open:
+
+- Nothing in this release is verified against a live provider.
+- The long-term memory block is **recency, not relevance** — up to ~1,200 tokens
+  of arbitrary recent memory in every prompt. Needs its own measurement.
+- `1cd18b20` carries four files belonging to a different fix (a turn that ended
+  with no answer and rendered nothing). The code is correct and tested; the
+  commit message does not describe it. Not rewritten, because it is published.
+- The changelog shipped *inside* the release is stale at `0.9.0`, so
+  `/release-notes` on a packaged install shows year-old notes.
+
+---
+
 ## [1.0.101] — displays as `v1.0.101`
 
 Twenty-two commits. **No benchmark claim of any kind** — no arm was run for this

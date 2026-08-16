@@ -1124,6 +1124,26 @@ table was owned by whichever process created it, and being reached from transien
 processes meant the first one to exit destroyed every session's ledger. Fixed in
 this release. **Both benchmark arms predate the fix.**
 
+### Known break as of 1.0.102 — TUI resize
+
+Resizing the terminal destroys the on-screen transcript. Outside a multiplexer
+OSA wipes the screen on resize and rebuilds; measured in real libvte, prose
+partially survives while **bordered tables and code fences are absent from the
+transcript entirely**. The wipe is deliberate — it prevents a worse defect where
+erasing on VTE scrolls content into history instead, depositing a stacked copy
+per drag step.
+
+The fix is to own the scrollback and re-render the retained transcript at the new
+width. That is 1.0.103. Hyperlinks are **not** a cost of that change: OSA's
+renderer already lays lines out at true visible width and attaches escapes to the
+following cell, so an owned scrollback keeps OSC-8 intact.
+
+`test/pty/vte_content_reflow.py` is the instrument; it drives the release binary
+inside the library GNOME Terminal and Tilix use. It measures the wipe, not the
+terminal's reflow of already-committed rows, and it cannot see OSC-8 — stated
+because both existing test paths are structurally blind to reflow, which is how
+31 passing PTY tests coexisted with a broken screen.
+
 ### Prefix cost as of 1.0.101
 
 The static prefix is what every turn pays before any work happens, so it is the
