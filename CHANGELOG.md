@@ -9,10 +9,308 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased] — proposed `1.0.101`
+## [1.0.101] — displays as `v1.0.101`
 
-`mix.exs` is deliberately **not** bumped and nothing is tagged: `v1.0.100` is
-already published with binaries attached, and the work below is not in them.
+Twenty-two commits. **No benchmark claim of any kind** — no arm was run for this
+release, and the last one is documented under 1.0.100 as diagnostic rather than
+comparable.
+
+Almost everything here was found the same two ways: an operator using the
+product and saying it felt wrong, or a guard that turned out to be correct about
+something nobody had read. Three of the findings below are defects in code
+written *last night*, caught because a test was written instead of a claim.
+
+### Fixed — the safety breaker could be stalled, not just fooled
+
+CI had been red on all eight runs since v1.0.76, and **the failure was never an
+assertion** — it was a 60-second `ExUnit.TimeoutError` inside `Regex.safe_run/3`.
+The bypass fix it guards was correct all along; the test was reporting a second
+defect in the same code: **a ReDoS in the circuit breaker**.
+
+Two nested quadratic patterns, fed up to 128 variants per command, on the
+**tool-approval path for every call**:
+
+| | before | after |
+|---|---:|---:|
+| `catastrophic_destruction?` on a padded `rm -rf "/"` | 5,391 ms | 22 ms |
+| the same through `bash -c` | 8,732 ms | 56 ms |
+| that module's suite | 27.5 s | 0.6 s |
+
+An oversized command was a denial of service on the breaker, and answering
+slowly enough is indistinguishable from not answering. The rewrite **cannot
+match less** — the pattern stays unanchored, the capture was only ever read by
+an optional backreference, and moving from `run/3` to `scan/3` makes it strictly
+*broader*: `f(){ echo hi }; g(){ g|g&; };g` is now caught. Nothing was relaxed,
+widened or excluded.
+
+Three sibling patterns share the shape and are **deliberately not fixed** —
+every rewrite tried either dropped an ordering requirement, creating unwaivable
+false positives in the hard-deny tier, or bounded the scan, which weakens it.
+Characterised in the commit; they want their own change.
+
+### Fixed — a check that could not find out reported "up to date"
+
+An operator ran the update command on a second machine, saw *"Already up to
+date"*, and concluded nothing had been published. Three independent defects, and
+the one that bit was the one that was telling the truth:
+
+- **Source checkouts compared against their own branch's upstream.** On a
+  feature branch forked 40 commits behind, `HEAD == @{u}` is true and the final
+  line was an unqualified green tick. `git rev-list --count HEAD..origin/main`
+  was never called, though every ref it needs was already fetched. The
+  `⚠ (not main)` warning fires ~60 seconds earlier, before a build.
+- **`else -> false`.** Any parse failure, network error, rate limit or `nil`
+  became "up to date". `Version.parse("1.0.099")` is `:error` — semver forbids
+  leading zeros, and this project's tags are the padded display form.
+- **`--sort=-v:refname` ranked `v1.0.4` above every `v1.0.09x` tag.** Before
+  `v1.0.100` existed, "latest" resolved to **1.0.4**.
+
+And the one that made the rest academic: **`osa update check` was unreachable.**
+Its updater sits under a supervisor absent from the default application tree, so
+every invocation on an ordinary install hit the `:exit` catch and printed
+`Check failed: :not_running`. The only network-backed check in the product was
+dead from the command named after it.
+
+Three outcomes are now distinct everywhere — available, current, and *could not
+check*. On `/health`, `latest_version: null` now means only the third.
+
+### Fixed — the deadline freed the turn and leaked the process
+
+Last night's `file_grep` bound stopped a wedged search from hanging a turn, and
+its comment claimed closing a port kills the OS process it owns. **Measured:
+false.**
+
+```
+BEFORE (System.cmd + Task.shutdown :brutal_kill)   survivors: 2
+  Ss   sh -c 'sleep 300' & wait      ← session leader
+  S    sh -c sleep 300               ← grandchild
+AFTER (Port.open + setsid + killpg)  survivors: 0
+```
+
+`BoundedCmd` and `file_grep` now spawn through `setsid` and signal the negative
+pgid — TERM, grace, KILL — guarded against pgid 0, pgid 1 and the BEAM's own
+group. Three-tier degradation, logged and in telemetry; **a failed reap never
+changes the caller's answer.** Missing-executable now returns `exit 127` with
+the binary named, restoring a message quality the previous commit had regressed.
+
+The two `nohup` launches stay unbounded **and a test now enforces it** — a
+mechanical sweep would have pointed the reaper at an application launch and
+killed the operator's app 120 s in. A written reason was not protection.
+
+`OS.ProcessGroup` resolves `ps`/`pgrep`/`kill` by `PATH`, so under a stripped
+launcher environment reaping degrades to nothing. It fails safe and logs;
+absolute paths would be better. Not fixed.
+
+### Fixed — a checked-out repo could replace a bundled skill's instructions
+
+A `SKILL.md` body becomes a subagent's **entire system prompt**, and `:local`
+outranks `:bundled` — so a hostile clone silently replaced a shipped skill.
+Ungated. The `settings.json` hole already on record *was* gated, but keyed on
+the **layer name**, so renaming the file bypassed it.
+
+All seven project-scoped resource types are enumerated in the commit with what
+each could do: `defaultMode: bypassPermissions`, `additionalDirectories: ["/"]`,
+`env` (`LD_PRELOAD`), `hooks`, MCP server definitions (a command line executed at
+boot), and agent definitions declaring their own permission tier.
+
+`Workspace.ProjectResource` replaces four hand-rolled copies of the same
+predicate and classifies **by where the path lives, not by the scope label the
+calling loader attaches** — so a loader that mislabels its own scopes still
+lands inside the gate. A source-level guard scans `lib/**` for new project
+config-dir joins and fails unless explicitly routed.
+
+**Trust is evaluated independently of `permission_mode`**: under `overdrive` a
+hostile clone's settings, agents, MCP servers and skills are still withheld.
+That matters most there, because a silently granted `bypassPermissions` would
+never produce a prompt to notice.
+
+`AGENTS.md` / `CLAUDE.md` / `.cursorrules` stay ungated by judgement: they grant
+nothing, and a trust prompt on every repo's context file would train reflexive
+acceptance and weaken the five items that do matter. The injection scanner is
+pattern-based and beatable — stated, not papered over.
+
+Sixteen skill tests broke on the fix and were made to trust their own fixture
+roots. The gate was not weakened to accommodate them.
+
+### Fixed — an unattended loop ran a model-authored command ungated
+
+`verify_loop`'s `test_command` came straight from tool input and reached
+`OS.Shell.cmd/2` once per iteration with **no permission check and no circuit
+breaker** — while `apply_fix/1`, two functions away, gates every model-authored
+command and documents at length why an unattended loop must not be a hole. The
+command the model chooses *first*, and which runs up to `max_iterations` times,
+was the ungated one. Now gated at `init/1`, so a refused loop never starts.
+
+### Added — the agent authors its own goal, and cannot rewrite it into an easy one
+
+Ported from Codex, whose goal is **one free-text string**: no criteria, no plan.
+A grep for `acceptance_criteria|success_criteria` across `codex-rs/` returns
+zero hits. The rigor lives in a continuation prompt re-injected every turn
+(*"do not redefine success around a smaller or easier task"*; *"the audit must
+prove completion, not merely fail to find obvious remaining work"*) and in a
+tool pair that refuses to create a goal while one is unfinished and lets the
+model set only `complete` or `blocked` — pause and resume belong to the user.
+
+On keeping a **self-authored** goal honest, grok-build is stronger and this
+release says so: it runs a planner once before the work, and shows the judge the
+founding request verbatim with the rule that a derived checklist *"may clarify
+but never narrow"*. Neither harness does both halves the operator asked for.
+OSA already had grok's panel; Codex's authoring half was what was missing.
+
+Three safeguards, one **stronger than Codex**:
+
+1. The objective **freezes** while a goal is live. The real risk was never an
+   easy goal at t=0 — it was swapping in an easier one at t=n, which the old
+   path did silently while resetting the stall counters.
+2. **Completion is a claim, not a verdict**: `update_goal(complete)` forces a
+   panel round. In Codex it writes straight to the database.
+3. The judge sees the immutable founding brief beside the model's restatement.
+
+`blocked` requires three consecutive turns **enforced in code**, where Codex
+states it in prose and trusts the model to count. No timeouts anywhere — a test
+asserts the prompt contains no deadline language.
+
+### Fixed — the `/goal` users reach never contacted the backend
+
+A complete client-side `/goal` had shipped in the TUI, deciding a goal was
+finished when the model's reply ended in `DONE`. No criteria, no evidence, no
+independent check — while the real tracker sat unused. Every form now routes to
+the backend, including acceptance criteria, which the client arm could not
+express. **`reply_signals_done` is deleted**; no code path anywhere inspects
+reply text.
+
+The budgets reconcile as **three nested bounds, not three racing counters**: the
+per-turn continuation cap bounds synthetic turns inside one turn; the tracker
+decides across turns and gates the rest absolutely; the client cycle cap can
+only stop *earlier*, never extend past `completed` or `paused`. Stops are named,
+and interrupt now *pauses* rather than clears — neither is evidence about a goal.
+
+### Fixed — a subagent could be invisible, and its clocks disagreed
+
+Measured: **at 100×20 with four running subagents and a twelve-item plan, the
+roster was shed to nothing while the plan kept its header and every row.** A
+launched subagent could leave no evidence on screen that it existed. The roster
+now holds a one-row floor while anything runs, exactly as the composer holds
+`INPUT_FLOOR`; the shed ladder is otherwise unchanged, because per row the plan
+really is the better use of the tenth row.
+
+Elapsed time came from a **TUI-local `Instant` reset by every `agent_started`
+frame** while `tool_uses` came from the backend's accumulated counter — which is
+how one was seen reporting 17 seconds and 99 tool uses. Both numbers were true
+about different clocks. Elapsed is now backend-anchored and sent as an **age**,
+so an age-less frame leaves the anchor alone instead of resetting it.
+
+### Fixed — a stored session's cost moved when the clock did
+
+`:requested_at` is stamped before the request is issued and survives the save.
+The cause was narrower than "nothing writes it": `normalize_usage/1` rebuilds
+the map from its four token keys, so a provider that stamped one would have had
+it discarded before pricing saw it. Measured on a stored DeepSeek row: **$0.44
+re-costing as $0.22**, silently, across a peak boundary. A bare date is refused
+rather than accepted as fact.
+
+### Fixed — a result that came back while the turn was ending was never read
+
+`TaskNotifications` drains at two sites; a completion landing while a turn
+finalizes hit a catch-all and was dropped, with nothing re-poking, and
+`pending?/1` had **zero production callers**. `settle/1` now asks the **queue**
+rather than the poke — covering a poke that raced the status flip, and any
+future caller that queues without poking. A second stranding point was found in
+the process: plan-mode returns never enter the finalize path at all, and those
+are the longest turns.
+
+### Fixed — 20 subprocess calls could block a turn forever
+
+`diff`, `ssh`/`scp`, the docker and X11/Wayland/macOS adapters — same shape as
+the bare `rg` that wedged a turn for 1h51m. All follow `file_grep`'s pattern,
+including the part that matters: an incomplete operation names itself and its
+target rather than substituting a plausible result. **`:infinity` tool execution
+is correct and stays** — a wall-clock cap punishes work for taking long, a step
+cap punishes it for going nowhere.
+
+The remaining inventory is **not** mechanical and is recorded as such: package
+installs and builds legitimately exceed any default, several sit behind `sudo`
+prompts, and three of them *are* reaping primitives.
+
+### Changed — the MCP catalog is now O(servers), not O(tools)
+
+Measured by speaking MCP stdio to 13 configured servers; 7 answered with **387
+real tools**:
+
+| | prefix tokens |
+|---|---:|
+| declared as native schemas | **72,111** |
+| virtualized, every name listed | 2,020 |
+| virtualized, per-server ceiling | **417** |
+
+Connecting a server with 300 tools now costs one line. `PermissionBroker` and
+`PathPolicy` are untouched — every MCP call still goes through an OSA tool with
+a real schema. This is the half of Prime Intellect's design worth taking; the
+single-tool version of it is not, because they bought their 4.0k prefix by
+deleting the permission broker, path policy and audit trail outright.
+
+### Added — a gate is not re-run against a byte-identical tree
+
+`Verification.WorkspaceFingerprint` hashes git status, `diff --binary HEAD` and
+**untracked content** — the last is what makes it honest when a model rewrites
+the same new test file, which `git diff HEAD` says nothing about. Fail-open by
+construction: `:unknown` on a non-repo, missing git, timeout or >32 MB, and
+`unchanged?/2` is false whenever either side is unknown.
+
+Its first draft used raw `System.cmd("git", …)` and was caught by
+`git_untrusted_repo_test.exs` — `git status`/`diff` are exactly the read-only
+porcelain that fires a hostile repo's `core.fsmonitor`.
+
+### Build — the toolchain is pinned, and drift fails loudly
+
+This machine built and tested on **Elixir 1.19.5 / OTP 28**; CI and the release
+pin **1.17.3 / OTP 26.2.5**, and there was no `.tool-versions` in the repo. So
+every "tests pass" claim — including the 1.0.100 release gate — was a claim
+about a toolchain users never receive.
+
+Aligned **down** to the shipping versions, which is what the project's own setup
+documentation already specified; only the machine had drifted. A test asserts
+`.tool-versions`, both workflows, `mix.exs` and the running VM agree, reading
+the workflows **as data** so it cannot become a fourth place to drift.
+
+The 37-file reformat in this release is the same lesson: the **formatter** is
+part of the toolchain, so "formatted" was also a claim about the wrong version.
+
+### CI — the runners the gate stands on are being retired
+
+`ubuntu-22.04` deprecates 2026-09-17 with brownouts that *terminate* jobs;
+`macos-14` goes unsupported 2026-11-02; every action was force-running on a Node
+version it was not built for. Moved on the five jobs that ship nothing —
+`build-linux-x64` deliberately stays, because 24.04's glibc floor would silently
+drop Ubuntu 22.04 LTS, Debian 12 and RHEL 9, which is a product decision rather
+than maintenance. Cache keys now carry the image version, since `runner.os` is
+`"Linux"` for both and a restored NIF would fail at link time inside a dep.
+
+**Nothing was made green by asking less** — no step deleted, no matrix narrowed,
+`continue-on-error` unchanged at its three pre-existing advisory steps.
+
+### Removed — the desktop app
+
+The Tauri/SvelteKit app is retired and will be started over: 223 files, 144 MB,
+and it **did not build**. A sweep of every `$lib/…` import found two unresolved
+— one written and lost when an unrelated commit was dropped, and
+`workspace/FileTree.svelte`, which appears in no commit on any branch and whose
+directory never existed. Nothing depended on it; the release artifacts are the
+Elixir release and the Rust TUI. Recoverable from history.
+
+### Known — not fixed
+
+- **Nothing in this release is verified against a live provider.** No real model
+  has authored a goal through the new path, and no real skeptic panel has voted.
+- Three sibling ReDoS patterns in the safety breaker.
+- `OS.ProcessGroup` depends on `PATH`; reaping degrades to nothing without it.
+- The changelog shipped **inside** the release is stale at `0.9.0`, so
+  `/release-notes` on a packaged install shows year-old notes. Nothing in
+  `release.yml` syncs it.
+- GitHub Actions is disabled at the organisation level, so **macOS and Windows
+  have had no binary since v1.0.83** and CI cannot run.
+- Triggering compaction off the provider's own reported token count (~5 lines,
+  removes estimator drift entirely) remains the best cheap win outstanding.
 
 ### Added — `api.uncensored.com` as a provider
 

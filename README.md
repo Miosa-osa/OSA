@@ -1124,6 +1124,35 @@ table was owned by whichever process created it, and being reached from transien
 processes meant the first one to exit destroyed every session's ledger. Fixed in
 this release. **Both benchmark arms predate the fix.**
 
+### Prefix cost as of 1.0.101
+
+The static prefix is what every turn pays before any work happens, so it is the
+one efficiency number worth quoting on its own. Measured locally, not modelled:
+
+| segment | tokens |
+|---|---:|
+| tool schemas | 7,259 |
+| static base | 6,340 |
+| world state | 2,865 |
+| volatile tail (uncached by design) | 1,215 |
+| **total** | **≈17.7k** |
+
+MCP is separate and used to dominate it. Measured by speaking MCP stdio to 13
+configured servers, of which 7 answered with **387 real tools**:
+
+| | prefix tokens |
+|---|---:|
+| declared as native tool schemas | 72,111 |
+| virtualized, every tool name listed | 2,020 |
+| virtualized, per-server ceiling (1.0.101) | **417** |
+
+The cost is now **O(servers), not O(tools)** — a server exposing 300 tools costs
+one line. Permission gating is unchanged: every MCP call still goes through an
+OSA tool with a real schema and a real permission check.
+
+**No benchmark arm was run for 1.0.101.** The last one is described above and is
+diagnostic, not comparable.
+
 ### Head-to-head, model held fixed
 
 Terminal-Bench 2.0 tasks, all arms on `glm-5.2:cloud` through one local daemon,
