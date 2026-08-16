@@ -106,16 +106,33 @@ defmodule OptimalSystemAgent.Providers.ModelRetirementTest do
       end
     end
 
-    test "Groq's Llamas and Google's 2.5 pair trip the 90-day guard" do
-      # Explicitly asserted because these are the two the brief called out: they
-      # still WORK today, so only the forward-looking guard catches them.
-      refute Retirements.retired?("llama-3.3-70b-versatile"),
-             "still live today — the point is that it is about to die"
+    test "the guard catches a model on both sides of its retirement date" do
+      # Asserted against a FIXED date, not `Date.utc_today()`. The earlier
+      # version of this test read the wall clock and asserted Groq's Llamas were
+      # "still live today" — true when written, false on 2026-08-16, which is
+      # their retirement date. It then failed for being right about the world.
+      #
+      # A test that expires is the same defect this suite exists to catch: an
+      # assertion that agrees with you until the world moves under it. What is
+      # worth pinning is the *mechanism* — that `retired?/2` flips at the date
+      # and `retiring_soon?/2` warns before it — and neither of those depends on
+      # when the suite runs.
+      llama = "llama-3.3-70b-versatile"
+      retires_on = Retirements.retirement_date(llama)
 
-      assert Retirements.retiring_soon?("llama-3.3-70b-versatile")
+      day_before = Date.add(retires_on, -1)
+      refute Retirements.retired?(llama, day_before),
+             "must still be live the day before its retirement date"
+
+      assert Retirements.retired?(llama, retires_on),
+             "must be retired ON the date, not the day after"
+
+      assert Retirements.retired?(llama, Date.add(retires_on, 1))
+
+      # The forward-looking guard is what gives an operator warning, and it is
+      # the half that has to work while the model still serves traffic.
+      assert Retirements.retiring_soon?(llama)
       assert Retirements.retiring_soon?("llama-3.1-8b-instant")
-
-      refute Retirements.retired?("gemini-2.5-pro")
       assert Retirements.retiring_soon?("gemini-2.5-pro")
       assert Retirements.retiring_soon?("gemini-2.5-flash")
     end
