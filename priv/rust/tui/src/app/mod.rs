@@ -89,6 +89,16 @@ pub struct BackgroundTask {
 
 // Some fields initialized but not yet read directly (accessed via render pipeline or Phase 3+)
 #[allow(dead_code)]
+/// Upper bound on [`App::committed`].
+///
+/// The store exists to be re-laid-out, so it has to be bounded: a long session
+/// otherwise grows it without limit, and every resize would re-render all of it.
+/// Oldest messages are dropped first. Losing the head of a very long transcript
+/// is a real cost, and it is the same cost the terminal's own scrollback limit
+/// already imposes -- `Vte.Terminal.set_scrollback_lines` defaults to a few
+/// thousand rows and drops the head exactly the same way.
+pub const MAX_COMMITTED_MESSAGES: usize = 2_000;
+
 pub struct App {
     // Components
     pub header: Header,
@@ -435,6 +445,31 @@ pub struct App {
     // native scrollback; `transcript` is the open overlay state (None = closed).
     pub transcript_log: Vec<crate::dialogs::transcript_viewer::TranscriptEntry>,
     pub transcript: Option<crate::dialogs::transcript_viewer::TranscriptViewer>,
+
+    /// Finalized messages, retained in the form they were BUILT in — the only
+    /// store from which the transcript can be laid out again at a new width.
+    ///
+    /// `transcript_log` beside it cannot do this job and was never meant to.
+    /// It is `{role, text: String}`, built for a read-only reader: an agent
+    /// message keeps its raw markdown, but a tool call is flattened through
+    /// `line_to_plain` over `Line`s that were already laid out at the width
+    /// they were committed at, and every style is dropped on the way. Rendering
+    /// the session from it would make the product monochrome and would freeze
+    /// tool cells at a stale width.
+    ///
+    /// A `Message` keeps what re-layout needs: the raw `content` for markdown,
+    /// `tool_data.lines` as styled `Line`s the tool renderer can rebuild, the
+    /// survey pairs, and the flags (`raw_mode`, `msg_type`) that decide how it
+    /// draws. Re-laying out is then `invalidate_for_width` + render at the new
+    /// width.
+    ///
+    /// Before this existed the commit loop's `drain_scrollback()` was a
+    /// `mem::take` whose messages were rendered straight into the terminal and
+    /// DROPPED at the end of the iteration — the transcript existed only in the
+    /// terminal's native scrollback, which OSA cannot read, rewrite, or re-wrap.
+    /// That is the root of the resize damage: not that the re-layout was wrong,
+    /// but that there was nothing left to lay out.
+    pub committed: Vec<crate::components::chat::message::Message>,
     /// When set, the transcript overlay renders THESE entries instead of
     /// `transcript_log` — used for nested subagent transcripts fetched from the
     /// backend (dashboard "view"). Cleared when the overlay closes.
@@ -801,6 +836,7 @@ impl App {
             pending_welcome_banner: None,
 
             transcript_log: Vec::new(),
+            committed: Vec::new(),
             transcript: None,
             transcript_override: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),

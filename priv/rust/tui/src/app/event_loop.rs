@@ -1453,9 +1453,14 @@ impl App {
                     batch: &mut Vec<(crate::components::chat::message::Message, u16)>,
                     batch_h: u16,
                     w: u16,
+                    retain: &mut Vec<crate::components::chat::message::Message>,
                 ) -> std::io::Result<()> {
                     if batch_h == 0 {
-                        batch.clear();
+                        // Still retained. A message that renders to zero rows at
+                        // THIS width is not necessarily empty at another one, and
+                        // dropping it here would put a hole in the transcript
+                        // that only appears after a resize.
+                        retain.extend(batch.drain(..).map(|(msg, _)| msg));
                         return Ok(());
                     }
                     terminal.insert_before(batch_h, |buf| {
@@ -1465,7 +1470,12 @@ impl App {
                             y = y.saturating_add(*h);
                         }
                     })?;
-                    batch.clear();
+                    // Move the messages into the retention store rather than
+                    // dropping them with the batch. This is the whole point: the
+                    // rows just handed to `insert_before` are frozen at `w` and
+                    // belong to the terminal now, so the only copy OSA can ever
+                    // lay out again is this one.
+                    retain.extend(batch.drain(..).map(|(msg, _)| msg));
                     Ok(())
                 }
 
@@ -1493,13 +1503,20 @@ impl App {
                         continue;
                     }
                     if batch_h > 0 && batch_h.saturating_add(h) > cap {
-                        flush(&mut terminal, &mut batch, batch_h, w)?;
+                        flush(&mut terminal, &mut batch, batch_h, w, &mut self.committed)?;
                         batch_h = 0;
                     }
                     batch_h = batch_h.saturating_add(h);
                     batch.push((msg, h));
                 }
-                flush(&mut terminal, &mut batch, batch_h, w)?;
+                flush(&mut terminal, &mut batch, batch_h, w, &mut self.committed)?;
+
+                // Bound the store. Oldest first, so what survives is the tail
+                // the user is actually looking at.
+                if self.committed.len() > crate::app::MAX_COMMITTED_MESSAGES {
+                    let excess = self.committed.len() - crate::app::MAX_COMMITTED_MESSAGES;
+                    self.committed.drain(..excess);
+                }
             }
 
             // `insert_before` (the welcome banner + every finalized-message flush

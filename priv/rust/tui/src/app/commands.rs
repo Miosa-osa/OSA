@@ -133,6 +133,10 @@ impl App {
                 self.chat.clear();
                 self.tasks.clear();
                 self.transcript_log.clear();
+                // The re-layout store is a second thing that can put a message
+                // back on screen, so it clears with the rest. Leaving it would
+                // resurrect the whole conversation on the next resize.
+                self.committed.clear();
                 self.attachments.clear();
                 // ...including everything that can PUT A MESSAGE BACK.
                 //

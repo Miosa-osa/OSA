@@ -235,6 +235,30 @@ impl Message {
         self.cached_height.set(None);
     }
 
+    /// Drop every width-dependent cache so this message can be laid out again
+    /// at a DIFFERENT width.
+    ///
+    /// [`Message::invalidate_cache`] is not enough on its own: it clears the
+    /// height memo but leaves `prerendered_body`, which
+    /// [`Message::prepare_for_commit`] filled by parsing the markdown at a
+    /// specific width. A message re-rendered after a resize would keep the old
+    /// body — wrapped for the old width — and the new height would be measured
+    /// against it, which is the same class of mismatch that put mixed-width
+    /// table rules on one screen.
+    ///
+    /// The guard is the load-bearing part. `prerendered_body` is a CACHE only
+    /// when the message still carries the `content` it was parsed from; for a
+    /// Plan message, and for the live streaming preview built by
+    /// `new_agent_prerendered`, it is not a cache but the body ITSELF and the
+    /// content is empty. Clearing it there would erase the message rather than
+    /// re-wrap it, so the reconstructible case is the only one touched.
+    pub fn invalidate_for_width(&mut self) {
+        self.cached_height.set(None);
+        if !self.content.is_empty() {
+            self.prerendered_body = None;
+        }
+    }
+
     /// U-T7: toggle raw-markdown display for this message. Returns the new state.
     /// Height depends on `raw_mode`, so the height cache is invalidated.
     pub fn toggle_raw_mode(&mut self) -> bool {

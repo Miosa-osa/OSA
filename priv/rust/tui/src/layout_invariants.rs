@@ -6139,3 +6139,156 @@ Beta is the one I would pick.
         }
     }
 }
+
+#[cfg(test)]
+/// Re-layout of RETAINED messages — the property the whole resize fix rests on.
+///
+/// A user dragged their window and the transcript was destroyed: a bordered
+/// markdown table came back with horizontal rules at two different widths, a
+/// doubled left border, and cell text torn mid-word. Measured on real libvte
+/// (`test/pty/vte_content_reflow.py`), a 9-row table committed at 120 columns
+/// occupies 18 physical rows at 60, with rule rows at two widths and bordered
+/// rows at three.
+///
+/// The cause was not that re-layout was wrong. It was that there was nothing
+/// left to lay out: the commit loop's `drain_scrollback()` is a `mem::take`
+/// whose messages were rendered into the terminal and then DROPPED, so the only
+/// copy of the transcript lived in the terminal's native scrollback — which OSA
+/// cannot read, rewrite or re-wrap. `App::committed` retains them instead.
+///
+/// Retention is worth nothing unless a retained message actually lays out again
+/// at a new width, so that is what these pin.
+mod relayout_invariants {
+    use super::*;
+    use crate::components::chat::message::{Message, MessageType};
+    use ratatui::layout::Rect;
+
+    const TABLE: &str = "\
+| Component | Owner | Notes |
+| --- | --- | --- |
+| gateway | platform | handles the websocket handshake literally |
+| renderer | client | markdown, tables, and the cotagline path |
+| storage | infra | see ISSUES.md and Documentation/CANON.md |
+";
+
+    fn agent(content: &str) -> Message {
+        Message::new(MessageType::Agent, content.to_string(), None)
+    }
+
+    /// Render `msg` at `width` and return the non-blank rows, as the screen has
+    /// them. Escapes are stripped so widths measure what is visible.
+    fn rows_at(msg: &mut Message, width: u16) -> Vec<String> {
+        msg.invalidate_for_width();
+        msg.prepare_for_commit(width);
+        let h = msg.height(width).max(1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, h));
+        msg.render_to_buffer(Rect::new(0, 0, width, h), &mut buf, 0);
+        (0..h)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    fn rule_widths(rows: &[String]) -> Vec<usize> {
+        let mut w: Vec<usize> = rows
+            .iter()
+            .filter(|r| r.chars().any(|c| "┌┬┐├┼┤└┴┘".contains(c)))
+            .map(|r| crate::util::cols(r))
+            .collect();
+        w.sort_unstable();
+        w.dedup();
+        w
+    }
+
+    /// The invariant the user's screenshot violates, stated at the width the
+    /// table is actually being drawn at: every rule row is the same width.
+    #[test]
+    fn a_retained_table_relayouts_cleanly_at_every_width() {
+        let mut msg = agent(TABLE);
+        for width in [120u16, 100, 80, 60, 100, 120, 60] {
+            let rows = rows_at(&mut msg, width);
+            let widths = rule_widths(&rows);
+            assert_eq!(
+                widths.len(),
+                1,
+                "at {width} columns a retained table produced rule rows of \
+                 {widths:?} — mixed-width rules inside one table is exactly the \
+                 reported corruption.\nrows:\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                widths[0] <= width as usize,
+                "at {width} columns the table drew {} columns wide, so the \
+                 terminal will wrap it and the wrap is what shreds it",
+                widths[0]
+            );
+        }
+    }
+
+    /// The sweep above is the real usage pattern — narrow, widen, narrow again —
+    /// and it must not accumulate. Laying out at 60 after a trip through 120
+    /// must be byte-identical to laying out at 60 directly.
+    #[test]
+    fn relayout_is_not_cumulative() {
+        let direct = rows_at(&mut agent(TABLE), 60);
+
+        let mut dragged = agent(TABLE);
+        for width in [120u16, 90, 60, 140, 70, 60] {
+            let _ = rows_at(&mut dragged, width);
+        }
+        let after_drag = rows_at(&mut dragged, 60);
+
+        assert_eq!(
+            direct,
+            after_drag,
+            "a table laid out at 60 after a drag differs from one laid out at 60 \
+             directly — the damage in the user's report is cumulative, and this \
+             is where that would come from"
+        );
+    }
+
+    /// `invalidate_for_width` must actually drop the width-baked body.
+    /// Without this, a resize re-measures the NEW width against the OLD wrapped
+    /// body, which is the same mismatch that puts two rule widths on one screen.
+    #[test]
+    fn invalidate_for_width_drops_the_width_baked_body() {
+        let mut msg = agent(TABLE);
+        msg.prepare_for_commit(120);
+        assert!(msg.prerendered_body.is_some(), "commit prep fills the body");
+
+        msg.invalidate_for_width();
+        assert!(
+            msg.prerendered_body.is_none(),
+            "the body parsed at 120 columns survived invalidation, so a \
+             re-render at 60 would reuse 120-column wrapping"
+        );
+        assert!(
+            msg.cached_height.get().is_none(),
+            "the height memo survived invalidation"
+        );
+    }
+
+    /// …but ONLY when it is a cache. For a Plan message and for the live
+    /// streaming preview, `prerendered_body` is not a cache, it is the body,
+    /// and `content` is empty. Clearing it there erases the message instead of
+    /// re-wrapping it.
+    #[test]
+    fn invalidate_for_width_keeps_a_body_that_is_not_a_cache() {
+        let mut msg = Message::new(MessageType::Agent, String::new(), None);
+        msg.prerendered_body = Some(crate::render::markdown::render_markdown("body", 40));
+
+        msg.invalidate_for_width();
+
+        assert!(
+            msg.prerendered_body.is_some(),
+            "the only copy of an empty-content message's body was dropped — \
+             that erases the message rather than re-laying it out"
+        );
+    }
+}
