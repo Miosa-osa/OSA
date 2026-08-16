@@ -159,6 +159,39 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
     end
   end
 
+  # Role allowlists (explore/explorer tools_allowed) must shrink what the
+  # model SEES. Execution-only gating is how a read-only explorer still
+  # calls `delegate` and nests forever.
+  describe "filter_for_role_allowlist/2" do
+    defp advertised_tools do
+      ~w(file_read file_glob file_grep dir_list code_symbols shell_execute delegate tool_search)
+      |> Enum.map(&%{name: &1})
+    end
+
+    test "explore-style allowlist drops delegate and tool_search from the advertised set" do
+      allowed = ~w(file_read file_glob file_grep dir_list code_symbols shell_execute)
+
+      names =
+        advertised_tools()
+        |> ToolFilter.filter_for_role_allowlist(allowed)
+        |> Enum.map(& &1.name)
+
+      assert names == allowed
+      refute "delegate" in names
+      refute "tool_search" in names
+    end
+
+    test "nil allowlist (unrestricted / parent session) leaves the advertised set alone" do
+      tools = advertised_tools()
+      assert ToolFilter.filter_for_role_allowlist(tools, nil) == tools
+    end
+
+    test "empty allowlist is unrestricted, same as nil" do
+      tools = advertised_tools()
+      assert ToolFilter.filter_for_role_allowlist(tools, []) == tools
+    end
+  end
+
   defp session_effort_level do
     case :ets.whereis(:osa_settings) do
       :undefined ->

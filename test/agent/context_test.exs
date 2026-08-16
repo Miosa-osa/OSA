@@ -430,4 +430,41 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
         ""
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # First-meet ritual — USER.md name line is the only completion signal
+  # ---------------------------------------------------------------------------
+
+  describe "user_known?/1" do
+    setup do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "osa-user-known-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      %{dir: dir}
+    end
+
+    test "blank template is unknown", %{dir: dir} do
+      File.write!(Path.join(dir, "USER.md"), "- **Name:**\n")
+      refute Context.user_known?(dir)
+    end
+
+    test "missing USER.md is unknown", %{dir: dir} do
+      refute Context.user_known?(dir)
+    end
+
+    test "filled - **Name:** line is known", %{dir: dir} do
+      File.write!(Path.join(dir, "USER.md"), "- **Name:** Roberto\n")
+      assert Context.user_known?(dir)
+    end
+
+    test "free-form prose without the Name line is unknown", %{dir: dir} do
+      File.write!(Path.join(dir, "USER.md"), "They're called Roberto.\n")
+      refute Context.user_known?(dir)
+    end
+  end
 end

@@ -129,6 +129,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   end
 
   @doc """
+  Restrict the ADVERTISED tool array to a role's `tools_allowed`.
+
+  `state.allowed_tools` used to gate EXECUTION only. An explore/explorer
+  child still saw `delegate` and spawned another explorer — the nest that
+  never STOPs. This pass is what makes the role file true at prompt time.
+
+  `nil` or `[]` means unrestricted (parent session / generic agent).
+  Applied at session start next to the coordinator and env-allowlist gates.
+  """
+  @spec filter_for_role_allowlist(list(), [String.t()] | nil) :: list()
+  def filter_for_role_allowlist(tools, allowed) when is_list(allowed) and allowed != [] do
+    Enum.filter(tools, fn t -> tool_name(t) in allowed end)
+  end
+
+  def filter_for_role_allowlist(tools, _), do: tools
+
+  @doc """
   Restrict the tool list to coordinator-mode tools (delegation, messaging, and
   management) when `coordinator?` is true; otherwise return `tools` unchanged.
 
@@ -151,9 +168,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
 
   Inert when the variable is unset or empty, which is every non-experimental
   run. It exists because there was no other way to vary the tool surface:
-  `state.allowed_tools` gates EXECUTION only (`subagent_tool_allowed?/2`), so
-  it leaves every schema in the request and measures nothing about what
-  advertising a tool costs. `:lite` is a SYSTEM-PROMPT variant and likewise
+  Role allowlists now also shrink the advertised set via
+  `filter_for_role_allowlist/2`. This env gate is the experimental override. `:lite` is a SYSTEM-PROMPT variant and likewise
   does not remove a tool from the array a native-tool provider receives.
 
   Applied once at session start, next to the coordinator and ask_user gates,

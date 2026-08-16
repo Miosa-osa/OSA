@@ -1283,10 +1283,26 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  # True once USER.md has a name filled in (not the blank template).
-  defp user_known?(dir) do
+  # Completion signal for the first-meet ritual. A free-form "they're called X"
+  # note does NOT match — only the USER.md template line the seed writes:
+  # `- **Name:** Roberto`. Doctor and Onboarding.seed_workspace/0 must use this
+  # same check; a private copy is how known users get asked their name again.
+  @user_known_re ~r/-\s*\*\*Name:\*\*\s*\S+/
+
+  @doc "The regex `user_known?/1` applies to USER.md."
+  @spec user_known_regex() :: Regex.t()
+  def user_known_regex, do: @user_known_re
+
+  @doc """
+  True once `USER.md` in `dir` has a filled `- **Name:** …` line.
+
+  Missing or unreadable USER.md is unknown. The blank template
+  (`- **Name:**` with nothing after) is unknown.
+  """
+  @spec user_known?(Path.t()) :: boolean()
+  def user_known?(dir) do
     case File.read(Path.join(dir, "USER.md")) do
-      {:ok, content} -> Regex.match?(~r/-\s*\*\*Name:\*\*\s*\S+/, content)
+      {:ok, content} -> Regex.match?(@user_known_re, content)
       {:error, _} -> false
     end
   end

@@ -1039,6 +1039,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         all_tools
         |> ToolFilter.filter_for_coordinator(coordinator?)
         |> AskUserMode.filter_tools(ask_user_enabled?)
+        |> ToolFilter.filter_for_role_allowlist(Keyword.get(opts, :allowed_tools))
         |> ToolFilter.filter_for_env_allowlist(),
       all_tools: all_tools,
       coordinator: coordinator?,
@@ -1510,9 +1511,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # is also read by Agent.Context to inject the "Mode: coordinator" system note.
   def handle_call({:set_coordinator, on?}, _from, state) when is_boolean(on?) do
     tools =
-      state.all_tools
-      |> ToolFilter.filter_for_coordinator(on?)
-      |> AskUserMode.filter_tools(state.ask_user_enabled)
+      rebuild_advertised_tools(state, coordinator: on?, ask_user_enabled: state.ask_user_enabled)
 
     {:reply, {:ok, on?}, %{state | coordinator: on?, tools: tools}}
   end
@@ -1527,9 +1526,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # cost (a single prompt-cache re-prime) is named in the reply text.
   def handle_call({:set_ask_user, on?}, _from, state) when is_boolean(on?) do
     tools =
-      state.all_tools
-      |> ToolFilter.filter_for_coordinator(state.coordinator)
-      |> AskUserMode.filter_tools(on?)
+      rebuild_advertised_tools(state, coordinator: state.coordinator, ask_user_enabled: on?)
 
     {:reply, {:ok, on?}, %{state | ask_user_enabled: on?, tools: tools}}
   end
@@ -1544,6 +1541,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:get_strategy, _from, state) do
     {:reply, {:ok, :none, %{}}, state}
+  end
+
+  # Mid-session toggles must keep the role allowlist. Rebuilding from
+  # `all_tools` without it is how an explorer would get `delegate` back.
+  defp rebuild_advertised_tools(state, coordinator: coordinator?, ask_user_enabled: ask?) do
+    state.all_tools
+    |> ToolFilter.filter_for_coordinator(coordinator?)
+    |> AskUserMode.filter_tools(ask?)
+    |> ToolFilter.filter_for_role_allowlist(state.allowed_tools)
+    |> ToolFilter.filter_for_env_allowlist()
   end
 
   # Durable session save, serialized by THIS process' mailbox.
