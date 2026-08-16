@@ -34,38 +34,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
 
     """
     Reads a file from the local filesystem. `path` must be absolute. Reads the
-    full file by default; use `offset` and `limit` for large files. Reads images
-    (PNG, JPG, GIF, WEBP) as base64 for vision analysis. Files only — use
-    `#{dir_list_name}` for directories. A file that exists but is empty returns a
-    warning.
+    full file by default; `offset`/`limit` window a large one. Reads images as
+    base64 for vision analysis. Files only — use `#{dir_list_name}` for
+    directories.
 
-    Every result ends with either `(End of file — N lines total)` or
-    `(Showing lines A-B. Use offset=C to continue.)`, so you never have to read
-    again to find out whether you have the whole file. If you need more than the
-    window gave you, continue from the offset it names or ask for a larger
-    `limit` — do not walk the file in small overlapping slices. Reading several
-    different files is independent work: issue those calls in parallel in one
-    turn.
+    Every result ends with `(End of file — N lines total)` or `(Showing lines
+    A-B. Use offset=C to continue.)`, so never read again just to find out
+    whether you have the whole file. If you need more, continue from the offset
+    it names or ask for a larger `limit` — do not walk a file in small
+    overlapping slices. Reading several different files is independent work:
+    issue those calls in parallel in one turn.
 
-    Lines you have already been shown this session are not sent twice. If part
-    of a window is already in your context and the file has not changed, the
-    result carries the rest and names the lines it left out — that is the whole
-    of what you asked for, split between this result and the earlier one, not a
-    truncation. Pass `resend: true` if you no longer have the earlier result.
+    Lines already shown to you this session are not sent twice, so a result that
+    names the lines it left out is the rest of what you asked for, not a
+    truncation; pass `resend: true` if you no longer have the earlier result. An
+    over-wide line is clamped and the notice names the `byte_offset` continuing
+    it.
 
-    A line too wide to return whole is clamped, and the notice names the
-    `byte_offset` that continues it — bytes are a second axis, and the only one
-    that can reach the rest of a line `limit` already selected in full.
+    Do NOT read a file to answer a question ABOUT it — for *does it contain X*,
+    *how many Y* or *is it well-formed*, use `#{transform_name}`'s `count` or
+    `assert_balanced`, or a one-line `shell_execute` script.
 
-    Do NOT read a file to answer a question ABOUT it. For *does it contain X*,
-    *how many Y*, or *is it well-formed*, use `#{transform_name}`'s `count` or
-    `assert_balanced`, or a one-line `shell_execute` script: the answer costs its
-    own size, and reading the file costs the file.
-
-    Read a file once before your FIRST `#{edit_name}` or `#{write_name}` to it.
-    Do not re-read it after your own successful edit — you know what you
-    changed, and if anything else changes the file, the next edit is rejected
-    with a stale-view error rather than silently landing.
+    Read a file once before your FIRST `#{edit_name}` or `#{write_name}` to it,
+    and never re-read it after your own successful edit — an edit against a stale
+    view is rejected, not silently landed.
     """
   end
 

@@ -28,11 +28,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
     Create and manage the session's task board, so the user sees your plan and
     real-time progress.
 
-    Use it proactively for work needing 3+ distinct steps, for careful planning,
-    when the user asks for a list or gives several tasks, and to capture new
-    instructions as they arrive. Skip it for a single straightforward task, work
-    under 3 steps, or a purely conversational question — a one-step plan is pure
-    latency. When in doubt, use it.
+    Use it for work needing 3+ distinct steps, when the user gives several tasks
+    or asks for a list, and to capture new instructions as they arrive. Skip it
+    for a single straightforward task or a conversational question — for one edit
+    in one place, just call #{file_edit_name}. When in doubt, use it.
 
     States: `pending` → `in_progress` → `completed` (or `failed`).
     - EXACTLY ONE task `in_progress` while work is underway — not less, not more.
@@ -41,19 +40,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
       tests fail, the implementation is partial, or errors are unresolved.
     - If blocked, keep it `in_progress` and add a new task describing the blocker.
 
-    Actions: `add` / `add_multiple` to create, `start`, `complete`, `fail` (with a
-    reason), `update` (revise without changing status), `add_dependency` /
-    `remove_dependency` for ordering, `next` for the next unblocked task, `list`,
-    and `clear` (sparingly).
-
-    The board renders itself. After any mutating call do NOT restate the plan, list
-    the tasks, or narrate the status change — it is already on screen. Just continue
-    with the work. For a single edit in one place, use #{file_edit_name} directly.
-
-    A status update is bookkeeping, not work. Send it in the SAME turn as the tool
-    call that does the next step — a turn whose only call is #{Constants.tool_name()}
-    moved nothing and cost a full round-trip through your context. The one exception
-    is the opening `add_multiple` that creates the board before any work exists.
+    The board renders itself: after a mutating call do NOT restate the plan, list
+    the tasks or narrate the status change, just continue with the work. Send the
+    status update in the SAME turn as the tool call that takes the next step — a
+    turn whose only call is #{Constants.tool_name()} moves nothing. The one
+    exception is the opening `add_multiple` that creates the board.
     """
   end
 

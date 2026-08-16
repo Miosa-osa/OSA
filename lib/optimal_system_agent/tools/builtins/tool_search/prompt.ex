@@ -14,12 +14,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   """
 
   @prompt_head """
-  Fetches full schema definitions for deferred tools so they can be called.
+  Fetches the schemas of deferred tools so they can be called.
 
   """
 
   @prompt_tail ~S"""
-   Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. Matched tools' full JSONSchema definitions come back inside a <functions> block and are then callable like any other tool.
+   A deferred tool cannot be called until you fetch it here.
 
   Query forms:
   - "select:Read,Edit,Grep" — these exact tools by name
@@ -51,13 +51,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   # are listed in the separate <mcp-servers> block built by
   # `Soul.ToolsSection.build_mcp_catalog/0`. Saying only "<system-reminder>"
   # told the model to look somewhere MCP tools have never appeared.
-  @mcp_hint " MCP tools are listed separately, by server, in the <mcp-servers> block."
+  @mcp_hint " MCP tools are listed by server in <mcp-servers>."
 
   defp tool_location_hint(:system_reminder),
-    do: "Deferred tools appear by name in <system-reminder> messages." <> @mcp_hint
+    do: "Deferred tools are named in <system-reminder> messages." <> @mcp_hint
 
   defp tool_location_hint(:available_block),
-    do: "Deferred tools appear by name in <available-deferred-tools> messages." <> @mcp_hint
+    do: "Deferred tools are named in <available-deferred-tools> messages." <> @mcp_hint
 
   defp tool_location_hint(_),
     do: tool_location_hint(:system_reminder)

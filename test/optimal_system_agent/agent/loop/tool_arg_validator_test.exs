@@ -15,7 +15,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
         arguments: %{"path" => "/tmp/x.txt", "old_string" => "a", "new_string" => "b"}
       }
 
-      assert :ok = ToolArgValidator.validate(tool_call, %{session_id: sid})
+      assert {:ok, %{arguments: _}} = ToolArgValidator.validate(tool_call, %{session_id: sid})
     end
   end
 
@@ -69,7 +69,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
       assert {:reask, m1} = ToolArgValidator.validate(bad, state)
       assert m1 =~ "attempt 1 of 2"
       # Clean call resets the budget.
-      assert :ok = ToolArgValidator.validate(good, state)
+      assert {:ok, _} = ToolArgValidator.validate(good, state)
       # Next bad call starts again at attempt 1.
       assert {:reask, m2} = ToolArgValidator.validate(bad, state)
       assert m2 =~ "attempt 1 of 2"
@@ -79,7 +79,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
   describe "non-builtin tools" do
     test "unknown / MCP tool names pass through untouched", %{session_id: sid} do
       tool_call = %{name: "mcp_some_unknown_tool", arguments: %{}}
-      assert :ok = ToolArgValidator.validate(tool_call, %{session_id: sid})
+      assert {:ok, %{arguments: _}} = ToolArgValidator.validate(tool_call, %{session_id: sid})
     end
   end
 end

@@ -18,21 +18,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Prompt do
     killed), and exit code of a background command started by `#{shell_name}`
     with `run_in_background: true`.
 
-    DO NOT SPIN. A bare call returns instantly, so calling it in a loop while
-    the command is `running`, or sleeping between calls, buys nothing and costs
-    a round trip each time.
+    DO NOT SPIN: never call this in a loop while the command is `running`, and
+    never sleep between calls. To WAIT, pass `wait_ms` — ONE call that blocks
+    until the command reaches a terminal status or the wait elapses.
 
-    To WAIT, pass `wait_ms` — ONE call that blocks until the command reaches a
-    terminal status (`done`, `failed`, `killed`) or the wait elapses, then
-    returns its final output. That is the only sanctioned way to wait, and it
-    is the right move whenever your answer depends on the result: `wait_ms:
-    600000` costs one tool call, not one per check.
-
-    You may also be woken by a completion notification instead — but only if
-    something drives another turn of this session after the command finishes.
-    That happens in an interactive session and does NOT happen in a one-shot or
-    headless run, which ends the moment you give your final answer. So: if you
-    need the result, block on it here. If you do not need it, leave it alone.
+    A completion notification may wake you instead, but only if something drives
+    another turn of this session afterwards — true interactively, FALSE in a
+    one-shot or headless run, which ends the moment you answer. So if you need
+    the result, block on it here before answering; if you do not, leave it alone.
 
     Use `kill: true` to stop a command early; it returns the final output too.
     """

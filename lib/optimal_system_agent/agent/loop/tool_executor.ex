@@ -1255,7 +1255,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # instead of silently executing with empty (%{}) arguments.
     case ToolArgValidator.validate(tool_call, state) do
       {:reask, message} -> message
-      :ok -> run_validated_tool(tool_call, state)
+      {:ok, validated_call} -> run_validated_tool(validated_call, state)
     end
   end
 

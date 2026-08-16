@@ -31,26 +31,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidator do
   @doc """
   Validate `tool_call.arguments` against the tool's schema.
 
-  Returns `:ok` to proceed, or `{:reask, message}` where `message` starts with
+  Returns `{:ok, tool_call}` to proceed — with `:arguments` replaced by the
+  schema-COERCED map (see `Tools.ArgCoercion`), which the caller must be the
+  one it executes — or `{:reask, message}` where `message` starts with
   `"Error:"` so downstream finalization treats it as a tool failure.
   """
-  @spec validate(map(), map()) :: :ok | {:reask, String.t()}
+  @spec validate(map(), map()) :: {:ok, map()} | {:reask, String.t()}
   def validate(tool_call, state) do
     session_id = Map.get(state, :session_id)
     tool_name = tool_call.name
 
     case Registry.module_for(tool_name) do
       nil ->
-        # MCP / unknown / aliased tool — no local schema to validate against.
-        :ok
+        # MCP / unknown tool — no local schema to validate against.
+        {:ok, tool_call}
 
       mod ->
         args = Map.get(tool_call, :arguments) || %{}
 
-        case Registry.validate_arguments(mod, args) do
-          :ok ->
+        case Registry.coerce_and_validate(mod, args) do
+          {:ok, coerced} ->
             reset_count(session_id, tool_name)
-            :ok
+            # The COERCED arguments are what the caller must execute — a
+            # repaired `"30"` that only validates and never runs is no fix at
+            # all.
+            {:ok, Map.put(tool_call, :arguments, coerced)}
 
           {:error, reason} ->
             reask(session_id, tool_name, reason)

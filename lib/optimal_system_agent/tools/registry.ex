@@ -364,7 +364,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
   defp execute_direct_unguarded(tool_name, arguments) do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
-    case Map.get(builtin_tools, tool_name) do
+    case Map.get(builtin_tools, tool_name) || module_for_alias(tool_name) do
       nil ->
         mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
@@ -379,9 +379,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
         end
 
       mod ->
-        with :ok <- validate_arguments(mod, arguments),
-             :ok <- action_authority_result(tool_name, arguments) do
-          mod.execute(arguments)
+        with {:ok, args} <- coerce_and_validate(mod, arguments),
+             :ok <- action_authority_result(tool_name, args) do
+          mod.execute(args)
         end
     end
   end
@@ -484,7 +484,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
   defp execute_unguarded(tool_name, arguments) do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
-    case Map.get(builtin_tools, tool_name) do
+    case Map.get(builtin_tools, tool_name) || module_for_alias(tool_name) do
       nil ->
         mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
@@ -499,9 +499,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
         end
 
       mod ->
-        with :ok <- validate_arguments(mod, arguments),
-             :ok <- action_authority_result(tool_name, arguments) do
-          dispatch(mod, arguments)
+        with {:ok, args} <- coerce_and_validate(mod, arguments),
+             :ok <- action_authority_result(tool_name, args) do
+          dispatch(mod, args)
         end
     end
   rescue
@@ -548,7 +548,103 @@ defmodule OptimalSystemAgent.Tools.Registry do
   """
   @spec module_for(String.t()) :: module() | nil
   def module_for(tool_name) do
-    :persistent_term.get({__MODULE__, :builtin_tools}, %{}) |> Map.get(tool_name)
+    :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+    |> Map.get(tool_name)
+    |> case do
+      nil -> module_for_alias(tool_name)
+      mod -> mod
+    end
+  end
+
+  @doc """
+  Resolve a builtin tool's declared ALIAS to its module, or `nil`.
+
+  Consulted only after an exact-name miss, in `module_for/1` and in both
+  execute paths, so a canonical name always wins over an alias that collides
+  with it.
+
+  Aliases are deliberately absent from `list_active/0`: the advertised tool
+  array is re-sent on every request, so an alias that appeared there would cost
+  prefix tokens every turn. They exist to *catch* a name the model invented
+  (measured: 21 `bash_execute` + 9 `bash` calls against a tool actually named
+  `shell_execute`), not to advertise one.
+  """
+  @spec module_for_alias(String.t()) :: module() | nil
+  def module_for_alias(tool_name) when is_binary(tool_name) do
+    Map.get(alias_map(), tool_name)
+  end
+
+  def module_for_alias(_tool_name), do: nil
+
+  # alias -> module, built once from each builtin's `aliases/0` and cached in
+  # :persistent_term alongside the canonical map. A canonical name is never
+  # shadowed: entries colliding with a canonical name are dropped here, and the
+  # lookup is a fallback after the canonical miss anyway.
+  defp alias_map do
+    case :persistent_term.get({__MODULE__, :tool_aliases}, nil) do
+      nil ->
+        map = build_alias_map(:persistent_term.get({__MODULE__, :builtin_tools}, %{}))
+        :persistent_term.put({__MODULE__, :tool_aliases}, map)
+        map
+
+      map ->
+        map
+    end
+  end
+
+  defp build_alias_map(builtin_tools) do
+    Enum.reduce(builtin_tools, %{}, fn {_name, mod}, acc ->
+      aliases =
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :aliases, 0) do
+          try do
+            mod.aliases()
+          rescue
+            _ -> []
+          catch
+            _, _ -> []
+          end
+        else
+          []
+        end
+
+      Enum.reduce(List.wrap(aliases), acc, fn
+        a, inner when is_binary(a) ->
+          if Map.has_key?(builtin_tools, a), do: inner, else: Map.put_new(inner, a, mod)
+
+        _, inner ->
+          inner
+      end)
+    end)
+  end
+
+  @doc """
+  Coerce tool arguments against the module's JSON Schema, then validate them.
+
+  Returns `{:ok, coerced_arguments}` — the caller MUST execute with the
+  returned map, not the one it passed in, or the coercion is cosmetic.
+
+  This is the single place the model's stringified scalars (`"30"` for an
+  `integer` field, a bare string for an `array` field) are repaired. See
+  `OptimalSystemAgent.Tools.ArgCoercion` for the (deliberately conservative)
+  rules: anything ambiguous is left untouched and still fails validation with a
+  real error, so this narrows the REASK rate without ever inventing a value.
+  """
+  @spec coerce_and_validate(module(), map()) :: {:ok, map()} | {:error, String.t()}
+  def coerce_and_validate(mod, arguments) do
+    coerced = coerce_arguments(mod, arguments)
+
+    case do_validate_arguments(mod, coerced) do
+      :ok -> {:ok, coerced}
+      {:error, _message} = error -> error
+    end
+  end
+
+  defp coerce_arguments(mod, arguments) do
+    OptimalSystemAgent.Tools.ArgCoercion.coerce(mod.parameters(), arguments)
+  rescue
+    _ -> arguments
+  catch
+    _, _ -> arguments
   end
 
   @doc """
@@ -557,11 +653,23 @@ defmodule OptimalSystemAgent.Tools.Registry do
   Returns `:ok` when arguments conform to the schema, or
   `{:error, message}` with a structured description of all validation failures.
 
+  Thin wrapper over `coerce_and_validate/2`, kept because callers that only
+  want a yes/no answer (and existing tests) use it. Callers that go on to
+  EXECUTE must use `coerce_and_validate/2` so the repaired arguments are the
+  ones that run.
+
   If validation infrastructure is unavailable or crashes, read-only tools remain
   fail-open for compatibility. Mutating or unknown-safety tools fail closed.
   """
   @spec validate_arguments(module(), map()) :: :ok | {:error, String.t()}
   def validate_arguments(mod, arguments) do
+    case coerce_and_validate(mod, arguments) do
+      {:ok, _coerced} -> :ok
+      {:error, _message} = error -> error
+    end
+  end
+
+  defp do_validate_arguments(mod, arguments) do
     unless Code.ensure_loaded?(ExJsonSchema.Schema) and
              Code.ensure_loaded?(ExJsonSchema.Validator) do
       validation_infra_error_result(mod, arguments, :ex_json_schema_unavailable)
@@ -890,6 +998,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     tools = build_tool_list(builtin_tools, skills)
 
     :persistent_term.put({__MODULE__, :builtin_tools}, builtin_tools)
+    :persistent_term.put({__MODULE__, :tool_aliases}, build_alias_map(builtin_tools))
     :persistent_term.put({__MODULE__, :skills}, skills)
     :persistent_term.put({__MODULE__, :tools}, tools)
 
@@ -913,6 +1022,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     tools = build_tool_list(builtin_tools, state.skills)
 
     :persistent_term.put({__MODULE__, :builtin_tools}, builtin_tools)
+    :persistent_term.put({__MODULE__, :tool_aliases}, build_alias_map(builtin_tools))
     :persistent_term.put({__MODULE__, :tools}, tools)
 
     # The system prompt renders {{TOOL_DEFINITIONS}} from this exact map and
@@ -968,7 +1078,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
           {:error, circuit_breaker_message(tool_name, reason, severity)}
 
         :ok ->
-          case Map.get(state.builtin_tools, tool_name) do
+          case Map.get(state.builtin_tools, tool_name) || module_for_alias(tool_name) do
             nil ->
               mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
@@ -978,8 +1088,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
               end
 
             mod ->
-              case validate_arguments(mod, arguments) do
-                :ok -> mod.execute(arguments)
+              case coerce_and_validate(mod, arguments) do
+                {:ok, args} -> mod.execute(args)
                 {:error, _reason} = error -> error
               end
           end

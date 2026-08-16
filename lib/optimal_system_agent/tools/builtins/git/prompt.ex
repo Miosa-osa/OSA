@@ -20,6 +20,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Prompt do
     commit, branch, checkout, stash, reset, tag, remote, blame, shortlog,
     describe, reflog.
 
+    `command` is ONE bare subcommand — `diff`, not `diff --stat` and not
+    `git diff`. Every flag and argument goes in `args`. This tool is not a
+    shell: for anything not in the list above, or for git inside a pipeline,
+    use shell_execute.
+
     Git Safety Protocol (mandatory):
     - Before committing, run `git status`, `git diff HEAD`, and
       `git log --oneline -10` to match the repo's commit style; messages

@@ -20,7 +20,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
   def name, do: Constants.tool_name()
 
   @impl true
-  def aliases, do: ["shell", "run_command"]
+  # "bash" (9) and "bash_execute" (21) were measured as calls to a tool that
+  # does not exist — the model reaching for the name every other harness uses.
+  # Aliases are resolved as a fallback in `Tools.Registry` and never appear in
+  # the advertised array, so catching these costs zero prefix tokens.
+  def aliases, do: ["shell", "run_command", "bash", "bash_execute"]
 
   @impl true
   def search_hint, do: "execute shell commands: git, mix, npm, cargo, docker, make"
