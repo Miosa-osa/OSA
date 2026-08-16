@@ -51,6 +51,34 @@ continuation, so a 68-column table row reads back as 68 columns on a 60-column
 screen. Reflow damage is by definition a physical-row phenomenon, so a range
 read reports a shredded table as pristine. One call per row costs one IPC
 round trip each and is the only way to see the screen as the user does.
+
+The adjustment goes STALE after ``ESC[3J``
+------------------------------------------
+Third failure of the same class, and the nastiest, because unlike the other two
+it only appears once the product starts erasing saved lines.
+
+``ESC[3J`` (erase-saved-lines, ``ClearType::Purge``) makes VTE drop its
+scrollback. The ring's own row numbering — the coordinates
+``get_text_range_format`` takes — does NOT restart; the dropped rows simply stop
+being addressable and everything after them keeps the index it always had. The
+``Gtk.Adjustment``, however, is left describing the ring as it was: measured on
+this box, after a resize drag against a build that purges on every step, the
+adjustment reports ``lower=0, upper=116`` with the visible screen at
+``[66, 116)`` while ``get_cursor_position()`` — which IS in ring coordinates —
+returns row **277**.
+
+Rows 66..116 are inside the purged span, so every one of them reads back empty.
+A harness trusting the adjustment therefore reports a blank screen and an absent
+transcript, and every content grade comes out DESTROYED with the note "block
+markers vanished". The transcript is intact and correctly reflowed the whole
+time; only the address is wrong. ``vte_content_reflow.py`` graded a working
+build as destroying its own transcript for exactly this reason.
+
+The cursor is the fixed point. It is reported in ring coordinates and it is
+always inside the visible screen, so it pins the bottom of the buffer to within
+one screenful no matter how far the adjustment has drifted. [`ring_bounds`] uses
+it, and falls back to the adjustment verbatim whenever the two still agree — so
+a session that never purges reads exactly as it did before.
 """
 
 from __future__ import annotations
@@ -64,16 +92,57 @@ def _row(term, Vte, r: int, width: int) -> str:
 
 
 def screen_bounds(term) -> tuple[int, int]:
-    """``(first, last_exclusive)`` absolute row indices of the VISIBLE screen."""
+    """``(first, last_exclusive)`` VISIBLE screen, as the ADJUSTMENT states it.
+
+    Raw. Prefer [`ring_bounds`], which repairs this after ``ESC[3J``.
+    """
     adj = term.get_vadjustment()
     top = int(adj.get_value())
     return top, top + int(adj.get_page_size())
 
 
 def buffer_bounds(term) -> tuple[int, int]:
-    """``(first, last_exclusive)`` absolute row indices of the WHOLE ring."""
+    """``(first, last_exclusive)`` WHOLE ring, as the ADJUSTMENT states it.
+
+    Raw. Prefer [`ring_bounds`], which repairs this after ``ESC[3J``.
+    """
     adj = term.get_vadjustment()
     return int(adj.get_lower()), int(adj.get_upper())
+
+
+def ring_bounds(term, Vte) -> tuple[int, int, int]:
+    """``(buffer_first, screen_first, last_exclusive)`` in RING coordinates.
+
+    The adjustment's numbers when they are still coherent, and cursor-derived
+    ones when ``ESC[3J`` has desynchronized them (see the module docstring).
+
+    "Coherent" is decided by the one check that cannot be argued with: the
+    cursor is always inside the visible screen, so a cursor row at or past the
+    adjustment's ``upper`` proves the adjustment describes a ring that no longer
+    exists. Nothing is repaired unless that fires, so a session that never
+    purges reads byte-identically to before this function existed.
+    """
+    adj = term.get_vadjustment()
+    lower, upper = int(adj.get_lower()), int(adj.get_upper())
+    page = int(adj.get_page_size()) or term.get_row_count()
+    top = int(adj.get_value())
+    _, cursor_row = term.get_cursor_position()
+
+    if cursor_row < upper:
+        return lower, top, upper
+
+    # Stale. The cursor pins the bottom to within one screenful: the screen
+    # cannot end more than `page` rows below it. Scan that far and take the
+    # last row holding anything, so the chrome under the cursor (hint row,
+    # status bar) is included rather than clipped.
+    width = term.get_column_count()
+    last = cursor_row + 1
+    for r in range(cursor_row + 1, cursor_row + page + 1):
+        if _row(term, Vte, r, width).strip():
+            last = r + 1
+    # The ring's span survives the drop even though its origin does not, so it
+    # still says how far back there is anything to read.
+    return max(0, last - (upper - lower)), max(0, last - page), last
 
 
 def screen_rows(term, Vte) -> list[str]:
@@ -83,7 +152,7 @@ def screen_rows(term, Vte) -> list[str]:
     about layout, chrome placement or a resize wipe is about.
     """
     width = term.get_column_count()
-    first, last = screen_bounds(term)
+    _, first, last = ring_bounds(term, Vte)
     return [_row(term, Vte, r, width) for r in range(first, last)]
 
 
@@ -97,7 +166,7 @@ def buffer_rows(term, Vte, limit: int | None = None) -> list[str]:
     each row is an IPC round trip and a long session's ring runs to thousands.
     """
     width = term.get_column_count()
-    first, last = buffer_bounds(term)
+    first, _, last = ring_bounds(term, Vte)
     if limit is not None:
         first = max(first, last - limit)
     return [_row(term, Vte, r, width) for r in range(first, last)]

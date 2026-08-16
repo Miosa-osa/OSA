@@ -149,6 +149,19 @@ def slice_block(rows: list[str], name: str) -> list[str] | None:
     Matched with `in` rather than equality: the markers are committed through
     the markdown renderer, which may indent them, and after a reflow they can
     share a physical row with neighbouring text.
+
+    The marker rows are INCLUDED, with the marker token itself removed, and that
+    is load-bearing rather than tidy. A marker and the block it brackets are
+    consecutive non-blank lines, so markdown folds them into ONE PARAGRAPH and
+    re-wraps them together. At 120 columns `…indifferent to the weather.` and
+    `PROSEBLOCK_END` happen to land on separate physical rows; at 60 they share
+    one. Excluding the end row therefore deleted a real word from the graded
+    text and reported it as `prose lost the word 'indifferent'` — a re-wrap the
+    probe asked for, graded as data loss.
+
+    That only started mattering when OSA began re-rendering the transcript at
+    the new width: before, the block was frozen at the width it was committed
+    at and the markers never moved.
     """
     begin = end = None
     for i, row in enumerate(rows):
@@ -159,7 +172,10 @@ def slice_block(rows: list[str], name: str) -> list[str] | None:
             break
     if begin is None or end is None:
         return None
-    return rows[begin + 1 : end]
+    block = list(rows[begin : end + 1])
+    block[0] = block[0].replace(f"{name}_BEGIN", "")
+    block[-1] = block[-1].replace(f"{name}_END", "")
+    return block
 
 
 def grade_table(rows: list[str]) -> list[str]:
@@ -187,8 +203,27 @@ def grade_table(rows: list[str]) -> list[str]:
 
     # 2. No doubled border. `||` (or `││`) is what a wrapped row produces when
     #    its continuation begins with the border glyph of the next row.
+    #
+    #    ADJACENCY IS THE DEFECT, and this used to strip spaces before looking,
+    #    which is not the same question. An EMPTY CELL is two borders separated
+    #    by the column's width in spaces, and it collapses to `││` under
+    #    `replace(" ", "")` exactly as damage does. Every continuation row of a
+    #    multi-line table cell has empty leading cells, so the space-blind form
+    #    flags a correctly wrapped table:
+    #
+    #        ┃│           │          │ handshake literally             │
+    #
+    #    That never fired before because OSA never re-rendered a committed table
+    #    at a narrower width — the rows were frozen at the width they were
+    #    committed at, and the terminal, not the renderer, did the wrapping.
+    #    Source-backed replay re-renders them, and cell wrapping is what a
+    #    correct narrow table looks like.
+    #
+    #    Real doubling has nothing between the two glyphs, so match them
+    #    adjacent. Reflow damage that does land inside a cell still fails
+    #    checks 1 and 3, which measure the widths this check cannot.
     for r in rows:
-        if TABLE_SIDE * 2 in r.replace(" ", "") or "||" in r.replace(" ", ""):
+        if TABLE_SIDE * 2 in r or "||" in r:
             faults.append(f"doubled left border in row: {r.strip()[:60]!r}")
             break
 

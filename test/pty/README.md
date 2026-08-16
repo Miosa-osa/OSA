@@ -261,6 +261,46 @@ All three were missing, and each made these tests pass while the bug shipped.
    25 turns at every height tested. `turn_ceiling_probe.py` asserts exactly
    that, so the claim cannot rot back.
 
+4. **Do not trust the `Gtk.Adjustment` after `ESC[3J`** (`vte_reader.py`, again).
+   Third instance of the same class, and it only appears once the product
+   erases saved lines, so the first two fixes did not prevent it.
+
+   `ESC[3J` makes VTE drop its scrollback. The ring's own row numbering — the
+   coordinates `get_text_range_format` takes — does **not** restart; the dropped
+   rows simply stop being addressable and everything after them keeps the index
+   it always had. The adjustment is left describing the ring as it was.
+   Measured, after a resize drag against a build that purges on every step:
+   `lower=0, upper=116`, visible screen `[66, 116)` — while
+   `get_cursor_position()`, which *is* in ring coordinates, returns row **277**.
+   Rows 66..116 sit inside the purged span, so all fifty read back empty.
+
+   This one invented a product defect too, and a spectacular one: every content
+   grade in `vte_content_reflow.py` came out `DESTROYED — block markers vanished
+   from the transcript`, i.e. "OSA wipes your conversation on resize", against a
+   build whose transcript was intact and correctly reflowed the whole time. Only
+   the address was wrong. The cursor is the fixed point — always in ring
+   coordinates, always inside the visible screen — so `ring_bounds()` derives
+   the bottom from it and falls back to the adjustment verbatim whenever the two
+   still agree.
+
+   Two graders in `vte_content_reflow.py` had the matching flaw, both invisible
+   until OSA started re-rendering committed content at the new width rather than
+   leaving the terminal to re-wrap it:
+
+   * `slice_block` excluded the marker rows. A marker and its block are
+     consecutive non-blank lines, so markdown folds them into one paragraph and
+     re-wraps them together; at 60 columns the last prose word shares a row with
+     `PROSEBLOCK_END`, and dropping that row reported the word as lost.
+   * `grade_table`'s doubled-border check stripped spaces first, which makes an
+     **empty cell** — two borders separated by the column width — indistinguishable
+     from two adjacent ones. Every continuation row of a wrapped table cell has
+     empty leading cells, so a correctly wrapped narrow table failed. Adjacency
+     is the defect; match it adjacent.
+
+   The instrument keeps its teeth either way: with all three repairs, `main`
+   still grades `DESTROYED` on the committed table (rule rows at widths 9 and
+   60 — the user's screenshot) and the source-backed replay grades `SURVIVED`.
+
 ### Ghostty
 
 Ghostty has no CLI, control socket or escape sequence that reports screen or

@@ -9,6 +9,58 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased]
+
+### Fixed — a resize re-renders the transcript instead of surrendering it
+
+Committed rows leave through `insert_before` into the terminal's native
+scrollback, where OSA no longer owns them. On a width change the terminal
+re-wraps those raw rows with no idea that some of them were a table, which is
+what shredded a committed markdown table into rules of two different widths with
+a doubled left border while the prose beside it re-wrapped fine.
+
+The resize path now rebuilds the transcript **from source**: it purges the
+projection, rebuilds the inline viewport at a known origin, and re-renders every
+retained `Message` at the settled width. Tables are laid out again at the width
+the terminal actually has, rather than preserved as border rows frozen at a width
+it no longer has.
+
+Measured on real libvte (`test/pty/vte_content_reflow.py`), across a
+120→100→80→60→80→100→60 drag: the committed table grades `DESTROYED` on 1.0.103
+(rule rows at widths 9 and 60 inside one table) and `SURVIVED` here.
+
+The replay bottom-aligns. A rebuild at row 0 followed by `insert_before` leaves
+the live region on the row the replay ends on — the bottom once the conversation
+overflows the screen, but the TOP before it does, which left the composer on row
+9 of a 30-row screen with twenty dead rows beneath it. Blank rows are emitted
+*ahead* of the transcript so the chrome sits against the last transcript row and
+still occupies the screen's last rows, which is where a real resize has anchored
+it since 1.0.75.
+
+### Known — a resize now destroys scrollback from before OSA launched
+
+Own this before upgrading. The rebuild purges the terminal's scroll history
+(`ESC[3J`), and that history is not OSA's alone: it includes whatever was in the
+terminal **before OSA started**.
+
+Measured, 40 marker lines printed by the shell and then `exec`-ing the binary,
+across a 120→100→80→100→120 drag on real libvte:
+
+| build | pre-launch shell lines still addressable |
+| --- | --- |
+| 1.0.103 | 40 / 40 |
+| this build | 0 / 40 |
+
+So: your own conversation survives a resize and reflows correctly, and your
+shell history from before you ran `osa` does not. The alternate-screen design
+avoids this tradeoff and remains the standing alternative; this ships the replay
+because the transcript corruption was the reported defect.
+
+Also lost on resize, for the same reason and already true in 1.0.103: the
+welcome banner, which is not a retained `Message` and so is not replayed.
+
+---
+
 ## [1.0.103] — displays as `v1.0.103`
 
 Three commits. **The resize defect is not fixed here.** Two of its prerequisites
@@ -118,6 +170,7 @@ the following cell — but that is an expectation, not a measurement.
 
 Also unchanged from 1.0.102: nothing in this release is verified against a live
 provider, and the long-term memory block is recency rather than relevance.
+||||||| parent of abf50741 (fix(tui): bottom-align the replayed transcript, and fix the reader that graded it)
 
 ---
 

@@ -189,6 +189,14 @@ def assert_chrome_bottom_anchored(session: PtySession, context: str) -> None:
     only row the rebuild can defensibly pick (`resize_clear_top_from_bottom`).
     That is the v1.0.75 fix, and this is what pins it.
 
+    Source-backed replay does not retire that. The rebuild now reconstructs the
+    transcript from retained `Message` values instead of leaving the screen
+    blank, so where the region lands is the row the REPLAY ends on — which is
+    the bottom once the transcript fills the screen, and was the TOP when it did
+    not. `replay_scrollback` pads a short transcript up to `rows - inline_h` for
+    precisely that reason, so both this assertion and
+    `assert_chrome_follows_the_transcript` hold at every transcript length.
+
     It measures the status bar's distance from the SCREEN BOTTOM, not from the
     last non-blank row. That distinction is the whole assertion: when the region
     is rebuilt at the top, everything below it is blank, so the status bar is
@@ -1170,7 +1178,27 @@ def test_resize_emits_nothing_that_deposits_into_scrollback(
                 "that this assertion no longer covers"
             )
 
-        assert_single_live_region(s, "after the emission-checked drag")
+        # `assert_single_live_region_with_transcript`, not the bare one, and for
+        # exactly the reason `test_resize_with_transcript` already gives: this
+        # test commits THREE `/version` turns before it drags, so the screen
+        # carries three `❯  You` headers (which `COMPOSER` matches) and the turn
+        # separators between them (which `COMPOSER_TOP` matches). Counting those
+        # as stranded chrome reads a healthy screen as `composer: 4,
+        # composer_top: 3`.
+        #
+        # The bare assertion passed here only while a resize WIPED the
+        # transcript off the screen: with nothing committed left to see, the
+        # ambiguous markers had nothing to collide with and happened to read 1
+        # apiece. Now that the resize path replays the transcript instead of
+        # destroying it, the markers collide here exactly as they always did in
+        # `test_resize_with_transcript`. Measured across the drag this test
+        # performs, all four raw counts are IDENTICAL before and after
+        # (`composer_top` 3/3, `composer` 4/4, `composer_hints` 1/1, `status`
+        # 1/1) — nothing stacked; the screen simply stopped being empty.
+        #
+        # Three independent markers still have to read exactly one, so the
+        # stranding this test exists to catch is still caught.
+        assert_single_live_region_with_transcript(s, "after the emission-checked drag")
 
 
 def test_connecting_splash_does_not_trap_the_user(backend: StubBackend) -> None:

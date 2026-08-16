@@ -1085,7 +1085,7 @@ impl App {
                 cur_inline_h = desired_inline_h;
                 shrink_streak = 0;
                 last_inline_top = Some(terminal.get_frame().area().top());
-            } else if terminal_resized && !want_full {
+            } else if terminal_resized && !want_full && !was_full {
                 // Source-backed resize replay, adapted from OpenAI Codex's
                 // `app::resize_reflow` architecture (Apache-2.0). Terminal
                 // scrollback is not a retained widget tree, so an old absolute
@@ -1094,6 +1094,13 @@ impl App {
                 // render every retained Message at the settled width. This also
                 // reflows markdown tables instead of preserving old-width
                 // border rows.
+                //
+                // Gated on `!was_full` as well as `!want_full` so a resize that
+                // lands in the same iteration as a dialog CLOSING does not
+                // rebuild the viewport here and then have `switch_to_inline`
+                // rebuild it again on the next pass. The mode switch already
+                // reconstructs the region from scratch, which absorbs the
+                // resize.
                 resize_sync_guard = Some(ResizeSyncGuard::begin());
                 purge_scrollback()?;
                 rebuild_inline(&mut terminal, desired_inline_h, Some(0))?;
@@ -1104,6 +1111,7 @@ impl App {
                     &self.committed,
                     size.cols,
                     size.rows.max(1),
+                    desired_inline_h,
                 )?;
                 last_inline_top = Some(terminal.get_frame().area().top());
                 // The source-backed rebuild fully consumed this resize. Do not
@@ -2730,6 +2738,28 @@ pub(crate) fn surgical_clear_top(last_inline_top: u16, rebuild_top: u16) -> u16 
     last_inline_top.min(rebuild_top)
 }
 
+/// Blank rows [`replay_scrollback`] emits AHEAD of a replayed transcript so the
+/// live region still lands on the screen's last `inline_h` rows.
+///
+/// A source-backed resize rebuilds the viewport at row 0 and then re-inserts the
+/// transcript, which leaves the region on the row the replay ends on. Once the
+/// conversation overflows the screen that IS `rows - inline_h` and the two
+/// coincide; before it does, they do not, and the region was left at the top
+/// with the rest of the screen dead beneath it.
+///
+/// Padding ahead of the content — never between the content and the chrome —
+/// is what lets both invariants hold at once: the chrome sits directly against
+/// the last transcript row, AND it occupies the bottom of the screen, which is
+/// where a real resize has re-anchored it since v1.0.75.
+///
+/// Saturating throughout, so the boundary cases cannot underflow: a transcript
+/// exactly `rows - inline_h` tall pads by 0, one row shorter pads by 1, and one
+/// row taller pads by 0 and scrolls its single overflowing row into history
+/// through ratatui's own path — the same motion a commit performs.
+pub(crate) fn bottom_align_lead(rows: u16, inline_h: u16, content_h: u16) -> u16 {
+    rows.saturating_sub(inline_h).saturating_sub(content_h)
+}
+
 /// Leave the alternate screen and rebuild the inline viewport, restoring the
 /// host terminal's scrollback untouched.
 ///
@@ -2861,58 +2891,6 @@ fn switch_to_inline(
 ///
 /// The caller should still `terminal.clear()` / erase beforehand so no stale
 /// rows of the old-sized region remain.
-/// Re-render retained finalized messages into native scrollback at `width`.
-///
-/// This is the OSA adapter for Codex's source-backed transcript resize replay.
-/// Messages are cloned because markdown preparation is width-specific; the
-/// retained originals remain canonical for the next resize.
-fn replay_scrollback(
-    terminal: &mut Term,
-    messages: &[crate::components::chat::message::Message],
-    width: u16,
-    batch_cap: u16,
-) -> Result<()> {
-    let mut batch: Vec<(crate::components::chat::message::Message, u16)> = Vec::new();
-    let mut batch_h = 0u16;
-
-    let flush = |terminal: &mut Term,
-                 batch: &mut Vec<(crate::components::chat::message::Message, u16)>,
-                 batch_h: u16|
-     -> std::io::Result<()> {
-        if batch_h == 0 {
-            batch.clear();
-            return Ok(());
-        }
-        terminal.insert_before(batch_h, |buf| {
-            let mut y = 0u16;
-            for (message, height) in batch.iter() {
-                message.render_to_buffer(Rect::new(0, y, width, *height), buf, 0);
-                y = y.saturating_add(*height);
-            }
-        })?;
-        batch.clear();
-        Ok(())
-    };
-
-    for source in messages {
-        let mut message = source.clone();
-        message.invalidate_for_width();
-        message.prepare_for_commit(width);
-        let height = message.height(width);
-        if height == 0 {
-            continue;
-        }
-        if batch_h > 0 && batch_h.saturating_add(height) > batch_cap {
-            flush(terminal, &mut batch, batch_h)?;
-            batch_h = 0;
-        }
-        batch_h = batch_h.saturating_add(height);
-        batch.push((message, height));
-    }
-    flush(terminal, &mut batch, batch_h)?;
-    Ok(())
-}
-
 fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) -> Result<()> {
     if let Some(top) = known_top {
         // No cursor query happens at all, so there is nothing to drop and
@@ -2959,6 +2937,114 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
     info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    Ok(())
+}
+
+/// Re-render retained finalized messages into native scrollback at `width`.
+///
+/// This is the OSA adapter for Codex's source-backed transcript resize replay.
+/// Messages are cloned because markdown preparation is width-specific; the
+/// retained originals remain canonical for the next resize.
+///
+/// **Why it bottom-aligns.** The caller has just purged the screen and rebuilt
+/// the inline viewport at row 0, so `insert_before` leaves the live region at
+/// whatever row the replayed transcript ends on. On a session whose transcript
+/// already overflows the screen that IS the bottom, and the two coincide. On a
+/// short one it is not: a three-line transcript on a 30-row screen left the
+/// composer on row 9 with twenty dead rows under it, which is the "region
+/// rebuilt at the TOP" shape `assert_chrome_bottom_anchored` exists to catch —
+/// and a visible regression against the pre-resize screen, where a real resize
+/// has always re-anchored the region at `rows - inline_h` (v1.0.75).
+///
+/// So when the replayed transcript is SHORTER than `rows - inline_h`, the
+/// difference is emitted as blank rows ahead of it. Both invariants then hold
+/// at once: the chrome sits directly against the last transcript row (nothing
+/// is inserted BETWEEN them), and it occupies the last `inline_h` rows of the
+/// screen. The padding is measured with a bounded look-ahead — at most one
+/// screenful of messages is prepared before the first flush — so a long
+/// transcript pays nothing for it and never buffers more than it did before.
+///
+/// Nothing here scrolls: with `pad + content + inline_h == rows`, ratatui's
+/// `insert_before` draws in place and moves the viewport without pushing a row
+/// into history.
+fn replay_scrollback(
+    terminal: &mut Term,
+    messages: &[crate::components::chat::message::Message],
+    width: u16,
+    rows: u16,
+    inline_h: u16,
+) -> Result<()> {
+    type Prepared = (crate::components::chat::message::Message, u16);
+
+    let prepare = |source: &crate::components::chat::message::Message| -> Prepared {
+        let mut message = source.clone();
+        message.invalidate_for_width();
+        message.prepare_for_commit(width);
+        let height = message.height(width);
+        (message, height)
+    };
+
+    // The row the live region must start on for the screen to be full.
+    let floor = rows.saturating_sub(inline_h);
+
+    // Look ahead only as far as `floor`: once the transcript reaches that row
+    // there is no padding to compute and the rest can stream out in batches
+    // exactly as before.
+    let mut head: Vec<Prepared> = Vec::new();
+    let mut head_h = 0u16;
+    let mut rest = messages.iter();
+    for source in rest.by_ref() {
+        let (message, height) = prepare(source);
+        if height == 0 {
+            continue;
+        }
+        head_h = head_h.saturating_add(height);
+        head.push((message, height));
+        if head_h >= floor {
+            break;
+        }
+    }
+    // Non-zero only when the whole transcript fit above `floor`, in which case
+    // `rest` is exhausted and everything goes out in one `insert_before`.
+    let mut lead = bottom_align_lead(rows, inline_h, head_h);
+
+    let cap = rows.max(1);
+    let mut batch: Vec<Prepared> = Vec::new();
+    let mut batch_h = lead;
+
+    let flush = |terminal: &mut Term,
+                 batch: &mut Vec<Prepared>,
+                 batch_h: u16,
+                 lead: u16|
+     -> std::io::Result<()> {
+        if batch_h == 0 {
+            batch.clear();
+            return Ok(());
+        }
+        terminal.insert_before(batch_h, |buf| {
+            let mut y = lead;
+            for (message, height) in batch.iter() {
+                message.render_to_buffer(Rect::new(0, y, width, *height), buf, 0);
+                y = y.saturating_add(*height);
+            }
+        })?;
+        batch.clear();
+        Ok(())
+    };
+
+    for (message, height) in head.into_iter().chain(rest.map(prepare)) {
+        if height == 0 {
+            continue;
+        }
+        if batch_h > 0 && batch_h.saturating_add(height) > cap {
+            flush(terminal, &mut batch, batch_h, lead)?;
+            batch_h = 0;
+            lead = 0;
+        }
+        batch_h = batch_h.saturating_add(height);
+        batch.push((message, height));
+    }
+    flush(terminal, &mut batch, batch_h, lead)?;
     Ok(())
 }
 
@@ -3716,7 +3802,9 @@ mod render_tests {
     // INSIDE the old chrome, not above it. Rebuilding there without clearing
     // strands the old chrome's rows above the new viewport, still holding the
     // previous frame's rendered characters — the visible duplicate.
-    use super::{clamp_inline_top, resize_clear_top_from_bottom, surgical_clear_top};
+    use super::{
+        bottom_align_lead, clamp_inline_top, resize_clear_top_from_bottom, surgical_clear_top,
+    };
 
     #[test]
     fn clamp_inline_top_accepts_row_within_current_terminal() {
@@ -3750,6 +3838,55 @@ mod render_tests {
     // `resize_clear_top_from_bottom`, wiping from the region's first row downward,
     // instead of trusting ratatui's stale `viewport_area` OR a DSR cursor query
     // that a resize burst can drop or answer stale.
+
+    /// The boundary the padding arithmetic would fail at if it could underflow.
+    ///
+    /// `rows - inline_h - content_h` is subtraction on `u16` twice over, and a
+    /// transcript at or just past the screen height is exactly where a wrapped
+    /// result would turn a zero pad into ~65_000 blank rows — a pad taller than
+    /// any terminal, inserted on a resize, on a session that had simply grown
+    /// past one screenful. Saturating both steps is what makes the boundary
+    /// uneventful, and this is what says so.
+    #[test]
+    fn bottom_align_lead_is_zero_at_and_past_the_screen_boundary() {
+        // Screen 30, region 4 → the transcript must reach row 26.
+        // One row short: pad exactly the one row.
+        assert_eq!(bottom_align_lead(30, 4, 25), 1);
+        // Exactly there: nothing to pad, and nothing scrolls.
+        assert_eq!(bottom_align_lead(30, 4, 26), 0);
+        // One row past: still zero, never a wrapped value. The overflowing row
+        // goes into history through `insert_before`, which is correct.
+        assert_eq!(bottom_align_lead(30, 4, 27), 0);
+        // Far past — an ordinary long session.
+        assert_eq!(bottom_align_lead(30, 4, 4_000), 0);
+        // Empty transcript: the whole area above the region.
+        assert_eq!(bottom_align_lead(30, 4, 0), 26);
+        // Degenerate geometry (region taller than the screen, mid-shrink) must
+        // clamp rather than wrap.
+        assert_eq!(bottom_align_lead(4, 30, 0), 0);
+        assert_eq!(bottom_align_lead(0, 0, 0), 0);
+    }
+
+    /// The padded replay must exactly fill the screen, so ratatui's
+    /// `insert_before` has no reason to scroll: `pad + content + inline_h` is
+    /// `rows` whenever the transcript is short enough to be padded at all.
+    /// Anything less leaves dead rows under the region; anything more pushes a
+    /// row of the user's conversation into history to make room for padding.
+    #[test]
+    fn a_padded_replay_fills_the_screen_exactly() {
+        for rows in [10u16, 24, 30, 50, 80] {
+            for inline_h in [1u16, 4, 7] {
+                for content_h in 0..rows.saturating_sub(inline_h) {
+                    let pad = bottom_align_lead(rows, inline_h, content_h);
+                    assert_eq!(
+                        pad + content_h + inline_h,
+                        rows,
+                        "rows={rows} inline_h={inline_h} content_h={content_h}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn resize_clear_top_from_bottom_lands_on_region_first_row() {
