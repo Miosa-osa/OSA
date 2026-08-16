@@ -340,6 +340,49 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsBypassTest do
       end
     end
 
+    # The test above answered "does the breaker still SAY no?" but not "how long
+    # does it take to say it?", and the second question was the live defect: the
+    # catastrophic patterns were quadratic, so the check above cost ~14 s of CPU
+    # on an idle 24-core desktop and blew ExUnit's 60 s timeout on CI's smaller
+    # runner. It was reported as a failure of the bypass test, which made it look
+    # like the bypass fix was wrong; it was actually a ReDoS in the gate.
+    #
+    # Answering slowly enough is indistinguishable from not answering: the
+    # approval path runs this on every tool call, so an oversized command was a
+    # denial of service on the circuit breaker. Correctness of the verdict is
+    # therefore not sufficient — the cost is part of the contract.
+    #
+    # The bound is deliberately loose. Post-fix these calls take ~20-60 ms, so
+    # 2 s is ~40x headroom against a loaded machine, while the pre-fix
+    # implementation (5.4 s and 8.7 s for the two inputs) fails it outright.
+    test "the breaker answers in bounded time on a padded command (ReDoS)" do
+      pad = String.duplicate("#", 25_000)
+
+      for cmd <- [
+            ~s(#{@rm} "#{@root}" ; echo #{pad}),
+            ~s(bash -c "#{@rm} '#{@root}'" # #{pad}),
+            # An unterminated function body: the other quadratic source, where
+            # `{` opens a body that never closes and the `|`/`&` scan tried
+            # every split of it.
+            ":(){ " <> String.duplicate("a|b&", 5_000)
+          ] do
+        {us, _} = :timer.tc(fn -> DC.catastrophic_destruction?(cmd) end)
+
+        assert us < 2_000_000,
+               "catastrophic_destruction?/1 took #{div(us, 1000)} ms on a " <>
+                 "#{byte_size(cmd)}-byte command — the safety gate is superlinear again"
+      end
+    end
+
+    test "a fork bomb hiding behind a harmless function definition is still caught" do
+      # `Regex.scan/3` rather than `run/3` in `fork_bomb?/1`: the first function
+      # body in the command is innocent, and only the second is the bomb.
+      assert DC.catastrophic_destruction?("f(){ echo hi }; g(){ g|g& };g")
+      assert DC.catastrophic_destruction?(":(){ :|:& };:")
+      assert DC.catastrophic_destruction?("bomb(){ bomb|bomb& };bomb")
+      refute DC.catastrophic_destruction?("f(){ echo hi }; f")
+    end
+
     test "an incompletely-analysed command reports itself as such" do
       assert CommandVariants.fully_analyzed?("ls -la")
       refute CommandVariants.fully_analyzed?(String.duplicate("x", 30_000))

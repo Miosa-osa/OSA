@@ -129,9 +129,40 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
   # ── fork bomb ───────────────────────────────────────────────────────
   # Classic `:(){ :|:& };:` and single-char-function variants like
-  # `b(){ b|b& };b`. Match a function def whose body pipes itself and
-  # backgrounds, then is invoked.
-  @fork_bomb ~r/(\S+)\s*\(\s*\)\s*\{[^}]*\|[^}]*&[^}]*\}\s*;?\s*\1?/
+  # `b(){ b|b& };b`: a function definition whose body pipes itself and
+  # backgrounds. Paired with `fork_bomb?/1`, which applies the
+  # pipes-and-backgrounds test to the captured body.
+  #
+  # BOUNDED ON PURPOSE. The obvious spelling of this pattern —
+  #
+  #     ~r/(\S+)\s*\(\s*\)\s*\{[^}]*\|[^}]*&[^}]*\}\s*;?\s*\1?/
+  #
+  # — is quadratic twice over, and was a ReDoS in the safety gate itself:
+  #
+  #   * `\S+` rescans the whole remaining input from every start offset, so a
+  #     long run of non-space padding costs O(n²). Measured on OTP 26.2.5:
+  #     2.5 s for 25 KB of `#`.
+  #   * the three unbounded `[^}]*` runs try every split of a body that has no
+  #     closing `}`. Measured: 1.2 s for a 6 KB unterminated body.
+  #
+  # `CommandVariants.variants/1` hands this up to `@max_variants * 2` strings
+  # of up to 20 KB each, so `catastrophic_destruction?/1` on a padded command
+  # ran for tens of seconds — enough to blow ExUnit's 60 s timeout in CI, and,
+  # far worse, to stall the tool-approval path on any large command. A safety
+  # gate that an oversized input can hang is a denial of service on the gate.
+  #
+  # The rewrite is linear and cannot match less than the old one did:
+  #
+  #   * `\S{1,64}` — the pattern is unanchored, so if any run of non-space
+  #     characters reaches the `(`, then a start offset within 64 bytes of that
+  #     `(` reaches it too. The name was only ever read back by an OPTIONAL
+  #     backreference, so nothing depended on which characters landed in it.
+  #   * `\{([^}]*)\}` — `[^}]*` cannot cross a `}`, so the body is uniquely
+  #     determined and matching it never backtracks. Moving the `|`/`&` test
+  #     into `fork_bomb?/1` also makes it STRICTER-in-coverage: every function
+  #     body in the command is examined rather than only those where a `|`
+  #     happens to precede a `&`.
+  @fork_bomb ~r/\S{1,64}\s*\(\s*\)\s*\{([^}]*)\}/
 
   # ── dd to a block device ────────────────────────────────────────────
   @dd_block_device ~r/\bdd\b[^\n]*\bof=\/dev\/(?:sd|nvme|hd|vd|disk|mmcblk|xvd|loop)/i
@@ -303,7 +334,7 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   def catastrophic_destruction?(command) when is_binary(command) do
     CommandVariants.any?(command, fn variant ->
       rm_rf_broad_root?(variant) or
-        Regex.match?(@fork_bomb, variant) or
+        fork_bomb?(variant) or
         Regex.match?(@dd_block_device, variant) or
         Regex.match?(@mkfs, variant)
     end)
@@ -324,7 +355,7 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
         {:blocked, "recursive force-delete of a root/home path (rm -rf) is never permitted",
          :catastrophic}
 
-      Regex.match?(@fork_bomb, command) ->
+      fork_bomb?(command) ->
         {:blocked, "fork bomb pattern is never permitted", :catastrophic}
 
       Regex.match?(@dd_block_device, command) ->
@@ -419,6 +450,23 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
         :ok
     end
   end
+
+  # A shell function whose body BOTH pipes and backgrounds — `:(){ :|:& };:`.
+  #
+  # `@fork_bomb` captures each function body; the `|`/`&` test lives here
+  # because expressing it in the regex is what made the pattern quadratic (see
+  # the note on `@fork_bomb`). `scan/3` is used rather than `run/3` so that a
+  # harmless definition ahead of the bomb — `f(){ echo hi }; g(){ g|g& };g` —
+  # cannot hide it.
+  defp fork_bomb?(command) when is_binary(command) do
+    @fork_bomb
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.any?(fn [body] ->
+      String.contains?(body, "|") and String.contains?(body, "&")
+    end)
+  end
+
+  defp fork_bomb?(_), do: false
 
   # rm + recursive + force + a broad-root target — all present, order-insensitive.
   defp rm_rf_broad_root?(command) do
