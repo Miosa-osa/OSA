@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any, override
@@ -69,6 +70,50 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 HERE = Path(__file__).resolve().parent
 RELEASE_TARBALL = HERE / "dist" / "osa-release-linux-x86_64.tar.gz"
+
+#: The glibc-2.31 variant, built by `./build_release.sh --bullseye`.
+#:
+#: ERTS is native code and glibc is not forward compatible, so the bookworm
+#: artefact (glibc 2.36) cannot start on `debian:bullseye-slim` (glibc 2.31):
+#: `erlexec: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.34' not found`.
+#: On `osa-tb20-full89-f6981b61` that killed `qemu-startup` and
+#: `qemu-alpine-ssh` in `install()` -- two of that run's three harness faults,
+#: charged to the harness because the episode never ran at all.
+#:
+#: The remedy is not a task-name allowlist. `install()` asks the container what
+#: glibc it has and picks the artefact that can boot on it, so a future task on
+#: any old base image is covered without an edit here.
+RELEASE_TARBALL_BULLSEYE = HERE / "dist-bullseye" / "osa-release-linux-x86_64.tar.gz"
+
+#: Set by `run_bench.py` to `<run>/artifacts`, holding an immutable copy of each
+#: variant that this run owns for its lifetime. When present it wins over
+#: `dist/`; when absent the two constants above are used exactly as before, so a
+#: bare `harbor run` and an older runner are unaffected.
+#:
+#: This is the half of the artefact guarantee that survives a build ignoring the
+#: advisory lock: `dist/` was clobbered 86 seconds before one run launched, and
+#: mid-run on another. A copy inside the run directory cannot be clobbered, and
+#: it makes the run self-describing afterwards. See `artifact_lock`.
+PINNED_ROOT_ENV = "OSA_BENCH_ARTIFACT_ROOT"
+TARBALL_NAME = "osa-release-linux-x86_64.tar.gz"
+
+
+def pinned_artifact(variant: str) -> Path | None:
+    """The pinned tarball for `variant`, or None when this run did not pin.
+
+    Returns None rather than raising on a missing file: the caller falls back
+    to the live `dist/` path, which is the pre-pinning behaviour and is never
+    worse than it was.
+    """
+    root = os.environ.get(PINNED_ROOT_ENV)
+    if not root:
+        return None
+    p = Path(root) / variant / TARBALL_NAME
+    return p if p.exists() else None
+
+#: The lowest glibc the bookworm artefact's ERTS will load against. Read off
+#: the loader's own complaint above, not guessed.
+MIN_GLIBC_FOR_DEFAULT_ARTIFACT = (2, 34)
 DRIVER = HERE / "driver" / "osa_headless.py"
 BOOT_CHECK = HERE / "driver" / "osa_boot_check.py"
 
@@ -114,6 +159,11 @@ OSA_ABLATION_ENV_KEYS = (
     # "0"/"false"/"off"/"no" disables it. Clauses 1 and 2 are NOT affected,
     # and neither is `VerificationGate.first_write_nudge/1`.
     "OSA_VERIFICATION_ADEQUACY",
+    # Agent.Loop.ToolFilter.filter_for_env_allowlist/1 -- comma-separated tool
+    # names. Trims the ADVERTISED native schema array at session start (not
+    # just execution permission), which is the only way to vary the tool
+    # surface as an experimental condition. Unset = full surface.
+    "OSA_TOOL_ALLOWLIST",
 )
 
 
@@ -521,6 +571,73 @@ class OsaAgent(BaseInstalledAgent):
     # --------------------------------------------------------------- install
 
     @override
+    @staticmethod
+    def _parse_glibc(text: str) -> tuple[int, int] | None:
+        """`(major, minor)` from `getconf`/`ldd` output, or None if unreadable.
+
+        Deliberately returns None rather than a guess: an unreadable version is
+        not evidence that the default artefact will boot, and the caller treats
+        it as "keep the default and let the boot check speak", which is the
+        behaviour that was in place before this function existed.
+        """
+        m = re.search(r"(\d+)\.(\d+)", text or "")
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    async def _artifact_for(self, environment: BaseEnvironment) -> Path:
+        """The release tarball whose ERTS can actually start on this image.
+
+        Asks the container, rather than keying on a task name, so the rule is a
+        property of the image and not a list somebody has to remember to extend.
+        Falls back to the default artefact whenever the answer is unavailable or
+        the bullseye variant has not been built -- the failure mode is then
+        exactly the pre-existing one (a loud boot-check failure), never a silent
+        substitution.
+        """
+        probe = await self.exec_as_root(
+            environment,
+            command="getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>&1 | head -1",
+        )
+        ver = self._parse_glibc(getattr(probe, "stdout", "") or "")
+        self._container_glibc = ver
+
+        if ver is None or ver >= MIN_GLIBC_FOR_DEFAULT_ARTIFACT:
+            self._artifact_used = "default"
+            pin = pinned_artifact("default")
+            if pin:
+                self._artifact_used = "default (pinned)"
+                return pin
+            return RELEASE_TARBALL
+
+        pin = pinned_artifact("bullseye")
+        if pin:
+            self.logger.info(
+                "container glibc %s.%s < %s.%s -- using the pinned bullseye artefact",
+                ver[0], ver[1], *MIN_GLIBC_FOR_DEFAULT_ARTIFACT,
+            )
+            self._artifact_used = "bullseye (pinned)"
+            return pin
+
+        if not RELEASE_TARBALL_BULLSEYE.exists():
+            # Say why the trial is about to fail, here, where the reason is
+            # known -- rather than leaving a GLIBC symbol error in a boot log
+            # for someone to re-derive.
+            self.logger.warning(
+                "container glibc %s.%s is below %s.%s and %s is missing; the "
+                "default artefact cannot boot here. Build it with "
+                "./build_release.sh --bullseye",
+                ver[0], ver[1], *MIN_GLIBC_FOR_DEFAULT_ARTIFACT,
+                RELEASE_TARBALL_BULLSEYE,
+            )
+            self._artifact_used = "default (bullseye variant missing)"
+            return RELEASE_TARBALL
+
+        self.logger.info(
+            "container glibc %s.%s < %s.%s -- using the bullseye artefact",
+            ver[0], ver[1], *MIN_GLIBC_FOR_DEFAULT_ARTIFACT,
+        )
+        self._artifact_used = "bullseye"
+        return RELEASE_TARBALL_BULLSEYE
+
     async def install(self, environment: BaseEnvironment) -> None:
         # python3 for the driver; procps so the driver can reap `serve`; tar to
         # unpack; ca-certificates so OSA's HTTP client can reach a provider.
@@ -540,7 +657,9 @@ class OsaAgent(BaseInstalledAgent):
             environment, command=f"mkdir -p {shlex.quote(REMOTE_ROOT)}"
         )
         remote_tar = f"{REMOTE_ROOT}/osa-release.tar.gz"
-        await environment.upload_file(RELEASE_TARBALL, remote_tar)
+        await environment.upload_file(
+            await self._artifact_for(environment), remote_tar
+        )
         await environment.upload_file(DRIVER, REMOTE_DRIVER)
         await environment.upload_file(BOOT_CHECK, REMOTE_BOOT_CHECK)
 

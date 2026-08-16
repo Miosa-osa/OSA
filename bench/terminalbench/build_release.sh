@@ -66,6 +66,45 @@ if [[ -f "$OUT" && "${1:-}" != "--force" ]]; then
   exit 0
 fi
 
+# ── The build lock ────────────────────────────────────────────────────────
+#
+# `dist/` is shared mutable state that several sessions write and every run
+# reads, and until this existed nothing arbitrated it. Measured: an arm verified
+# its artefact at 01:43:15Z, a sibling ran `--force` at 01:52:41Z, and the run
+# launched 86 seconds later on the sibling's build. Twice more, an arm found its
+# artefact stale, or built from a commit a history rewrite had deleted.
+#
+# The lock is taken NON-BLOCKING and the second builder fails. It deliberately
+# does not queue: a build that waits its turn still overwrites the artefact when
+# it gets there, so waiting converts a loud collision into the same silent one
+# with extra latency.
+#
+# This is advisory and it is only half the guarantee -- `artifact_lock.pin_for_run`
+# copies the tarball into the run directory so a run owns immutable bytes even
+# if some future caller ignores this lock. See that module's docstring.
+mkdir -p "$OUTDIR"
+LOCK="$OUTDIR/.build.lock"
+exec 9>>"$LOCK"
+if ! flock -n 9; then
+  echo "!!  refusing to build: $OUTDIR is locked by another build." >&2
+  echo "!!  holder: $(cat "$LOCK" 2>/dev/null | tr -d '\n' | head -c 400)" >&2
+  echo "!!  Wait for it to finish, or kill it -- do NOT delete the lock while" >&2
+  echo "!!  that pid is alive; the two builds would interleave in $OUTDIR." >&2
+  exit 9
+fi
+
+# Stamped AFTER the flock so the payload always describes the real holder.
+# `artifact_lock.describe_holder` parses this, and reports "identity not yet
+# written" for the window between the two.
+LOCK_SHA="$(if [[ -n "$FROM_COMMIT" ]]; then git -C "$REPO" rev-parse "$FROM_COMMIT"; else git -C "$REPO" rev-parse HEAD; fi)"
+: >"$LOCK"
+printf '{"pid":%d,"purpose":"build_release.sh","build_sha":"%s","dockerfile":"%s","held_since":"%s"}\n' \
+  "$$" "$LOCK_SHA" "$(basename "$DOCKERFILE")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&9
+
+# The lock is released when fd 9 closes, which the kernel does on exit however
+# we leave -- including `set -e`, a signal, or a docker build failure. No trap
+# needed, and no stale lock survives a crash.
+
 # `mix release` copies priv/ wholesale, and priv/rust/tui/target is ~30 GB on
 # any machine that has built the TUI. mix.exs prunes it *after* :assemble, which
 # is far too late. Keep it out of the build context entirely.

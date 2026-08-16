@@ -20,6 +20,7 @@ So these assert three things that are otherwise invisible:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -476,3 +477,318 @@ def test_agreeing_datasets_still_resolve(tmp_path, monkeypatch):
     _write_task(root / "ds-b", "agree", 900.0)
     monkeypatch.setattr(mod, "HERE", tmp_path)
     assert mod.task_declared_timeout(_trial_logs_dir(tmp_path, "agree")) == 900.0
+
+
+# ---------------------------------------------------------------------------
+# The build lock and the per-run artefact pin.
+#
+# `dist/` is unlocked shared mutable state: several sessions build it, every run
+# reads it, and nothing arbitrated that. Measured, three times -- an artefact
+# replaced 86 seconds before a run launched, an artefact four hours stale while
+# `lib/` moved under it, and an artefact built from a commit a history rewrite
+# had deleted. A fourth: `dist/` was clobbered mid-run and `dist-bullseye/` was
+# not, so 2 of 89 tasks measured a different commit than the other 87.
+#
+# Recording provenance answers "what happened?" afterwards; it cannot answer "is
+# this still the thing I verified?" at the moment that matters. These assert the
+# two mechanisms that can: a build refuses to race another build, and a run owns
+# an immutable copy that no later build can touch.
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+artifact_lock = _localimport.load("artifact_lock")
+
+
+def _variant(dirpath: Path, *, sha: str, body: bytes = b"tarball") -> Path:
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / artifact_lock.TARBALL_NAME).write_bytes(body)
+    (dirpath / artifact_lock.PROVENANCE_NAME).write_text(
+        json.dumps({"build_sha": sha, "from_commit": True, "lib_dirty_at_build": False})
+    )
+    return dirpath
+
+
+def test_a_second_builder_is_refused_and_told_who_holds_the_lock(tmp_path):
+    """Not "waits" -- refused. A build that queues still overwrites the artefact
+    when its turn comes, so waiting converts a loud collision into a silent one.
+    """
+    out = tmp_path / "dist"
+    with artifact_lock.build_lock(out, purpose="build_release.sh"):
+        assert artifact_lock.is_locked(out)
+        with pytest.raises(artifact_lock.ArtifactError) as exc:
+            with artifact_lock.build_lock(out, purpose="second build"):
+                pass
+    # The refusal must name the holder, not merely say "busy".
+    assert "locked by another process" in str(exc.value)
+    assert f"pid={os.getpid()}" in str(exc.value)
+    # ...and the lock must be gone once the holder leaves.
+    assert not artifact_lock.is_locked(out)
+
+
+def test_the_lock_is_released_when_the_holder_dies(tmp_path):
+    """flock is released by the kernel on exit, so a crashed build leaves no
+    stale lock that someone has to know to delete."""
+    out = tmp_path / "dist"
+    out.mkdir()
+    lock = out / artifact_lock.LOCK_NAME
+    prog = (
+        "import fcntl,os,sys,time\n"
+        f"fd=os.open({str(lock)!r}, os.O_RDWR|os.O_CREAT)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('held', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    p = subprocess.Popen([sys.executable, "-c", prog], stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        assert artifact_lock.is_locked(out)
+    finally:
+        p.kill()
+        p.wait(timeout=10)
+    assert not artifact_lock.is_locked(out)
+
+
+def test_the_shell_builder_and_python_share_one_lock_file():
+    """`build_release.sh` uses flock(1) and this module uses fcntl.flock; they
+    are the same flock(2). If the basenames ever diverge the two would lock
+    different files and neither would notice."""
+    script = (HERE / "build_release.sh").read_text()
+    assert f'LOCK="$OUTDIR/{artifact_lock.LOCK_NAME}"' in script
+    assert "flock -n 9" in script
+
+
+def test_a_run_pins_an_immutable_copy_of_every_variant(tmp_path):
+    variants = {
+        "default": _variant(tmp_path / "dist", sha="a" * 40, body=b"bookworm"),
+        "bullseye": _variant(tmp_path / "dist-bullseye", sha="a" * 40, body=b"bullseye"),
+    }
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    pin = artifact_lock.pin_for_run(run, variants=variants)
+
+    for name, body in (("default", b"bookworm"), ("bullseye", b"bullseye")):
+        pinned = Path(pin["variants"][name]["pinned"])
+        assert pinned.read_bytes() == body
+        # inside the RUN directory -- that is the whole point
+        assert run in pinned.parents
+    assert pin["variants_agree"]
+
+    # A later build cannot reach the pinned bytes.
+    (variants["default"] / artifact_lock.TARBALL_NAME).write_bytes(b"CLOBBERED")
+    assert Path(pin["variants"]["default"]["pinned"]).read_bytes() == b"bookworm"
+    assert artifact_lock.verify_pin(Path(pin["root"])) == {
+        "default": True, "bullseye": True
+    }
+
+
+def test_pinning_refuses_while_a_build_holds_the_lock(tmp_path):
+    """The 01:52:41Z incident, as a test: a build was replacing dist/ while a
+    run was about to read it."""
+    variants = {"default": _variant(tmp_path / "dist", sha="a" * 40)}
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    with artifact_lock.build_lock(variants["default"], purpose="build_release.sh"):
+        with pytest.raises(artifact_lock.ArtifactError) as exc:
+            artifact_lock.pin_for_run(run, variants=variants)
+    assert "locked by another process" in str(exc.value)
+
+
+def test_pinning_refuses_an_artefact_with_no_provenance(tmp_path):
+    """Incident 3: `dist/` built from a commit that no longer existed. An
+    artefact that cannot be attributed to a commit must not be measurable."""
+    d = tmp_path / "dist"
+    d.mkdir()
+    (d / artifact_lock.TARBALL_NAME).write_bytes(b"x")
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    with pytest.raises(artifact_lock.ArtifactError, match="build-provenance.json"):
+        artifact_lock.pin_for_run(run, variants={"default": d})
+
+
+def test_pinning_refuses_provenance_without_a_build_sha(tmp_path):
+    d = tmp_path / "dist"
+    d.mkdir()
+    (d / artifact_lock.TARBALL_NAME).write_bytes(b"x")
+    (d / artifact_lock.PROVENANCE_NAME).write_text(json.dumps({"built_at": "now"}))
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    with pytest.raises(artifact_lock.ArtifactError, match="no build_sha"):
+        artifact_lock.pin_for_run(run, variants={"default": d})
+
+
+def test_a_split_build_is_detected_rather_than_measured(tmp_path):
+    """Incident 4, measured on `osa-tb20-full89-9b57ee7d`: `dist/` was clobbered
+    mid-run and `dist-bullseye/` was not, so the 2 qemu tasks that select the
+    bullseye variant by glibc ran a different commit than the other 87 -- and
+    the results file said nothing at all. Pinning alone does not catch this; it
+    would faithfully pin two different builds."""
+    variants = {
+        "default": _variant(tmp_path / "dist", sha="04061c68" + "0" * 32),
+        "bullseye": _variant(tmp_path / "dist-bullseye", sha="9b57ee7d" + "0" * 32),
+    }
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    pin = artifact_lock.pin_for_run(run, variants=variants)
+    assert pin["variants_agree"] is False
+    assert set(pin["build_shas"].values()) == {
+        "04061c68" + "0" * 32, "9b57ee7d" + "0" * 32
+    }
+
+
+def test_verify_pin_catches_a_pinned_copy_that_was_edited(tmp_path):
+    variants = {"default": _variant(tmp_path / "dist", sha="a" * 40)}
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    pin = artifact_lock.pin_for_run(run, variants=variants)
+    Path(pin["variants"]["default"]["pinned"]).write_bytes(b"tampered")
+    with pytest.raises(artifact_lock.ArtifactError, match="no longer matches"):
+        artifact_lock.verify_pin(Path(pin["root"]))
+
+
+def test_a_missing_default_artefact_refuses_rather_than_pinning_nothing(tmp_path):
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    with pytest.raises(artifact_lock.ArtifactError, match="no release tarball"):
+        artifact_lock.pin_for_run(run, variants={"default": tmp_path / "dist"})
+
+
+def test_a_missing_bullseye_variant_is_recorded_not_fatal(tmp_path):
+    """It may simply not have been built. That is the pre-existing behaviour in
+    `osa_agent._artifact_for` and must stay."""
+    variants = {
+        "default": _variant(tmp_path / "dist", sha="a" * 40),
+        "bullseye": tmp_path / "dist-bullseye",
+    }
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    pin = artifact_lock.pin_for_run(run, variants=variants)
+    assert pin["variants"]["bullseye"] == {
+        "present": False, "source": str(tmp_path / "dist-bullseye" / artifact_lock.TARBALL_NAME)
+    }
+    assert pin["variants_agree"]
+
+
+def test_the_adapter_installs_from_the_pin_when_told_to(tmp_path, monkeypatch):
+    """The env var is the only channel from the runner to the adapter -- the
+    adapter runs inside the harbor subprocess."""
+    mod = _load_osa_agent()
+    root = tmp_path / "artifacts"
+    (root / "default").mkdir(parents=True)
+    tar = root / "default" / mod.TARBALL_NAME
+    tar.write_bytes(b"pinned")
+    monkeypatch.setenv(mod.PINNED_ROOT_ENV, str(root))
+    assert mod.pinned_artifact("default") == tar
+    # bullseye was not pinned -> None, and the caller falls back
+    assert mod.pinned_artifact("bullseye") is None
+
+
+def test_an_unpinned_run_reads_dist_exactly_as_before(monkeypatch):
+    """No env var means the pre-pinning behaviour, byte for byte. A bare
+    `harbor run` and an older runner must be unaffected."""
+    mod = _load_osa_agent()
+    monkeypatch.delenv(mod.PINNED_ROOT_ENV, raising=False)
+    assert mod.pinned_artifact("default") is None
+    assert mod.pinned_artifact("bullseye") is None
+
+
+# ---------------------------------------------------------------------------
+# `scripts/failure_species.py` -- the detector whose acceptance test is
+# "fires on >=1 failure and ZERO solves". That property is only meaningful if
+# the corpus was actually read.
+# ---------------------------------------------------------------------------
+
+REFERENCE_RUN = HERE / "runs" / "osa-tb20-full89-f6981b61"
+
+
+def _load_failure_species():
+    path = HERE.parent.parent / "scripts" / "failure_species.py"
+    spec = importlib.util.spec_from_file_location("failure_species_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _species_rows(cwd: Path):
+    """Run the detector as a subprocess from `cwd`, returning (rc, stdout)."""
+    r = subprocess.run(
+        [sys.executable, str(HERE.parent.parent / "scripts" / "failure_species.py"),
+         str(REFERENCE_RUN)],
+        cwd=str(cwd), capture_output=True, text=True, timeout=300,
+    )
+    return r.returncode, r.stdout
+
+
+@pytest.mark.skipif(not REFERENCE_RUN.exists(), reason="reference run not on disk")
+@pytest.mark.parametrize("cwd_name", ["repo_root", "bench_terminalbench"])
+def test_the_detector_reads_the_same_corpus_from_any_cwd(cwd_name):
+    """Harbor records `trial_dir` relative to `bench/terminalbench`, but the
+    script's own usage line says to run it from the repo root -- where every one
+    of those paths resolves to nothing. `load_events` then returned `[]` for all
+    89 trials, every detector saw an empty episode, and the script printed
+    "0 trials matched a species" and exited 0.
+
+    A broken corpus was indistinguishable from a clean run, so the acceptance
+    test that is the entire point of that file passed vacuously. Same class as
+    the `:/lib` pathspec bug above: a guard that reported success
+    unconditionally from the day it was written.
+    """
+    cwd = HERE.parent.parent if cwd_name == "repo_root" else HERE
+    rc, out = _species_rows(cwd)
+    assert rc == 0, out
+    # The measured reference numbers, which only appear if the logs were read.
+    assert out.count("announced_next_action") == 9, out
+    assert "0 detector hits landed on a SOLVED trial" in out
+    assert "87/89 trials had an event log" in out
+
+
+def test_an_unreadable_corpus_fails_instead_of_reporting_a_clean_run(tmp_path):
+    """Zero readable event logs is a broken corpus, not a passing acceptance
+    test, and must not exit 0."""
+    run = tmp_path / "runs" / "empty"
+    run.mkdir(parents=True)
+    (run / "results.json").write_text(json.dumps({"tasks": [
+        {"task_name": "x/y", "resolved": False, "trial_dir": "runs/empty/harbor/nope"}
+    ]}))
+    r = subprocess.run(
+        [sys.executable, str(HERE.parent.parent / "scripts" / "failure_species.py"), str(run)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert "proves nothing" in r.stderr
+
+
+def test_the_announcement_verbs_mirror_the_elixir_guardrail():
+    """`failure_species.ANNOUNCEMENT_RE` and `Guardrails.@announcement_pattern`
+    are the same predicate by construction -- the measured 9-of-34 / 0-of-49
+    precision belongs to the pair. If they drift, the Elixir backstop is no
+    longer the thing that was measured."""
+    mod = _load_failure_species()
+    guardrails = (HERE.parent.parent / "lib" / "optimal_system_agent" / "agent"
+                  / "loop" / "guardrails.ex").read_text()
+
+    py_pattern = mod.ANNOUNCEMENT_RE.pattern.replace("\n", "").replace(" ", "")
+    ex_line = next(l for l in guardrails.splitlines() if "@announcement_pattern" in l)
+    ex_pattern = ex_line.split("~r/", 1)[1].rsplit("/i", 1)[0].replace(" ", "")
+    assert py_pattern == ex_pattern, (py_pattern, ex_pattern)
+
+    ex_line = next(l for l in guardrails.splitlines() if "@courtesy_pattern" in l)
+    ex_courtesy = ex_line.split("~r/", 1)[1].rsplit("/i", 1)[0]
+    assert mod.COURTESY_RE.pattern.replace("\n", "").replace(" ", "") == \
+        ex_courtesy.replace(" ", "")
+
+
+def test_the_added_verbs_are_present_and_the_excluded_ones_are_not():
+    mod = _load_failure_species()
+    for verb in ("examine", "inspect", "explore", "analyze", "analyse", "look", "read"):
+        assert mod.ANNOUNCEMENT_RE.search(f"I'll {verb} the files first."), verb
+    # `check` and `review` are deliberate exclusions -- see the note on
+    # `Guardrails.@announcement_pattern`.
+    assert not mod.ANNOUNCEMENT_RE.search(
+        mod.COURTESY_RE.sub("", "I'll check that and get back to you."))
+    assert not mod.ANNOUNCEMENT_RE.search(
+        mod.COURTESY_RE.sub("", "I'll review it once CI is green."))
+    # The sign-off form of the one risky added verb is scrubbed.
+    assert not mod.ANNOUNCEMENT_RE.search(
+        mod.COURTESY_RE.sub("", "Done. I'll look into it if it recurs."))

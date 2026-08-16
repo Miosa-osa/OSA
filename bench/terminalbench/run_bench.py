@@ -49,6 +49,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import artifact_lock  # noqa: E402
 import datasets as datasets_mod  # noqa: E402
 import probeset as probeset_mod  # noqa: E402
 import report as report_mod  # noqa: E402
@@ -411,6 +412,15 @@ def main() -> int:
                           "compatibility check that costs no tokens")
     run.add_argument("--report-only", metavar="JOB_DIR",
                      help="skip running; just re-report an existing harbor job dir")
+    run.add_argument("--allow-unpinned-artifact", action="store_true",
+                     help="read dist/ live instead of pinning an immutable copy "
+                          "into the run directory. Any rebuild during the run "
+                          "then silently changes what is measured -- which has "
+                          "happened three times. Debugging only.")
+    run.add_argument("--allow-split-build", action="store_true",
+                     help="launch even when dist/ and dist-bullseye/ were built "
+                          "from different commits. Tasks are routed between them "
+                          "by container glibc, so the run measures two builds.")
 
     args = ap.parse_args()
     run_id = args.run_id or f"{args.agent}-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -585,6 +595,11 @@ def main() -> int:
         # attributed to any particular code, which has already voided one
         # ablation. See `artifact_provenance`.
         "artifact": artifact_provenance(),
+        # WHICH BYTES THIS RUN OWNS. `artifact` above describes `dist/` at
+        # launch and stops being true the moment anyone rebuilds; this names
+        # the immutable copy inside the run directory that every container was
+        # actually installed from. Filled in by the pin step below.
+        "artifact_pin": None,
         # WHICH SWITCHES THIS RUN FLIPPED. Same reason as `artifact`: a results
         # file that cannot say which behaviour flags were on cannot be one arm
         # of an ablation, and two arms of the same artefact are otherwise
@@ -630,8 +645,62 @@ def main() -> int:
         if args.host_provider and args.agent == "osa":
             cmd += ["--extra-docker-compose", str(HERE / "compose-host-provider.yaml")]
 
+        # ── Pin the artefact for the lifetime of this run ──────────────────
+        #
+        # Until this existed, a run read `dist/` at launch and trusted it for
+        # hours while other sessions were free to rebuild it -- which they did,
+        # three times, and once mid-run. Copying the tarball into the run
+        # directory and installing from there means the run owns bytes nobody
+        # can replace, and means "what did we actually measure?" is answerable
+        # from the run itself rather than from a `dist/` that has since moved.
+        #
+        # This REFUSES rather than records-and-continues; see
+        # `artifact_lock.pin_for_run` for the exact conditions. Record-and-
+        # continue is what produced the unusable runs.
+        if args.agent == "osa" and not args.allow_unpinned_artifact:
+            try:
+                pin = artifact_lock.pin_for_run(out)
+                artifact_lock.verify_pin(Path(pin["root"]))
+            except artifact_lock.ArtifactError as exc:
+                raise SystemExit(f"artefact pin failed, refusing to launch: {exc}") from exc
+            config["artifact_pin"] = pin
+            for name, entry in sorted(pin["variants"].items()):
+                if entry.get("present"):
+                    log(f"pinned {name} artefact "
+                        f"build_sha={(entry['build'].get('build_sha') or '?')[:12]} "
+                        f"sha256={entry['sha256'][:12]} -> {entry['pinned']}")
+                else:
+                    log(f"no {name} artefact to pin ({entry['source']})")
+            # Two variants built from different commits is the split-build
+            # incident: `dist/` was clobbered mid-run while `dist-bullseye/`
+            # was not, so 2 of 89 tasks measured a different commit than the
+            # other 87 and nothing said so. Loud, and fatal unless waived --
+            # a run that measures two builds is not one measurement.
+            if not pin["variants_agree"]:
+                msg = (f"the pinned variants were built from DIFFERENT commits: "
+                       f"{pin['build_shas']}. Tasks are routed between them by "
+                       f"container glibc, so this run would measure two builds.")
+                if args.allow_split_build:
+                    log(f"WARNING: {msg} (allowed by --allow-split-build)")
+                else:
+                    raise SystemExit(
+                        f"{msg}\nRebuild both from the same commit:\n"
+                        f"  ./build_release.sh --from-commit <sha> --force\n"
+                        f"  ./build_release.sh --bullseye --from-commit <sha> --force\n"
+                        f"or pass --allow-split-build to measure them anyway."
+                    )
+        elif args.agent == "osa":
+            log("WARNING: --allow-unpinned-artifact: this run reads dist/ live "
+                "for its whole lifetime and any rebuild will silently change "
+                "what it measures.")
+
         env = os.environ.copy()
         env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
+        # The adapter installs from the pinned copy when this is set, and from
+        # `dist/` when it is not -- so an adapter run under a bare `harbor run`
+        # behaves exactly as it did before pinning existed.
+        if config["artifact_pin"]:
+            env[artifact_lock.PINNED_ROOT_ENV] = config["artifact_pin"]["root"]
         # Tell the adapter WHICH task set this run selected.
         #
         # It needs the task's own `timeout_sec` to set a driver deadline that
