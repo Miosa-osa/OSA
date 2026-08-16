@@ -4,8 +4,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
 
   The prompt body is a function
   (not a static string) so it can reference *current* tool names — when
-  `file_edit` is renamed, this prompt updates automatically through the
+  `file_grep` is renamed, this prompt updates automatically through the
   `safe_ref/3` helper.
+
+  Read-before-edit, never-re-read-after-edit and batch-your-reads are stated
+  once in SYSTEM.md §2 and are deliberately absent here; the windowing and
+  already-sent-lines mechanics live on the `offset`, `limit` and `resend`
+  parameters. What is left is the one thing that must be said at THIS
+  affordance, because this tool is the wrong move being competed with: a
+  question about a file is not a reason to read the file.
   """
 
   @doc """
@@ -16,11 +23,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
   """
   @spec render(keyword()) :: String.t()
   def render(_opts \\ []) do
-    edit_name =
-      safe_ref(OptimalSystemAgent.Tools.Builtins.FileEdit.Constants, :tool_name, "file_edit")
-
-    write_name =
-      safe_ref(OptimalSystemAgent.Tools.Builtins.FileWrite.Constants, :tool_name, "file_write")
+    grep_name =
+      safe_ref(OptimalSystemAgent.Tools.Builtins.FileGrep.Constants, :tool_name, "file_grep")
 
     dir_list_name =
       safe_ref(OptimalSystemAgent.Tools.Builtins.DirList.Constants, :tool_name, "dir_list")
@@ -40,24 +44,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
 
     Every result ends with `(End of file — N lines total)` or `(Showing lines
     A-B. Use offset=C to continue.)`, so never read again just to find out
-    whether you have the whole file. If you need more, continue from the offset
-    it names or ask for a larger `limit` — do not walk a file in small
-    overlapping slices. Reading several different files is independent work:
-    issue those calls in parallel in one turn.
-
-    Lines already shown to you this session are not sent twice, so a result that
-    names the lines it left out is the rest of what you asked for, not a
-    truncation; pass `resend: true` if you no longer have the earlier result. An
-    over-wide line is clamped and the notice names the `byte_offset` continuing
-    it.
+    whether you have the whole file.
 
     Do NOT read a file to answer a question ABOUT it — for *does it contain X*,
-    *how many Y* or *is it well-formed*, use `#{transform_name}`'s `count` or
-    `assert_balanced`, or a one-line `shell_execute` script.
-
-    Read a file once before your FIRST `#{edit_name}` or `#{write_name}` to it,
-    and never re-read it after your own successful edit — an edit against a stale
-    view is rejected, not silently landed.
+    *how many Y*, *is it well-formed* or *did my edit land*, use
+    `#{transform_name}`'s `count` or `assert_balanced`, `#{grep_name}`, or a
+    one-line `shell_execute` script. This is the single most expensive habit
+    available to you: the answer is one line and the file is not.
     """
   end
 

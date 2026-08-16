@@ -50,7 +50,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Tool do
         },
         "old_string" => %{
           "type" => "string",
-          "description" => "Exact text to find; unique unless replace_all"
+          "description" =>
+            "Exact text to find, reproducing its existing indentation (tabs/spaces) " <>
+              "byte for byte. Unique in the file unless `replace_all` is set. The file " <>
+              "must have been read this session; this tool errors otherwise, and it " <>
+              "errors rather than land an edit against a view that went stale — so a " <>
+              "success IS the confirmation and needs no read-back."
         },
         "new_string" => %{
           "type" => "string",
@@ -58,7 +63,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Tool do
         },
         "replace_all" => %{
           "type" => "boolean",
-          "description" => "Replace all occurrences (default false)"
+          "description" =>
+            "Replace all occurrences (default false). Requires an EXACT match and is " <>
+              "refused on a fuzzy one."
         }
       },
       "required" => ["path", "old_string", "new_string"]

@@ -57,14 +57,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
         "task" => %{
           "type" => "string",
           "description" =>
-            "The subtask, self-contained: paths, requirements, constraints. " <>
-              "The subagent cannot see your conversation."
+            "The subtask, fully self-contained. The subagent has NOT seen this " <>
+              "conversation — brief it like a colleague who just walked in: the " <>
+              "objective and why, every relevant path, the constraints and forbidden " <>
+              "actions, the verification you require, and the expected output shape " <>
+              "and stop condition. Terse command-style prompts produce shallow work."
         },
         "tasks" => %{
           "type" => "array",
           "description" =>
             "Fan-out: subtasks run in PARALLEL as one wave, then synthesized. " <>
-              "'task' becomes the umbrella description. Omit for a single delegation.",
+              "'task' becomes the umbrella description. Omit for a single delegation. " <>
+              "For parallel work prefer ONE call with tasks:[...] over sequential calls.",
           "items" => %{
             "type" => "object",
             "required" => ["prompt"],

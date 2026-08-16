@@ -16,18 +16,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Prompt do
     """
     Retrieve the cumulative stdout/stderr, status (running, done, failed,
     killed), and exit code of a background command started by `#{shell_name}`
-    with `run_in_background: true`.
-
-    DO NOT SPIN: never call this in a loop while the command is `running`, and
-    never sleep between calls. To WAIT, pass `wait_ms` — ONE call that blocks
-    until the command reaches a terminal status or the wait elapses.
+    with `run_in_background: true`, or moved there by outrunning its wait window.
 
     A completion notification may wake you instead, but only if something drives
     another turn of this session afterwards — true interactively, FALSE in a
     one-shot or headless run, which ends the moment you answer. So if you need
-    the result, block on it here before answering; if you do not, leave it alone.
-
-    Use `kill: true` to stop a command early; it returns the final output too.
+    the result, block on it here with `wait_ms` before answering; if you do not,
+    leave it alone.
     """
   end
 

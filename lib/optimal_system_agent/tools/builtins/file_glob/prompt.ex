@@ -6,19 +6,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Prompt do
   propagate automatically.
   """
 
-  alias OptimalSystemAgent.Tools.Builtins.FileGlob.Constants
-
   @spec render(keyword()) :: String.t()
   def render(_opts \\ []) do
     read_name =
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
-
-    shell_name =
-      safe_ref(
-        OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants,
-        :tool_name,
-        "shell_execute"
-      )
 
     """
     Fast file pattern matching at any codebase size, e.g. "**/*.js" or
@@ -26,12 +17,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Prompt do
     suffixed with `/`. Dotfiles and dot-directories ARE matched, so no separate
     `.*` pattern is needed; `.git/` contents are omitted unless the pattern names
     `.git`. A `path` that does not exist is reported as such, never as "no
-    matches". ALWAYS use #{Constants.tool_name()} rather than #{shell_name} with
-    find or ls, then #{read_name} to read the matches.
-
-    Searching is cheap and independent: when several patterns are plausibly
-    useful, issue them as parallel calls in one turn rather than one per turn
-    and waiting in between.
+    matches". Read the matches with #{read_name}.
     """
   end
 

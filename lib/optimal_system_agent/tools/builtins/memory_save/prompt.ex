@@ -25,15 +25,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemorySave.Prompt do
     Save context to persistent memory that survives the session: user
     preferences, corrections, decisions, architectural choices, patterns that
     worked or failed, names, project facts. When the user says "remember",
-    "note", or "save", call this RIGHT THEN.
+    "note", or "save", call this RIGHT THEN. Save as you go; don't batch, don't
+    ask permission. Retrieve with `#{recall_name}`.
 
-    Iron Rule: never make a mental note — saying "I'll remember that" without
-    calling this tool loses it. Save as you go; don't batch, don't ask
-    permission. Save only what you VERIFIED this turn, never your own
-    model/version/context window, and never "current" anything that can change
-    without you. Note uncertainty inline ("as of X, per Y"), and flag it when
-    you rely on memory for a fact you did not verify this turn. Retrieve with
-    `#{recall_name}`.
+    Save only what you VERIFIED this turn, never your own model/version/context
+    window, and never "current" anything that can change without you. Note
+    uncertainty inline ("as of X, per Y").
     """
   end
 

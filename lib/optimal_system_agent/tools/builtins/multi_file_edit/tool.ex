@@ -48,7 +48,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool do
       "properties" => %{
         "edits" => %{
           "type" => "array",
-          "description" => "Edits to apply, each with path, old_string, new_string",
+          "description" =>
+            "Edits to apply, each with path, old_string, new_string. Every file named " <>
+              "here must have been read this session; the call fails otherwise, and it " <>
+              "fails without writing anything when any single edit does not apply — so " <>
+              "a success IS the confirmation and needs no read-back.",
           "items" => %{
             "type" => "object",
             "properties" => %{

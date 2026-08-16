@@ -39,9 +39,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemorySaveTest do
       assert String.contains?(result, recall_name)
     end
 
-    test "contains the Iron Rule" do
+    # The Iron Rule is stated once, as policy, in SYSTEM.md §6 (and
+    # SYSTEM_LEAN.md §4) rather than restated in this tool description. What
+    # this description must still carry is the trigger — call it RIGHT THEN —
+    # and the never-save-unverified guard.
+    test "carries the save-now trigger and the unverified guard" do
       result = Prompt.render([])
-      assert String.contains?(result, "Iron Rule")
+      assert String.contains?(result, "RIGHT THEN")
+      assert String.contains?(result, "VERIFIED this turn")
+    end
+
+    test "the Iron Rule is stated in the system prompt, not restated here" do
+      for f <- ["priv/prompts/SYSTEM.md", "priv/prompts/SYSTEM_LEAN.md"] do
+        assert File.read!(f) =~ "Iron Rule", "#{f} must carry the Iron Rule"
+      end
     end
   end
 

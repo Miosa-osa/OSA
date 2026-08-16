@@ -43,11 +43,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Tool do
         },
         "offset" => %{
           "type" => "integer",
-          "description" => "1-based start line. Optional."
+          "description" =>
+            "1-based start line. Optional. Continue from the offset the previous " <>
+              "result named; do not walk a file in small overlapping slices."
         },
         "limit" => %{
           "type" => "integer",
-          "description" => "Max lines to read. Optional."
+          "description" =>
+            "Max lines to read. Optional. If you need more of the file, raise this " <>
+              "rather than issuing several overlapping reads."
         },
         "byte_offset" => %{
           "type" => "integer",

@@ -12,8 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Prompt do
     Read one definition out of a source file, without reading the file.
 
     With `name`: the source of that one function or class plus its line range —
-    the definition, not a guessed window around it. Make this call instead of
-    grepping for `def foo` and then reading 40 lines near the hit.
+    the definition, not a guessed window around it.
 
     Without `name`: every function, class and module in the file, with line
     numbers.

@@ -14,21 +14,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Prompt do
   """
   @spec render(keyword()) :: String.t()
   def render(_opts \\ []) do
-    read_name =
-      safe_ref(OptimalSystemAgent.Tools.Builtins.FileRead.Constants, :tool_name, "file_read")
+    transform_name =
+      safe_ref(
+        OptimalSystemAgent.Tools.Builtins.FileTransform.Constants,
+        :tool_name,
+        "file_transform"
+      )
 
     edit_name =
       safe_ref(OptimalSystemAgent.Tools.Builtins.FileEdit.Constants, :tool_name, "file_edit")
 
     """
-    Writes a file to the local filesystem, overwriting any file already at that path.
+    Writes a file to the local filesystem, overwriting any file already at that
+    path.
 
-    - For an existing file you MUST `#{read_name}` it first; this tool fails otherwise.
-    - Prefer `#{edit_name}` for modifying existing files; use this only for new files or full rewrites.
-    - Do NOT re-read to verify a successful write.
-    - NEVER create *.md or README files unless explicitly requested.
-    - Only use emojis if the user explicitly requests it.
-    - Relative paths resolve to ~/.osa/workspace/; absolute and ~ paths also work.
+    Prefer `#{edit_name}` or `#{transform_name}` for modifying an existing file;
+    use this only for a genuinely new file or a full rewrite. Never clobber a
+    file to change a few lines.
     """
   end
 

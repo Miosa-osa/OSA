@@ -117,6 +117,15 @@ defmodule OptimalSystemAgent.Shell.BackgroundServiceLifetimeTest do
 
     refute prompt =~ "full suites and servers"
     assert prompt =~ "setsid nohup"
-    assert prompt =~ "killed when the session ends"
+
+    # The description names the distinction ("dies with the session") and the
+    # escape hatch; the lifetime fact itself is a contract on the flag that
+    # creates the doomed process, so it is stated on `run_in_background` — that
+    # is where the model is deciding to set it. Both surfaces reach the model
+    # in the same request; only one of them should carry the same sentence.
+    assert prompt =~ "dies with the session"
+
+    schema = Jason.encode!(OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool.parameters())
+    assert schema =~ "killed when the session ends"
   end
 end

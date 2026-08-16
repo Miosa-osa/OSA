@@ -39,13 +39,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Prompt do
     """
     Replaces an exact string in a file.
 
-    - If you can name the change by an ANCHOR instead of exact bytes — a pattern, a matching line, the end of the file — use `#{transform_name}`: it needs no `#{read_name}` and never quotes the file, so its cost does not grow with file size. Use this tool when the change needs the surrounding bytes to be unambiguous.
-    - Read the file with `#{read_name}` first; this tool errors otherwise.
-    - Preserve the exact existing indentation (tabs/spaces).
-    - The edit FAILS if `old_string` is not unique — add surrounding context, or set `replace_all` to change every instance.
-    - `replace_all` requires an EXACT match and is refused on a fuzzy one.
-    - Do NOT re-read to verify a successful edit — this tool errors when the edit does not apply.
-    - Only use emojis if the user explicitly requests it.
+    If you can name the change by an ANCHOR instead of exact bytes — a pattern, a
+    matching line, the end of the file — use `#{transform_name}`: it needs no
+    `#{read_name}` and never quotes the file, so its cost does not grow with file
+    size. Use this tool when the change needs the surrounding bytes to be
+    unambiguous.
+
+    The edit FAILS if `old_string` is not unique — add surrounding context, or set
+    `replace_all` to change every instance.
     """
   end
 

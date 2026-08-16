@@ -138,17 +138,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
       assert rendered =~ "ask_user"
     end
 
+    # These two rules were relocated from the description into the parameter
+    # schema, where the model is composing the value they constrain. The
+    # invariant is that they reach the model at all — the whole serialized tool
+    # is what reaches it, so that is what the test asserts against. Pinning
+    # these to the description string is what would block the next relocation.
     test "tells the model how to brief a subagent that cannot see the conversation" do
-      rendered = Prompt.render([])
-      assert rendered =~ "NOT seen this conversation"
-      assert rendered =~ "constraints"
+      payload = serialized()
+      assert payload =~ "NOT seen this conversation"
+      assert payload =~ "constraints"
     end
 
     test "carries the background/foreground contract" do
-      rendered = Prompt.render([])
-      assert rendered =~ "Background is the DEFAULT"
-      assert rendered =~ "do NOT poll"
-      assert rendered =~ "background=false"
+      payload = serialized()
+      assert Prompt.render([]) =~ "Background is the DEFAULT"
+      assert Prompt.render([]) =~ "do NOT poll"
+      assert payload =~ "BLOCKS you and the user"
+    end
+
+    defp serialized do
+      Jason.encode!(%{
+        "description" => OptimalSystemAgent.Tools.Builtins.Delegate.Tool.description(),
+        "input_schema" => OptimalSystemAgent.Tools.Builtins.Delegate.Tool.parameters()
+      })
     end
 
     test "contains 'Roles' section" do

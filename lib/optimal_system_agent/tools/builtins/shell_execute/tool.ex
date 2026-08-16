@@ -41,7 +41,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
     %{
       "type" => "object",
       "properties" => %{
-        "command" => %{"type" => "string", "description" => "Shell command to execute"},
+        "command" => %{
+          "type" => "string",
+          "description" =>
+            "Shell command to execute. Prefer absolute literal paths, quoted if they " <>
+              "contain spaces. Permission is decided per SEGMENT: the line is split at " <>
+              "`|`, `&&`, `||`, `;`, `&` (not inside quotes or `$(...)`) and each " <>
+              "segment's first word classified. ONE risky segment — rm, sudo, chmod, " <>
+              "chown, kill, mount, systemctl, nc, shutdown, piping into a shell, " <>
+              "redirecting into system directories, `git reset --hard`, `git clean -f`, " <>
+              "force-push, or a file-mutating command reaching outside the working " <>
+              "directory — sends the WHOLE line to approval, and it is approved or " <>
+              "refused AS A WHOLE. So keep an unrelated risky step out of a line you " <>
+              "want waved through, and send UNRELATED commands as separate calls in one " <>
+              "turn rather than joining them with `;`, which merges their exit codes " <>
+              "into one approval. A heredoc (`<<`) or command substitution (`$(`, " <>
+              "backticks) can never be saved as an always-allow rule and will prompt " <>
+              "every time; favour one self-contained `-c` script over several heredocs. " <>
+              "Bound an open-ended discovery scan (`-maxdepth`, `-d 1`); on a non-zero " <>
+              "exit CHANGE the command rather than retrying a near-identical variant."
+        },
         "cwd" => %{
           "type" => "string",
           "description" =>
@@ -51,12 +70,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
         "run_in_background" => %{
           "type" => "boolean",
           "description" =>
-            "Optional. When true, run the command as a supervised background " <>
-              "process and return a background_id immediately instead of " <>
-              "blocking. Poll its output/status with the bash_output tool. " <>
-              "Defaults to false (foreground). A foreground command that outlives " <>
-              "the wait window is moved to the background automatically rather " <>
-              "than being killed."
+            "Optional, defaults to false (foreground). Set true UP FRONT for a long " <>
+              "job whose result you will come back for: the call returns a " <>
+              "background_id immediately. Collect the result with a SINGLE bash_output " <>
+              "call using `wait_ms` — never poll it in a loop and never sleep between " <>
+              "calls. A background process is killed when the session ends, so it is " <>
+              "the wrong tool for a server that must outlive the task."
         }
       },
       "required" => ["command"]

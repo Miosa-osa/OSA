@@ -52,7 +52,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool do
         "action" => %{
           "type" => "string",
           "enum" => Constants.actions(),
-          "description" => "Operation to perform"
+          "description" =>
+            "Operation to perform. States run `pending` -> `in_progress` -> " <>
+              "`completed` (or `failed`). EXACTLY ONE task may be `in_progress` while " <>
+              "work is underway — not less, not more. Start a task BEFORE working on " <>
+              "it, never after. Complete one only when fully accomplished, with " <>
+              "evidence — NEVER when tests fail, the implementation is partial, or " <>
+              "errors are unresolved; if blocked, leave it `in_progress` and add a new " <>
+              "task describing the blocker. Send the status change in the SAME turn as " <>
+              "the tool call that takes the next step — a turn whose only call is this " <>
+              "one moves nothing. The single exception is the opening `add_multiple` " <>
+              "that creates the board."
         },
         "session_id" => %{
           "type" => "string",

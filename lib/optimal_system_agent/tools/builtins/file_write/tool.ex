@@ -39,7 +39,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Tool do
       "properties" => %{
         "path" => %{
           "type" => "string",
-          "description" => "Path to write. Relative paths root at ~/.osa/workspace/."
+          "description" =>
+            "Path to write. Relative paths root at ~/.osa/workspace/; absolute and ~ " <>
+              "paths also work. If a file already exists there you MUST read it first; " <>
+              "this tool fails otherwise. On success it needs no read-back."
         },
         "content" => %{
           "type" => "string",

@@ -54,8 +54,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
           "description" =>
             "Block for up to this many milliseconds waiting for the command to reach a " <>
               "terminal status (done/failed/killed), then return its final output. " <>
-              "0 (default) returns the current snapshot immediately. Use this instead of " <>
-              "polling in a loop or sleeping. Capped at 1800000 (30 min)."
+              "0 (default) returns the current snapshot immediately. DO NOT SPIN. To WAIT, "
+              <> "use this — ONE " <>
+              "call that blocks until a terminal status or the wait elapses. NEVER call " <>
+              "this tool in a loop while the command is `running`, and never sleep " <>
+              "between calls. Capped at 1800000 (30 min)."
         }
       }
     }

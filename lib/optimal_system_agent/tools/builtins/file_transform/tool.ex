@@ -59,7 +59,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Tool do
                 "type" => "string",
                 "description" =>
                   "replace | replace_regex | delete_matching_lines | insert_after | " <>
-                    "insert_before | append | prepend | count | assert_balanced"
+                    "insert_before | append | prepend | count | assert_balanced. " <>
+                    "`count` and `assert_balanced` change nothing and return one line " <>
+                    "whether the file is 50 lines or 5,000 — use them to answer a " <>
+                    "question about the file instead of reading it, and to re-check " <>
+                    "structure after each change."
               },
               "find" => %{"type" => "string", "description" => "replace: literal text to find"},
               "pattern" => %{
@@ -77,8 +81,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Tool do
               "expect" => %{
                 "type" => "integer",
                 "description" =>
-                  "Exact number of matches required. Omit to require at least one. " <>
-                    "A mismatch aborts the whole transform without writing."
+                  "Exact number of matches required. OPTIONAL — omit it unless you " <>
+                    "actually know the count, and omitting it requires at least one, " <>
+                    "which is the guard that makes an unread file safe to edit. Set it " <>
+                    "when the count is the point. A mismatch aborts the whole transform " <>
+                    "without writing and reports the count it found; re-issue the same " <>
+                    "call with that count rather than switching tools."
               },
               "open" => %{"type" => "string", "description" => "assert_balanced: opener, e.g. ("},
               "close" => %{"type" => "string", "description" => "assert_balanced: closer, e.g. )"}

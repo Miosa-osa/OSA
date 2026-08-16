@@ -32,6 +32,21 @@ defmodule OptimalSystemAgent.Tools.ToolDescriptionDietTest do
   goes. The tests below pin the rules that survived that question, so a later
   edit cannot quietly drop a behavioural rule while trimming, or quietly re-add
   the prose that was removed.
+
+  ## The second pass: relocation, not another diet
+
+  The diet cut explanation. The pass after it applied the codex *placement*
+  finding above rather than cutting further: every surviving rule was
+  classified as **policy** (belongs in the system prompt, stated once, not
+  restated per tool), **parameter contract** (belongs on the parameter whose
+  value it constrains, where the schema already is), or **the one thing a model
+  reliably gets wrong about this tool** (the only thing left in a description).
+  Array cost went 32,942 B / 8,236 tok to 29,809 B / 7,453 tok, and description
+  prose went from 62% of the array to 38%, with no rule dropped.
+
+  So these assertions name the surface a rule must reach the model on, and
+  several additionally `refute` it on the surface it moved off. A rule asserted
+  on two surfaces is a rule being paid for twice.
   """
   use ExUnit.Case, async: true
 
@@ -42,6 +57,9 @@ defmodule OptimalSystemAgent.Tools.ToolDescriptionDietTest do
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt, as: ShellExecute
   alias OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt, as: TaskWrite
   alias OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt, as: ToolSearch
+
+  defp schema_of(mod), do: Jason.encode!(mod.parameters())
+  defp system_prompt, do: File.read!("priv/prompts/SYSTEM.md")
 
   @diet_targets [ShellExecute, FileTransform, FileRead, TaskWrite, BashOutput, ToolSearch]
   @all_touched [Git | @diet_targets]
@@ -93,15 +111,16 @@ defmodule OptimalSystemAgent.Tools.ToolDescriptionDietTest do
 
     test "the permission-segmentation contract survives" do
       # The model has to know a compound line is scored as a whole, or it cannot
-      # choose what to put in one. This is the rule, not the rationale.
-      text = shell()
+      # choose what to put in one. This is the rule, not the rationale. It is a
+      # contract on the `command` string, so it lives on that parameter.
+      text = schema_of(OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool)
       assert text =~ "split at"
       assert text =~ "sends the WHOLE line to approval"
       assert text =~ "approved or refused AS A WHOLE"
     end
 
     test "heredocs are still declared unsuppressible" do
-      text = shell()
+      text = schema_of(OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool)
       assert text =~ "never be saved as an always-allow rule"
       assert text =~ "prompt every time"
     end
@@ -111,54 +130,88 @@ defmodule OptimalSystemAgent.Tools.ToolDescriptionDietTest do
       assert text =~ "YIELD, NOT a kill"
       assert text =~ "background_id"
       assert text =~ "do NOT re-run it"
-      assert text =~ "run_in_background"
+
+      # When to opt in up front, and the no-polling rule, sit on the parameter.
+      schema = schema_of(OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool)
+      assert schema =~ "Set true UP FRONT"
+      assert schema =~ "never poll it in a loop"
     end
 
     test "a daemonised service is still distinguished from a background job" do
-      text = shell()
-      assert text =~ "setsid nohup"
-      assert text =~ "killed when the session"
+      assert shell() =~ "setsid nohup"
+
+      assert schema_of(OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool) =~
+               "killed when the session ends"
     end
 
-    test "the write-side routing and its one-clause reason survive" do
-      text = shell()
+    test "the write-side routing and its one-clause reason survive, stated once" do
+      text = system_prompt()
       assert text =~ "sed -i"
       assert text =~ "allowed-write roots"
-      assert text =~ "has not changed under you since"
+      assert text =~ "changed under you"
+      refute shell() =~ "sed -i"
     end
 
-    test "computing an answer instead of reading the file survives" do
-      text = shell()
-      assert text =~ "ANSWER A QUESTION about a file"
+    test "computing an answer instead of reading the file survives, stated once" do
+      text = system_prompt()
+      assert text =~ "Answer With a Program, Not With a Read"
       assert text =~ "Prefer one command that answers the question"
+      refute shell() =~ "Prefer one command that answers the question"
     end
   end
 
   describe "the other five keep theirs" do
     test "task_write keeps the exactly-one-in_progress state machine" do
-      text = TaskWrite.render([])
-      assert text =~ "EXACTLY ONE task `in_progress`"
-      assert text =~ "BEFORE starting"
+      # Relocated onto `action`, whose enum is the state machine it describes.
+      text = schema_of(OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool)
+      assert text =~ "EXACTLY ONE task may be `in_progress`"
+      assert text =~ "BEFORE working on it"
       assert text =~ "NEVER when"
+      refute TaskWrite.render([]) =~ "EXACTLY ONE"
     end
 
     test "file_read keeps the continuation stamp and the widen-don't-reslice rule" do
       text = FileRead.render([])
       assert text =~ "End of file"
       assert text =~ "offset=C to continue"
-      assert text =~ "overlapping slices"
-      assert text =~ "in parallel in one turn"
+      # The reslice rule moved onto `offset`/`limit`, the parameters that do it.
+      schema = schema_of(OptimalSystemAgent.Tools.Builtins.FileRead.Tool)
+      assert schema =~ "overlapping slices"
+      assert schema =~ "overlapping reads"
+      # Batching is policy: SYSTEM.md §5, once, not per read-tool.
+      assert system_prompt() =~ "DEFAULT TO PARALLEL"
+      refute text =~ "in parallel in one turn"
     end
 
     test "file_transform keeps `expect` as the guard that replaces the read" do
       text = FileTransform.render([])
-      assert text =~ "Set `expect` on every mutating operation"
       assert text =~ "No prior"
       assert text =~ "assert_balanced"
+
+      # `expect` is documented on its own parameter now, and deliberately NOT as
+      # "set it on every mutating operation". In the benchmark corpus this tool
+      # fails at 10.3% — the highest of any edit tool — and two of three observed
+      # failures were `expect` count mismatches, after which the per-run traces
+      # show permanent reversion to file_edit. Mandating a guessed count is what
+      # produced that. Omission still means "at least one", so the guard that
+      # makes an unread file safe to edit is intact either way.
+      schema = schema_of(OptimalSystemAgent.Tools.Builtins.FileTransform.Tool)
+      assert schema =~ "OPTIONAL"
+      assert schema =~ "requires at least one"
+      assert schema =~ "guard that makes an unread file safe to edit"
+      refute text =~ "Set `expect` on every mutating operation"
+    end
+
+    test "file_transform tells the model how to recover from a missed expectation" do
+      text = FileTransform.render([])
+      assert text =~ "MISS, not a reason to give up"
+
+      assert schema_of(OptimalSystemAgent.Tools.Builtins.FileTransform.Tool) =~
+               "re-issue the same call with that count"
     end
 
     test "bash_output keeps wait_ms as the one sanctioned wait" do
-      text = BashOutput.render([])
+      text = BashOutput.render([]) <> schema_of(OptimalSystemAgent.Tools.Builtins.BashOutput.Tool)
       assert text =~ "DO NOT SPIN"
       assert text =~ "wait_ms"
       # And it must not resurrect the capitalised ban that contradicted the gate
@@ -185,17 +238,22 @@ defmodule OptimalSystemAgent.Tools.ToolDescriptionDietTest do
     # other 11,057 calls taught it shell syntax. The tool is not being removed,
     # so the boundary has to be stated where the confusion happens.
     test "git states the argument shape and defers the rest to shell_execute" do
-      text = Git.render([])
-      assert text =~ "ONE bare subcommand"
-      assert text =~ "diff --stat"
-      assert text =~ "shell_execute"
+      # The argument shape is a contract on `command`; the boundary is routing
+      # and stays in the description.
+      assert schema_of(OptimalSystemAgent.Tools.Builtins.Git.Tool) =~ "ONE bare git subcommand"
+      assert schema_of(OptimalSystemAgent.Tools.Builtins.Git.Tool) =~ "not `git diff`"
+      assert Git.render([]) =~ "not a shell"
+      assert Git.render([]) =~ "shell_execute"
     end
 
     test "git keeps the destructive-command guardrail" do
       text = Git.render([])
       assert text =~ "reset --hard"
       assert text =~ "clean -f"
-      assert text =~ "never `git add .`"
+      assert schema_of(OptimalSystemAgent.Tools.Builtins.Git.Tool) =~ "never `git add .`"
+      # The general commit hygiene protocol is SYSTEM.md §8, not restated here.
+      assert system_prompt() =~ "Git Safety"
+      refute text =~ "Git Safety Protocol"
     end
   end
 

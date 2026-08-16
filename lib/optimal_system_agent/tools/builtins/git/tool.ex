@@ -49,11 +49,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Tool do
       "properties" => %{
         "command" => %{
           "type" => "string",
-          "description" => "Git subcommand, e.g. status, diff, log, add, commit"
+          "description" =>
+            "ONE bare git subcommand — `diff`, not `diff --stat` and not `git diff`. " <>
+              "Every flag and argument goes in `args`."
         },
         "args" => %{
           "type" => "string",
-          "description" => "Additional flags and arguments. Optional."
+          "description" =>
+            "Flags and arguments for the subcommand. Optional. Stage named paths only " <>
+              "— never `git add .` and never `-A`, which can sweep in secrets."
         },
         "path" => %{
           "type" => "string",

@@ -8,7 +8,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
 
   Kept deliberately short: this string sits in the cached static prefix of
   EVERY request, so anything the parameter schema already states, or that
-  §3 of the system prompt already states, does not belong here.
+  §3 of the system prompt already states, does not belong here. In particular
+  the briefing rule lives on the `task` parameter and the fan-out rule on
+  `tasks`, because that is where the model is composing the value they
+  constrain. What is left here is the routing decision and the one thing a
+  model reliably gets wrong: that a running agent must be left alone.
   """
 
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
@@ -37,16 +41,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     Background is the DEFAULT: the call returns an agentId immediately and a \
     <task-notification> reaches you when it finishes. While it runs, do NOT poll \
     task_output, read its output file, or redo its work — just do other work. \
-    Pass background=false only when the result gates your very next step; it \
-    blocks you AND the user. Continue a finished agent with task_resume or \
-    message_agent.
-
-    For parallel work prefer ONE call with tasks:[...] over sequential calls.
-
-    The subagent has NOT seen this conversation. Brief it like a colleague who \
-    just walked in: the objective and why, every relevant path, the constraints \
-    and forbidden actions, the verification you require, and the expected output \
-    shape and stop condition. Terse command-style prompts produce shallow work.
+    Continue a finished agent with task_resume or message_agent.
     """
   end
 
