@@ -97,6 +97,7 @@ pub struct SurveyQAData {
 }
 
 /// A chat message
+#[derive(Clone)]
 pub struct Message {
     pub msg_type: MessageType,
     pub content: String,
@@ -1402,5 +1403,32 @@ mod commit_parse_tests {
         let mut user = Message::new(MessageType::User, body(), None);
         user.prepare_for_commit(80);
         assert!(user.prerendered_body.is_none());
+    }
+
+    #[test]
+    fn retained_source_message_reflows_independently_at_each_width() {
+        let mut source = Message::new(
+            MessageType::Agent,
+            "| OSA principle | How this project matches |\n| --- | --- |\n| Source-backed transcript replay | Tables render again at the current terminal width |"
+                .to_string(),
+            None,
+        );
+
+        source.prepare_for_commit(120);
+        let wide_height = source.height(120);
+
+        let mut narrow = source.clone();
+        narrow.invalidate_for_width();
+        narrow.prepare_for_commit(42);
+        let narrow_height = narrow.height(42);
+
+        assert!(
+            narrow_height > wide_height,
+            "the retained source must be parsed again at the resized width"
+        );
+        assert!(
+            source.prerendered_body.is_some(),
+            "the committed source should model a message prepared at its original width"
+        );
     }
 }
