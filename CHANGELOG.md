@@ -9,6 +9,260 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.100] — displays as `v1.0.100`
+
+Forty-two commits, and **no solve-rate claim**. The one benchmark arm run for
+this release used an 8× timeout multiplier — far outside Terminal-Bench's own
+budget, on 8 of 89 tasks at k=1 — so it is diagnostic, not comparable, and it is
+not quoted as a result. What it does establish is narrow and worth having: of
+three tasks previously lost to identical clock cutoffs, **two were genuinely
+clock-bound and one was never a timeout at all** — it finished early and wrong.
+That third diagnosis had been ours, and it was incorrect.
+
+The reasoning fix landed unambiguously (**11,829 thinking frames against 0 of
+5,587 previously**) and **disproved the hypothesis behind it**: output per turn
+*rose*, 2,354 → 3,504. Reasoning is returned under a separate key and never
+written back onto the message, so nothing about what the provider receives
+changed. It is a measurement fix, not a compute saving.
+
+Most of what follows was found by reading a real session, or by an operator
+using the product and saying it felt wrong.
+
+### The pattern, a third time
+
+1.0.98 named eleven defects sharing one shape — a guard correct for a narrow
+case, applied one scope too wide, silently disabling a capability with nothing
+reporting the loss. 1.0.99 added three. This release adds a further set, and the
+ratchet file now carries six class-level guards that fail on the *next* instance
+rather than this one. The sixth caught a live defect on its first run.
+
+### Fixed — work in flight was not counted as work
+
+**A delegated teammate did not count as work in flight.** `VerificationGate`
+clause 0 exists precisely to refuse a turn that finishes on unobserved
+background work — and it queried only `Shell.BackgroundManager`, whose writers
+are `shell_execute` alone. A delegated subagent lives in `Agent.RunStore` and
+never enters that manager, so at turn-finalize the loop had nothing outstanding
+and no reason to stay alive. Observed live: OSA delegated, said *"let me wait
+for the explorer"*, and ended the turn 26 seconds later with a 5-item plan
+untouched.
+
+The prompt was the other half. It correctly said launching is never a reason to
+stop, and it **never named `task_wait`** — the only affordance that blocks on an
+agent. A model that genuinely needed the result had no correct move, and
+"waiting" degenerated into ending the turn.
+
+The result then had a real chance of no reader: `TaskNotifications` is drained
+at two sites, a completion arriving while a turn finalizes hits a catch-all, and
+`pending?/1` has **zero production callers**. Holding the turn open while a child
+is alive closes that without a new reader. No new budget — clause 0 spends the
+counter it already had.
+
+### Fixed — a working session said it did not exist
+
+`Agent.Loop` runs an entire turn synchronously inside `handle_call`, so the
+mailbox is unserved for its duration and **`get_state` returned
+`{:error, :not_found}` for a live session** — indistinguishable from a dead one,
+and inherited by `/status`, the HTTP progress route and the subagent view. A
+snapshot is now published to ETS before the turn goes deaf. Cancellation was
+already correct via an ETS flag and is now pinned by a test, so a future change
+routing it through the mailbox fails loudly.
+
+This is observability, not control: a busy loop becomes *observable*, not
+*commandable*. The turn was deliberately **not** restructured into a supervised
+child — concurrent mutating calls against a turn holding its own copy of state
+is a lost-update class this codebase has already deleted code over.
+
+### Fixed — the hang, and the inventory around it
+
+**`file_grep` ran a bare `rg` subprocess with no timeout.** `rg` blocks forever
+on a FIFO, a stalled network mount, or `/proc`. It is now bounded to one
+subprocess (120s, configurable, `:infinity` to disable) and reports an
+**incomplete search naming itself and the path** — deliberately *not* falling
+through to the Elixir fallback, since answering a hung search with a plausible
+result is the silent wrong answer that module was already burned by.
+
+The wider inventory is in the commit: `diff`, ~12 `computer_use` adapter calls,
+an `await_predecessors/1` receive with no `after`, a deadline checked before a
+`receive` and never enforced, `repl` passing an invalid `:timeout` so the tool
+always errors instead of running. **`:infinity` tool execution is correct and
+stays** — a recorded 10-minute ceiling once killed a three-agent dispatch and
+lost the turn's work. A wall-clock cap punishes work for taking long; a step cap
+punishes it for going nowhere.
+
+**No turn timeout was added, and none was tightened.**
+
+### Fixed — the interface could not distinguish working from dead
+
+The elapsed counter was anchored to **turn start**, not to the last frame
+received, so a turn grinding productively and a turn that died ninety minutes
+ago rendered identically. The two other figures on that row are frozen snapshots
+of the last frame that landed. A `last_output_at` existed and drove only a colour
+ramp that saturates at **6 seconds** — and the one branch users get stuck in
+ignored it entirely. A silence figure now appears at 600s and clears the instant
+a frame arrives, staying quiet during a running tool, a pending approval or a
+retry.
+
+`TURN_TIMEOUT` was a red herring and its absence is its own finding: the
+orchestrate route returns **202 immediately**, so the 3900s client ceiling never
+applied to a turn, and its doc comment describes a contract the backend stopped
+honouring. The backend default is 24 hours.
+
+### Fixed — the model picker made things worse with each press
+
+Selecting a provider whose model list is dynamic started a catalog fetch and
+**left the dialog byte-identical to the screen before the keypress** — nothing
+distinguishes that from a key that was never received, so the operator pressed
+Enter again and started another fetch. Each reply then reset the cursor and
+cleared the filter, so the row under the cursor was not the row selected. It
+never retried into success; the operator outlasted the window.
+
+A `LoadingModels` mode now owns the screen for the fetch, Enter has an inert
+place to land, and a reply that no longer answers a live question is dropped.
+`/model`, `/models`, `/provider`, `/providers` and `/login` funnel into one
+picker and are fixed together. No retry and no delay was added — the duplicate
+requests were the defect, not the cure.
+
+**Adjacent, and it fires:** `swap_provider` ran a context probe inside a
+`GenServer.call`. Measured against a black-holed host, a stated 3s budget takes
+**5,017 ms** — `receive_timeout` bounds only the response wait while connect and
+pool checkout fall back to a 5s default — inside a call whose limit is exactly
+5,000 ms. The caller gave up 17 ms before the server completed the swap, and
+because a call timeout is an `:exit` rather than an error, it crashed the caller
+rather than returning one.
+
+### Fixed — the world-state ledger was destroyed in production
+
+`:osa_world_state_ledger` was created lazily, so the ETS table **belonged to
+whichever process first called it**. `assemble/3` is reached from transient
+processes — HTTP request processes, tool Tasks, subagent Tasks — so the first
+such process took *every session's* ledger with it on exit. Sections then
+re-emit as `:added`: the model receives a second full copy of something already
+in its history, with no supersession notice, which is exactly the contradictory
+double-copy those notices exist to prevent. Nothing logged, nothing failed.
+
+**This was the cache regression.** A benchmark arm showed hit rate falling
+95.4% → 63.2% with cache writes rising 360k → 11.9M. 95.8% of those writes come
+from one trial of eight, where 66 turns re-write the whole conversation while
+`cache_read` pins at exactly **22,333** — the static+tools prefix, the segment
+*before* the world-state breakpoint. A re-add with no cause invalidates that
+breakpoint and re-prefills everything behind it. The bug needs the first toucher
+of the table to be transient, which is a startup-order race — and a
+one-in-eight distribution is what a race looks like, where a structural property
+of the block layout would have hit all eight.
+
+A per-payload block restructure was designed and **deliberately not shipped**: a
+structural change to the primary prompt path, unverifiable without a live
+provider, aimed at a residual nobody has measured.
+
+It also explains a test that had been failing one run in four. That flake was
+this bug.
+
+### Fixed — cost accounting, again
+
+Every one of these reported `confidence: :exact` while being wrong, which is why
+none reached the guess path that would have warned.
+
+- **Claude Sonnet billed 1.50× over.** Priced at $3/$15 while a comment in the
+  same file noted the $2/$10 introductory rate. Reconciled three ways: account
+  **$52.73**, token-derived **$52.31**, OSA reported **$78.55**. The row was
+  wrong *on purpose*, under a never-under-estimate policy — an estimate biased
+  away from the invoice cannot reconcile against it, which is its only job.
+- **Every Mistral model through a gateway billed $0.00.** Local-model detection
+  judged an id's shape before the routing suffix was stripped, so
+  `mistral-large-latest:free` read as a free local model. Caught by the new
+  ratchet on its first run.
+- **DeepSeek moved to peak/off-peak billing at 16:00 UTC on 2026-08-16.** Rates
+  now carry `effective_from` and resolve at **request** time, so a promotional
+  price expires by itself rather than waiting for a human. Windows are half-open
+  on the UTC hour; a turn spanning a boundary bills wholly at its request
+  instant, because splitting needs per-token timestamps no provider reports.
+- **Published cache-read rates were collected and ignored.** xAI and Z.ai
+  catalogs carry real per-vendor rates while billing applied a flat `input × 0.1`
+  regardless. Now consumed, with `cache_read_confidence/1,2` reporting
+  `:published | :multiplier | :unknown` — kept separate from `confidence/1`,
+  which takes only a model and would otherwise mark every Anthropic model
+  `:estimated` for using Anthropic's own published ratio.
+- `glm-4.6v` encoded `0.055` where Z.ai publishes `0.05` — `input × 0.185`, a
+  *different* model's ratio applied to this one. A derived number wearing a
+  published one's clothes, harmless while the field was ignored and live the
+  moment it was consumed.
+
+### Fixed — aliases declared nothing
+
+`ConflictScope`'s tables are keyed by raw call name, so `wget` and `fetch_file`
+— which really do execute the download — declared no writes and resolved
+`:parallel`. Two `wget`s to one path did not conflict. It had not fired in
+production only because the orchestrator is alias-blind in the *opposite*
+direction and resolved them to no module, landing on `:barrier`: two bugs
+holding each other up, where fixing either alone exposes the race. Aliases now
+resolve to canonical names before lookup.
+
+The sweep also found **`send_user_file`**, which declares itself concurrency-safe
+and reads a caller-supplied path but was absent from the reader table — it could
+be batched against a write to the very file it was sending.
+
+### Added — the goal system had a door that led elsewhere
+
+`GoalTracker` is fully implemented and `start/2` had **no caller anywhere**. The
+design note said there was no `/goal` command; that is true of the Elixir table
+and **false of the product** — the TUI has shipped a complete client-side
+`/goal` for some time, which never contacts the backend, whose completion check
+is **the model's reply ending in `DONE`**, and whose 25-cycle cap can see neither
+the tracker's run cap nor the loop's continuation budget. So the gap was never a
+missing door; the door users reach leads somewhere other than the machine.
+
+Now wired: `/goal` starts the tracker, `GOAL:` progress notes anchor it,
+acceptance criteria are plumbed through capture, and goal-anchored re-entry
+shares the **existing** per-turn continuation budget rather than adding a third.
+Completion discriminates in both directions under an injected panel — the
+unfinished direction tested hardest, since that is where every rejected detector
+failed.
+
+Also fixed there: `set_goal/3` called capture with no options, so the fallback
+wrote **the goal text into `acceptance_criteria`**. The brief stated criteria
+every turn and they restated the goal.
+
+Automatic criteria elicitation was deliberately not built: a model that writes
+its own definition of done can write an easy one. Whether real skeptics tell
+finished from unfinished work is **unverified** and is the defect class this
+repo has failed at nine times.
+
+### Fixed — the CLI dropped the transcript and kept the bill
+
+Exit called `System.halt/1`, skipping `terminate/2`: the synchronous spend flush
+survived, the two-hop async transcript save did not. **1,684 of 3,029 spend
+files had no transcript.** A third exit site nobody had counted was also found.
+All three now flush synchronously, bounded at 5s.
+
+This is why the operator's report that OSA sometimes stops before finishing
+could not be investigated: every session where it happened was discarded on
+exit. The surviving transcript from the verification probe contains the pair
+that makes the next report debuggable — an assistant turn followed by *"you
+stopped before finishing the task"*.
+
+### Known — not fixed
+
+- **Nothing in this release is verified against a live provider.** No working
+  credentials exist on the build machine.
+- The `poke`-dropped-while-not-idle window remains live, and
+  `TaskNotifications.pending?/1` is still uncalled. The delegate fix makes it far
+  harder to reach; it does not close it.
+- A subagent's *elapsed* time is computed from a TUI-local `Instant` that resets
+  on every `agent_started` frame while `tool_uses` comes from the backend's
+  accumulated counter — which is how one was seen reporting 17 seconds and 99
+  tool uses. Both numbers are true about different clocks.
+- The TUI's `DONE`-sentinel goal loop is untouched and is the path users reach.
+- `:requested_at` is never stamped, so time-varying rates fall back to `utc_now`
+  — correct in the hot loop, and the stability guarantee for stored sessions
+  only becomes real once the field is written.
+- xAI cache-read rates are now load-bearing on every cached xAI turn and were
+  **not re-fetched** this cycle.
+- ~12 `computer_use` adapter subprocess calls remain unbounded.
+- No non-destructive escape from a busy turn exists; `esc esc` still discards it.
+
+---
+
 ## [1.0.99] — displays as `v1.0.099`
 
 Measured on a fixed 8-task Terminal-Bench probe against a recorded baseline,

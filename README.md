@@ -1082,6 +1082,48 @@ claim than we can support:
   observations. It is variance, and single runs on this set are not evidence of
   small differences in either direction.
 
+### Corrections as of 1.0.100
+
+Four claims above are wrong or superseded. They are corrected here rather than
+edited away, because the corrections are the more useful record.
+
+- **The dollar figures understate spend.** Both arms were priced with
+  `glm-5.2:cloud` carrying the previous generation's rate — `{0.60, 2.20}`
+  against Z.ai's `{1.40, 4.40}`. Every dollar number in the table above is
+  **2.4x low**. The *percentage* delta survives, because both arms carry the
+  same error; the absolute figures do not. Three further mispricings were found
+  since: Sonnet 1.50x over, Opus 3.00x over, and every Mistral model reached
+  through a gateway billing **$0.00**. All four reported `confidence: :exact`.
+- **The 162:1 in:out ratio is not comparable to the field's.** It measures our
+  reasoning-suppressed output against competitors' reasoning-inclusive output.
+  Measured on the same basis, OSA is **69:1 against codex's 75:1** — inside the
+  band, not far outside it.
+- **Caching is now demonstrated end-to-end**, which the note above said it was
+  not. It had been emitted only when the provider was native Anthropic, while
+  benchmarks reach Claude through a compat gateway — so on the path that
+  actually runs, the feature was dead code. **0% → 92.8%** on a live arm.
+- **The prefix is 17.7k tokens, not the 29.8k previously measured**, of which
+  7.3k is tool schemas rather than 18.6k. Earlier releases already took that;
+  the larger figure was stale when quoted.
+
+One arm was run for 1.0.100, on `anthropic/claude-sonnet-5` with an **8x timeout
+multiplier**. It is **not quotable as a result**: 8 of 89 tasks, k=1, and a
+multiplier far outside Terminal-Bench's own budget — one task consumed 3h11m
+against a declared 30 minutes. It was run to answer one question, and it did.
+
+Of three tasks previously lost to identical 1743s cutoffs, **two were genuinely
+clock-bound** (solving at 42m and 3h11m) and **one was never a timeout at all** —
+it finished early and wrong, in half the turns. That third diagnosis had been
+ours and it was incorrect. Useful calibration: one task needed 1.45x its declared
+budget and the other 6.4x, so a 2x multiplier recovers one of them and nothing
+else.
+
+The same arm surfaced a cache hit rate falling **95.4% → 63.2%**. That was traced
+to a live defect, not to the model or the timeout: the world-state ledger's ETS
+table was owned by whichever process created it, and being reached from transient
+processes meant the first one to exit destroyed every session's ledger. Fixed in
+this release. **Both benchmark arms predate the fix.**
+
 ### Head-to-head, model held fixed
 
 Terminal-Bench 2.0 tasks, all arms on `glm-5.2:cloud` through one local daemon,
