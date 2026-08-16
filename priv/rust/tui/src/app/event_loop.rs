@@ -736,6 +736,10 @@ impl App {
         self.activity
             .set_a11y(self.config.a11y || crate::a11y::env_hint());
 
+        // Seed the lean view (`/lean`) from persisted config, same shape as
+        // a11y above: a display preference the client owns outright.
+        self.chat.set_lean(self.config.lean);
+
         // Initial health check
         self.check_health();
 
@@ -1382,6 +1386,20 @@ impl App {
             //    `insert_before` from ever having to scroll more than the
             //    terminal can show at once (an over-tall single message still
             //    goes out alone, exactly as before).
+            // 2a. Tool cells suppressed by the lean view (`/lean`).
+            //     They are never printed, but they are still WORK THAT HAPPENED,
+            //     so they go into the transcript log exactly as a printed cell
+            //     does — ctrl+o remains a complete record of the session, which
+            //     is what makes hiding them honest rather than lossy. Drained
+            //     before the visible lane so the log keeps chronological order,
+            //     and outside the `has_pending_scrollback` gate because a turn
+            //     of nothing but hidden tools leaves that lane empty.
+            for msg in self.chat.drain_hidden() {
+                if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(&msg) {
+                    self.transcript_log.push(entry);
+                }
+            }
+
             if !was_full && self.chat.has_pending_scrollback() {
                 // Both from this frame's ONE size. `get_frame().area().width` was
                 // a third, independent size source: it reports the width the

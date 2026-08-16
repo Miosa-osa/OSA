@@ -39,6 +39,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("update", "Update OSA to the latest version"),
     ("reasoning", "Set the reasoning effort level"),
     ("verbose", "Cycle tool output detail"),
+    ("lean", "Lean view — print the model's words, not its tool calls"),
     ("theme", "Switch the color theme"),
     ("keybindings", "Show the keybinding map + config file"),
     ("config", "Open the settings editor"),
@@ -412,6 +413,49 @@ impl App {
                 self.chat.add_system_message(msg, "info");
                 self.toasts
                     .push(msg.to_string(), crate::components::toast::ToastLevel::Info);
+            }
+            "/lean" => {
+                // Lean view: print what the model SAYS, not the machinery it
+                // used. Same shape as `/a11y` above — an explicit on/off arg,
+                // else a flip — because it is the same KIND of thing: a
+                // client-side display preference, persisted in `tui.json`.
+                //
+                // Only tool cells are affected. Errors, loop-guard and control
+                // text (the `Loop.TerminalSource` distinction) and permission
+                // prompts are structurally out of reach of the filter; see
+                // `Chat::push_scrollback_block`.
+                let on = match arg.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" | "enable" => true,
+                    "off" | "false" | "0" | "no" | "disable" => false,
+                    _ => !self.chat.lean(),
+                };
+                self.chat.set_lean(on);
+                self.config.lean = on;
+                let _ = self.config.save();
+                // The confirmation says "from here on" and it means it.
+                // Finalized rows went out through `insert_before`, which writes
+                // into the terminal's OWN scrollback at the width they were
+                // wrapped at; nothing in this process can reach back and repaint
+                // them. A message implying the screen had been cleaned up would
+                // be a quiet lie, and turning the mode OFF cannot resurrect the
+                // cells it hid either — ctrl+o is where those live.
+                let msg = if on {
+                    "Lean view: on \u{2014} tool calls hidden from here on. \
+                     The model's words and its reasoning still show, as do errors \
+                     and permission prompts; ctrl+o for the full transcript."
+                } else {
+                    "Lean view: off \u{2014} tool calls shown from here on. \
+                     Already-hidden calls stay in ctrl+o only."
+                };
+                self.chat.add_system_message(msg, "info");
+                self.toasts.push(
+                    if on {
+                        "Lean view: on".to_string()
+                    } else {
+                        "Lean view: off".to_string()
+                    },
+                    crate::components::toast::ToastLevel::Info,
+                );
             }
             "/overdrive" | "/yolo" | "/dangerous" => {
                 // Overdrive (full auto) toggle. Turning ON the first time on this

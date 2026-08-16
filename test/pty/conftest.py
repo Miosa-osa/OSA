@@ -18,11 +18,35 @@ agrees with you because it never ran.
 
 from __future__ import annotations
 
+import os
 import socket
+import tempfile
 
 import pytest
 
 from stub_backend import StubBackend
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_home():
+    """Keep the harness out of the developer's real `~/.osa`.
+
+    `osa_pty.PtySession` reads `$OSA_PTY_HOME` and falls back to the REAL `$HOME`
+    when it is unset. `run.sh` always sets it; running these tests under pytest
+    directly does not — so any test that makes OSA write state (a `/theme`, an
+    `/a11y`, a `/hide-tools`, anything that lands in `~/.osa/tui.json`) would
+    edit the config of whoever ran it. Set it here so both entry points are
+    equally safe, and leave an operator-provided value alone.
+    """
+    if os.environ.get("OSA_PTY_HOME"):
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix="osa-pty-home-") as home:
+        os.environ["OSA_PTY_HOME"] = home
+        try:
+            yield
+        finally:
+            os.environ.pop("OSA_PTY_HOME", None)
 
 
 def _free_port() -> int:

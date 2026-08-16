@@ -106,6 +106,25 @@ pub struct Chat {
     /// ordinary block push, so a tool cell landing between two chunks correctly
     /// re-opens the margin.
     agent_flow_open: bool,
+    /// Lean view (`/lean`): keep tool cells out of the terminal's native
+    /// scrollback so the printed conversation is the model's prose, and its
+    /// reasoning, and nothing else. Presentation only — nothing about the turn
+    /// changes, the tools still run, and every suppressed cell is still handed
+    /// to `transcript_log` through [`Chat::drain_hidden`].
+    lean: bool,
+    /// Tool cells suppressed by `lean`, awaiting the app loop. They are
+    /// drained into the transcript log (ctrl+o) and then dropped, never printed.
+    ///
+    /// A separate lane rather than a `hidden` flag on `Message` because the
+    /// suppression has to happen at PUSH time, not at print time: every block
+    /// queued for scrollback is preceded by a blank margin row
+    /// ([`Chat::push_scrollback_block`]), and a cell filtered out later would
+    /// leave its margin behind as a stray blank line.
+    hidden: Vec<Message>,
+    /// Tool cells suppressed since the last [`Chat::take_hidden_count`]. Drives
+    /// the one-line "N tool calls hidden" receipt at turn end — total silence
+    /// while a 60-turn task runs would read as a hang.
+    hidden_count: usize,
 }
 
 impl Chat {
@@ -132,7 +151,40 @@ impl Chat {
             turn_started: false,
             turn_separators: true,
             agent_flow_open: false,
+            lean: false,
+            hidden: Vec::new(),
+            hidden_count: 0,
         }
+    }
+
+    // ── Lean view (`/lean`) ───────────────────────────────────────────
+
+    /// Turn the lean view on or off.
+    ///
+    /// Takes effect on the next block queued for scrollback. Rows already handed
+    /// to `insert_before` are frozen in the terminal's own history at the width
+    /// they were wrapped at and cannot be un-printed, so this can never be
+    /// retroactive — which is why the command's confirmation says "from here on"
+    /// rather than implying a redraw.
+    pub fn set_lean(&mut self, on: bool) {
+        self.lean = on;
+    }
+
+    /// Whether the lean view is active.
+    pub fn lean(&self) -> bool {
+        self.lean
+    }
+
+    /// Suppressed tool cells, for the transcript log. Drained by the app loop in
+    /// the same pass as [`Chat::drain_scrollback`], and BEFORE it, so the log
+    /// keeps the order the work happened in.
+    pub fn drain_hidden(&mut self) -> Vec<Message> {
+        std::mem::take(&mut self.hidden)
+    }
+
+    /// How many tool cells have been suppressed since this was last called.
+    pub fn take_hidden_count(&mut self) -> usize {
+        std::mem::take(&mut self.hidden_count)
     }
 
     /// Toggle the turn-separator appearance flag. Returns the new state.
@@ -187,6 +239,28 @@ impl Chat {
     /// exactly one blank line before every block except the very first
     /// (Claude Code's `addMargin` / `marginTop={1}`).
     fn push_scrollback_block(&mut self, msg: Message) {
+        // Lean view: a tool cell is diverted BEFORE the margin row is
+        // emitted, so nothing about it reaches the terminal — not the cell, not
+        // the blank line it would have been given. `agent_flow_open` is still
+        // cleared, so two prose chunks separated by a hidden tool keep the same
+        // block structure they have with the tool visible; joining them would
+        // weld two assistant messages into one paragraph.
+        //
+        // The predicate is deliberately narrow: ONLY a tool cell. Errors and
+        // turn failures are `SystemError`, loop-guard and control text is
+        // `SystemWarning` (the `Loop.TerminalSource` distinction), and a
+        // permission prompt is not a message at all — it is an overlay drawn
+        // into the stream band. None of them can reach this branch, so no
+        // setting of this flag can swallow them.
+        if self.lean
+            && matches!(msg.msg_type, MessageType::ToolCall)
+            && !msg.is_turn_separator()
+        {
+            self.agent_flow_open = false;
+            self.hidden_count += 1;
+            self.hidden.push(msg);
+            return;
+        }
         if self.scrollback_started {
             self.scrollback.push(Message::new_tool_call(ToolCallData {
                 name: String::new(),
@@ -603,6 +677,12 @@ impl Chat {
         self.scrollback_started = false;
         self.turn_started = false;
         self.agent_flow_open = false;
+        // `/clear` drops the suppressed cells with everything else: they exist
+        // only to feed a transcript log that is being cleared in the same
+        // breath, and a count carried across the boundary would report work
+        // from a conversation that no longer exists.
+        self.hidden.clear();
+        self.hidden_count = 0;
     }
 
     pub fn last_agent_message(&self) -> Option<String> {
@@ -1131,5 +1211,227 @@ mod concurrent_tool_pairing_tests {
             .tool_data
             .as_ref()
             .map_or(false, |td| td.result.is_empty()));
+    }
+}
+
+/// The lean view (`/lean`) — what it removes, and what it must never
+/// be able to remove.
+///
+/// The value of the mode is entirely in the second half. A flag that suppresses
+/// output is one mistake away from suppressing an approval request, and a
+/// session parked on a permission prompt nobody can see is unrecoverable — the
+/// exact failure this codebase spent a session removing. So these tests pin the
+/// negative space: errors, loop-guard/control text and system notices go through
+/// `add_system_message` and stay, turn separators stay, and the suppressed tool
+/// cells are still handed over for the ctrl+o transcript rather than dropped.
+///
+/// Permission prompts are not tested here because they are not messages at all
+/// (`dialogs::permissions` draws into the stream band); the structural fact that
+/// they never touch `Chat` is what makes them unhidable. The PTY suite asserts
+/// that end of it against the real binary.
+#[cfg(test)]
+mod lean_view_tests {
+    use super::*;
+    use ratatui::text::Line;
+
+    fn tool(name: &str) -> ToolCallData {
+        ToolCallData {
+            name: name.to_string(),
+            tool_call_id: Some(name.to_string()),
+            args: String::new(),
+            result: String::new(),
+            duration_ms: 0,
+            success: true,
+            expanded: false,
+            hook_runs: Default::default(),
+            lines: vec![Line::from(format!("{name} ran"))],
+        }
+    }
+
+    /// Every block queued for the terminal, as a coarse kind label.
+    fn printed(chat: &mut Chat) -> Vec<&'static str> {
+        chat.drain_scrollback()
+            .iter()
+            .map(|m| match m.msg_type {
+                MessageType::User => "user",
+                MessageType::Agent | MessageType::AgentContinuation => "agent",
+                MessageType::SystemError => "error",
+                MessageType::SystemWarning => "warning",
+                MessageType::SystemInfo => "info",
+                MessageType::ToolCall if m.is_turn_separator() => "separator",
+                // The CC margin row rides the same carrier as a tool cell, with
+                // no tool name. It is spacing, not content.
+                MessageType::ToolCall
+                    if m.tool_data.as_ref().map_or(true, |t| t.name.is_empty()) =>
+                {
+                    "margin"
+                }
+                MessageType::ToolCall => "tool",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_cells_do_not_reach_the_terminal() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        chat.add_user_message("go");
+        chat.add_tool_message_rich(tool("shell_execute"));
+        chat.finalize_tool("shell_execute", Some("shell_execute"));
+        chat.add_agent_message("here is what I found", None);
+
+        assert_eq!(
+            printed(&mut chat),
+            vec!["user", "margin", "agent"],
+            "a tool cell reached native scrollback with the lean view on"
+        );
+    }
+
+    /// The margin row goes with the cell. `push_scrollback_block` emits one blank
+    /// line before every block, so a cell filtered out anywhere downstream would
+    /// leave its blank line stranded — a lean view that accumulates a gap per
+    /// hidden tool is not a cleaner screen, it is a gappier one.
+    #[test]
+    fn a_hidden_tool_leaves_no_blank_row_behind() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        chat.add_agent_message("first", None);
+        for n in 0..5 {
+            let name = format!("t{n}");
+            chat.add_tool_message_rich(tool(&name));
+            chat.finalize_tool(&name, Some(&name));
+        }
+        chat.add_agent_message("second", None);
+
+        // Two prose blocks and exactly ONE margin row between them, which is what
+        // two adjacent blocks get with no tools involved at all.
+        let blocks = chat.drain_scrollback();
+        assert_eq!(
+            blocks.len(),
+            3,
+            "expected agent + margin + agent, got {} blocks",
+            blocks.len()
+        );
+    }
+
+    /// Nothing is lost, only unprinted. The suppressed cells are handed to the
+    /// caller for `transcript_log`, which is what ctrl+o reads.
+    #[test]
+    fn hidden_tools_are_still_handed_over_for_the_transcript() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        chat.add_tool_message_rich(tool("read_file"));
+        chat.finalize_tool("read_file", Some("read_file"));
+
+        let hidden = chat.drain_hidden();
+        assert_eq!(hidden.len(), 1, "the suppressed cell was dropped outright");
+        assert_eq!(
+            hidden[0].tool_data.as_ref().map(|t| t.name.as_str()),
+            Some("read_file")
+        );
+        assert!(
+            chat.drain_hidden().is_empty(),
+            "drain_hidden must not hand the same cell over twice"
+        );
+    }
+
+    /// The count that becomes the per-turn receipt. Without it the mode is
+    /// indistinguishable from a hang.
+    #[test]
+    fn suppressed_cells_are_counted_once_each() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        for n in 0..3 {
+            let name = format!("t{n}");
+            chat.add_tool_message_rich(tool(&name));
+            chat.finalize_tool(&name, Some(&name));
+        }
+        assert_eq!(chat.take_hidden_count(), 3);
+        assert_eq!(chat.take_hidden_count(), 0, "the count must not repeat");
+    }
+
+    /// The load-bearing test. An error, a loop-guard/control message and an
+    /// ordinary notice all arrive through `add_system_message`, and no setting of
+    /// this flag may touch any of them.
+    #[test]
+    fn errors_and_system_authored_text_are_never_hidden() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        chat.add_tool_message_rich(tool("shell_execute"));
+        chat.finalize_tool("shell_execute", Some("shell_execute"));
+        chat.add_system_message("Error (tool_failure): exit 1", "error");
+        chat.add_system_message("3 generations produced no tool calls", "warning");
+        chat.add_system_message("Reading view: on", "info");
+
+        let kinds = printed(&mut chat);
+        assert!(kinds.contains(&"error"), "an error was hidden: {kinds:?}");
+        assert!(
+            kinds.contains(&"warning"),
+            "system-authored text was hidden: {kinds:?}"
+        );
+        assert!(kinds.contains(&"info"), "a notice was hidden: {kinds:?}");
+        assert!(
+            !kinds.contains(&"tool"),
+            "the tool cell was NOT hidden: {kinds:?}"
+        );
+    }
+
+    /// Turn separators ride the `ToolCall` carrier (see `TURN_SEPARATOR_MARKER`),
+    /// so the narrow predicate has to exclude them or the reading view silently
+    /// deletes the rule between turns.
+    #[test]
+    fn turn_separators_survive() {
+        let mut chat = Chat::new();
+        chat.set_lean(true);
+        chat.add_user_message("one");
+        chat.add_agent_message("a", None);
+        chat.add_user_message("two");
+
+        let kinds = printed(&mut chat);
+        assert!(
+            kinds.contains(&"separator"),
+            "the turn separator was hidden: {kinds:?}"
+        );
+    }
+
+    /// Off is off: the default must print exactly what it always did.
+    #[test]
+    fn the_default_is_unchanged() {
+        let mut chat = Chat::new();
+        chat.add_user_message("go");
+        chat.add_tool_message_rich(tool("shell_execute"));
+        chat.finalize_tool("shell_execute", Some("shell_execute"));
+        chat.add_agent_message("done", None);
+
+        assert!(printed(&mut chat).contains(&"tool"));
+        assert_eq!(chat.take_hidden_count(), 0);
+    }
+
+    /// Turning the mode on mid-conversation cannot be retroactive — the earlier
+    /// cell is already queued for `insert_before`, where content is frozen at the
+    /// width it was wrapped at. This pins the behaviour the confirmation message
+    /// promises: it applies from here on, and says so.
+    #[test]
+    fn toggling_on_applies_forward_only() {
+        let mut chat = Chat::new();
+        chat.add_tool_message_rich(tool("before"));
+        chat.finalize_tool("before", Some("before"));
+        chat.set_lean(true);
+        chat.add_tool_message_rich(tool("after"));
+        chat.finalize_tool("after", Some("after"));
+
+        let names: Vec<String> = chat
+            .drain_scrollback()
+            .iter()
+            .filter_map(|m| m.tool_data.as_ref())
+            .map(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["before".to_string()],
+            "a cell queued before the toggle was retroactively removed"
+        );
     }
 }

@@ -33,6 +33,7 @@ from stub_backend import (  # noqa: E402
     hold_turn,
     post_mark,
     posts_since,
+    push_sse,
     release_health,
     release_turn,
     set_claude_cli_state,
@@ -1600,6 +1601,204 @@ def test_clear_adopts_the_session_the_backend_hands_back(
             )
 
 
+def _submit(s: PtySession, text: bytes) -> None:
+    """Type `text` and submit it.
+
+    Two Enters, like `_start_a_turn`: a leading `/` opens the completions popup,
+    and the first Enter closes it rather than submitting.
+    """
+    s.write(text)
+    s.pump(SETTLE)
+    s.write(b"\r")
+    s.pump(SETTLE)
+    s.write(b"\r")
+    s.pump(SETTLE)
+
+
+def _flat(s: PtySession) -> str:
+    """The screen as one whitespace-normalised string.
+
+    A system notice is wrapped to the terminal width, so a phrase the test cares
+    about is routinely split across two rows. Searching the raw line list for it
+    fails on a build that renders it perfectly.
+    """
+    import re as _re
+
+    return _re.sub(r"\s+", " ", " ".join(line.strip() for line in s.lines()))
+
+
+def _run_a_tool(marker: str, call_id: str) -> None:
+    """Drive one complete non-collapsible tool call down the stream.
+
+    `make` deliberately, not `ls`/`cat`/`rg`: `collapse::classify_shell_command`
+    folds pure search/read pipelines into a one-line "Read 3 files" summary, and
+    a folded run has no per-call cell to hide. This one renders its own row with
+    the command in it, which is what the assertions look for.
+    """
+    args = '{"command":"make %s"}' % marker
+    push_sse("tool_call", {"name": "shell_execute", "phase": "start",
+                           "args": args, "tool_call_id": call_id})
+    push_sse("tool_call", {"name": "shell_execute", "phase": "end", "args": args,
+                           "duration_ms": 12, "success": True, "tool_call_id": call_id})
+    push_sse("tool_result", {"name": "shell_execute", "result": "ok",
+                             "success": True, "tool_call_id": call_id})
+
+
+def test_the_lean_view_hides_tool_calls_and_only_tool_calls(
+    backend: StubBackend,
+) -> None:
+    """`/lean` removes the tool rows and nothing else.
+
+    Asked for as "some mode that hides the tool calls… you only see what the
+    model is saying" — a lean view rather than a working view.
+
+    The risk in any output-suppressing flag is not that it hides too little. It
+    is that it hides an approval request, and parks the session on a dialog
+    nobody can see: a turn that ended under an overlay wedged a session
+    permanently, and the user could not tell it from slowness. So this test
+    spends most of its length on the negative space. It pins, in one session:
+
+      * a control — with the mode OFF the tool row IS printed, so a later
+        absence means something;
+      * the tool row gone once the mode is on;
+      * the turn's prose still printed;
+      * an error still printed;
+      * a permission prompt still on screen;
+      * the receipt that says how many calls were hidden, because total silence
+        through a long turn reads as a hang;
+      * the confirmation naming what the toggle actually did.
+
+    This has to be a PTY test. `cargo test` renders through `VT100Backend`,
+    which answers cursor queries from a perfect model — the unit suite can prove
+    `Chat` queues the right blocks (it does, in `reading_view_tests`) but not
+    that the right things ended up on a real screen.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=120, rows=36) as s:
+            s.boot()
+
+            # --- control: the mode is off, so the row must be there ---------
+            _start_a_turn(s, b"FIRST PROMPT")
+            _run_a_tool("PTYTOOLVISIBLE", "call_visible")
+            if not s.wait_for_text("PTYTOOLVISIBLE", 6.0):
+                raise AssertionError(
+                    "the tool row never appeared with the lean view OFF, so "
+                    "this test cannot tell a hidden row from a row that was "
+                    "never drawn. If the tool cell shape changed, fix the "
+                    "control rather than deleting it.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            release_turn()
+            end_turn("first answer")
+            s.pump(SETTLE)
+
+            # --- turn it on -------------------------------------------------
+            _submit(s, b"/lean")
+            if not s.wait_for_text("Lean view: on", 6.0):
+                raise AssertionError(
+                    "/lean produced no confirmation. A mode that changes "
+                    "what the screen shows and says nothing about it is the "
+                    "kind of quiet lie this command exists not to be.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            # And it must say that it applies going forward, because it does:
+            # printed rows live in the terminal's own scrollback at the width
+            # they were wrapped at and cannot be un-printed.
+            screen = _flat(s)
+            if "from here on" not in screen:
+                raise AssertionError(
+                    "the confirmation did not say the change applies from here "
+                    "on. It cannot be retroactive, so it must not imply it "
+                    f"is.\n--- rendered screen ---\n{s.dump()}"
+                )
+            if "PTYTOOLVISIBLE" not in screen:
+                raise AssertionError(
+                    "turning the mode on retroactively erased a row that had "
+                    "already been printed. That is not possible honestly — it "
+                    "means something is repainting native scrollback.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # --- with it on: the tool row is gone ---------------------------
+            hold_turn()
+            _start_a_turn(s, b"SECOND PROMPT")
+            _run_a_tool("PTYTOOLHIDDEN", "call_hidden")
+            s.pump(SETTLE * 2)
+            if "PTYTOOLHIDDEN" in "\n".join(s.lines()):
+                raise AssertionError(
+                    "the tool row was printed with the lean view on.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # --- a permission prompt must still reach the screen ------------
+            #
+            # Structurally it is an overlay drawn into the stream band, not a
+            # chat message, so no setting of this flag can route past it. That
+            # is the argument; this is the evidence.
+            push_sse(
+                "permission_required",
+                {
+                    # `parse_system_event` keys off the `event` FIELD, not the SSE
+                    # frame name — the backend unwraps sub-events but keeps the
+                    # discriminator in the body. A payload without it parses to
+                    # None and the prompt never exists, which looks exactly like
+                    # the bug this assertion is hunting.
+                    "event": "permission_required",
+                    "tool": "shell_execute",
+                    "args": '{"command":"rm -rf PTYPERMMARK"}',
+                    "request_id": "pty-perm-1",
+                    "kind": "exec",
+                },
+            )
+            if not s.wait_for_text("PTYPERMMARK", 8.0):
+                raise AssertionError(
+                    "the permission prompt did not appear while the lean "
+                    "view was on. This is the failure the mode must never "
+                    "cause: the session parks on an approval nobody can see, "
+                    "and there is no way out of it.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            s.write(b"n")  # deny, so the turn is not left parked on the prompt
+            s.pump(SETTLE)
+
+            # --- an error is NOT tool chrome and must survive ---------------
+            push_sse("error", {"kind": "tool_failure", "reason": "PTYERRORMARK"})
+            if not s.wait_for_text("PTYERRORMARK", 6.0):
+                raise AssertionError(
+                    "a turn error was swallowed by the lean view. A turn "
+                    "that dies must say so, whatever the display settings "
+                    f"are.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # --- the model's own words still print, and the receipt with them
+            release_turn()
+            end_turn("PTYPROSEMARK is what the model said")
+            if not s.wait_for_text("PTYPROSEMARK", 6.0):
+                raise AssertionError(
+                    "the assistant's prose was hidden. The whole point of the "
+                    "mode is that this is the part that stays.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if not s.wait_for_text("tool call hidden", 6.0):
+                raise AssertionError(
+                    "no receipt for the hidden work. Without it a sixty-turn "
+                    "task in this mode is indistinguishable from a hang — and "
+                    "a hang is exactly what a user cannot diagnose here.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # --- and off again ---------------------------------------------
+            _submit(s, b"/lean off")
+            if not s.wait_for_text("Lean view: off", 6.0):
+                raise AssertionError(
+                    "the mode could not be turned back off.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -1620,6 +1819,7 @@ TESTS = [
     test_a_turn_that_ends_under_an_overlay_does_not_wedge_the_session,
     test_clear_leaves_no_queued_message_behind,
     test_clear_adopts_the_session_the_backend_hands_back,
+    test_the_lean_view_hides_tool_calls_and_only_tool_calls,
 ]
 
 

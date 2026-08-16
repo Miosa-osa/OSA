@@ -370,6 +370,22 @@ impl App {
             self.chat.end_agent_chunk_flow();
         }
 
+        // Lean view receipt. The mode's whole risk is that it looks like
+        // nothing happened: a long turn can spend sixty tool calls and print
+        // three paragraphs, and a user who has forgotten the mode is on has no
+        // way to tell that from a model that did no work. One dim line per turn
+        // is the smallest honest answer — it names the amount and where to go
+        // and see it. Nothing is emitted when nothing was hidden, so a turn that
+        // called no tools does not gain a line saying so.
+        let hidden = self.chat.take_hidden_count();
+        if hidden > 0 {
+            let noun = if hidden == 1 { "tool call" } else { "tool calls" };
+            self.chat.add_system_message(
+                &format!("{hidden} {noun} hidden \u{00b7} ctrl+o for the full transcript"),
+                "info",
+            );
+        }
+
         // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it
         // (and before /goal auto-continue or a queued auto-submit can restart
         // it for the NEXT turn). The turn_recap SSE event arrives after this

@@ -171,6 +171,20 @@ pub struct Config {
     /// the animated star spinner + braille feed. Toggled via `/a11y`.
     #[serde(default)]
     pub a11y: bool,
+    /// Lean view: hide tool calls and tool results from the printed
+    /// conversation, leaving the model's prose (and its reasoning, which is live
+    /// chrome and unaffected). Toggled via `/lean`.
+    ///
+    /// Durable here rather than in `~/.osa/settings.json` because this is purely
+    /// how the client draws — the backend neither knows nor needs to. The
+    /// `Agent.AskUserMode` shape (session-sticky ETS + a trust-gated settings
+    /// key) exists because that flag changes what the AGENT may do and an
+    /// untrusted workspace must not be able to set it; neither applies to a
+    /// display preference, and there is no settings payload from the backend to
+    /// the TUI to carry one anyway. `a11y` is the existing precedent for exactly
+    /// this class and this follows it.
+    #[serde(default)]
+    pub lean: bool,
     #[serde(skip)]
     pub profile_dir: PathBuf,
     #[serde(skip)]
@@ -199,6 +213,7 @@ impl Default for Config {
             request_timeout_secs: default_request_timeout_secs(),
             goal_max_cycles: default_goal_max_cycles(),
             a11y: false,
+            lean: false,
             sidebar_enabled: false,
             profile_dir: default_profile_dir(),
             base_url: default_base_url(),
