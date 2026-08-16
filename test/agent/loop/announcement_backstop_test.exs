@@ -103,6 +103,21 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
       refute Guardrails.announcement_only?(:done)
     end
 
+    test "a courtesy sign-off is not an announcement" do
+      # "Let me know if …" matches the announcement pattern and is the opposite
+      # of an announcement: the work is done and follow-up is being offered.
+      refute Guardrails.announcement_only?(
+               "Wrote /app/pipeline_parallel.py; the smoke test prints PASS. " <>
+                 "Let me know if you want the benchmark numbers too."
+             )
+
+      # …but scrubbing the sign-off must not disarm a real announcement that
+      # happens to carry one.
+      assert Guardrails.announcement_only?(
+               "Let me write the implementation now. Let me know if that's wrong."
+             )
+    end
+
     test "a session that only talked is a conversation, not an interrupted task" do
       # The second conjunct of the loop clause. `TextOnlyTurnTerminationTest`
       # pins a text-only answer at exactly one round trip, and its fixture —
@@ -118,6 +133,89 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
 
       # A real tool result does.
       refute Guardrails.talked_only?(chat ++ [%{role: "tool", content: "use_cache True"}])
+    end
+  end
+
+  describe "the unstarted task — the case the shipped backstop could not see" do
+    # `not talked_only?/1` reads "a session that has only talked is a
+    # conversation". That is right for a conversation and wrong for the FIRST
+    # turn of a task, and the second case is the worse one.
+    #
+    # Verbatim from
+    # `bench/terminalbench/runs/VOID-contended-probe-minimal-04061c68/harbor/
+    #  2026-08-16__08-53-05/path-tracing__52TWkik/agent/osa-events.jsonl`:
+    # one generation, 263 output tokens, ZERO tool calls, $0.00174, then [DONE].
+    @path_tracing_answer "I'll start by examining the image to understand what I need to reproduce."
+
+    # Verbatim opening of `bench/terminalbench/tasks/terminal-bench-2-1/
+    # path-tracing/instruction.md` — the mutating verb ("Write") and the named
+    # artefacts (`/app/image.ppm`, `image.c`) are what make it a deliverable
+    # task rather than a question.
+    @path_tracing_task "I've put an image at /app/image.ppm that I rendered programmatically. " <>
+                         "Write a c program image.c that I can run and compile and will generate " <>
+                         "an image that's as close as possible to the image I put here."
+
+    # `TextOnlyTurnTerminationTest`'s fixture — a question, answered in prose,
+    # with announcement wording. It must stay a complete turn.
+    @conversation [
+      %{role: "user", content: "check how the retry budget is configured and explain it to me"}
+    ]
+    @conversation_answer "Let me check the configuration: the value lives in config/runtime.exs " <>
+                           "and is read at boot, so changing it needs a restart."
+
+    test "path-tracing: announced the first action, called nothing, and stopped" do
+      assert {:continue, :unstarted_task} =
+               Guardrails.announcement_continue(
+                 @path_tracing_answer,
+                 [%{role: "user", content: @path_tracing_task}]
+               )
+    end
+
+    test "torch-pipeline-parallelism is still the interrupted-task shape" do
+      worked = [
+        %{role: "user", content: "implement the pipeline schedule in /app/pipeline_parallel.py"},
+        %{role: "tool", content: "use_cache True"}
+      ]
+
+      assert {:continue, :interrupted_task} =
+               Guardrails.announcement_continue(
+                 "I have enough understanding. Let me write the implementation now.",
+                 worked
+               )
+    end
+
+    test "a question answered in prose is a complete turn" do
+      assert :stop = Guardrails.announcement_continue(@conversation_answer, @conversation)
+    end
+
+    test "a coding task whose tools all FAILED has started — it is not this shape" do
+      # `never_ran_a_tool?/1` is strictly stronger than `talked_only?/1`: a
+      # session that tried and errored is a different failure, and continuing it
+      # on announcement wording would re-enter a loop that is already stuck.
+      tried = [
+        %{role: "user", content: @path_tracing_task},
+        %{role: "tool", content: "Error: gcc: command not found"}
+      ]
+
+      refute Guardrails.never_ran_a_tool?(tried)
+      assert :stop = Guardrails.announcement_continue(@path_tracing_answer, tried)
+    end
+
+    test "the tighter ceiling — at zero tools the announcement is the whole episode" do
+      long =
+        @path_tracing_answer <>
+          " " <> String.duplicate("Here is some further preamble about the plan. ", 6)
+
+      assert String.length(long) > 200
+      assert String.length(long) < 500
+      # Still an announcement by the measured 500-char predicate…
+      assert Guardrails.announcement_only?(long)
+      # …but not the unstarted shape, which is calibrated on an episode that
+      # produced nothing but the announcement.
+      assert :stop =
+               Guardrails.announcement_continue(long, [
+                 %{role: "user", content: @path_tracing_task}
+               ])
     end
   end
 
@@ -220,6 +318,72 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
     test "a real report after real work still ends the turn in one round-trip" do
       n = run_with("Wrote /app/pipeline_parallel.py; the smoke test prints PASS.", @worked)
       assert n == 1
+    end
+
+    @unstarted [%{role: "user", content: @path_tracing_task}]
+
+    test "path-tracing's turn no longer ends after one zero-tool generation" do
+      n = run_with(@path_tracing_answer, @unstarted)
+
+      assert n == 2,
+             "a coding task that announced its first action and called nothing must get " <>
+               "one more chance to act; cost #{n} round-trips"
+    end
+
+    test "the unstarted branch is bounded by the same one-per-turn budget" do
+      # The mock repeats the announcement, i.e. a model that will not take the
+      # hint. Bounded at cap+1, not at `max_iterations`.
+      n = run_with(@path_tracing_answer, @unstarted)
+      assert n == 2, "the unstarted branch must be capped at one nudge; cost #{n}"
+    end
+
+    test "an exhausted budget ends the turn LOUDLY, not silently" do
+      # The distinction the event carries: "the model reported a result" and
+      # "the model announced again after being told to act" are different
+      # endings, and used to look identical from outside the process.
+      session = "announce-exhausted-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session}")
+
+      Application.put_env(:optimal_system_agent, :mock_provider_final_text, @path_tracing_answer)
+
+      state =
+        Map.from_struct(%OptimalSystemAgent.Agent.Loop{
+          session_id: session,
+          provider: :mock,
+          model: "mock-model-1.0",
+          iteration: 0,
+          auto_continues: 0,
+          messages: @unstarted,
+          tools: [],
+          permission_mode: :ask,
+          permission_tier: :full,
+          working_dir: File.cwd!()
+        })
+
+      {_response, final} = ReactLoop.run(state)
+
+      assert_receive {:osa_event,
+                      %{
+                        type: :system_event,
+                        event: :announcement_continue,
+                        reason: :unstarted_task
+                      }},
+                     2000
+
+      assert_receive {:osa_event,
+                      %{
+                        type: :system_event,
+                        event: :announcement_continue_exhausted,
+                        reason: :unstarted_task,
+                        nudges_spent: 1
+                      }},
+                     2000
+
+      # And the count is on the turn state, so `Observability.turn_end/2` can
+      # report it next to `effort` and `reasoning`.
+      assert Map.get(final, :announcement_continues) == 1
+
+      assert OptimalSystemAgent.Observability.announcement_continue_count(final) == 1
     end
   end
 end

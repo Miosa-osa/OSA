@@ -906,6 +906,39 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     content = if String.trim(content) == "", do: "...", else: content
 
+    # Computed once, before the `cond`, because the clause needs BOTH the
+    # boolean and the reason it fired, and a `cond` clause cannot bind.
+    announcement = Guardrails.announcement_continue(content, state.messages)
+    announcement_spent = Map.get(state, :announcement_continues, 0)
+
+    # An exhausted cap must be LOUD. One nudge is the whole budget, so this
+    # backstop is done — and "the model announced again after being told" and
+    # "the model reported a result" are different endings that used to look
+    # identical from outside. Emitted before the `cond` so it is recorded even
+    # though the announcement clause below will decline; a LATER clause
+    # (`VerificationGate`, the reasoning-only backstop) may still continue the
+    # turn for a reason of its own, which is why this says only that the
+    # announcement budget is spent, not that the turn is over.
+    if match?({:continue, _}, announcement) and
+         announcement_spent >= @max_announcement_continues do
+      {:continue, reason} = announcement
+
+      Logger.info(
+        "[loop] Announcement backstop EXHAUSTED (#{reason}) — the answer still announces " <>
+          "the next action after #{announcement_spent} nudge(s); this backstop will not " <>
+          "continue it again (iteration #{state.iteration})"
+      )
+
+      Bus.emit(:system_event, %{
+        event: :announcement_continue_exhausted,
+        session_id: state.session_id,
+        reason: reason,
+        iteration: state.iteration,
+        nudges_spent: announcement_spent,
+        answer_preview: String.slice(content, 0, 200)
+      })
+    end
+
     cond do
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->
@@ -1008,30 +1041,44 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # `announced_next_action` detector: 9 of 34 model failures, 0 of 49 solves
       # on the reference run (`docs/research/failure-taxonomy.md` §7).
       #
-      # It is ALSO conditioned on the session having actually run something.
-      # "Let me check the configuration: the value lives in config/runtime.exs
-      # and is read at boot" is a complete answer to a question, and a session
-      # that has only talked is a conversation, not an interrupted task — see
-      # `TextOnlyTurnTerminationTest`, which pins a text-only answer at exactly
-      # one round trip. `torch-pipeline-parallelism` had 29 turns of tool calls
-      # behind its announcement. Adding this conjunct can only shrink the fire
-      # set, so the detector's measured 0-of-49-solves carries over.
+      # WHICH sessions is decided by `Guardrails.announcement_continue/2`, which
+      # admits exactly two shapes and names the one that fired:
+      #
+      #   * `:interrupted_task` — the session ran real work and then announced
+      #     the next step. `torch-pipeline-parallelism` had 29 turns of tool
+      #     calls behind its announcement.
+      #   * `:unstarted_task` — a coding request whose first answer announces
+      #     the first action with NO tool call anywhere in the session.
+      #     `path-tracing` in `runs/VOID-contended-probe-minimal-04061c68`:
+      #     one generation, zero tools, $0.00174, "I'll start by examining the
+      #     image…", `[DONE]`. That run's binary already had this backstop; it
+      #     was blocked by the `not talked_only?` conjunct, which a session that
+      #     has never called a tool trivially fails.
+      #
+      # A conversation is neither. "Let me check the configuration: the value
+      # lives in config/runtime.exs and is read at boot" is a complete answer to
+      # a question, and `TextOnlyTurnTerminationTest` pins it at exactly one
+      # round trip — the `:unstarted_task` shape stays off it because the
+      # request asks for an explanation, not a code change.
       #
       # ONE nudge per turn. The failure it addresses is a turn that ended one
       # step early, and one step is what it gives back; a model that announces
-      # again after being told is choosing to, and the answer has already
-      # streamed to the user either way.
-      Map.get(state, :announcement_continues, 0) < @max_announcement_continues and
-        Guardrails.announcement_only?(content) and
-          not Guardrails.talked_only?(state.messages) ->
+      # again after being told is choosing to (and says so on the wire —
+      # `:announcement_continue_exhausted`, emitted above), and the answer has
+      # already streamed to the user either way.
+      announcement_spent < @max_announcement_continues and
+          match?({:continue, _}, announcement) ->
+        {:continue, reason} = announcement
+
         Logger.info(
-          "[loop] Announcement backstop: answer announces the next action instead of " <>
-            "reporting a result — continuing once (iteration #{state.iteration})"
+          "[loop] Announcement backstop (#{reason}): answer announces the next action " <>
+            "instead of reporting a result — continuing once (iteration #{state.iteration})"
         )
 
         Bus.emit(:system_event, %{
           event: :announcement_continue,
           session_id: state.session_id,
+          reason: reason,
           iteration: state.iteration,
           answer_preview: String.slice(content, 0, 200)
         })
@@ -1053,8 +1100,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             iteration: state.iteration + 1
         }
 
-        state =
-          Map.put(state, :announcement_continues, Map.get(state, :announcement_continues, 0) + 1)
+        state = Map.put(state, :announcement_continues, announcement_spent + 1)
 
         run(state)
 

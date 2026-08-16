@@ -38,6 +38,8 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     subscribe_pr_registered
     goal_verifier_round
     verification_gate_triggered
+    announcement_continue
+    announcement_continue_exhausted
     scratchpad_activity
     coordinator_mode
     ask_user_mode

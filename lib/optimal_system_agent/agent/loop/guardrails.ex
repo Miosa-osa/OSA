@@ -140,6 +140,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   @announcement_pattern ~r/(let me |i'll (now|start|begin|write|investigate|wait|hold|report|keep|stop)|now let)/i
   @announcement_max_chars 500
 
+  # "Let me know if …" is a sign-off, not an announcement: the work is done and
+  # the model is offering follow-up. It matches `let me ` and so counts as an
+  # announcement under the pattern above — a hole the reference run happens not
+  # to exercise, because a solve that ends "Done. Let me know if you want the
+  # benchmark numbers too." would have fired the shipped detector.
+  #
+  # Scrubbed BEFORE matching (length is still measured on the original), so the
+  # phrase can no longer be the thing that makes an answer an announcement,
+  # while "Let me write it now. Let me know if that's wrong." still fires on its
+  # first clause. This can only SHRINK the fire set, so the measured
+  # 0-of-49-solves carries over unchanged; replayed to confirm it also keeps all
+  # 9 measured failures.
+  @courtesy_pattern ~r/\blet me know\b/i
+
   @doc """
   Returns true when a text-only answer reads as an announcement of the next
   action rather than a report of a result.
@@ -152,10 +166,110 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
 
   def announcement_only?(content) when is_binary(content) do
     String.length(content) < @announcement_max_chars and
-      Regex.match?(@announcement_pattern, content)
+      Regex.match?(@announcement_pattern, Regex.replace(@courtesy_pattern, content, ""))
   end
 
   def announcement_only?(_), do: false
+
+  # ── The unstarted-task announcement ────────────────────────────────────
+  #
+  # The conjunct `not talked_only?/1` reads "a session that has only talked is a
+  # conversation, not an interrupted task". That is right for a conversation and
+  # wrong for the first turn of a task, and the second case is the worse one.
+  #
+  # Measured: `path-tracing` in
+  # `bench/terminalbench/runs/VOID-contended-probe-minimal-04061c68` — one
+  # generation, 263 output tokens, **zero tool calls**, $0.00174, and the whole
+  # episode was
+  #
+  #     I'll start by examining the image to understand what I need to reproduce.
+  #
+  # then `[DONE]`. That run's binary already CONTAINED the announcement backstop
+  # (21bdbc21 is an ancestor of 04061c68) and `announcement_only?/1` matches that
+  # sentence — `i'll start`, 73 characters. The clause was blocked by
+  # `not talked_only?/1` alone, because a session that has never called a tool
+  # has, trivially, only talked.
+  #
+  # So the missing case is the exact opposite of a conversation: the model
+  # announced the first action of a task and then did nothing at all. Three
+  # further conjuncts keep it away from real conversation:
+  #
+  #   * `never_ran_a_tool?/1` — not "no tool SUCCEEDED" but "no tool result
+  #     exists at all". The model did not try. This is also why the branch is
+  #     structurally incapable of firing on a solved benchmark trial: a solve
+  #     produced a deliverable, which needs at least one tool.
+  #   * `deliverable_task?/1` on the user's own message — the request asks for
+  #     something to be BUILT: a mutating verb (write / create / implement / …)
+  #     plus either a code noun or a named artefact. This is what separates
+  #     `path-tracing` ("Write a c program image.c …", "/app/image.ppm") from
+  #     `TextOnlyTurnTerminationTest`'s fixture ("check how the retry budget is
+  #     configured and explain it to me"), whose announcement-worded answer
+  #     — "Let me check the configuration: the value lives in config/runtime.exs
+  #     …" — is a complete answer and must still cost exactly one round trip.
+  #     Note that "check" is deliberately NOT a mutating verb: a request to look
+  #     something up is answerable in prose and needs no tool at all, which is
+  #     exactly the over-firing that keeps `needs_verification_gate?/1` behind
+  #     `continue_on_text_only`.
+  #   * a tighter ceiling than the 500 the measured detector uses. At zero tools
+  #     the announcement is the entire episode, so it is short; `path-tracing`'s
+  #     was 73 characters. 500 is calibrated for an answer that reports work and
+  #     then announces more; here there is no work to report.
+  @unstarted_max_chars 200
+
+  @doc """
+  Should a text-only answer that announces the next action be continued, and why?
+
+  Returns `{:continue, reason}` or `:stop`. Two admissible shapes, and the
+  reason names which one fired so a continuation is legible in telemetry:
+
+    * `:interrupted_task` — the session did real work and then announced the
+      next step instead of taking it. The shipped, measured backstop
+      (`announced_next_action`: 9 of 34 model failures, 0 of 49 solves on
+      `bench/terminalbench/runs/osa-tb20-full89-f6981b61`).
+      `torch-pipeline-parallelism` is this shape.
+    * `:unstarted_task` — a coding task whose FIRST answer announces the first
+      action, with no tool call anywhere in the session. `path-tracing` is this
+      shape; see the note above for why it needs its own conjuncts.
+
+  Everything else is `:stop`. A text-only answer that answers the user is a
+  complete turn and must end.
+  """
+  @spec announcement_continue(String.t() | nil, [map()]) ::
+          {:continue, :interrupted_task | :unstarted_task} | :stop
+  def announcement_continue(content, messages) when is_binary(content) and is_list(messages) do
+    cond do
+      not announcement_only?(content) -> :stop
+      not talked_only?(messages) -> {:continue, :interrupted_task}
+      unstarted_task_announcement?(content, messages) -> {:continue, :unstarted_task}
+      true -> :stop
+    end
+  end
+
+  def announcement_continue(_content, _messages), do: :stop
+
+  defp unstarted_task_announcement?(content, messages) do
+    String.length(content) < @unstarted_max_chars and
+      never_ran_a_tool?(messages) and
+      Enum.any?(messages, fn
+        %{role: "user", content: text} when is_binary(text) -> deliverable_task?(text)
+        _ -> false
+      end)
+  end
+
+  @doc """
+  True when no tool result exists in `messages` at all — the model never even
+  tried.
+
+  Strictly stronger than `talked_only?/1`, which also returns true when every
+  tool call errored. A session that tried and failed has started the task and
+  is a different failure; this one has not started it.
+  """
+  @spec never_ran_a_tool?([map()]) :: boolean()
+  def never_ran_a_tool?(messages) when is_list(messages) do
+    not Enum.any?(messages, &match?(%{role: "tool"}, &1))
+  end
+
+  def never_ran_a_tool?(_), do: false
 
   @doc "Returns true when model embeds a substantial code block instead of calling file_write/file_edit."
   def code_in_text?(nil), do: false
@@ -188,6 +302,32 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   end
 
   def complex_coding_task?(_), do: false
+
+  # A named artefact: an absolute path, or a filename with a source/data
+  # extension. `@coding_context_patterns` ("function", "module", "file", …)
+  # covers a request phrased in the abstract; this covers one phrased
+  # concretely. `path-tracing` needs this half — "Write a c program image.c
+  # that I can run and compile" has the verb and the artefact but not one of
+  # the nouns.
+  @artefact_pattern ~r/(\/[\w.\-]+){2,}|\b[\w\-]+\.(c|h|cc|cpp|hpp|py|ex|exs|erl|rs|go|js|mjs|ts|tsx|jsx|java|rb|sh|bash|zsh|sql|json|ya?ml|toml|ini|cfg|md|txt|csv|tsv|ppm|png|jpe?g|cs|swift|kt|scala|lua|pl|php|r|zig|nim|ml|hs|dart|proto|lock|conf)\b/i
+
+  @doc """
+  True when the message asks for something to be BUILT — a mutating verb plus
+  either a code noun or a concretely named artefact.
+
+  Strictly narrower than `has_task_context?/1`, whose verb list also includes
+  "check", "find" and "run": those describe requests that are answerable in
+  prose, and treating them as tasks is what makes wording-based continuation
+  chatter. Used by the `:unstarted_task` arm of `announcement_continue/2`.
+  """
+  @spec deliverable_task?(String.t() | term()) :: boolean()
+  def deliverable_task?(message) when is_binary(message) do
+    Regex.match?(@coding_action_patterns, message) and
+      (Regex.match?(@coding_context_patterns, message) or
+         Regex.match?(@artefact_pattern, message))
+  end
+
+  def deliverable_task?(_), do: false
 
   # ── Bug-report intent detection ─────────────────────────────────────────
   #

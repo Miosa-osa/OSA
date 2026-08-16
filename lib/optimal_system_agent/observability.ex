@@ -156,11 +156,43 @@ defmodule OptimalSystemAgent.Observability do
         # started without the tool can end with it.
         ask_user: ask_user_enabled(state),
         unobserved_background: unobserved_background_count(state),
-        truncations: truncation_count(state)
+        truncations: truncation_count(state),
+        announcement_continues: announcement_continue_count(state)
       },
       state,
       source: "agent.turn"
     )
+  end
+
+  @doc """
+  How many times this turn was continued past an answer that announced the next
+  action instead of taking it.
+
+  Recorded next to `effort` and `reasoning` for the same reason they are: it is
+  a condition the turn ran under, and it changes what the answer means. Above
+  zero means the turn you are reading did not end where the model first tried
+  to end it — OSA sent it back with `[System: … DO THE THING NOW …]`, and the
+  per-firing `:announcement_continue` event carries the reason
+  (`:interrupted_task` | `:unstarted_task`) and the answer that triggered it.
+
+  The cap is one per turn (`ReactLoop.@max_announcement_continues`), so this is
+  0 or 1; an announcement that arrives with the budget already spent ends the
+  turn and emits `:announcement_continue_exhausted` rather than passing
+  silently.
+
+  Set by `ReactLoop.handle_result/3`; reset per turn by
+  `TurnPipeline.reset_per_turn_fields/1`. Never raises: any failure reads `0`.
+  """
+  @spec announcement_continue_count(map()) :: non_neg_integer()
+  def announcement_continue_count(state) do
+    case Map.get(state, :announcement_continues, 0) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  catch
+    _, _ -> 0
   end
 
   @doc """

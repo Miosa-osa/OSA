@@ -67,6 +67,71 @@ ANNOUNCEMENT_RE = re.compile(
 )
 ANNOUNCEMENT_MAX_CHARS = 500
 
+#: "Let me know if ..." is a sign-off, not an announcement. It matches the
+#: pattern above and so would count as one; scrubbed before matching (length is
+#: still measured on the original). Mirrors `Guardrails.@courtesy_pattern`.
+COURTESY_RE = re.compile(r"\blet me know\b", re.IGNORECASE)
+
+#: The *unstarted* variant of the same species, and the one the shipped backstop
+#: could not see. `path-tracing` in
+#: `bench/terminalbench/runs/VOID-contended-probe-minimal-04061c68`: ONE
+#: generation, 263 output tokens, ZERO tool calls, $0.00174, and the entire
+#: episode was "I'll start by examining the image to understand what I need to
+#: reproduce." That binary already contained the backstop (21bdbc21 is an
+#: ancestor of 04061c68) -- it was blocked by the loop's `not talked_only?`
+#: conjunct, which a session that never called a tool trivially fails.
+#:
+#: The zero-tool-call conjunct is what makes this detector structurally unable
+#: to fire on a solve: a solved trial produced a deliverable, and that takes at
+#: least one tool. The ceiling is tighter than the 500 above because at zero
+#: tools the announcement IS the whole episode. Mirrors
+#: `Guardrails.unstarted_task_announcement?/2`.
+UNSTARTED_MAX_CHARS = 200
+
+#: `Guardrails.deliverable_task?/1`, verbatim: a mutating verb plus either a
+#: code noun or a concretely named artefact. This is what separates
+#: `path-tracing` ("Write a c program image.c ...") from a question that is
+#: answerable in prose. Note "check" is deliberately not a mutating verb.
+CODING_ACTION_RE = re.compile(
+    r"\b(fix|change|update|refactor|add|implement|create|modify|edit|write|build"
+    r"|rewrite|delete|remove|rename)\b",
+    re.IGNORECASE,
+)
+CODING_CONTEXT_RE = re.compile(
+    r"\b(function|method|module|file|code|script|class|endpoint|handler|component"
+    r"|route|controller|service|model|schema|migration|test|spec|bug|error|feature)\b",
+    re.IGNORECASE,
+)
+ARTEFACT_RE = re.compile(
+    r"(/[\w.\-]+){2,}|\b[\w\-]+\.(c|h|cc|cpp|hpp|py|ex|exs|erl|rs|go|js|mjs|ts|tsx"
+    r"|jsx|java|rb|sh|bash|zsh|sql|json|ya?ml|toml|ini|cfg|md|txt|csv|tsv|ppm|png"
+    r"|jpe?g|cs|swift|kt|scala|lua|pl|php|r|zig|nim|ml|hs|dart|proto|lock|conf)\b",
+    re.IGNORECASE,
+)
+
+#: Where task instructions live, relative to the repo root.
+TASKS_ROOT = Path(__file__).resolve().parent.parent / "bench" / "terminalbench" / "tasks"
+
+
+def announcement(text: str) -> bool:
+    """Announcement wording, courtesy sign-offs scrubbed first."""
+    return bool(ANNOUNCEMENT_RE.search(COURTESY_RE.sub("", text)))
+
+
+def coding_task(task_name: str) -> bool:
+    """True when the task's own instruction asks for a deliverable to be built.
+
+    Conservative: an instruction we cannot find reads as NOT a coding task, so
+    a missing tasks/ checkout can only suppress a detector, never invent one.
+    """
+    for p in sorted(TASKS_ROOT.glob(f"*/{task_name}/instruction.md")):
+        text = p.read_text(errors="replace")
+        return bool(
+            CODING_ACTION_RE.search(text)
+            and (CODING_CONTEXT_RE.search(text) or ARTEFACT_RE.search(text))
+        )
+    return False
+
 
 def load_events(trial_dir: Path) -> list[dict]:
     p = trial_dir / "agent" / "osa-events.jsonl"
@@ -87,8 +152,11 @@ def episode(events: list[dict]) -> dict:
     generations: list[int] = []
     final_response = None
     saw_done = False
+    tool_calls = 0
     for e in events:
         t = e.get("type")
+        if t == "tool_call":
+            tool_calls += 1
         if t == "background_command_started":
             running[e["background_id"]] = str(e.get("command", ""))
         elif t == "background_command_completed":
@@ -105,10 +173,11 @@ def episode(events: list[dict]) -> dict:
         "generations": generations[::2],
         "final_response": final_response,
         "saw_done": saw_done,
+        "tool_calls": tool_calls,
     }
 
 
-def detect(ep: dict) -> list[tuple[str, str]]:
+def detect(ep: dict, task_name: str = "") -> list[tuple[str, str]]:
     """Return [(species, evidence)] for one episode."""
     hits = []
     gens = ep["generations"]
@@ -142,8 +211,22 @@ def detect(ep: dict) -> list[tuple[str, str]]:
 
     # --- the last words announce the next action ---------------------------
     # Fires on 9 trials of the reference run, 0 solves.
-    if fr and len(fr) < ANNOUNCEMENT_MAX_CHARS and ANNOUNCEMENT_RE.search(fr):
+    if fr and len(fr) < ANNOUNCEMENT_MAX_CHARS and announcement(fr):
         hits.append(("announced_next_action", fr.replace("\n", " ")[:110]))
+
+    # --- the task was announced and never started -------------------------
+    # Zero tool calls in the whole episode, on a task that asks for a code
+    # change. Fires on 0 trials of the reference run and on `path-tracing` in
+    # `runs/VOID-contended-probe-minimal-04061c68`; it cannot fire on a solve.
+    if (
+        fr
+        and ep["tool_calls"] == 0
+        and len(fr) < UNSTARTED_MAX_CHARS
+        and announcement(fr)
+        and coding_task(task_name)
+    ):
+        hits.append(("announced_unstarted_task",
+                     f"0 tool calls: {fr.replace(chr(10), ' ')[:90]}"))
 
     return hits
 
@@ -172,7 +255,7 @@ def main() -> int:
         ep = episode(load_events(Path(d)))
         name = t["task_name"].split("/")[-1]
         outcome = "solved" if t.get("resolved") else (t.get("fault_owner") or "?")
-        hits = detect(ep)
+        hits = detect(ep, name)
         if not hits and not args.all:
             continue
         for species, evidence in hits or [("-", "")]:

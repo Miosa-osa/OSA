@@ -227,6 +227,48 @@ identified as a requirement**. The verifier's first assertion is
 `assert i >= 1, "Primer must have clamp of at least 1 nucleotide before BsaI site."`
 **[measured]**.
 
+### 2.4a Live follow-up: `pytorch-model-cli`, and a build accepted as a test
+
+**[measured]**, `runs/osa-tb20-full89-9b57ee7d`, on the build carrying the changes below.
+Reward **0.0**; a pass in the baseline. Final message: "**Verified:** … the C tool matches
+PyTorch exactly in every case" — compared against a PyTorch reference the model wrote
+itself at `/tmp/osa-tests/reference.py`, run once, green. Textbook species 2.
+
+**`verification_gate_triggered` never fired on this trial.** The ledger was replayed
+through the real module from the trial's own event log; the answer is not "the bar is
+insufficient", it is **the gate could not see straight**:
+
+```
+discriminating: %{artifact: {:file, "/tmp/osa-tests/lodepng.o"},
+                  failed_at: 24, fixed_at: 26, passed_at: 29}
+```
+
+24 is `gcc -c lodepng.cpp -o /tmp/osa-tests/lodepng.o` failing, 26 is a `file_edit` of
+`/app/cli_tool.c`, 29 is `nm /tmp/osa-tests/lodepng.o | grep …` succeeding. A perfect
+red → fix → green triple whose "test" is a **compiler output file** and whose "green run"
+is `nm`. The adequacy clause was discharged by a build — the exact thing `@test_patterns`
+and `@build_patterns` were split apart to prevent.
+
+The cause is this session's own §6 fix, in two steps: the directive said "send anything
+your test compiles to the same scratch directory (`-o /tmp/osa-tests/bin`)", and
+`@test_dir_segments` treated *everything* under a test directory as a test artefact. The
+model followed the instruction and the ledger mis-read the result. **Fixed**:
+`test_artifact_path?/1`'s directory rule now also requires `code_file?/1` (a `.o`, `.so`,
+`.png` or stripped binary is not a test wherever it sits), and compiled output is directed
+to a separate `/tmp/osa-build/`. Replayed against the same trial afterwards:
+`discriminating: nil`, `triaged: {:inadequate_test, :large}`,
+`oracle_provenance: :self_authored` — the gate now fires, and the provenance field says
+exactly what the transcript shows.
+
+`oracle_provenance` **did reach the artefacts** — 8 trials in that run carry it
+(`:self_authored` on `headless-terminal` and `overfull-hbox`, `:none` elsewhere). It was
+absent on `pytorch-model-cli` only because no event was emitted there at all.
+
+Also measured in the same run: **`polyglot-rust-c` scored 1** (0 in the reference run).
+Its test went to `/tmp/osa-tests/test_polyglot_fib.py`, it ran Python with
+`PYTHONDONTWRITEBYTECODE=1`, and it cleaned `rmain`/`cmain` out of `/app/polyglot` before
+finishing. §6 works.
+
 ### 2.5 The anchoring hypothesis, tested and only half-true
 
 The reading above suggests the discriminator is *external anchoring*: `dna-insert` used a
@@ -555,6 +597,61 @@ not at the artefacts.
 
 **Detectable — shipped** (`announced_next_action`). **Fixable**: unknown until root-caused;
 any change here is loop control flow and is out of scope for shipping. Rank: **7**.
+
+### 7a. Root-caused, and a second instance that the first fix could not see (2026-08-16)
+
+The "not root-caused" above is now closed. `continue_on_text_only` defaults to `false`
+(`config/config.exs`), so `ReactLoop.prose_continue?/1` is false and all three of the
+loop's wording-keyed continuation clauses are dead — including the one on
+`Guardrails.wants_to_continue?/1`, whose regex matches "Let me write the implementation
+now." That default is **correct and stays**: those clauses fire on ordinary explanatory
+prose, and OSA was measured as the only harness of those studied that auto-continues after
+a text-only answer by default (`reference_harness_flow_comparison`, ~5–7 extra turns per
+session where the others spend 0).
+
+The announcement backstop (21bdbc21) was added instead: announcement wording **and**
+`len < 500` **and** `not talked_only?`. It postdates this run, which is why
+`torch-pipeline-parallelism` shows no continuation — replayed against the recorded final
+response it fires as `:interrupted_task`.
+
+A second instance then arrived that the backstop **could** see and still did not catch —
+`path-tracing` in `runs/VOID-contended-probe-minimal-04061c68`, whose binary contains
+21bdbc21 (it is an ancestor of 04061c68):
+
+```
+[SAY]  I'll start by examining the image to understand what I need to reproduce.
+[FINAL RESPONSE] I'll start by examining the image to understand what I need to reproduce.
+[DONE]
+```
+
+One generation, 263 output tokens, **zero tool calls**, $0.00174, `turn_recap tool_calls=0`
+**[measured]**. `announcement_only?/1` matches that sentence (`i'll start`, 73 chars). The
+blocker was `not talked_only?` **alone**: a session that has never called a tool has,
+trivially, only talked, so the conjunct written to keep the backstop off conversations also
+kept it off the first turn of every task.
+
+The distinction the backstop now encodes has two admissible shapes, and
+`Guardrails.announcement_continue/2` names which one fired:
+
+| shape | condition | instance |
+|---|---|---|
+| `:interrupted_task` | announcement + `len < 500` + the session ran a tool successfully | `torch-pipeline-parallelism` |
+| `:unstarted_task` | announcement + `len < 200` + **no tool result at all** + the user asked for a deliverable (`deliverable_task?/1`) | `path-tracing` |
+
+`:unstarted_task` cannot fire on a solved trial by construction — a solve produced a
+deliverable, and that takes at least one tool. Replayed with
+`scripts/failure_species.py` (`announced_unstarted_task`) across every run under
+`bench/terminalbench/runs` with a `results.json`: **0 hits on any solved trial**, and it
+fires on `path-tracing`'s recorded episode. `announced_next_action` still fires on the same
+9 of 34 model failures after the `let me know` sign-off scrub was added.
+
+Bounded at **one** nudge per turn (`ReactLoop.@max_announcement_continues`, reset by
+`TurnPipeline.reset_per_turn_fields/1`). An announcement arriving with the budget spent
+ends the turn and says so: `:announcement_continue_exhausted`. Both events are now on
+`TuiForwarder`'s allowlist — `:announcement_continue` was Bus-only when it shipped, i.e.
+absent from `osa-events.jsonl`, so a continuation could not be seen in a run artefact at
+all. `Observability.turn_end/2` also carries `announcement_continues` next to `effort` and
+`reasoning`.
 
 ---
 
