@@ -1,4 +1,6 @@
 defmodule OptimalSystemAgent.Providers.Cohere do
+
+  alias OptimalSystemAgent.Providers.ConfiguredModel
   @moduledoc """
   Cohere provider — Command R+ and Command A models.
 
@@ -42,8 +44,7 @@ defmodule OptimalSystemAgent.Providers.Cohere do
     api_key = Application.get_env(:optimal_system_agent, :cohere_api_key)
 
     model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :cohere_model, default_model())
+      ConfiguredModel.resolve(opts, :cohere, &default_model/0)
 
     base_url = Application.get_env(:optimal_system_agent, :cohere_url, @default_url)
 

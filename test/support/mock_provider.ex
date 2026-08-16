@@ -40,9 +40,10 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   timeout/cancel robustness tests) without a real network dependency.
   """
   @impl true
-  def chat(_messages, _opts) do
+  def chat(_messages, opts) do
     maybe_sleep()
     bump_round_trips()
+    record_opts(opts)
 
     result =
       case forced_final_text() do
@@ -191,6 +192,41 @@ defmodule OptimalSystemAgent.Test.MockProvider do
 
   defp bump_round_trips do
     :ets.update_counter(counter_table(), :round_trips, {2, 1}, {:round_trips, 0})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # The opts of the most recent `chat/2`, in the same public table.
+  #
+  # Exists so a test can assert what actually reached the wire rather than what
+  # a caller intended — the null-model 422 was invisible precisely because the
+  # compactor's own `summarizer_model/1` resolved a correct name that was only
+  # ever used for BILLING, never put on the request.
+  defp record_opts(opts) when is_list(opts) do
+    :ets.insert(counter_table(), {:last_opts, opts})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp record_opts(_), do: :ok
+
+  @doc "Opts of the most recent `chat/2` call, or `nil` if there has been none."
+  @spec last_opts() :: keyword() | nil
+  def last_opts do
+    case :ets.lookup(counter_table(), :last_opts) do
+      [{:last_opts, opts}] -> opts
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc "Forget the recorded opts (call in test setup)."
+  @spec reset_last_opts() :: :ok
+  def reset_last_opts do
+    :ets.delete(counter_table(), :last_opts)
     :ok
   rescue
     ArgumentError -> :ok

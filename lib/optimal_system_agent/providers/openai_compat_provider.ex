@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   openrouter, qwen, moonshot, zhipu, volcengine, baichuan.
   """
 
+  alias OptimalSystemAgent.Providers.ConfiguredModel
   alias OptimalSystemAgent.Providers.OpenAICompat
 
   # Every provider routed through here goes out via `OpenAICompat`, which puts
@@ -213,11 +214,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
     # NOT `Application.get_env(app, key, fallback)`: that returns nil when the
     # key is present and explicitly nil, which several providers configure. The
-    # value must be a usable model name or we fall back.
-    case Application.get_env(:optimal_system_agent, :"#{provider}_model") do
-      m when is_binary(m) and m != "" -> m
-      _ -> fallback
-    end
+    # value must be a usable model name or we fall back. `ConfiguredModel` is
+    # the shared implementation of that rule — `chat/3` and `chat_stream/4`
+    # each had their own copy of the *unfixed* form until the null-model 422.
+    ConfiguredModel.configured(provider) || fallback
   end
 
   @doc false
@@ -306,11 +306,16 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat(provider, messages, opts \\ []) do
     config = get_config!(provider)
 
-    with {:ok, api_key, url} <- resolve_credential(provider, config) do
-      model =
-        Keyword.get(opts, :model) ||
-          Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
-
+    with {:ok, api_key, url} <- resolve_credential(provider, config),
+         # NOT `Application.get_env(app, key, config.default_model)`. Every
+         # `:<provider>_model` key is present-and-nil whenever its env var is
+         # unset, so that form resolved to nil for any caller that did not name
+         # a model — which is every compaction call. See `ConfiguredModel`.
+         {:ok, model} <-
+           ConfiguredModel.ensure(
+             ConfiguredModel.resolve(opts, provider, config.default_model),
+             provider
+           ) do
       opts =
         opts
         |> Keyword.delete(:model)
@@ -346,11 +351,16 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat_stream(provider, messages, callback, opts \\ []) do
     config = get_config!(provider)
 
-    with {:ok, api_key, url} <- resolve_credential(provider, config) do
-      model =
-        Keyword.get(opts, :model) ||
-          Application.get_env(:optimal_system_agent, :"#{provider}_model", config.default_model)
-
+    with {:ok, api_key, url} <- resolve_credential(provider, config),
+         # NOT `Application.get_env(app, key, config.default_model)`. Every
+         # `:<provider>_model` key is present-and-nil whenever its env var is
+         # unset, so that form resolved to nil for any caller that did not name
+         # a model — which is every compaction call. See `ConfiguredModel`.
+         {:ok, model} <-
+           ConfiguredModel.ensure(
+             ConfiguredModel.resolve(opts, provider, config.default_model),
+             provider
+           ) do
       opts =
         opts
         |> Keyword.delete(:model)

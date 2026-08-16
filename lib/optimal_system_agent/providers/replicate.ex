@@ -1,4 +1,6 @@
 defmodule OptimalSystemAgent.Providers.Replicate do
+
+  alias OptimalSystemAgent.Providers.ConfiguredModel
   @moduledoc """
   Replicate provider — run open-source models via prediction API.
 
@@ -79,8 +81,7 @@ defmodule OptimalSystemAgent.Providers.Replicate do
     api_key = Application.get_env(:optimal_system_agent, :replicate_api_key)
 
     model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :replicate_model, default_model())
+      ConfiguredModel.resolve(opts, :replicate, &default_model/0)
 
     base_url = Application.get_env(:optimal_system_agent, :replicate_url, @default_url)
 

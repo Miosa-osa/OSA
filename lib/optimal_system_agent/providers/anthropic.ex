@@ -31,6 +31,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
   def native_tool_schemas?, do: true
 
+  alias OptimalSystemAgent.Providers.ConfiguredModel
   alias OptimalSystemAgent.Providers.AnthropicModels
   alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.PromptCache
@@ -49,8 +50,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
       auth ->
         model =
-          Keyword.get(opts, :model) ||
-            Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+          ConfiguredModel.resolve(opts, :anthropic, &default_model/0)
 
         base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
         do_chat(base_url, auth, model, messages, Keyword.delete(opts, :model))
@@ -65,8 +65,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
       auth ->
         model =
-          Keyword.get(opts, :model) ||
-            Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+          ConfiguredModel.resolve(opts, :anthropic, &default_model/0)
 
         base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
         do_chat_stream(base_url, auth, model, messages, callback, Keyword.delete(opts, :model))

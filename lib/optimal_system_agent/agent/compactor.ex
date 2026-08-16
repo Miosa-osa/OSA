@@ -1554,6 +1554,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @spec bounded_chat([map()], keyword()) :: {:ok, map()} | {:error, term()}
   def bounded_chat(messages, opts) do
     timeout = Application.get_env(:optimal_system_agent, :summarizer_timeout_ms, 90_000)
+    opts = with_resolved_model(opts)
 
     task =
       Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
@@ -1634,6 +1635,44 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   # A failed/timed-out summarizer reports no usage — there is nothing to bill.
   defp bill_summarizer_call(_other, _opts), do: :ok
+
+  # Pin the summariser's provider and model INTO the opts the wire sees.
+  #
+  # `bounded_chat/2`'s call sites pass `temperature:`/`max_tokens:` and nothing
+  # else, so the compaction request was the one request in the system that
+  # named no model. That was survivable only while every provider's app-env
+  # fallback worked; it does not, because `:<provider>_model` is
+  # present-and-nil whenever its env var is unset (see
+  # `Providers.ConfiguredModel`). On xAI/`grok-4.6` the request went out as
+  # `"model": null` and came back HTTP 422 in under a second — "compaction
+  # failed after 0 seconds, conversation unchanged", on BOTH the `/compact`
+  # path and the automatic one, since both funnel through here.
+  #
+  # `summarizer_model/1` already resolved a model correctly — it was just only
+  # ever used to *price* the call, never to make it, so billing and the wire
+  # disagreed. Now they are the same value, computed once, and the resolution
+  # is the shared cascade rather than a private fourth copy of it.
+  defp with_resolved_model(opts) do
+    provider = summarizer_provider(opts)
+    model = summarizer_model(opts)
+
+    opts
+    |> then(fn o -> if provider, do: Keyword.put(o, :provider, provider), else: o end)
+    |> then(fn o -> if is_binary(model) and model != "", do: Keyword.put(o, :model, model), else: o end)
+    |> tap(fn o ->
+      unless is_binary(Keyword.get(o, :model)) do
+        Logger.error(
+          "[compactor] no model resolved for the summarizer (provider=#{inspect(provider)}) — " <>
+            "the request will be refused rather than sent with a null model. " <>
+            "Set #{OptimalSystemAgent.Providers.ConfiguredModel.env_var(provider)}."
+        )
+      end
+    end)
+  rescue
+    e ->
+      Logger.error("[compactor] summarizer model resolution failed: #{inspect(e)}")
+      opts
+  end
 
   defp summarizer_provider(opts) do
     Keyword.get(opts, :provider) || Providers.resolved_default_provider()

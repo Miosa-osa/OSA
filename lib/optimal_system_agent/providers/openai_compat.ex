@@ -27,10 +27,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   @spec chat(String.t(), String.t() | nil, String.t(), list(), keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def chat(base_url, api_key, model, messages, opts) do
-    unless api_key do
-      {:error, "API key not configured"}
-    else
-      do_chat(base_url, api_key, model, messages, opts)
+    with :ok <- require_model(model, opts) do
+      unless api_key do
+        {:error, "API key not configured"}
+      else
+        do_chat(base_url, api_key, model, messages, opts)
+      end
     end
   end
 
@@ -45,10 +47,40 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   @spec chat_stream(String.t(), String.t() | nil, String.t(), list(), function(), keyword()) ::
           :ok | {:error, String.t()}
   def chat_stream(base_url, api_key, model, messages, callback, opts) do
-    unless api_key do
-      {:error, "API key not configured"}
-    else
-      do_chat_stream(base_url, api_key, model, messages, callback, opts)
+    with :ok <- require_model(model, opts) do
+      unless api_key do
+        {:error, "API key not configured"}
+      else
+        do_chat_stream(base_url, api_key, model, messages, callback, opts)
+      end
+    end
+  end
+
+  # The last gate before a model name is written into a request body.
+  #
+  # `do_chat/5` and `build_stream_body/4` both start with a literal
+  # `%{model: model, ...}`, so a nil here serialises to `"model": null` and the
+  # provider rejects the whole payload — MEASURED on xAI/`grok-4.6`:
+  #
+  #     HTTP 422: failed to deserialize the JSON body into the target type
+  #     model: invalid type: null, expected a string at line 1, column 171659
+  #
+  # Column 171659 is the cost: ~170KB of transcript was assembled, serialised
+  # and sent before the one missing field failed it. Every caller is now
+  # expected to have resolved a model through
+  # `Providers.ConfiguredModel.resolve/3`; this refuses, by name and above
+  # `debug`, for the one that did not, rather than paying the round-trip to
+  # learn the same thing from a stranger's JSON parser.
+  defp require_model(model, opts) do
+    provider = Keyword.get(opts, :provider, :openai_compatible)
+
+    case OptimalSystemAgent.Providers.ConfiguredModel.ensure(model, provider) do
+      {:ok, _} ->
+        :ok
+
+      {:error, message} ->
+        Logger.error("[providers] refusing to send a request with no model: #{message}")
+        {:error, message}
     end
   end
 

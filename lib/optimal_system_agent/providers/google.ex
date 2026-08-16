@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Providers.Google do
 
   require Logger
 
+  alias OptimalSystemAgent.Providers.ConfiguredModel
   alias OptimalSystemAgent.Providers.GoogleModels
 
   @default_url "https://generativelanguage.googleapis.com/v1beta"
@@ -99,8 +100,7 @@ defmodule OptimalSystemAgent.Providers.Google do
     api_key = Application.get_env(:optimal_system_agent, :google_api_key)
 
     model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :google_model, default_model())
+      ConfiguredModel.resolve(opts, :google, &default_model/0)
 
     base_url = Application.get_env(:optimal_system_agent, :google_url, @default_url)
 
