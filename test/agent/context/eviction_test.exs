@@ -237,11 +237,59 @@ defmodule OptimalSystemAgent.Agent.Context.EvictionTest do
     # hosted tags from the local KV-cache ceiling, so a 1M-window cloud model was
     # budgeted as a 32k local one — MEASURED on Terminal-Bench as a 30x
     # under-budget that gutted the world state for a window that was never real.
+    #
+    # ## What this test may NOT assert
+    #
+    # It used to end on `assert Context.evictions(session) == []`, which reads
+    # like a statement about the window and is in fact a statement about the
+    # GLOBAL long-term memory store. `Memory.Store` is a singleton GenServer
+    # over named ETS tables and one SQLite file; the suite shares it by design,
+    # and long-term memory is cross-session by definition, so there is nothing
+    # per-test about it to isolate. MEASURED: with an empty store this build
+    # evicts nothing, and after ONE `Memory.save/2` of the 6,900-char row that
+    # `Memory.StoreMergeTest` ("an oversized existing entry is not appended to")
+    # leaves behind, the same build records
+    #
+    #     %{label: "memory", group: :recall, kind: :truncated, wanted: 1204, kept: 1196}
+    #
+    # — the recall block truncated to `Budget.memory_context_token_cap/0`. That
+    # row has ZERO lexical overlap with "refactor the retry helper". It reaches
+    # the prompt because `Memory.recall_hybrid/2` unions in `recent(100)`
+    # unconditionally, and it clears the 0.35 floor on category weight
+    # (0.50 * 0.30) plus recency (~1.0 * 0.20) alone — landing within 1e-5 of
+    # the cutoff, which is why it flips with a few seconds of elapsed time and
+    # why the same seed passed on one machine and failed on another.
+    #
+    # So the empty-list assertion was a clock and a store census wearing the
+    # costume of a window check. What replaces it below is strictly about the
+    # window, and still fails if the window resolves wrong:
+    #
+    #   * under the 8,192 local ceiling the prompt provably does not fit at all
+    #     (static base 11,575 > window), so `[:osa, :context, :overflow]` fires
+    #     on every build; under the resolved 1M window it never fires. That
+    #     event IS the window resolution, observed.
+    #   * a wrong window also drops `ws:tools`, an ESSENTIAL block — so both the
+    #     log refutation and the group assertion below still catch it.
+    #
+    # Recall truncation is excluded, and only recall truncation: it is the one
+    # outcome the shared store can produce on its own.
     test "a nil model budgets against the configured model, not the local ceiling" do
       prev = Application.get_env(:optimal_system_agent, :ollama_model)
       Application.put_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud")
 
+      handler = "nil-model-window-#{:erlang.unique_integer([:positive])}"
+      parent = self()
+
+      :telemetry.attach(
+        handler,
+        [:osa, :context, :overflow],
+        fn _e, m, meta, _ -> send(parent, {:overflow, m, meta}) end,
+        nil
+      )
+
       on_exit(fn ->
+        :telemetry.detach(handler)
+
         if prev,
           do: Application.put_env(:optimal_system_agent, :ollama_model, prev),
           else: Application.delete_env(:optimal_system_agent, :ollama_model)
@@ -252,9 +300,18 @@ defmodule OptimalSystemAgent.Agent.Context.EvictionTest do
       log = capture_log(fn -> Context.build(state) end)
 
       refute log =~ "ESSENTIAL context block",
-             "an Ollama Cloud tag keeps its full window; nothing should be evicted"
+             "an Ollama Cloud tag keeps its full window; no essential block should be evicted"
 
-      assert Context.evictions(state.session_id) == []
+      refute_receive {:overflow, _, _},
+                     200,
+                     "the prompt overflowed, so `model: nil` was budgeted against the local " <>
+                       "num_ctx ceiling instead of the configured glm-5.2:cloud window"
+
+      for e <- Context.evictions(state.session_id) do
+        assert e.group == :recall,
+               "a full cloud window must not evict #{e.group} block #{e.label}; only the " <>
+                 "recall group may be trimmed, and only by what the shared memory store holds"
+      end
     end
   end
 
