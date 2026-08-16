@@ -1038,7 +1038,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       tools:
         all_tools
         |> ToolFilter.filter_for_coordinator(coordinator?)
-        |> AskUserMode.filter_tools(ask_user_enabled?),
+        |> AskUserMode.filter_tools(ask_user_enabled?)
+        |> ToolFilter.filter_for_env_allowlist(),
       all_tools: all_tools,
       coordinator: coordinator?,
       ask_user_enabled: ask_user_enabled?,

@@ -145,6 +145,47 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     end)
   end
 
+  @doc """
+  Restrict the ADVERTISED tool array to an explicit allowlist read from
+  `OSA_TOOL_ALLOWLIST` (comma-separated tool names).
+
+  Inert when the variable is unset or empty, which is every non-experimental
+  run. It exists because there was no other way to vary the tool surface:
+  `state.allowed_tools` gates EXECUTION only (`subagent_tool_allowed?/2`), so
+  it leaves every schema in the request and measures nothing about what
+  advertising a tool costs. `:lite` is a SYSTEM-PROMPT variant and likewise
+  does not remove a tool from the array a native-tool provider receives.
+
+  Applied once at session start, next to the coordinator and ask_user gates,
+  so the array is stable for the whole session and the cached tool prefix
+  stays valid.
+  """
+  @spec filter_for_env_allowlist(list()) :: list()
+  def filter_for_env_allowlist(tools) do
+    case env_allowlist() do
+      [] ->
+        tools
+
+      names ->
+        kept = Enum.filter(tools, fn t -> tool_name(t) in names end)
+
+        Logger.info(
+          "[loop] OSA_TOOL_ALLOWLIST active — advertising #{length(kept)} of " <>
+            "#{length(tools)} tools (#{kept |> Enum.map(&tool_name/1) |> Enum.join(", ")})"
+        )
+
+        kept
+    end
+  end
+
+  defp env_allowlist do
+    "OSA_TOOL_ALLOWLIST"
+    |> System.get_env("")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
   # --- Private ---
 
   # Depth guard — a child at or beyond the max delegation depth loses its
