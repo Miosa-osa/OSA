@@ -9,6 +9,96 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.105] — displays as `v1.0.105`
+
+**Clickable links were broken, and worse than "not clickable."** Measured at 70
+columns, a committed agent reply came back as:
+
+```
+┃Docs: the OSA guide (htt
+```
+
+The rest of the sentence gone, and the cut landing **inside** the hyperlink — so
+the terminator was never emitted and the link was left **open**, ready to absorb
+whatever the terminal printed next.
+
+### Root cause — one draw path never got the escape-aware renderer
+
+`Message::draw_agent` / `draw_agent_continuation` rendered the markdown body
+through **`Paragraph`**, the exact widget `render/cells.rs` was written to
+replace. With no `.wrap()`, ratatui cuts the line with `LineTruncator`, which
+measures using `unicode-width`, which reports **width 1 for ESC** — so a short
+`https://` link costs about **45 phantom columns**. `cells.rs` had been wired
+into the tool-call path only, while the markdown path — where `[text](url)`,
+bare-URL autolinks and attachment chips are linkified — still went through
+`Paragraph`.
+
+Latent before 1.0.104, because at 100 columns the row happened to fit. **Permanent
+after it**: the resize replay re-renders every retained message at every drag
+step, into scrollback nothing can repaint. Both agent draw paths now go through
+`render::cells::render_lines`.
+
+### The instrument, and why it is not VTE's own attribute
+
+`test/pty/osc8_reader.py` models libvte's per-cell `hyperlink_uri` from the byte
+stream OSA writes, rather than asking VTE — because on this box **there is no
+working accessor left**, and that was pinned rather than assumed. VTE 0.76's
+`Vte.Format.HTML` export emits no anchors, verified against colour, which it
+*does* export: `<font color="#C00000">RED</font>` on one row, bare
+`<pre>LINKED tail</pre>` on the linked one. `hyperlink_check_event` returns
+`None` for every cell of a realized, mapped terminal, including a brute-force
+sweep of the full 722×434 pixel allocation. The discriminator: `match_check_event`
+resolves position through the same `rowcol_from_event` and **also** returns `None`
+at coordinates where its regex plainly matches the text on screen — so it is the
+GdkEvent conversion failing, not hyperlink storage.
+
+**It can see** the URI on any cell at its post-wrap, post-scroll position;
+contiguous linked runs with the label *as it landed in cells*, so a sheared row
+reads as a short label rather than a missing escape; an OSC 8 that never closes;
+and a wrong URI.
+
+**It cannot see** reflow of rows OSA has surrendered to native scrollback (that
+stays `vte_content_reflow.py`'s job, and its header now says so accurately),
+whether an emulator actually makes a run clickable, or anything before the mark
+it replays from.
+
+Per the standing rule in this area, the reader had to prove the **negative** case
+before being trusted: it fails unless every cell that must *not* carry a URI
+reports `None`, across overwrite, erase, scroll-off, split feeds, and plain text
+beside a link. **The first draft failed that check** — a fifth instance of the
+instrument-fault pattern: it anchored its partial-sequence holdback on the last
+ESC in the buffer, so a PTY read ending one byte into a terminator fed a
+complete-looking OSC to the emulator and silently dropped the URI.
+
+### Verification
+
+`test/pty/osc8_resize_probe.py` passes at all four stages — before any resize,
+after one, after repeated narrow/widen/narrow, and with the URI checked for
+correctness rather than mere presence. With the fix reverted and rebuilt it goes
+red on exactly the right things: the baseline shear, the label cut to
+`'https://osa.dev/bare/auto'`, and *"the stream ends inside an OPEN hyperlink"*.
+
+`vte_content_reflow.py` re-run after the change: **SURVIVED** on both prose and
+table. The 1.0.104 resize fix is intact.
+
+Elixir 9,746 / 0. Rust **1,483** / 0. PTY 31 / 31.
+
+### Known — not fixed
+
+Unchanged from 1.0.104: pre-launch shell scrollback is destroyed on resize; each
+drag step re-renders every retained message and this is unmeasured near the
+2,000-message cap; the welcome banner is not replayed; `accessed_at` bumping on
+every recall makes memory injection self-reinforcing; and nothing is verified
+against a live inference provider.
+
+One harness note: `PtySession` gained an optional `env` override (default `{}`,
+existing behaviour byte-identical). It was unavoidable — the harness sets
+`NO_COLOR=""`, and `supports_hyperlinks` treats a *present* `NO_COLOR` as a hard
+opt-out whatever its value, so without unsetting it not one OSC 8 byte is emitted
+and any link probe grades a blank screen.
+
+---
+
 ## [1.0.104] — displays as `v1.0.104`
 
 **TUI resize is fixed.** A dragged terminal no longer shreds the transcript.
