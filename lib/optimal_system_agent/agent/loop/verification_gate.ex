@@ -15,9 +15,9 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   When the agent is about to finish a turn (the model emitted no tool calls)
   after having changed files, the gate asks, in order:
 
-    0. `:unobserved_background` — is a background command this session started
-       STILL RUNNING? Then the turn is finishing on work it has not seen.
-       (**Engagement**. See below.)
+    0. `:unobserved_background` — is a background job this session started —
+       a shell command OR a delegated subagent — STILL RUNNING? Then the turn
+       is finishing on work it has not seen. (**Engagement**. See below.)
     1. `:failing_check`   — did something RUN AND FAIL since the last write and
        not been superseded? Ending here is ending on a red test.
     2. `:unchecked_write` — has any grounded check PASSED against the changed
@@ -432,30 +432,88 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   defp cap_for_reason(_reason, scale), do: cap_for(scale)
 
   @doc """
-  Background commands **this session started** that are still `:running`.
+  Background jobs **this session started** that are still `:running` — shell
+  commands and delegated subagents alike.
 
   The engagement signal of clause 0, and a directly observable fact rather than
   a proxy: no wall clock, no token count, no turn count. Returns `[]` when the
-  detector is switched off, when there is no session, or when the background
-  manager is unavailable — every failure mode is silence, never a false fire.
+  detector is switched off, when there is no session, or when either roster is
+  unavailable — every failure mode is silence, never a false fire.
+
+  ## Why there are two rosters
+
+  A background subagent is not a background command and never enters
+  `Shell.BackgroundManager`: the only writers into that manager are
+  `shell_execute`'s `start/3` and `adopt/1`. A delegated agent lives in
+  `Agent.RunStore`, keyed by `:parent_session_id`. So for the whole life of this
+  clause it could not see the single most common kind of background work OSA
+  spawns, and the async-abandonment shape it was built to refuse went straight
+  through whenever the outstanding job was a teammate rather than a command —
+  reproduced live in `DelegatedChildIsOutstandingWorkTest`.
+
+  Both rosters are normalised to the same shape so the directive and every
+  caller can treat them uniformly:
+
+    * `:id`      — background id or agentId
+    * `:kind`    — `:command` | `:agent`, which decides the affordance the
+      directive offers (they are not interchangeable — see `body/4`)
+    * `:command` — the command line, or the subagent's role and task
+
+  Each roster is read in its own `try`, so one being down cannot silence the
+  other.
   """
   @spec unobserved_background(term()) :: [map()]
   def unobserved_background(session_id) when is_binary(session_id) do
     if engagement_enabled?() do
-      background_module().list()
-      |> Enum.filter(fn snap ->
-        Map.get(snap, :status) == :running and Map.get(snap, :session_id) == session_id
-      end)
+      running_commands(session_id) ++ running_agents(session_id)
     else
       []
     end
+  end
+
+  def unobserved_background(_), do: []
+
+  defp running_commands(session_id) do
+    background_module().list()
+    |> Enum.filter(fn snap ->
+      Map.get(snap, :status) == :running and Map.get(snap, :session_id) == session_id
+    end)
+    |> Enum.map(fn snap ->
+      %{
+        id: Map.get(snap, :id),
+        kind: :command,
+        command: Map.get(snap, :command)
+      }
+    end)
   rescue
     _ -> []
   catch
     _, _ -> []
   end
 
-  def unobserved_background(_), do: []
+  # A delegated child is outstanding work for its PARENT — the session that
+  # dispatched it — which is why the match is on `:parent_session_id` and not on
+  # the `:session_id` key the shell snapshots carry.
+  defp running_agents(session_id) do
+    subagent_module().all_running_local()
+    |> Enum.filter(fn run ->
+      Map.get(run, :status) == :running and Map.get(run, :parent_session_id) == session_id
+    end)
+    |> Enum.map(fn run ->
+      role = to_string(Map.get(run, :role) || "agent")
+      task = run |> Map.get(:task, "") |> to_string()
+
+      %{
+        id: Map.get(run, :agent_id),
+        kind: :agent,
+        command: if(task == "", do: role, else: "#{role} — #{task}")
+      }
+    end)
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
 
   defp background_pending?(session_id, content) do
     not background_escaped?(content) and unobserved_background(session_id) != []
@@ -473,6 +531,19 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       :optimal_system_agent,
       :background_manager,
       OptimalSystemAgent.Shell.BackgroundManager
+    )
+  end
+
+  # The subagent half of the same seam. `all_running_local/0` rather than
+  # `all_running/0` deliberately: the latter reads a machine-global index, so in
+  # a second `osa` invocation it would report another process's teammates as
+  # this turn's outstanding work and hold the turn open for something this
+  # session cannot observe or influence.
+  defp subagent_module do
+    Application.get_env(
+      :optimal_system_agent,
+      :subagent_roster,
+      OptimalSystemAgent.Agent.RunStore
     )
   end
 
@@ -651,18 +722,30 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   # It does NOT say "keep working" or "you stopped too early". The episodes
   # this catches include one that ran 62 turns; the defect is the claim resting
   # on unobserved work, not the length of the run.
+  # Two kinds of outstanding work, two different exits, and they are NOT
+  # interchangeable. `delegate`'s own prompt tells the model in as many words not
+  # to poll `task_output` and not to read a running agent's output file; a
+  # directive that answered "call task_output" would be the third instance in
+  # this codebase of a gate ordering the model to do what the tool it names
+  # forbids — the `bash_output` "DO NOT USE THIS TOOL TO WAIT" trap recorded in
+  # this module's moduledoc, shipped again. The blocking join that actually
+  # exists for agents is `task_wait`, so that is what gets named.
   defp body(:unobserved_background, session_id, step, cap) do
     running = (session_id && unobserved_background(session_id)) || []
+    {agents, commands} = Enum.split_with(running, &(Map.get(&1, :kind) == :agent))
 
     listed =
       running
       |> Enum.take(3)
       |> Enum.map_join("\n", fn snap ->
-        "  * `#{Map.get(snap, :id)}`: #{String.slice(to_string(Map.get(snap, :command) || "?"), 0, 200)}"
+        label = if Map.get(snap, :kind) == :agent, do: "agent", else: "command"
+
+        "  * `#{Map.get(snap, :id)}` (#{label}): " <>
+          String.slice(to_string(Map.get(snap, :command) || "?"), 0, 200)
       end)
 
     header(step, cap) <>
-      "You are finishing while #{length(running)} background command(s) you started " <>
+      "You are finishing while #{length(running)} background job(s) you started " <>
       "are STILL RUNNING:\n" <>
       listed <>
       "\n\nA completion notification MAY wake you afterwards, and it may not — a " <>
@@ -671,22 +754,58 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "guess right now, and \"I'll check once it completes\" is not a finished " <>
       "turn.\n\n" <>
       "Take one of these, now:\n" <>
-      "  1. BLOCK ON IT IN ONE CALL: `bash_output` with the background_id above and " <>
-      "`wait_ms` (e.g. 600000). That waits until it reaches a terminal status and " <>
-      "hands you its exit code and output — then report what it actually printed and " <>
-      "whether it passed. Do NOT call `bash_output` without `wait_ms` in a loop; a " <>
-      "bare call returns instantly and tells you nothing new.\n" <>
-      "  2. If waiting is not affordable, kill it (`bash_output` with `kill: true`) " <>
-      "and do the same work synchronously in the foreground, so you see the result.\n" <>
-      "  3. If it is a long-lived service you started deliberately and it is " <>
-      "SUPPOSED to keep running (a server under test, a daemon), say so on its own " <>
-      "line as `BACKGROUND_INTENTIONAL: <one-line reason>` and finish. Note that a " <>
-      "background command is a child of THIS SESSION and is killed when the session " <>
-      "ends — if something has to still be listening after you finish, restart it " <>
-      "detached (`setsid nohup <cmd> </dev/null >/tmp/<name>.log 2>&1 &`) and verify " <>
-      "it independently before you say so.\n\n" <>
+      exits(agents, commands) <>
+      "\n  #{escape_ordinal(agents, commands)}. If it is meant to outlive this turn " <>
+      "and you are NOT going to report on it, say so on its own line as " <>
+      "`BACKGROUND_INTENTIONAL: <one-line reason>` and finish.\n\n" <>
       "Do not report a result you have not observed, and do not promise to check " <>
       "it later."
+  end
+
+  # The agent exit. `task_wait` blocks on chosen agentIds until they reach a
+  # terminal state and returns their reports — the one affordance that both
+  # exists and is permitted here.
+  defp exits(agents, commands) do
+    agent_exit =
+      if agents == [] do
+        ""
+      else
+        ids = agents |> Enum.take(3) |> Enum.map_join(", ", &"\"#{Map.get(&1, :id)}\"")
+
+        "  1. JOIN THE TEAMMATE(S) IN ONE CALL: `task_wait` with " <>
+          "`agent_ids: [#{ids}]`. That blocks until they finish and hands you their " <>
+          "reports, which is what you were going to wait for anyway — then report " <>
+          "what they actually found. Do NOT poll `task_output` and do not read a " <>
+          "running agent's output file; both are forbidden by `delegate` and " <>
+          "neither waits.\n" <>
+          "  2. If their result is not needed for what you are about to say, say " <>
+          "only what you verified yourself and do not characterise their findings " <>
+          "at all.\n"
+      end
+
+    command_exit =
+      if commands == [] do
+        ""
+      else
+        n = if agents == [], do: 1, else: 3
+
+        "  #{n}. BLOCK ON THE COMMAND IN ONE CALL: `bash_output` with the " <>
+          "background_id above and `wait_ms` (e.g. 600000). That waits until it " <>
+          "reaches a terminal status and hands you its exit code and output. Do NOT " <>
+          "call `bash_output` without `wait_ms` in a loop; a bare call returns " <>
+          "instantly and tells you nothing new.\n"
+      end
+
+    agent_exit <> command_exit
+  end
+
+  # The escape is always the last numbered option, so its ordinal depends on how
+  # many exits were actually offered above it: two for agents (join, or decline
+  # to characterise), one for commands.
+  defp escape_ordinal(agents, commands) do
+    agent_exits = if agents == [], do: 0, else: 2
+    command_exits = if commands == [], do: 0, else: 1
+    agent_exits + command_exits + 1
   end
 
   defp body(:failing_check, session_id, step, cap) do
