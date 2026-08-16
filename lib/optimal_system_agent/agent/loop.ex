@@ -1039,7 +1039,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
         all_tools
         |> ToolFilter.filter_for_coordinator(coordinator?)
         |> AskUserMode.filter_tools(ask_user_enabled?)
-        |> ToolFilter.filter_for_role_allowlist(Keyword.get(opts, :allowed_tools))
+        |> ToolFilter.filter_for_role_allowlist(%{
+          allowed_tools: Keyword.get(opts, :allowed_tools),
+          blocked_tools: Keyword.get(opts, :blocked_tools, []),
+          permission_tier: Keyword.get(opts, :permission_tier, :full)
+        })
         |> ToolFilter.filter_for_env_allowlist(),
       all_tools: all_tools,
       coordinator: coordinator?,
@@ -1587,7 +1591,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     state.all_tools
     |> ToolFilter.filter_for_coordinator(coordinator?)
     |> AskUserMode.filter_tools(ask?)
-    |> ToolFilter.filter_for_role_allowlist(state.allowed_tools)
+    |> ToolFilter.filter_for_role_allowlist(state)
     |> ToolFilter.filter_for_env_allowlist()
   end
 

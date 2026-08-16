@@ -129,21 +129,114 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   end
 
   @doc """
-  Restrict the ADVERTISED tool array to a role's `tools_allowed`.
+  Restrict the ADVERTISED tool array to what the role could actually execute.
 
-  `state.allowed_tools` used to gate EXECUTION only. An explore/explorer
-  child still saw `delegate` and spawned another explorer — the nest that
-  never STOPs. This pass is what makes the role file true at prompt time.
+  `state.allowed_tools` used to gate EXECUTION only. An explore/explorer child
+  still saw `delegate` in its schema array and tried to spawn another explorer.
+  This pass is what makes the role file true at prompt time.
 
-  `nil` or `[]` means unrestricted (parent session / generic agent).
-  Applied at session start next to the coordinator and env-allowlist gates.
+  ## One decision, not one-and-a-half
+
+  The execution gate is `ToolExecutor.subagent_tool_allowed?/2`, and it answers
+  with THREE clauses: the always-blocked set (`delegate`, `ask_user`,
+  `create_skill`, `create_agent`, `memory_save`), the per-agent denylist
+  (`tools_blocked`), and the per-agent allowlist (`tools_allowed`). Advertising
+  only the third clause is how a subagent still gets handed `delegate` and is
+  then refused at call time — e.g. `Builtins.UseSkill` sets
+  `tools_blocked: ["delegate", "use_skill"]` with no allowlist at all, so the
+  allowlist clause alone declines to filter anything.
+
+  So this delegates to that same predicate rather than restating a subset of
+  it. `@subagent_blocked_tools` applies only at `permission_tier: :subagent`,
+  which is the tier under which the execution gate is consulted — a parent
+  session keeps `delegate`.
+
+  Accepts the loop state (or any map carrying `:allowed_tools`,
+  `:blocked_tools`, `:permission_tier`). The bare-list form is the legacy
+  allowlist-only call and is treated as tier `:full`.
+
+  Unrestricted roles (no allowlist, no denylist, not a subagent) return `tools`
+  untouched and log nothing.
   """
-  @spec filter_for_role_allowlist(list(), [String.t()] | nil) :: list()
-  def filter_for_role_allowlist(tools, allowed) when is_list(allowed) and allowed != [] do
-    Enum.filter(tools, fn t -> tool_name(t) in allowed end)
+  @spec filter_for_role_allowlist(list(), map() | [String.t()] | nil) :: list()
+  def filter_for_role_allowlist(tools, %{} = role) do
+    allowed = Map.get(role, :allowed_tools)
+    blocked = Map.get(role, :blocked_tools) || []
+    tier = Map.get(role, :permission_tier) || :full
+
+    allowlist? = is_list(allowed) and allowed != []
+    denylist? = is_list(blocked) and blocked != []
+
+    if not (allowlist? or denylist? or tier == :subagent) do
+      tools
+    else
+      gate = %{allowed_tools: allowed, blocked_tools: blocked}
+      kept = Enum.filter(tools, &role_permits?(tier, tool_name(&1), gate))
+      report_role_filter(tools, kept, tier, allowed, blocked)
+    end
   end
 
-  def filter_for_role_allowlist(tools, _), do: tools
+  def filter_for_role_allowlist(tools, allowed) when is_list(allowed) or is_nil(allowed) do
+    filter_for_role_allowlist(tools, %{
+      allowed_tools: allowed,
+      blocked_tools: [],
+      permission_tier: :full
+    })
+  end
+
+  # At :subagent tier the advertised set is exactly the executable set. At any
+  # other tier the always-blocked list does not apply, so only the role's own
+  # allow/deny pair does.
+  defp role_permits?(:subagent, name, gate),
+    do: OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?(name, gate)
+
+  defp role_permits?(_tier, name, %{allowed_tools: allowed, blocked_tools: blocked}) do
+    cond do
+      is_list(blocked) and name in blocked -> false
+      is_list(allowed) and allowed != [] -> name in allowed
+      true -> true
+    end
+  end
+
+  # A gate that removes tools must say so. `filter_for_env_allowlist/1` and
+  # `strip_spawning_tools/2` both log; this one shipped silent, which is the
+  # same defect `Agent.FastPath` records as "the only stage in filter/1 that
+  # logged NOTHING".
+  defp report_role_filter(tools, kept, tier, allowed, blocked) do
+    cond do
+      kept == tools ->
+        tools
+
+      kept == [] and tools != [] ->
+        # A `tools_allowed` typo or a stale tool name intersects to nothing, and
+        # a zero-length schema array is not something native-tool providers
+        # degrade from gracefully. Drop the unsatisfiable ALLOWLIST, keep the
+        # safety clauses, and say loudly that the role file is wrong.
+        salvaged =
+          Enum.filter(tools, &role_permits?(tier, tool_name(&1), %{
+            allowed_tools: nil,
+            blocked_tools: blocked
+          }))
+
+        Logger.warning(
+          "[loop] role allowlist #{inspect(allowed)} matches NO advertised tool " <>
+            "(tier #{inspect(tier)}) — ignoring it and advertising " <>
+            "#{length(salvaged)} of #{length(tools)} tools. Check tools_allowed " <>
+            "in the agent/skill definition for a typo or a renamed tool."
+        )
+
+        salvaged
+
+      true ->
+        Logger.info(
+          "[loop] role tool gate active (tier #{inspect(tier)}) — advertising " <>
+            "#{length(kept)} of #{length(tools)} tools " <>
+            "(#{kept |> Enum.map(&tool_name/1) |> Enum.join(", ")})"
+        )
+
+        kept
+    end
+  end
 
   @doc """
   Restrict the tool list to coordinator-mode tools (delegation, messaging, and

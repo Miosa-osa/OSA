@@ -1,6 +1,8 @@
 defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
 
@@ -189,6 +191,134 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
     test "empty allowlist is unrestricted, same as nil" do
       tools = advertised_tools()
       assert ToolFilter.filter_for_role_allowlist(tools, []) == tools
+    end
+
+    # The advertised set and the executable set must be ONE decision. The
+    # execution gate (`ToolExecutor.subagent_tool_allowed?/2`) answers with
+    # three clauses; advertising only the allowlist clause is how a subagent
+    # still gets handed a tool that is then refused at call time.
+    test "a denylist with no allowlist still shrinks the advertised set" do
+      tools = advertised_tools()
+
+      names =
+        tools
+        |> ToolFilter.filter_for_role_allowlist(%{
+          allowed_tools: nil,
+          blocked_tools: ["delegate", "shell_execute"],
+          permission_tier: :full
+        })
+        |> Enum.map(& &1.name)
+
+      refute "delegate" in names
+      refute "shell_execute" in names
+      assert "file_read" in names
+    end
+
+    test "at :subagent tier the always-blocked set is never advertised, allowlist or not" do
+      tools = advertised_tools()
+
+      names =
+        tools
+        |> ToolFilter.filter_for_role_allowlist(%{
+          allowed_tools: nil,
+          blocked_tools: [],
+          permission_tier: :subagent
+        })
+        |> Enum.map(& &1.name)
+
+      # @subagent_blocked_tools — the nest that #107 set out to stop.
+      refute "delegate" in names
+      assert "file_read" in names
+    end
+
+    test "advertised set agrees with the execution gate for every tool, at :subagent tier" do
+      tools = advertised_tools()
+      role = %{allowed_tools: ~w(file_read delegate dir_list), blocked_tools: ["dir_list"]}
+
+      advertised =
+        tools
+        |> ToolFilter.filter_for_role_allowlist(Map.put(role, :permission_tier, :subagent))
+        |> Enum.map(& &1.name)
+        |> MapSet.new()
+
+      executable =
+        tools
+        |> Enum.map(& &1.name)
+        |> Enum.filter(&OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?(&1, role))
+        |> MapSet.new()
+
+      assert advertised == executable
+      # and specifically: allowlisted but always-blocked, allowlisted but denied
+      refute "delegate" in advertised
+      refute "dir_list" in advertised
+      assert "file_read" in advertised
+    end
+
+    # config/test.exs pins Logger to :warning, so an :info line is dropped
+    # before capture. Raise the floor for the assertion, then put it back —
+    # otherwise "does it report?" is untestable by construction.
+    defp capture_info(fun) do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+
+      try do
+        ExUnit.CaptureLog.capture_log(fun)
+      after
+        Logger.configure(level: previous)
+      end
+    end
+
+    test "a gate that removes tools says so at info, never silently" do
+      tools = advertised_tools()
+
+      log = capture_info(fn -> ToolFilter.filter_for_role_allowlist(tools, ~w(file_read file_glob)) end)
+
+      assert log =~ "role tool gate active"
+      assert log =~ "advertising 2 of 8 tools"
+    end
+
+    test "an unrestricted role logs nothing — the gate is inert, not quiet" do
+      tools = advertised_tools()
+
+      log = capture_info(fn -> ToolFilter.filter_for_role_allowlist(tools, nil) end)
+
+      refute log =~ "role tool gate"
+    end
+
+    # `tools_allowed` comes from arbitrary user frontmatter. A typo or a
+    # renamed tool intersects to nothing, and a zero-length schema array is not
+    # something native-tool providers degrade from gracefully.
+    test "an allowlist matching nothing warns loudly and does not hand over an empty array" do
+      tools = advertised_tools()
+
+      {result, log} =
+        with_log(fn ->
+          ToolFilter.filter_for_role_allowlist(tools, ~w(file_reed grep_search))
+        end)
+
+      assert log =~ "matches NO advertised tool"
+      assert log =~ "typo"
+      refute result == []
+      assert length(result) == length(tools)
+    end
+
+    test "the empty-allowlist salvage still honours the denylist and the tier" do
+      tools = advertised_tools()
+
+      {result, _log} =
+        with_log(fn ->
+          ToolFilter.filter_for_role_allowlist(tools, %{
+            allowed_tools: ~w(totally_bogus_tool),
+            blocked_tools: ["file_glob"],
+            permission_tier: :subagent
+          })
+        end)
+
+      names = Enum.map(result, & &1.name)
+      refute names == []
+      refute "file_glob" in names, "denylist must survive the salvage"
+      refute "delegate" in names, "always-blocked must survive the salvage"
+      assert "file_read" in names
     end
   end
 
