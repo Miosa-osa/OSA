@@ -24,7 +24,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from osa_pty import COMPOSER_TOP, SETTLE, SINGLETON_BANDS, STATUS, PtySession  # noqa: E402
+from osa_pty import (  # noqa: E402
+    COMPOSER_TOP,
+    SETTLE,
+    SINGLETON_BANDS,
+    STATUS,
+    USER_HEADER,
+    PtySession,
+)
 from stub_backend import (  # noqa: E402
     CLEARED_SESSION_ID,
     StubBackend,
@@ -61,6 +68,53 @@ def assert_single_live_region(session: PtySession, context: str) -> None:
         raise AssertionError(
             f"{context}: expected exactly one of each live-region band, got "
             f"{counts} (offending: {wrong}).\n"
+            f"--- rendered screen ---\n{session.dump()}"
+        )
+
+
+def assert_single_live_region_with_transcript(session: PtySession, context: str) -> None:
+    """`assert_single_live_region`, for a screen that has COMMITTED TURNS on it.
+
+    Same defect, same strength — a stranded copy is still caught by three
+    independent markers — but two of `SINGLETON_BANDS`' four markers stop
+    identifying the live region once the transcript is non-empty, and counting
+    them anyway fails a correct build:
+
+    * **`composer_top`** (`^─{20,}$`) is a bare full-width rule, and so is the
+      TURN SEPARATOR drawn between committed turns. Their glyphs are identical
+      and there is nothing on the row to tell them apart. Worse for this test
+      specifically: pyte does not reflow, so separators committed at 120
+      columns stay 120 columns wide in history after a narrowing drag, which is
+      exactly the "progressively wider separator" signature the stranding bug
+      produces. The marker cannot distinguish the defect from the transcript,
+      so it is dropped here rather than trusted.
+    * **`composer`** (`^\\s*❯`) also matches the `❯  You` header that every
+      committed user message leaves behind (`USER_HEADER`). Those are counted
+      and subtracted, which keeps the marker — the count below is the number of
+      prompt glyphs that are NOT transcript headers, i.e. composers.
+
+    Why this test now needs it, stated so the next reader does not re-derive
+    it: a slash command used to leave no trace in the transcript, so four
+    `/version` invocations committed four output blocks and no headers or
+    separators, and the four raw markers happened to stay at one apiece. They
+    are echoed as user messages since 1d7c11b5 (an action that starts work
+    while leaving the screen unchanged is indistinguishable from a dropped
+    keypress), so the same four invocations now commit four `❯  You` headers
+    and three separators. Nothing about the live region changed — measured on
+    the same drag, `composer`/`composer_hints`/`status` are 1/1/1 before the
+    narrowing sweep, after it, and after the widening sweep. Only the markers'
+    ambiguity changed.
+    """
+    counts = {
+        "composer": session.count(SINGLETON_BANDS["composer"]) - session.count(USER_HEADER),
+        "composer_hints": session.count(SINGLETON_BANDS["composer_hints"]),
+        "status": session.count(SINGLETON_BANDS["status"]),
+    }
+    wrong = {name: n for name, n in counts.items() if n != 1}
+    if wrong:
+        raise AssertionError(
+            f"{context}: expected exactly one of each transcript-stable "
+            f"live-region band, got {counts} (offending: {wrong}).\n"
             f"--- rendered screen ---\n{session.dump()}"
         )
 
@@ -990,19 +1044,28 @@ def test_resize_with_transcript(backend: StubBackend) -> None:
             s.write(b"\x1b")
             s.pump(0.2)
         s.pump(SETTLE)
-        assert_single_live_region(s, "after filling the transcript at 120x30")
+        # `assert_single_live_region_with_transcript`, not the bare one: two of
+        # the four raw markers stop identifying the live region once committed
+        # turns are on screen. See that helper for which, and why.
+        assert_single_live_region_with_transcript(
+            s, "after filling the transcript at 120x30"
+        )
 
         for width in range(115, 79, -5):
             s.resize(width, 30)
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after narrowing sweep WITH transcript")
+        assert_single_live_region_with_transcript(
+            s, "after narrowing sweep WITH transcript"
+        )
 
         for width in range(85, 125, 5):
             s.resize(width, 30)
             s.pump(0.05)
         s.pump(SETTLE * 2)
-        assert_single_live_region(s, "after widening sweep WITH transcript")
+        assert_single_live_region_with_transcript(
+            s, "after widening sweep WITH transcript"
+        )
 
 
 def test_resize_emits_nothing_that_deposits_into_scrollback(

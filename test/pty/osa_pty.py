@@ -308,6 +308,11 @@ class PtySession:
 COMPOSER_TOP = re.compile(r"^─{20,}$")
 # The composer's prompt glyph, at the start of its row.
 COMPOSER = re.compile(r"^\s*❯")
+# The header a COMMITTED user message draws into the transcript: the same
+# prompt glyph, then the literal "You" (`components/chat/message.rs::draw_user`
+# renders `"❯  "` + `"You"`). It is transcript, not live region, but `COMPOSER`
+# cannot tell the two apart — subtract this to count composers alone.
+USER_HEADER = re.compile(r"^\s*❯\s{2}You(\s|$)")
 # The composer's BOTTOM divider, which carries the right-aligned key hints.
 COMPOSER_HINTS = re.compile(r"/ commands · @ files")
 # The status line's context-percentage chip.
