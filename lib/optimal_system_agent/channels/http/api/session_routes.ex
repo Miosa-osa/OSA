@@ -561,9 +561,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     # sidecars (`<id>.updates.jsonl`, `.lock`, `.corrupt`). Persistence never
     # writes a bare `<id>.jsonl`, so deleting that path always 404'd and the
     # session reappeared on next list/resume.
+    #
+    # …and the SQLite transcript rows, which are a SECOND, independent copy of
+    # the conversation. Deleting only the files left every one of them: a
+    # "deleted" session still answered `GET /sessions`, `/:id/messages`,
+    # `/:id/export`, `/sessions/search`, and the agent's own `session_search`
+    # tool. Delete is the one operation whose whole contract is that the content
+    # is gone, so it has to cover both stores.
+    {:ok, erased_rows} = OptimalSystemAgent.Store.SessionTranscript.delete_session(session_id)
+
     case OptimalSystemAgent.Agent.SessionPersistence.delete(session_id) do
       :ok ->
-        body = Jason.encode!(%{status: "deleted", session_id: session_id})
+        body =
+          Jason.encode!(%{
+            status: "deleted",
+            session_id: session_id,
+            transcript_rows_erased: erased_rows
+          })
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, body)
+
+      # No files, but rows were erased: the session was real and is now gone.
+      # 404-ing here would tell the user nothing was deleted while the erase had
+      # in fact just happened.
+      {:error, :enoent} when erased_rows > 0 ->
+        body =
+          Jason.encode!(%{
+            status: "deleted",
+            session_id: session_id,
+            transcript_rows_erased: erased_rows
+          })
 
         conn
         |> put_resp_content_type("application/json")
@@ -648,6 +677,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           :exit, _ -> nil
         end
 
+      # Tombstone the old session BEFORE the new one is created.
+      #
+      # Step 1 above just rewrote `<old_id>.json`, which refreshed its mtime to
+      # now — and `SessionPersistence.list/1` orders by mtime, while the fresh
+      # session writes no file at all until its first turn completes. Without
+      # this mark the clear left the DISCARDED conversation as the most recent
+      # session for this directory, so the very next `/continue` (or `-c`, or a
+      # directory-scoped POST /sessions) resumed it and `Loop.init/1`
+      # repopulated the message history the user had just thrown away.
+      #
+      # The mark is a tombstone, not a delete: `list/1` skips it, so nothing
+      # finds it by enumeration, but `load/1` still works so `/resume <old_id>`
+      # and export keep the clear recoverable on purpose. Erasing is
+      # `DELETE /sessions/:id`.
+      _ = OptimalSystemAgent.Agent.SessionPersistence.mark_cleared(old_id)
+
       # session_end hooks fire inside Loop.terminate/2 (synchronous — ordered
       # strictly before the new loop's session_start). A tracked-but-not-live
       # session has no loop to stop; {:error, :not_found} is fine.
@@ -662,6 +707,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
                working_dir: working_dir,
                parent_session_id: old_id
              ) do
+        Logger.info(
+          "[clear] session swap #{old_id} -> #{new_id} (working_dir=#{inspect(working_dir)}); " <>
+            "#{old_id} tombstoned — still loadable by id, no longer enumerated"
+        )
+
         json(conn, 201, %{
           id: new_id,
           status: "cleared",

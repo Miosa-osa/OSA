@@ -107,7 +107,10 @@ the orchestrator. On Anthropic, a batched turn ran all calls at once; two
 generalised: `ConflictScope` resolves each call to declared reads and writes,
 compares them after symlink and relative-path normalisation, and fails closed on
 anything unresolvable. `file_edit` relaxes from unconditional barrier to
-path-scoped, so edits to *different* files now run in parallel.
+path-scoped, so edits to *different* files now run in parallel. `download`
+declares its destination the same way, so two downloads to one path serialise
+instead of racing — its handler writes straight to the final destination with no
+temp file, so the scope declaration is the only thing standing between them.
 
 ### Fixed — the interface lied about its own state
 
@@ -192,7 +195,6 @@ production callers, a live hazard the moment anything wired it up.
   detectors were ruled out on evidence — the best fires on 15 of 49 solves. And
   our event log stores a write's *path* but not its *content*, so a
   content-based detector is unmeasurable from our own artefacts.
-- `download` remains per-call concurrency-safe; two downloads to one path race.
 - Bedrock and Google cache/reasoning paths are implemented against documented
   shapes and **unverified against a live call** — no credentials exist on the
   build machine.

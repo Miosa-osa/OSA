@@ -223,6 +223,46 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
     _ -> default
   end
 
+  @doc """
+  Delete every transcript row for one session. Returns the row count removed.
+
+  This store is the SECOND, independent home of a conversation: the resume
+  files under `~/.osa/sessions/` are one, these SQLite rows are the other, and
+  until now only the first had a per-session delete. `DELETE /sessions/:id`
+  therefore removed the files and left the transcript entirely intact — so a
+  "deleted" session still answered `GET /sessions`, `/sessions/:id/messages`,
+  `/sessions/:id/export`, full-text `/sessions/search`, and the agent's own
+  `session_search` tool. There was no operation anywhere in the product that
+  actually made a conversation go away.
+
+  Deletes through the schema (not raw SQL) so the FTS5 mirror's delete trigger
+  fires for each row and the search index does not outlive the content.
+
+  Best-effort: an erase that raises is worse than one that reports zero, because
+  the caller's next move is to tell the user their data is gone.
+  """
+  @spec delete_session(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def delete_session(session_id) when is_binary(session_id) and session_id != "" do
+    {count, _} =
+      from(t in __MODULE__, where: t.session_id == ^session_id)
+      |> Repo.delete_all()
+
+    if count > 0 do
+      Logger.info("[transcript] erased #{count} row(s) for session #{session_id}")
+    end
+
+    {:ok, count}
+  rescue
+    e ->
+      Logger.warning(
+        "[transcript] erase failed for session #{session_id}: #{Exception.message(e)}"
+      )
+
+      {:error, e}
+  end
+
+  def delete_session(_), do: {:ok, 0}
+
   @doc "Current row count — used by retention tests and diagnostics."
   @spec count() :: non_neg_integer()
   def count, do: Repo.aggregate(__MODULE__, :count, :id)

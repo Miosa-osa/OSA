@@ -239,12 +239,60 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   end
 
   @doc """
+  Mark a session as cleared.
+
+  `/clear` is a session SWAP, not an erase: the old transcript is deliberately
+  saved and kept resumable, and lineage is recorded on the new session. But the
+  endpoint's own contract is that the conversation is over — "hand back a fresh
+  session so the model cannot remember anything said before the clear" — and
+  saving the old transcript is what broke it, in the most direct way available:
+  `auto_save/1` rewrites `<id>.json`, `list/1` orders by MTIME, and the fresh
+  session writes no file until its first turn. So for the whole window between
+  the clear and the next turn, the CLEARED session was the newest one for its
+  directory, and the next `/continue` (or `-c`, or a directory-scoped
+  `POST /sessions`) resumed it — `Loop.init/1` repopulating `state.messages`
+  straight out of the conversation the user had just discarded.
+
+  The tombstone draws the line at enumeration: a cleared session is never
+  returned by `list/1`, so nothing reaches it by "most recent" or by scanning a
+  picker. It stays fully loadable BY ID (`load/1`, `/resume <id>`, export), which
+  is what makes the clear recoverable on purpose rather than by accident.
+
+  Erasure is a different operation with a different endpoint — see
+  `delete/1` and `DELETE /sessions/:id`.
+  """
+  @spec mark_cleared(String.t()) :: :ok | {:error, term()}
+  def mark_cleared(session_id) when is_binary(session_id) do
+    update_metadata(session_id, %{cleared_at: DateTime.utc_now() |> DateTime.to_iso8601()})
+  end
+
+  def mark_cleared(_), do: :ok
+
+  @doc """
+  Whether this session has been cleared (tombstoned by `mark_cleared/1`).
+  """
+  @spec cleared?(String.t()) :: boolean()
+  def cleared?(session_id) when is_binary(session_id) do
+    not is_nil(get_metadata(session_id).cleared_at)
+  rescue
+    _ -> false
+  end
+
+  def cleared?(_), do: false
+
+  @doc """
   List recent saved sessions. Pass `working_dir:` to only return sessions for
   that folder (directory-scoped, Claude Code style).
+
+  Cleared sessions (see `mark_cleared/1`) are excluded — this function is every
+  "find me a session" path there is (`find_latest_for_dir/1`, the `/resume`
+  picker, `--continue`), and a discarded conversation must not be what any of
+  them lands on. Pass `include_cleared: true` for an audit/recovery view.
   """
   def list(opts \\ []) do
     limit = Keyword.get(opts, :limit, @max_sessions)
     filter_dir = normalize_dir(Keyword.get(opts, :working_dir))
+    include_cleared? = Keyword.get(opts, :include_cleared, false)
 
     case File.ls(sessions_dir()) do
       {:ok, files} ->
@@ -267,6 +315,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
                   working_dir: meta.working_dir,
                   title: meta.title,
                   tags: meta.tags,
+                  cleared_at: meta.cleared_at,
                   size: stat.size,
                   modified_at: to_naive(stat.mtime)
                 }
@@ -275,6 +324,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
             {:error, _} ->
               []
           end
+        end)
+        |> then(fn sessions ->
+          if include_cleared?,
+            do: sessions,
+            else: Enum.reject(sessions, &(not is_nil(&1.cleared_at)))
         end)
         |> then(fn sessions ->
           if filter_dir,
@@ -1325,7 +1379,8 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     %{
       working_dir: record["working_dir"],
       title: meta["title"] || record["title"],
-      tags: normalize_tags(meta["tags"] || record["tags"])
+      tags: normalize_tags(meta["tags"] || record["tags"]),
+      cleared_at: meta["cleared_at"]
     }
   end
 
