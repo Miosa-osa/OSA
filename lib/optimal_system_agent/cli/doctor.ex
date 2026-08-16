@@ -346,7 +346,12 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   # through `Runtime.Identity`, the same source `check_model/0` and `/health`
   # use, and probe only to qualify that answer — or, when nothing is configured
   # at all, to guess (the old behaviour, now confined to the case it was for).
-  defp check_provider do
+  # Public for the same reason `configured_model_name/1` is: the identity half
+  # needs no network and no TTY, so it can be asserted directly instead of
+  # through `checks/0`, which probes.
+  @doc false
+  @spec check_provider() :: {:pass | :fail | :optional, String.t(), String.t()}
+  def check_provider do
     case OptimalSystemAgent.Runtime.Identity.provider() do
       nil -> detect_any_provider()
       provider -> check_configured_provider(provider)
