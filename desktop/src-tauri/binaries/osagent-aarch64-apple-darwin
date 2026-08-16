@@ -1,3 +1,0 @@
-#\!/bin/sh
-echo "OSA sidecar stub — use mix osa.serve for development"
-exit 0
