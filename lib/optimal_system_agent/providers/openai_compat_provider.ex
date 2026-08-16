@@ -177,6 +177,40 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
       default_url: "https://api.hyperbolic.xyz/v1",
       default_model: "meta-llama/Llama-3.3-70B-Instruct"
     },
+    # api.uncensored.com — an OpenAI chat-completions gateway fronting ~82
+    # frontier models with the refusal behaviour trained out. Two quirks that
+    # the rest of this table does not have:
+    #
+    #   * auth is `x-api-key`, NOT `Authorization: Bearer`. A Bearer token is
+    #     not merely rejected, it is ignored — the API answers exactly as it
+    #     does for an unauthenticated call, so a Bearer-only client fails with
+    #     a misleading "invalid key" and no hint that the header was wrong.
+    #   * the base URL carries an `/api` segment before `/v1`.
+    #
+    # Model IDs are the provider's own and do not match upstream vendor naming
+    # (`claude-opus-5`, not `claude-opus-5-20260219`). The live list is public
+    # and needs no key: GET https://api.uncensored.com/api/v1/models
+    uncensored: %{
+      default_url: "https://api.uncensored.com/api/v1",
+      default_model: "claude-opus-5",
+      auth_style: :x_api_key,
+      available_models: [
+        "claude-opus-5",
+        "claude-opus-4.8",
+        "claude-sonnet-4.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gemini-3.1-pro-preview",
+        "grok-4-6",
+        "grok-4.5",
+        "kimi-k3",
+        "deepseek-v4-pro",
+        "glm-5.2",
+        "qwen3-coder",
+        "hermes-3-llama-3.1-405b"
+      ]
+    },
+
     # LM Studio — local, OpenAI-compatible server (no key needed)
     lmstudio: %{
       default_url: "http://localhost:1234/v1",
@@ -295,6 +329,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   @spec keyless?(atom()) :: boolean()
   def keyless?(provider), do: Map.get(get_config!(provider), :keyless, false)
 
+  @doc "Auth header convention for a provider — `:bearer` unless it says otherwise."
+  def auth_style(provider), do: Map.get(get_config!(provider), :auth_style, :bearer)
+
   @doc false
   # Test/introspection seam for the private `resolve_api_key/2` — lets the
   # live-fallback resolution (P2/P3: Application snapshot → System.get_env →
@@ -323,6 +360,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         # that knows the answer, so it says it.
         |> Keyword.put(:provider, provider)
         |> maybe_add_headers(config)
+        |> maybe_add_auth_style(config)
         |> maybe_extend_timeout(model)
 
       messages = demote_non_leading_system(messages)
@@ -363,6 +401,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         # that knows the answer, so it says it.
         |> Keyword.put(:provider, provider)
         |> maybe_add_headers(config)
+        |> maybe_add_auth_style(config)
         |> maybe_extend_timeout(model)
 
       result =
@@ -561,6 +600,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     do: Keyword.put(opts, :extra_headers, headers)
 
   defp maybe_add_headers(opts, _config), do: opts
+
+  # Providers that authenticate with something other than a Bearer token say so
+  # in their config; everything else keeps the OpenAI default in OpenAICompat.
+  defp maybe_add_auth_style(opts, %{auth_style: style}), do: Keyword.put(opts, :auth_style, style)
+
+  defp maybe_add_auth_style(opts, _config), do: opts
 
   # Reasoning models (o3, deepseek-reasoner, kimi) need 600s timeout
   defp maybe_extend_timeout(opts, model) do

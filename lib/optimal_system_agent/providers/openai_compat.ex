@@ -80,13 +80,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # by the thing written to report it.
     cache_fp = CacheAttribution.fingerprint(body)
 
-    extra_headers = Keyword.get(opts, :extra_headers, [])
-
-    headers =
-      [
-        {"Authorization", "Bearer #{api_key}"},
-        {"Content-Type", "application/json"}
-      ] ++ extra_headers
+    headers = build_headers(api_key, opts)
 
     url = "#{base_url}/chat/completions"
     # Reasoning models (o3, deepseek-reasoner, etc.) need 300+ s for chain-of-thought
@@ -302,6 +296,23 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   def prompt_cache_key_host?(_), do: false
 
+  # Auth header shape differs by provider. Default is the OpenAI convention,
+  # `Authorization: Bearer <key>`; a provider config may set `auth_style:
+  # :x_api_key` to send `x-api-key: <key>` instead (api.uncensored.com reads
+  # only that header and ignores a Bearer token entirely).
+  @doc false
+  # Public only so the auth-style matrix can be asserted directly; see
+  # test/providers/uncensored_provider_test.exs.
+  def build_headers(api_key, opts) do
+    auth =
+      case Keyword.get(opts, :auth_style, :bearer) do
+        :x_api_key -> [{"x-api-key", api_key}]
+        _ -> [{"Authorization", "Bearer #{api_key}"}]
+      end
+
+    auth ++ [{"Content-Type", "application/json"}] ++ Keyword.get(opts, :extra_headers, [])
+  end
+
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
     body = build_stream_body(model, messages, opts, base_url)
 
@@ -310,13 +321,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # measured route dark even after wiring `do_chat/5`.
     cache_fp = CacheAttribution.fingerprint(body)
 
-    extra_headers = Keyword.get(opts, :extra_headers, [])
-
-    headers =
-      [
-        {"Authorization", "Bearer #{api_key}"},
-        {"Content-Type", "application/json"}
-      ] ++ extra_headers
+    headers = build_headers(api_key, opts)
 
     url = "#{base_url}/chat/completions"
     timeout = Keyword.get(opts, :receive_timeout, 600_000)
