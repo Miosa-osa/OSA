@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   """
 
   alias OptimalSystemAgent.Tools.Ablation
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.FileGrep.Backend
   alias OptimalSystemAgent.Tools.Builtins.FileGrep.Constants
   alias OptimalSystemAgent.Tools.UseContext
@@ -325,41 +326,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
     _ -> {:fallback, :failed}
   end
 
-  # Run ripgrep under a deadline, killing the OS process if it blows through it.
+  # Run ripgrep under a deadline, killing its whole process group if it blows
+  # through one.
   #
-  # `Task.shutdown(:brutal_kill)` tears down the Port, and closing a Port kills
-  # the OS process it owns — so a wedged `rg` does not survive as an orphan
-  # holding the mount that wedged it.
+  # This used to run `System.cmd/3` inside a supervised task and
+  # `Task.shutdown(:brutal_kill)` it on expiry, with a comment claiming that
+  # "closing a Port kills the OS process it owns". That claim is FALSE, and it
+  # was load-bearing: the turn was freed and the `rg` was not. Measured with
+  # `ps` — after the deadline fired and the task was brutal-killed, the child
+  # was still there, still holding the mount that wedged it, now reparented to
+  # init. A long session accumulated one orphan per wedged search, invisibly.
+  #
+  # `BoundedCmd` spawns through `Port.open/2` under `setsid` so there is an
+  # os_pid and a process group to signal, and reaps the group on expiry. The
+  # reporting contract is unchanged and is still the important part: a timeout
+  # is reported as ITSELF, never folded into `{:fallback, :failed}`, which
+  # would send the search quietly down the pure-Elixir path and hand back a
+  # plausible-looking result for a search that hung.
   defp bounded_ripgrep(exe, args) do
-    task =
-      Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
-        System.cmd(exe, args, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, Constants.ripgrep_timeout_ms()) ||
-           Task.shutdown(task, :brutal_kill) do
-      {:ok, {output, 0}} ->
+    case BoundedCmd.run(exe, args,
+           label: "ripgrep",
+           target: List.last(args),
+           timeout_ms: Constants.ripgrep_timeout_ms()
+         ) do
+      {:ok, output, 0} ->
         {:ok, output}
 
       # ripgrep exits 1 for "no match". That is a real, trustworthy answer
       # from a real engine — not a fallback trigger.
-      {:ok, {_output, 1}} ->
+      {:ok, _output, 1} ->
         :empty
 
       # 2+ means ripgrep ran and failed. A different fault from absence.
-      {:ok, {_, _}} ->
+      {:ok, _output, _} ->
         {:fallback, :failed}
 
-      # The deadline fired, or the task died. `nil` from `Task.shutdown/2` is
-      # the timeout case and is reported as itself — NOT folded into
-      # `{:fallback, :failed}`, which would send the search quietly down the
-      # pure-Elixir path and hand back a plausible-looking result for a search
-      # that hung. Silent recovery is how a wedge stays invisible.
-      nil ->
+      {:timeout, _why} ->
         {:timeout, Constants.ripgrep_timeout_ms()}
-
-      {:exit, _reason} ->
-        {:fallback, :failed}
     end
   end
 

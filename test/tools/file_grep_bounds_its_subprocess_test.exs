@@ -83,6 +83,57 @@ defmodule OptimalSystemAgent.Tools.FileGrepBoundsItsSubprocessTest do
            "a hung search must never be reported as a completed empty search"
   end
 
+  test "the wedged ripgrep is actually REAPED, not just abandoned", %{search_dir: dir} do
+    # The bound freed the turn from the start. It did not free the machine: the
+    # original fix ran `System.cmd/3` in a task and `:brutal_kill`ed the task,
+    # and its comment claimed "closing a Port kills the OS process it owns".
+    # Measured with `ps`, that claim was false — the `rg` survived its own
+    # deadline, reparented to init, still holding whatever wedged it, one orphan
+    # per wedged search for the life of the session.
+    #
+    # `ps` is the evidence here for the same reason it was the evidence that
+    # exposed the bug: the BEAM's view of a port says nothing about whether the
+    # OS process is still running.
+    marker = "osa-fg-reap-#{System.unique_integer([:positive])}"
+
+    bin_dir = Path.join(System.tmp_dir!(), "fg-reap-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(bin_dir)
+    fake_rg = Path.join(bin_dir, "rg")
+
+    # A shell that forks a GRANDCHILD and waits on it. This is the shape that
+    # actually leaks — signalling only the direct child leaves the grandchild
+    # running — and it is what a real `rg` piping into a pager, or any wrapper
+    # script, looks like to the kernel.
+    File.write!(fake_rg, "#!/bin/sh\nsleep 120 # #{marker} &\nsleep 120 # #{marker}\n")
+    File.chmod!(fake_rg, 0o755)
+
+    prev_path = System.get_env("PATH")
+    System.put_env("PATH", bin_dir <> ":" <> prev_path)
+    Application.put_env(:optimal_system_agent, :file_grep_timeout_ms, 700)
+
+    on_exit(fn ->
+      System.put_env("PATH", prev_path)
+      File.rm_rf(bin_dir)
+    end)
+
+    assert {:error, _} = Handler.execute(%{"pattern" => "needle", "path" => dir}, %{})
+
+    # TERM, grace, KILL, then the kernel reaps the zombie.
+    Process.sleep(500)
+    {ps_out, _} = System.cmd("ps", ["-eo", "pid,stat,args"], stderr_to_stdout: true)
+
+    survivors =
+      ps_out
+      |> String.split("\n")
+      |> Enum.filter(&String.contains?(&1, marker))
+      |> Enum.reject(&String.contains?(&1, "<defunct>"))
+      |> Enum.reject(&String.contains?(&1, "ps -eo"))
+
+    assert survivors == [],
+             "the wedged ripgrep outlived its deadline as an orphan:\n" <>
+               Enum.join(survivors, "\n")
+  end
+
   test "the bound does not fire on a search that answers normally", %{search_dir: dir} do
     # Same fixture, same code path, a fake `rg` that behaves. Guards against a
     # bound so tight (or a branch so eager) that it reports healthy searches as
