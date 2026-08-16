@@ -598,10 +598,15 @@ impl Message {
                 }
             };
             let body_scroll = scroll_top.saturating_sub(1); // header was line 0
-            let paragraph = Paragraph::new(styled_text)
-                .block(block)
-                .scroll((body_scroll, 0));
-            paragraph.render(content_area, buf);
+            // NOT via `Paragraph`: a markdown body can carry OSC 8 hyperlink
+            // escapes (`render/markdown.rs` linkifies `[text](url)`, bare URLs
+            // and attachment chips). With no `.wrap()`, `Paragraph` truncates
+            // through `LineTruncator`, which counts every ESC byte as one
+            // display column — about 45 phantom columns for a short https link
+            // — and cuts the row's visible tail. See `render/cells.rs`.
+            let inner = block.inner(content_area);
+            block.render(content_area, buf);
+            crate::render::cells::render_lines(&styled_text.lines, inner, buf, body_scroll);
         }
     }
 
@@ -628,10 +633,10 @@ impl Message {
             }
         };
         // No header on a continuation, so scroll_top applies straight to the body.
-        let paragraph = Paragraph::new(styled_text)
-            .block(block)
-            .scroll((scroll_top, 0));
-        paragraph.render(area, buf);
+        // Escape-aware renderer, for the reason spelled out in `draw_agent`.
+        let inner = block.inner(area);
+        block.render(area, buf);
+        crate::render::cells::render_lines(&styled_text.lines, inner, buf, scroll_top);
     }
 
     fn draw_system(
@@ -1430,5 +1435,101 @@ mod commit_parse_tests {
             source.prerendered_body.is_some(),
             "the committed source should model a message prepared at its original width"
         );
+    }
+}
+
+#[cfg(test)]
+mod hyperlink_render_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+
+    fn osc8(text: &str, url: &str) -> String {
+        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+    }
+
+    /// Visible text of a rendered row — cell symbols with escapes removed,
+    /// which is what the user actually sees.
+    fn visible_row(buf: &Buffer, y: u16) -> String {
+        let mut out = String::new();
+        for x in 0..buf.area.width {
+            let sym = buf[(x, y)].symbol();
+            let mut i = 0usize;
+            while i < sym.len() {
+                if let Some(len) = crate::util::escape_len_at(sym, i) {
+                    i += len;
+                    continue;
+                }
+                let c = sym[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+        out.trim_end().to_string()
+    }
+
+    fn raw_row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// A markdown body carrying an OSC 8 hyperlink must keep the whole visible
+    /// row AND emit both halves of the escape.
+    ///
+    /// `draw_agent` / `draw_agent_continuation` rendered the body through
+    /// `Paragraph`, which with no `.wrap()` cuts the row via `LineTruncator` —
+    /// and `unicode-width` reports width 1 for ESC, so a short `https://` link
+    /// costs about 45 phantom columns. The row was cut mid-URL, permanently:
+    /// finalized messages go straight to the terminal's own scrollback through
+    /// `insert_before`, and v1.0.104's resize replay re-renders them at every
+    /// new width, so a narrowing drag sheared the same row again on each step.
+    ///
+    /// Worse than losing the tail: the cut landed INSIDE the link, so the
+    /// terminator was never emitted and the hyperlink was left OPEN — the next
+    /// thing the terminal printed became part of it.
+    ///
+    /// The escape is built here directly rather than through `hyperlink_span`,
+    /// which consults the process environment; this asserts the RENDERER, in
+    /// every environment.
+    #[test]
+    fn agent_body_keeps_a_hyperlinked_row_whole_and_closes_the_link() {
+        let url = "https://osa.dev/guide/streaming";
+        let text = Text::from(vec![Line::from(vec![
+            Span::raw("Docs: "),
+            Span::raw(osc8("the OSA guide", url)),
+            Span::raw(" and PLAINWORD here."),
+        ])]);
+        // Visible content is 45 columns; the escape adds ~45 phantom ones, so a
+        // 60-column area is comfortable for the truth and impossible for the
+        // phantom measurement.
+        let area = Rect::new(0, 0, 60, 2);
+
+        for msg in [
+            Message::new_agent_prerendered(text.clone(), true),
+            Message::new_agent_prerendered(text.clone(), false),
+        ] {
+            let mut buf = Buffer::empty(area);
+            msg.render_to_buffer(area, &mut buf, 0);
+            // The header occupies row 0 for `Agent`, none for a continuation.
+            let y = match msg.msg_type {
+                MessageType::Agent => 1,
+                _ => 0,
+            };
+            let seen = visible_row(&buf, y);
+            assert!(
+                seen.ends_with("and PLAINWORD here."),
+                "row was sheared by phantom escape columns: {seen:?}"
+            );
+            let raw = raw_row(&buf, y);
+            assert!(
+                raw.contains(&format!("\x1b]8;;{url}\x1b\\")),
+                "the hyperlink opener never reached the buffer"
+            );
+            assert!(
+                raw.contains("\x1b]8;;\x1b\\"),
+                "the hyperlink terminator never reached the buffer — the link is \
+                 left OPEN and swallows whatever the terminal prints next"
+            );
+        }
     }
 }

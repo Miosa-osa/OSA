@@ -93,6 +93,31 @@ Two further scope notes:
 | `osa_pty.py` | the PTY session — fork, resize, pump, answer DSR, render, count |
 | `stub_backend.py` | the smallest HTTP backend `osagent` will boot against |
 | `test_resize.py` | the assertions |
+| `osc8_reader.py` | the only reader here that can see an OSC 8 hyperlink — per-cell URIs |
+| `osc8_resize_probe.py` | does a link survive the resize replay, with the right target |
+
+### Reading hyperlinks
+
+Every other reader in this directory hands back text with the escapes already
+consumed — `pyte` drops OSC 8 (its OSC branch dispatches codes 0/1/2 only),
+`vte_reader` reads `Vte.Format.TEXT`, and `vte_exit_dump` reads a dump OSA has
+*deliberately* stripped so a half-open hyperlink cannot be inherited by the
+shell prompt. So "links still work after a resize" was an expectation nothing
+could measure, and `vte_content_reflow.py` says so in its own header.
+
+`osc8_reader.py` models libvte's per-cell `hyperlink_uri` from the byte stream
+OSA writes, which is what every real emulator builds that attribute from. It is
+modelled rather than read from libvte because on this box (VTE 0.76 / GTK 3) the
+attribute is unreachable from a test process: HTML export emits no anchors
+(verified — the same export renders colour faithfully), and
+`hyperlink_check_event` needs a `GdkEvent` that a synthesized one cannot
+satisfy. That was pinned rather than guessed: `match_check_event`, which
+resolves position through the same `rowcol_from_event`, also returns `None` at
+coordinates where its regex plainly matches the text on screen.
+
+Run `python3 test/pty/osc8_reader.py` before trusting anything measured with it.
+It fails unless it reports `None` for every cell that must **not** carry a URI —
+overwritten, erased, scrolled off, or simply plain text next to a link.
 
 ## The tests
 
