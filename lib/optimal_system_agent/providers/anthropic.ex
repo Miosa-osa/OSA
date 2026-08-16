@@ -1229,9 +1229,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
       case reason do
         :placed ->
-          Logger.debug(
-            "[Anthropic] system cache breakpoint placed: #{bytes} B (~#{tokens} tok)"
-          )
+          Logger.debug("[Anthropic] system cache breakpoint placed: #{bytes} B (~#{tokens} tok)")
 
         :caching_disabled ->
           Logger.debug(

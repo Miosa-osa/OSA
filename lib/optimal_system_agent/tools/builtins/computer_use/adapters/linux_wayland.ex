@@ -194,9 +194,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
              target: "the Wayland compositor",
              stderr_to_stdout: false
            ) do
-        {:ok, out, 0} -> {:ok, out}
-        {:ok, output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
-        {:timeout, why} -> {:error, why}
+        {:ok, out, 0} ->
+          {:ok, out}
+
+        {:ok, output, code} ->
+          {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+
+        {:timeout, why} ->
+          {:error, why}
       end
     else
       {:error, "clipboard_get unavailable (install wl-clipboard)"}

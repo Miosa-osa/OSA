@@ -130,8 +130,8 @@ defmodule OptimalSystemAgent.Tools.FileGrepBoundsItsSubprocessTest do
       |> Enum.reject(&String.contains?(&1, "ps -eo"))
 
     assert survivors == [],
-             "the wedged ripgrep outlived its deadline as an orphan:\n" <>
-               Enum.join(survivors, "\n")
+           "the wedged ripgrep outlived its deadline as an orphan:\n" <>
+             Enum.join(survivors, "\n")
   end
 
   test "the bound does not fire on a search that answers normally", %{search_dir: dir} do

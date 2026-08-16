@@ -28,7 +28,12 @@ defmodule OptimalSystemAgent.Security.TrustHotpathCostTest do
 
     Trust.forget(dir)
     Trust.accept(dir)
-    on_exit(fn -> Trust.forget(dir); File.rm_rf(dir) end)
+
+    on_exit(fn ->
+      Trust.forget(dir)
+      File.rm_rf(dir)
+    end)
+
     {:ok, dir: dir}
   end
 

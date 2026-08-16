@@ -190,7 +190,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.BackendTest do
       File.write!(Path.join(nested, "target.ex"), "UNIQUE_SENTINEL_TOKEN\n")
 
       without_ripgrep(fn ->
-        assert {:ok, out} = FileGrep.execute(%{"pattern" => "UNIQUE_SENTINEL_TOKEN", "path" => dir})
+        assert {:ok, out} =
+                 FileGrep.execute(%{"pattern" => "UNIQUE_SENTINEL_TOKEN", "path" => dir})
+
         # The fallback must walk the whole tree, not the first N lexicographic
         # entries — this is the 0.9%-of-54,905-files defect.
         assert out =~ "UNIQUE_SENTINEL_TOKEN"

@@ -178,7 +178,11 @@ defmodule OptimalSystemAgent.CLI.Auth do
       # command is, almost by definition, someone it used to work for.
       OptimalSystemAgent.Auth.LegacyAnthropicOAuth.removed_provider?(provider) ->
         IO.puts("")
-        IO.puts("  #{@yellow}#{OptimalSystemAgent.Auth.LegacyAnthropicOAuth.login_notice()}#{@reset}")
+
+        IO.puts(
+          "  #{@yellow}#{OptimalSystemAgent.Auth.LegacyAnthropicOAuth.login_notice()}#{@reset}"
+        )
+
         IO.puts("")
         {:error, :anthropic_oauth_removed}
 

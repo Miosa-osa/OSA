@@ -21,5 +21,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Prompt do
     reports itself rather than returning empty.
     """
   end
-
 end

@@ -17,5 +17,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Prompt do
     means the pattern is absent, not filtered.
     """
   end
-
 end

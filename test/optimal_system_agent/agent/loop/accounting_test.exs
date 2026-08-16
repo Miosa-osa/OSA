@@ -367,7 +367,12 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
 
     defp peak_and_off_peak(window, day) do
       [{from, _until} | _] = window.peak_hours
-      off = Enum.find(0..23, fn h -> not Enum.any?(window.peak_hours, fn {f, u} -> h >= f and h < u end) end)
+
+      off =
+        Enum.find(0..23, fn h ->
+          not Enum.any?(window.peak_hours, fn {f, u} -> h >= f and h < u end)
+        end)
+
       {at_hour(day, from), at_hour(day, off)}
     end
 
@@ -413,8 +418,11 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
 
     test "a garbage stamp is refused rather than carried into the price" do
       state = base_state()
-      recorded = Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0},
-        requested_at: "not a datetime")
+
+      recorded =
+        Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0},
+          requested_at: "not a datetime"
+        )
 
       assert recorded.session_cost_usd == 3.0
     end

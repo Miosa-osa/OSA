@@ -1658,7 +1658,9 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
     opts
     |> then(fn o -> if provider, do: Keyword.put(o, :provider, provider), else: o end)
-    |> then(fn o -> if is_binary(model) and model != "", do: Keyword.put(o, :model, model), else: o end)
+    |> then(fn o ->
+      if is_binary(model) and model != "", do: Keyword.put(o, :model, model), else: o
+    end)
     |> tap(fn o ->
       unless is_binary(Keyword.get(o, :model)) do
         Logger.error(

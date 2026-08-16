@@ -244,7 +244,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
       executable =
         tools
         |> Enum.map(& &1.name)
-        |> Enum.filter(&OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?(&1, role))
+        |> Enum.filter(
+          &OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?(&1, role)
+        )
         |> MapSet.new()
 
       assert advertised == executable
@@ -271,7 +273,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
     test "a gate that removes tools says so at info, never silently" do
       tools = advertised_tools()
 
-      log = capture_info(fn -> ToolFilter.filter_for_role_allowlist(tools, ~w(file_read file_glob)) end)
+      log =
+        capture_info(fn ->
+          ToolFilter.filter_for_role_allowlist(tools, ~w(file_read file_glob))
+        end)
 
       assert log =~ "role tool gate active"
       assert log =~ "advertising 2 of 8 tools"

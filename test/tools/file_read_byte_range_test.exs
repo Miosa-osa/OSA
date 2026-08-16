@@ -22,7 +22,9 @@ defmodule OptimalSystemAgent.Tools.FileReadByteRangeTest do
     dir = Path.join(System.tmp_dir!(), "osa-byte-range-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
-    {:ok, dir: dir, ctx: %UseContext{session_id: "byte-range-#{System.unique_integer([:positive])}"}}
+
+    {:ok,
+     dir: dir, ctx: %UseContext{session_id: "byte-range-#{System.unique_integer([:positive])}"}}
   end
 
   defp write(dir, name, content) do

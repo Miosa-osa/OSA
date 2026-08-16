@@ -213,10 +213,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
         # degrade from gracefully. Drop the unsatisfiable ALLOWLIST, keep the
         # safety clauses, and say loudly that the role file is wrong.
         salvaged =
-          Enum.filter(tools, &role_permits?(tier, tool_name(&1), %{
-            allowed_tools: nil,
-            blocked_tools: blocked
-          }))
+          Enum.filter(
+            tools,
+            &role_permits?(tier, tool_name(&1), %{
+              allowed_tools: nil,
+              blocked_tools: blocked
+            })
+          )
 
         Logger.warning(
           "[loop] role allowlist #{inspect(allowed)} matches NO advertised tool " <>

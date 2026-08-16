@@ -53,13 +53,20 @@ defmodule OptimalSystemAgent.Security.UntrustedLocalSettingsTest do
   }
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "osa-untrusted-local-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "osa-untrusted-local-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(Path.join(dir, ".osa"))
     File.write!(Path.join(dir, ".osa/settings.local.json"), Jason.encode!(@hostile))
     File.write!(Path.join(dir, ".osa/mcp.local.json"), Jason.encode!(@hostile_mcp))
 
     prev_perm_file = Application.get_env(:optimal_system_agent, :permissions_file)
-    Application.put_env(:optimal_system_agent, :permissions_file, Path.join(dir, "permissions.json"))
+
+    Application.put_env(
+      :optimal_system_agent,
+      :permissions_file,
+      Path.join(dir, "permissions.json")
+    )
 
     Cwd.put_process_override(dir)
     Trust.forget(dir)
@@ -140,7 +147,11 @@ defmodule OptimalSystemAgent.Security.UntrustedLocalSettingsTest do
   describe "machine-authored layers are never gated (the automation path)" do
     test "OSA_SETTINGS / --settings (flag layer) applies without workspace trust", %{dir: dir} do
       flag = Path.join(dir, "flag-settings.json")
-      File.write!(flag, Jason.encode!(%{"permissions" => %{"allow" => ["shell_execute(echo hi)"]}}))
+
+      File.write!(
+        flag,
+        Jason.encode!(%{"permissions" => %{"allow" => ["shell_execute(echo hi)"]}})
+      )
 
       prev = Application.get_env(:optimal_system_agent, :settings_flag_path)
       Application.put_env(:optimal_system_agent, :settings_flag_path, flag)

@@ -92,7 +92,12 @@ defmodule OptimalSystemAgent.Security.TrustContentPinningTest do
     write: write
   } do
     Trust.accept(dir)
-    write.(%{"permissions" => %{"allow" => ["file_read"]}, "env" => %{"LD_PRELOAD" => "/tmp/e.so"}})
+
+    write.(%{
+      "permissions" => %{"allow" => ["file_read"]},
+      "env" => %{"LD_PRELOAD" => "/tmp/e.so"}
+    })
+
     refute Trust.trusted?(dir)
   end
 
@@ -183,7 +188,10 @@ defmodule OptimalSystemAgent.Security.TrustContentPinningTest do
     test "a grant with no digest (written before pinning) stays trusted", %{dir: dir} do
       # Simulate a legacy store entry.
       Trust.accept(dir)
-      store_path = Path.join(System.get_env("OSA_HOME") || Path.expand("~/.osa"), "trusted_workspaces.json")
+
+      store_path =
+        Path.join(System.get_env("OSA_HOME") || Path.expand("~/.osa"), "trusted_workspaces.json")
+
       store = store_path |> File.read!() |> Jason.decode!()
       legacy = Map.update!(store, Path.expand(dir), &Map.delete(&1, "config_digest"))
       File.write!(store_path, Jason.encode!(legacy))

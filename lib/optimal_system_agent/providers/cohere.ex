@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Providers.Cohere do
-
   alias OptimalSystemAgent.Providers.ConfiguredModel
+
   @moduledoc """
   Cohere provider — Command R+ and Command A models.
 

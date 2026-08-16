@@ -268,7 +268,10 @@ defmodule OptimalSystemAgent.Providers.PromptCache do
       # the separator the cached prefix stayed pinned at 26,213 tokens for six
       # straight turns; with the breakpoint on the last history message it grew
       # 26,213 → 28,297 and the session got another 21% cheaper.
-      trailing = %{role: "user", content: [%{type: "text", text: @tail_marker <> "\n" <> volatile}]}
+      trailing = %{
+        role: "user",
+        content: [%{type: "text", text: @tail_marker <> "\n" <> volatile}]
+      }
 
       marked_history = List.update_at(history, -1, &mark_last_part/1)
 
@@ -300,7 +303,10 @@ defmodule OptimalSystemAgent.Providers.PromptCache do
 
   defp put_marker(%{"text" => _} = p), do: Map.put(p, "cache_control", %{"type" => "ephemeral"})
   defp put_marker(p) when is_map(p), do: Map.put(p, :cache_control, %{type: "ephemeral"})
-  defp put_marker(p) when is_binary(p), do: %{type: "text", text: p, cache_control: %{type: "ephemeral"}}
+
+  defp put_marker(p) when is_binary(p),
+    do: %{type: "text", text: p, cache_control: %{type: "ephemeral"}}
+
   defp put_marker(p), do: p
 
   defp last_marked_index(parts) do

@@ -248,7 +248,6 @@ defmodule OptimalSystemAgent.Agent.Safety.PromptInjection do
 
   def faked_conversation?(_), do: false
 
-
   # Normalize user input before Tier 2 injection pattern matching.
   # Eliminates common Unicode obfuscation vectors without touching
   # the original string (Tier 1 always runs on raw input).

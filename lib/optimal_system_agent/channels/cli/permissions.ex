@@ -40,9 +40,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
     )
 
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
+
     IO.puts(
       "  #{@dim}│#{@reset}  #{@yellow}⚠#{@reset}  #{@bold}#{Sanitize.scrub_line(tool_name)}#{@reset} wants to:"
     )
+
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
 
     # Word-wrap the description inside the box

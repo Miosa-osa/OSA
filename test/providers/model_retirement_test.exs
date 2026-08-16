@@ -121,6 +121,7 @@ defmodule OptimalSystemAgent.Providers.ModelRetirementTest do
       retires_on = Retirements.retirement_date(llama)
 
       day_before = Date.add(retires_on, -1)
+
       refute Retirements.retired?(llama, day_before),
              "must still be live the day before its retirement date"
 

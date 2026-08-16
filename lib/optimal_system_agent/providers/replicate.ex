@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Providers.Replicate do
-
   alias OptimalSystemAgent.Providers.ConfiguredModel
+
   @moduledoc """
   Replicate provider — run open-source models via prediction API.
 

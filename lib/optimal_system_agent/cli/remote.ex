@@ -149,7 +149,8 @@ defmodule OptimalSystemAgent.CLI.Remote do
 
   defp cmd_agent(%{host: host, prompt: prompt, opts: opts}) do
     with_client(fn pid ->
-      with {:ok, sid} <- Client.open_session(pid, host, :agent, Frames.agent_params(prompt, opts)),
+      with {:ok, sid} <-
+             Client.open_session(pid, host, :agent, Frames.agent_params(prompt, opts)),
            {:ok, text} <- Client.await_result(pid, sid) do
         # A remote agent's answer — model text that has additionally crossed a
         # machine boundary. Same tier, same reason, as the local model sink.

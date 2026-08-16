@@ -198,10 +198,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
   @doc "List open windows via wmctrl."
   def list_windows do
     case BoundedCmd.run("wmctrl", ["-l"], label: "wmctrl -l", target: "the window manager") do
-      {:ok, out, 0} -> {:ok, out}
-      {:ok, output, code} -> {:error, "list_windows failed (exit #{code}): #{String.trim(output)}"}
+      {:ok, out, 0} ->
+        {:ok, out}
+
+      {:ok, output, code} ->
+        {:error, "list_windows failed (exit #{code}): #{String.trim(output)}"}
+
       # An empty window list would read as "nothing is open". It is not.
-      {:timeout, why} -> {:error, why}
+      {:timeout, why} ->
+        {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "list_windows unavailable (install wmctrl): #{inspect(e)}"}
@@ -237,9 +242,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
            target: "the clipboard selection owner",
            stderr_to_stdout: false
          ) do
-      {:ok, out, 0} -> {:ok, out}
-      {:ok, output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
-      {:timeout, why} -> {:error, why}
+      {:ok, out, 0} ->
+        {:ok, out}
+
+      {:ok, output, code} ->
+        {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+
+      {:timeout, why} ->
+        {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "clipboard_get unavailable (install xclip): #{inspect(e)}"}

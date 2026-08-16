@@ -223,7 +223,8 @@ defmodule OptimalSystemAgent.Security.GitUntrustedRepoTest do
           ctx
         )
 
-      assert match?({:ok, _}, result), "worktree creation itself must still work: #{inspect(result)}"
+      assert match?({:ok, _}, result),
+             "worktree creation itself must still work: #{inspect(result)}"
 
       assert fired(base) == [],
              "enter_worktree executed repo-controlled code: #{inspect(fired(base))}"

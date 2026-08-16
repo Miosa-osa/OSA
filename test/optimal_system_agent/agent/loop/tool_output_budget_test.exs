@@ -42,6 +42,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOutputBudgetTest do
 
   test "a result inside the budget is returned untouched" do
     small = "all good\nnothing to truncate"
+
     assert ToolResultStorage.apply_budget(small, "shell_execute", "call-2", "sess-budget") ==
              small
   end

@@ -180,6 +180,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         clear_line()
         hint = tool_hint(state.active_tool)
         duration = format_duration(ms)
+
         safe_io_puts(
           "#{@cyan}  ⏺ #{Sanitize.scrub_line(name)}#{hint} #{@dim}(#{duration})#{@reset}"
         )
@@ -224,6 +225,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
       case state.phase do
         :tool_running ->
           {name, args, _start} = state.active_tool
+
           if args != "",
             do: "#{Sanitize.scrub_line(name)} — #{truncate(Sanitize.scrub_line(args), 50)}",
             else: "#{Sanitize.scrub_line(name)}…"

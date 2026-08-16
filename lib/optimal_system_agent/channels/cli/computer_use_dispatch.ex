@@ -50,10 +50,12 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
       {:ok, tool_calls} when tool_calls != [] ->
         Enum.each(tool_calls, fn {tool_name, params} ->
           clear_line()
+
           IO.write(
             "#{@dim}  ⚡ #{Sanitize.scrub_line(tool_name)}" <>
               "#{Sanitize.scrub_line(format_multi_params(tool_name, params))}#{@reset}"
           )
+
           result = execute_multi_tool(tool_name, params)
           clear_line()
           # Tool result straight from the tool — this line was not even

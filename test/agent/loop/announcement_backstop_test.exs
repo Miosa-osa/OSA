@@ -145,6 +145,7 @@ defmodule OptimalSystemAgent.Agent.Loop.AnnouncementBackstopTest do
                      frobnicate) do
         assert Guardrails.announcement_only?("I'll #{verb} the files first."),
                "expected \"I'll #{verb}\" to read as an announcement"
+
         assert Guardrails.announcement_only?("I will #{verb} the files first."),
                "expected \"I will #{verb}\" to read as an announcement"
       end

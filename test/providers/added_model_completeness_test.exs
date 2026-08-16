@@ -271,7 +271,9 @@ defmodule OptimalSystemAgent.Providers.AddedModelCompletenessTest do
       # returns the receive timeout from 600s to 120s.
       for m <- Enum.filter(XAIModels.models(), & &1.reasoning) do
         level = XAIModels.reasoning_effort(m.id, :high)
-        assert level in m.efforts, "#{m.id} produced #{inspect(level)}, not in #{inspect(m.efforts)}"
+
+        assert level in m.efforts,
+               "#{m.id} produced #{inspect(level)}, not in #{inspect(m.efforts)}"
       end
 
       for m <- Enum.filter(ZaiModels.models(), &(&1.efforts != [])) do

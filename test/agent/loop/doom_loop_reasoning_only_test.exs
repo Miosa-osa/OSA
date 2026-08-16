@@ -122,6 +122,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnlyTest do
 
   defp put_resample_config(kw),
     do: Application.put_env(:optimal_system_agent, :doom_loop_resample, kw)
+
   # ── A conversation is not a spin ────────────────────────────────────
   #
   # LIVE REPORT: a user typed `ok how about now` into the TUI and OSA's entire
@@ -200,5 +201,4 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnlyTest do
       assert TerminalSource.of(TerminalSource.reset(marked)) == :model
     end
   end
-
 end

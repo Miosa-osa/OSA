@@ -18,7 +18,11 @@ defmodule OptimalSystemAgent.Agent.CompactorMultimodalMergeTest do
   defp image_block do
     %{
       "type" => "image",
-      "source" => %{"type" => "base64", "media_type" => "image/png", "data" => String.duplicate("A", 4000)}
+      "source" => %{
+        "type" => "base64",
+        "media_type" => "image/png",
+        "data" => String.duplicate("A", 4000)
+      }
     }
   end
 
@@ -37,6 +41,7 @@ defmodule OptimalSystemAgent.Agent.CompactorMultimodalMergeTest do
 
     assert is_list(merged), "block lists must stay lists, got: #{inspect(merged, limit: 3)}"
     assert length(merged) == 4
+
     assert Enum.count(merged, &(&1["type"] == "image")) == 2,
            "both images must survive as image blocks"
   end

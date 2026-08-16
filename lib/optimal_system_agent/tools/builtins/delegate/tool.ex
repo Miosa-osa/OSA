@@ -107,8 +107,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
         },
         "background" => %{
           "type" => "boolean",
-          "description" =>
-            "Default true. False BLOCKS you and the user until the agent returns."
+          "description" => "Default true. False BLOCKS you and the user until the agent returns."
         },
         "permissionMode" => %{
           "type" => "string",

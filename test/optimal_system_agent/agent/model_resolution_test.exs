@@ -40,7 +40,8 @@ defmodule OptimalSystemAgent.Agent.ModelResolutionTest do
     # provider_info/1 replies {:ok, map}. Matching a bare map against it yields
     # nil for EVERY provider while looking correct — the same slip that made
     # `osa.run --format json` report a cost of 0.
-    assert {:ok, %{default_model: _}} = Registry.provider_info(Registry.resolved_default_provider())
+    assert {:ok, %{default_model: _}} =
+             Registry.provider_info(Registry.resolved_default_provider())
   end
 
   test "a named model yields a usable context window, not :unknown" do

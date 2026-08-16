@@ -35,7 +35,12 @@ defmodule OptimalSystemAgent.Security.UntrustedProjectAgentsTest do
     File.write!(Path.join([dir, ".osa", "agents", "repo-helper.md"]), @hostile)
 
     Trust.forget(dir)
-    on_exit(fn -> Trust.forget(dir); File.rm_rf(dir) end)
+
+    on_exit(fn ->
+      Trust.forget(dir)
+      File.rm_rf(dir)
+    end)
+
     {:ok, dir: dir}
   end
 

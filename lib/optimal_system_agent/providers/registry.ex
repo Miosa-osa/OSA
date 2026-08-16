@@ -2203,19 +2203,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp fetch_ollama_context(model) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
+    # `connect_options` is load-bearing, not belt-and-braces. `receive_timeout`
+    # bounds only the wait for a RESPONSE; establishing the connection and
+    # checking one out of the pool fall back to Finch's own 5s default. So the
+    # "3s" budget above measured 5017ms against a black-holed host — and this
+    # probe runs inside `Loop.handle_call({:swap_provider, ...})`, whose
+    # callers use the 5000ms `GenServer.call` default. The caller gave up 17ms
+    # before the server finished, and the server then completed the swap: a
+    # model change that lands and reports failure.
+    #
+    # A refused connection returns instantly and never showed this. A remote
+    # Ollama, a loaded machine or a half-open socket does not get refused — it
+    # hangs, which is exactly the configuration this probe exists for.
     opts =
-      # `connect_options` is load-bearing, not belt-and-braces. `receive_timeout`
-      # bounds only the wait for a RESPONSE; establishing the connection and
-      # checking one out of the pool fall back to Finch's own 5s default. So the
-      # "3s" budget above measured 5017ms against a black-holed host — and this
-      # probe runs inside `Loop.handle_call({:swap_provider, ...})`, whose
-      # callers use the 5000ms `GenServer.call` default. The caller gave up 17ms
-      # before the server finished, and the server then completed the swap: a
-      # model change that lands and reports failure.
-      #
-      # A refused connection returns instantly and never showed this. A remote
-      # Ollama, a loaded machine or a half-open socket does not get refused — it
-      # hangs, which is exactly the configuration this probe exists for.
       [
         json: %{name: model},
         receive_timeout: @probe_timeout_ms,
