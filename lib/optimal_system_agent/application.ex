@@ -170,6 +170,15 @@ defmodule OptimalSystemAgent.Application do
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
 
+    # Live turn snapshots (Agent.Loop `@live_table`). Owned here for exactly the
+    # reason the cancel table is: a Loop runs its whole turn inside `handle_call`
+    # and serves no messages while it does, so "what is this session doing" has
+    # to be answerable without the mailbox. A busy loop used to answer that
+    # question with `{:error, :not_found}` — a live session denying it existed.
+    # read_concurrency because it is written once per turn and read by every
+    # status poll, progress route and orchestrator liveness check.
+    :ets.new(:osa_loop_live, [:named_table, :public, :set, read_concurrency: true])
+
     # ETS table for the file_grep "ripgrep is missing" warn-once latch. Owned
     # here for the same reason as :osa_runtime_sessions below: tool execution
     # happens inside short-lived Tasks, and a table created lazily by the first

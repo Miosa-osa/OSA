@@ -51,4 +51,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Constants do
 
   @default_max_results 50
   def default_max_results, do: @default_max_results
+
+  # Deadline for ONE ripgrep subprocess. Not a bound on the tool call, the turn,
+  # or the session — only on how long a single `rg` may produce nothing before
+  # it is declared wedged and killed.
+  #
+  # 120s matches `shell_execute`'s own subprocess bound, and is one to two orders
+  # of magnitude above a real search: a cold `rg` over a large monorepo is single-
+  # digit seconds. Anything past this is not a slow search, it is `rg` blocked on
+  # a FIFO, a stalled network mount, or a `/proc` pseudo-file — cases where it
+  # would never return at all.
+  #
+  # Override with `:file_grep_timeout_ms`; `:infinity` restores the old
+  # unbounded behaviour for an operator who wants it.
+  @ripgrep_timeout_ms 120_000
+  def ripgrep_timeout_ms do
+    case Application.get_env(:optimal_system_agent, :file_grep_timeout_ms, @ripgrep_timeout_ms) do
+      :infinity -> :infinity
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> @ripgrep_timeout_ms
+    end
+  end
 end

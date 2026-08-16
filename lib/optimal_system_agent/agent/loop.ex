@@ -179,6 +179,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @cancel_table :osa_cancel_flags
 
+  # Live turn snapshots, readable while the loop's mailbox is blocked.
+  #
+  # Same ownership and the same justification as `@cancel_table` above: the turn
+  # runs on the GenServer's own stack, so anything that must be readable DURING a
+  # turn cannot go through the mailbox. Cancel already lived here; state now does
+  # too. Written at the turn's entry and deleted at its exit (including the crash
+  # path, via `terminate/2`), so a row's presence means "a turn is in flight",
+  # and its absence means the loop is idle or gone.
+  @live_table :osa_loop_live
+
   # `init/1` traps exits so `terminate/2` actually runs on a supervisor shutdown
   # (it did not before — see the `terminate/2` comment), which makes this budget
   # load-bearing rather than incidental. It is bounded on purpose: `terminate/2`
@@ -256,12 +266,126 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
-  @doc "Get a snapshot of loop state (iteration count, token estimate, status, etc.)."
+  @doc """
+  Get a snapshot of loop state (iteration count, token estimate, status, etc.).
+
+  Answers even while the loop is BUSY. The whole turn runs synchronously inside
+  `handle_call({:process, ...})` — `TurnPipeline.run` -> `ReactLoop.run` ->
+  `ToolOrchestrator.dispatch` — so for the entire duration of a turn this call
+  sits in a mailbox nobody is serving. Tool execution is deliberately unbounded
+  (`config :tool_timeout_ms, :infinity`, locked by `LongRunningToolTest` after a
+  ten-minute ceiling killed a three-agent dispatch and lost its turn's work), so
+  that stretch has no ceiling at all.
+
+  What made that a defect rather than a latency was the answer it produced. The
+  `catch` below turned the call timeout into `{:error, :not_found}` — a live
+  session, doing exactly what it was asked, telling every reader it did not
+  exist. `/status`, the HTTP progress route and the orchestrator's view of a
+  subagent all inherit that, and none of them can tell it from a dead session.
+
+  So the timeout is no longer an answer, it is a fallback: the turn publishes a
+  snapshot to ETS before it blocks, and a call that times out reads THAT.
+  `:not_found` now means what it says — no live row and no live process.
+
+  This is the same exemption the cancel flag already had, and for the same
+  stated reason: ETS reads work while `handle_call` blocks the mailbox. Nothing
+  here bounds a turn; a turn may still run forever. It may no longer be
+  invisible while it does.
+  """
   def get_state(session_id) do
     GenServer.call(via(session_id), :get_state)
   catch
-    :exit, _ -> {:error, :not_found}
+    :exit, _ -> live_snapshot(session_id)
   end
+
+  @doc """
+  The snapshot a turn published before it blocked, if a turn is in flight.
+
+  `{:error, :not_found}` here is the honest answer it always claimed to be:
+  no live row means no turn, and the process is idle (in which case the call
+  above answered) or gone.
+  """
+  @spec live_snapshot(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def live_snapshot(session_id) do
+    case safe_live_lookup(session_id) do
+      [{^session_id, snap}] ->
+        # Elapsed is computed at READ time, never stored. A stored duration
+        # would be frozen at the moment the turn blocked — which is exactly the
+        # "number that looks live and is not" this whole change is about.
+        {:ok, Map.put(snap, :working_for_seconds, monotonic_seconds_since(snap.working_since_ms))}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  # The table is created by `Application.start/2`. A caller that reaches this in
+  # a bare unit test (no application booted) must get `:not_found`, not an
+  # ArgumentError from a missing table.
+  defp safe_live_lookup(session_id) do
+    :ets.lookup(@live_table, session_id)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp monotonic_seconds_since(then_ms) do
+    div(System.monotonic_time(:millisecond) - then_ms, 1000)
+  end
+
+  # Publish what this loop knows at the moment it stops being able to answer.
+  #
+  # Deliberately NOT a live progress feed. Everything here is known at the turn's
+  # entry, so publishing costs one ETS write per turn and cannot itself be a
+  # source of blocking. The one thing that must be live — how long this has been
+  # going — is derived at read time from a monotonic stamp.
+  #
+  # `iteration` is therefore the count as of the turn's start. Making it advance
+  # would mean writing from inside `ReactLoop`, which is a different module and
+  # a larger change than this defect needs; a reader that wants per-iteration
+  # progress has the session's PubSub topic, which carries it already.
+  defp publish_live(state, message) do
+    snap = %{
+      session_id: state.session_id,
+      status: :working,
+      # The status a reader gets from a busy loop is now a fact about the loop,
+      # not an artefact of a call timeout, so it is labelled as what it is.
+      observed: :live_snapshot,
+      working_since_ms: System.monotonic_time(:millisecond),
+      started_at: state.started_at,
+      iteration: state.iteration,
+      turn_count: Map.get(state, :turn_count, 0),
+      provider: state.provider,
+      model: state.model,
+      effective_context_window: state.effective_context_window,
+      tokens_used: used_context_tokens(state),
+      tools_called: state.last_meta[:tools_used] || [],
+      spend: OptimalSystemAgent.Agent.Loop.Accounting.snapshot(state),
+      prompt_preview: preview(message)
+    }
+
+    _ = safe_live_insert(state.session_id, snap)
+    :ok
+  end
+
+  defp safe_live_insert(session_id, snap) do
+    :ets.insert(@live_table, {session_id, snap})
+  rescue
+    ArgumentError -> false
+  end
+
+  defp clear_live_key(session_id) when is_binary(session_id) do
+    :ets.delete(@live_table, session_id)
+  rescue
+    ArgumentError -> true
+  end
+
+  defp clear_live_key(_), do: true
+
+  defp preview(message) when is_binary(message) do
+    message |> String.trim() |> String.slice(0, 120)
+  end
+
+  defp preview(_), do: ""
 
   @doc "Get metadata from the last process_message call (iteration_count, tools_used)."
   def get_metadata(session_id) do
@@ -1267,17 +1391,34 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Best-effort and never allowed to disrupt the turn.
     _ = maybe_rewind_checkpoint(state, message)
 
-    # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
-    # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
-    # guard, compaction, message build, and genre routing) live in TurnPipeline
-    # as named ordered steps. It returns a terminal reply or hands back a
-    # `:dispatch` signal for plan-mode / ReactLoop execution.
-    during_turn(fn ->
-      case TurnPipeline.run(message, opts, state) do
-        {:reply, reply, state} -> {:reply, reply, state}
-        {:dispatch, state, skip_plan} -> dispatch_message(state, skip_plan)
-      end
-    end)
+    # From here to the `after` below, this process serves no messages: the whole
+    # turn runs on its own stack. Publish what a reader needs BEFORE going deaf,
+    # so `get_state/1` has something true to fall back on for however long the
+    # turn takes — which, with tool execution unbounded by design, is unbounded.
+    publish_live(state, message)
+
+    try do
+      # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
+      # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
+      # guard, compaction, message build, and genre routing) live in TurnPipeline
+      # as named ordered steps. It returns a terminal reply or hands back a
+      # `:dispatch` signal for plan-mode / ReactLoop execution.
+      during_turn(fn ->
+        case TurnPipeline.run(message, opts, state) do
+          {:reply, reply, state} -> {:reply, reply, state}
+          {:dispatch, state, skip_plan} -> dispatch_message(state, skip_plan)
+        end
+      end)
+    after
+      # `after` and not a tail call: a turn that raises or exits must not leave a
+      # row claiming it is still working. The crash path that skips this entirely
+      # (a brutal kill) is covered by `terminate/2`, and a loop that dies without
+      # either is gone from the registry too, so the stale row is unreachable —
+      # `live_snapshot/1` is only ever consulted after a call to that same
+      # session failed, and a dead session's next incarnation overwrites the row
+      # at its own turn start.
+      clear_live_key(state.session_id)
+    end
   end
 
   @impl true
@@ -1734,6 +1875,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # whose only reader is a process that no longer exists, so it must go with
     # the process (see `clear_cancel/1`).
     clear_cancel_key(state.session_id)
+    # Same lifetime as the cancel flag, and for the same reason: it is per-run
+    # state whose only meaning is "this process is mid-turn". Leaving it behind
+    # would make a dead session read as a working one — the exact inversion of
+    # the defect this table exists to fix.
+    clear_live_key(state.session_id)
     save_unsaved_turn(state, reason)
     fire_session_end(state, reason)
     :ok
@@ -1741,6 +1887,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp end_session(state, hook_reason) do
     clear_cancel_key(state.session_id)
+    clear_live_key(state.session_id)
 
     # The terminal-frame latch belongs to a RUN, not to an id, and ids are
     # reused on purpose (see `init/1`). Leaving the last turn's latch behind

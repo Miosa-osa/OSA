@@ -128,6 +128,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
       {:fallback, reason} ->
         if reason == :missing, do: Backend.warn_missing_once(ctx)
         fallback_grep(pattern, path, rg_opts, {:fallback, reason})
+
+      # Reported, attributable, and NOT a discarded turn: the model gets a named
+      # failure for this one tool call and can narrow the path or the glob. The
+      # alternative — falling through to `fallback_grep` — would answer a search
+      # that hung with a result that looks like it ran, which is the same class
+      # of silent wrong answer as the missing-path case above.
+      {:timeout, ms} ->
+        {:error,
+         "file_grep: ripgrep did not finish within #{div(ms, 1000)}s and was stopped. " <>
+           "The search was NOT completed, so this is not evidence that #{inspect(pattern)} " <>
+           "is absent. A path that reaches a FIFO, a stalled network mount, or /proc will " <>
+           "hang the search — narrow `path` (currently #{inspect(path)}) or set a `glob`, " <>
+           "then try again."}
     end
   end
 
@@ -284,20 +297,70 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
         {:fallback, :missing}
 
       exe ->
-        case System.cmd(exe, args, stderr_to_stdout: true) do
-          {output, 0} -> {:ok, output}
-          # ripgrep exits 1 for "no match". That is a real, trustworthy answer
-          # from a real engine — not a fallback trigger.
-          {_output, 1} -> :empty
-          # 2+ means ripgrep ran and failed. A different fault from absence.
-          {_, _} -> {:fallback, :failed}
-        end
+        # `System.cmd/3` has no timeout, and this one had no wrapper either, so a
+        # ripgrep that never returns never returned. That is not theoretical:
+        # `rg` blocks indefinitely reading a FIFO, a dead NFS/SSHFS mount, or a
+        # `/proc` pseudo-file that a broad `path` can walk into.
+        #
+        # Nothing above catches it. The tool Task has no deadline
+        # (`:tool_timeout_ms` is `:infinity` by design — see `LongRunningToolTest`)
+        # and the loop runs the turn on its own stack, so one wedged `rg` takes
+        # the whole session with it until the 24h `GenServer.call` backstop.
+        # Every other tool that shells out already bounds itself
+        # (`shell_execute` 120s, `web_fetch` 30s, `github` 30s); this one and
+        # `diff` were the exceptions, which makes them oversights against the
+        # design rather than instances of it.
+        #
+        # The bound is on ONE subprocess, not on the turn, and it is deliberately
+        # far above any real search (a cold `rg` over a large monorepo is single-
+        # digit seconds). On expiry the tool reports what happened and the turn
+        # continues with that answer — no turn is discarded and nothing is
+        # silently downgraded.
+        bounded_ripgrep(exe, args)
     end
   rescue
     # Backstop for what the lookup cannot see: the binary removed between
     # `find_executable/1` and the spawn, an exec-permission error, a bad
     # interpreter. Rare, and no longer how "not installed" is detected.
     _ -> {:fallback, :failed}
+  end
+
+  # Run ripgrep under a deadline, killing the OS process if it blows through it.
+  #
+  # `Task.shutdown(:brutal_kill)` tears down the Port, and closing a Port kills
+  # the OS process it owns — so a wedged `rg` does not survive as an orphan
+  # holding the mount that wedged it.
+  defp bounded_ripgrep(exe, args) do
+    task =
+      Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
+        System.cmd(exe, args, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, Constants.ripgrep_timeout_ms()) ||
+           Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} ->
+        {:ok, output}
+
+      # ripgrep exits 1 for "no match". That is a real, trustworthy answer
+      # from a real engine — not a fallback trigger.
+      {:ok, {_output, 1}} ->
+        :empty
+
+      # 2+ means ripgrep ran and failed. A different fault from absence.
+      {:ok, {_, _}} ->
+        {:fallback, :failed}
+
+      # The deadline fired, or the task died. `nil` from `Task.shutdown/2` is
+      # the timeout case and is reported as itself — NOT folded into
+      # `{:fallback, :failed}`, which would send the search quietly down the
+      # pure-Elixir path and hand back a plausible-looking result for a search
+      # that hung. Silent recovery is how a wedge stays invisible.
+      nil ->
+        {:timeout, Constants.ripgrep_timeout_ms()}
+
+      {:exit, _reason} ->
+        {:fallback, :failed}
+    end
   end
 
   # ── Private: Elixir fallback ──────────────────────────────────────────
