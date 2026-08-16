@@ -1693,6 +1693,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp end_session(state, hook_reason) do
     clear_cancel_key(state.session_id)
 
+    # The terminal-frame latch belongs to a RUN, not to an id, and ids are
+    # reused on purpose (see `init/1`). Leaving the last turn's latch behind
+    # lets a fresh loop under the same id inherit a claim it never made.
+    OptimalSystemAgent.Agent.TurnTermination.forget(state.session_id)
+
     # Last chance to make the durable bill match what this process actually
     # spent. The clean-exit branch below DELETES the crash checkpoint, so after
     # this point the sidecar is the only surviving record of the run's spend —

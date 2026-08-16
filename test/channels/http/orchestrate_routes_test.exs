@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.OrchestrateRoutesTest do
   use ExUnit.Case, async: false
   use Plug.Test
 
+  alias OptimalSystemAgent.Agent.TurnTermination
   alias OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes
 
   @opts OrchestrateRoutes.init([])
@@ -82,6 +83,41 @@ defmodule OptimalSystemAgent.Channels.HTTP.OrchestrateRoutesTest do
       # arrives, ending the turn.
       assert_receive {:osa_event, %{type: :agent_response, session_id: ^session_id}}, 5_000
       assert_receive {:osa_event, %{type: :done, session_id: ^session_id}}, 5_000
+    end
+
+    # The second, independent path to the same "nothing happens" symptom.
+    #
+    # The dedup latch is per-TURN only because `TurnPipeline.run/3` calls
+    # `TurnTermination.open/1` at the top of a turn. A turn that dies on the way
+    # IN — the Loop is gone, the call exits, `handle_call` raises before the
+    # pipeline runs — never reaches that `open/1`. So the latch the PREVIOUS
+    # turn set is still standing, the route's crash fallback asks to claim, is
+    # refused, and broadcasts nothing at all. The SSE loop then spins on
+    # keepalives forever and the session is inert: the same wedge, reached
+    # without the client being involved.
+    test "a previous turn's latch does not swallow the next turn's crash frame" do
+      session_id = "stale-latch-#{System.unique_integer([:positive])}"
+
+      # Turn A: ended at an in-turn gate (budget/turn limit, hook block,
+      # injection guard). It opened the turn and claimed its own terminal frame.
+      TurnTermination.open(session_id)
+      assert TurnTermination.claim(session_id), "turn A terminates itself"
+
+      # Turn B: never reaches TurnPipeline, so nothing clears turn A's latch.
+      fake_loop = start_doomed_fake_loop(session_id)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+      conn = json_post("/", %{"input" => "hello", "session_id" => session_id})
+      assert conn.status == 202
+
+      send(fake_loop, :die)
+
+      assert_receive {:osa_event, %{type: :agent_response, session_id: ^session_id}}, 5_000
+
+      assert_receive {:osa_event, %{type: :done, session_id: ^session_id}},
+                     5_000,
+                     "a finished turn must always emit its terminal frame — a latch " <>
+                       "left over from an earlier turn must never swallow it"
     end
   end
 

@@ -126,6 +126,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
           # every failure path broadcast a terminal SSE frame directly (mirroring
           # the normal-completion shape: an `agent_response` with the error text
           # followed by `done`) so the turn always ends client-side.
+          # Read the turn-termination epoch BEFORE dispatching. If the turn dies
+          # on the way in it never opens a turn of its own, and this is the only
+          # evidence that the latch we would otherwise be refused by belongs to
+          # a turn that already ended.
+          turn_epoch = OptimalSystemAgent.Agent.TurnTermination.observe(session_id)
+
           Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
             try do
               result =
@@ -147,7 +153,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
                 {:error, reason} ->
                   Logger.warning("[OrchestrateRoutes] Agent loop error: #{inspect(reason)}")
-                  emit_terminal_error(session_id, "Error: #{inspect(reason)}")
+                  emit_terminal_error(session_id, "Error: #{inspect(reason)}", turn_epoch)
 
                 other ->
                   Logger.info("[OrchestrateRoutes] Agent loop returned: #{inspect(other)}")
@@ -155,12 +161,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             rescue
               e ->
                 Logger.error("[OrchestrateRoutes] Agent loop crashed: #{Exception.message(e)}")
-                emit_terminal_error(session_id, "Agent error: #{Exception.message(e)}")
+
+                emit_terminal_error(
+                  session_id,
+                  "Agent error: #{Exception.message(e)}",
+                  turn_epoch
+                )
             catch
               :exit, reason ->
                 Logger.error("[OrchestrateRoutes] Agent loop exited: #{inspect(reason)}")
 
-                emit_terminal_error(session_id, "Agent error: the agent loop crashed")
+                emit_terminal_error(session_id, "Agent error: the agent loop crashed", turn_epoch)
             end
           end)
 
@@ -216,6 +227,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
         case SessionManager.ensure_loop(session_id, user_id, :http) do
           :ok ->
+            # Read before dispatch — see the POST "/" handler and
+            # `TurnTermination`'s moduledoc.
+            turn_epoch = OptimalSystemAgent.Agent.TurnTermination.observe(session_id)
+
             Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
               try do
                 SessionManager.process_message(session_id, task)
@@ -225,11 +240,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
                     "[OrchestrateRoutes] Complex task crashed: #{Exception.message(e)}"
                   )
 
-                  emit_terminal_error(session_id, "Agent error: #{Exception.message(e)}")
+                  emit_terminal_error(
+                    session_id,
+                    "Agent error: #{Exception.message(e)}",
+                    turn_epoch
+                  )
               catch
                 :exit, reason ->
                   Logger.error("[OrchestrateRoutes] Complex task exited: #{inspect(reason)}")
-                  emit_terminal_error(session_id, "Agent error: the agent loop crashed")
+
+                  emit_terminal_error(
+                    session_id,
+                    "Agent error: the agent loop crashed",
+                    turn_epoch
+                  )
               end
             end)
 
@@ -457,7 +481,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   # Broadcasts directly onto the session's PubSub topic — the same shape a
   # normal turn ends with (`agent_response` then `done`) — so the TUI both
   # shows the error and resolves its spinner.
-  defp emit_terminal_error(session_id, message) do
+  defp emit_terminal_error(session_id, message, turn_epoch) do
     # Claimed, not merely sent. This fallback exists for the crash and `:exit`
     # cases, where nothing broadcast anything and the SSE loop would otherwise
     # spin on keepalives forever. But it also fires for a plain
@@ -469,7 +493,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     # on `done`, so done #1 drains the queue, the drained message opens a new
     # turn, and done #2 then lands mid-turn — the early-drain bug the gate was
     # added to fix, reproduced through a narrower door.
-    if OptimalSystemAgent.Agent.TurnTermination.claim(session_id) do
+    #
+    # `turn_epoch` is the latch epoch read BEFORE this turn was dispatched. It
+    # is what stops the dedup from becoming its own wedge: a turn that dies on
+    # the way in never reaches `TurnPipeline.run/3`, so it never opens a latch
+    # of its own, and without the epoch this claim would be refused by the
+    # PREVIOUS turn's latch — the exact case this fallback exists to rescue.
+    # See `TurnTermination`'s moduledoc.
+    if OptimalSystemAgent.Agent.TurnTermination.claim(session_id, turn_epoch) do
       do_emit_terminal_error(session_id, message)
     else
       :ok
