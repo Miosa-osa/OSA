@@ -1799,6 +1799,240 @@ def test_the_lean_view_hides_tool_calls_and_only_tool_calls(
         release_turn()
 
 
+def _start_held_turn(s: PtySession, prompt: bytes = b"HANG FOR A WHILE") -> int:
+    """Submit `prompt` into a gated (held-open) turn and return a post mark.
+
+    Factored out because three tests need a turn that is genuinely outstanding:
+    `POST /api/v1/orchestrate` is a long poll for a whole turn, so with the stub
+    answering instantly the TUI is back at Idle within milliseconds and Esc
+    means something else entirely.
+    """
+    mark = post_mark()
+    s.write(prompt)
+    s.pump(SETTLE)
+    s.write(b"\r")
+    waited = 0.0
+    while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+        s.pump(0.25)
+        waited += 0.25
+    if not posts_since(mark, "/api/v1/orchestrate"):
+        raise AssertionError(
+            f"the prompt never reached the backend, so there is no turn.\n"
+            f"--- rendered screen ---\n{s.dump()}"
+        )
+    if not s.wait_for_text("esc to interrupt", 5.0):
+        raise AssertionError(
+            f"the TUI is not showing a running turn.\n"
+            f"--- rendered screen ---\n{s.dump()}"
+        )
+    return mark
+
+
+def test_the_queued_message_row_does_not_promise_a_key_that_interrupts(
+    backend: StubBackend,
+) -> None:
+    """The queued-message row must not advertise `esc to send now`.
+
+    Reported verbatim: "the 'esc to send now' when I send a message for the
+    queue thing, it doesn't work either. I click it, it didn't do it. If I
+    press it again it doesn't do it, and then if I do it too many times it just
+    turns off the conversation — it interrupts it."
+
+    Established before changing anything, and it is worse than a wrong window:
+    **there is no send-now key at all.** `maybe_dequeue_message` is called from
+    five turn-completion sites and from no key handler anywhere, and
+    `queue_may_drain` requires `Idle && turn_done` — so no keystroke can run a
+    queued message while the turn is alive. What `esc to send now` described was
+    the side effect of the interrupt chord: Esc-Esc ends the turn, and the queue
+    then drains. The label named the consequence and hid the mechanism, and the
+    mechanism destroys the work in flight.
+
+    This is the third instance in this file of one defect class — the screen
+    naming a key whose behaviour differs from the words next to it — and the
+    most dangerous shape of it, because here the advertised action is benign and
+    the real one is destructive.
+
+    Asserted on the SCREEN, because the screen is the entire bug: the row is a
+    promise, and a promise is a rendering.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            _start_held_turn(s)
+
+            # Type a second message: mid-turn text is queued, not sent.
+            s.write(b"QUEUED-MESSAGE-ONE")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("QUEUED-MESSAGE-ONE", 5.0):
+                raise AssertionError(
+                    "the mid-turn message was neither queued nor shown.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            screen = "\n".join(s.lines())
+            if "esc to send now" in screen:
+                raise AssertionError(
+                    "the queued-message row still advertises `esc to send now`. "
+                    "No such key exists — the press arms the interrupt, and the "
+                    "next one ends the turn. An affordance naming a key that "
+                    "does something else is worse than no affordance.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "sends when this turn ends" not in screen:
+                raise AssertionError(
+                    "the row no longer says WHEN the message runs. That half "
+                    "answered an earlier report (a queued message during a "
+                    "14-minute fan-out was indistinguishable from the app "
+                    f"ignoring the keystroke).\n--- rendered screen ---\n{s.dump()}"
+                )
+            if "esc esc" not in screen:
+                raise AssertionError(
+                    "the row names a gesture that is not the real one. One Esc "
+                    "only arms; it takes two, and the hint has to say so.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_the_queued_row_hint_is_true_end_to_end(backend: StubBackend) -> None:
+    """`esc esc interrupts and runs it now` — both halves, on the wire.
+
+    A truthful-looking sentence is not a truthful one. This drives the exact
+    gesture the row now prints and asserts both of its claims actually happen:
+
+      1. **interrupts** — `POST /api/v1/sessions/<id>/cancel` goes out;
+      2. **runs it now** — a SECOND `POST /api/v1/orchestrate` follows,
+         carrying the QUEUED text.
+
+    (2) is the one that could not be assumed. The queue drains only through
+    `maybe_dequeue_message`, which is gated on `Idle && turn_done`; whether an
+    interrupt actually reaches that state — and does so without the user
+    pressing anything else — is a property of the cancel teardown, not of the
+    hint. If it ever stops being true, the row goes back to lying and this test
+    is what says so.
+
+    Deliberately uses the SLOW gesture (a 2.5s gap). The hint makes no promise
+    about timing, so neither may the test; and the in-turn interrupt arm is
+    untimed precisely so that a user reading this row at their own pace gets
+    the behaviour it describes.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            _start_held_turn(s)
+
+            s.write(b"QUEUED-RUNS-AFTER-INTERRUPT")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("QUEUED-RUNS-AFTER-INTERRUPT", 5.0):
+                raise AssertionError(
+                    f"the message was not queued.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            mark = post_mark()
+            s.write(b"\x1b")
+            if not s.wait_for_text("esc again to interrupt", 3.0):
+                raise AssertionError(
+                    f"the first Esc did not arm.\n--- rendered screen ---\n{s.dump()}"
+                )
+            s.pump(SLOW_ESC_GAP)
+            s.write(b"\x1b")
+
+            # 1. It interrupts.
+            waited = 0.0
+            while waited < 5.0 and not posts_since(
+                mark, "/api/v1/sessions/pty-stub-session/cancel"
+            ):
+                s.pump(0.25)
+                waited += 0.25
+            if not posts_since(mark, "/api/v1/sessions/pty-stub-session/cancel"):
+                raise AssertionError(
+                    "`esc esc interrupts` is false: no cancel request went out.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # 2. …and then the queued message runs, with no further keystrokes.
+            #    Generous: the cancel teardown waits on SSE and falls back to a
+            #    3s CancelTimeout safety net, which the stub's silent stream
+            #    means is the path taken here.
+            waited = 0.0
+            ran = []
+            while waited < 15.0:
+                s.pump(0.25)
+                waited += 0.25
+                ran = [
+                    body
+                    for _, body in posts_since(mark, "/api/v1/orchestrate")
+                    if "QUEUED-RUNS-AFTER-INTERRUPT" in body
+                ]
+                if ran:
+                    break
+            if not ran:
+                raise AssertionError(
+                    "`and runs it now` is false: the turn was interrupted but "
+                    "the queued message never became a request, so the row is "
+                    "promising something the product does not do.\n"
+                    f"POSTs since the interrupt: "
+                    f"{[p for p, _ in posts_since(mark)] or 'none'}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
+def test_a_queued_message_does_not_make_the_interrupt_harder_to_reach(
+    backend: StubBackend,
+) -> None:
+    """Interrupt costs the same gesture whether or not something is queued.
+
+    The constraint that outranks everything else here: the user must never be
+    unable to stop a turn. They were trapped by one earlier and had to queue
+    `/exit` to escape it.
+
+    So the tempting fix — "when a queue exists, the first Esc means send-now" —
+    is the one thing that must not happen: it would push interrupt to a third
+    press in exactly the state where a user is most likely to be losing
+    patience. This pins that Esc-Esc still interrupts with a queue present,
+    which is what makes it safe to leave the interrupt semantics untouched.
+    """
+    hold_turn()
+    try:
+        with PtySession(backend.base_url, cols=140, rows=30) as s:
+            s.boot()
+            _start_held_turn(s)
+            s.write(b"SOMETHING QUEUED")
+            s.pump(SETTLE)
+            s.write(b"\r")
+            if not s.wait_for_text("SOMETHING QUEUED", 5.0):
+                raise AssertionError(
+                    f"nothing queued.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            mark = post_mark()
+            s.write(b"\x1b")
+            s.pump(0.4)
+            s.write(b"\x1b")
+            waited = 0.0
+            while waited < 5.0:
+                s.pump(0.25)
+                waited += 0.25
+                if posts_since(mark, "/api/v1/sessions/pty-stub-session/cancel"):
+                    break
+            else:
+                raise AssertionError(
+                    "with a message queued, Esc-Esc no longer interrupts. A "
+                    "queued message must never cost the user access to the "
+                    "stop gesture.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        release_turn()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -1820,6 +2054,9 @@ TESTS = [
     test_clear_leaves_no_queued_message_behind,
     test_clear_adopts_the_session_the_backend_hands_back,
     test_the_lean_view_hides_tool_calls_and_only_tool_calls,
+    test_the_queued_message_row_does_not_promise_a_key_that_interrupts,
+    test_the_queued_row_hint_is_true_end_to_end,
+    test_a_queued_message_does_not_make_the_interrupt_harder_to_reach,
 ]
 
 

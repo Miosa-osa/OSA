@@ -130,6 +130,20 @@ the TUI stays in `Processing`. Both release on demand and both carry a ceiling.
 - **`test_one_stray_escape_still_does_not_kill_a_turn`** — the other side of
   that change: one Esc must not cancel, and an intervening keystroke must still
   withdraw the arm, which is now the only thing that can.
+- **`test_the_queued_message_row_does_not_promise_a_key_that_interrupts`** — the
+  queued-message row used to print `esc to send now`. There is no send-now key
+  anywhere: `maybe_dequeue_message` is called from five turn-completion sites
+  and from no key handler, and `queue_may_drain` requires `Idle && turn_done`.
+  The label described the side effect of the interrupt chord — Esc-Esc ends the
+  turn, and the queue then drains — while hiding that the mechanism destroys the
+  work in flight.
+- **`test_the_queued_row_hint_is_true_end_to_end`** — drives the gesture the row
+  now prints and checks BOTH of its claims on the wire: the cancel goes out, and
+  a second `POST /api/v1/orchestrate` carrying the queued text follows with no
+  further keystrokes. A truthful-looking sentence is not a truthful one.
+- **`test_a_queued_message_does_not_make_the_interrupt_harder_to_reach`** — a
+  queued message must never cost the user access to the stop gesture, which
+  rules out the tempting "first Esc means send-now when something is queued".
 
 Measured against a binary with both defects restored: the three new
 behaviour tests fail (`Ctrl+C` on the splash did not exit within 5s; the typed

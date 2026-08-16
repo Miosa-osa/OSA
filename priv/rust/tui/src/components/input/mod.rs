@@ -29,6 +29,50 @@ use self::completions::{CompletionAction, CompletionItem, Completions};
 use self::mentions::{Attachment, Candidate, Frecency, MentionKind, SubmitKind};
 use super::{AppAction, Component, ComponentAction};
 
+/// The trailing hint on the FIRST queued-message row, in full.
+///
+/// It used to read `— sends when this turn ends · esc to send now`, and the
+/// second half was **not wired to anything**. There is no send-now key, in this
+/// state or any other: `maybe_dequeue_message` is called from five
+/// turn-completion sites and from no key handler at all, and `queue_may_drain`
+/// requires `Idle && turn_done` — so a queued message cannot run until the turn
+/// has ENDED, by finishing or by being interrupted.
+///
+/// What "esc to send now" actually described was the side effect of the
+/// interrupt chord: Esc-Esc cancels the turn, `turn_done` is set on that path,
+/// and the queue then drains. The label named the consequence and hid the
+/// mechanism — and the mechanism is "destroy the work in flight". A user
+/// reported precisely the resulting experience: "I click it, it didn't do it.
+/// If I press it again it doesn't do it, and then if I do it too many times it
+/// just turns off the conversation."
+///
+/// So the hint now says what the key does, cost first, and says that it takes
+/// two presses. Both halves are load-bearing:
+///
+/// * **"esc esc"** — one press only arms; the spinner's affordance flips to
+///   "esc again to interrupt". A hint that said "esc" was the reason the first
+///   press read as the app ignoring the keystroke.
+/// * **"interrupts"** before "runs it now" — the destructive half is what the
+///   user is actually agreeing to, so it leads.
+///
+/// Deliberately NOT offered here: a real mid-turn send. `/steer` is the
+/// product's explicit gesture for injecting into a running turn, and plain
+/// mid-turn text was moved OFF that path on purpose (see `submit_input`) —
+/// automatic steering "read as the agent lurching off course mid-thought".
+/// Naming `/steer` on this row would be another near-miss promise anyway: it
+/// injects text you retype, not the message already queued here.
+pub const QUEUED_HINT_FULL: &str =
+    "  \u{2014} sends when this turn ends \u{00b7} esc esc interrupts and runs it now";
+
+/// The narrow-terminal fallback: the trigger, with no key named.
+///
+/// Naming a key that does not fit its explanation is how this went wrong the
+/// first time, so the short form names none. "Sends when this turn ends" is the
+/// half that answered the earlier report (a queued message during a 14-minute
+/// fan-out was indistinguishable from the app ignoring the keystroke), and it
+/// survives to a much narrower terminal on its own.
+pub const QUEUED_HINT_SHORT: &str = "  \u{2014} sends when this turn ends";
+
 /// Rows the `@`-mention dropdown reserves while it is open.
 ///
 /// A CONSTANT, not the live match count — see [`InputComponent::mention_popup_height`]:
@@ -2718,11 +2762,23 @@ impl Component for InputComponent {
                 // wrap, so it is dropped on a narrow terminal rather than
                 // costing a row.
                 if i == 0 {
-                    let hint = "  \u{2014} sends when this turn ends \u{00b7} esc to send now";
                     let used = unicode_width::UnicodeWidthStr::width(one_line.as_str()) + 2;
-                    let need = unicode_width::UnicodeWidthStr::width(hint);
-
-                    if used + need <= area.width as usize {
+                    let fits = |h: &str| {
+                        used + unicode_width::UnicodeWidthStr::width(h) <= area.width as usize
+                    };
+                    // Widest truthful form first, then the short form, then
+                    // nothing. Two tiers rather than one so a narrow terminal
+                    // keeps "sends when this turn ends" — the half that fixed
+                    // the "typing appeared to do nothing" report — instead of
+                    // losing the whole row's explanation to a longer sentence.
+                    let hint = if fits(QUEUED_HINT_FULL) {
+                        Some(QUEUED_HINT_FULL)
+                    } else if fits(QUEUED_HINT_SHORT) {
+                        Some(QUEUED_HINT_SHORT)
+                    } else {
+                        None
+                    };
+                    if let Some(hint) = hint {
                         spans.push(Span::styled(hint.to_string(), theme.recede()));
                     }
                 }
@@ -4930,16 +4986,64 @@ mod queued_affordance {
 
     #[test]
     fn the_first_queued_row_names_its_trigger() {
-        let row = queued_row_text(vec!["check the god files"], 100);
+        let row = queued_row_text(vec!["check the god files"], 120);
         assert!(row.contains("check the god files"), "{row:?}");
         assert!(
             row.contains("sends when this turn ends"),
             "a queued message must say WHEN it runs: {row:?}"
         );
+    }
+
+    /// THE regression. `esc to send now` named a key that was never wired to
+    /// anything: there is no send-now handler, and `queue_may_drain` requires
+    /// `Idle && turn_done`, so no keystroke can run a queued message while the
+    /// turn is alive. What Esc-Esc actually does is END the turn — after which
+    /// the queue drains, which is what the label was describing without saying.
+    ///
+    /// Reported verbatim: "I click it, it didn't do it. If I press it again it
+    /// doesn't do it, and then if I do it too many times it just turns off the
+    /// conversation — it interrupts it."
+    #[test]
+    fn the_row_never_promises_a_send_now_key() {
+        for width in [40usize, 60, 80, 100, 120, 200] {
+            let row = queued_row_text(vec!["check the god files"], width as u16);
+            assert!(
+                !row.contains("esc to send now"),
+                "at width {width} the row still advertises a send-now key that \
+                 does not exist; pressing it interrupts the turn instead: {row:?}"
+            );
+        }
+    }
+
+    /// When a key IS named, the row must name the real gesture — two presses,
+    /// and the cost stated before the benefit.
+    #[test]
+    fn the_named_gesture_is_the_one_that_actually_runs() {
+        let row = queued_row_text(vec!["check the god files"], 140);
         assert!(
-            row.contains("esc to send now"),
-            "and how to send it sooner: {row:?}"
+            row.contains("esc esc"),
+            "one Esc only arms the interrupt; a hint saying `esc` is why the \
+             first press read as the app ignoring the keystroke: {row:?}"
         );
+        let i = row.find("interrupts").expect("names the cost");
+        let j = row.find("runs it now").expect("names the effect");
+        assert!(
+            i < j,
+            "the destructive half is what the user is agreeing to, so it must \
+             come first: {row:?}"
+        );
+    }
+
+    /// Narrow terminals keep the trigger and drop the key, rather than losing
+    /// the whole explanation to a longer sentence.
+    #[test]
+    fn a_narrow_row_keeps_the_trigger_and_names_no_key() {
+        let row = queued_row_text(vec!["check the god files"], 60);
+        assert!(
+            row.contains("sends when this turn ends"),
+            "the short form must survive where the long one does not: {row:?}"
+        );
+        assert!(!row.contains("esc"), "no key may be named part-way: {row:?}");
     }
 
     #[test]
