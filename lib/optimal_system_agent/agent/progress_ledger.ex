@@ -192,7 +192,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
           # coordinator, /goal), so this single chokepoint covers them all.
           # `capture/3` is a no-op once a brief exists and ignores the placeholder,
           # so re-issuing /goal never clobbers the founding brief. Best-effort.
-          maybe_capture_brief(session_id, body)
+          maybe_capture_brief(session_id, body, opts)
           emit(session_id, :goal_set, %{goal: body})
           Logger.debug("[progress_ledger] goal set for #{session_id}")
           {:ok, body}
@@ -445,8 +445,17 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   end
 
   # Immutable Task Brief capture (audit gap M1). Never raises into set_goal.
-  defp maybe_capture_brief(session_id, goal) do
-    OptimalSystemAgent.Agent.TaskBrief.capture(session_id, goal)
+  #
+  # `:acceptance_criteria` / `:constraints` are forwarded when the caller supplied
+  # them. Without this they were never plumbed at all, so `TaskBrief.capture/3`
+  # always took its fallback branch and wrote the GOAL TEXT into
+  # `acceptance_criteria` — a brief that has stated criteria on every turn, whose
+  # criteria restate the goal and therefore say nothing about what "done" means.
+  # Only forward keys the caller actually set, so the fallback still applies when
+  # no criteria were authored.
+  defp maybe_capture_brief(session_id, goal, opts) do
+    brief_opts = Keyword.take(opts, [:acceptance_criteria, :constraints])
+    OptimalSystemAgent.Agent.TaskBrief.capture(session_id, goal, brief_opts)
     :ok
   rescue
     _ -> :ok

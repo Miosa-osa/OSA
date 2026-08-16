@@ -238,9 +238,26 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   snapshot (clearing any prior stall/pause bookkeeping) and writes `goal`
   into the `ProgressLedger`'s `## Goal` section. Idempotent to call again
   with a new goal text (e.g. `/goal` re-issued) — always resets to `:active`.
+
+  ## Options
+
+    * `:acceptance_criteria` — what "done" means for this goal, in checkable
+      terms. Forwarded through `ProgressLedger.set_goal/3` to
+      `Agent.TaskBrief.capture/3`, which freezes it and re-injects it into the
+      `role: "system"` block on every subsequent turn.
+
+      Supplying it AT ANCHOR TIME is the only way to get real criteria into the
+      brief: the brief is immutable and captured by the first goal-set, so a
+      later attempt to add criteria is silently ignored. Absent this option the
+      brief falls back to storing the goal text as its own acceptance criteria.
+
+    * `:constraints` — hard constraints, same freezing semantics.
   """
-  @spec start(String.t(), String.t()) :: Snapshot.t()
-  def start(session_id, goal) when is_binary(session_id) and is_binary(goal) do
+  @spec start(String.t(), String.t(), keyword()) :: Snapshot.t()
+  def start(session_id, goal, opts \\ [])
+
+  def start(session_id, goal, opts)
+      when is_binary(session_id) and is_binary(goal) and is_list(opts) do
     # A fresh identity per anchoring. It is what makes the ledger's `## Log`
     # attributable: without it, a re-issued `/goal` overwrote the `## Goal`
     # head in place while the previous goal's log lines stayed put, and
@@ -257,7 +274,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     }
 
     put(snap)
-    ProgressLedger.set_goal(session_id, goal, goal_id: goal_id)
+
+    ProgressLedger.set_goal(
+      session_id,
+      goal,
+      Keyword.merge(Keyword.take(opts, [:acceptance_criteria, :constraints]), goal_id: goal_id)
+    )
+
     log(session_id, tag(snap, "[goal-tracker] goal started: #{goal}"))
     emit(snap, :started)
     snap

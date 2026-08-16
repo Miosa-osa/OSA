@@ -369,7 +369,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     strategy swarm plan permission orchestrate
     login logout new doctor export version tasks
     skills coordinator memory setup channels
-    effort fast
+    effort fast goal
   )
 
   defp handle_tab_completion(state) do

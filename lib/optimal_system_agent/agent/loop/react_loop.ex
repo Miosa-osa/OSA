@@ -1197,12 +1197,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # flag is cleared here so it fires exactly once PER COMPACTION — and the
       # per-turn budget below bounds how many compactions may buy one.
       just_compacted?(state) and ProactiveCompaction.continuation_enabled?() and
-          compaction_continues_left?(state) ->
+          turn_continues_left?(state) ->
         spent = Map.get(state, :compaction_continues, 0) + 1
 
         Logger.info(
           "[loop] Post-compaction continue: resuming the turn across the fold " <>
-            "(#{spent}/#{max_compaction_continues()}, iteration #{state.iteration})"
+            "(#{spent}/#{max_turn_continues()}, iteration #{state.iteration})"
         )
 
         Observability.emit(
@@ -1210,7 +1210,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           %{
             event: :compaction_continue,
             continues_spent: spent,
-            max_continues: max_compaction_continues(),
+            max_continues: max_turn_continues(),
             overflow: Map.get(state, :just_compacted_overflow, false),
             iteration: state.iteration
           },
@@ -1254,7 +1254,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           %{
             event: :compaction_continue_exhausted,
             continues_spent: spent,
-            max_continues: max_compaction_continues(),
+            max_continues: max_turn_continues(),
             iteration: state.iteration,
             answer_preview: String.slice(to_string(content), 0, 200)
           },
@@ -1266,6 +1266,94 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           state
           |> Map.put(:just_compacted, false)
           |> Map.put(:just_compacted_overflow, false)
+
+        finish_turn(content, state)
+
+      # Goal-anchored re-entry. The model produced a final, tool-call-free answer,
+      # but an explicitly anchored goal (`GoalTracker.start/2`, via `/goal` or the
+      # `progress_note` goal path) is still live and has NOT been judged complete.
+      # Continue toward the goal instead of ending the turn.
+      #
+      # Why this is not the double-ending defect described above: that defect was
+      # the goal VERIFIER re-entering here to bolt a second closing summary onto a
+      # conclusion the user had already been shown, unasked. This clause fires only
+      # when the operator explicitly anchored a goal, and "keep working past an
+      # intermediate answer" is the entire thing they asked for. It is opt-in, it
+      # spends the shared per-turn budget above, and the tracker — not the model —
+      # decides when to stop.
+      #
+      # The stop condition is deliberately NOT the model saying it is done.
+      # `GoalTracker.continue?/1` is false only for `:completed` (which only
+      # `GoalVerifier`'s independent skeptic panel can set, via `advance/2`) or
+      # `:paused` (stall fingerprint / lifetime run cap / manual). A model that
+      # writes "the goal is complete" in its answer does not end this loop.
+      goal_continue_due?(state) and turn_continues_left?(state) ->
+        sid = state.session_id
+        spent = Map.get(state, :compaction_continues, 0) + 1
+        snap = GoalTracker.snapshot(sid)
+
+        Logger.info(
+          "[loop] Goal continue: resuming toward the anchored goal " <>
+            "(#{spent}/#{max_turn_continues()}, iteration #{state.iteration})"
+        )
+
+        Observability.emit(
+          :system_event,
+          %{
+            event: :goal_continue,
+            session_id: sid,
+            continues_spent: spent,
+            max_continues: max_turn_continues(),
+            goal_id: Map.get(snap || %{}, :goal_id),
+            status: Map.get(snap || %{}, :status),
+            iteration: state.iteration
+          },
+          state,
+          source: "agent.goal"
+        )
+
+        state =
+          %{
+            state
+            | messages:
+                state.messages ++
+                  [
+                    %{role: "assistant", content: content},
+                    goal_continuation_message(snap)
+                  ],
+              iteration: state.iteration + 1
+          }
+          |> Map.put(:compaction_continues, spent)
+
+        run(state)
+
+      # Budget spent. End the turn on the model's own answer rather than driving
+      # it again, and SAY that the budget is what ended it — a goal left unfinished
+      # by an exhausted budget must be distinguishable from a goal judged complete.
+      # The goal itself stays `:active` on disk, so the next turn resumes it.
+      goal_continue_due?(state) ->
+        sid = state.session_id
+        spent = Map.get(state, :compaction_continues, 0)
+
+        Logger.warning(
+          "[loop] Goal continue EXHAUSTED — #{spent} synthetic continuation(s) spent " <>
+            "this turn (iteration #{state.iteration}); the goal is still active and the " <>
+            "next turn resumes it."
+        )
+
+        Observability.emit(
+          :system_event,
+          %{
+            event: :goal_continue_exhausted,
+            session_id: sid,
+            continues_spent: spent,
+            max_continues: max_turn_continues(),
+            iteration: state.iteration,
+            answer_preview: String.slice(to_string(content), 0, 200)
+          },
+          state,
+          source: "agent.goal"
+        )
 
         finish_turn(content, state)
 
@@ -1367,7 +1455,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   defp just_compacted?(state), do: Map.get(state, :just_compacted, false) == true
 
-  # Per-turn budget for post-compaction continuations.
+  # THE per-turn continuation budget — ONE counter, shared by every clause that
+  # re-enters `run/1` after the model already produced a final, tool-call-free
+  # answer. Currently two such clauses: the post-compaction resume and the
+  # goal-anchored resume.
   #
   # Compaction is supposed to be invisible to the work, so the turn resumes
   # across the fold — but "resumes across every fold, forever" is a different
@@ -1377,21 +1468,93 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # ended such a turn was `max_iterations`, which on high effort is in the
   # hundreds. Three is enough for a genuinely long task to fold, resume, and
   # fold again; past that the turn is not making progress the fold caused.
-  @default_max_compaction_continues 3
+  #
+  # The goal clause deliberately spends the SAME counter rather than growing its
+  # own. Two independent resume budgets multiply: a turn that may fold 3 times
+  # AND resume 3 times toward a goal is 9 synthetic turns, and neither counter
+  # can see the other reach its cap. Sharing makes the bound a real bound —
+  # after N synthetic continuations from ANY cause, the turn ends on the model's
+  # own answer.
+  #
+  # The field is still named `:compaction_continues` (and the override is still
+  # `:compaction_max_continues`) because both predate the goal clause and are
+  # asserted on by shipped tests; the NAME is historical, the ROLE is shared.
+  @default_max_turn_continues 3
 
-  defp max_compaction_continues do
+  defp max_turn_continues do
     case Application.get_env(
            :optimal_system_agent,
            :compaction_max_continues,
-           @default_max_compaction_continues
+           @default_max_turn_continues
          ) do
       n when is_integer(n) and n >= 0 -> n
-      _ -> @default_max_compaction_continues
+      _ -> @default_max_turn_continues
     end
   end
 
-  defp compaction_continues_left?(state),
-    do: Map.get(state, :compaction_continues, 0) < max_compaction_continues()
+  defp turn_continues_left?(state),
+    do: Map.get(state, :compaction_continues, 0) < max_turn_continues()
+
+  # Should this turn be driven another step toward an anchored goal?
+  #
+  # Every conjunct is load-bearing:
+  #
+  #   * `enabled?/1` — honors the operator's `goal_tracker_enabled` override and
+  #     the autonomous-posture default, so an ordinary interactive turn never
+  #     silently gains a resume loop.
+  #   * `goal_loop?/1` — a REAL goal was anchored by `start/2`. `tick_turn/1`
+  #     lazily creates a bare row for EVERY session; without this, every session
+  #     in the product would qualify.
+  #   * `continue?/1` — `:active` or `:off_track`. False once the skeptic panel
+  #     completed the goal, or the tracker paused it on a stall/run cap.
+  #
+  # Public for direct unit testing without spinning up a loop; `@doc false` keeps
+  # it out of the module docs.
+  @doc false
+  @spec goal_continue_due?(map()) :: boolean()
+  def goal_continue_due?(state) when is_map(state) do
+    sid = Map.get(state, :session_id)
+
+    is_binary(sid) and sid != "" and
+      GoalTracker.enabled?(state) and
+      GoalTracker.goal_loop?(sid) and
+      GoalTracker.continue?(sid)
+  end
+
+  def goal_continue_due?(_), do: false
+
+  # The synthetic turn that carries the goal back into context.
+  #
+  # It restates the goal verbatim rather than saying "continue": the answer that
+  # just ended the turn may have concluded something narrow, and a bare "keep
+  # going" invites re-planning from whatever the model last had in view. Same
+  # reasoning as `ProactiveCompaction.continuation_message/1`, which states the
+  # open plan verbatim for exactly this reason.
+  defp goal_continuation_message(snap) do
+    goal = Map.get(snap || %{}, :goal)
+    status = Map.get(snap || %{}, :status, :active)
+
+    off_track_note =
+      if status == :off_track do
+        "\n\nThe verification panel judged the current approach off-track; a re-plan " <>
+          "directive is queued. Take a materially different approach."
+      else
+        ""
+      end
+
+    %{
+      role: "user",
+      content:
+        "[Goal loop] You have an anchored goal that has NOT been verified complete:\n\n" <>
+          "  #{goal}\n\n" <>
+          "Your previous answer ended the step, not the goal. Continue working toward " <>
+          "the goal now — take the next concrete action (read, edit, run, test) rather " <>
+          "than restating a plan or re-deriving what to do. If you believe the goal is " <>
+          "already met, do not simply assert it: produce the evidence (a passing test, a " <>
+          "checked output, the written file) that an independent reviewer would need." <>
+          off_track_note
+    }
+  end
 
   # Re-estimate `last_input_tokens` from the freshly-folded history.
   #

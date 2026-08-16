@@ -480,11 +480,20 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # (`docs/research/failure-taxonomy.md` §7): a turn that ends on "let me
       # write it now" gets exactly one chance to actually write it.
       announcement_continues: 0,
-      # Per-turn budget for post-compaction continuations
-      # (`ReactLoop.max_compaction_continues/0`). Compaction resuming the turn
-      # is the point — but the budget has to be per-turn, or the first long turn
-      # in a session spends it and every later turn stops dead at its first fold,
-      # which is the exact stop this feature exists to remove.
+      # THE per-turn continuation budget (`ReactLoop.max_turn_continues/0`),
+      # shared by EVERY clause that re-enters the loop after a final,
+      # tool-call-free answer: the post-compaction resume and the goal-anchored
+      # resume both spend this one counter. The name is historical — compaction
+      # was the first such clause — but a second budget must never be added
+      # beside it, because two independent resume budgets multiply into a bound
+      # neither one can see.
+      #
+      # Resuming the turn is the point — but the budget has to be per-turn, or
+      # the first long turn in a session spends it and every later turn stops
+      # dead at its first fold, which is the exact stop this feature exists to
+      # remove. Cross-turn runaway is bounded separately and durably by
+      # `Agent.Loop.GoalTracker` (lifetime run cap + stall fingerprint), which
+      # survives the BEAM boundary this reset does not.
       compaction_continues: 0,
       # A fresh user turn is not "just compacted". Left set, the first text-only
       # answer of the next turn would spend a continuation on a fold that

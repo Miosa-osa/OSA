@@ -47,6 +47,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "bg" => {"List background work — subagent runs and background commands", :cmd_bg},
     "fg" => {"Foreground a running agent/fleet node — switch the active session to it", :cmd_fg},
     "steer" => {"Inject a directive into the running turn (mid-turn steer)", :cmd_steer},
+    "goal" => {"Anchor a goal the agent keeps working toward across turns", :cmd_goal},
     "sessions" => {"List recent sessions", :cmd_sessions},
     "tasks" => {"Show current tasks", :cmd_tasks},
     "plan" => {"Toggle plan mode", :cmd_plan},
@@ -1058,6 +1059,172 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: could not steer#{@reset}\n")
       session_id
+  end
+
+  @doc """
+  Anchor a cross-turn goal — the door onto `Agent.Loop.GoalTracker`.
+
+  `GoalTracker` (cross-turn status machine, gap-fingerprint stall detector,
+  lifetime run cap, reverify cadence, durable sidecar) has been fully built and
+  entirely unreachable: `start/2` had no caller anywhere in `lib/`, so the only
+  live entry point was `advance/2` from the verifier, advancing a goal that was
+  never started. This command is that missing caller, and anchoring a goal here
+  lights up five already-written subsystems at once — the tracker, the immutable
+  `TaskBrief` injected into the system block every turn, the stall detector, the
+  run cap, and `GoalVerifier`'s "anchored goal loop" activation heuristic.
+
+  ## Forms
+
+      /goal                        show status
+      /goal <text>                 anchor a goal
+      /goal <text> :: <criteria>   anchor with explicit acceptance criteria
+      /goal pause | resume         halt / restart cross-turn pursuit
+      /goal clear                  forget the goal entirely
+
+  Criteria must be given at anchor time. `TaskBrief` is immutable by design (it
+  is the run's founding instruction, not a status field), so the FIRST goal-set
+  freezes them; a later `/goal ... :: ...` cannot revise them.
+  """
+  def cmd_goal(args, session_id) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        print_goal_status(session_id)
+
+      verb when verb in ["pause", "stop"] ->
+        GoalTracker.pause(session_id, :user)
+        IO.puts("  #{@green}✓#{@reset} Goal paused. #{@dim}/goal resume to continue.#{@reset}")
+
+      "resume" ->
+        GoalTracker.resume(session_id)
+        IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+
+      verb when verb in ["clear", "off", "reset"] ->
+        GoalTracker.reset(session_id)
+        IO.puts("  #{@green}✓#{@reset} Goal cleared. Auto-continue toward it stops.")
+
+      "status" ->
+        print_goal_status(session_id)
+
+      text ->
+        anchor_goal_command(text, session_id)
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: could not update goal (#{Exception.message(e)})#{@reset}\n")
+      session_id
+  end
+
+  # `<goal> :: <criteria>` — the separator is doubled so ordinary goal prose
+  # containing a colon ("fix bug: the parser drops trailing commas") is not
+  # silently split into a goal and a criterion.
+  defp anchor_goal_command(text, session_id) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    {goal, criteria} =
+      case String.split(text, "::", parts: 2) do
+        [g, c] -> {String.trim(g), String.trim(c)}
+        [g] -> {String.trim(g), nil}
+      end
+
+    if goal == "" do
+      IO.puts("  #{@dim}Usage: /goal <text> [:: <acceptance criteria>]#{@reset}")
+    else
+      opts = if criteria in [nil, ""], do: [], else: [acceptance_criteria: criteria]
+      snap = GoalTracker.start(session_id, goal, opts)
+
+      IO.puts("  #{@green}✓#{@reset} Goal anchored #{@dim}(#{snap.goal_id})#{@reset}")
+      IO.puts("  #{@bold}#{goal}#{@reset}")
+
+      case criteria do
+        nil ->
+          IO.puts("")
+
+          IO.puts(
+            "  #{@yellow}No acceptance criteria.#{@reset} #{@dim}Completion will be judged " <>
+              "against the goal text alone.#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}For an unattended run, state what done means in checkable terms:#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}  /goal #{goal} :: mix test passes and lib/foo.ex exports bar/1#{@reset}"
+          )
+
+        c ->
+          IO.puts("  #{@dim}done when:#{@reset} #{c}")
+      end
+
+      IO.puts("")
+
+      IO.puts(
+        "  #{@dim}The agent keeps working toward this across turns. Completion is judged " <>
+          "by an independent#{@reset}"
+      )
+
+      IO.puts(
+        "  #{@dim}skeptic panel, not by the agent saying so. /goal pause stops it.#{@reset}"
+      )
+    end
+  end
+
+  defp print_goal_status(session_id) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    case GoalTracker.snapshot(session_id) do
+      %{goal: goal} = snap when is_binary(goal) and goal != "" ->
+        IO.puts("  #{@bold}Goal#{@reset} #{@dim}(#{snap.goal_id})#{@reset}")
+        IO.puts("  #{goal}")
+        IO.puts("")
+
+        reason = if snap.pause_reason, do: " (#{snap.pause_reason})", else: ""
+
+        IO.puts(
+          "  #{@dim}status:#{@reset} #{snap.status}#{reason}  #{@dim}phase:#{@reset} #{snap.phase}"
+        )
+
+        IO.puts(
+          "  #{@dim}turns:#{@reset} #{snap.turn_count}  " <>
+            "#{@dim}verification rounds:#{@reset} #{snap.verify_run_count}/#{GoalTracker.max_runs()}"
+        )
+
+        case OptimalSystemAgent.Agent.TaskBrief.load(session_id) do
+          {:ok, %{acceptance_criteria: c}} when is_binary(c) and c != "" ->
+            # The brief falls back to storing the goal text when no criteria were
+            # authored; showing that back as "done when: <the goal>" would read
+            # as a real criterion, so say plainly that none were set.
+            if String.trim(c) == String.trim(goal) do
+              IO.puts("  #{@dim}done when:#{@reset} #{@yellow}not specified#{@reset}")
+            else
+              IO.puts("  #{@dim}done when:#{@reset} #{c}")
+            end
+
+          _ ->
+            :ok
+        end
+
+        case snap.history do
+          [latest | _] -> IO.puts("  #{@dim}latest:#{@reset} #{latest}")
+          _ -> :ok
+        end
+
+      _ ->
+        IO.puts("  #{@dim}No goal anchored. Set one with /goal <text>.#{@reset}")
+
+        IO.puts(
+          "  #{@dim}An anchored goal is pursued across turns until an independent panel#{@reset}"
+        )
+
+        IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
+    end
   end
 
   def cmd_sessions(_args, session_id) do

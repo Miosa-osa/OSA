@@ -72,7 +72,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ProgressNote.Handler do
     if Regex.match?(@goal_prefix, note) do
       goal = Regex.replace(@goal_prefix, note, "")
 
-      case ProgressLedger.set_goal(sid, goal) do
+      # Anchor through `GoalTracker.start/2` rather than `ProgressLedger.set_goal/2`.
+      #
+      # This is the path by which the AGENT sets its own goal, and it used to
+      # write the ledger and the immutable TaskBrief while leaving the cross-turn
+      # machine untouched — so a self-authored goal got durable prose and no
+      # tracker, no stall detector, no run cap, and no phase. `start/2` writes the
+      # ledger itself (via `set_goal/3`, the single brief-capture chokepoint), so
+      # this anchors BOTH halves with one call and no double write.
+      #
+      # Nothing here decides to run autonomously. Whether an anchored goal
+      # actually drives another turn is gated separately, at the re-entry site,
+      # by `GoalTracker.enabled?/1` — which is off for ordinary interactive turns.
+      case anchor_goal(sid, goal) do
         {:ok, saved} -> {:ok, "Ledger goal set: #{saved}"}
         {:error, reason} -> {:error, "Failed to set goal: #{inspect(reason)}"}
       end
@@ -82,6 +94,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ProgressNote.Handler do
         {:error, reason} -> {:error, "Failed to record note: #{inspect(reason)}"}
       end
     end
+  end
+
+  # Anchor via the tracker, falling back to a plain ledger write if the tracker
+  # is unavailable for any reason. Recording the goal is the load-bearing part;
+  # losing the cross-turn machine is a degradation, not a failure of the tool.
+  @spec anchor_goal(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  defp anchor_goal(sid, goal) do
+    case OptimalSystemAgent.Agent.Loop.GoalTracker.start(sid, goal) do
+      %{goal: saved} when is_binary(saved) and saved != "" -> {:ok, saved}
+      _ -> ProgressLedger.set_goal(sid, goal)
+    end
+  rescue
+    _ -> ProgressLedger.set_goal(sid, goal)
   end
 
   @spec session_id(UseContext.t()) :: String.t() | nil

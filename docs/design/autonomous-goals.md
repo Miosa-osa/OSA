@@ -1,12 +1,115 @@
 # Autonomous goals
 
-Status: design sketch. **Nothing here is implemented by the change that
-accompanies it** — the shippable half of that work was making compaction a
-continuation (`docs/design/context-compaction.md` is the subsystem; the
-continuation behaviour lives in `Agent.Loop.ReactLoop` and
-`Agent.Loop.ProactiveCompaction`). This document describes the *next* thing:
-OSA setting its own goal and its own completion criteria, and working until it
-meets them.
+Status: **partly implemented.** Part 5 steps 1 and 3 have shipped, step 2 has
+shipped in its authored-by-a-human form only, and steps 4-5 have not. See
+"§0 — What shipped, and one correction" immediately below before reading the
+rest, which is preserved as written.
+
+---
+
+## §0 — What shipped, and one correction
+
+### The correction: there was already a `/goal`, and it grades its own homework
+
+§2.1 below says "There is also no `/goal` command". That is true of the Elixir
+command table and **false of the product**. The Rust TUI has shipped a complete,
+entirely client-side `/goal` for some time:
+
+- registered at `priv/rust/tui/src/app/commands.rs:52`, handled at `:646-659`;
+- state (`goal`, `goal_cycle`, `goal_max_cycles`) at
+  `priv/rust/tui/src/app/mod.rs:383-396`;
+- the loop itself is `maybe_continue_goal/1`,
+  `priv/rust/tui/src/app/handle_actions.rs:2059-2099`.
+
+It never contacts the backend — the match arm handles `/goal` locally, so no
+Elixir code was involved at any point. Its properties:
+
+- **Completion detection is the model saying so.** `reply_signals_done/1`
+  (`handle_actions.rs:2047`) returns true when the last non-empty line of the
+  reply is exactly `DONE`. That is the "grading its own homework" failure mode
+  in its purest form: no criteria, no evidence, no independent check.
+- **Its budget is a third, uncoordinated one**: `goal_max_cycles`, default
+  **25** (`priv/rust/tui/src/config/mod.rs:208`), which knows nothing about
+  `GoalTracker`'s lifetime run cap or the loop's per-turn continuation budget.
+
+So the real gap was never "there is no door". It was that **the shipping front
+door leads somewhere else than the rigorous machinery**, and the two systems
+cannot see each other. That reframes the work from "build a door" to "connect
+the front door to the machine" — and the TUI half of that connection is *not*
+done (see "Not done" below).
+
+### Verified as written
+
+- `GoalTracker.start/2` genuinely had **no caller in `lib/`** — confirmed. The
+  only live entry was `advance/2` from `GoalVerifier`, advancing a goal nothing
+  had started. `ensure/1` and `continue?/1` likewise had no `lib/` callers.
+- `TaskBrief.acceptance_criteria` was **never authored**: every goal-set path
+  funnels through `ProgressLedger.set_goal/3`, which called
+  `TaskBrief.capture/2` **with no opts**, so `capture/3` always took its
+  fallback branch and wrote the *goal text* into `acceptance_criteria`. The
+  field was populated on every turn and said nothing.
+- The tracker works when driven. Its own suites (125 tests across
+  `goal_tracker_test`, `goal_tracker_durability_test`, `goal_verifier_test`,
+  `goal_identity_test`, `react_loop_goal_verifier_gate_test`) pass.
+
+### One thing §1.5 overstates
+
+§1.5 says "A not-refuted vote does not default to 'complete'." At the level of a
+single skeptic that is true (a crash, a timeout, or a malformed verdict all
+count as fail-closed refutes, `goal_verifier.ex:1452-1466`). At the level of the
+*panel*, `aggregate/1` (`goal_verifier.ex:1199-1217`) returns `:complete`
+whenever refuters are fewer than a strict majority — so three non-refuting
+skeptics do produce `:complete`. Only the empty-panel case is fail-closed. The
+aggregate rule is "not refuted by a majority ⇒ complete", which is a weaker
+guarantee than the sentence implies.
+
+### Shipped
+
+1. **`/goal` in the Elixir command table** (`channels/cli/commands.ex`) —
+   `start`/`status`/`pause`/`resume`/`clear`, plus
+   `/goal <text> :: <criteria>`. This is the missing `GoalTracker.start/2`
+   caller, and it lights up the tracker, the brief, the stall detector, the run
+   cap and the verifier's activation heuristic.
+2. **The agent's own goal now anchors the tracker.** `progress_note` with a
+   `GOAL:` prefix went through `ProgressLedger.set_goal/2`, which wrote the
+   ledger and the brief and left the cross-turn machine untouched. It now
+   anchors via `GoalTracker.start/2` (which writes the ledger itself, so there
+   is no double write). This is the "creates its own goal" half.
+3. **Criteria are plumbed.** `set_goal/3` forwards `:acceptance_criteria` and
+   `:constraints` to `TaskBrief.capture/3`; `GoalTracker.start/3` forwards them
+   in turn. Criteria supplied at anchor time are frozen into the brief and
+   injected into the system block every turn. Absent criteria still fall back to
+   the goal text, but `/goal` now *says* they are unset rather than presenting
+   the echo as a criterion.
+4. **Goal-anchored re-entry** (§2.3) in `ReactLoop`, sharing the per-turn
+   continuation budget with the post-compaction resume as §2.3 requires — one
+   counter (`:compaction_continues`, name historical), one cap
+   (`max_turn_continues/0`, default 3), one reset
+   (`TurnPipeline.reset_per_turn_fields/1`). Exhaustion emits
+   `:goal_continue_exhausted` and ends on the model's own answer.
+
+### Not done, deliberately
+
+- **Automatic criteria elicitation (§2.2 steps 1-3).** A model proposing its own
+  definition of done is the drift risk in Part 3, and building it was inventing
+  rather than wiring. Criteria are authored by a human or left explicitly unset.
+- **The TUI still runs its own `DONE`-sentinel loop.** Nothing here changed it,
+  and it remains the highest-consequence path because it is the one users
+  actually reach. Routing the TUI arm to the backend (the `_` fallthrough at
+  `commands.rs:837-841` already does this for unknown commands) is the single
+  highest-value follow-up in this document.
+- **Cross-turn dollar/turn budgets and a spend report (§2.4).**
+- **The secondary stall signal (Part 3).** §5 step 5 marks this *required before
+  step 3 runs unattended*; step 3 shipped, so this is now the outstanding
+  safety item. What exists is the gap-fingerprint detector only, which catches a
+  repeated identical gap and not a differently-worded one each round.
+
+---
+
+## The original document follows unchanged
+
+This document describes the *next* thing: OSA setting its own goal and its own
+completion criteria, and working until it meets them.
 
 **The problem in one sentence:** OSA can already be told what to do and can
 already judge whether it did it, but nothing connects those two facts, so every
