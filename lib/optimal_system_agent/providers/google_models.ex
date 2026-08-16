@@ -47,9 +47,12 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
   recorded here at its list price of `{1.50, 7.50}` while Google was actually
   billing `{0.75, 3.75}`, so every Gemini cost OSA reported was 2x high and
   `Pricing.confidence/1` called it `:exact`. Both current Flash models now
-  carry the rate in force today, and both promos lapse **2027-01-01** — after
-  which these two rows must be doubled. Nothing in the code knows that date;
-  it is a diary entry, not a mechanism.
+  carry the rate in force today, and both promos lapse **2027-01-01**.
+
+  That date is no longer a diary entry. `pricing_schedule/0` below carries the
+  post-promo rate alongside its effective date, and `Agent.Pricing` resolves it
+  at REQUEST time — so on 2027-01-01 these two models start pricing at
+  `{1.50, 7.50}` on their own, with nothing for anyone to remember.
 
   Sources: https://ai.google.dev/gemini-api/docs/models,
   https://ai.google.dev/gemini-api/docs/pricing,
@@ -299,6 +302,28 @@ defmodule OptimalSystemAgent.Providers.GoogleModels do
     |> Enum.filter(& &1.pricing)
     |> Map.new(&{&1.id, &1.pricing})
   end
+
+  # Both Flash rows carry Google's INTRODUCTORY rate, which it publishes as
+  # running through 2026-12-31. `:pricing` is what Google bills today; these
+  # are what it bills from 2027-01-01. Resolved at request time by
+  # `Agent.Pricing`, so a release built in 2026 does not price 2027 turns at
+  # the promo rate.
+  #
+  # Source: https://ai.google.dev/gemini-api/docs/pricing (checked 2026-08-15).
+  @pricing_schedule %{
+    "gemini-3.7-flash" => [{~D[2027-01-01], {1.50, 7.50}}],
+    "gemini-3.6-flash" => [{~D[2027-01-01], {1.50, 7.50}}]
+  }
+
+  @doc """
+  Published rate changes, as `%{model_id => [{effective_from, {input, output}}]}`.
+
+  See `AnthropicModels.pricing_schedule/0` for the contract — this is the same
+  mechanism, and Gemini's introductory Flash pricing is the second instance of
+  the defect that motivated it.
+  """
+  @spec pricing_schedule() :: %{String.t() => [{Date.t(), {number(), number()}}]}
+  def pricing_schedule, do: @pricing_schedule
 
   @doc "Context window for a model, or nil when unknown."
   @spec context_window(String.t() | nil) :: pos_integer() | nil

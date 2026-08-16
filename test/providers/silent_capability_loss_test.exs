@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.LLMClient
+  alias OptimalSystemAgent.Agent.Pricing
   alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Providers.Bedrock
@@ -1513,6 +1514,127 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
       assert log =~ "[info]",
              "the one place a session's cost stops coming from OSA's price table must be " <>
                "visible; a silent substitution is indistinguishable from a pricing bug"
+    end
+
+    # ── The sixth class ratchet ───────────────────────────────────────────
+    #
+    # Three pricing defects shipped in one night, and they share a shape that
+    # none of the per-model tests above can catch:
+    #
+    #   * `glm-5.2:cloud` carried GLM-4.7's rate            (under 2.4x)
+    #   * `anthropic/claude-opus-5` missed the exact table on its vendor
+    #     prefix, matched the `"claude-opus"` substring, and billed at Claude 3
+    #     Opus rates                                         (over 3.000x)
+    #   * `claude-sonnet-5` carried the list rate through an introductory
+    #     period                                             (over 1.500x)
+    #
+    # In all three `Pricing.confidence/1` said `:exact`. That is the defect:
+    # a wrong number reached via an "exact" path never touches the `@families`
+    # guess that would have warned, so the loudness added there protects only
+    # the models that were never the problem.
+    #
+    # The invariant that would have caught all three: **every model a provider
+    # surface can actually offer prices at the rate its OWN catalog publishes,
+    # through the spellings a gateway actually sends, and reports `:exact`.**
+    # Catalog drift, a vendor-prefix miss, and a routing-suffix miss all break
+    # it. So does a new catalog nobody wired into `Pricing`.
+    #
+    # What it cannot catch, stated so nobody reads more into a green run: it
+    # compares OSA against OSA. A catalog whose number disagrees with the
+    # vendor's published rate is exactly as green as one that agrees — that
+    # check needs the vendor's page, not the test suite.
+    @priced_catalogs [
+      OptimalSystemAgent.Providers.AnthropicModels,
+      OptimalSystemAgent.Providers.OpenAIModels,
+      OptimalSystemAgent.Providers.XAIModels,
+      OptimalSystemAgent.Providers.ZaiModels,
+      OptimalSystemAgent.Providers.GoogleModels,
+      OptimalSystemAgent.Providers.DeepSeekModels,
+      OptimalSystemAgent.Providers.MistralModels,
+      OptimalSystemAgent.Providers.OllamaCloud
+    ]
+
+    # The last date on which every catalog's `:pricing` is, by definition, the
+    # rate in force — derived from the schedules rather than hardcoded, so
+    # adding a dated rate cannot silently invalidate the baseline and no
+    # assertion here expires with the calendar.
+    defp pricing_baseline_date do
+      Pricing.pricing_schedules()
+      |> Enum.flat_map(fn {_id, entries} -> Enum.map(entries, fn {d, _r} -> d end) end)
+      |> Enum.min_by(&Date.to_gregorian_days/1, fn -> ~D[2099-01-01] end)
+      |> Date.add(-1)
+    end
+
+    # The decorations a gateway puts on an id. OpenRouter sends `vendor/id`;
+    # `:free`/`:nitro` are routing directives, not identity. Ids that already
+    # carry a `:` tag (`glm-5.2:cloud`) are left alone — a second colon is not
+    # a spelling anything emits.
+    defp gateway_spellings(id) do
+      base = [id, "vendor/" <> id]
+      if String.contains?(id, ":"), do: base, else: base ++ Enum.map(base, &(&1 <> ":free"))
+    end
+
+    test "every offerable priced model reaches its own catalog's rate, at :exact" do
+      on = pricing_baseline_date()
+
+      failures =
+        for mod <- @priced_catalogs,
+            {id, catalog_rate} <- mod.pricing(),
+            spelling <- gateway_spellings(id),
+            got = Pricing.rates(spelling, on),
+            conf = Pricing.confidence(spelling, on),
+            got != catalog_rate or conf != :exact do
+          "  #{inspect(spelling)} (#{inspect(mod)}) -> #{inspect(got)} / #{conf}, " <>
+            "catalog publishes #{inspect(catalog_rate)}"
+        end
+
+      assert failures == [], """
+      #{length(failures)} offerable model(s) do not price at their own catalog's rate:
+
+      #{Enum.join(failures, "\n")}
+
+      Each line is a model OSA will happily run and bill at a number its own
+      source of truth disagrees with — the shape that produced a 3.000x
+      over-report (claude-opus-5 via its vendor prefix), a 2.4x under-report
+      (glm-5.2:cloud), and a 1.500x over-report (claude-sonnet-5 on list
+      price). A `:estimated` here means the id fell through to the
+      `@families` substring guess; a mismatched rate means the exact table has
+      drifted from the catalog it is supposed to mirror.
+
+      Fix the catalog or the lookup path — do not add the id to the exact map
+      by hand, which is how these tables drift apart in the first place.
+      """
+    end
+
+    test "a dated rate changes itself on its date, in both directions" do
+      # The mechanism, pinned with injected dates so the test never expires.
+      # A rate whose only clock is Date.utc_today/0 cannot be tested on both
+      # sides of its own boundary, and an assertion that goes red on a calendar
+      # date is a defect, not a guard.
+      assert Pricing.pricing_schedules() != %{},
+             "this ratchet is vacuous with no scheduled rates in the tree"
+
+      for {id, entries} <- Pricing.pricing_schedules(),
+          {effective_from, scheduled} <- entries do
+        day_before = Date.add(effective_from, -1)
+
+        before_rate = Pricing.rates(id, day_before)
+
+        assert before_rate != scheduled,
+               "#{id}: the scheduled rate #{inspect(scheduled)} is already in force the day " <>
+                 "before #{effective_from} — the entry is a no-op and will be forgotten"
+
+        assert Pricing.rates(id, effective_from) == scheduled,
+               "#{id}: rate did not change on #{effective_from}"
+
+        assert Pricing.confidence(id, effective_from) == :exact,
+               "#{id}: a published rate with a published start date is not a guess"
+
+        # And through the spelling a gateway sends — the vendor-prefix miss is
+        # the whole reason lookup_keys/1 exists.
+        assert Pricing.rates("vendor/" <> id, effective_from) == scheduled,
+               "#{id}: the schedule does not survive a vendor prefix"
+      end
     end
 
     test "Copilot's premium requests accumulate as themselves, not as dollars" do

@@ -57,9 +57,12 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
      `:budget` for anything older that supports extended thinking, `:none` if
      it has no thinking mode at all. Set `:prefill` to `false` for Opus/Sonnet
      4.6 and newer (prefill removed), `true` only for Haiku 4.5 and older.
-  3. Set `:pricing` to `{input, output}` USD per 1M tokens. Leave it `nil`
-     rather than guessing — an unpriced model accounts at $0.00 and logs, which
-     is honest; a guessed price is not.
+  3. Set `:pricing` to `{input, output}` USD per 1M tokens — **the rate the
+     vendor bills today**, not a list price the vendor is currently discounting
+     away from. Leave it `nil` rather than guessing: an unpriced model accounts
+     at $0.00 and logs, which is honest; a guessed price is not. If the vendor
+     publishes a date on which the rate changes, add the post-change rate to
+     `pricing_schedule/0` instead of picking one of the two — see there.
   4. `mix compile` + `mix test test/providers`. Nothing else to touch.
 
   Sources: https://platform.claude.com/docs/en/about-claude/models/overview and
@@ -110,9 +113,17 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       prefill: false,
       vision: true,
       tools: true,
-      # $3/$15 list; an introductory $2/$10 applies through 2026-08-31. We
-      # account at list price so a bill is never under-estimated.
-      pricing: {3.00, 15.00},
+      # $3/$15 list, with an introductory $2/$10 in force through 2026-08-31.
+      # `:pricing` is the rate BILLED TODAY; the list rate lives in
+      # `pricing_schedule/0` and takes over on 2026-09-01 by itself.
+      #
+      # This row previously carried the list rate on a "never under-estimate"
+      # policy, and that policy is what made it wrong: an 8-task benchmark arm
+      # billed $52.73 at OpenRouter and reconciled to $52.31 against $2/$10
+      # (0.8%), while OSA reported $78.55 — exactly 1.50x, the ratio of the two
+      # rates. An estimate deliberately biased away from the invoice cannot
+      # reconcile against it, which is the one job a cost figure has.
+      pricing: {2.00, 10.00},
       recommended: false,
       legacy: false,
       note: "1M ctx — near-Opus quality at Sonnet cost, best speed/intelligence"
@@ -344,6 +355,43 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
     |> Enum.filter(& &1.pricing)
     |> Map.new(&{&1.id, &1.pricing})
   end
+
+  # ── Dated rate changes ───────────────────────────────────────────────────
+  #
+  # A vendor price is not always a constant, and encoding it as one is how two
+  # separate 1.5x-2x accounting errors shipped: `claude-sonnet-5` carried the
+  # $3/$15 list rate through an introductory $2/$10 period (1.50x over), and
+  # `gemini-3.6-flash` did the same thing in `GoogleModels` (2x over). Both
+  # were reported as `:exact` the whole time, because an exact table has no way
+  # to say "correct until".
+  #
+  # So a row whose rate has a PUBLISHED change date carries the change here.
+  # `:pricing` above is the rate in force now; each entry is `{effective_from,
+  # rate}` and takes over on that date. `Agent.Pricing` resolves this at
+  # RUNTIME against the turn's own date — deliberately not at compile time,
+  # because a release built during a promo would otherwise carry the promo
+  # rate for the rest of its life.
+  #
+  # The mechanism, not the date, is what the tests pin: they resolve against
+  # injected dates on both sides of the boundary, so no test expires and
+  # 2026-09-01 arrives with the rate already correct rather than with a red
+  # suite telling someone to go fix it.
+  @pricing_schedule %{
+    # The introductory rate lapses; list price resumes.
+    # Source: https://platform.claude.com/docs/en/pricing (checked 2026-08-16).
+    "claude-sonnet-5" => [{~D[2026-09-01], {3.00, 15.00}}]
+  }
+
+  @doc """
+  Published rate changes, as `%{model_id => [{effective_from, {input, output}}]}`.
+
+  An id absent here has no announced change — its `:pricing` is simply the
+  rate. An id present here is priced at `:pricing` until the first date, then
+  at that entry's rate. Entries are resolved by `Agent.Pricing` at request
+  time, never baked into the build.
+  """
+  @spec pricing_schedule() :: %{String.t() => [{Date.t(), {number(), number()}}]}
+  def pricing_schedule, do: @pricing_schedule
 
   @doc """
   Which thinking dialect this model speaks.

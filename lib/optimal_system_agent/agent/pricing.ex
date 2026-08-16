@@ -151,17 +151,34 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   Local/self-hosted models served via Ollama are free and return `{0.0, 0.0}`.
   """
   @spec rates(String.t() | atom() | nil) :: {number(), number()} | nil
-  def rates(nil), do: nil
+  def rates(model), do: rates(model, Date.utc_today())
 
-  def rates(model) when is_atom(model), do: rates(Atom.to_string(model))
+  @doc """
+  `rates/1` against an explicit date.
 
-  def rates(model) when is_binary(model) do
+  `today` exists because some published rates are DATED (see
+  `@pricing_schedules`), and a date-dependent price whose only clock is
+  `Date.utc_today/0` cannot be tested on both sides of its own boundary
+  without waiting for the calendar. Mirrors `AnthropicModels.retired?/2`.
+  """
+  @spec rates(String.t() | atom() | nil, Date.t()) :: {number(), number()} | nil
+  def rates(nil, _today), do: nil
+
+  def rates(model, today) when is_atom(model), do: rates(Atom.to_string(model), today)
+
+  def rates(model, today) when is_binary(model) do
     key = String.downcase(model)
 
     cond do
       # Local Ollama-hosted models (e.g. "ollama/llama3", "qwen2.5:7b") are free.
       ollama_local?(key) ->
         {0.0, 0.0}
+
+      # Checked BEFORE the exact table: a scheduled rate supersedes the
+      # catalog's `:pricing` once its date arrives, and the exact table would
+      # otherwise keep returning the pre-change rate forever.
+      rate = scheduled_rate(key, today) ->
+        rate
 
       rate = Enum.find_value(lookup_keys(key), &exact_rate/1) ->
         rate
@@ -170,6 +187,11 @@ defmodule OptimalSystemAgent.Agent.Pricing do
         family_rate(key)
     end
   end
+
+  # Unexpected model type (number, map, tuple, …) — never guess a price and
+  # never raise. A malformed loop state must not crash cost accounting in the
+  # hot path; treat as unknown (nil → $0.0 in cost/2, same as an unknown name).
+  def rates(_, _), do: nil
 
   # A gateway names a model `<vendor>/<id>` — `anthropic/claude-opus-5`,
   # `z-ai/glm-5.2`, `openai/gpt-5.6-sol` — and that is the form OSA actually
@@ -273,10 +295,57 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     end)
   end
 
-  # Unexpected model type (number, map, tuple, …) — never guess a price and
-  # never raise. A malformed loop state must not crash cost accounting in the
-  # hot path; treat as unknown (nil → $0.0 in cost/2, same as an unknown name).
-  def rates(_), do: nil
+  # ── Dated rates ──────────────────────────────────────────────────────────
+  #
+  # Some vendor prices are not constants. `claude-sonnet-5` ran an
+  # introductory $2/$10 through 2026-08-31 against a $3/$15 list, and both
+  # Gemini Flash models run an introductory rate through 2026-12-31. Encoding
+  # one of the two numbers and a comment about the other is exactly how the
+  # 1.50x sonnet-5 over-report and the 2x gemini-3.6 over-report shipped —
+  # both labelled `:exact`.
+  #
+  # The SCHEDULE is compile-time data (dates do not change). The RESOLUTION is
+  # runtime, against the caller's date: a release built during a promo must not
+  # carry the promo rate past its expiry, which is precisely what merging a
+  # resolved rate into `@pricing` at compile time would do.
+  @scheduled_price_modules [
+    OptimalSystemAgent.Providers.AnthropicModels,
+    OptimalSystemAgent.Providers.GoogleModels
+  ]
+
+  @pricing_schedules Enum.reduce(@scheduled_price_modules, %{}, fn mod, acc ->
+                       Map.merge(acc, mod.pricing_schedule())
+                     end)
+
+  @doc false
+  # Test seam: lets a ratchet assert the schedule is non-empty and well-formed
+  # without reaching into each catalog.
+  @spec pricing_schedules() :: %{String.t() => [{Date.t(), {number(), number()}}]}
+  def pricing_schedules, do: @pricing_schedules
+
+  # The latest scheduled rate whose date has ARRIVED, or nil while the model's
+  # own `:pricing` is still in force. Tried against the same decorated
+  # spellings as every other lookup, so `anthropic/claude-sonnet-5` and
+  # `claude-sonnet-5:nitro` follow the schedule too — the vendor-prefix miss is
+  # the exact shape that billed Opus 5 at Claude 3 Opus rates.
+  defp scheduled_rate(key, today) do
+    Enum.find_value(lookup_keys(key), fn k ->
+      case Map.fetch(@pricing_schedules, k) do
+        {:ok, entries} -> effective_rate(entries, today)
+        :error -> nil
+      end
+    end)
+  end
+
+  defp effective_rate(entries, today) do
+    entries
+    |> Enum.filter(fn {from, _rate} -> Date.compare(today, from) != :lt end)
+    |> Enum.max_by(fn {from, _rate} -> Date.to_gregorian_days(from) end, fn -> nil end)
+    |> case do
+      {_from, rate} -> rate
+      nil -> nil
+    end
+  end
 
   @doc """
   Compute the USD cost for one turn's usage against `model`.
@@ -343,21 +412,28 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   3x off — the latter is what invalidated a whole benchmark run's conclusions.
   """
   @spec confidence(String.t() | atom() | nil) :: :exact | :estimated | :unknown
-  def confidence(nil), do: :unknown
-  def confidence(model) when is_atom(model), do: confidence(Atom.to_string(model))
+  def confidence(model), do: confidence(model, Date.utc_today())
 
-  def confidence(model) when is_binary(model) do
+  @doc "`confidence/1` against an explicit date. See `rates/2`."
+  @spec confidence(String.t() | atom() | nil, Date.t()) :: :exact | :estimated | :unknown
+  def confidence(nil, _today), do: :unknown
+  def confidence(model, today) when is_atom(model), do: confidence(Atom.to_string(model), today)
+
+  def confidence(model, today) when is_binary(model) do
     key = String.downcase(model)
 
     cond do
       ollama_local?(key) -> :exact
+      # A scheduled rate is a PUBLISHED rate with a published start date, not a
+      # guess — same standing as the exact table it supersedes.
+      scheduled_rate(key, today) -> :exact
       Enum.find_value(lookup_keys(key), &exact_rate/1) -> :exact
       family_rate(key, log?: false) -> :estimated
       true -> :unknown
     end
   end
 
-  def confidence(_), do: :unknown
+  def confidence(_, _), do: :unknown
 
   # --- Private ---
 
@@ -429,12 +505,31 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     _ -> :ok
   end
 
+  # "Is this a free, locally-hosted model?" — answered from the id's SHAPE: a
+  # `name:tag` spelling is Ollama's, and the family substrings are the ones
+  # that actually ship as local weights.
+  #
+  # The `:tag` half of that heuristic collides with OpenRouter's ROUTING
+  # SUFFIXES, and the collision was live: `mistral-large-latest:free` contains
+  # a colon and the substring "mistral", so every Mistral model reached through
+  # a gateway with a routing directive was priced at {0.0, 0.0} — free — and
+  # `confidence/1` called it `:exact`. Silent, exact-labelled, and wrong in the
+  # direction that flatters us, which is the same shape as the three pricing
+  # defects the class ratchet in `silent_capability_loss_test.exs` exists for.
+  # (Found BY that ratchet, on its first run.)
+  #
+  # So the routing directive is stripped before the shape is judged. A genuine
+  # local tag is untouched: `qwen2.5:7b` keeps its `:7b` (not a routing
+  # suffix), `ollama/llama3` still matches on its prefix, and a `:cloud` tag is
+  # still excluded as hosted.
   defp ollama_local?(key) do
-    String.starts_with?(key, "ollama/") or
-      (String.contains?(key, ":") and
-         (String.contains?(key, "llama") or String.contains?(key, "qwen") or
-            String.contains?(key, "mistral") or String.contains?(key, "gemma") or
-            String.contains?(key, "phi")) and not String.contains?(key, "cloud"))
+    bare = strip_routing_suffix(key)
+
+    String.starts_with?(bare, "ollama/") or
+      (String.contains?(bare, ":") and
+         (String.contains?(bare, "llama") or String.contains?(bare, "qwen") or
+            String.contains?(bare, "mistral") or String.contains?(bare, "gemma") or
+            String.contains?(bare, "phi")) and not String.contains?(bare, "cloud"))
   end
 
   defp get_tok(usage, key) do
