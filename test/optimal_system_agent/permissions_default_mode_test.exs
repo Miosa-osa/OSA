@@ -4,11 +4,19 @@ defmodule OptimalSystemAgent.PermissionsDefaultModeTest do
 
   alias OptimalSystemAgent.{Permissions, Settings}
 
-  @flag Path.join(System.tmp_dir!(), "osa-defaultmode-flag.json")
-
+  # Per-test path, not a fixed one. A shared `/tmp/osa-defaultmode-flag.json`
+  # is readable and writable by every concurrent `mix test`, and a run that
+  # dies before `on_exit` leaves it behind for the next one to inherit as
+  # settings it never wrote.
   setup do
+    flag =
+      Path.join(
+        System.tmp_dir!(),
+        "osa-defaultmode-flag-#{System.unique_integer([:positive])}.json"
+      )
+
     prior = Application.get_env(:optimal_system_agent, :settings_flag_path)
-    Application.put_env(:optimal_system_agent, :settings_flag_path, @flag)
+    Application.put_env(:optimal_system_agent, :settings_flag_path, flag)
     Settings.reset_cache()
 
     on_exit(fn ->
@@ -17,45 +25,45 @@ defmodule OptimalSystemAgent.PermissionsDefaultModeTest do
         p -> Application.put_env(:optimal_system_agent, :settings_flag_path, p)
       end
 
-      File.rm(@flag)
+      File.rm(flag)
       Settings.reset_cache()
     end)
 
-    :ok
+    {:ok, flag: flag}
   end
 
-  defp write(mode) do
-    File.write!(@flag, Jason.encode!(%{"permissions" => %{"defaultMode" => mode}}))
+  defp write(flag, mode) do
+    File.write!(flag, Jason.encode!(%{"permissions" => %{"defaultMode" => mode}}))
     Settings.reset_cache()
   end
 
-  test "maps CC defaultMode strings to OSA mode atoms" do
-    write("acceptEdits")
+  test "maps CC defaultMode strings to OSA mode atoms", %{flag: flag} do
+    write(flag, "acceptEdits")
     assert Permissions.default_mode() == :accept_edits
-    write("bypassPermissions")
+    write(flag, "bypassPermissions")
     assert Permissions.default_mode() == :overdrive
-    write("plan")
+    write(flag, "plan")
     assert Permissions.default_mode() == :plan
-    write("default")
+    write(flag, "default")
     assert Permissions.default_mode() == :ask
   end
 
-  test "defaults to :ask when unset or unknown" do
-    File.rm(@flag)
+  test "defaults to :ask when unset or unknown", %{flag: flag} do
+    File.rm(flag)
     Settings.reset_cache()
     assert Permissions.default_mode() == :ask
-    write("weirdmode")
+    write(flag, "weirdmode")
     assert Permissions.default_mode() == :ask
   end
 
-  defp write_legacy(mode) do
-    File.write!(@flag, Jason.encode!(%{"permission_mode" => mode}))
+  defp write_legacy(flag, mode) do
+    File.write!(flag, Jason.encode!(%{"permission_mode" => mode}))
     Settings.reset_cache()
   end
 
-  defp write_both(cc_mode, legacy_mode) do
+  defp write_both(flag, cc_mode, legacy_mode) do
     File.write!(
-      @flag,
+      flag,
       Jason.encode!(%{
         "permissions" => %{"defaultMode" => cc_mode},
         "permission_mode" => legacy_mode
@@ -65,21 +73,21 @@ defmodule OptimalSystemAgent.PermissionsDefaultModeTest do
     Settings.reset_cache()
   end
 
-  test "falls back to legacy permission_mode key when defaultMode absent" do
-    write_legacy("auto-edit")
+  test "falls back to legacy permission_mode key when defaultMode absent", %{flag: flag} do
+    write_legacy(flag, "auto-edit")
     assert Permissions.default_mode() == :accept_edits
-    write_legacy("plan")
+    write_legacy(flag, "plan")
     assert Permissions.default_mode() == :plan
-    write_legacy("overdrive")
+    write_legacy(flag, "overdrive")
     assert Permissions.default_mode() == :overdrive
-    write_legacy("ask")
+    write_legacy(flag, "ask")
     assert Permissions.default_mode() == :ask
-    write_legacy("bogus")
+    write_legacy(flag, "bogus")
     assert Permissions.default_mode() == :ask
   end
 
-  test "CC permissions.defaultMode wins over legacy permission_mode" do
-    write_both("plan", "overdrive")
+  test "CC permissions.defaultMode wins over legacy permission_mode", %{flag: flag} do
+    write_both(flag, "plan", "overdrive")
     assert Permissions.default_mode() == :plan
   end
 end

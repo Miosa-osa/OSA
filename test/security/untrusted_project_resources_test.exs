@@ -216,7 +216,13 @@ defmodule OptimalSystemAgent.Security.UntrustedProjectResourcesTest do
   describe "overdrive (full auto) does not imply trust" do
     setup do
       Settings.set_session("permission_mode", "overdrive")
-      on_exit(fn -> Settings.set_session("permission_mode", nil) end)
+      # `delete_session`, NOT `set_session(…, nil)`. The session layer is the
+      # highest-priority layer and resolution is presence-based, so writing nil
+      # leaves a row that shadows every lower layer's permission_mode for the
+      # rest of the run — it pinned `Permissions.default_mode/0` to :ask in
+      # whichever later test happened to read it (seed-dependent, so it looked
+      # like a flake in `PermissionsDefaultModeTest`).
+      on_exit(fn -> Settings.delete_session("permission_mode") end)
       :ok
     end
 

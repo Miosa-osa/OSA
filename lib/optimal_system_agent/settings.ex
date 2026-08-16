@@ -184,6 +184,63 @@ defmodule OptimalSystemAgent.Settings do
   def set_session_for(_session_id, key, value), do: put_session(:global, key, value)
 
   @doc """
+  Remove ONE session-scoped setting, so the cascade resolves it again.
+
+  Not the same as `set_session(key, nil)`, and the difference is the whole
+  reason this exists. Resolution is presence-based (`Map.fetch` on the merged
+  map — CC `updateSettingsForSource` semantics), so a written `nil` is an
+  explicit "this setting is null" that SHADOWS every lower layer for as long as
+  the row survives. Without a delete, "put the setting back the way it was"
+  had no expression, and the nearest thing to hand — writing `nil` or `%{}` —
+  quietly pinned the key instead of releasing it.
+
+  Scoped exactly like `set_session/2`: the current session's row when one is
+  published, the daemon-wide `:global` row otherwise.
+  """
+  @spec delete_session(atom() | String.t()) :: :ok
+  def delete_session(key), do: drop_session(current_session(), key)
+
+  @doc "`delete_session/1` for a SPECIFIC session id (`nil` → the `:global` scope)."
+  @spec delete_session_for(String.t() | nil, atom() | String.t()) :: :ok
+  def delete_session_for(session_id, key) when is_binary(session_id) and session_id != "",
+    do: drop_session(session_id, key)
+
+  def delete_session_for(_session_id, key), do: drop_session(:global, key)
+
+  defp drop_session(:global, key) do
+    # `put_session(:global, …)` stores the key VERBATIM (it is `get_all_session`
+    # that stringifies on read), so `set_session(:effort_level, …)` leaves an
+    # atom-keyed row and `set_session("effort_level", …)` a binary-keyed one.
+    # Both spellings are dropped, or a delete written one way silently misses a
+    # row written the other and reads as a no-op.
+    Enum.each(global_key_spellings(key), &:ets.delete(:osa_settings, {:session, &1}))
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp global_key_spellings(key) when is_atom(key), do: [key, Atom.to_string(key)]
+
+  defp global_key_spellings(key) when is_binary(key) do
+    [key | try_existing_atom(key)]
+  end
+
+  defp global_key_spellings(key), do: [key, to_string(key)]
+
+  defp try_existing_atom(key) do
+    [String.to_existing_atom(key)]
+  rescue
+    ArgumentError -> []
+  end
+
+  defp drop_session(session_id, key) do
+    :ets.delete(:osa_settings, {:session, session_id, to_string(key)})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
   Drop every session-scoped setting for `session_id` (call on session end).
 
   Without this the ETS table grows one row per {session, key} for the daemon's
@@ -591,8 +648,31 @@ defmodule OptimalSystemAgent.Settings do
   # Fail CLOSED: while any settings layer is unreadable we cannot know what the
   # user denied, so nothing is auto-approved. "ask" is the most restrictive
   # mode that still lets work proceed (unlike "plan", which blocks all writes).
+  #
+  # BOTH spellings of the mode are pinned, and pinning only one is why this
+  # existed without working. `Permissions.default_mode/0` reads the CC key
+  # `permissions.defaultMode` FIRST and only falls back to the legacy
+  # top-level `permission_mode`; this function used to pin the fallback alone.
+  # So the rule fired for legacy settings and was completely inert for the CC
+  # key that supersedes it: with a corrupt layer in the cascade, a
+  # `"defaultMode": "bypassPermissions"` user carried on auto-approving every
+  # tool call while the `deny` list that was supposed to bound them had
+  # vanished — the exact fail-OPEN this function exists to prevent, reached by
+  # the newer of the two documented spellings.
+  #
+  # "default" is the CC vocabulary for ask (`Permissions.@default_mode_map`),
+  # and it is written even when the user set no `permissions` block at all, so
+  # the pin does not depend on which keys the surviving layers happen to have.
   defp harden_if_unparseable(%{@unparseable_key => [_ | _]} = merged) do
-    Map.put(merged, "permission_mode", "ask")
+    permissions =
+      case Map.get(merged, "permissions") do
+        m when is_map(m) -> m
+        _ -> %{}
+      end
+
+    merged
+    |> Map.put("permission_mode", "ask")
+    |> Map.put("permissions", Map.put(permissions, "defaultMode", "default"))
   end
 
   defp harden_if_unparseable(merged), do: merged

@@ -96,6 +96,59 @@ defmodule OptimalSystemAgent.SettingsSessionScopeTest do
       assert Settings.get("personality") == "terse"
     end
 
+    test "delete_session/1 RELEASES a global key that set_session(nil) would pin" do
+      # The bug this exists for: tests (and any caller) undid a session write by
+      # setting it back to `nil`/`%{}`. Resolution is presence-based, so that is
+      # not an undo — it is an explicit value in the highest-priority layer, and
+      # it shadowed the flag/file layers for the rest of the run. It surfaced as
+      # a seed-dependent `PermissionsDefaultModeTest` failure, hundreds of tests
+      # away from the write.
+      Settings.set_session("permission_mode", "overdrive")
+      assert Settings.get("permission_mode") == "overdrive"
+
+      Settings.set_session("permission_mode", nil)
+
+      assert Settings.layer(:session)["permission_mode"] == nil
+
+      assert Map.has_key?(Settings.layer(:session), "permission_mode"),
+             "writing nil must still be a PRESENT key — that is the shadowing " <>
+               "this delete exists to undo, so if it stops being true the " <>
+               "assertion below stops meaning anything"
+
+      Settings.delete_session("permission_mode")
+
+      refute Map.has_key?(Settings.layer(:session), "permission_mode"),
+             "delete_session left the key in the session layer, so the cascade " <>
+               "is still shadowed"
+    end
+
+    test "delete_session/1 drops a key written with an ATOM name" do
+      # `put_session(:global, …)` stores the key verbatim (`/effort` writes
+      # `:effort_level`), while reads stringify. A delete that only tried the
+      # binary spelling would silently miss those rows.
+      Settings.set_session(:osa_scope_atom_key, "set")
+      assert Settings.get("osa_scope_atom_key") == "set"
+
+      Settings.delete_session("osa_scope_atom_key")
+
+      refute Map.has_key?(Settings.layer(:session), "osa_scope_atom_key")
+    end
+
+    test "delete_session_for/2 drops only that session's row" do
+      a = "sess-a-#{unique()}"
+      b = "sess-b-#{unique()}"
+      Settings.set_session_for(a, "model", "a-model")
+      Settings.set_session_for(b, "model", "b-model")
+
+      Settings.delete_session_for(a, "model")
+
+      Process.put(:osa_session_id, a)
+      assert Settings.get("model", :unset) == :unset
+      Process.put(:osa_session_id, b)
+      assert Settings.get("model") == "b-model"
+      Process.delete(:osa_session_id)
+    end
+
     test "set_session/2 stays global when no session is in context" do
       # Existing callers (CLI /effort, /personality typed outside a turn, tests)
       # must keep working exactly as before.

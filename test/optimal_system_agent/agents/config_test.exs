@@ -6,7 +6,10 @@ defmodule OptimalSystemAgent.Agents.ConfigTest do
 
   setup do
     # Session layer is highest-priority and cheap to set/clear per test.
-    on_exit(fn -> Settings.set_session("agent_overrides", %{}) end)
+    # It must be DELETED, not overwritten with an empty map: a written value
+    # stays in the cascade and shadows every lower layer for the rest of the
+    # run.
+    on_exit(fn -> Settings.delete_session("agent_overrides") end)
     :ok
   end
 

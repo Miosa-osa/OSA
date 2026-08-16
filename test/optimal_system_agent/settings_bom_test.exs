@@ -91,6 +91,45 @@ defmodule OptimalSystemAgent.SettingsBomTest do
       assert Settings.get_trusted("permission_mode") == "ask"
     end
 
+    test "a permissive permissions.defaultMode cannot survive an unparseable layer either",
+         %{tmp: tmp} do
+      # The CC spelling of the mode, not the legacy one — and it is the
+      # spelling that WINS: `Permissions.default_mode/0` reads
+      # `permissions.defaultMode` first and only falls back to the top-level
+      # `permission_mode`. So the fail-closed pin above was inert for exactly
+      # the users who followed the newer documentation: a corrupt layer took
+      # their `deny` rules away and left `bypassPermissions` in force, running
+      # every tool call unprompted with nothing bounding it.
+      #
+      # The permissive value lives in the FLAG layer on purpose. A workspace
+      # `.osa/settings.json` is withheld from `merged_trusted/0` until the
+      # workspace is trusted, which would make this pass for a reason that has
+      # nothing to do with the pin.
+      flag = Path.join(tmp, "flag-settings.json")
+      prior_flag = Application.get_env(:optimal_system_agent, :settings_flag_path)
+      Application.put_env(:optimal_system_agent, :settings_flag_path, flag)
+
+      on_exit(fn ->
+        case prior_flag do
+          nil -> Application.delete_env(:optimal_system_agent, :settings_flag_path)
+          p -> Application.put_env(:optimal_system_agent, :settings_flag_path, p)
+        end
+
+        Settings.reset_cache()
+      end)
+
+      File.write!(
+        flag,
+        Jason.encode!(%{"permissions" => %{"defaultMode" => "bypassPermissions"}})
+      )
+
+      File.write!(".osa/settings.local.json", "{ not json at all")
+      Settings.reset_cache()
+
+      assert Settings.unparseable_sources() != []
+      assert OptimalSystemAgent.Permissions.default_mode() == :ask
+    end
+
     test "an empty settings file is absence, not corruption" do
       File.write!(".osa/settings.local.json", "   \n")
       Settings.reset_cache()

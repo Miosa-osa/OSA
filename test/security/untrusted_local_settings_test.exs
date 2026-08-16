@@ -171,7 +171,10 @@ defmodule OptimalSystemAgent.Security.UntrustedLocalSettingsTest do
 
     test "session-set rules still apply without workspace trust" do
       Settings.set_session("permissions", %{"allow" => ["shell_execute(ls:*)"]})
-      on_exit(fn -> Settings.set_session("permissions", %{}) end)
+      # `delete_session`, not `set_session(…, %{})`: the session layer is
+      # highest-priority, so a written value stays in the cascade for the rest
+      # of the run instead of releasing the key.
+      on_exit(fn -> Settings.delete_session("permissions") end)
 
       refute Settings.project_trusted?()
       assert Permissions.check("shell_execute", %{"command" => "ls -la"}) == :allow
