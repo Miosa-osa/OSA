@@ -179,8 +179,41 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       iteration: Map.get(state, :iteration)
     )
 
-    Providers.chat(messages, opts)
+    messages
+    |> Providers.chat(opts)
+    |> surface_sync_reasoning(Map.get(state, :session_id, "session"))
   end
+
+  # A non-streamed turn has no `{:thinking_delta, _}` callback, so a provider
+  # that reasons on this path would otherwise hand back `:reasoning` that
+  # nothing ever read — the "accumulated somewhere with no reader" shape. Emit
+  # it through the SAME bus + PubSub pair the streaming branch ends at, with the
+  # same redaction, so the two branches surface reasoning identically and a
+  # transcript cannot tell which transport served the turn.
+  #
+  # The result map is returned UNCHANGED: `:reasoning` stays a separate key and
+  # is never folded into `:content`, so it cannot reach the assistant message
+  # and be replayed to the provider next turn.
+  defp surface_sync_reasoning({:ok, %{reasoning: text} = result}, session_id)
+       when is_binary(text) and text != "" do
+    text = Trajectory.redact(text)
+
+    Bus.emit(:system_event, %{
+      event: :thinking_delta,
+      session_id: session_id,
+      delta: text
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
+    )
+
+    {:ok, result}
+  end
+
+  defp surface_sync_reasoning(other, _session_id), do: other
 
   # `Keyword.put_new/3` so an explicit caller-supplied scope (a sub-agent, a
   # side computation with its own prefix) still wins.

@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   require Logger
 
   alias OptimalSystemAgent.Providers.OpenAICompat
+  alias OptimalSystemAgent.Providers.ReasoningContent
   alias OptimalSystemAgent.Utils.Text
 
   @doc "Non-streaming completion against the Responses API."
@@ -94,7 +95,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     body = model |> build_body(messages, opts, true) |> put_prompt_cache_key(opts, base_url)
     timeout = Keyword.get(opts, :receive_timeout, 300_000)
 
-    acc = %{content: "", tool_calls: [], usage: %{}, stop_reason: nil, buffer: ""}
+    acc = %{content: "", tool_calls: [], usage: %{}, stop_reason: nil, buffer: "", reasoning: ""}
     {:ok, agent} = Agent.start_link(fn -> acc end)
 
     try do
@@ -411,12 +412,21 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
       |> Enum.filter(&(&1["type"] == "function_call"))
       |> Enum.map(&decode_call/1)
 
+    # `reasoning` items in `output` carry a `summary` array of
+    # `%{"type" => "summary_text", "text" => ...}`. Encrypted reasoning carries
+    # no text and yields nothing, by design.
+    reasoning =
+      output
+      |> Enum.filter(&(is_map(&1) and &1["type"] == "reasoning"))
+      |> Enum.map_join("", &ReasoningContent.extract(%{"reasoning_details" => &1["summary"]}))
+
     %{
       content: content,
       tool_calls: tool_calls,
       usage: parse_usage(Map.get(resp, "usage"), orig_messages, content),
       stop_reason: stop_reason(resp, tool_calls)
     }
+    |> ReasoningContent.put_result(reasoning)
   end
 
   defp decode_call(item) do
@@ -514,14 +524,27 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     end
   end
 
-  # The five events that carry everything OSA needs. Anything else (the many
-  # `.added` / `.delta` variants for annotations, refusals, reasoning summaries)
-  # is ignored on purpose: reacting to events we do not render would only
-  # create ways to double-count.
+  # The events that carry everything OSA needs. Anything else (the many
+  # `.added` / `.delta` variants for annotations and refusals) is ignored on
+  # purpose: reacting to events we do not render would only create ways to
+  # double-count. Reasoning summaries used to be in that ignored set; they are
+  # not, because OSA DOES render reasoning — in the thinking box.
   defp handle(acc, %{"type" => "response.output_text.delta", "delta" => delta}, callback)
        when is_binary(delta) do
     callback.({:text_delta, delta})
     %{acc | content: acc.content <> delta}
+  end
+
+  # Reasoning summary text. The Responses API is the SAME defect as
+  # chat/completions' `reasoning` vs `reasoning_content` split, wearing
+  # different event names: the summary arrives on its own event stream and the
+  # comment below used to call ignoring it deliberate. It is not double-counted
+  # by surfacing it — nothing else renders it, and `usage` is untouched
+  # (`:reasoning_tokens` stays collected-and-unsummed, see parse_usage/3).
+  defp handle(acc, %{"type" => "response.reasoning_summary_text.delta", "delta" => delta}, cb)
+       when is_binary(delta) and delta != "" do
+    cb.({:thinking_delta, delta})
+    %{acc | reasoning: Map.get(acc, :reasoning, "") <> delta}
   end
 
   defp handle(
@@ -556,6 +579,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
       usage: parse_usage(acc.usage, orig_messages, content),
       stop_reason: acc.stop_reason || if(acc.tool_calls != [], do: "tool_calls", else: "stop")
     }
+    |> ReasoningContent.put_result(Map.get(acc, :reasoning, ""))
   end
 
   # ── Errors ──────────────────────────────────────────────────────────────

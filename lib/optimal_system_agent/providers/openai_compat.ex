@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   require Logger
 
   alias OptimalSystemAgent.Providers.CacheAttribution
+  alias OptimalSystemAgent.Providers.ReasoningContent
   alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
@@ -113,13 +114,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # fail the request (see CacheAttribution).
           observe_cache(cache_fp, usage, opts)
 
+          # The sync path had NO reasoning handling of any kind — not even the
+          # `reasoning_content` clause the streaming path had. Same normaliser,
+          # same separate key, so the two branches cannot drift again (the
+          # `cached_tokens` bug lived for months on exactly that asymmetry).
           {:ok,
            %{
              content: content,
              tool_calls: tool_calls,
              usage: usage,
              stop_reason: choice["finish_reason"]
-           }}
+           }
+           |> ReasoningContent.put_result(ReasoningContent.extract(msg))}
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
           retry_after = parse_retry_after(resp_headers)
@@ -325,6 +331,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       tool_calls: %{},
       usage: %{},
       finish_reason: nil,
+      # Native reasoning channel (`reasoning` / `reasoning_content` /
+      # `reasoning_details`), kept separate from `content` for the whole stream.
+      reasoning: "",
       # Streaming splitter for inline <think>…</think> reasoning tags (GLM et al.)
       think: ThinkStreamParser.new()
     })
@@ -394,6 +403,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       tool_calls: %{},
       usage: %{},
       finish_reason: nil,
+      reasoning: "",
       think: ThinkStreamParser.new()
     }
 
@@ -494,22 +504,36 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
             {visible, thinking, think_state} = ThinkStreamParser.feed(acc.think, text)
             if thinking != "", do: callback.({:thinking_delta, thinking})
             if visible != "", do: callback.({:text_delta, visible})
+
+            # Inline-tag reasoning lands in the same `:reasoning` accumulator as
+            # the native channel, so `:reasoning` means the same thing whichever
+            # dialect the backend speaks.
             %{acc | content: full, think: think_state}
+            |> Map.put(:reasoning, Map.get(acc, :reasoning, "") <> thinking)
           end
 
         _ ->
           acc
       end
 
-    # Reasoning/thinking content (DeepSeek and some providers)
+    # Reasoning/thinking content. Every OpenAI-shaped spelling — DeepSeek's
+    # `reasoning_content`, OpenRouter's unified `reasoning`, the structured
+    # `reasoning_details` — resolves in ONE place (ReasoningContent), because
+    # this clause used to match `reasoning_content` alone and OpenRouter's
+    # entire reasoning stream fell through it silently.
+    #
+    # Accumulated as well as emitted: the delta callback feeds the live TUI,
+    # and `finalize_sse_stream/4` needs the whole thing to hand back under
+    # `:reasoning` for a caller that was not watching the stream. It is NOT
+    # appended to `acc.content` — reasoning is not the assistant's answer.
     acc =
-      case delta do
-        %{"reasoning_content" => text} when is_binary(text) and text != "" ->
-          callback.({:thinking_delta, text})
+      case ReasoningContent.extract(delta) do
+        "" ->
           acc
 
-        _ ->
-          acc
+        text ->
+          callback.({:thinking_delta, text})
+          Map.put(acc, :reasoning, Map.get(acc, :reasoning, "") <> text)
       end
 
     # Tool call deltas — accumulate across chunks.
@@ -551,15 +575,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp finalize_sse_stream(acc, callback, model, orig_messages) do
     # Drain any tag tail the streaming splitter was holding back, so the live
     # display never loses trailing characters at end-of-stream.
-    case Map.get(acc, :think) do
-      %ThinkStreamParser{} = ts ->
-        {leftover_vis, leftover_think, _} = ThinkStreamParser.flush(ts)
-        if leftover_think != "", do: callback.({:thinking_delta, leftover_think})
-        if leftover_vis != "", do: callback.({:text_delta, leftover_vis})
+    acc =
+      case Map.get(acc, :think) do
+        %ThinkStreamParser{} = ts ->
+          {leftover_vis, leftover_think, _} = ThinkStreamParser.flush(ts)
+          if leftover_think != "", do: callback.({:thinking_delta, leftover_think})
+          if leftover_vis != "", do: callback.({:text_delta, leftover_vis})
+          Map.put(acc, :reasoning, Map.get(acc, :reasoning, "") <> leftover_think)
 
-      _ ->
-        :ok
-    end
+        _ ->
+          acc
+      end
 
     content = Text.strip_thinking_tokens(acc.content)
 
@@ -607,12 +633,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # already uses for budgeting (Agent.Context.estimate_tokens*).
     usage = estimate_usage_fallback(acc.usage, orig_messages, content)
 
-    result = %{
-      content: content,
-      tool_calls: tool_calls,
-      usage: usage,
-      stop_reason: Map.get(acc, :finish_reason)
-    }
+    result =
+      %{
+        content: content,
+        tool_calls: tool_calls,
+        usage: usage,
+        stop_reason: Map.get(acc, :finish_reason)
+      }
+      # Separate key, never folded into `:content`. `usage` is untouched:
+      # reasoning tokens are already inside the provider's `completion_tokens`
+      # (see ReasoningContent's "Accounting" section) — counting them again here
+      # is the double-count `reconcile_prompt_slices/2` exists to prevent.
+      |> ReasoningContent.put_result(Map.get(acc, :reasoning, ""))
 
     callback.({:done, result})
     :ok
@@ -1443,9 +1475,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     if Process.get(:osa_compat_reasoning) != key do
       Process.put(:osa_compat_reasoning, key)
 
-      Logger.info(
-        "[OpenAICompat] reasoning_effort=#{value} model=#{model} source=#{source}"
-      )
+      Logger.info("[OpenAICompat] reasoning_effort=#{value} model=#{model} source=#{source}")
     end
 
     :ok
