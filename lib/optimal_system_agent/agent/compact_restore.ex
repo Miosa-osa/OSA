@@ -9,9 +9,69 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
   """
   require Logger
 
+  # The restore block re-injects up to 50k characters of file bodies, which is
+  # ~12.5k tokens on its own and was measured at 65,004 tokens in the field. The
+  # bound belongs HERE, on the builder, not on the callers: `ProactiveCompaction`
+  # clamped it and `Compactor` -- the path behind `/compact` and the prune tier --
+  # appended it raw, so the same block was bounded on one compaction path and
+  # unbounded on its sibling. A live v1.0.101 session recorded the result:
+  #
+  #     Compacted ~6.1k -> ~71.8k tokens (1 messages folded)
+  #
+  # i.e. compaction inflating the window ~12x, then re-firing because the fold
+  # had pushed the total past the very threshold that triggers folding.
+  #
+  # Clamping at the source means a future caller cannot reintroduce it by
+  # forgetting; the caller-side clamp in `ProactiveCompaction` is left in place
+  # and is now idempotent.
+  @default_max_tokens 4_000
+
+  defp max_tokens do
+    case Application.get_env(
+           :optimal_system_agent,
+           :compaction_restore_max_tokens,
+           @default_max_tokens
+         ) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_tokens
+    end
+  end
+
+  @truncation_notice "\n\n[Restore context truncated to fit the compacted window.]"
+
+  defp clamp(%{content: content} = msg) when is_binary(content) do
+    max = max_tokens()
+
+    if OptimalSystemAgent.Agent.Compactor.estimate_tokens([msg]) <= max do
+      msg
+    else
+      # Budget the notice and the per-message overhead BEFORE slicing. Slicing to
+      # `max * 4` and then appending overshoots — measured 4,019 against a 4,000
+      # ceiling, and 519 against 500. A bound that is exceeded by the very text
+      # it appends is the same defect one scale down, and on this path the
+      # overshoot lands in a window that was just compacted.
+      notice_chars = String.length(@truncation_notice)
+      overhead_chars = 32
+      budget = max(max * 4 - notice_chars - overhead_chars, 0)
+
+      %{msg | content: String.slice(content, 0, budget) <> @truncation_notice}
+    end
+  end
+
+  defp clamp(msg), do: msg
+
+  @doc false
+  # Exposed so the invariant can be asserted on the clamp itself rather than
+  # through a session fixture — the defect was that one caller skipped it, so
+  # the test must not reach it through a caller.
+  def clamp_for_test(msg), do: clamp(msg)
+
   @doc """
   Build a restoration message containing current working context.
   Returns a system message map or nil if no context to restore.
+
+  The returned block is clamped to `:compaction_restore_max_tokens` (default
+  4,000) so it can never re-inflate a freshly compacted window.
   """
   def build_restore_message(session_id) do
     sections =
@@ -32,7 +92,7 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
           "Here is your current working context:]\n\n" <>
           Enum.join(sections, "\n\n")
 
-      %{role: "system", content: content}
+      clamp(%{role: "system", content: content})
     end
   rescue
     e ->
