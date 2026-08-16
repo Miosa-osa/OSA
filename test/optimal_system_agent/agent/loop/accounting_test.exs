@@ -338,6 +338,88 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
     end
   end
 
+  # ══════════════════════════════════════════════════════════════════════
+  # `:requested_at` — the price is a property of the TURN, not of the viewing
+  #
+  # `Pricing` resolves windowed (peak/off-peak) rates against the instant the
+  # request was ISSUED, falling back to `DateTime.utc_now/0` when nothing
+  # stamped one. For a whole release nothing stamped one: `normalize_usage/1`
+  # rebuilds the usage map from `@usage_keys` and dropped any such field on the
+  # floor, so every turn was priced against the wall clock at the moment
+  # accounting happened to run. In the hot loop that is milliseconds later and
+  # harmless. For anything STORED it means a finished session re-reports a
+  # different number after the clock rolls past a tier boundary.
+  # ══════════════════════════════════════════════════════════════════════
+  describe ":requested_at" do
+    alias OptimalSystemAgent.Agent.Pricing
+
+    # A model whose rate genuinely moves with the hour, taken from the live
+    # window card rather than hardcoded, so this follows the card if it moves.
+    defp windowed_model do
+      [{id, window} | _] = Enum.to_list(Pricing.pricing_windows())
+      day = DateTime.add(window.effective_from, 30, :day)
+      {id, window, day}
+    end
+
+    defp at_hour(day, hour) do
+      %{day | hour: hour, minute: 0, second: 0, microsecond: {0, 0}}
+    end
+
+    defp peak_and_off_peak(window, day) do
+      [{from, _until} | _] = window.peak_hours
+      off = Enum.find(0..23, fn h -> not Enum.any?(window.peak_hours, fn {f, u} -> h >= f and h < u end) end)
+      {at_hour(day, from), at_hour(day, off)}
+    end
+
+    test "record/3 prices the round-trip at the instant the request was ISSUED" do
+      {model, window, day} = windowed_model()
+      {peak, off_peak} = peak_and_off_peak(window, day)
+
+      usage = %{input_tokens: 1_000_000, output_tokens: 0}
+      state = %{base_state() | model: model, provider: :deepseek}
+
+      priced_at_peak = Accounting.record(state, usage, requested_at: peak).session_cost_usd
+      priced_off_peak = Accounting.record(state, usage, requested_at: off_peak).session_cost_usd
+
+      # If the stamp never reaches pricing, BOTH of these are the wall-clock
+      # price and this is an equality. That is the defect.
+      refute priced_at_peak == priced_off_peak,
+             "record/3 ignored :requested_at — both tiers priced against the wall clock"
+
+      assert_in_delta priced_at_peak, Pricing.cost(model, usage, peak), 1.0e-9
+      assert_in_delta priced_off_peak, Pricing.cost(model, usage, off_peak), 1.0e-9
+    end
+
+    test "the stamp rides the usage map out to every consumer of the turn" do
+      {model, window, day} = windowed_model()
+      {peak, _off} = peak_and_off_peak(window, day)
+      state = %{base_state() | model: model, provider: :deepseek}
+
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}")
+
+      Accounting.record(state, %{input_tokens: 1_000, output_tokens: 10}, requested_at: peak)
+
+      assert_receive {:osa_event, %{type: :cost_update, usage: usage}}, 1_000
+
+      assert usage[:requested_at] == peak,
+             "the :cost_update stream carried a usage map that cannot be re-priced"
+    end
+
+    test "an unstamped turn still prices, against now — the fallback is not removed" do
+      state = base_state()
+      recorded = Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0})
+      assert recorded.session_cost_usd == 3.0
+    end
+
+    test "a garbage stamp is refused rather than carried into the price" do
+      state = base_state()
+      recorded = Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0},
+        requested_at: "not a datetime")
+
+      assert recorded.session_cost_usd == 3.0
+    end
+  end
+
   describe "snapshot/1" do
     test "exposes running spend for the TUI / auto-mode" do
       state = Accounting.record(base_state(), %{input_tokens: 1_000_000, output_tokens: 0})

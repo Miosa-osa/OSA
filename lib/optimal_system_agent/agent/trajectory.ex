@@ -133,6 +133,7 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
           output_tokens: non_neg_integer(),
           cache_creation_tokens: non_neg_integer(),
           cache_read_tokens: non_neg_integer(),
+          requested_at: DateTime.t() | nil,
           cost_usd: float(),
           tool_calls: [map()],
           tool_results: [String.t()],
@@ -261,6 +262,58 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
     end
   end
 
+  @doc """
+  Turn one stored row back into a usage map `Agent.Pricing` can price.
+
+  This is the other half of persisting `requested_at`. The row spells the cache
+  counters `cache_creation_tokens` / `cache_read_tokens`; `Pricing` wants
+  `cache_creation_input_tokens` / `cache_read_input_tokens`. A caller re-costing
+  a stored session had to know that, and a caller that got it wrong would silently
+  bill the cached prompt at zero — so the mapping lives here, once, next to the
+  writer it has to agree with.
+
+  The returned map carries `:requested_at` when the row has one, which is what
+  makes `Pricing.cost/2` on the result return the SAME dollar figure the row
+  already records, at any hour, forever. A row written before this field existed
+  has none; it re-prices against the wall clock, exactly as it always did, and
+  the absence is visible rather than papered over with the row's `timestamp`
+  (which is when the response landed, not when the request went out).
+  """
+  @spec usage_of(map()) :: map()
+  def usage_of(row) when is_map(row) do
+    base = %{
+      input_tokens: row_int(row, "input_tokens"),
+      output_tokens: row_int(row, "output_tokens"),
+      cache_creation_input_tokens: row_int(row, "cache_creation_tokens"),
+      cache_read_input_tokens: row_int(row, "cache_read_tokens")
+    }
+
+    case decode_instant(Map.get(row, "requested_at") || Map.get(row, :requested_at)) do
+      nil -> base
+      at -> Map.put(base, :requested_at, at)
+    end
+  end
+
+  defp row_int(row, key) do
+    case Map.get(row, key) || Map.get(row, String.to_atom(key)) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  end
+
+  defp encode_instant(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp encode_instant(_), do: nil
+
+  defp decode_instant(s) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+
+  defp decode_instant(%DateTime{} = dt), do: dt
+  defp decode_instant(_), do: nil
+
   @doc "List all session IDs that have trajectory files."
   @spec list_sessions() :: [String.t()]
   def list_sessions do
@@ -376,6 +429,13 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
       "output_tokens" => Map.get(entry, :output_tokens, 0),
       "cache_creation_tokens" => Map.get(entry, :cache_creation_tokens, 0),
       "cache_read_tokens" => Map.get(entry, :cache_read_tokens, 0),
+      # `timestamp` above is when this row was WRITTEN, which is after the
+      # response landed. `requested_at` is when the request was ISSUED, and it
+      # is the only one of the two that can reproduce `cost_usd` — rates move
+      # by date and by hour of day, and a turn that streamed across a boundary
+      # was written on the far side of the tier it was billed at. Null on a row
+      # whose caller did not stamp one; `usage_of/1` then declines to invent it.
+      "requested_at" => encode_instant(Map.get(entry, :requested_at)),
       "cost_usd" => Map.get(entry, :cost_usd, 0.0),
       "tool_calls" => truncate_tool_calls(Map.get(entry, :tool_calls, [])),
       "tool_results" => truncate_list(Map.get(entry, :tool_results, [])),

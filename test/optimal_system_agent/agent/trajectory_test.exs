@@ -167,4 +167,104 @@ defmodule OptimalSystemAgent.Agent.TrajectoryTest do
       assert File.exists?(fresh)
     end
   end
+
+  # ══════════════════════════════════════════════════════════════════════
+  # A STORED session's cost does not move when the clock does
+  #
+  # This is the assertion the whole `:requested_at` feature exists for. A turn
+  # is recorded through the real accounting path, written to disk through the
+  # real trajectory writer, read back through the real reader, and re-costed on
+  # the far side of a DeepSeek peak/off-peak boundary. The number must not move.
+  #
+  # Before the stamp was wired through, it moved by 2x: `Accounting` rebuilt the
+  # usage map from its four token keys, `Pricing` found no instant and fell back
+  # to `DateTime.utc_now/0`, and the row on disk had no way to say which tier
+  # produced the `cost_usd` sitting next to it.
+  # ══════════════════════════════════════════════════════════════════════
+  describe "a stored turn re-prices to the same number" do
+    alias OptimalSystemAgent.Agent.Loop.Accounting
+    alias OptimalSystemAgent.Agent.Pricing
+
+    test "across a peak boundary, from the row on disk" do
+      Application.put_env(:optimal_system_agent, :trajectory_recording, true)
+
+      [{model, window} | _] = Enum.to_list(Pricing.pricing_windows())
+      day = DateTime.add(window.effective_from, 30, :day)
+      [{peak_hour, _} | _] = window.peak_hours
+
+      off_peak_hour =
+        Enum.find(0..23, fn h ->
+          not Enum.any?(window.peak_hours, fn {f, u} -> h >= f and h < u end)
+        end)
+
+      issued_at = %{day | hour: peak_hour, minute: 0, second: 0, microsecond: {0, 0}}
+      viewed_at = %{day | hour: off_peak_hour, minute: 0, second: 0, microsecond: {0, 0}}
+
+      session_id = "traj-recost-#{System.unique_integer([:positive])}"
+
+      state = %{
+        session_id: session_id,
+        model: model,
+        provider: :deepseek,
+        messages: [],
+        session_cost_usd: 0.0,
+        session_input_tokens: 0,
+        session_output_tokens: 0,
+        session_cache_creation_tokens: 0,
+        session_cache_read_tokens: 0,
+        last_input_tokens: 0,
+        max_budget_usd: nil
+      }
+
+      recorded =
+        Accounting.record(state, %{input_tokens: 1_000_000, output_tokens: 0},
+          requested_at: issued_at
+        )
+
+      # The row reached disk, carrying the instant that priced it.
+      assert [row] = Trajectory.read(session_id)
+      assert row["requested_at"] == DateTime.to_iso8601(issued_at)
+
+      usage = Trajectory.usage_of(row)
+      assert usage[:requested_at] == issued_at
+
+      # Re-cost it. The explicit-instant form is what a replay/reconciliation
+      # tool reaches for, and here it is handed a DIFFERENT hour on purpose —
+      # the stored row's own instant must win over the one being viewed from.
+      re_costed_now = Pricing.cost(model, usage)
+      re_costed_from_another_hour = Pricing.cost(model, usage, usage[:requested_at])
+
+      assert re_costed_now == re_costed_from_another_hour
+
+      assert_in_delta re_costed_now, row["cost_usd"], 1.0e-9
+      assert_in_delta re_costed_now, recorded.session_cost_usd, 1.0e-9
+      assert_in_delta re_costed_now, Pricing.cost(model, usage, issued_at), 1.0e-9
+
+      # And the measurement that makes this non-vacuous: the OTHER tier really
+      # is a different number, so "did not move" is a result and not a tautology.
+      unstamped = Map.delete(usage, :requested_at)
+      priced_at_the_wrong_hour = Pricing.cost(model, unstamped, viewed_at)
+
+      refute_in_delta re_costed_now,
+                      priced_at_the_wrong_hour,
+                      1.0e-9,
+                      "the two tiers price identically — this test cannot detect drift"
+    end
+
+    test "a row written before the field existed says so instead of guessing" do
+      # `timestamp` is when the response landed. Substituting it for the request
+      # instant would look like a stamp and be wrong by exactly one turn's
+      # duration — which is the whole distance across a boundary.
+      legacy = %{
+        "input_tokens" => 100,
+        "output_tokens" => 10,
+        "cache_creation_tokens" => 0,
+        "cache_read_tokens" => 0,
+        "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+
+      refute Map.has_key?(Trajectory.usage_of(legacy), :requested_at)
+      assert Trajectory.usage_of(legacy).input_tokens == 100
+    end
+  end
 end

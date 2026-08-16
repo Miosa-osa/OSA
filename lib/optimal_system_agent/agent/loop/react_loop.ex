@@ -428,6 +428,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     Observability.otel_model_request(state)
 
     start_time = System.monotonic_time(:millisecond)
+
+    # The instant this request is ISSUED — the clock that prices it. Taken here,
+    # before the call, and never after it: a turn that streams for four minutes
+    # across a DeepSeek peak boundary must be billed at the tier it was sent in,
+    # not the tier it happened to land in. `System.monotonic_time/1` above cannot
+    # serve — it is a duration source with no calendar. See `Accounting.record/3`
+    # and `Pricing`'s moduledoc for why the wall clock at accounting time is the
+    # wrong answer for every stored turn.
+    requested_at = DateTime.utc_now()
+
     thinking_opts = LLMClient.thinking_config(state)
     tools_for_call = ToolFilter.filter(state.tools, state)
 
@@ -471,11 +481,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         {:ok, resp} ->
           [
             provider_cost_usd: Map.get(resp, :provider_cost_usd),
-            provider_quota: Map.get(resp, :provider_quota)
+            provider_quota: Map.get(resp, :provider_quota),
+            requested_at: requested_at
           ]
 
+        # A failed round-trip was still issued, and Anthropic bills the prompt
+        # from `message_start` before the failure. The instant it was issued is
+        # known either way, so it goes through either way.
         _ ->
-          []
+          [requested_at: requested_at]
       end
 
     input_tokens = Map.get(usage, :input_tokens, 0)

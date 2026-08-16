@@ -99,6 +99,28 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       (`CopilotCli.reported_quota/0` publishes `%{premium_requests: float}`).
       Accumulated and reported alongside cost; never converted into dollars or
       tokens.
+    * `:requested_at` — the instant the request was ISSUED (a `DateTime`, a
+      `NaiveDateTime`, or unix seconds). See "Which clock prices a turn" below.
+
+  ## Which clock prices a turn
+
+  `Pricing` resolves DATED and HOURED rates against the instant the request was
+  issued, falling back to `DateTime.utc_now/0` when nobody says. For an entire
+  release nobody said: `normalize_usage/1` rebuilds the usage map from
+  `@usage_keys` alone, so a `:requested_at` arriving on a provider's usage map
+  was discarded here before `Pricing` ever saw it, and every turn was priced
+  against the wall clock at the moment accounting happened to run.
+
+  In the hot loop that is milliseconds after the round-trip and harmless. It is
+  not harmless for anything STORED: a DeepSeek session recorded at 03:00 UTC
+  (peak) and re-costed at 12:00 (off-peak) reports half the number, for the same
+  finished turn, with no indication that anything moved.
+
+  So the instant is captured where the request is issued — `ReactLoop` stamps it
+  immediately before `LLMClient.llm_chat_stream/3`, not after the response lands
+  — passed here, used to price, and then carried ON the normalized usage map so
+  every downstream consumer (the `:cost_update` stream, the trajectory record on
+  disk) can re-price the same turn to the same number forever.
 
   ## Why a provider figure has to win
 
@@ -298,6 +320,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       usage
       |> normalize_usage()
       |> reconcile_prompt_slices(Map.get(state, :provider))
+      # Stamp BEFORE pricing: `turn_cost/3` reads the instant off the map, and
+      # every consumer downstream of here gets a usage map that re-prices to the
+      # same number rather than to whatever the wall clock says later.
+      |> stamp_requested_at(request_instant(usage, opts))
 
     turn_cost = turn_cost(state, norm, opts)
 
@@ -318,6 +344,51 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
     state
   end
+
+  # ── When the request was issued ───────────────────────────────────────────
+
+  @doc """
+  The instant a round-trip's request was ISSUED, as `record/3` will use it, or
+  `nil` when neither the caller nor the provider supplied a usable one.
+
+  Precedence: the `:requested_at` option (what `ReactLoop` stamps at the call
+  site) beats a `:requested_at` the provider happened to put on its own usage
+  map. Both are validated — an unparseable value is REFUSED rather than carried,
+  because a stamp that `Pricing` cannot resolve would silently fall back to the
+  wall clock while looking, on disk and in the event stream, exactly like a
+  stamped turn.
+  """
+  @spec request_instant(map() | nil, keyword()) :: DateTime.t() | nil
+  def request_instant(usage, opts) do
+    from_opts = Keyword.get(opts, :requested_at)
+
+    from_usage =
+      if is_map(usage) do
+        Map.get(usage, :requested_at) || Map.get(usage, "requested_at")
+      end
+
+    coerce_instant(from_opts) || coerce_instant(from_usage)
+  end
+
+  # Every shape `Pricing.clock/1` can resolve to an HOUR, normalized to one.
+  # A bare `Date` is deliberately NOT accepted: it names a day but not an hour,
+  # and `Pricing` treats an unknown hour as peak with `:estimated` confidence.
+  # Recording that as a request instant would turn a guess into a stored fact.
+  defp coerce_instant(%DateTime{} = dt), do: DateTime.shift_zone!(dt, "Etc/UTC")
+
+  defp coerce_instant(%NaiveDateTime{} = ndt), do: DateTime.from_naive!(ndt, "Etc/UTC")
+
+  defp coerce_instant(unix) when is_integer(unix) do
+    case DateTime.from_unix(unix) do
+      {:ok, dt} -> dt
+      _ -> nil
+    end
+  end
+
+  defp coerce_instant(_), do: nil
+
+  defp stamp_requested_at(norm, nil), do: norm
+  defp stamp_requested_at(norm, %DateTime{} = at), do: Map.put(norm, :requested_at, at)
 
   # ── The provider's own price beats OSA's rate card ────────────────────────
 
@@ -493,6 +564,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
       usage
       |> normalize_usage()
       |> reconcile_prompt_slices(Keyword.get(opts, :provider))
+      # Staged spend is priced HERE, at stage time, and only the resulting
+      # dollar figure is absorbed later — so the stamp matters for exactly one
+      # thing on this path, which is getting this pricing right.
+      |> stamp_requested_at(request_instant(usage, opts))
 
     if norm.input_tokens + norm.output_tokens + norm.cache_creation_input_tokens +
          norm.cache_read_input_tokens > 0 do
@@ -1108,6 +1183,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
         output_tokens: norm.output_tokens,
         cache_creation_tokens: Map.get(norm, :cache_creation_input_tokens, 0),
         cache_read_tokens: Map.get(norm, :cache_read_input_tokens, 0),
+        # The instant that produced `cost_usd`. Without it the stored row can be
+        # re-costed only against the wall clock, i.e. to a different number than
+        # the one sitting next to it in the same row.
+        requested_at: Map.get(norm, :requested_at),
         cost_usd: turn_cost,
         tool_calls: tool_calls,
         tool_results: tool_results,
