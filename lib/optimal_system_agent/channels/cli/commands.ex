@@ -35,7 +35,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
     "model" => {"Show or switch the current model", :cmd_model},
-    "uncensored" => {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
+    "uncensored" =>
+      {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -344,65 +345,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   def cmd_uncensored(args, session_id) do
     IO.puts("")
 
-    result =
-      case String.trim(args) do
-        arg when arg in ["off", "back", "return"] -> :restore
-        arg when arg in ["list", "models"] -> :list
-        "" -> :hop
-        model -> {:switch, model}
-      end
-
-    case result do
-      :list ->
-        IO.puts("  #{@bold}Uncensored models#{@reset}")
-
-        for m <- OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) do
-          IO.puts("  #{@dim}•#{@reset} #{m}")
-        end
-
-        IO.puts("")
-        IO.puts("  #{@dim}Full live list: GET https://api.uncensored.com/api/v1/models#{@reset}")
-
-      :restore ->
-        case Application.get_env(:optimal_system_agent, :uncensored_previous) do
-          {prov, model} ->
-            Application.delete_env(:optimal_system_agent, :uncensored_previous)
-            swap_to(prov, model, session_id)
-
-          _ ->
-            IO.puts("  #{@yellow}nothing to go back to#{@reset}")
-        end
-
-      :hop ->
-        provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-        model = get_model_name(provider)
-
-        cond do
-          provider == :uncensored ->
-            IO.puts("  #{@dim}already on uncensored (#{model}) — /uncensored off to return#{@reset}")
-
-          model in OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) ->
-            Application.put_env(:optimal_system_agent, :uncensored_previous, {provider, model})
-            IO.puts("  #{@dim}#{model} has an unfiltered twin — hopping#{@reset}")
-            swap_to(:uncensored, model, session_id)
-
-          true ->
-            IO.puts("  #{@yellow}no unfiltered twin for #{model}#{@reset}")
-            IO.puts("  #{@dim}/uncensored list to see what is available#{@reset}")
-        end
-
-      {:switch, model} ->
-        provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-
-        if provider != :uncensored do
-          Application.put_env(
-            :optimal_system_agent,
-            :uncensored_previous,
-            {provider, get_model_name(provider)}
-          )
-        end
-
-        swap_to(:uncensored, model, session_id)
+    case String.trim(args) do
+      arg when arg in ["list", "models"] -> uncensored_list()
+      arg when arg in ["off", "back", "return"] -> uncensored_restore(session_id)
+      "" -> uncensored_hop(session_id)
+      model -> uncensored_switch(model, session_id)
     end
 
     IO.puts("")
@@ -413,7 +360,136 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
+  defp uncensored_list do
+    IO.puts("  #{@bold}Uncensored models#{@reset}")
+
+    for m <- OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) do
+      IO.puts("  #{@dim}•#{@reset} #{m}")
+    end
+
+    IO.puts("")
+    IO.puts("  #{@dim}Full live list: GET https://api.uncensored.com/api/v1/models#{@reset}")
+  end
+
+  defp uncensored_restore(session_id) do
+    case take_previous_provider(session_id) do
+      {prov, model} ->
+        case swap_to(prov, model, session_id) do
+          :ok -> :ok
+          # Put it back: a failed restore that forgets where it came from
+          # strands the session on the gateway with no way home.
+          :error -> remember_previous_provider(session_id, prov, model)
+        end
+
+      nil ->
+        IO.puts("  #{@yellow}nothing to go back to#{@reset}")
+    end
+  end
+
+  defp uncensored_hop(session_id) do
+    {provider, model} = session_provider_model(session_id)
+
+    cond do
+      provider == :uncensored ->
+        IO.puts("  #{@dim}already on uncensored (#{model}) — /uncensored off to return#{@reset}")
+
+      model in OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) ->
+        IO.puts("  #{@dim}#{model} has an unfiltered twin — hopping#{@reset}")
+        remember_on_success(session_id, provider, model, swap_to(:uncensored, model, session_id))
+
+      true ->
+        IO.puts("  #{@yellow}no unfiltered twin for #{model}#{@reset}")
+        IO.puts("  #{@dim}/uncensored list to see what is available#{@reset}")
+    end
+  end
+
+  defp uncensored_switch(model, session_id) do
+    {provider, from_model} = session_provider_model(session_id)
+    result = swap_to(:uncensored, model, session_id)
+
+    if provider != :uncensored do
+      remember_on_success(session_id, provider, from_model, result)
+    end
+  end
+
+  # Only a swap that actually happened has anything to go back FROM. Recording
+  # the origin before the call means a rejected model id (`known_model?/2`
+  # says no) leaves a "previous" pointing at the model the session is still on,
+  # and the next `/uncensored off` is a no-op that reports success.
+  defp remember_on_success(session_id, provider, model, :ok) do
+    remember_previous_provider(session_id, provider, model)
+  end
+
+  defp remember_on_success(_session_id, _provider, _model, _result), do: :ok
+
+  # ── Per-session provider state ────────────────────────────────────────────
+  #
+  # `{:swap_provider, …}` records each session's choice in
+  # `:osa_session_provider_overrides`, so that table — not the application
+  # environment — is where a session's current provider/model lives. The app
+  # env holds the node's DEFAULT, which is only this session's provider until
+  # some session swaps; reading it from a session command reports whatever the
+  # node was configured with while the session runs something else.
+  #
+  # The origin to return to is per-session for the same reason, and a node-wide
+  # one was worse than merely inaccurate: two sessions hopping to the gateway
+  # left one `:uncensored_previous`, so the first `/uncensored off` restored
+  # its own origin into whichever session happened to run it.
+
+  defp session_provider_model(session_id) do
+    case ets_lookup(:osa_session_provider_overrides, session_id) do
+      {provider, model} ->
+        {provider, model}
+
+      nil ->
+        provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+        {provider, get_model_name(provider)}
+    end
+  end
+
+  defp remember_previous_provider(session_id, provider, model) do
+    ets_insert(:osa_session_provider_previous, {session_id, provider, model})
+  end
+
+  defp take_previous_provider(session_id) do
+    case ets_lookup(:osa_session_provider_previous, session_id) do
+      {provider, model} ->
+        ets_delete(:osa_session_provider_previous, session_id)
+        {provider, model}
+
+      nil ->
+        nil
+    end
+  end
+
+  # These tables are created by `Application.start/2`. A command dispatched in
+  # a bare unit test — or before the tree is up — must degrade to "no session
+  # state", never crash the command.
+  defp ets_lookup(table, key) do
+    case :ets.lookup(table, key) do
+      [{^key, provider, model}] -> {provider, model}
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp ets_insert(table, row) do
+    :ets.insert(table, row)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp ets_delete(table, key) do
+    :ets.delete(table, key)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   # Shared tail of /model and /uncensored: ask the session to swap and report.
+  # Returns `:ok` only when the session actually moved.
   defp swap_to(provider, model, session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{pid, _}] ->
@@ -425,15 +501,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
               "  #{@green}#{@reset} Switched to #{info.model} #{@dim}(#{info.provider}, #{format_context_window(ctx)} ctx)#{@reset}"
             )
 
+            :ok
+
           {:error, reason} ->
             IO.puts("  #{@yellow}error: #{reason}#{@reset}")
+            :error
 
           :ok ->
             IO.puts("  #{@green}#{@reset} Switched to #{model}")
+            :ok
         end
 
       _ ->
         IO.puts("  #{@yellow}error: session not found#{@reset}")
+        :error
     end
   end
 

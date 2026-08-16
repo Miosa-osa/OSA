@@ -269,6 +269,14 @@ defmodule OptimalSystemAgent.Application do
     # Rows: {session_id, provider, model}
     :ets.new(:osa_session_provider_overrides, [:named_table, :public, :set])
 
+    # ETS table for the provider/model a session left behind when it hopped to
+    # a reselling gateway, so `/uncensored off` can put it back. Keyed by
+    # session id for the same reason the table above is: this is one session's
+    # history, and a node-global "previous" lets one session's `off` restore
+    # another session's model.
+    # Rows: {session_id, provider, model}
+    :ets.new(:osa_session_provider_previous, [:named_table, :public, :set])
+
     # ETS table for tracking pending ask_user questions.
     # Lets GET /sessions/:id/pending_questions show when the agent is blocked.
     # Rows: {ref_string, %{session_id, question, options, asked_at}}
