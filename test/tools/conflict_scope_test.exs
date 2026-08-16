@@ -108,6 +108,66 @@ defmodule OptimalSystemAgent.Tools.ConflictScopeTest do
     end
   end
 
+  describe "a tool called by its ALIAS declares the same target" do
+    # `Registry` resolves `wget` to the download tool at execute time, so an
+    # aliased call really does write. Keyed on the raw name it matched no
+    # declaration, and a declaration-free call that says it is concurrency-safe
+    # is `:parallel` — so two `wget` calls to ONE path did not conflict. That is
+    # the same race, reached by the tool's other name.
+    test "two downloads to one path conflict under every spelling", %{dir: dir} do
+      p = Path.join(dir, "same.bin")
+
+      wget = fn -> ConflictScope.for_call("wget", %{"path" => p}, true) end
+      fetch = fn -> ConflictScope.for_call("fetch_file", %{"path" => p}, true) end
+
+      assert ConflictScope.conflict?(wget.(), wget.())
+      assert ConflictScope.conflict?(wget.(), download(p))
+      assert ConflictScope.conflict?(fetch.(), download(p))
+    end
+
+    test "an aliased writer is scoped to its target, not a whole-batch barrier", %{dir: dir} do
+      a = ConflictScope.for_call("wget", %{"path" => Path.join(dir, "a.bin")}, true)
+      b = ConflictScope.for_call("wget", %{"path" => Path.join(dir, "b.bin")}, true)
+
+      assert a.mode == :scoped
+      refute ConflictScope.conflict?(a, b)
+    end
+
+    test "aliased file writers resolve too", %{dir: dir} do
+      p = Path.join(dir, "f.txt")
+
+      assert ConflictScope.conflict?(
+               ConflictScope.for_call("write_file", %{"path" => p}, false),
+               edit(p)
+             )
+
+      assert ConflictScope.conflict?(
+               ConflictScope.for_call("multi_edit", %{"edits" => [%{"path" => p}]}, false),
+               edit(p)
+             )
+    end
+
+    test "an alias that resolves to nothing keeps the fail-closed answer" do
+      assert ConflictScope.for_call("wgett", %{"path" => "/tmp/x"}, false).mode == :barrier
+    end
+  end
+
+  describe "readers that are not file_read" do
+    test "send_user_file conflicts with a write to the file it is sending", %{dir: dir} do
+      p = Path.join(dir, "attachment.pdf")
+
+      send_file = ConflictScope.for_call("send_user_file", %{"path" => p}, true)
+
+      assert send_file.mode == :scoped
+
+      assert ConflictScope.conflict?(send_file, edit(p)),
+             "a file was sent to the user while another call in the same batch rewrote it"
+
+      refute ConflictScope.conflict?(send_file, edit(Path.join(dir, "other.txt")))
+      refute ConflictScope.conflict?(send_file, send_file)
+    end
+  end
+
   describe "normalisation — the load-bearing half" do
     test "a relative and an absolute path to one file are not distinct" do
       # `file_edit` roots relatives at the process cwd, mirroring

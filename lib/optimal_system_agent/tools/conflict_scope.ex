@@ -49,6 +49,14 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
   than to a comparison it cannot trust: a wrong `:barrier` costs latency, a
   wrong "disjoint" costs a file.
 
+  ## Names, not modules
+
+  The tables are keyed by canonical tool name, and a call may arrive under an
+  ALIAS (`wget` for `download`, `write_file` for `file_write`). `canonical_name/1`
+  resolves the alias through `Registry` before the lookup — without it an
+  aliased writer declares nothing, and a declaration-free call that calls itself
+  concurrency-safe is `:parallel`.
+
   ## Kill switch
 
   `config :optimal_system_agent, :cross_call_conflict_detection, false` reverts
@@ -81,8 +89,14 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
 
   # Readers only matter because a writer may be batched beside them: a read of
   # a file another call in the same batch is rewriting is a torn read.
+  #
+  # `send_user_file` belongs here for exactly that reason: it declares
+  # `concurrency_safe? true` and then reads a caller-supplied `path`, so without
+  # an entry it was `:parallel` against a `file_write` to the very file it was
+  # about to hand the user — a half-written attachment, reported as sent.
   @readers %{
-    "file_read" => {["path", "file_path"], :cwd}
+    "file_read" => {["path", "file_path"], :cwd},
+    "send_user_file" => {["path"], :cwd}
   }
 
   # Multi-target writers — the paths live in a list of edit maps.
@@ -167,6 +181,8 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
   # ── Classification ────────────────────────────────────────────────────
 
   defp classify(name, input, per_call_safe?) when is_binary(name) and is_map(input) do
+    name = canonical_name(name)
+
     cond do
       spec = Map.get(@writers, name) -> scoped_writer(spec, input, name)
       spec = Map.get(@list_writers, name) -> scoped_list_writer(spec, input, name)
@@ -178,6 +194,53 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
 
   defp classify(_, _, per_call_safe?),
     do: %__MODULE__{mode: if(per_call_safe?, do: :parallel, else: :barrier)}
+
+  # The tables above are keyed by CANONICAL tool name, but a tool call does not
+  # have to arrive under one. Every path-scoped writer here declares aliases —
+  # `download` answers to `wget` and `fetch_file`, `file_write` to `write` and
+  # `write_file`, `multi_file_edit` to `multi_edit` — and `Registry` resolves
+  # them at execute time, so an aliased call really does run the writer.
+  #
+  # Keyed on the raw name, `wget` matched nothing, and a tool that says
+  # `concurrency_safe? true` and matches nothing is `:parallel`. Two `wget`
+  # calls to one path therefore did NOT conflict: the same last-write-wins,
+  # both-report-success race this module exists to stop, reachable by writing
+  # the tool's other name.
+  #
+  # It has not been firing in production only because the orchestrator's own
+  # module lookup is alias-blind in the opposite direction — it resolves `wget`
+  # to no module at all and passes `per_call_safe? false`, landing on
+  # `:barrier`. Two bugs cancelling: one calls the pair safe, the other calls
+  # the tool unknown. Fixing either alone — and resolving aliases in
+  # `lookup_module/1` is the obvious fix, since `Registry` already does —
+  # uncovers the race. Resolving the name HERE closes it from the side that
+  # owns the decision, and costs the accidental barrier nothing: an aliased
+  # writer becomes `:scoped` on its real target rather than serialising the
+  # whole batch.
+  defp canonical_name(name) do
+    if known_name?(name), do: name, else: alias_target(name) || name
+  end
+
+  defp known_name?(name) do
+    Map.has_key?(@writers, name) or Map.has_key?(@list_writers, name) or
+      Map.has_key?(@readers, name)
+  end
+
+  defp alias_target(name) do
+    case OptimalSystemAgent.Tools.Registry.module_for_alias(name) do
+      nil ->
+        nil
+
+      mod ->
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :name, 0),
+          do: mod.name(),
+          else: nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
 
   defp scoped_writer({keys, root}, input, _name) do
     case first_path(input, keys) do
