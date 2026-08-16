@@ -112,6 +112,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  cerebras: {:compat, :cerebras},
                  sambanova: {:compat, :sambanova},
                  hyperbolic: {:compat, :hyperbolic},
+                 uncensored: {:compat, :uncensored},
                  lmstudio: {:compat, :lmstudio},
                  llamacpp: {:compat, :llamacpp},
 

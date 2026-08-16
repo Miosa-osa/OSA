@@ -173,6 +173,7 @@ provider_map = %{
   "hyperbolic" => :hyperbolic,
   "lmstudio" => :lmstudio,
   "llamacpp" => :llamacpp,
+  "uncensored" => :uncensored,
   "miosa" => :miosa,
   "replicate" => :replicate,
   "qwen" => :qwen,
@@ -241,6 +242,7 @@ config :optimal_system_agent,
   hyperbolic_api_key: System.get_env("HYPERBOLIC_API_KEY"),
   lmstudio_api_key: System.get_env("LMSTUDIO_API_KEY"),
   llamacpp_api_key: System.get_env("LLAMACPP_API_KEY"),
+  uncensored_api_key: System.get_env("UNCENSORED_API_KEY"),
   # Bedrock's key mode uses AWS's own variable name rather than a
   # `BEDROCK_API_KEY` of OSA's invention, so a user who already exported it
   # for the AWS CLI or an SDK does not have to export it twice under a second
@@ -269,6 +271,7 @@ config :optimal_system_agent,
   hyperbolic_model: System.get_env("HYPERBOLIC_MODEL"),
   lmstudio_model: System.get_env("LMSTUDIO_MODEL"),
   llamacpp_model: System.get_env("LLAMACPP_MODEL"),
+  uncensored_model: System.get_env("UNCENSORED_MODEL"),
 
   # ── Channel Adapters ────────────────────────────────────────────────
   # WhatsApp (Baileys bridge sidecar)
@@ -449,6 +452,9 @@ config :optimal_system_agent,
 
          :llamacpp ->
            System.get_env("LLAMACPP_MODEL")
+
+         :uncensored ->
+           System.get_env("UNCENSORED_MODEL")
 
          _ ->
            nil

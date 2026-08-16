@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
     "model" => {"Show or switch the current model", :cmd_model},
+    "uncensored" => {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -329,6 +330,111 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: model switch failed#{@reset}\n")
       session_id
+  end
+
+  # `/uncensored` — api.uncensored.com serves the SAME model ids OSA already
+  # uses (`claude-opus-5`, `grok-4-6`, `gpt-5.6-sol`), so the useful default is
+  # not "pick a model" but "keep this model, drop the filter": hop the current
+  # model id to the uncensored provider and remember where we came from.
+  #
+  #   /uncensored          hop the current model across, if it exists there
+  #   /uncensored <model>  switch to a specific uncensored model
+  #   /uncensored off      go back to the provider/model we came from
+  #   /uncensored list     show the advertised models
+  def cmd_uncensored(args, session_id) do
+    IO.puts("")
+
+    result =
+      case String.trim(args) do
+        arg when arg in ["off", "back", "return"] -> :restore
+        arg when arg in ["list", "models"] -> :list
+        "" -> :hop
+        model -> {:switch, model}
+      end
+
+    case result do
+      :list ->
+        IO.puts("  #{@bold}Uncensored models#{@reset}")
+
+        for m <- OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) do
+          IO.puts("  #{@dim}•#{@reset} #{m}")
+        end
+
+        IO.puts("")
+        IO.puts("  #{@dim}Full live list: GET https://api.uncensored.com/api/v1/models#{@reset}")
+
+      :restore ->
+        case Application.get_env(:optimal_system_agent, :uncensored_previous) do
+          {prov, model} ->
+            Application.delete_env(:optimal_system_agent, :uncensored_previous)
+            swap_to(prov, model, session_id)
+
+          _ ->
+            IO.puts("  #{@yellow}nothing to go back to#{@reset}")
+        end
+
+      :hop ->
+        provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+        model = get_model_name(provider)
+
+        cond do
+          provider == :uncensored ->
+            IO.puts("  #{@dim}already on uncensored (#{model}) — /uncensored off to return#{@reset}")
+
+          model in OptimalSystemAgent.Providers.OpenAICompatProvider.available_models(:uncensored) ->
+            Application.put_env(:optimal_system_agent, :uncensored_previous, {provider, model})
+            IO.puts("  #{@dim}#{model} has an unfiltered twin — hopping#{@reset}")
+            swap_to(:uncensored, model, session_id)
+
+          true ->
+            IO.puts("  #{@yellow}no unfiltered twin for #{model}#{@reset}")
+            IO.puts("  #{@dim}/uncensored list to see what is available#{@reset}")
+        end
+
+      {:switch, model} ->
+        provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+
+        if provider != :uncensored do
+          Application.put_env(
+            :optimal_system_agent,
+            :uncensored_previous,
+            {provider, get_model_name(provider)}
+          )
+        end
+
+        swap_to(:uncensored, model, session_id)
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: uncensored switch failed#{@reset}\n")
+      session_id
+  end
+
+  # Shared tail of /model and /uncensored: ask the session to swap and report.
+  defp swap_to(provider, model, session_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] ->
+        case GenServer.call(pid, {:swap_provider, provider, model}) do
+          {:ok, info} ->
+            ctx = ProviderRegistry.effective_context_window(info.model, info.provider)
+
+            IO.puts(
+              "  #{@green}#{@reset} Switched to #{info.model} #{@dim}(#{info.provider}, #{format_context_window(ctx)} ctx)#{@reset}"
+            )
+
+          {:error, reason} ->
+            IO.puts("  #{@yellow}error: #{reason}#{@reset}")
+
+          :ok ->
+            IO.puts("  #{@green}#{@reset} Switched to #{model}")
+        end
+
+      _ ->
+        IO.puts("  #{@yellow}error: session not found#{@reset}")
+    end
   end
 
   def cmd_status(_args, session_id) do
