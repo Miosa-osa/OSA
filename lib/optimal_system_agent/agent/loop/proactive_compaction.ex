@@ -199,11 +199,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   the original list is returned untouched (and a failure is recorded toward the
   circuit breaker) so callers can safely fall through to the reactive
   `ContextCollapse` path without breaking the turn.
-  """
-  @spec compact([map()], String.t() | nil, String.t() | nil) :: [map()]
-  def compact(messages, session_id \\ nil, instructions \\ nil)
 
-  def compact(messages, session_id, instructions) when is_list(messages) do
+  `trigger` labels the announcement the user sees. It defaults to `:auto`
+  because this function's *unlabelled* callers are the automatic ones
+  (`ReactLoop`'s threshold branch); only `/compact` passes `:manual`. It used
+  to be hardcoded to `:manual` for BOTH, so an automatic compaction announced
+  itself as something the user had asked for — which is precisely the
+  distinction someone asking "shouldn't it just compact automatically?" needs
+  to be able to see.
+  """
+  @spec compact([map()], String.t() | nil, String.t() | nil, atom()) :: [map()]
+  def compact(messages, session_id \\ nil, instructions \\ nil, trigger \\ :auto)
+
+  def compact(messages, session_id, instructions, trigger) when is_list(messages) do
     {older, recent} = split_turns(messages, keep_turns())
     older_tokens = Compactor.estimate_tokens(older)
 
@@ -227,7 +235,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         # regularly runs into the tens of seconds); emitting only on completion
         # is what made the TUI freeze with no explanation.
         started_at = System.monotonic_time(:millisecond)
-        CompactionEvents.started(session_id, :manual, older_tokens)
+        CompactionEvents.started(session_id, trigger, older_tokens)
 
         # Same process-dictionary stash `Compactor.run_pipeline/6` sets, for the
         # same reason and now for a second consumer: `Compactor.bounded_chat/2`
@@ -330,7 +338,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     end
   end
 
-  def compact(messages, _session_id, _instructions), do: messages
+  def compact(messages, _session_id, _instructions, _trigger), do: messages
 
   defp restore_compact_session_id(nil), do: Process.delete(:osa_compact_session_id)
   defp restore_compact_session_id(prior), do: Process.put(:osa_compact_session_id, prior)

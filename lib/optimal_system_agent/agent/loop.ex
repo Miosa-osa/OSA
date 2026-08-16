@@ -1446,7 +1446,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
         OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(
           messages,
           state.session_id,
-          instructions
+          instructions,
+          # This handler IS `/compact`. Everything else that reaches
+          # `compact/4` is the threshold path and keeps the `:auto` default.
+          :manual
         )
       end) || messages
 

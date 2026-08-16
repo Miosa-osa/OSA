@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
   alias OptimalSystemAgent.Events.Bus
 
   @doc """
@@ -21,7 +22,28 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # usable window is min(config num_ctx, trained window), not the catalog's
     # trained size. `effective_context_window/2` resolves that; for hosted
     # providers it is identical to the trained `context_window/1`.
-    max_tok = provider_context_window(state)
+    model_window = provider_context_window(state)
+
+    # ONE denominator. `used_percent/2` and `warning_state/2` both clamp the
+    # window internally (`operative_window/1`, min(window, 200k)), but the raw
+    # window was ALSO emitted as `max_tokens` — which the TUI both displays and
+    # uses as its own ratio fallback (`estimated_tokens / max_tokens`). On a
+    # 500K model that is a 2.8x disagreement inside a single status line.
+    #
+    # REPORTED LIVE on grok-4.6 (500K window) at ~104.6k occupancy:
+    #
+    #     104_600 / 500_000              = 21%   ("it dropped to 20%")
+    #     104_600 / 180_000 (operative)  = 58%   ("then to like 50%")
+    #
+    # Same session, same instant, two readings — which is exactly what the
+    # numbers "moving in ways they cannot interpret" was. So `max_tokens` is now
+    # the window OSA actually operates in, the one every threshold is derived
+    # from, and the model's true window is reported alongside it under its own
+    # name rather than silently standing in for it.
+    max_tok =
+      if model_window > 0,
+        do: CompactionThresholds.operative_window(model_window),
+        else: 0
 
     # Actual current usage: prefer the provider-reported input tokens; when the
     # provider does not return usage (glm/Ollama) fall back to the char/word
@@ -35,23 +57,36 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # Claude Code parity, so "N% used" lines up with the auto-compact threshold.
     utilization =
       if max_tok > 0,
-        do: OptimalSystemAgent.Agent.Loop.CompactionThresholds.used_percent(estimated, max_tok),
+        do: CompactionThresholds.used_percent(estimated, max_tok),
         else: 0.0
 
     warning =
       if is_integer(max_tok) and max_tok > 0 do
-        OptimalSystemAgent.Agent.Loop.CompactionThresholds.warning_state(estimated, max_tok)
+        CompactionThresholds.warning_state(estimated, max_tok)
       else
         %{percent_left: 100, above_warning: false, above_compact: false, at_blocking_limit: false}
       end
 
-    Logger.info("[ctx] estimated=#{estimated} max=#{max_tok} util=#{utilization}%")
+    # Every threshold decision, above `debug`, with the denominator named. The
+    # old line reported `max` alone, which was ambiguous between the model's
+    # window and the operative one and so could not be used to tell whether a
+    # missing compaction was "not yet due" or "never going to fire".
+    Logger.info(
+      "[ctx] estimated=#{estimated} operative_window=#{max_tok} " <>
+        "model_window=#{model_window}#{if max_tok < model_window, do: " (clamped)", else: ""} " <>
+        "util=#{utilization}% left=#{warning.percent_left}% " <>
+        "warn_at=#{if max_tok > 0, do: CompactionThresholds.warn_at(max_tok), else: 0} " <>
+        "compact_at=#{if max_tok > 0, do: CompactionThresholds.compact_at(max_tok), else: 0} " <>
+        "above_warning=#{warning.above_warning} above_compact=#{warning.above_compact}"
+    )
 
     Bus.emit(:system_event, %{
       event: :context_pressure,
       session_id: state.session_id,
       estimated_tokens: estimated,
       max_tokens: max_tok,
+      model_context_window: model_window,
+      context_window_clamped: max_tok < model_window,
       utilization: utilization,
       percent_left: warning.percent_left,
       context_low: warning.above_warning,
@@ -74,6 +109,8 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          session_id: state.session_id,
          estimated_tokens: estimated,
          max_tokens: max_tok,
+         model_context_window: model_window,
+         context_window_clamped: max_tok < model_window,
          utilization: utilization,
          percent_left: warning.percent_left,
          context_low: warning.above_warning,
