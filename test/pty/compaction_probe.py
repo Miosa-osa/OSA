@@ -174,9 +174,115 @@ def main() -> int:
                 problems.append(
                     "failure: the running indicator outlived the failure")
 
+            # ── 5. LEAN VIEW: compaction is a primitive, never hidden ────────
+            # Standing requirement: "If I do the compact thing, it must show me
+            # that it's compacting. Even if I have the lean command on."
+            #
+            # `/lean` suppresses TOOL CELLS. Compaction is not tool chatter —
+            # it is the harness rewriting the conversation, and it blocks the
+            # turn for minutes. Structurally it is out of lean's reach (the
+            # spinner is chrome, and the completion line is SystemInfo, not
+            # ToolCall), but nothing asserted that on a real screen, so a
+            # widened predicate would have silently taken it away.
+            # Land the turn first. A command typed while a turn is live is
+            # QUEUED, not run (`submit_input` -> `enqueue_message`), and the
+            # queued row also contains the text — so asserting on the echo alone
+            # would pass against a `/lean` that never executed.
+            emit("done", {})
+            term.pump(1.0)
+
+            # Type and submit as two separate writes. A single write carrying
+            # the text AND the Enter looks like a paste burst
+            # (`input/paste_burst.rs`), and a pasted newline is a literal
+            # newline in the composer, not a submit.
+            term.write(b"/lean on")
+            term.pump(0.6)
+            term.write(b"\r")
+            term.pump(1.5)
+            lean_on = term.dump()
+            if "/lean on" not in lean_on:
+                problems.append(
+                    "lean: the typed command left no record on screen")
+            if "Lean view" not in lean_on and "lean" not in lean_on.lower():
+                problems.append(
+                    "lean: /lean produced no confirmation — it may not have run")
+
+            emit("compaction_started", {"trigger": "manual",
+                                        "tokens_before": 135400})
+            term.pump(1.6)
+            lean_running = term.dump()
+            if "Compacting" not in lean_running:
+                problems.append(
+                    "lean: compaction ran invisibly with the lean view on — "
+                    "the spinner never named the wait")
+            if not any(f"{n}s" in lean_running for n in range(1, 9)):
+                problems.append(
+                    "lean: no elapsed timer while compaction ran under /lean")
+
+            emit("compaction_completed", {
+                "tokens_before": 135400, "tokens_after": 6700,
+                "messages_before": 990, "messages_after": 14,
+                "duration_ms": 76000,
+            })
+            term.pump(1.2)
+            lean_done = term.dump()
+            if "Compacted" not in lean_done or "✓" not in lean_done:
+                problems.append(
+                    "lean: the completion line was suppressed by the lean view")
+            if "Compacting" in lean_done:
+                problems.append(
+                    "lean: the running indicator outlived the compaction")
+
+            # ── 6. The numbers must describe the CURRENT conversation ────────
+            # Reported live, one frame, right after a successful compaction:
+            #
+            #     Context low (6% remaining) · Run /compact to compact & continue
+            #     ⟐ grok-4.6 │ ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
+            #
+            # and later, once the bar had self-healed but the banner had not:
+            #
+            #     Context low (6% remaining)   ⣿⢿░░░░░░ 15% ctx
+            #
+            # grok-4.6 clamps to a 200k operative window: compact_at 167k,
+            # warn_at 147k, meter denominator 180k.
+            emit("context_pressure", {
+                "estimated_tokens": 157500, "max_tokens": 180000,
+                "utilization": 87.5, "percent_left": 6, "context_low": True,
+                "compact_at": 167000, "warn_at": 147000,
+            })
+            term.pump(1.0)
+            loaded = term.dump()
+            if "Context low" not in loaded:
+                problems.append(
+                    "pressure: the low-context banner never appeared at 157.5k")
+
+            # The fold lands. Only the next request's size carries the new
+            # total — this is the `llm_response` self-heal path, the one the
+            # banner did not share.
+            emit("llm_response", {"duration_ms": 900,
+                                  "usage": {"input_tokens": 29300,
+                                            "output_tokens": 120}})
+            term.pump(1.2)
+            after = term.dump()
+
+            if "Context low" in after:
+                problems.append(
+                    "pressure: the low-context banner outlived the compaction — "
+                    "it still reads 'Context low' with 29.3k of a 167k budget in use")
+            if "6% remaining" in after:
+                problems.append(
+                    "pressure: the banner still reports the pre-compaction "
+                    "'6% remaining'")
+            if "88% ctx" in after:
+                problems.append(
+                    "pressure: the meter still reports the pre-compaction 88%")
+
     if opts.keep:
         for name, snap in (("running", running), ("partial", partial),
-                           ("full", full), ("done", done), ("failed", failed)):
+                           ("full", full), ("done", done), ("failed", failed),
+                           ("lean_running", lean_running),
+                           ("lean_done", lean_done),
+                           ("loaded", loaded), ("after", after)):
             print(f"\n--- {name} ---\n{snap}")
 
     if problems:

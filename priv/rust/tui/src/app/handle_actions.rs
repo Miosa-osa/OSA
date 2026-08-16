@@ -636,6 +636,28 @@ impl App {
         }
 
         if text.starts_with('/') {
+            // Echo the command the user typed, exactly as `submit_prompt` does
+            // for prose.
+            //
+            // No slash command did this: `add_user_message` had exactly one
+            // call site in the whole TUI, inside `submit_prompt`. For commands
+            // that open an overlay or write their own output the omission is
+            // invisible, but `/compact` starts a multi-minute backend step and
+            // writes nothing until it lands, so the screen after the keypress
+            // was byte-identical to the screen before it. REPORTED: "it doesn't
+            // even show me that I put in the command in the chat" — followed by
+            // pressing it again, and three compactions inside 2.5 minutes.
+            //
+            // This is the same mechanism as the model picker that started a
+            // fetch while the dialog stood still (fixed in 62294fff): an action
+            // that begins work while leaving the screen unchanged is
+            // indistinguishable from a dropped keypress, so it gets repeated.
+            // Fixed here, at the one dispatch point, rather than per command —
+            // the next slow command should not have to remember.
+            //
+            // `/clear` is not exempt: it wipes the transcript immediately
+            // afterwards, so the echo cannot accumulate.
+            self.chat.add_user_message(text);
             self.handle_command(text);
         } else if let Some(shell_cmd) = text.strip_prefix('!') {
             self.execute_shell(shell_cmd.trim());

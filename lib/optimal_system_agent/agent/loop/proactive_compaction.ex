@@ -216,6 +216,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     {older, recent} = split_turns(messages, keep_turns())
     older_tokens = Compactor.estimate_tokens(older)
 
+    # The WHOLE conversation, which is the only thing "before" can honestly mean
+    # when "after" is also the whole conversation.
+    #
+    # `older_tokens` measures the fold's INPUT — the turns being summarized —
+    # and it is the right number for the "is this worth an LLM round-trip?"
+    # test below, which is a question about the fold. It was also being reported
+    # as `tokens_before` on every lifecycle event and hook, against a
+    # `tokens_after` computed over `[summary | restore ++ reminder] ++ recent`.
+    # Those are different SETS, so the pair was never a before/after of anything.
+    #
+    # REPORTED LIVE on grok-4.6, three consecutive runs:
+    #
+    #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded)
+    #     ✓ Compacted ~4.1k → ~7.8k tokens (tool output pruned in place)
+    #     ✓ Compacted ~7.8k → ~7.5k tokens (1 messages folded)
+    #
+    # Run 1 ends at 6.7k and run 2 begins at 4.1k with nothing in between that
+    # could remove 2.6k: 6.7k was the whole conversation, 4.1k was only the
+    # older slice of that same conversation. And run 2 "growing" 4.1k → 7.8k was
+    # the same mismatch at its most misleading — `recent`, counted on the right
+    # side and not the left, is most of a small conversation. The apparent
+    # growth was an artefact of the measurement, but a REAL net growth is also
+    # reachable here (the two injections below are appended on success alone),
+    # so both the accounting and the floor are fixed together.
+    total_before = Compactor.estimate_tokens(messages)
+
     cond do
       older == [] ->
         messages
@@ -228,7 +254,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         fire_compact_hook(:pre_compact, %{
           phase: :pre,
           strategy: :proactive,
-          tokens_before: older_tokens
+          tokens_before: total_before
         })
 
         # Announce BEFORE the summarizer call, not after. This path blocks the
@@ -236,7 +262,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         # regularly runs into the tens of seconds); emitting only on completion
         # is what made the TUI freeze with no explanation.
         started_at = System.monotonic_time(:millisecond)
-        CompactionEvents.started(session_id, trigger, older_tokens)
+        CompactionEvents.started(session_id, trigger, total_before)
 
         # Same process-dictionary stash `Compactor.run_pipeline/6` sets, for the
         # same reason and now for a second consumer: `Compactor.bounded_chat/2`
@@ -302,32 +328,74 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
                 msg -> [msg]
               end
 
-            compacted = [summary_msg | restore ++ reminder] ++ recent
-            after_tokens = Compactor.estimate_tokens(compacted)
+            # A compaction that cannot reduce must not be applied, and must not
+            # report a tick.
+            #
+            # The fold proper is `[summary | recent]`. The two blocks above are
+            # ADVISORY — they are appended on the strength of the summarizer
+            # having succeeded, not on the strength of anything having been
+            # removed — so on an already-small conversation they can cost more
+            # than the fold reclaims. `Compactor.run_pipeline/6` has carried
+            # exactly this guard since the same defect was measured there
+            # ("reclaimed nothing … returning history unchanged", plus the
+            # keep-the-work/drop-the-injections fallback); this path never grew
+            # one, which is why the run reported live as
+            #
+            #     ✓ Compacted ~4.1k → ~7.8k tokens
+            #
+            # could spend 70 seconds enlarging the conversation and still print
+            # a success tick.
+            #
+            # Ordered exactly like the pipeline's: prefer the full result, fall
+            # back to dropping the advisory blocks rather than dropping the
+            # summarization work already paid for, and only when even the bare
+            # fold cannot beat the original does the pass decline outright.
+            core = [summary_msg | recent]
+            with_injections = [summary_msg | restore ++ reminder] ++ recent
+
+            full_tokens = Compactor.estimate_tokens(with_injections)
+            core_tokens = Compactor.estimate_tokens(core)
+
+            {compacted, after_tokens, kept} =
+              cond do
+                full_tokens < total_before -> {with_injections, full_tokens, :full}
+                core_tokens < total_before -> {core, core_tokens, :fold_only}
+                true -> {messages, total_before, :declined}
+              end
+
+            if kept == :declined do
+              Logger.info(
+                "[proactive_compaction] fold reclaimed nothing " <>
+                  "(#{total_before} tokens before, #{core_tokens} after the bare fold) — " <>
+                  "returning history unchanged"
+              )
+            end
 
             fire_compact_hook(:post_compact, %{
               phase: :post,
               strategy: :proactive,
-              tokens_before: older_tokens,
+              tokens_before: total_before,
               tokens_after: after_tokens,
-              tokens_saved: older_tokens - after_tokens
+              tokens_saved: total_before - after_tokens
             })
 
-            emit_event(length(messages), length(compacted), older_tokens, after_tokens)
+            emit_event(length(messages), length(compacted), total_before, after_tokens)
 
             CompactionEvents.completed(session_id,
-              tokens_before: older_tokens,
+              tokens_before: total_before,
               tokens_after: after_tokens,
               messages_before: length(messages),
               messages_after: length(compacted),
               duration_ms: System.monotonic_time(:millisecond) - started_at
             )
 
-            Logger.info(
-              "[proactive_compaction] folded #{length(older)} older messages into 1 summary " <>
-                "(~#{older_tokens} → ~#{Compactor.estimate_tokens([summary_msg])} tokens; " <>
-                "kept #{length(recent)} recent verbatim)"
-            )
+            if kept != :declined do
+              Logger.info(
+                "[proactive_compaction] folded #{length(older)} older messages into 1 summary " <>
+                  "(~#{total_before} → ~#{after_tokens} tokens; " <>
+                  "kept #{length(recent)} recent verbatim, injections=#{kept})"
+              )
+            end
 
             compacted
 

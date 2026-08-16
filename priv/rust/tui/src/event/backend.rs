@@ -364,6 +364,12 @@ pub enum BackendEvent {
         /// None/absent from older backends.
         percent_left: Option<u32>,
         context_low: Option<bool>,
+        /// The ABSOLUTE thresholds `percent_left`/`context_low` were derived
+        /// from, so the status bar can re-derive them against a total that
+        /// arrived by another route (`LlmResponse.input_tokens`) instead of
+        /// rendering a cached figure alongside a fresher bar. 0 == unknown.
+        compact_at: u64,
+        warn_at: u64,
     },
 
     // === Tasks ===

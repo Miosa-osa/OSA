@@ -1295,6 +1295,13 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 percent_left: Option<u32>,
                 #[serde(default)]
                 context_low: Option<bool>,
+                // The absolute thresholds the two fields above were derived
+                // from. Defaulted to 0 ("unknown") so older backends still
+                // parse; the status bar falls back to the reported values.
+                #[serde(default)]
+                compact_at: u64,
+                #[serde(default)]
+                warn_at: u64,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::ContextPressure {
@@ -1303,6 +1310,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 max_tokens: ev.max_tokens,
                 percent_left: ev.percent_left,
                 context_low: ev.context_low,
+                compact_at: ev.compact_at,
+                warn_at: ev.warn_at,
             })
         }
 

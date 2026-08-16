@@ -406,6 +406,11 @@ pub struct StatusBar {
     /// WS12 — backend crossed the low-context warning threshold
     /// (context_pressure `context_low`); drives the red hint + % styling.
     context_low: bool,
+    /// Absolute token thresholds from the backend, so `percent_left` and
+    /// `context_low` can be DERIVED from `context_estimated` on every update
+    /// rather than cached from whichever event last carried them. 0 == unknown.
+    context_compact_at: u64,
+    context_warn_at: u64,
     /// U-T26 — number of connected MCP servers (from `McpServersLoaded`). 0 ⇒
     /// no chip. Populated on session start and on `/mcp`.
     mcp_count: usize,
@@ -474,6 +479,8 @@ impl StatusBar {
             billing: None,
             percent_left: None,
             context_low: false,
+            context_compact_at: 0,
+            context_warn_at: 0,
             mcp_count: 0,
             swarm_label: None,
             hooks_ok: 0,
@@ -687,6 +694,7 @@ impl StatusBar {
             utilization
         };
         self.context_utilization = utilization.clamp(0.0, 1.0);
+        self.recompute_warning();
     }
 
     /// Self-heal the context meter from the real last-request size.
@@ -712,6 +720,12 @@ impl StatusBar {
             return;
         }
         self.context_estimated = input_tokens;
+        // The banner is derived from the same committed total as the bar, so a
+        // self-heal that moves one moves both. Deliberately BEFORE the
+        // unknown-window bail-out: the warning thresholds are absolute token
+        // counts and do not need `context_max`, so a session that never
+        // resolved a window still gets an honest banner.
+        self.recompute_warning();
 
         if self.context_max == 0 {
             return;
@@ -758,9 +772,58 @@ impl StatusBar {
     /// WS12 — CC TokenWarning parity fields from the backend's context_pressure
     /// event: percent of usable context left before auto-compact, and whether
     /// the low-context warning threshold has been crossed.
-    pub fn set_context_warning(&mut self, percent_left: Option<u32>, context_low: bool) {
+    ///
+    /// `compact_at` / `warn_at` are the ABSOLUTE thresholds those two were
+    /// derived from (0 == the backend could not resolve them). Storing them is
+    /// what lets `recompute_warning` re-derive the banner from whatever total
+    /// the bar currently holds, instead of leaving a cached percentage next to
+    /// a fresher one — see `recompute_warning` for the reported screen.
+    pub fn set_context_warning(
+        &mut self,
+        percent_left: Option<u32>,
+        context_low: bool,
+        compact_at: u64,
+        warn_at: u64,
+    ) {
         self.percent_left = percent_left;
         self.context_low = context_low;
+        self.context_compact_at = compact_at;
+        self.context_warn_at = warn_at;
+    }
+
+    /// Re-derive the low-context banner from the committed context total.
+    ///
+    /// The bar and the banner are two renderings of one fact, but they had
+    /// different writers. `context_utilization` is refreshed by BOTH
+    /// `set_context` (the `context_pressure` event) and `note_input_tokens`
+    /// (every `LlmResponse`), because the pressure event does not fire on every
+    /// provider/turn. `percent_left`/`context_low` had only the first. So a
+    /// turn that self-healed the bar left the banner describing a superseded
+    /// state — REPORTED LIVE, one frame, just after a compaction:
+    ///
+    /// ```text
+    ///     Context low (6% remaining) · Run /compact to compact & continue
+    ///     ⟐ grok-4.6 │ ⣿⢿░░░░░░ 15% ctx
+    /// ```
+    ///
+    /// 15% used and 6% left cannot both be true. Deriving both from
+    /// `context_estimated` makes that unrepresentable rather than merely fixed
+    /// on one path.
+    ///
+    /// Mirrors `CompactionThresholds.warning_state/2`: `percent_left` is
+    /// measured against `compact_at` and floored at 0; the band opens at
+    /// `warn_at`. With no thresholds (older backend, or a window the backend
+    /// could not resolve) there is nothing to derive from, so the reported
+    /// values stand — this is the pre-existing behaviour for those backends.
+    fn recompute_warning(&mut self) {
+        if self.context_compact_at == 0 {
+            return;
+        }
+        let tokens = self.context_estimated;
+        let compact_at = self.context_compact_at;
+        let left = compact_at.saturating_sub(tokens) as f64 / compact_at as f64 * 100.0;
+        self.percent_left = Some(left.round() as u32);
+        self.context_low = self.context_warn_at > 0 && tokens >= self.context_warn_at;
     }
 
     /// Whether the backend flagged low context (warning threshold crossed).
@@ -1481,13 +1544,56 @@ mod status_bar_tests {
         let mut sb = StatusBar::new();
         assert!(!sb.context_low());
         assert_eq!(sb.percent_left(), None);
-        sb.set_context_warning(Some(18), true);
+        // No thresholds (0/0) — the reported values are stored verbatim, which
+        // is the older-backend path.
+        sb.set_context_warning(Some(18), true, 0, 0);
         assert!(sb.context_low());
         assert_eq!(sb.percent_left(), Some(18));
         // A fresh report after compaction clears both.
-        sb.set_context_warning(None, false);
+        sb.set_context_warning(None, false, 0, 0);
         assert!(!sb.context_low());
         assert_eq!(sb.percent_left(), None);
+    }
+
+    /// The reported screen: `Context low (6% remaining)` above a bar reading
+    /// `15% ctx`, in one frame, right after a compaction.
+    ///
+    /// The bar self-heals from every `LlmResponse` (`note_input_tokens`); the
+    /// banner only ever had the `context_pressure` event. So a fold followed by
+    /// a smaller request moved one and not the other. Both are now derived from
+    /// the committed total, so the disagreement cannot be constructed.
+    #[test]
+    fn the_low_context_banner_cannot_outlive_the_bar() {
+        let mut sb = StatusBar::new();
+        // grok-4.6: operative window 200k → compact_at 167k, warn_at 147k.
+        sb.set_context_warning(Some(6), true, 167_000, 147_000);
+        sb.set_context(0.875, 157_500, 180_000);
+        assert!(sb.context_low(), "precondition: the band is open at 157.5k");
+
+        // The next request after the fold is small. Only `note_input_tokens`
+        // carries it — no `context_pressure` event has fired yet.
+        sb.note_input_tokens(29_300);
+
+        assert!(
+            !sb.context_low(),
+            "the low-context banner survived a fold that emptied the context"
+        );
+        let left = sb.percent_left().expect("percent_left must be derivable");
+        assert!(
+            left > 80,
+            "percent_left still reads {left}% with 29.3k of a 167k budget in use"
+        );
+    }
+
+    /// The banner is derived even when the window is unknown, because the
+    /// thresholds are absolute token counts and do not need a denominator.
+    #[test]
+    fn the_banner_is_derived_without_a_known_window() {
+        let mut sb = StatusBar::new();
+        sb.set_context_warning(Some(3), true, 167_000, 147_000);
+        sb.note_input_tokens(10_000);
+        assert!(!sb.context_low());
+        assert_eq!(sb.percent_left(), Some(94));
     }
 
     #[test]

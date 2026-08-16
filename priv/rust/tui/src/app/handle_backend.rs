@@ -758,6 +758,8 @@ impl App {
                 max_tokens,
                 percent_left,
                 context_low,
+                compact_at,
+                warn_at,
             } => {
                 // Normalize at the handler level: the backend sends utilization as
                 // a 0-100 percentage. If it's absent/zero but the token counts are
@@ -771,11 +773,20 @@ impl App {
                 if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }
-                self.status.set_context(ratio, estimated_tokens, max_tokens);
                 // WS12 — feed the CC token-warning state to the status bar; the
                 // context-low hint above the composer keys off these.
-                self.status
-                    .set_context_warning(percent_left, context_low.unwrap_or(false));
+                //
+                // BEFORE `set_context`, which now re-derives the banner from the
+                // committed total: the thresholds have to be in place for that
+                // derivation to have anything to work with on the very first
+                // pressure event of a session.
+                self.status.set_context_warning(
+                    percent_left,
+                    context_low.unwrap_or(false),
+                    compact_at,
+                    warn_at,
+                );
+                self.status.set_context(ratio, estimated_tokens, max_tokens);
                 self.sidebar.set_context(ratio);
                 // `max_tokens == 0` means the backend could not honestly resolve
                 // this model's window. Tell the sidebar so it renders the token

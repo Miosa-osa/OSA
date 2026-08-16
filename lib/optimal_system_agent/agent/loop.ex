@@ -1577,7 +1577,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # now that we are back in the loop process holding the state.
     state = Accounting.absorb_side_spend(state)
 
-    {:reply, :ok, %{state | messages: compacted}}
+    {:reply, :ok, republish_context(%{state | messages: compacted}, compacted != messages)}
   end
 
   # Legacy atom form kept for any pre-instructions caller.
@@ -1609,7 +1609,49 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Bill the summarizer round-trips staged by the bounded task above.
     state = Accounting.absorb_side_spend(state)
 
-    {:reply, {:ok, stats}, %{state | messages: compacted}}
+    {:reply, {:ok, stats},
+     republish_context(%{state | messages: compacted}, compacted != messages)}
+  end
+
+  # After a MANUAL compaction, make the meter describe the conversation that now
+  # exists.
+  #
+  # `last_input_tokens` is written in exactly one other place
+  # (`Accounting.maybe_put_last_input/2`) and only when a provider reported a
+  # positive input count, so after a fold it still holds the PRE-compaction
+  # prompt size. `Telemetry.emit_context_pressure/1` prefers that field over any
+  # local estimate, which is why the status bar and the low-context banner both
+  # went on describing a conversation that had just been replaced:
+  #
+  #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
+  #     …
+  #     Context low (6% remaining) · Run /compact to compact & continue
+  #     ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
+  #
+  # Both loop-driven paths already do exactly this for exactly this reason —
+  # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
+  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
+  # handlers are `/compact`, the form people actually type, and neither was
+  # covered. Re-emitting the pressure event is the other half: without it the
+  # refreshed figure would sit in state until the next turn boundary.
+  #
+  # Skipped when the fold changed nothing, so a declined compaction cannot
+  # replace a provider-reported count with a local estimate.
+  @spec republish_context(map(), boolean()) :: map()
+  defp republish_context(state, false), do: state
+
+  defp republish_context(state, true) do
+    state =
+      Map.put(
+        state,
+        :last_input_tokens,
+        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+      )
+
+    Telemetry.emit_context_pressure(state)
+    state
+  rescue
+    _ -> state
   end
 
   def handle_call(:enter_plan_mode, _from, state) do

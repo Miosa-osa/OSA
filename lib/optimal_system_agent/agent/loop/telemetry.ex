@@ -67,6 +67,29 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         %{percent_left: 100, above_warning: false, above_compact: false, at_blocking_limit: false}
       end
 
+    # The two ABSOLUTE thresholds the warning above was derived from, so the TUI
+    # can re-derive it instead of caching it.
+    #
+    # `utilization`/`percent_left`/`context_low` are three renderings of one
+    # fact, but only the first has a second writer on the TUI side: the status
+    # bar self-heals its ratio from `LlmResponse.input_tokens`
+    # (`StatusBar::note_input_tokens`) because this event does not fire on every
+    # provider/turn. The banner had no such path, so the two drifted apart —
+    # REPORTED LIVE, one frame, immediately after a compaction:
+    #
+    #     Context low (6% remaining)      ← this event, pre-compaction
+    #     ⣿⢿░░░░░░ 15% ctx                ← self-healed from the next request
+    #
+    # Shipping the thresholds lets the TUI compute the banner from whatever
+    # total it currently holds, which makes the contradiction unrepresentable
+    # rather than merely fixed on this path.
+    {compact_at, warn_at} =
+      if is_integer(max_tok) and max_tok > 0 do
+        {CompactionThresholds.compact_at(max_tok), CompactionThresholds.warn_at(max_tok)}
+      else
+        {0, 0}
+      end
+
     # Every threshold decision, above `debug`, with the denominator named. The
     # old line reported `max` alone, which was ambiguous between the model's
     # window and the operative one and so could not be used to tell whether a
@@ -91,7 +114,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       percent_left: warning.percent_left,
       context_low: warning.above_warning,
       above_compact: warning.above_compact,
-      at_blocking_limit: warning.at_blocking_limit
+      at_blocking_limit: warning.at_blocking_limit,
+      compact_at: compact_at,
+      warn_at: warn_at
     })
 
     Phoenix.PubSub.broadcast(
@@ -115,7 +140,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          percent_left: warning.percent_left,
          context_low: warning.above_warning,
          above_compact: warning.above_compact,
-         at_blocking_limit: warning.at_blocking_limit
+         at_blocking_limit: warning.at_blocking_limit,
+         compact_at: compact_at,
+         warn_at: warn_at
        }}
     )
 
