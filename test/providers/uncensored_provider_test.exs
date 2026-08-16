@@ -133,24 +133,39 @@ defmodule OptimalSystemAgent.Providers.UncensoredProviderTest do
     # keyed by model id, so before `UncensoredModels` every one of these billed
     # the vendor's number at `:exact`. Rates are the gateway's own published
     # figures (GET /api/v1/models, 2026-08-16).
+    # Every rate below is read at ONE named instant, never at `DateTime.utc_now()`.
+    #
+    # `Pricing.rates/1` is a function of the wall clock by design: `deepseek-v4-pro`
+    # moved to peak/off-peak billing at 16:00:00Z on 2026-08-16, so its "vendor
+    # rate" is `{0.435, 0.87}` before that second and a tier rate after it. The
+    # first version of this test hardcoded the flat number against `rates/1` and
+    # passed for exactly as long as the suite happened to run before 16:00Z —
+    # CI's last green run finished at 15:55Z, five minutes ahead of the bomb.
+    #
+    # A time-varying price cannot be asserted without naming a time. 12:00Z is
+    # off-peak (peak is 01:00–04:00 and 06:00–10:00), and a fixed past instant's
+    # answer is a constant: if a catalog edit moves it, that IS the drift these
+    # rows exist to catch, and the assertion says so.
+    @at ~U[2026-08-17 12:00:00Z]
+
     @collisions [
       {"claude-opus-5", {5.0, 25.0}, {6.0, 30.0}},
       {"glm-5.2", {1.4, 4.4}, {1.68, 5.28}},
-      {"deepseek-v4-pro", {0.435, 0.87}, {1.84, 3.66}}
+      {"deepseek-v4-pro", {0.66, 1.98}, {1.84, 3.66}}
     ]
 
     test "the same id prices differently on the gateway than on the vendor" do
       for {id, vendor_rate, gateway_rate} <- @collisions do
-        assert Pricing.rates(id) == vendor_rate,
-               "#{id}: the VENDOR's own rate moved — this test's premise is stale"
+        assert Pricing.rates(id, @at) == vendor_rate,
+               "#{id}: the VENDOR's own rate at #{@at} moved — this test's premise is stale"
 
         qualified = Pricing.qualify(id, :uncensored)
 
-        assert Pricing.rates(qualified) == gateway_rate,
-               "#{id}: billed #{inspect(Pricing.rates(qualified))} on the gateway, which " <>
+        assert Pricing.rates(qualified, @at) == gateway_rate,
+               "#{id}: billed #{inspect(Pricing.rates(qualified, @at))} on the gateway, which " <>
                  "charges #{inspect(gateway_rate)}"
 
-        assert Pricing.confidence(qualified) == :exact,
+        assert Pricing.confidence(qualified, @at) == :exact,
                "#{id}: the gateway publishes this rate — it is not a guess"
 
         refute vendor_rate == gateway_rate,
@@ -161,9 +176,37 @@ defmodule OptimalSystemAgent.Providers.UncensoredProviderTest do
 
     test "qualifying for the gateway does not move the vendor's own price" do
       for {id, vendor_rate, _gateway} <- @collisions do
-        assert Pricing.rates(id) == vendor_rate
-        assert Pricing.confidence(id) == :exact
+        assert Pricing.rates(id, @at) == vendor_rate
+        assert Pricing.confidence(id, @at) == :exact
       end
+    end
+
+    # The regression the clock exposed, asserted directly rather than as a side
+    # effect of one row's numbers.
+    #
+    # `@pricing_windows` is keyed on the VENDOR's bare id (`deepseek-v4-pro`),
+    # and `windowed_rate/3` is checked BEFORE the exact table, walking
+    # `lookup_keys/1` — which strips the `uncensored/` namespace down to that
+    # bare id. So from 16:00Z on 2026-08-16 the gateway's own published
+    # {1.84, 3.66} was superseded by DeepSeek's {0.66, 1.98}: a 2.8x
+    # under-bill on input, reported `:exact`, with the cache-read column 5.9x
+    # under beside it. `exact_rate/1` had carried the reseller guard since this
+    # namespace was introduced; the dated mechanisms did not.
+    test "a vendor's dated rate card does not reach through the gateway's namespace" do
+      for id <- UncensoredModels.gateway_ids() do
+        key = UncensoredModels.key(id)
+        published = UncensoredModels.model(key)[:pricing]
+
+        assert Pricing.rates(key, @at) == published,
+               "#{key}: the gateway publishes #{inspect(published)} and OSA bills " <>
+                 "#{inspect(Pricing.rates(key, @at))} — an upstream vendor's schedule or " <>
+                 "peak/off-peak window resolved through the reseller namespace"
+      end
+
+      # The other direction, so the guard cannot be "widened" into a no-op:
+      # the VENDOR's own id still follows the vendor's window.
+      assert Pricing.rates("deepseek-v4-pro", @at) == {0.66, 1.98}
+      assert Pricing.rates("deepseek/deepseek-v4-pro", @at) == {0.66, 1.98}
     end
 
     test "qualify/2 is identity for every provider that is not a reseller" do

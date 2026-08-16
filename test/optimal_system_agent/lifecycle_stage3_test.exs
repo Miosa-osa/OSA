@@ -123,8 +123,30 @@ defmodule OptimalSystemAgent.LifecycleStage3Test do
       out = capture_io(fn -> assert "s1" = Commands.dispatch("version", "s1") end)
       assert out =~ "OSA"
       assert out =~ "v#{ReleaseNotes.current_version()}"
-      # Either an "available" upgrade hint or an "up to date" line is shown.
-      assert out =~ "available" or out =~ "up to date"
+
+      # `cmd_version/2` has THREE outcomes, and the third is the whole point of
+      # the code it guards: `version_status/0` answers `:unknown` when nothing
+      # local is authoritative, precisely so an install with nothing to compare
+      # against stops reporting itself as current. This test asserted only two
+      # of them, so it was really asserting "this checkout has git tags".
+      #
+      # `actions/checkout` fetches none by default, so `latest_release_tag/0`
+      # returned nil on CI, `classify/3` correctly refused to conclude
+      # `:current` from the bundled changelog, and the honest third sentence
+      # printed — failing a test that had no row for it. It passed here only
+      # because a developer's clone carries the tags.
+      #
+      # So the line is matched against the status actually reported, which is
+      # stronger than the original disjunction rather than weaker: a missing
+      # line, or the wrong sentence for the reported status, still fails.
+      expected =
+        case ReleaseNotes.version_status() do
+          %{status: :update_available} -> "available"
+          %{status: :current} -> "up to date"
+          %{status: :unknown} -> "could not check for updates"
+        end
+
+      assert out =~ expected
     end
 
     test "/release-notes prints the what's-new section, returns session_id" do

@@ -389,6 +389,50 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     Enum.any?(@reseller_prefixes, fn {_provider, prefix} -> String.starts_with?(key, prefix) end)
   end
 
+  # The same guard `exact_rate/1` carries, for the mechanisms that are checked
+  # BEFORE the exact table.
+  #
+  # `lookup_keys/1` deliberately yields the BARE id alongside the namespaced
+  # one, so a reseller model this catalog does not carry still reaches the
+  # vendor's rate. For a reseller model it DOES carry, that bare id is the
+  # UPSTREAM VENDOR'S, and a dated mechanism keyed on it silently supersedes
+  # the gateway's own published number.
+  #
+  # This was live, not theoretical. DeepSeek's peak/off-peak window took effect
+  # at 16:00:00Z on 2026-08-16 and `@pricing_windows` keys it as
+  # `deepseek-v4-pro`. From that instant:
+  #
+  #   uncensored/deepseek-v4-pro    published {1.84, 3.66} → billed {0.66, 1.98}
+  #                                 cache read 0.13        → billed 0.022
+  #   uncensored/deepseek-v4-flash  published {0.17, 0.34} → billed {0.22, 0.66}
+  #                                 cache read 0.028       → billed 0.007
+  #
+  # — all four reported `:exact`, i.e. as the gateway's published figures. That
+  # is the identical defect the namespace was introduced to prevent, arriving
+  # through `windowed_rate/3` instead of through `ssot_rate/1`.
+  #
+  # `scheduled_rate/2` has the same shape and no live collision today only
+  # because the gateway happens not to relist `claude-sonnet-5`. It is guarded
+  # here rather than left to be discovered the next time a rate card is dated.
+  #
+  # Scope is narrow on purpose: only when the key names a reseller AND some
+  # namespaced spelling of it is actually priced. Everything else — every
+  # vendor id, every reseller id this catalog has no row for — walks the full
+  # `lookup_keys/1` exactly as before, so nothing that prices correctly today
+  # can move.
+  defp dated_lookup_keys(key) do
+    keys = lookup_keys(key)
+
+    if reseller_key?(key) do
+      case Enum.filter(keys, &(reseller_key?(&1) and Map.has_key?(@pricing, &1))) do
+        [] -> keys
+        owned -> owned
+      end
+    else
+      keys
+    end
+  end
+
   # Exact-key lookup happens above; this catches DATED SNAPSHOT ids that the
   # exact map has no row for — e.g. "claude-haiku-4-5-20251001", which
   # otherwise fell through to the `@families` substring table and matched
@@ -457,7 +501,7 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # `claude-sonnet-5:nitro` follow the schedule too — the vendor-prefix miss is
   # the exact shape that billed Opus 5 at Claude 3 Opus rates.
   defp scheduled_rate(key, today) do
-    Enum.find_value(lookup_keys(key), fn k ->
+    Enum.find_value(dated_lookup_keys(key), fn k ->
       case Map.fetch(@pricing_schedules, k) do
         {:ok, entries} -> effective_rate(entries, today)
         :error -> nil
@@ -539,7 +583,7 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   end
 
   defp window_entry(key) do
-    Enum.find_value(lookup_keys(key), &Map.get(@pricing_windows, &1))
+    Enum.find_value(dated_lookup_keys(key), &Map.get(@pricing_windows, &1))
   end
 
   # nil = the card is not in force yet (the model's flat `:pricing` still is).
@@ -668,8 +712,13 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     end
   end
 
+  # `dated_lookup_keys/1`, not `lookup_keys/1`: a reseller model this catalog
+  # prices but publishes no cached-input column for must fall to the documented
+  # `input * @cache_read_multiplier` fallback — computed from the GATEWAY's
+  # input rate — rather than borrow the upstream vendor's published cache
+  # column and label it `:published`.
   defp catalog_cache_read(key) do
-    Enum.find_value(lookup_keys(key), fn k ->
+    Enum.find_value(dated_lookup_keys(key), fn k ->
       Enum.find_value(@cache_read_modules, fn mod -> mod.cache_read_rate(k) end)
     end)
   end

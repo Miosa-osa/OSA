@@ -57,6 +57,36 @@ defmodule OptimalSystemAgent.Agent.Safety.WorkspaceScopeTest do
     %{workspace: workspace}
   end
 
+  # `Permissions.add_directory/1` writes `permissions.additionalDirectories`
+  # into the SESSION settings layer — `:ets.insert(:osa_settings, …)`, which is
+  # process-wide and has no per-test lifetime. The temp workspace here is a
+  # bare path that is never created on disk, so there is nothing to `rm_rf`
+  # and nothing that looks like it needs cleaning up; the recorded permission
+  # nonetheless outlives the test for the rest of the VM, and the cascade
+  # DEEP-MERGES `permissions`, so every later test that reads the key gets an
+  # `"additionalDirectories" => ["/extra-<n>"]` entry it never wrote.
+  #
+  # `SettingsBomTest` asserts on that map by equality, so it failed whenever
+  # the seed ordered this file first — which is what CI hit at seed 214827.
+  # Identical shape, and identical fix, to `AddDirCommandTest`: a test that
+  # mutates global state and cleans up only the part it can see on disk.
+  defp restore_session_permissions do
+    prior =
+      case :ets.whereis(:osa_settings) do
+        :undefined -> :missing
+        _ -> :ets.lookup(:osa_settings, {:session, "permissions"})
+      end
+
+    on_exit(fn ->
+      if :ets.whereis(:osa_settings) != :undefined do
+        case prior do
+          [{key, value}] -> :ets.insert(:osa_settings, {key, value})
+          _ -> :ets.delete(:osa_settings, {:session, "permissions"})
+        end
+      end
+    end)
+  end
+
   describe "a session whose working_dir differs from the OS cwd" do
     test "the workspace is writable via the per-process override", %{workspace: ws} do
       Cwd.put_process_override(ws)
@@ -74,6 +104,7 @@ defmodule OptimalSystemAgent.Agent.Safety.WorkspaceScopeTest do
 
     test "a directory added with /add-dir is in scope too", %{workspace: ws} do
       Cwd.put_process_override(ws)
+      restore_session_permissions()
       extra = "/extra-#{System.unique_integer([:positive])}"
 
       Permissions.add_directory(extra)

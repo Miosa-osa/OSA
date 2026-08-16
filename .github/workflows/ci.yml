@@ -55,10 +55,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `version-type: strict` because the default is PREFIX matching, and it
+      # drifts silently. `otp-version: 26.2.5` resolved to the newest build
+      # beginning with that string — 26.2.5.21 — so this lane tested a
+      # toolchain nobody pinned, and `ToolchainPinTest` (which compares the
+      # RUNNING versions against `.tool-versions`, where asdf installs 26.2.5
+      # exactly) failed for that reason alone. Its own comment names the stake:
+      # this is the drift that hid a ReDoS in the safety gate for eight
+      # releases.
+      #
+      # The env pins above are unchanged and still hold ci.yml and release.yml
+      # to the same declared versions; only the RESOLUTION of those strings is
+      # tightened, and only here. release.yml resolves the same pins across
+      # ubuntu, macOS and Windows runners whose available build lists differ,
+      # and turning strict matching on for a lane that cannot be exercised
+      # without cutting a tag would trade a diagnosable red test for a release
+      # that fails at setup.
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
+          version-type: strict
 
       - name: Cache deps and _build
         uses: actions/cache@v6
@@ -108,10 +125,20 @@ jobs:
       #
       # `tee` under `pipefail` so the log survives the run WITHOUT weakening the
       # gate: mix's exit status still propagates, the step still fails.
+      #
+      # The log is written to `$RUNNER_TEMP`, OUTSIDE the checkout, because the
+      # suite reads its own working tree. `Verification.WorkspaceFingerprint`
+      # hashes `git status -uall` plus the bytes of every untracked file, and
+      # `LoopNoopGateTest` asserts that a verification loop refuses to re-run a
+      # failing command when nothing on disk changed between iterations. A
+      # growing untracked `mix-test.log` in the repo root changed the
+      # fingerprint on every capture, so the gate never fired, the loop spent
+      # all five iterations, and the test timed out waiting for a terminal
+      # state — a CI-only failure caused by CI writing into the subject.
       - name: Run test suite
         run: |
           set -o pipefail
-          mix test 2>&1 | tee mix-test.log
+          mix test 2>&1 | tee "$RUNNER_TEMP/mix-test.log"
         env:
           OSA_HTTP_PORT: "19087"
 
@@ -134,13 +161,13 @@ jobs:
             echo 'not reproduce this lane).'
             echo
             echo '```'
-            grep -E '^Running ExUnit with seed:|^Randomized with seed|tests?, [0-9]+ failures?' mix-test.log || true
+            grep -E '^Running ExUnit with seed:|^Randomized with seed|tests?, [0-9]+ failures?' "$RUNNER_TEMP/mix-test.log" || true
             echo '```'
             echo
             echo '### Failing tests'
             echo
             echo '```'
-            grep -E '^\s+[0-9]+\) (test|property) ' mix-test.log || echo '(could not parse — see the artifact)'
+            grep -E '^\s+[0-9]+\) (test|property) ' "$RUNNER_TEMP/mix-test.log" || echo '(could not parse — see the artifact)'
             echo '```'
             echo
             echo 'Reproduce the exact order with `mix test --seed <seed above>`.'
@@ -151,7 +178,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: elixir-test-log
-          path: mix-test.log
+          path: ${{ runner.temp }}/mix-test.log
           if-no-files-found: warn
 
   rust:
