@@ -332,38 +332,108 @@ defmodule OptimalSystemAgent.CLI.Doctor do
     end
   end
 
+  # WHICH provider OSA will actually dial — not merely which one answers a ping.
+  #
+  # This used to probe Ollama first and report whatever responded, then pair it
+  # with `configured_model_name/1`, which reads `:default_provider`. Two
+  # different questions ("what is reachable?" and "what is configured?")
+  # rendered as one line, so a machine with `OSA_DEFAULT_PROVIDER=anthropic`,
+  # `OSA_MODEL=claude-opus-5` and any listening `OLLAMA_URL` printed
+  # "Ollama (claude-opus-5)" — a pairing that existed in no config file and
+  # describes a request Ollama could never serve.
+  #
+  # Configuration is the identity; reachability is a property OF it. So resolve
+  # through `Runtime.Identity`, the same source `check_model/0` and `/health`
+  # use, and probe only to qualify that answer — or, when nothing is configured
+  # at all, to guess (the old behaviour, now confined to the case it was for).
   defp check_provider do
-    # Try Ollama first (most common local provider). OLLAMA_URL is the var the
-    # rest of the app reads (onboarding, providers, setup) — OLLAMA_HOST was a
-    # misalignment that made doctor probe the wrong endpoint.
-    ollama_url = System.get_env("OLLAMA_URL") || "http://localhost:11434"
+    case OptimalSystemAgent.Runtime.Identity.provider() do
+      nil -> detect_any_provider()
+      provider -> check_configured_provider(provider)
+    end
+  end
 
-    case detect_ollama(ollama_url) do
+  defp check_configured_provider(provider) do
+    label = "#{provider_label(provider)} (#{OptimalSystemAgent.Runtime.Identity.model()})"
+
+    cond do
+      provider == :ollama ->
+        case detect_ollama(ollama_url()) do
+          {:ok, _first_pulled_model} -> {:pass, "Provider", label}
+          :no_models -> {:optional, "Provider", "#{label} — reachable, no models pulled"}
+          :unreachable -> {:fail, "Provider", "#{label} — #{ollama_url()} unreachable"}
+        end
+
+      provider_configured?(provider) ->
+        {:pass, "Provider", label}
+
+      true ->
+        {:fail, "Provider", "#{label} — configured, but no credential found for #{provider}"}
+    end
+  end
+
+  # Does the registry consider this provider usable (key present, or keyless)?
+  # Registry owns that rule for every provider; duplicating it here is how the
+  # two would drift.
+  defp provider_configured?(provider) do
+    case OptimalSystemAgent.Providers.Registry.provider_info(provider) do
+      {:ok, %{configured?: configured}} -> configured
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # Only for a machine with no provider configured: report whatever answers.
+  defp detect_any_provider do
+    case detect_ollama(ollama_url()) do
       {:ok, _first_pulled_model} ->
-        {:pass, "Provider", "Ollama (#{configured_model_name(:ollama)})"}
+        {:optional, "Provider", "none configured — Ollama reachable, set OSA_DEFAULT_PROVIDER"}
 
       :no_models ->
-        {:pass, "Provider", "Ollama (no models pulled)"}
+        {:optional, "Provider", "none configured — Ollama reachable, no models pulled"}
 
       :unreachable ->
-        # Check for cloud provider API keys
         cond do
           System.get_env("ANTHROPIC_API_KEY") ->
-            {:pass, "Provider", "Anthropic (#{configured_model_name(:anthropic)})"}
+            {:optional, "Provider", "none configured — ANTHROPIC_API_KEY present"}
 
           System.get_env("OPENAI_API_KEY") ->
-            {:pass, "Provider", "OpenAI (#{configured_model_name(:openai)})"}
+            {:optional, "Provider", "none configured — OPENAI_API_KEY present"}
 
           System.get_env("GROQ_API_KEY") ->
-            {:pass, "Provider", "Groq (#{configured_model_name(:groq)})"}
+            {:optional, "Provider", "none configured — GROQ_API_KEY present"}
 
           has_lm_studio?() ->
-            {:pass, "Provider", "LM Studio (responding)"}
+            {:optional, "Provider", "none configured — LM Studio responding"}
 
           true ->
             {:fail, "Provider", "no provider detected"}
         end
     end
+  end
+
+  # OLLAMA_URL is the var the rest of the app reads (onboarding, providers,
+  # setup) — OLLAMA_HOST was a misalignment that made doctor probe the wrong
+  # endpoint.
+  defp ollama_url, do: System.get_env("OLLAMA_URL") || "http://localhost:11434"
+
+  @provider_labels %{
+    ollama: "Ollama",
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    groq: "Groq",
+    lmstudio: "LM Studio",
+    llamacpp: "llama.cpp",
+    openrouter: "OpenRouter",
+    miosa: "MIOSA",
+    uncensored: "Uncensored"
+  }
+
+  defp provider_label(provider) do
+    Map.get_lazy(@provider_labels, provider, fn -> to_string(provider) end)
   end
 
   @doc """
