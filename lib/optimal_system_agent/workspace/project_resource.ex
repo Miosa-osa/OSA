@@ -67,7 +67,7 @@ defmodule OptimalSystemAgent.Workspace.ProjectResource do
 
   # Config directory names a project may carry. Kept in one place so the
   # source-level coverage guard and the loaders agree on what counts.
-  @config_dir_names ~w(.osa .claude .agents .grok .cursor)
+  @config_dir_names ~w(.osa .claude .agents .codex .grok .cursor)
 
   @doc "The config directory basenames that make a subtree project-scoped config."
   @spec config_dir_names() :: [String.t()]

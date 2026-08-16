@@ -171,10 +171,27 @@ defmodule OptimalSystemAgent.Agent.Effort do
 
   @doc "Get the current global effort level (legacy values normalized)."
   def current do
-    # Settings cascade: session → local → project → user → app default
-    (OptimalSystemAgent.Settings.get(:effort_level) ||
+    # A bounded recovery may raise effort for this loop process only. It must
+    # never mutate the global/session setting because other live sessions can
+    # be issuing requests concurrently.
+    (Process.get(:osa_effort_override) ||
+       OptimalSystemAgent.Settings.get(:effort_level) ||
        Application.get_env(:optimal_system_agent, :effort_level, :medium))
     |> normalize()
+  end
+
+  @doc false
+  def with_process_override(level, fun) when is_function(fun, 0) do
+    previous = Process.get(:osa_effort_override)
+    Process.put(:osa_effort_override, normalize(level))
+
+    try do
+      fun.()
+    after
+      if previous == nil,
+        do: Process.delete(:osa_effort_override),
+        else: Process.put(:osa_effort_override, previous)
+    end
   end
 
   @doc """

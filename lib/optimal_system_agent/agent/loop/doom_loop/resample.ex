@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Resample do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop.TerminalSource
+  alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Events.Bus
 
   @default_max_retries 2
@@ -106,7 +107,19 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Resample do
         })
 
         maybe_backoff()
-        run_fun.(build_retry_state(snapshot, attempt))
+        retry_state = build_retry_state(snapshot, attempt)
+
+        # Fast mode is the lowest reasoning tier. Re-running the exact failed
+        # decision at the same tier repeatedly reproduced the same tool loop in
+        # production, exhausting both retries. Recovery is intentionally a
+        # different operating point: raise only THIS loop process to medium for
+        # the retry, which also disables FastPath's narrowed tool set, then
+        # restore the user's global fast setting in `after`.
+        if Effort.current() == :fast do
+          Effort.with_process_override(:medium, fn -> run_fun.(retry_state) end)
+        else
+          run_fun.(retry_state)
+        end
     end
   end
 

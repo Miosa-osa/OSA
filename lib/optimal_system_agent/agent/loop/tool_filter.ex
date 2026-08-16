@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     fleet fleet_spawn fleet_workflow spawn_fleet_node fan_out)
 
   # Priority tools kept when trimming for local providers.
-  @priority_tools ~w(file_read file_write file_edit shell_execute ask_user computer_use memory_recall)
+  @priority_tools ~w(file_read file_write file_edit shell_execute ask_user computer_use memory_recall skill_view)
 
   # Local/slow provider atoms. Used ONLY by the computer-use focus heuristic's
   # transport check; the tool budget keys on the model's real window instead —
@@ -44,7 +44,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
 
   # Coordinator mode restricts tools to delegation, messaging, and management.
   @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
-    task_write list_agents list_skills session_search ask_user)
+    task_write list_agents list_skills skill_view session_search ask_user)
 
   @doc """
   Filter the tool list for the current state and signal weight.

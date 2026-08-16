@@ -119,6 +119,27 @@ def assert_single_live_region_with_transcript(session: PtySession, context: str)
         )
 
 
+def test_fast_updates_the_persistent_effort_chip(backend: StubBackend) -> None:
+    """The backend can change effort after startup; the status bar must adopt
+    the command response instead of remaining frozen at the health snapshot."""
+    with PtySession(backend.base_url, cols=100, rows=30) as s:
+        s.boot()
+        if "effort:medium" not in "\n".join(s.lines()):
+            raise AssertionError(f"startup effort was not medium:\n{s.dump()}")
+
+        s.write(b"/fast")
+        s.pump(0.2)
+        s.write(b"\r")
+        s.pump(0.2)
+        s.write(b"\r")
+
+        if not s.wait_for_text("effort:fast", 5.0):
+            raise AssertionError(
+                "/fast completed but the persistent effort chip did not update.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
 def _region_top(session: PtySession) -> int | None:
     """Row the live region begins on, read off the screen.
 
@@ -2922,6 +2943,7 @@ def test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan(
 
 
 TESTS = [
+    test_fast_updates_the_persistent_effort_chip,
     test_resize_sweep,
     test_resize_with_transcript,
     test_resize_emits_nothing_that_deposits_into_scrollback,

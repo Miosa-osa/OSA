@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   # so the prompt's tool-defs match the tools a local model can actually call.
   @core_tools ~w(file_read file_write file_edit file_grep file_glob dir_list
     shell_execute task_write ask_user memory_recall memory_save tool_search
-    delegate list_agents use_skill web_fetch)
+    delegate list_agents skill_view use_skill web_fetch)
 
   @doc """
   Returns the full tool-definitions block for the system prompt, or `nil`

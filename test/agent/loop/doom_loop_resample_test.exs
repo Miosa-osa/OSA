@@ -4,6 +4,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ResampleTest do
 
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Resample
+  alias OptimalSystemAgent.Agent.Effort
 
   @key :doom_loop_resample
 
@@ -74,6 +75,41 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ResampleTest do
 
       assert {"the real answer", _state} =
                Resample.handle("looped!", snapshot(), snapshot(), run_fun)
+    end
+  end
+
+  describe "handle/4 — fast-mode recovery changes operating point" do
+    test "a retry runs at medium in this process and restores fast afterward" do
+      previous = Effort.current()
+      :ok = Effort.set(:fast)
+
+      on_exit(fn -> Effort.set(previous) end)
+
+      run_fun = fn state ->
+        assert Effort.current() == :medium
+        {"recovered", state}
+      end
+
+      assert {"recovered", _state} =
+               Resample.handle("looped!", snapshot(), snapshot(), run_fun)
+
+      assert Effort.current() == :fast
+    end
+
+    test "the process override is restored when the retry raises" do
+      previous = Effort.current()
+      :ok = Effort.set(:fast)
+
+      on_exit(fn -> Effort.set(previous) end)
+
+      assert_raise RuntimeError, "retry failed", fn ->
+        Resample.handle("looped!", snapshot(), snapshot(), fn _state ->
+          assert Effort.current() == :medium
+          raise "retry failed"
+        end)
+      end
+
+      assert Effort.current() == :fast
     end
   end
 

@@ -446,7 +446,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       session_id =
         OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
 
-      body = Jason.encode!(%{output: capture_cli_output(command, session_id), command: command})
+      body =
+        Jason.encode!(%{
+          output: capture_cli_output(command, session_id),
+          command: command,
+          effort: OptimalSystemAgent.Agent.Effort.current() |> to_string()
+        })
+
       conn |> put_resp_content_type("application/json") |> send_resp(200, body)
     end
   end
@@ -768,7 +774,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   end
 
   defp handle_list_skills(conn) do
-    skills = Tools.load_skill_definitions()
+    # The live registry is authoritative across bundled, user, Codex, Claude,
+    # and trusted project scopes. `load_skill_definitions/0` reads only the
+    # bundled tree, which made the TUI browser claim 10 skills while the agent
+    # could actually load 100.
+    skills = Tools.list_skills()
 
     summaries =
       Enum.map(skills, &Map.take(&1, [:name, :description, :category, :triggers, :priority]))

@@ -332,6 +332,10 @@ pub struct CommandExecuteResponse {
     /// not be settled by one of them.
     #[serde(default)]
     pub command: String,
+    /// Authoritative effort after the command ran. Present on backend CLI
+    /// command responses so `/fast` and `/effort` can update persistent UI.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Present only on a `/goal` response: the backend `GoalTracker`'s own view
     /// of the goal, so a client can act on it instead of parsing `output`.
     #[serde(default)]
@@ -1091,4 +1095,3 @@ mod health_update_parse_tests {
         assert!(h.update.is_none());
     }
 }
-

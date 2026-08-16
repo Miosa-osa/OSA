@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Agent.FastPath do
   alias OptimalSystemAgent.Agent.Effort
 
   @prefetch_timeout_ms 120
-  @fallback_tools ~w(tool_search delegate orchestrate ask_user task_write file_read shell_execute)
+  @fallback_tools ~w(tool_search skill_view delegate orchestrate ask_user task_write file_read shell_execute)
 
   @intent_tools %{
     code:

@@ -550,6 +550,10 @@ class _Handler(BaseHTTPRequestHandler):
                         "goal": _GOAL["goal"],
                     }
                 )
+            if str(body.get("command", "")).lower() == "fast":
+                return self._json(
+                    {"output": "Fast mode enabled", "command": "fast", "effort": "fast"}
+                )
             return self._json({"output": "", "command": body.get("command", "")})
         if path == "/api/v1/orchestrate":
             # Recorded ABOVE, then held: a test can see the turn start while it

@@ -27,9 +27,6 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   defstruct builtin_tools: %{}, skills: %{}, tools: []
 
-  @max_triggered_skill_chars 4_000
-  @max_triggered_total_chars 12_000
-
   # ── GenServer Start ──────────────────────────────────────────────────
 
   def start_link(_opts) do
@@ -762,10 +759,22 @@ defmodule OptimalSystemAgent.Tools.Registry do
       else
         lines =
           Enum.map_join(active, "\n", fn skill ->
-            "- **#{skill.name}**: #{skill.description}"
+            description =
+              skill.description
+              |> to_string()
+              |> String.replace(~r/\s+/, " ")
+              |> String.slice(0, 120)
+
+            "- **#{skill.name}**: #{description}"
           end)
 
-        "## Custom Skills\n\nThe following skills are available:\n#{lines}"
+        "## Skills (mandatory)\n\n" <>
+          "Before acting on any non-trivial task, scan this compact catalog. " <>
+          "If a skill is relevant or partially relevant, say which skill you are using, " <>
+          "call `skill_view` to load its full instructions, and follow them before using " <>
+          "other task tools. Never guess a skill body from its description. Do not create " <>
+          "a new skill unless the user asks or the completed workflow is genuinely reusable.\n\n" <>
+          lines
       end
     end
   rescue
@@ -773,88 +782,17 @@ defmodule OptimalSystemAgent.Tools.Registry do
   end
 
   @doc """
-  Same as `active_skills_context/0` but also injects the full workflow instructions
-  for any skills whose trigger keywords match the given message.
+  Same compact catalog as `active_skills_context/0`.
+
+  Skill bodies are deliberately never auto-injected. The main agent selects a
+  relevant entry and loads only that body with `skill_view`, preserving context
+  as the library grows.
   """
   @spec active_skills_context(String.t() | nil) :: String.t() | nil
   def active_skills_context(nil), do: active_skills_context()
   def active_skills_context(""), do: active_skills_context()
 
-  def active_skills_context(message) when is_binary(message) do
-    base = active_skills_context()
-    matched = match_skill_triggers(message)
-
-    if matched != [] do
-      skill_names = Enum.map(matched, fn {name, _} -> name end)
-
-      Enum.each(skill_names, &SkillUsage.record_use/1)
-
-      try do
-        OptimalSystemAgent.Events.Bus.emit(:system_event, %{
-          event: :skills_triggered,
-          skills: skill_names,
-          message_preview: String.slice(message, 0, 120)
-        })
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
-
-    {injected_parts, _budget_used} =
-      matched
-      |> Enum.sort_by(fn {_name, skill} -> Map.get(skill, :priority, 5) end)
-      |> Enum.reduce({[], 0}, fn {_name, skill}, {acc, used} ->
-        remaining = @max_triggered_total_chars - used
-
-        if remaining <= 0 do
-          {acc, used}
-        else
-          # Progressive disclosure: the listing carries no body, so load the
-          # instruction body on demand only for skills whose triggers matched.
-          inst =
-            case SkillLoader.load_body(skill[:path]) do
-              {:ok, body} -> String.trim(body)
-              _ -> skill[:instructions] |> to_string() |> String.trim()
-            end
-
-          if inst == "" do
-            {acc, used}
-          else
-            capped =
-              if String.length(inst) > @max_triggered_skill_chars do
-                String.slice(inst, 0, @max_triggered_skill_chars) <>
-                  "\n\n[Truncated — call `use_skill` with name \"#{skill.name}\" for full instructions]"
-              else
-                inst
-              end
-
-            capped =
-              if String.length(capped) > remaining do
-                String.slice(capped, 0, remaining) <>
-                  "\n\n[Truncated — call `use_skill` with name \"#{skill.name}\" for full instructions]"
-              else
-                capped
-              end
-
-            {acc ++ ["### Active Skill: #{skill.name}\n\n#{capped}"],
-             used + String.length(capped)}
-          end
-        end
-      end)
-
-    injected = Enum.join(injected_parts, "\n\n")
-
-    cond do
-      is_nil(base) and injected == "" -> nil
-      is_nil(base) -> injected
-      injected == "" -> base
-      true -> base <> "\n\n" <> injected
-    end
-  rescue
-    _ -> active_skills_context()
-  end
+  def active_skills_context(message) when is_binary(message), do: active_skills_context()
 
   @doc """
   Match a message against all loaded skill trigger keywords.
@@ -1142,6 +1080,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch.Tool,
       "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool,
       "use_tool" => OptimalSystemAgent.Tools.Builtins.UseTool.Tool,
+      "skill_view" => OptimalSystemAgent.Tools.Builtins.SkillView,
       "cron" => OptimalSystemAgent.Tools.Builtins.Cron.Tool,
       "enter_plan_mode" => OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Tool,
       "exit_plan_mode" => OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Tool,
