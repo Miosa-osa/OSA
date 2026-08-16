@@ -9,6 +9,87 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased] — proposed `1.0.101`
+
+`mix.exs` is deliberately **not** bumped and nothing is tagged: `v1.0.100` is
+already published with binaries attached, and the work below is not in them.
+
+### Added — `api.uncensored.com` as a provider
+
+An OpenAI-compatible gateway fronting 82 frontier models with the refusal
+behaviour trained out, plus a `/uncensored` command. Contributed in #105.
+
+The gateway authenticates with `x-api-key`, **not** `Authorization: Bearer`,
+and the failure mode is quiet: a Bearer token is not rejected, it is ignored —
+the API answers exactly as it does for an unauthenticated call, so a
+Bearer-only client reports "invalid key" and gives no hint that the header
+itself was wrong. Auth header shape therefore moves into provider config
+(`auth_style: :bearer | :x_api_key`), and both the sync and the streaming path
+now build headers through one `OpenAICompat.build_headers/2` instead of the two
+inlined copies that could have drifted apart.
+
+`/uncensored` hops the session's current model to its unfiltered twin (`off` to
+return, `list` to see what is advertised) rather than asking for a model, since
+the gateway serves the same ids OSA already runs.
+
+> **Unverified against the live endpoint.** There are no credentials for this
+> service on the machine this was built on. Every test asserts what OSA builds
+> and what OSA bills; no request has been sent and no invoice reconciled — the
+> same standing as the Bedrock and Google paths.
+
+### Fixed — a reselling gateway billed at its upstream's list price
+
+The gateway relists other vendors' models under the vendors' own ids
+(`claude-opus-5`, `glm-5.2`, `deepseek-v4-pro`) and charges its own margin.
+`Agent.Pricing` is keyed by model id alone, so every turn on it exact-matched
+the **vendor's** rate card and billed the vendor's number — with
+`Pricing.confidence/1` reporting `:exact`. Measured against the gateway's own
+published rates on 2026-08-16:
+
+| model | OSA billed | gateway charges |
+|---|---|---|
+| `claude-opus-5` | `{5.000, 25.00}` | `{6.00, 30.00}` |
+| `glm-5.2` | `{1.400, 4.40}` | `{1.68, 5.28}` |
+| `deepseek-v4-pro` | `{0.435, 0.87}` | `{1.84, 3.66}` |
+
+All three under-billed, all three said `:exact` — the seventh instance of the
+shape the class ratchet exists for. Ids the gateway spells differently
+(`grok-4-6` against xAI's `grok-4.6`) or that no OSA catalog carries at all
+(`qwen3-coder`, `hermes-3-llama-3.1-405b`) did not mis-price so much as not
+price: `:unknown`, $0.00 a turn.
+
+`Providers.UncensoredModels` now carries the gateway's own rate card,
+transcribed mechanically from its public model list, with every row namespaced
+`uncensored/<id>`. `Pricing.lookup_keys/1` already tries the full id before it
+strips a vendor prefix, so a namespaced key resolves to the reseller's price
+and the bare id keeps resolving to the vendor's — no new lookup path, and no
+provider argument threaded through the pricing API. `Pricing.qualify/2`
+composes that key from the provider, and `Loop.Accounting` is the only caller.
+Cache reads bill from the gateway's own published column (51 of its 82 models
+quote one) rather than the flat `input * 0.1`.
+
+Two holes found by adding the catalog to the class ratchet, both the same shape
+the namespace exists to close:
+
+- the SSOT resolvers are decoration-tolerant and read `uncensored/` as a vendor
+  prefix, answering `uncensored/glm-5.2:free` with Z.ai's own rate at `:exact`;
+- `ollama_local?/1` judges an id by shape and would price a namespaced id the
+  gateway charges for as a free local model at `{0.0, 0.0}`, also `:exact`.
+
+Both now exclude reseller keys, and both are pinned by tests.
+
+### Fixed — one session's `/uncensored off` restored another session's model
+
+`:uncensored_previous` was a single node-global application-env key, so with
+two sessions on the gateway the first `off` consumed the only "previous" there
+was. `/uncensored` also read the node's default provider rather than the
+session's own, which `{:swap_provider, …}` records in
+`:osa_session_provider_overrides`. Both are now per-session, and the origin is
+recorded only after a swap that actually succeeded — recording it first left a
+rejected model id pointing "back" at the model the session was still on.
+
+---
+
 ## [1.0.100] — displays as `v1.0.100`
 
 Forty-two commits, and **no solve-rate claim**. The one benchmark arm run for
