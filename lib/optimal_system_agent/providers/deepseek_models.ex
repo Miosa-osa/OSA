@@ -56,8 +56,34 @@ defmodule OptimalSystemAgent.Providers.DeepSeekModels do
   So the window is binary (1,048,576) while the output cap is decimal
   (384,000) — a mixed pair no reasonable guess would have produced.
 
-  Sources: https://api-docs.deepseek.com/quick_start/pricing,
-  https://api-docs.deepseek.com/guides/reasoning_model,
+  ## Pricing is no longer a constant: it varies by HOUR OF DAY
+
+  From **16:00 UTC on 2026-08-16** DeepSeek bills peak/off-peak. Peak is
+  `01:00–04:00` and `06:00–10:00` UTC; every other hour is off-peak at half the
+  peak rate. Both tiers are *above* the flat rate they replace, so the flat
+  `:pricing` rows below under-bill by 1.6x (flash off-peak) to 4.7x (pro peak)
+  once the change lands.
+
+  There is no single number to encode here, and encoding one anyway — with a
+  comment about the other — is precisely how the `claude-sonnet-5` 1.50x
+  over-report and the `gemini-3.6-flash` 2x over-report shipped, both labelled
+  `:exact`. So the *window* is the data: `pricing_windows/0` publishes both
+  tiers plus the hours, and `Agent.Pricing` resolves it against the instant the
+  request was issued.
+
+  ## Cache hits have a PUBLISHED price, not a multiplier
+
+  DeepSeek quotes input twice — "cache hit" and "cache miss" — as its own
+  column, and the ratio is nothing like the Anthropic-style `input * 0.1` that
+  `Agent.Pricing` applies by default: flash reads cache at `$0.0028` against a
+  `$0.14` miss rate, which is `0.02x`, five times cheaper than the multiplier
+  assumes. `:pricing` records the MISS rate (the rate for tokens that actually
+  had to be processed); `:cache_read` records the hit rate, and the windows
+  carry their own hit rates because those move with the hour too.
+
+  Sources: https://api-docs.deepseek.com/quick_start/pricing (re-checked
+  2026-08-16, twice, for the peak/off-peak table and its 16:00 UTC effective
+  time), https://api-docs.deepseek.com/guides/reasoning_model,
   https://api-docs.deepseek.com/api/create-chat-completion (checked 2026-08-01)
   and the live OpenRouter endpoints API (queried 2026-08-01).
   """
@@ -72,6 +98,7 @@ defmodule OptimalSystemAgent.Providers.DeepSeekModels do
           default_effort: String.t(),
           tools: boolean(),
           pricing: {number(), number()} | nil,
+          cache_read: number() | nil,
           recommended: boolean(),
           note: String.t()
         }
@@ -86,6 +113,7 @@ defmodule OptimalSystemAgent.Providers.DeepSeekModels do
       default_effort: "high",
       tools: true,
       pricing: {0.14, 0.28},
+      cache_read: 0.0028,
       recommended: true,
       note: "1M ctx — 284B/13B active MoE; very cheap. Default."
     },
@@ -99,12 +127,87 @@ defmodule OptimalSystemAgent.Providers.DeepSeekModels do
       default_effort: "high",
       tools: true,
       pricing: {0.435, 0.87},
+      cache_read: 0.003625,
       recommended: false,
       note: "1M ctx — strongest DeepSeek reasoning"
     }
   ]
 
   @by_id Map.new(@models, &{&1.id, &1})
+
+  # ── Peak / off-peak ───────────────────────────────────────────────────────
+  #
+  # UTC hours at which DeepSeek bills the peak tier, as HALF-OPEN intervals
+  # `[from, until)` on the hour. DeepSeek writes "01:00 - 04:00"; half-open is
+  # the reading OSA commits to, so 01:00:00.0 is peak and 04:00:00.0 is not,
+  # and the two windows can never both claim an instant. Stated once, here,
+  # rather than left for each caller to interpret.
+  @peak_hours [{1, 4}, {6, 10}]
+
+  # DeepSeek's announcement gives a TIME, not just a date: "the new prices take
+  # effect at 16:00 UTC on August 16, 2026". Recorded to the hour because this
+  # module is about to start caring about hours — rounding it to a date would
+  # re-price every turn taken earlier that same day.
+  @dynamic_from ~U[2026-08-16 16:00:00Z]
+
+  @pricing_windows %{
+    "deepseek-v4-flash" => %{
+      effective_from: @dynamic_from,
+      peak_hours: @peak_hours,
+      peak: %{pricing: {0.44, 1.32}, cache_read: 0.014},
+      off_peak: %{pricing: {0.22, 0.66}, cache_read: 0.007}
+    },
+    "deepseek-v4-pro" => %{
+      effective_from: @dynamic_from,
+      peak_hours: @peak_hours,
+      peak: %{pricing: {1.32, 3.96}, cache_read: 0.044},
+      off_peak: %{pricing: {0.66, 1.98}, cache_read: 0.022}
+    }
+  }
+
+  @typedoc """
+  One model's time-of-day rate card.
+
+  `:peak`/`:off_peak` each carry the `{input, output}` pair and the published
+  cache-hit rate for that tier, all USD per 1M tokens. `:effective_from` is the
+  instant the card replaces the model's flat `:pricing`; before it, `:pricing`
+  is the rate.
+  """
+  @type pricing_window :: %{
+          effective_from: DateTime.t(),
+          peak_hours: [{0..23, 1..24}],
+          peak: %{pricing: {number(), number()}, cache_read: number() | nil},
+          off_peak: %{pricing: {number(), number()}, cache_read: number() | nil}
+        }
+
+  @doc """
+  Time-of-day rate cards, as `%{model_id => pricing_window()}`.
+
+  A model absent here is priced by a constant. A model present here has NO
+  single rate: `Agent.Pricing` resolves it against the instant the request was
+  issued, and refuses to call a guessed hour `:exact`.
+
+  Like `pricing_schedule/0` elsewhere, this is compile-time DATA and runtime
+  RESOLUTION — a release built during off-peak must not carry the off-peak rate
+  into the next peak window.
+  """
+  @spec pricing_windows() :: %{String.t() => pricing_window()}
+  def pricing_windows, do: @pricing_windows
+
+  @doc """
+  DeepSeek's published cache-HIT rate per 1M tokens for the flat era, or nil.
+
+  Explicitly not `input * 0.1`: flash reads cache at `0.0028` against a `0.14`
+  miss rate (`0.02x`). Once `pricing_windows/0` takes effect the hit rate moves
+  with the hour and comes from there instead.
+  """
+  @spec cache_read_rate(String.t() | nil) :: number() | nil
+  def cache_read_rate(id) do
+    case resolve(id) do
+      nil -> nil
+      m -> Map.get(m, :cache_read)
+    end
+  end
 
   @doc "The full catalog, in picker display order."
   @spec models() :: [model()]

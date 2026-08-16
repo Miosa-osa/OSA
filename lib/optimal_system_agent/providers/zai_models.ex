@@ -245,7 +245,13 @@ defmodule OptimalSystemAgent.Providers.ZaiModels do
       tools: true,
       caching: true,
       pricing: {0.30, 0.90},
-      cache_read: 0.055,
+      # Z.ai publishes $0.05, not $0.055. The `0.055` this row carried was
+      # `input * 0.185` — GLM-5.2's ratio, applied to a model that does not
+      # share it — i.e. a derived number wearing a published one's clothes.
+      # 10% high, and it became live the moment cache reads stopped going
+      # through the flat multiplier. Re-checked against
+      # https://docs.z.ai/guides/overview/pricing on 2026-08-16.
+      cache_read: 0.05,
       recommended: false,
       note: "128K ctx — cheap multimodal (image + video)"
     }

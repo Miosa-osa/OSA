@@ -1558,9 +1558,20 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     # rate in force — derived from the schedules rather than hardcoded, so
     # adding a dated rate cannot silently invalidate the baseline and no
     # assertion here expires with the calendar.
+    # Windowed cards count here too, and for a sharper reason than schedules do:
+    # past a window's effective instant a bare Date names no tier at all, so
+    # `:pricing` is not merely superseded, it is unanswerable from a date. Fold
+    # both in and the baseline stays honest as either kind of card is added.
     defp pricing_baseline_date do
-      Pricing.pricing_schedules()
-      |> Enum.flat_map(fn {_id, entries} -> Enum.map(entries, fn {d, _r} -> d end) end)
+      schedule_dates =
+        Pricing.pricing_schedules()
+        |> Enum.flat_map(fn {_id, entries} -> Enum.map(entries, fn {d, _r} -> d end) end)
+
+      window_dates =
+        Pricing.pricing_windows()
+        |> Enum.map(fn {_id, w} -> DateTime.to_date(w.effective_from) end)
+
+      (schedule_dates ++ window_dates)
       |> Enum.min_by(&Date.to_gregorian_days/1, fn -> ~D[2099-01-01] end)
       |> Date.add(-1)
     end
@@ -1635,6 +1646,216 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
         assert Pricing.rates("vendor/" <> id, effective_from) == scheduled,
                "#{id}: the schedule does not survive a vendor prefix"
       end
+    end
+
+    # ── The seventh class: a rate that is a function of the HOUR ──────────
+    #
+    # DeepSeek moved to peak/off-peak on 2026-08-16 and OSA under-billed it by
+    # 1.6x–4.7x, because a model with two published prices had one number
+    # encoded for it. The failure a single-value catalog cannot even express:
+    # there IS no rate to check, only a rate-at-an-instant.
+    #
+    # Same honesty caveat as the ratchet above — this compares OSA to OSA. It
+    # cannot know DeepSeek's real hours. What it CAN guarantee is that whatever
+    # hours a catalog claims, both tiers are actually reachable through the
+    # spellings a gateway sends, that they differ, that neither leaks backwards
+    # past the card's effective instant, and that a caller who cannot name the
+    # hour is never handed an `:exact`.
+    #
+    # Every instant below is INJECTED. Nothing here reads the wall clock: a
+    # peak-hours assertion that passes only between 01:00 and 04:00 UTC is not
+    # a guard, it is a scheduled outage.
+    defp an_hour_in(peak_hours), do: peak_hours |> List.first() |> elem(0)
+
+    defp an_hour_outside(peak_hours) do
+      Enum.find(0..23, fn h ->
+        not Enum.any?(peak_hours, fn {from, until} -> h >= from and h < until end)
+      end)
+    end
+
+    defp at_hour(%DateTime{} = day, hour) do
+      %{day | hour: hour, minute: 0, second: 0, microsecond: {0, 0}}
+    end
+
+    test "a windowed rate resolves to BOTH of its tiers, at the hours it publishes" do
+      assert Pricing.pricing_windows() != %{},
+             "this ratchet is vacuous with no time-varying rates in the tree"
+
+      for {id, window} <- Pricing.pricing_windows() do
+        # Well after the card lands, so nothing here depends on the boundary day.
+        day = DateTime.add(window.effective_from, 30, :day)
+        peak_at = at_hour(day, an_hour_in(window.peak_hours))
+        off_at = at_hour(day, an_hour_outside(window.peak_hours))
+
+        assert window.peak.pricing != window.off_peak.pricing,
+               "#{id}: both tiers carry the same rate — the window is a no-op and the " <>
+                 "whole mechanism could be deleted without changing a bill"
+
+        assert Pricing.rates(id, peak_at) == window.peak.pricing,
+               "#{id}: peak hour #{peak_at.hour}:00 UTC did not resolve to the peak tier"
+
+        assert Pricing.rates(id, off_at) == window.off_peak.pricing,
+               "#{id}: off-peak hour #{off_at.hour}:00 UTC did not resolve to the off-peak tier"
+
+        for {label, at} <- [peak: peak_at, off_peak: off_at] do
+          assert Pricing.confidence(id, at) == :exact,
+                 "#{id}: #{label} is a published rate at a known hour, not a guess"
+
+          # The vendor-prefix miss is what billed Opus 5 at 3x. A new dimension
+          # that only works on the bare id reinstates it.
+          assert Pricing.rates("vendor/" <> id, at) == Pricing.rates(id, at),
+                 "#{id}: the window does not survive a vendor prefix at #{label}"
+        end
+
+        # Half-open [from, until): the first hour is in, the closing hour is out.
+        # Stated once in the catalog; pinned once here.
+        for {from, until} <- window.peak_hours do
+          assert Pricing.rates(id, at_hour(day, from)) == window.peak.pricing,
+                 "#{id}: #{from}:00 is the first peak hour and must bill as peak"
+
+          if until <= 23 do
+            assert Pricing.rates(id, at_hour(day, until)) == window.off_peak.pricing,
+                   "#{id}: #{until}:00 closes the window and must bill as off-peak"
+          end
+        end
+
+        # Nothing leaks backwards. A turn taken a second before the card lands
+        # is billed at the rate it was actually charged, forever.
+        one_second_before = DateTime.add(window.effective_from, -1, :second)
+
+        assert Pricing.rates(id, one_second_before) not in [
+                 window.peak.pricing,
+                 window.off_peak.pricing
+               ],
+               "#{id}: the new card is already in force before #{window.effective_from} — " <>
+                 "history re-prices itself, which is the one thing this design forbids"
+
+        # An unnamed hour is an unknown, not a coin flip. It bills at the peak
+        # tier (never under-state) and says so.
+        a_date = DateTime.to_date(day)
+
+        assert Pricing.rates(id, a_date) == window.peak.pricing,
+               "#{id}: a date-only clock must not under-state a time-varying rate"
+
+        assert Pricing.confidence(id, a_date) == :estimated,
+               "#{id}: a rate resolved without the hour it depends on is not :exact"
+      end
+    end
+
+    test "a windowed cache-read rate moves with its own tier" do
+      for {id, window} <- Pricing.pricing_windows(),
+          not is_nil(window.peak.cache_read) do
+        day = DateTime.add(window.effective_from, 30, :day)
+        peak_at = at_hour(day, an_hour_in(window.peak_hours))
+        off_at = at_hour(day, an_hour_outside(window.peak_hours))
+
+        assert Pricing.cache_read_rate(id, peak_at) == {window.peak.cache_read, :published}
+        assert Pricing.cache_read_rate(id, off_at) == {window.off_peak.cache_read, :published}
+      end
+    end
+
+    # ── The eighth class: a published number that billing throws away ─────
+    #
+    # `cache_read_rate/1` sat in the xAI and Z.ai catalogs, correct and
+    # consumed by nothing, while `Pricing` billed every cache read at a flat
+    # `input * 0.1`. grok-4.6 under-billed by 2.5x, glm-5.2 by 1.86x, and
+    # deepseek-v4-flash OVER-billed by 5x — all reported `:exact`, because the
+    # RATE was exact and nobody was asking about the cache column.
+    #
+    # A catalog carrying the right answer that billing ignores is worse than no
+    # catalog: it looks like coverage.
+    @cache_read_catalogs [
+      OptimalSystemAgent.Providers.XAIModels,
+      OptimalSystemAgent.Providers.ZaiModels,
+      OptimalSystemAgent.Providers.DeepSeekModels
+    ]
+
+    test "a published cache-read rate is billed, never the flat multiplier" do
+      on = pricing_baseline_date()
+
+      failures =
+        for mod <- @cache_read_catalogs,
+            %{id: id} = m <- mod.models(),
+            published = mod.cache_read_rate(id),
+            not is_nil(published),
+            spelling <- gateway_spellings(id),
+            got = Pricing.cache_read_rate(spelling, on),
+            got != {published, :published} do
+          "  #{inspect(spelling)} (#{inspect(mod)}) -> #{inspect(got)}, " <>
+            "catalog publishes #{published} (model #{inspect(m.name)})"
+        end
+
+      assert failures == [], """
+      #{length(failures)} model(s) publish a cached-input rate that billing does not use:
+
+      #{Enum.join(failures, "\n")}
+
+      A `:multiplier` here means the flat `input * 0.1` fallback fired for a
+      model whose vendor quotes a real number — the shape that under-billed
+      grok-4.6 cache reads by 2.5x while `confidence/1` said `:exact`.
+      """
+    end
+
+    test "the flat multiplier remains the documented fallback, and says so" do
+      # Anthropic publishes no separate cached-input column; 0.1x IS its
+      # published ratio. The fallback is not a bug, it is the other branch —
+      # what matters is that a caller can tell the two apart.
+      assert {rate, :multiplier} = Pricing.cache_read_rate("claude-3-5-sonnet")
+      assert_in_delta rate, 0.30, 0.000_001
+      assert Pricing.cache_read_confidence("claude-3-5-sonnet") == :multiplier
+
+      assert Pricing.cache_read_confidence("grok-4.6") == :published
+      assert Pricing.cache_read_confidence("no-such-model-anywhere") == :unknown
+    end
+
+    test "a cache-heavy turn is billed at the published rate, not input * 0.1" do
+      # grok-4.6: $2.00 input, $0.50 published cache read. The multiplier would
+      # say $0.20 — 2.5x low on every cached token, which on a long agentic
+      # session is most of the prompt.
+      usage = %{
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 1_000_000
+      }
+
+      assert_in_delta Pricing.cost("grok-4.6", usage), 0.50, 0.000_001
+
+      refute_in_delta Pricing.cost("grok-4.6", usage),
+                      0.20,
+                      0.000_001,
+                      "cache reads fell back to the flat multiplier for a model that publishes a rate"
+    end
+
+    test "a recorded turn does not re-price itself as the clock moves" do
+      # The failure this guards is subtle and worse than under-billing: view a
+      # session at 02:00 UTC and again at 05:00 and get two different numbers
+      # for the same finished turn. Stamping the request instant onto the usage
+      # map is what makes the price a property of the turn rather than of the
+      # viewing.
+      [{id, window} | _] = Enum.to_list(Pricing.pricing_windows())
+      day = DateTime.add(window.effective_from, 30, :day)
+      issued_at = at_hour(day, an_hour_in(window.peak_hours))
+      viewed_later = at_hour(day, an_hour_outside(window.peak_hours))
+
+      usage = %{input_tokens: 1_000_000, output_tokens: 0, requested_at: issued_at}
+
+      priced_then = Pricing.cost(id, usage, issued_at)
+      priced_now = Pricing.cost(id, usage)
+      priced_from_a_different_hour = Pricing.cost(id, usage, viewed_later)
+
+      assert priced_then == priced_now,
+             "#{id}: usage carrying :requested_at re-priced itself against the wall clock"
+
+      # And the explicit argument still wins, for the caller who really does
+      # mean "what would this have cost at that other hour".
+      refute priced_from_a_different_hour == priced_then
+
+      # Without the stamp there is nothing to be stable against, and the
+      # docstring says so rather than pretending otherwise.
+      unstamped = Map.delete(usage, :requested_at)
+
+      assert Pricing.cost(id, unstamped, issued_at) == priced_then
     end
 
     test "Copilot's premium requests accumulate as themselves, not as dollars" do

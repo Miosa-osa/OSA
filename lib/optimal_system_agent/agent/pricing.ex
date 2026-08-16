@@ -3,15 +3,62 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   Per-model token pricing table for real cost accounting (primitive #29).
 
   Prices are quoted in **USD per 1,000,000 tokens** as `{input_rate, output_rate}`.
-  Cache tokens are priced off the input rate using the standard Anthropic-style
-  multipliers:
 
-    * cache **write** (`cache_creation_input_tokens`) → `input_rate * 1.25`
-    * cache **read**  (`cache_read_input_tokens`)     → `input_rate * 0.1`
+  Cache **writes** (`cache_creation_input_tokens`) are priced off the input rate
+  at the standard Anthropic-style `input_rate * 1.25`; no catalog in the tree
+  publishes a distinct write rate, so that multiplier is the only answer
+  available.
+
+  Cache **reads** (`cache_read_input_tokens`) have two possible provenances, and
+  `cache_read_confidence/1` says which one produced the number:
+
+    * `:published` — the model's own catalog quotes a cached-input rate, and it
+      is billed at that. xAI, Z.ai and DeepSeek all do, and none of them agrees
+      with the multiplier: `grok-4.6` reads at `0.25x` input, `grok-4.5` at
+      `0.15x` **at the same input rate**, `glm-5.2` at `0.186x`,
+      `deepseek-v4-flash` at `0.02x`. No single multiplier can be right for even
+      two of those.
+    * `:multiplier` — no published rate, so the documented `input_rate * 0.1`
+      fallback stands. That is Anthropic's actual published ratio, so for
+      Anthropic it is exact; elsewhere it is a convention.
 
   Model lookup is: exact (case-insensitive) match first — the hand-written
   table, then each provider's own catalog — then a family SUBSTRING GUESS, then
   nothing.
+
+  ## Prices are functions of TIME, in two different ways
+
+  A rate is not a constant, and every attempt in this module's history to treat
+  one as a constant shipped as a wrong number labelled `:exact`.
+
+    * A **scheduled** rate changes on a DATE and stays changed (an
+      introductory price lapsing). See `@pricing_schedules`.
+    * A **windowed** rate changes with the HOUR OF DAY and changes back
+      (DeepSeek's peak/off-peak). See `@pricing_windows`.
+
+  Both are resolved against **the instant the request was issued**, in UTC, and
+  never against the instant somebody happens to ask. That distinction is the
+  whole design: a session's recorded cost must not move when it is viewed
+  again, and a cost that re-prices itself as the clock rolls past 10:00 UTC
+  would be a worse bug than the under-billing that motivated the feature.
+
+  Three ways the request instant is obtained, in order:
+
+    1. `cost/3` / `rates/2` / `confidence/2` — an explicit instant. Use this
+       whenever re-pricing anything historical.
+    2. `usage[:requested_at]` — a `DateTime` (or unix seconds) carried on the
+       normalized usage map. A caller that records when it fired the request
+       gets stable historical pricing for free, through the un-suffixed
+       `cost/2`.
+    3. `DateTime.utc_now/0`. Correct in the hot loop, where pricing happens
+       within milliseconds of the round-trip it is pricing, and wrong for
+       anything else — which is why 1 and 2 exist.
+
+  Whichever is used, the price is resolved **once**, from that single instant.
+  A turn that spans a peak/off-peak boundary is billed entirely at the tier its
+  request instant fell in; the alternative — splitting a turn's tokens across
+  two tiers by wall-clock — needs per-token timestamps no provider reports.
+  The rule is encoded here, once, rather than left to each caller.
 
   Three outcomes, and callers that publish a dollar figure must not treat them
   alike (`confidence/1` / `cost_with_confidence/2` return which one fired):
@@ -151,33 +198,45 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   Local/self-hosted models served via Ollama are free and return `{0.0, 0.0}`.
   """
   @spec rates(String.t() | atom() | nil) :: {number(), number()} | nil
-  def rates(model), do: rates(model, Date.utc_today())
+  def rates(model), do: rates(model, DateTime.utc_now())
 
   @doc """
-  `rates/1` against an explicit date.
+  `rates/1` against an explicit instant — a `DateTime` (resolved in UTC) or a
+  bare `Date`.
 
-  `today` exists because some published rates are DATED (see
-  `@pricing_schedules`), and a date-dependent price whose only clock is
-  `Date.utc_today/0` cannot be tested on both sides of its own boundary
-  without waiting for the calendar. Mirrors `AnthropicModels.retired?/2`.
+  `at` exists because published rates are DATED (`@pricing_schedules`) and now
+  also HOURED (`@pricing_windows`), and a time-dependent price whose only clock
+  is the wall clock cannot be tested on both sides of its own boundary without
+  waiting for the calendar. Mirrors `AnthropicModels.retired?/2`.
+
+  Passing a bare `Date` for a model whose rate varies within the day names an
+  hour nobody knows. That case does not silently pick one: it returns the PEAK
+  rate — never under-state — and `confidence/2` downgrades it to `:estimated`.
   """
-  @spec rates(String.t() | atom() | nil, Date.t()) :: {number(), number()} | nil
-  def rates(nil, _today), do: nil
+  @spec rates(String.t() | atom() | nil, DateTime.t() | Date.t()) ::
+          {number(), number()} | nil
+  def rates(nil, _at), do: nil
 
-  def rates(model, today) when is_atom(model), do: rates(Atom.to_string(model), today)
+  def rates(model, at) when is_atom(model), do: rates(Atom.to_string(model), at)
 
-  def rates(model, today) when is_binary(model) do
+  def rates(model, at) when is_binary(model) do
     key = String.downcase(model)
+    {date, instant} = clock(at)
 
     cond do
       # Local Ollama-hosted models (e.g. "ollama/llama3", "qwen2.5:7b") are free.
       ollama_local?(key) ->
         {0.0, 0.0}
 
+      # Most specific clock first. A windowed rate supersedes both the schedule
+      # and the exact table once its effective instant has passed.
+      result = windowed_rate(key, date, instant) ->
+        elem(result, 0)
+
       # Checked BEFORE the exact table: a scheduled rate supersedes the
       # catalog's `:pricing` once its date arrives, and the exact table would
       # otherwise keep returning the pre-change rate forever.
-      rate = scheduled_rate(key, today) ->
+      rate = scheduled_rate(key, date) ->
         rate
 
       rate = Enum.find_value(lookup_keys(key), &exact_rate/1) ->
@@ -347,6 +406,197 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     end
   end
 
+  # ── The clock ────────────────────────────────────────────────────────────
+  #
+  # Everything time-dependent resolves through here, so there is exactly one
+  # answer to "what is UTC now" and exactly one place that decides what a
+  # date-only clock means.
+  #
+  # Returns `{date, instant_or_nil}`. `instant` is nil ONLY when the caller
+  # supplied a bare `Date` — i.e. named a day but not an hour. Callers must
+  # treat that as "the hour is unknown", never as midnight: midnight is 00:00,
+  # which is off-peak, which would quietly halve every DeepSeek turn priced
+  # from a date.
+  defp clock(%DateTime{} = dt) do
+    utc = dt |> DateTime.to_unix() |> DateTime.from_unix!()
+    {DateTime.to_date(utc), utc}
+  end
+
+  defp clock(%Date{} = d), do: {d, nil}
+  defp clock(%NaiveDateTime{} = ndt), do: clock(DateTime.from_naive!(ndt, "Etc/UTC"))
+  defp clock(unix) when is_integer(unix), do: clock(DateTime.from_unix!(unix))
+  defp clock(_), do: clock(DateTime.utc_now())
+
+  # ── Windowed (time-of-day) rates ─────────────────────────────────────────
+  #
+  # DeepSeek moved to peak/off-peak billing at 16:00 UTC on 2026-08-16: peak
+  # 01:00–04:00 and 06:00–10:00 UTC, off-peak at half rate, and BOTH tiers sit
+  # above the flat rate they replace (by 1.6x to 4.7x). There is no single
+  # number to encode, which is why the previous pass correctly declined to
+  # encode one: picking either tier and commenting about the other is the exact
+  # shape of the `claude-sonnet-5` 1.50x over-report.
+  #
+  # So the dimension exists instead. Like `@pricing_schedules`, the CARD is
+  # compile-time data and the RESOLUTION is runtime — a release built at 03:00
+  # UTC must not carry the peak rate into off-peak.
+  @windowed_price_modules [OptimalSystemAgent.Providers.DeepSeekModels]
+
+  @pricing_windows Enum.reduce(@windowed_price_modules, %{}, fn mod, acc ->
+                     Map.merge(acc, mod.pricing_windows())
+                   end)
+
+  @doc false
+  # Test seam: lets a ratchet drive every window to both of its tiers without
+  # reaching into each catalog.
+  @spec pricing_windows() :: %{String.t() => map()}
+  def pricing_windows, do: @pricing_windows
+
+  # `{rate, confidence, tier}` or nil when this model has no window in force.
+  #
+  # Tried against the same decorated spellings as every other lookup:
+  # `deepseek/deepseek-v4-pro` is the form a gateway actually sends, and a
+  # vendor-prefix miss here would reinstate exactly the under-count this
+  # function exists to remove.
+  defp windowed_rate(key, date, instant) do
+    with entry when not is_nil(entry) <- window_entry(key),
+         tier when not is_nil(tier) <- window_tier(entry, date, instant) do
+      case tier do
+        :unknown_hour -> {entry.peak.pricing, :estimated, :peak}
+        t -> {Map.fetch!(entry, t).pricing, :exact, t}
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp window_entry(key) do
+    Enum.find_value(lookup_keys(key), &Map.get(@pricing_windows, &1))
+  end
+
+  # nil = the card is not in force yet (the model's flat `:pricing` still is).
+  defp window_tier(entry, date, instant) do
+    from = entry.effective_from
+
+    cond do
+      # No hour to resolve against. In force / not in force is decided on the
+      # DATE, and the day the card lands is treated as unknown rather than as
+      # either side of a 16:00 boundary the caller did not name.
+      is_nil(instant) ->
+        if Date.compare(date, DateTime.to_date(from)) == :lt, do: nil, else: :unknown_hour
+
+      DateTime.compare(instant, from) == :lt ->
+        nil
+
+      peak_hour?(entry.peak_hours, instant.hour) ->
+        :peak
+
+      true ->
+        :off_peak
+    end
+  end
+
+  # Half-open `[from, until)` on the UTC hour — the rule DeepSeekModels states
+  # and the only one under which two adjacent windows cannot both claim an
+  # instant.
+  defp peak_hour?(windows, hour) do
+    Enum.any?(windows, fn {from, until} -> hour >= from and hour < until end)
+  end
+
+  # ── Cache-read rates ─────────────────────────────────────────────────────
+  #
+  # The catalogs have published these all along and billing threw them away:
+  # `cache_read_rate/1` existed in the xAI and Z.ai catalogs and was consumed by
+  # NOTHING, while `do_cost/3` applied `input * 0.1` to everything. On grok-4.6
+  # that under-billed cache reads by 2.5x; on deepseek-v4-flash it OVER-bills
+  # them by 5x. Both silent, both `:exact`.
+  @cache_read_modules [
+    OptimalSystemAgent.Providers.XAIModels,
+    OptimalSystemAgent.Providers.ZaiModels,
+    OptimalSystemAgent.Providers.DeepSeekModels
+  ]
+
+  @doc """
+  The USD-per-1M rate one cache-read token is billed at, and where it came
+  from: `{rate, :published | :multiplier}`, or `nil` for a model with no price
+  at all.
+
+  `:published` is the model catalog's own cached-input column. `:multiplier` is
+  the documented `input_rate * @cache_read_multiplier` fallback.
+  """
+  @spec cache_read_rate(String.t() | atom() | nil, DateTime.t() | Date.t()) ::
+          {number(), :published | :multiplier} | nil
+  def cache_read_rate(model, at \\ nil)
+  def cache_read_rate(nil, _at), do: nil
+  def cache_read_rate(model, at) when is_atom(model), do: cache_read_rate(Atom.to_string(model), at)
+
+  def cache_read_rate(model, at) when is_binary(model) do
+    at = at || DateTime.utc_now()
+    key = String.downcase(model)
+    {date, instant} = clock(at)
+
+    cond do
+      # A free local model reads cache for free too; saying `:published` here
+      # would claim a vendor quoted a rate for something no vendor sells.
+      ollama_local?(key) ->
+        {0.0, :multiplier}
+
+      rate = published_cache_read(key, date, instant) ->
+        {rate, :published}
+
+      true ->
+        case rates(model, at) do
+          {input, _out} -> {input * @cache_read_multiplier, :multiplier}
+          nil -> nil
+        end
+    end
+  end
+
+  def cache_read_rate(_, _), do: nil
+
+  @doc """
+  Which of the two produced this model's cache-read price: `:published` (the
+  catalog quotes one), `:multiplier` (the flat fallback), or `:unknown` (the
+  model has no price at all).
+
+  This is the companion to `confidence/1`, and it is separate for a reason:
+  `confidence/1` answers for the RATE CARD, and a turn with no cache-read
+  tokens is not one bit less certain for having a guessed cache multiplier.
+  A consumer publishing a dollar figure for a turn that DID read cache should
+  carry both.
+  """
+  @spec cache_read_confidence(String.t() | atom() | nil, DateTime.t() | Date.t() | nil) ::
+          :published | :multiplier | :unknown
+  def cache_read_confidence(model, at \\ nil) do
+    case cache_read_rate(model, at) do
+      {_rate, source} -> source
+      nil -> :unknown
+    end
+  end
+
+  defp published_cache_read(key, date, instant) do
+    windowed_cache_read(key, date, instant) || catalog_cache_read(key)
+  end
+
+  defp windowed_cache_read(key, date, instant) do
+    with entry when not is_nil(entry) <- window_entry(key),
+         tier when not is_nil(tier) <- window_tier(entry, date, instant) do
+      # Same never-under-state rule as the rate itself: an unknown hour bills
+      # the peak cache rate.
+      case tier do
+        :unknown_hour -> entry.peak.cache_read
+        t -> Map.fetch!(entry, t).cache_read
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp catalog_cache_read(key) do
+    Enum.find_value(lookup_keys(key), fn k ->
+      Enum.find_value(@cache_read_modules, fn mod -> mod.cache_read_rate(k) end)
+    end)
+  end
+
   @doc """
   Compute the USD cost for one turn's usage against `model`.
 
@@ -361,6 +611,34 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   end
 
   @doc """
+  `cost/2` against an explicit request instant.
+
+  Use this to price anything that did not happen just now — re-costing a stored
+  session, a replayed trajectory, a reconciliation against an invoice. Rates
+  vary by date and by hour of day, so `cost/2`'s "now" is only the right clock
+  when the turn being priced is the turn that just finished.
+  """
+  @spec cost(String.t() | atom() | nil, map(), DateTime.t() | Date.t()) :: float()
+  def cost(model, usage, at) when is_map(usage) do
+    do_cost(model, usage, at)
+  end
+
+  # The instant this usage's request was ISSUED, if the caller recorded one.
+  #
+  # A turn's price is a function of when it happened, so a session's recorded
+  # cost must not drift when the same usage is priced again from a different
+  # side of a peak boundary. A caller that stamps `:requested_at` gets that
+  # stability through the plain `cost/2`; one that does not falls back to now,
+  # which is correct in the hot loop (pricing happens milliseconds after the
+  # round-trip) and wrong everywhere else.
+  defp usage_instant(usage) do
+    case Map.get(usage, :requested_at) || Map.get(usage, "requested_at") do
+      nil -> DateTime.utc_now()
+      at -> at
+    end
+  end
+
+  @doc """
   `cost/2` plus how much the number is worth: `{usd, :exact | :estimated |
   :unknown}` (see `confidence/1`).
 
@@ -371,21 +649,28 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   @spec cost_with_confidence(String.t() | atom() | nil, map()) ::
           {float(), :exact | :estimated | :unknown}
   def cost_with_confidence(model, usage) when is_map(usage) do
-    {do_cost(model, usage), confidence(model)}
+    at = usage_instant(usage)
+    {do_cost(model, usage, at), confidence(model, at)}
   end
 
-  defp do_cost(model, usage) do
-    case rates(model) do
+  defp do_cost(model, usage, at) do
+    case rates(model, at) do
       {input_rate, output_rate} ->
         input = get_tok(usage, :input_tokens)
         output = get_tok(usage, :output_tokens)
         cache_write = get_tok(usage, :cache_creation_input_tokens)
         cache_read = get_tok(usage, :cache_read_input_tokens)
 
+        cache_read_price =
+          case cache_read_rate(model, at) do
+            {rate, _source} -> rate
+            nil -> input_rate * @cache_read_multiplier
+          end
+
         raw =
           (input * input_rate +
              cache_write * input_rate * @cache_write_multiplier +
-             cache_read * input_rate * @cache_read_multiplier +
+             cache_read * cache_read_price +
              output * output_rate) / 1_000_000
 
         Float.round(raw, 6)
@@ -412,24 +697,51 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   3x off — the latter is what invalidated a whole benchmark run's conclusions.
   """
   @spec confidence(String.t() | atom() | nil) :: :exact | :estimated | :unknown
-  def confidence(model), do: confidence(model, Date.utc_today())
+  def confidence(model), do: confidence(model, DateTime.utc_now())
 
-  @doc "`confidence/1` against an explicit date. See `rates/2`."
-  @spec confidence(String.t() | atom() | nil, Date.t()) :: :exact | :estimated | :unknown
-  def confidence(nil, _today), do: :unknown
-  def confidence(model, today) when is_atom(model), do: confidence(Atom.to_string(model), today)
+  @doc """
+  `confidence/1` against an explicit instant. See `rates/2`.
 
-  def confidence(model, today) when is_binary(model) do
+  Note the fourth way this can come back `:estimated`, alongside the family
+  guess: a model whose rate varies by hour, resolved against a bare `Date`. The
+  day is known, the tier is not, and the peak rate that gets returned is an
+  upper bound rather than a published fact about that turn.
+
+  For the cache-read half of the bill, see `cache_read_confidence/2` — the two
+  are reported separately because they can disagree, and a turn's dollar figure
+  is only as good as whichever of them it actually leaned on.
+  """
+  @spec confidence(String.t() | atom() | nil, DateTime.t() | Date.t()) ::
+          :exact | :estimated | :unknown
+  def confidence(nil, _at), do: :unknown
+  def confidence(model, at) when is_atom(model), do: confidence(Atom.to_string(model), at)
+
+  def confidence(model, at) when is_binary(model) do
     key = String.downcase(model)
+    {date, instant} = clock(at)
 
     cond do
-      ollama_local?(key) -> :exact
+      ollama_local?(key) ->
+        :exact
+
+      # A windowed rate is published on both tiers; it is only a guess when the
+      # caller could not say which tier the request fell in.
+      result = windowed_rate(key, date, instant) ->
+        elem(result, 1)
+
       # A scheduled rate is a PUBLISHED rate with a published start date, not a
       # guess — same standing as the exact table it supersedes.
-      scheduled_rate(key, today) -> :exact
-      Enum.find_value(lookup_keys(key), &exact_rate/1) -> :exact
-      family_rate(key, log?: false) -> :estimated
-      true -> :unknown
+      scheduled_rate(key, date) ->
+        :exact
+
+      Enum.find_value(lookup_keys(key), &exact_rate/1) ->
+        :exact
+
+      family_rate(key, log?: false) ->
+        :estimated
+
+      true ->
+        :unknown
     end
   end
 
