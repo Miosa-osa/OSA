@@ -116,6 +116,37 @@ type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>
 
 use crate::app::inline_backend::InlineBackend;
 
+/// Keeps a DEC 2026 synchronized update balanced across early returns.
+/// Codex wraps resize repair and repaint in one transaction; this guard gives
+/// OSA the same guarantee without leaving the terminal frozen if replay fails.
+struct ResizeSyncGuard {
+    out: std::io::Stdout,
+    active: bool,
+}
+
+impl ResizeSyncGuard {
+    fn begin() -> Self {
+        let mut out = std::io::stdout();
+        let active = execute!(out, crossterm::terminal::BeginSynchronizedUpdate).is_ok();
+        Self { out, active }
+    }
+
+    fn finish(mut self) {
+        if self.active {
+            let _ = execute!(self.out, crossterm::terminal::EndSynchronizedUpdate);
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for ResizeSyncGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = execute!(self.out, crossterm::terminal::EndSynchronizedUpdate);
+        }
+    }
+}
+
 /// Intersect `rect` with the frame's drawable area, returning a rect guaranteed
 /// to lie within `frame.area()` (possibly zero-sized). Pass the result as the
 /// `area` to any component's `draw`: because every downstream `render_widget`
@@ -1003,6 +1034,11 @@ impl App {
             // emulator reflowed the whole screen, so the old chrome's position is
             // genuinely unknowable and a surgical clear cannot find it.
             let terminal_resized = std::mem::take(&mut self.resize_dirty);
+            // A source-backed resize replay clears and reconstructs both
+            // scrollback and the live viewport. Keep DEC 2026 open across that
+            // entire transaction so supporting terminals present only the
+            // completed frame, never the cleared intermediate state.
+            let mut resize_sync_guard: Option<ResizeSyncGuard> = None;
             // Commit immediately (bypassing the shrink debounce) for a real resize
             // AND for a slash-popup open/close, so a command that closes the popup
             // never leaves stacked chrome behind mid-debounce.
@@ -1049,6 +1085,29 @@ impl App {
                 cur_inline_h = desired_inline_h;
                 shrink_streak = 0;
                 last_inline_top = Some(terminal.get_frame().area().top());
+            } else if terminal_resized && !want_full {
+                // Source-backed resize replay, adapted from OpenAI Codex's
+                // `app::resize_reflow` architecture (Apache-2.0). Terminal
+                // scrollback is not a retained widget tree, so an old absolute
+                // row can never be repaired reliably after emulator reflow.
+                // Purge the projection, rebuild once at a known origin, then
+                // render every retained Message at the settled width. This also
+                // reflows markdown tables instead of preserving old-width
+                // border rows.
+                resize_sync_guard = Some(ResizeSyncGuard::begin());
+                purge_scrollback()?;
+                rebuild_inline(&mut terminal, desired_inline_h, Some(0))?;
+                cur_inline_h = desired_inline_h;
+                shrink_streak = 0;
+                replay_scrollback(
+                    &mut terminal,
+                    &self.committed,
+                    size.cols,
+                    size.rows.max(1),
+                )?;
+                last_inline_top = Some(terminal.get_frame().area().top());
+                // The source-backed rebuild fully consumed this resize. Do not
+                // enter the stale-anchor reconstruction below as well.
             } else if want_full != was_full {
                 if want_full {
                     // Remember where the inline chrome currently starts (its real
@@ -1568,14 +1627,20 @@ impl App {
             // between), so it can never dangle; unsupported terminals ignore the
             // private-mode sequence. Errors are non-fatal — the frame still draws.
             let mut sync_out = std::io::stdout();
-            let _ = execute!(sync_out, crossterm::terminal::BeginSynchronizedUpdate);
+            if resize_sync_guard.is_none() {
+                let _ = execute!(sync_out, crossterm::terminal::BeginSynchronizedUpdate);
+            }
             // Probe: how much assistant text this frame reveals. Recorded at
             // the single draw call so no frame can be missed, and reading the
             // accumulator (not the rendered cells) keeps it independent of
             // wrapping and of which band happens to be on screen.
             crate::app::stream_probe::paint(self.assistant_stream.text().chars().count());
             let draw_res = terminal.draw(|frame| self.draw(frame));
-            let _ = execute!(sync_out, crossterm::terminal::EndSynchronizedUpdate);
+            if let Some(guard) = resize_sync_guard.take() {
+                guard.finish();
+            } else {
+                let _ = execute!(sync_out, crossterm::terminal::EndSynchronizedUpdate);
+            }
             draw_res?;
             last_draw = std::time::Instant::now();
 
@@ -2796,6 +2861,58 @@ fn switch_to_inline(
 ///
 /// The caller should still `terminal.clear()` / erase beforehand so no stale
 /// rows of the old-sized region remain.
+/// Re-render retained finalized messages into native scrollback at `width`.
+///
+/// This is the OSA adapter for Codex's source-backed transcript resize replay.
+/// Messages are cloned because markdown preparation is width-specific; the
+/// retained originals remain canonical for the next resize.
+fn replay_scrollback(
+    terminal: &mut Term,
+    messages: &[crate::components::chat::message::Message],
+    width: u16,
+    batch_cap: u16,
+) -> Result<()> {
+    let mut batch: Vec<(crate::components::chat::message::Message, u16)> = Vec::new();
+    let mut batch_h = 0u16;
+
+    let flush = |terminal: &mut Term,
+                 batch: &mut Vec<(crate::components::chat::message::Message, u16)>,
+                 batch_h: u16|
+     -> std::io::Result<()> {
+        if batch_h == 0 {
+            batch.clear();
+            return Ok(());
+        }
+        terminal.insert_before(batch_h, |buf| {
+            let mut y = 0u16;
+            for (message, height) in batch.iter() {
+                message.render_to_buffer(Rect::new(0, y, width, *height), buf, 0);
+                y = y.saturating_add(*height);
+            }
+        })?;
+        batch.clear();
+        Ok(())
+    };
+
+    for source in messages {
+        let mut message = source.clone();
+        message.invalidate_for_width();
+        message.prepare_for_commit(width);
+        let height = message.height(width);
+        if height == 0 {
+            continue;
+        }
+        if batch_h > 0 && batch_h.saturating_add(height) > batch_cap {
+            flush(terminal, &mut batch, batch_h)?;
+            batch_h = 0;
+        }
+        batch_h = batch_h.saturating_add(height);
+        batch.push((message, height));
+    }
+    flush(terminal, &mut batch, batch_h)?;
+    Ok(())
+}
+
 fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) -> Result<()> {
     if let Some(top) = known_top {
         // No cursor query happens at all, so there is nothing to drop and
