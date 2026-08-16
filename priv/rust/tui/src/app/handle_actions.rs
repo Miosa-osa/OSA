@@ -472,6 +472,37 @@ impl App {
     ) {
         match result {
             Ok(resp) => {
+                // A `/goal` answer is ACTED on, not merely printed: it carries
+                // the backend's own liveness verdict, and the end-of-turn poll
+                // decides from it whether another turn starts.
+                //
+                // Matched on the ECHOED command, not merely on a pending intent:
+                // `/compact` and `/recap` synthesize `CommandResult`s of their
+                // own, and one of those arriving while a goal poll is in flight
+                // would otherwise settle the poll with an answer about a
+                // different command.
+                if is_goal_response(&resp) {
+                    if let Some(intent) = self.goal_intent.take() {
+                        // No `goal` field means a backend too old to report the
+                        // tracker's state. Stop driving rather than guess: an
+                        // unreported goal is not an active one, and inventing a
+                        // "still going" here is how the loop got its 25 free
+                        // turns in the first place.
+                        let Some(status) = resp.goal.clone() else {
+                            self.goal_state_unavailable(intent, &resp.output);
+                            self.finish_command_result();
+                            return;
+                        };
+                        if self.apply_goal_status(intent, &status, &resp.output) {
+                            // A real turn just started — returning early keeps
+                            // the cleanup below from landing us back on Idle and
+                            // stopping the spinner for a turn that is running.
+                            return;
+                        }
+                        self.finish_command_result();
+                        return;
+                    }
+                }
                 match resp.kind.as_str() {
                     "error" => {
                         self.chat.add_system_message(&resp.output, "error");
@@ -499,6 +530,13 @@ impl App {
                 }
             }
             Err(e) => {
+                // A failed request cannot settle a goal poll either way, and the
+                // loop must not sit waiting on an answer that is never coming.
+                // Drop the intent and stop driving — the goal itself is
+                // untouched on the backend.
+                if let Some(intent) = self.goal_intent.take() {
+                    self.goal_state_unavailable(intent, "");
+                }
                 self.toasts.push(
                     format!("Command error: {}", e),
                     crate::components::toast::ToastLevel::Error,
@@ -506,6 +544,11 @@ impl App {
             }
         }
 
+        self.finish_command_result();
+    }
+
+    /// Land the app after a command result that did NOT start a turn.
+    fn finish_command_result(&mut self) {
         if self.state.is_processing() {
             self.transition(AppState::Idle);
             self.activity.stop();
@@ -936,10 +979,12 @@ impl App {
             crate::components::toast::ToastLevel::Info,
         );
 
-        // A user interrupt also stops any active /goal auto-continue loop.
-        if self.goal.is_some() {
-            self.clear_goal(true);
-        }
+        // A user interrupt also stops any active /goal auto-continue loop —
+        // here AND on the backend, which is now the thing actually driving it.
+        self.pause_goal(
+            "Goal auto-continue stopped by the interrupt. The goal stays anchored — \
+             /goal resume to continue, /goal off to forget it.",
+        );
 
         // WS5 — the queue SURVIVES an interrupt (CC parity: clearCommandQueue
         // only runs in the kill-agents chord). Queued items either fire when
@@ -1962,67 +2007,167 @@ impl App {
         info!("Hands-free voice mode: {}", self.voice.hands_free);
     }
 
-    // ── /goal auto-continue (cross-turn keep-going) ──────────────────────────
+    // ── /goal — backend-anchored cross-turn keep-going ───────────────────────
+    //
+    // Every `/goal` the user types goes to the backend `GoalTracker` over
+    // `POST /api/v1/commands/execute`. Nothing here decides whether a goal is
+    // finished.
+    //
+    // What this replaced: a complete second `/goal`, entirely client-side, that
+    // never contacted the backend. It stopped when the reply's last non-empty
+    // line was exactly `DONE` — the model grading its own homework, the failure
+    // this codebase has repeatedly shipped — and it ran up to `goal_max_cycles`
+    // (25) turns on that say-so, while the tracker's acceptance criteria, skeptic
+    // panel, stall fingerprint and run cap went unused because the command that
+    // starts them was intercepted before it reached the wire.
 
-    /// Start (or replace) an active goal and kick off the first work turn.
-    pub(crate) fn set_goal(&mut self, goal: &str) {
-        let goal = goal.trim().to_string();
-        if goal.is_empty() {
+    /// Send a `/goal` invocation to the backend, remembering what its answer is
+    /// for. The verb split is pure ROUTING — which backend behaviour the user
+    /// asked for — not a judgement about the goal.
+    pub(crate) fn dispatch_goal_command(&mut self, arg: &str) {
+        let verb = arg.trim();
+        self.goal_intent = Some(goal_intent_for(verb));
+        self.execute_backend_command("goal", verb);
+    }
+
+    /// The backend did not report goal state (request failed, or a backend too
+    /// old to send it). Stop driving turns and say so, rather than assume.
+    fn goal_state_unavailable(&mut self, intent: GoalIntent, output: &str) {
+        if !output.is_empty() && intent != GoalIntent::TurnEnd && intent != GoalIntent::Silent {
+            self.chat.add_system_message(output, "info");
+        }
+        if self.goal.is_some() {
+            self.goal = None;
+            self.goal_cycle = 0;
+            self.refresh_goal_status();
+            self.chat.add_system_message(
+                "Goal auto-continue stopped: the backend did not report the goal's state, and \
+                 continuing without it would mean guessing. Run /goal to see where it stands.",
+                "warning",
+            );
+        }
+    }
+
+    /// Act on a `/goal` response. Returns true when it started a real turn, so
+    /// the caller does not immediately land the app back on `Idle`.
+    pub(super) fn apply_goal_status(
+        &mut self,
+        intent: GoalIntent,
+        status: &crate::client::types::GoalStatus,
+        output: &str,
+    ) -> bool {
+        // Mirror the backend. `self.goal` is a CACHE of what the backend last
+        // said, never an opinion of ours: `active` is `GoalTracker.goal_loop?/1
+        // and continue?/1`, the same pair `ReactLoop` gates its own re-entry on.
+        self.goal = if status.active {
+            status.goal.clone().filter(|g| !g.trim().is_empty())
+        } else {
+            None
+        };
+        if self.goal.is_none() {
+            self.goal_cycle = 0;
+        }
+        self.refresh_goal_status();
+
+        match intent {
+            GoalIntent::Inspect => {
+                if !output.is_empty() {
+                    self.chat.add_system_message(output, "info");
+                }
+                false
+            }
+            GoalIntent::Anchor => {
+                if !output.is_empty() {
+                    self.chat.add_system_message(output, "info");
+                }
+                // Anchoring alone does not start work — `GoalTracker.start/2`
+                // writes state, it does not run a turn — so the TUI starts the
+                // first one, exactly as the old client-side loop did.
+                if self.goal.is_some() {
+                    self.goal_cycle = 1;
+                    self.refresh_goal_status();
+                    self.submit_prompt(GOAL_WORK_PROMPT);
+                    return true;
+                }
+                false
+            }
+            // The pause we sent ourselves after an interrupt: the user already
+            // has our message, and echoing the backend's confirmation on top
+            // would report the same event twice.
+            GoalIntent::Silent => false,
+            GoalIntent::TurnEnd => self.continue_goal_from(status),
+        }
+    }
+
+    /// End-of-turn decision, made from the backend's answer.
+    fn continue_goal_from(&mut self, status: &crate::client::types::GoalStatus) -> bool {
+        if !status.active {
+            // NAME the stop. "Completed" and "paused" are different outcomes with
+            // different next steps, and the `DONE` sentinel could not tell them
+            // apart because it never asked anything that knew.
+            let msg = match (status.status.as_deref(), status.pause_reason.as_deref()) {
+                (Some("completed"), _) => format!(
+                    "Goal verified complete by the skeptic panel after {} backend turn(s). \
+                     Auto-continue stopped.",
+                    status.turn_count
+                ),
+                (Some("paused"), Some("run_cap")) => "Goal paused — the backend hit its lifetime \
+                     verification-run cap. The goal is kept; /goal resume to continue."
+                    .to_string(),
+                (Some("paused"), Some("no_progress")) => {
+                    "Goal paused — the backend saw the same gaps on consecutive rounds and \
+                     stopped rather than loop. /goal resume to continue."
+                        .to_string()
+                }
+                (Some("paused"), _) => {
+                    "Goal paused. /goal resume to continue, /goal off to forget it.".to_string()
+                }
+                _ => "Goal is no longer active on the backend. Auto-continue stopped.".to_string(),
+            };
+            self.chat.add_system_message(&msg, "info");
+            self.goal_cycle = 0;
+            self.refresh_goal_status();
+            return false;
+        }
+
+        // The backend has authorized another turn. Only now does our own outer
+        // bound get a say — it can stop early, never extend (see `goal_cycle`).
+        if self.goal_cycle >= self.goal_max_cycles {
+            self.chat.add_system_message(
+                &format!(
+                    "Goal auto-continue reached its {}-turn cap while the backend still has the \
+                     goal active. Stopping here — the goal stays anchored, so sending any message \
+                     resumes work on it.",
+                    self.goal_max_cycles
+                ),
+                "warning",
+            );
+            return false;
+        }
+
+        self.goal_cycle += 1;
+        self.refresh_goal_status();
+        self.submit_prompt(GOAL_WORK_PROMPT);
+        true
+    }
+
+    /// Stop driving turns toward the goal, and pause it on the backend so it
+    /// stops there too — `:user`, which `/goal resume` undoes.
+    ///
+    /// Pause, not clear: an interrupt or a timed-out turn means "stop", not
+    /// "forget what I asked for", and neither is evidence about the goal.
+    /// `why` is shown to the user; the backend's own confirmation is suppressed
+    /// so the same event is not reported twice.
+    pub(crate) fn pause_goal(&mut self, why: &str) {
+        if self.goal.is_none() {
             return;
         }
-        self.goal = Some(goal.clone());
-        self.goal_cycle = 0;
-        self.refresh_goal_status();
-        self.chat.add_system_message(
-            &format!(
-                "Goal set — auto-continuing until achieved (max {} cycles). Reply DONE to stop. Use /goal off to cancel.\n→ {}",
-                self.goal_max_cycles, goal
-            ),
-            "info",
-        );
-        // Kick off the first turn toward the goal.
-        let prompt = self.goal_continue_prompt(&goal);
-        self.goal_cycle = 1;
-        self.refresh_goal_status();
-        self.submit_prompt(&prompt);
-    }
-
-    /// Clear the active goal (from /goal off, cancel, DONE, or the cycle cap).
-    pub(crate) fn clear_goal(&mut self, notify: bool) {
-        let had_goal = self.goal.is_some();
         self.goal = None;
         self.goal_cycle = 0;
-        self.status.set_goal_label(None);
-        if notify && had_goal {
-            self.chat.add_system_message("Goal cleared.", "info");
-        }
-    }
-
-    /// Show the current goal status without changing it.
-    pub(crate) fn show_goal_status(&mut self) {
-        match self.goal.clone() {
-            Some(goal) => {
-                self.chat.add_system_message(
-                    &format!(
-                        "Active goal (cycle {}/{}):\n→ {}",
-                        self.goal_cycle, self.goal_max_cycles, goal
-                    ),
-                    "info",
-                );
-            }
-            None => {
-                self.chat
-                    .add_system_message("No active goal. Set one with /goal <text>.", "info");
-            }
-        }
-    }
-
-    /// The continue prompt sent on each cycle toward the goal.
-    fn goal_continue_prompt(&self, goal: &str) -> String {
-        format!(
-            "Continue toward the goal: {}. When the goal is fully achieved, reply with exactly DONE on its own line and stop.",
-            goal
-        )
+        self.refresh_goal_status();
+        self.chat.add_system_message(why, "info");
+        self.goal_intent = Some(GoalIntent::Silent);
+        self.execute_backend_command_quiet("goal", "stop");
     }
 
     /// Sync the status-bar "goal N/max" indicator with the current state.
@@ -2037,67 +2182,88 @@ impl App {
         }
     }
 
-    /// True when the assistant reply signals the goal is achieved. The sentinel
-    /// must be the *last* non-empty line of the reply (or the whole reply),
-    /// matching the `goal_continue_prompt` instruction to "reply with exactly
-    /// DONE on its own line and stop". Requiring the final line avoids false
-    /// positives from an intermediate turn that merely mentions a standalone
-    /// `DONE` line mid-reply — e.g. narrating `echo DONE`, a build-log line, a
-    /// checklist item, quoted code, or restating the instruction itself.
-    fn reply_signals_done(reply: &str) -> bool {
-        reply
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .next_back()
-            .map(|line| line == "DONE")
-            .unwrap_or(false)
-    }
-
-    /// Called at the end of each assistant turn. If a goal is active, either
-    /// stop (DONE / cap reached) or auto-submit the next continue prompt.
+    /// Called at the end of each assistant turn. Asks the BACKEND whether the
+    /// goal is still live; the answer arrives as a `CommandResult` and
+    /// `continue_goal_from` acts on it.
     pub(super) fn maybe_continue_goal(&mut self) {
-        let goal = match self.goal.clone() {
-            Some(g) => g,
-            None => return,
-        };
-        // Don't auto-continue if the user cancelled this turn.
+        if self.goal.is_none() {
+            return;
+        }
         if self.cancelled {
-            self.clear_goal(true);
-            return;
-        }
-
-        let last_reply = self.chat.last_agent_message().unwrap_or_default();
-        if Self::reply_signals_done(&last_reply) {
-            self.chat.add_system_message(
-                &format!(
-                    "Goal achieved in {} cycle(s). Auto-continue stopped.",
-                    self.goal_cycle
-                ),
-                "info",
+            self.pause_goal(
+                "Goal auto-continue stopped by the interrupt. The goal stays anchored — \
+                 /goal resume to continue, /goal off to forget it.",
             );
-            self.clear_goal(false);
             return;
         }
-
-        if self.goal_cycle >= self.goal_max_cycles {
-            self.chat.add_system_message(
-                &format!(
-                    "Goal auto-continue reached the {}-cycle cap without a DONE. Stopping. Use /goal <text> to resume.",
-                    self.goal_max_cycles
-                ),
-                "warning",
-            );
-            self.clear_goal(false);
-            return;
-        }
-
-        self.goal_cycle += 1;
-        self.refresh_goal_status();
-        let prompt = self.goal_continue_prompt(&goal);
-        self.submit_prompt(&prompt);
+        self.goal_intent = Some(GoalIntent::TurnEnd);
+        self.execute_backend_command_quiet("goal", "status");
     }
 }
+
+/// Which `/goal` form the user typed.
+///
+/// Pure ROUTING: it names the backend behaviour being asked for, using the
+/// backend's own vocabulary (`Channels.CLI.Commands.cmd_goal/2`). It makes no
+/// judgement about the goal — that judgement is the thing that moved to the
+/// backend.
+fn goal_intent_for(arg: &str) -> GoalIntent {
+    let verb = arg.trim();
+    // "" / "status" report, "pause"/"stop" pause, "resume" resumes,
+    // "clear"/"off"/"reset" forget it. Anything else anchors a new goal, with
+    // `::` separating optional acceptance criteria.
+    let inspecting = verb.is_empty()
+        || ["status", "pause", "stop", "resume", "clear", "off", "reset"]
+            .iter()
+            .any(|v| verb.eq_ignore_ascii_case(v));
+    if inspecting {
+        GoalIntent::Inspect
+    } else {
+        GoalIntent::Anchor
+    }
+}
+
+/// True when a `CommandResult` is the answer to a `/goal` request.
+///
+/// The backend echoes the command line it ran, so this is a fact about the
+/// response rather than a guess from timing. The `goal` field alone would not
+/// do: a backend that failed to build one still owes an answer to a poll that
+/// is waiting, and settling that poll from "whichever result arrived next" is
+/// how the wrong command's output ends up deciding whether work continues.
+fn is_goal_response(resp: &crate::client::types::CommandExecuteResponse) -> bool {
+    resp.goal.is_some()
+        || resp
+            .command
+            .split_whitespace()
+            .next()
+            .is_some_and(|c| c.eq_ignore_ascii_case("goal"))
+}
+
+/// What an outstanding `/goal` request was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoalIntent {
+    /// `/goal <text>` — anchor it, then start the first turn toward it.
+    Anchor,
+    /// `/goal`, `/goal status|pause|resume|clear` — print the backend's answer.
+    Inspect,
+    /// End-of-turn liveness check. Renders nothing; the answer decides whether
+    /// another turn starts.
+    TurnEnd,
+    /// A request the TUI made on its own behalf whose output is already covered
+    /// by a message we wrote.
+    Silent,
+}
+
+/// The prompt that starts each TUI-driven turn toward the goal.
+///
+/// Note what is NOT here: any instruction to announce completion. The old
+/// prompt asked the model to "reply with exactly DONE on its own line", which
+/// made the model both the worker and the judge. Completion is now decided by
+/// `GoalVerifier`'s panel, and within the turn the backend restates the goal
+/// itself (`ReactLoop.goal_continuation_message/1`), so this only has to start
+/// the turn.
+const GOAL_WORK_PROMPT: &str = "Continue working toward the anchored goal. Do not declare it \
+     finished — completion is judged independently against the acceptance criteria.";
 
 /// Resolve the user's home dir cross-platform. BaseDirs honors USERPROFILE /
 /// HOMEDRIVE+HOMEPATH on Windows (where $HOME is normally unset) and $HOME on
@@ -2469,35 +2635,83 @@ mod interrupt_steer_tests {
 }
 
 #[cfg(test)]
-mod goal_done_tests {
-    use super::App;
+mod goal_routing_tests {
+    use super::{goal_intent_for, is_goal_response, GoalIntent};
+    use crate::client::types::{CommandExecuteResponse, GoalStatus};
 
-    #[test]
-    fn done_only_when_final_nonempty_line() {
-        // Whole reply is exactly the sentinel.
-        assert!(App::reply_signals_done("DONE"));
-        assert!(App::reply_signals_done("DONE\n"));
-        // Sentinel as the last non-empty line (trailing whitespace/blanks ok).
-        assert!(App::reply_signals_done("All checks pass.\nDONE"));
-        assert!(App::reply_signals_done("finished\n  DONE  \n\n"));
+    fn resp(command: &str, goal: Option<GoalStatus>) -> CommandExecuteResponse {
+        CommandExecuteResponse {
+            kind: String::new(),
+            output: String::new(),
+            action: None,
+            command: command.to_string(),
+            goal,
+        }
     }
 
+    /// The whole point of the change: there is no longer any client-side verb
+    /// that means "the goal is finished". Every form is a request the BACKEND
+    /// answers, and the only split here is which backend behaviour was asked
+    /// for.
     #[test]
-    fn not_done_when_sentinel_is_mid_reply() {
-        // Intermediate turns that merely mention a standalone DONE line must
-        // NOT stop the goal loop prematurely.
-        assert!(!App::reply_signals_done(
-            "Running: echo DONE\nNow building..."
-        ));
-        assert!(!App::reply_signals_done(
-            "Step 1: DONE\nStep 2: still working on the migration"
-        ));
-        assert!(!App::reply_signals_done(
-            "The instruction says to reply with exactly DONE on its own line.\nContinuing."
-        ));
-        assert!(!App::reply_signals_done(""));
-        assert!(!App::reply_signals_done("done"));
-        assert!(!App::reply_signals_done("DONE deal, moving on"));
+    fn every_goal_form_routes_to_the_backend_and_only_the_form_differs() {
+        // Anchoring a goal — including one whose text contains a verb-looking
+        // word, which must not be mistaken for a subcommand.
+        assert_eq!(goal_intent_for("ship the parser"), GoalIntent::Anchor);
+        assert_eq!(
+            goal_intent_for("ship the parser :: mix test passes"),
+            GoalIntent::Anchor
+        );
+        assert_eq!(goal_intent_for("stop the flaky test"), GoalIntent::Anchor);
+
+        // The backend's own subcommands.
+        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset"] {
+            assert_eq!(
+                goal_intent_for(verb),
+                GoalIntent::Inspect,
+                "{verb:?} is a backend subcommand, not goal text"
+            );
+        }
+        // Case-insensitively, as the old client-side arm accepted them.
+        assert_eq!(goal_intent_for("OFF"), GoalIntent::Inspect);
+    }
+
+    /// A pending end-of-turn poll must be settled by the answer to the poll and
+    /// by nothing else. `/compact` and `/recap` synthesize `CommandResult`s of
+    /// their own; one of those landing first used to be indistinguishable.
+    #[test]
+    fn only_a_goal_answer_settles_a_goal_request() {
+        assert!(is_goal_response(&resp("goal status", Some(GoalStatus::default()))));
+        assert!(is_goal_response(&resp("goal ship the parser", None)));
+        assert!(!is_goal_response(&resp("compact", None)));
+        assert!(!is_goal_response(&resp("recap", None)));
+        assert!(!is_goal_response(&resp("", None)));
+    }
+
+    /// `active` is REPORTED, never inferred. A backend that reports a goal it
+    /// no longer considers live must stop the loop whatever the text says —
+    /// this is the replacement for `reply_signals_done`, which read the model's
+    /// own last line and let the model decide when to stop.
+    #[test]
+    fn liveness_comes_from_the_reported_flag_not_from_any_text() {
+        let done = GoalStatus {
+            active: false,
+            status: Some("completed".into()),
+            goal: Some("ship the parser".into()),
+            ..Default::default()
+        };
+        assert!(!done.active);
+
+        // A goal the backend still considers live stays live even when the
+        // model's answer reads like a conclusion. There is no code path left
+        // that inspects reply text at all.
+        let live = GoalStatus {
+            active: true,
+            status: Some("active".into()),
+            goal: Some("ship the parser".into()),
+            ..Default::default()
+        };
+        assert!(live.active);
     }
 }
 

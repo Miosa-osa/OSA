@@ -380,12 +380,36 @@ pub struct App {
     // Voice input
     pub voice: VoiceState,
 
-    // Active /goal auto-continue loop (cross-turn keep-going). When Some, each
-    // assistant turn-completion auto-submits a "continue toward the goal" prompt
-    // until the reply says DONE, the user cancels, /goal off, or the cycle cap.
+    // Active /goal auto-continue loop (cross-turn keep-going).
+    //
+    // `goal` is a MIRROR of the backend `GoalTracker`'s anchored goal text, not
+    // a decision of the TUI's own: it is set only from a `/goal` response's
+    // structured `active`/`goal` fields and cleared the moment the backend stops
+    // saying the goal is live. Nothing here judges completion. The loop used to
+    // stop when the reply's last line was exactly `DONE` — the model grading its
+    // own homework — while the backend's skeptic panel, stall detector and run
+    // cap sat unused because `/goal` never reached them.
     pub goal: Option<String>,
+    /// Turns the TUI has auto-started toward the goal since it was anchored.
+    ///
+    /// This is the OUTER of three nested bounds, and the only one the TUI owns:
+    ///
+    ///   1. `:compaction_continues` (backend, cap 3, reset per turn) bounds the
+    ///      synthetic continuations INSIDE one turn;
+    ///   2. `GoalTracker`'s lifetime verification-run cap and stall detector
+    ///      decide, across turns, whether the goal is still `active` at all —
+    ///      and that answer gates (3) absolutely;
+    ///   3. this counter bounds how many turns the TUI will start on its own
+    ///      while (2) keeps saying yes.
+    ///
+    /// They are nested, not racing: (3) is only ever consulted AFTER the backend
+    /// has authorized another turn, so it can stop the loop early but can never
+    /// extend it past a `completed` or `paused` goal.
     pub goal_cycle: u32,
     pub goal_max_cycles: u32,
+    /// What the in-flight `/goal` request was for, so its answer can be acted on
+    /// rather than merely printed. `None` when no `/goal` request is outstanding.
+    pub goal_intent: Option<crate::app::handle_actions::GoalIntent>,
     /// Instant the active goal became live, so the status-line goal indicator can
     /// count up "Working on: <goal> · 3m 40s" from activation (Codex
     /// `thread_goal_actions` + `status_indicator_widget` elapsed). Stamped the
@@ -769,6 +793,7 @@ impl App {
             goal: None,
             goal_cycle: 0,
             goal_max_cycles,
+            goal_intent: None,
             goal_activated_at: None,
             attachments: Vec::new(),
             welcome_injected: false,

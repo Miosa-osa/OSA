@@ -363,6 +363,46 @@ def gets_since(mark: int, path: str | None = None) -> list[str]:
     return [g for g in tail if path is None or g == path]
 
 
+#: What `POST /commands/execute {"command":"goal"}` answers with, as the real
+#: backend's `handle_goal_command/2` does: the captured terminal text plus a
+#: STRUCTURED snapshot of `GoalTracker`'s state.
+#:
+#: A test sets this to say whether the goal is still live. That is the whole
+#: point of routing `/goal` to the backend: the TUI drives another turn only
+#: while the backend says the goal is active, instead of stopping when the
+#: model's last line happens to read `DONE`.
+_GOAL: dict = {
+    "output": "Goal anchored",
+    "goal": {
+        "active": True,
+        "status": "active",
+        "goal": "ship the parser",
+        "goal_id": "g-1",
+        "turn_count": 1,
+        "pause_reason": None,
+    },
+}
+
+
+def set_goal_state(active: bool, status: str, pause_reason: str | None = None,
+                   goal: str = "ship the parser", turn_count: int = 1,
+                   output: str = "Goal status") -> None:
+    """Set what the next `/goal` answer reports."""
+    _GOAL["output"] = output
+    _GOAL["goal"] = {
+        "active": active,
+        "status": status,
+        "goal": goal,
+        "goal_id": "g-1",
+        "turn_count": turn_count,
+        "pause_reason": pause_reason,
+    }
+
+
+def reset_goal_state() -> None:
+    set_goal_state(True, "active", output="Goal anchored")
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Silence the default per-request stderr logging: the harness's own output
     # is the signal, and a boot storms this with a dozen lines.
@@ -496,6 +536,21 @@ class _Handler(BaseHTTPRequestHandler):
             # reached the wire WHILE the original turn was still outstanding,
             # which is a fact about the request, not about the model.
             return self._json({"status": "steered"}, 202)
+        if path == "/api/v1/commands/execute":
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                body = {}
+            if str(body.get("command", "")).lower() == "goal":
+                arg = body.get("arg") or ""
+                return self._json(
+                    {
+                        "output": _GOAL["output"],
+                        "command": ("goal " + arg).strip(),
+                        "goal": _GOAL["goal"],
+                    }
+                )
+            return self._json({"output": "", "command": body.get("command", "")})
         if path == "/api/v1/orchestrate":
             # Recorded ABOVE, then held: a test can see the turn start while it
             # is still in flight, which is the whole point — Esc only means

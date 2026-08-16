@@ -1585,15 +1585,14 @@ impl App {
                         crate::components::toast::ToastLevel::Error,
                     );
                     // If a /goal auto-continue loop was active, the stalled turn
-                    // silently kills it. Clear the (now-stale) goal indicator and
-                    // tell the user, rather than leaving a misleading "◎ goal N/max".
-                    if self.goal.is_some() {
-                        self.chat.add_system_message(
-                            "Goal auto-continue stopped: the turn timed out before completing. Use /goal <text> to resume.",
-                            "warning",
-                        );
-                        self.clear_goal(false);
-                    }
+                    // silently kills it. Stop driving turns and pause the goal on
+                    // the backend, rather than leaving a misleading "◎ goal N/max"
+                    // over a loop nothing is advancing. The goal itself survives —
+                    // a timed-out turn is not evidence about the goal.
+                    self.pause_goal(
+                        "Goal auto-continue stopped: the turn timed out before completing. \
+                         The goal stays anchored — /goal resume to continue.",
+                    );
                     self.start_sse();
                 } else if elapsed >= std::time::Duration::from_secs(warning_secs) {
                     // Fire warning once when crossing the 80% threshold

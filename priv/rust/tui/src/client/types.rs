@@ -326,6 +326,50 @@ pub struct CommandExecuteResponse {
     pub output: String,
     #[serde(default)]
     pub action: Option<String>,
+    /// The command line the backend actually ran, echoed back. Lets a client
+    /// tell WHICH outstanding request an answer belongs to — `/compact` and
+    /// `/recap` also arrive as `CommandResult`s, and a pending `/goal` poll must
+    /// not be settled by one of them.
+    #[serde(default)]
+    pub command: String,
+    /// Present only on a `/goal` response: the backend `GoalTracker`'s own view
+    /// of the goal, so a client can act on it instead of parsing `output`.
+    #[serde(default)]
+    pub goal: Option<GoalStatus>,
+}
+
+/// The backend's authoritative goal state, from `GoalTracker`.
+///
+/// This exists because `/goal` is the one command whose answer the TUI must act
+/// on rather than print: it drives the next turn only while the backend still
+/// says the goal is live. Everything here is REPORTED, never inferred — the TUI
+/// deciding for itself whether a goal is finished is the `DONE`-sentinel defect
+/// this type replaces.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GoalStatus {
+    /// `GoalTracker.goal_loop?/1 and GoalTracker.continue?/1` — the same pair
+    /// `ReactLoop.goal_continue_due?/1` gates its own re-entry on. False for a
+    /// completed goal (only the skeptic panel can set that), a paused one
+    /// (stall / run cap / user), and for no goal at all.
+    #[serde(default)]
+    pub active: bool,
+    /// `active` | `off_track` | `paused` | `completed`, or absent when the
+    /// session has no tracker entry yet.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// The anchored goal text, as the backend stored it.
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    /// Turns the backend has counted against this goal.
+    #[serde(default)]
+    pub turn_count: u32,
+    /// Why a `paused` goal paused: `no_progress` | `run_cap` | `off_track` |
+    /// `user`. Names the stop condition so an exhausted goal is distinguishable
+    /// from a finished one.
+    #[serde(default)]
+    pub pause_reason: Option<String>,
 }
 
 // === Tools ===

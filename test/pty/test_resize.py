@@ -38,7 +38,9 @@ from stub_backend import (  # noqa: E402
     push_sse,
     release_health,
     release_turn,
+    reset_goal_state,
     set_claude_cli_state,
+    set_goal_state,
 )
 
 # A high, unlikely-to-collide port. The stub binds loopback only.
@@ -2468,6 +2470,129 @@ def test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever(
         release_turn()
 
 
+def _wait_post(s, mark, path, needle=None, timeout=10.0):
+    """Pump until a POST to `path` (optionally containing `needle`) is recorded."""
+    waited = 0.0
+    while waited < timeout:
+        for _p, body in posts_since(mark, path):
+            if needle is None or needle in body:
+                return body
+        s.pump(0.25)
+        waited += 0.25
+    return None
+
+
+def test_goal_is_anchored_on_the_backend_not_graded_in_the_client(
+    backend: StubBackend,
+) -> None:
+    """`/goal` must REACH the backend, and the backend must decide when it ends.
+
+    The defect this pins: the TUI shipped a complete second `/goal` that never
+    contacted the backend at all. It stopped when the assistant's last non-empty
+    line was exactly `DONE` — the model grading its own homework — and would run
+    up to 25 turns on that say-so, while `GoalTracker`'s acceptance criteria,
+    independent skeptic panel, cross-turn stall fingerprint and run cap sat
+    unused because the command that starts them was intercepted client-side.
+
+    Asserted ON THE WIRE, deliberately. A screen check cannot tell "routed" from
+    "looks routed": the old client-side arm printed a perfectly convincing
+    "Goal set — auto-continuing…" line while sending nothing. Two un-wired
+    affordances have already shipped behind exactly that gap. So every claim
+    here is about a recorded request or the absence of one.
+
+    Three things are proved, in order:
+
+      1. the anchor reaches `POST /commands/execute` as `goal`, carrying the
+         `::` acceptance criteria the backend needs and the TUI never had;
+      2. `DONE` does not end anything — with the backend still reporting the
+         goal active, a reply that is literally the old sentinel is followed by
+         another turn;
+      3. the backend's verdict does end it — once the backend reports the goal
+         no longer active, no further turn is started.
+    """
+    reset_goal_state()
+    try:
+        with PtySession(backend.base_url, cols=100, rows=30) as s:
+            s.boot()
+
+            # (1) The anchor must reach the backend, criteria intact.
+            mark = post_mark()
+            s.write(b"/goal ship the parser :: mix test passes")
+            s.pump(SETTLE)
+            s.write(b"\r")
+
+            body = _wait_post(s, mark, "/api/v1/commands/execute", '"goal"')
+            if body is None:
+                raise AssertionError(
+                    "/goal never reached the backend. This is the shipped "
+                    "defect: the command is handled entirely client-side and "
+                    "GoalTracker is never told a goal exists.\n"
+                    f"--- posts ---\n{posts_since(mark)}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "mix test passes" not in body:
+                raise AssertionError(
+                    "the acceptance criteria did not reach the backend. Without "
+                    "them completion is judged against the goal text alone, "
+                    "which is the weaker check the criteria exist to replace.\n"
+                    f"--- request body ---\n{body}"
+                )
+
+            # Anchoring alone runs nothing (GoalTracker.start/2 writes state), so
+            # the TUI starts the first turn. That turn must be a real one.
+            if _wait_post(s, mark, "/api/v1/orchestrate") is None:
+                raise AssertionError(
+                    "the goal was anchored and no work turn followed, so /goal "
+                    "anchors a goal nothing pursues.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # (2) The old sentinel must be inert. The backend still says active.
+            set_goal_state(True, "active", output="Goal active", turn_count=2)
+            mark2 = post_mark()
+            end_turn("All checks pass.\nDONE")
+
+            if _wait_post(s, mark2, "/api/v1/commands/execute", '"goal"') is None:
+                raise AssertionError(
+                    "the turn ended and the TUI never asked the backend whether "
+                    "the goal was still live — so whatever ends this loop, it is "
+                    "not the backend.\n"
+                    f"--- posts ---\n{posts_since(mark2)}"
+                )
+            if _wait_post(s, mark2, "/api/v1/orchestrate") is None:
+                raise AssertionError(
+                    "a reply whose last line is exactly DONE stopped the goal "
+                    "loop while the backend still reported it ACTIVE. The model "
+                    "is still grading its own homework.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # (3) The backend's verdict ends it, and nothing else needs to.
+            set_goal_state(False, "completed", output="Goal complete", turn_count=3)
+            mark3 = post_mark()
+            # A reply that says nothing about being finished. Under the old
+            # sentinel this would have continued forever.
+            end_turn("Still working on the parser, more to do.")
+
+            if _wait_post(s, mark3, "/api/v1/commands/execute", '"goal"') is None:
+                raise AssertionError(
+                    "no end-of-turn liveness check was sent.\n"
+                    f"--- posts ---\n{posts_since(mark3)}"
+                )
+            # Give the client every chance to start another turn; it must not.
+            s.pump(2.5)
+            if posts_since(mark3, "/api/v1/orchestrate"):
+                raise AssertionError(
+                    "the backend reported the goal COMPLETED and the TUI started "
+                    "another turn anyway — the backend's verdict is advisory, "
+                    "which is exactly the bug.\n"
+                    f"--- posts ---\n{posts_since(mark3)}\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        reset_goal_state()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -2497,6 +2622,7 @@ TESTS = [
     test_the_queued_row_advertises_the_key_that_delivers,
     test_a_split_alt_enter_does_not_interrupt,
     test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever,
+    test_goal_is_anchored_on_the_backend_not_graded_in_the_client,
 ]
 
 

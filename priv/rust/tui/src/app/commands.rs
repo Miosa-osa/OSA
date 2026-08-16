@@ -634,18 +634,12 @@ impl App {
                 }
             }
             "/goal" => {
-                // Cross-turn keep-going: agent auto-continues toward a stated
-                // goal until it replies DONE, the cap is hit, or it's cleared.
-                if arg.is_empty() {
-                    self.show_goal_status();
-                } else if arg.eq_ignore_ascii_case("off")
-                    || arg.eq_ignore_ascii_case("stop")
-                    || arg.eq_ignore_ascii_case("clear")
-                {
-                    self.clear_goal(true);
-                } else {
-                    self.set_goal(arg);
-                }
+                // Cross-turn keep-going, anchored on the BACKEND. Every form —
+                // status, pause/resume, clear, and `<text> [:: <criteria>]` —
+                // goes to `GoalTracker`; the TUI only drives turns while the
+                // backend still reports the goal active. See
+                // `App::dispatch_goal_command`.
+                self.dispatch_goal_command(arg);
             }
             "/new" => {
                 // Create a new session
@@ -892,6 +886,8 @@ impl App {
                         kind: "info".into(),
                         output,
                         action: None,
+                        command: "context".into(),
+                        goal: None,
                     }))
                 }
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
@@ -932,6 +928,8 @@ impl App {
                                          already below the compaction threshold."
                                     .into(),
                                 action: None,
+                                command: "compact".into(),
+                                goal: None,
                             },
                         ))
                     } else {
@@ -958,6 +956,8 @@ impl App {
                         kind: "info".into(),
                         output: format!("Recap:\n{}", r.recap),
                         action: None,
+                        command: "recap".into(),
+                        goal: None,
                     },
                 )),
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
@@ -987,6 +987,31 @@ impl App {
         self.activity.start();
         self.status.set_active(true);
 
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let req = crate::client::types::CommandExecuteRequest {
+            command: command.to_string(),
+            arg: arg.to_string(),
+            session_id: self.session_id.clone(),
+        };
+        tokio::spawn(async move {
+            let result = client.execute_command(&req).await;
+            let event = match result {
+                Ok(resp) => BackendEvent::CommandResult(Ok(resp)),
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// The same wire call as [`Self::execute_backend_command`], without the turn
+    /// chrome.
+    ///
+    /// The end-of-turn goal liveness check is not a turn. Flipping to
+    /// `Processing` and starting the activity spinner for it would paint a turn
+    /// that is not happening, and the `Idle` landing on the way out would fight
+    /// the real turn its answer is about to start.
+    pub(crate) fn execute_backend_command_quiet(&mut self, command: &str, arg: &str) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         let req = crate::client::types::CommandExecuteRequest {

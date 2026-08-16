@@ -129,6 +129,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         cmd_name in ~w(ask-user ask_user) ->
           handle_ask_user_command(conn, conn.body_params["arg"] || "")
 
+        # Same CLI handler as the catch-all below, plus a structured snapshot of
+        # the goal state it just produced — see `handle_goal_command/2`.
+        cmd_name == "goal" ->
+          handle_goal_command(conn, full_command)
+
         cmd_name in @blocked_http_commands ->
           body =
             Jason.encode!(%{
@@ -441,32 +446,78 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       session_id =
         OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
 
-      output =
-        try do
-          {:ok, string_io} = StringIO.open("")
-          original_gl = Process.group_leader()
-          Process.group_leader(self(), string_io)
-
-          try do
-            OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
-          after
-            Process.group_leader(self(), original_gl)
-          end
-
-          {:ok, {_input, captured}} = StringIO.close(string_io)
-          captured
-        rescue
-          e -> "Error: #{Exception.message(e)}"
-        end
-
-      clean_output =
-        output
-        |> String.replace(~r/\e\[[0-9;]*m/, "")
-        |> String.trim()
-
-      body = Jason.encode!(%{output: clean_output, command: command})
+      body = Jason.encode!(%{output: capture_cli_output(command, session_id), command: command})
       conn |> put_resp_content_type("application/json") |> send_resp(200, body)
     end
+  end
+
+  # Run a CLI slash command for its terminal output. The CLI surface is a REPL:
+  # every command writes to the group leader and returns only the session id, so
+  # the only way to get its text over HTTP is to lend it a `StringIO` for the
+  # duration of the call.
+  defp capture_cli_output(command, session_id) do
+    output =
+      try do
+        {:ok, string_io} = StringIO.open("")
+        original_gl = Process.group_leader()
+        Process.group_leader(self(), string_io)
+
+        try do
+          OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+        after
+          Process.group_leader(self(), original_gl)
+        end
+
+        {:ok, {_input, captured}} = StringIO.close(string_io)
+        captured
+      rescue
+        e -> "Error: #{Exception.message(e)}"
+      end
+
+    output
+    |> String.replace(~r/\e\[[0-9;]*m/, "")
+    |> String.trim()
+  end
+
+  # ── POST /commands/execute — `goal` ────────────────────────────────
+  #
+  # `/goal` is the one slash command whose ANSWER a client must ACT on rather
+  # than merely print. A client driving the next turn toward the goal has to
+  # know whether the goal is still live, and the authority on that is
+  # `GoalTracker` — specifically the same `goal_loop?/1 and continue?/1` pair
+  # `ReactLoop.goal_continue_due?/1` gates its own re-entry on.
+  #
+  # That fact cannot ride on `output` alone. Scraping a human-readable status
+  # line for "is it active" is a client grading its own homework by another
+  # route, which is precisely what routing `/goal` here removes. So the captured
+  # terminal text is returned WITH a structured snapshot, and every client reads
+  # liveness from the same two functions the loop does.
+  defp handle_goal_command(conn, command) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    session_id =
+      OptimalSystemAgent.Agent.SessionId.resolve(conn.body_params["session_id"], "http")
+
+    output = capture_cli_output(command, session_id)
+
+    # Read the snapshot AFTER dispatch: `/goal <text>` anchors, `/goal clear`
+    # resets, and the caller needs the state it just produced, not the one it
+    # replaced.
+    snap = GoalTracker.snapshot(session_id)
+
+    goal = %{
+      # THE field clients gate on. Deliberately not derived here: it is exactly
+      # what the loop asks before it continues.
+      active: GoalTracker.goal_loop?(session_id) and GoalTracker.continue?(session_id),
+      status: snap && snap.status && to_string(snap.status),
+      goal: snap && snap.goal,
+      goal_id: snap && snap.goal_id,
+      turn_count: (snap && snap.turn_count) || 0,
+      pause_reason: snap && snap.pause_reason && to_string(snap.pause_reason)
+    }
+
+    body = Jason.encode!(%{output: output, command: command, goal: goal})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
 
   # ── POST /:name/execute (tools) ────────────────────────────────────
