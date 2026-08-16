@@ -6,31 +6,39 @@ Audience: contributors setting up OSA for local development and testing.
 
 ### Elixir and Erlang/OTP
 
-OSA requires Elixir 1.17+ and OTP 26. The release CI uses Elixir 1.17.3 and OTP 26.2.5. OTP 27 is **not** supported for release builds — it has Mix-release bugs and `erlexec` is pinned to a pre-OTP-27 version in `mix.exs` (see [CI/CD Pipeline](ci-cd.md)).
+OSA builds on **Elixir 1.17.3 / OTP 26.2.5**, and only that. Not "1.17 or newer" — the exact pair, because it is the pair `release.yml` uses to build the binaries users download. OTP 27 is **not** supported for release builds: it has Mix-release bugs and `erlexec` is pinned to a pre-OTP-27 version in `mix.exs` (see [CI/CD Pipeline](ci-cd.md)).
 
-The recommended way to manage Elixir versions is `asdf` or `mise`.
+The versions live in **`.tool-versions` at the repository root**, which is the single source of truth. `ci.yml` and `release.yml` carry the same numbers in their `env:` blocks, and `test/toolchain_pin_test.exs` fails the suite if the file, the two workflows, and the running VM ever disagree — so you will hear about drift rather than discover it in a release.
 
-With `asdf`:
+That test exists because this went wrong: for eight releases (v1.0.76–v1.0.83) there was no `.tool-versions` in the repo, development happened on Elixir 1.19 / OTP 28, and every locally-green suite was a statement about a toolchain no user received. CI was red the entire time on a real ReDoS in the safety gate that could not be observed from OTP 28.
+
+With `asdf` — no version arguments, because the file already has them:
 ```bash
 asdf plugin add erlang
 asdf plugin add elixir
-asdf install erlang 26.2.5
-asdf install elixir 1.17.3-otp-26
-asdf local erlang 26.2.5
-asdf local elixir 1.17.3-otp-26
+asdf install          # reads .tool-versions
 ```
 
-With `mise`:
+With `mise`, which reads `.tool-versions` natively:
 ```bash
-mise use erlang@26.2.5
-mise use elixir@1.17.3-otp-26
+mise install
 ```
 
-Verify:
+Verify — this must match `.tool-versions` exactly:
 ```bash
 elixir --version
-# Erlang/OTP 26 [erts-14.x] ... Elixir 1.17.3 (compiled with Erlang/OTP 26)
+# Erlang/OTP 26 [erts-14.2.5] ... Elixir 1.17.3 (compiled with Erlang/OTP 26)
 ```
+
+Building Erlang from source takes a while. On Ubuntu/Debian x86_64 you can drop in a prebuilt OTP instead:
+```bash
+curl -fsSL -o otp.tar.gz "https://builds.hex.pm/builds/otp/ubuntu-24.04/OTP-26.2.5.tar.gz"
+mkdir -p ~/.asdf/installs/erlang/26.2.5
+tar -xzf otp.tar.gz --strip-components=1 -C ~/.asdf/installs/erlang/26.2.5
+(cd ~/.asdf/installs/erlang/26.2.5 && ./Install -minimal "$PWD")
+asdf reshim erlang
+```
+Swap `ubuntu-24.04` for your release; the available targets are listed at <https://builds.hex.pm/builds/otp/>.
 
 ### Go (for the tokenizer sidecar)
 

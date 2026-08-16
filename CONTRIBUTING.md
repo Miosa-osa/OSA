@@ -143,7 +143,11 @@ warms the backend as a daemon and attaches the TUI to it.
 
 **Prerequisites:**
 
-- Elixir 1.17+ and a matching Erlang/OTP
+- Elixir 1.17.3 and OTP 26.2.5 — the exact pair pinned in `.tool-versions`, not
+  "1.17 or newer". It is what `release.yml` builds the shipped binaries with, so
+  a suite that passes on anything else has not tested what users receive.
+  `asdf install` (or `mise install`) reads the file and needs no arguments; the
+  suite fails loudly if your VM, the file, and the CI workflows disagree.
 - Rust toolchain (`cargo`) — only needed to build the TUI client
 - Ollama (for local testing without API keys)
 - Git
