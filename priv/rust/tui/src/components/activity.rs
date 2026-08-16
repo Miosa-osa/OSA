@@ -521,6 +521,12 @@ pub struct Activity {
     /// Whether the clock is currently stopped (an approval modal owns the
     /// screen). While paused, `elapsed` does not advance.
     timer_paused: bool,
+    /// When the current pause began, so `resume_timer_at` can push
+    /// `last_output_at` forward by the paused stretch. Without this the silence
+    /// notice would measure the time a HUMAN spent reading an approval prompt
+    /// and blame the backend for it — the same wall-clock-vs-agent-time mistake
+    /// `elapsed_running` exists to avoid.
+    paused_at: Option<std::time::Instant>,
 
     // ── Live shell-command output ────────────────────────────────────────
     /// Bounded preview of the output streamed by the currently running shell
@@ -594,6 +600,63 @@ pub fn progress_bar(done: u32, total: u32) -> String {
 /// How long a flavour verb may be the only thing on screen before the status
 /// row switches to naming what it is actually waiting for.
 const FLAVOR_VERB_GRACE_SECS: u64 = 4;
+
+/// How long the backend may say NOTHING before the spinner row states that fact
+/// outright.
+///
+/// The turn timer answers "how long has this turn been going", which is not the
+/// question a stalled user is asking. A turn that is streaming tokens and a turn
+/// whose provider socket went silent ninety minutes ago render identically:
+/// `Waiting for response… (1h51m10s · esc to interrupt)`. No amount of patience
+/// distinguishes them, because the only number on screen advances at exactly the
+/// same rate in both cases. That is the reported defect.
+///
+/// `last_output_at` already knows the answer — every frame that carries turn
+/// progress stamps it (`add_stream_chars`, `add_thinking_chars`, `set_tokens`,
+/// the tool edges, and any non-`Waiting` phase transition) — but until now it
+/// only drove a color ramp that saturates after six seconds, so six seconds of
+/// silence and six thousand looked the same too.
+///
+/// The threshold is set ABOVE every bound the backend itself enforces on a
+/// silent model, so a healthy-but-slow turn can never trip it:
+///
+/// | backend bound on model silence                                  | value |
+/// |-----------------------------------------------------------------|-------|
+/// | `LLMClient` stream idle watchdog (`@idle_timeout_ms`)            | 300s  |
+/// | `Anthropic.collect_stream` inactivity guard                      | 620s  |
+/// | `openai_compat` / `Anthropic` `receive_timeout` (thinking)       | 600s  |
+///
+/// A provider call that produces nothing for 300s is killed by the watchdog and
+/// the turn reports it. So silence past 600s is not a slow model still working —
+/// it is a turn in a state every one of those guards should already have ended,
+/// which is exactly the state that has no other symptom on screen.
+///
+/// Deliberately NOT a timeout. Nothing is cancelled, nothing is retried, the
+/// turn is untouched. The row gains one true sentence.
+const SILENCE_NOTICE_SECS: u64 = 600;
+
+/// The live threshold, which is [`SILENCE_NOTICE_SECS`] unless
+/// `OSA_SILENCE_NOTICE_SECS` overrides it.
+///
+/// A test seam, and the same one `SseClient::idle_timeout` already uses for the
+/// same reason: the only instrument that can prove this notice reaches a REAL
+/// terminal is `test/pty/`, which drives the real binary, and a probe cannot sit
+/// through ten real minutes of silence to see it. Read once — a threshold that
+/// changed mid-session would make the row's behaviour unreproducible.
+///
+/// Out-of-range values are ignored rather than clamped: a caller who sets this
+/// to nonsense gets the production behaviour, never a notice that fires on every
+/// healthy turn.
+fn silence_notice_secs() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("OSA_SILENCE_NOTICE_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(SILENCE_NOTICE_SECS)
+    })
+}
 
 /// Rotating counter so consecutive requests pick different starting verbs.
 static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -682,6 +745,7 @@ impl Activity {
             elapsed_running: std::time::Duration::ZERO,
             last_resume_at: None,
             timer_paused: false,
+            paused_at: None,
             live_streams: std::collections::HashMap::new(),
             live_command: None,
         }
@@ -875,6 +939,7 @@ impl Activity {
         self.elapsed_running = std::time::Duration::ZERO;
         self.last_resume_at = Some(now);
         self.timer_paused = false;
+        self.paused_at = None;
         self.details = None;
         self.details_max_lines = ACTIVITY_DETAILS_DEFAULT_MAX_LINES;
         self.displayed_tokens = 0;
@@ -896,6 +961,7 @@ impl Activity {
         self.elapsed_running = std::time::Duration::ZERO;
         self.last_resume_at = None;
         self.timer_paused = false;
+        self.paused_at = None;
         self.details = None;
         self.details_max_lines = ACTIVITY_DETAILS_DEFAULT_MAX_LINES;
         self.phase_since = None;
@@ -991,14 +1057,59 @@ impl Activity {
             self.elapsed_running += now.saturating_duration_since(resumed);
         }
         self.timer_paused = true;
+        self.paused_at = Some(now);
     }
 
     fn resume_timer_at(&mut self, now: std::time::Instant) {
         if !self.timer_paused {
             return;
         }
+        // Carry the stall clock across the pause too. An approval modal the user
+        // sat on for twenty minutes is twenty minutes the BACKEND was not silent
+        // — it was waiting on a human — so `last_output_at` moves forward with
+        // the turn clock instead of accruing silence nobody is responsible for.
+        if let (Some(paused), Some(last)) = (self.paused_at.take(), self.last_output_at) {
+            self.last_output_at = Some(last + now.saturating_duration_since(paused));
+        }
         self.last_resume_at = Some(now);
         self.timer_paused = false;
+    }
+
+    /// Seconds the backend has been completely SILENT, if that silence has
+    /// passed [`SILENCE_NOTICE_SECS`] and currently means something.
+    ///
+    /// `None` — say nothing — in every state where a long quiet stretch is
+    /// either expected or already explained on the row:
+    ///
+    /// * no live turn, or the clock is paused (a modal owns the screen);
+    /// * `pending_user` — the HUMAN is the blocker, and the row says so;
+    /// * a retry is in flight — the row already carries a countdown;
+    /// * `cancelling` — the turn is on its way out;
+    /// * `phase == ToolCall` — a tool is running. A long tool is work, not a
+    ///   stall, and the row already names the tool. This notice is about the
+    ///   state where the row names NOTHING, which is the reported one.
+    ///
+    /// The comparison is against the same agent-time clock the turn timer uses,
+    /// so it can never accuse the backend of a stretch the user spent reading a
+    /// prompt.
+    pub fn silent_secs(&self) -> Option<u64> {
+        self.silent_secs_at(std::time::Instant::now())
+    }
+
+    fn silent_secs_at(&self, now: std::time::Instant) -> Option<u64> {
+        if !self.active
+            || self.timer_paused
+            || self.pending_user
+            || self.cancelling
+            || self.retry.is_some()
+            || self.phase == ProcessingPhase::ToolCall
+        {
+            return None;
+        }
+        let secs = now
+            .saturating_duration_since(self.last_output_at?)
+            .as_secs();
+        (secs >= silence_notice_secs()).then_some(secs)
     }
 
     /// Whether the turn clock is currently stopped.
@@ -1490,6 +1601,13 @@ impl Component for Activity {
             if tokens > 0 {
                 text.push_str(&format!(", {} tokens", format_count(tokens)));
             }
+            // A screen-reader user has strictly less to go on than a sighted one
+            // here — no color ramp, no spinner motion — so the silence notice
+            // matters MORE on this path, not less. Announced in the same plain
+            // language as the rest of the line.
+            if let Some(secs) = self.silent_secs() {
+                text.push_str(&format!(", no response for {}", crate::util::fmt_elapsed(secs)));
+            }
             text.push(')');
             frame.render_widget(
                 Paragraph::new(Line::from(Span::raw(text))),
@@ -1590,6 +1708,18 @@ impl Component for Activity {
             turn_timer,
             interrupt_affordance(self.interrupt_armed)
         )];
+
+        // The silence notice outranks everything optional. It is the only segment
+        // that reports something is WRONG, and it is the answer to the question
+        // the turn timer looks like it is answering but is not: the turn timer
+        // advances identically whether frames are arriving or not, so without
+        // this the row cannot distinguish working from wedged at any width.
+        // Placed immediately after the interrupt hint so it is the last thing
+        // dropped as the pane narrows.
+        let silence = self.silent_secs();
+        if let Some(secs) = silence {
+            parts.push(format!("no response for {}", fmt_compact_tight(secs)));
+        }
 
         // Item 1 — live retry countdown (a stall notice), just under the hint.
         if let Some(r) = self.retry.as_ref() {
@@ -1723,9 +1853,20 @@ impl Component for Activity {
             )
         } else if self.phase == ProcessingPhase::Waiting && self.waiting_reason.is_some() {
             let label = self.waiting_reason.unwrap().label();
+            // This branch used to ignore the stall entirely — it painted
+            // `theme.spinner_verb()` unconditionally, so the ONE state the user
+            // actually gets stuck in ("Waiting for response…") was also the one
+            // state with no color change at all, however long it lasted. Once
+            // the silence is past the notice threshold the verb goes warning, so
+            // the row changes appearance and not just width.
+            let style = if silence.is_some() {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                theme.spinner_verb()
+            };
             (
-                Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
-                vec![Span::styled(format!("{}\u{2026}", label), theme.spinner_verb())],
+                Span::styled(format!("{} ", spinner_char), style),
+                vec![Span::styled(format!("{}\u{2026}", label), style)],
             )
         } else {
             // When a task is in progress, show its concrete active step (Claude
@@ -2543,6 +2684,173 @@ mod activity_tests {
         // Idle activity has no clock at all.
         act.stop();
         assert_eq!(act.elapsed_secs(), None);
+    }
+
+    /// Put the turn in the exact state of the reported screenshot: live, in
+    /// `Waiting` with reason `Model`, and silent for `silent_for` seconds.
+    fn wedged_turn(silent_for: u64) -> Activity {
+        use std::time::{Duration, Instant};
+        let mut act = Activity::new();
+        act.start();
+        act.set_waiting_reason(Some(WaitingReason::Model));
+        act.phase = ProcessingPhase::Waiting;
+        act.last_output_at = Some(Instant::now() - Duration::from_secs(silent_for));
+        act
+    }
+
+    #[test]
+    fn silence_notice_fires_only_past_the_threshold() {
+        // The whole point of the notice is that it does NOT fire on a turn that
+        // is merely slow, so the boundary is asserted from both sides.
+        assert_eq!(wedged_turn(SILENCE_NOTICE_SECS - 1).silent_secs(), None);
+        assert!(wedged_turn(SILENCE_NOTICE_SECS).silent_secs().is_some());
+        // The operator's screenshot: 1h51m of nothing.
+        assert_eq!(wedged_turn(6670).silent_secs(), Some(6670));
+    }
+
+    #[test]
+    fn silence_notice_is_silent_on_legitimately_slow_work() {
+        use std::time::{Duration, Instant};
+        let stale = Instant::now() - Duration::from_secs(6670);
+
+        // A long tool run (a big grep, a slow build) is WORK, and the row
+        // already names the tool. Never a stall notice.
+        let mut tool = wedged_turn(6670);
+        tool.phase = ProcessingPhase::ToolCall;
+        assert_eq!(tool.silent_secs(), None);
+
+        // The human is the blocker at an approval prompt — the row says so.
+        let mut pending = wedged_turn(6670);
+        pending.set_pending_user(true);
+        assert_eq!(pending.silent_secs(), None);
+
+        // A retry already carries its own countdown on the row.
+        let mut retrying = wedged_turn(6670);
+        retrying.set_retry(Some(RetryState {
+            attempt: 1,
+            max_attempts: 5,
+            reason: String::new(),
+            resume_at: Instant::now() + Duration::from_secs(8),
+        }));
+        assert_eq!(retrying.silent_secs(), None);
+
+        // A turn on its way out is not a stall.
+        let mut cancelling = wedged_turn(6670);
+        cancelling.set_cancelling(true);
+        assert_eq!(cancelling.silent_secs(), None);
+
+        // No live turn at all.
+        let mut idle = wedged_turn(6670);
+        idle.stop();
+        assert_eq!(idle.silent_secs(), None);
+
+        // And a frame arriving clears it outright — this is the property that
+        // makes the notice track LIVENESS rather than turn age.
+        let mut revived = wedged_turn(6670);
+        assert!(revived.silent_secs().is_some());
+        revived.add_stream_chars(1);
+        assert_eq!(revived.silent_secs(), None);
+
+        let mut thinking = wedged_turn(6670);
+        thinking.add_thinking_chars(1);
+        assert_eq!(thinking.silent_secs(), None);
+
+        // A usage report is a frame too.
+        let mut usage = wedged_turn(6670);
+        usage.set_tokens(100, 5);
+        assert_eq!(usage.silent_secs(), None);
+
+        // Sanity: `stale` really is past the threshold, so the negatives above
+        // are the gates doing work and not an accidentally-fresh stamp.
+        let mut bare = wedged_turn(0);
+        bare.last_output_at = Some(stale);
+        assert!(bare.silent_secs().is_some());
+    }
+
+    #[test]
+    fn silence_notice_never_bills_the_user_for_reading_a_prompt() {
+        // An approval modal the user sat on for 30 minutes is 30 minutes the
+        // BACKEND was not silent. Without carrying `last_output_at` across the
+        // pause, dismissing the modal would instantly accuse the backend of a
+        // half-hour stall it had nothing to do with.
+        use std::time::{Duration, Instant};
+        let mut act = Activity::new();
+        act.start();
+        let base = Instant::now();
+        act.last_resume_at = Some(base);
+        act.last_output_at = Some(base);
+
+        act.pause_timer_at(base + Duration::from_secs(5));
+        // Paused: never a notice, however long the modal sits.
+        assert_eq!(act.silent_secs_at(base + Duration::from_secs(1805)), None);
+
+        act.resume_timer_at(base + Duration::from_secs(1805));
+        // Immediately after dismissal only the pre-pause 5s of silence counts.
+        assert_eq!(act.silent_secs_at(base + Duration::from_secs(1805)), None);
+        // And the clock resumes from there rather than restarting.
+        assert_eq!(
+            act.silent_secs_at(base + Duration::from_secs(1805 + SILENCE_NOTICE_SECS)),
+            Some(SILENCE_NOTICE_SECS + 5)
+        );
+    }
+
+    #[test]
+    fn silence_notice_reaches_the_screen_and_only_when_it_fires() {
+        // Ties the predicate to the pixels. A hint wired to nothing is exactly
+        // the failure this repo has shipped before, so the render is asserted
+        // in BOTH directions against `silent_secs()` rather than on its own.
+        let quiet = wedged_turn(SILENCE_NOTICE_SECS - 1);
+        assert_eq!(quiet.silent_secs(), None);
+        let quiet_text = render_activity_text(&quiet);
+        assert!(
+            !quiet_text.contains("no response for"),
+            "a slow-but-live turn must not be accused of stalling: {quiet_text}"
+        );
+
+        let wedged = wedged_turn(6670);
+        assert!(wedged.silent_secs().is_some());
+        let text = render_activity_text(&wedged);
+        assert!(
+            text.contains("no response for 1h51m10s"),
+            "the stall must be stated on the row, not merely computed: {text}"
+        );
+        // The turn timer and the interrupt affordance still survive alongside it.
+        assert!(text.contains("esc to interrupt"), "{text}");
+        // And the state the user was actually stuck in is still named.
+        assert!(text.contains("Waiting for response"), "{text}");
+    }
+
+    #[test]
+    fn silence_notice_outranks_every_other_optional_segment() {
+        // `gate_parts` keeps LEADING segments and drops trailing ones as the
+        // pane narrows. The notice is the only optional segment that reports
+        // something is WRONG, so it must be the last one standing — asserted by
+        // narrowing until the counters are gone and checking what survived,
+        // rather than by pinning a magic width.
+        let mut wedged = wedged_turn(6670);
+        wedged.set_tokens(139_700, 692);
+        wedged.displayed_tokens = 692;
+        wedged.set_queued(3);
+        // `set_tokens` is a frame, so it just refreshed the stall clock. Re-age
+        // it: the state under test is "these counters arrived, and then nothing
+        // did for an hour and fifty-one minutes" — which is the screenshot.
+        wedged.last_output_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(6670));
+
+        // Wide: everything is on the row.
+        let wide = render_activity_text_sized(&wedged, 160, 1);
+        assert!(wide.contains("no response for"), "{wide}");
+        assert!(wide.contains("queued"), "{wide}");
+
+        // Narrower: the queue counter is gone, the stall notice is not.
+        let mid = render_activity_text_sized(&wedged, 92, 1);
+        assert!(
+            mid.contains("no response for"),
+            "the stall notice was dropped before a queue counter: {mid}"
+        );
+        assert!(
+            !mid.contains("queued"),
+            "expected the low-priority segment to gate out first: {mid}"
+        );
     }
 
     #[test]

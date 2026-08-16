@@ -2240,6 +2240,137 @@ def test_a_split_alt_enter_does_not_interrupt(backend: StubBackend) -> None:
         release_turn()
 
 
+#: Silence budget the binary runs with in these probes, via
+#: `OSA_SILENCE_NOTICE_SECS`. Production is 600s, which no probe can sit
+#: through; the seam exists so the notice can be proved on a REAL terminal
+#: rather than only in-process. High enough that the boot chatter and the
+#: turn's own opening frames cannot trip it by accident.
+SILENCE_BUDGET_SECS = 4
+
+
+def test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever(
+    backend: StubBackend,
+) -> None:
+    """Reproduce the owner's screenshot, then assert the row now names it.
+
+    The report: a live TUI sat on
+
+        grok-4.6 ∙ ⠸ Waiting for response… (1h51m10s · esc to interrupt · ⇣692 · ↑ 139.7k in)
+
+    for one hour and fifty-one minutes. Nothing on that row distinguishes a
+    turn that is streaming from a turn whose backend went silent ninety minutes
+    ago: the elapsed value is anchored to TURN START, so it advances at exactly
+    the same rate in both cases, and the two token counters are frozen snapshots
+    of the last frame that did arrive. There was no way to tell, and no amount
+    of patience could produce one.
+
+    The shape reproduced here is the one no read timeout catches: the SSE stream
+    stays OPEN and healthy — the stub keeps sending `: keepalive` comments, just
+    as `session_routes.ex` does every 30s — while carrying no turn events at
+    all. Every disconnect path in `handle_backend.rs` (`SseReconnecting`,
+    `SseDisconnected`) already finalizes an in-flight turn, so none of them
+    fire; that is precisely why this state had no symptom.
+
+    Two frames arrive first, so the assertion is about a turn that STOPPED
+    rather than one that never started — the former is the reported case and is
+    the harder one, since a turn with tokens on the row looks like it worked.
+
+    Asserted in both directions. Before the budget lapses the row must NOT
+    accuse a merely-slow turn; after it, the row must say what happened.
+    """
+    hold_turn()
+    prior = os.environ.get("OSA_SILENCE_NOTICE_SECS")
+    os.environ["OSA_SILENCE_NOTICE_SECS"] = str(SILENCE_BUDGET_SECS)
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+
+            mark = post_mark()
+            s.write(b"REPRODUCE THE STALL")
+            s.pump(SETTLE)
+            s.write(b"\r")
+
+            waited = 0.0
+            while waited < 10.0 and not posts_since(mark, "/api/v1/orchestrate"):
+                s.pump(0.25)
+                waited += 0.25
+            if not posts_since(mark, "/api/v1/orchestrate"):
+                raise AssertionError(
+                    "the prompt never reached the backend, so there was no turn "
+                    f"to stall.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # Two frames land, and then the backend goes quiet forever. This is
+            # the state: tokens on the row, a live stream, and nothing coming.
+            push_sse(
+                "streaming_token",
+                {"text": "Search", "session_id": "pty-stub-session"},
+            )
+            push_sse(
+                "streaming_token",
+                {"text": "ing…", "session_id": "pty-stub-session"},
+            )
+            if not s.wait_for_text("esc to interrupt", 5.0):
+                raise AssertionError(
+                    "the TUI never showed a running turn, so there is no stall "
+                    f"to detect.\n--- rendered screen ---\n{s.dump()}"
+                )
+
+            # Well inside the budget: a slow turn must not be accused.
+            s.pump(1.0)
+            early = "\n".join(s.lines())
+            if "no response for" in early:
+                raise AssertionError(
+                    "a turn that has been quiet for ~1s was reported as stalled. "
+                    "The notice must not fire on a merely-slow turn.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # Past it: the row must state the silence. The spinner keeps
+            # spinning and the turn is untouched — this is a notice, not a
+            # timeout — so the ONLY new evidence is the text.
+            if not s.wait_for_text("no response for", SILENCE_BUDGET_SECS + 8.0):
+                raise AssertionError(
+                    "after "
+                    f"{SILENCE_BUDGET_SECS}s of total backend silence the row "
+                    "still says nothing about it. This is the reported defect: "
+                    "a wedged turn and a working turn render identically.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # The turn is still alive and still interruptible — nothing was
+            # cancelled to produce that message.
+            screen = "\n".join(s.lines())
+            if "esc to interrupt" not in screen:
+                raise AssertionError(
+                    "the silence notice ended or disarmed the turn. It must be "
+                    "a report, never a timeout.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+
+            # And a frame arriving clears it: the notice tracks LIVENESS, not
+            # turn age. Without this half, a notice that latched on forever
+            # would pass the assertion above and still be useless.
+            push_sse(
+                "streaming_token",
+                {"text": " again", "session_id": "pty-stub-session"},
+            )
+            s.pump(1.5)
+            revived = "\n".join(s.lines())
+            if "no response for" in revived:
+                raise AssertionError(
+                    "a frame arrived and the stall notice stayed on screen. It "
+                    "is anchored to turn age, not to the last frame — which is "
+                    f"the original defect.\n--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        if prior is None:
+            os.environ.pop("OSA_SILENCE_NOTICE_SECS", None)
+        else:
+            os.environ["OSA_SILENCE_NOTICE_SECS"] = prior
+        release_turn()
+
+
 TESTS = [
     test_resize_sweep,
     test_resize_with_transcript,
@@ -2267,6 +2398,7 @@ TESTS = [
     test_alt_enter_delivers_a_queued_message_into_the_live_turn,
     test_the_queued_row_advertises_the_key_that_delivers,
     test_a_split_alt_enter_does_not_interrupt,
+    test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever,
 ]
 
 
