@@ -636,6 +636,15 @@ config :optimal_system_agent,
   # key; `/compact` is unaffected and stays available.
   proactive_compaction_enabled: System.get_env("OSA_PROACTIVE_COMPACTION") != "false",
 
+  # Ceiling on the window every compaction threshold is derived from. It exists
+  # as a cost brake -- a 1M-context model that never compacts grows the prompt
+  # quadratically -- but it applies to EVERY model above it, so a 500k model
+  # compacts at ~167k instead of ~467k and loses two thirds of the window it is
+  # being billed for. That is a cost/recalltradeoff only the operator can make,
+  # and until now it was reachable only from application config, i.e. not at all
+  # inside an installed release. Unset keeps the 200,000 default.
+  compaction_context_ceiling: parse_int.(System.get_env("OSA_CONTEXT_CEILING"), 200_000),
+
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.
   working_dir:
