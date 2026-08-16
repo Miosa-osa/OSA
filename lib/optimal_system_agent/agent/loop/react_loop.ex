@@ -1544,30 +1544,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # going" invites re-planning from whatever the model last had in view. Same
   # reasoning as `ProactiveCompaction.continuation_message/1`, which states the
   # open plan verbatim for exactly this reason.
+  #
+  # The body is now Codex's `goals/continuation.md`, rendered by
+  # `Agent.Loop.GoalPrompt` — see that module for what was ported verbatim
+  # (objective-as-untrusted-data framing, XML escaping, the completion audit's
+  # burden-of-proof wording) and what was adapted (Codex reports a token budget;
+  # OSA reports verification rounds against the tracker's lifetime cap).
   defp goal_continuation_message(snap) do
-    goal = Map.get(snap || %{}, :goal)
-    status = Map.get(snap || %{}, :status, :active)
-
-    off_track_note =
-      if status == :off_track do
-        "\n\nThe verification panel judged the current approach off-track; a re-plan " <>
-          "directive is queued. Take a materially different approach."
-      else
-        ""
-      end
-
-    %{
-      role: "user",
-      content:
-        "[Goal loop] You have an anchored goal that has NOT been verified complete:\n\n" <>
-          "  #{goal}\n\n" <>
-          "Your previous answer ended the step, not the goal. Continue working toward " <>
-          "the goal now — take the next concrete action (read, edit, run, test) rather " <>
-          "than restating a plan or re-deriving what to do. If you believe the goal is " <>
-          "already met, do not simply assert it: produce the evidence (a passing test, a " <>
-          "checked output, the written file) that an independent reviewer would need." <>
-          off_track_note
-    }
+    OptimalSystemAgent.Agent.Loop.GoalPrompt.continuation_message(
+      snap,
+      Map.get(snap || %{}, :session_id)
+    )
   end
 
   # Re-estimate `last_input_tokens` from the freshly-folded history.

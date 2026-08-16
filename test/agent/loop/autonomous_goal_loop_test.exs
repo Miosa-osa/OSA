@@ -243,8 +243,15 @@ defmodule OptimalSystemAgent.Agent.Loop.AutonomousGoalLoopTest do
         |> Map.get(:messages, [])
         |> Enum.map_join("\n", &to_string(Map.get(&1, :content) || ""))
 
-      assert String.contains?(texts, "[Goal loop]")
+      # The continuation body is now Codex's `goals/continuation.md` (see
+      # `Agent.Loop.GoalPrompt`), so the old `[Goal loop]` marker is gone. What
+      # this test is actually about is unchanged and still asserted: the goal
+      # comes back VERBATIM, wrapped as data, with the instruction not to shrink
+      # it — never a bare "keep going".
+      assert String.contains?(texts, "<objective>")
       assert String.contains?(texts, "ship the widget exporter")
+
+      assert String.contains?(texts, "do not redefine success around a smaller or easier task")
 
       GoalTracker.reset(session_id)
     end

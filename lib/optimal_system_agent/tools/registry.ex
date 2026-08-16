@@ -1191,6 +1191,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "bash_output" => OptimalSystemAgent.Tools.Builtins.BashOutput.Tool,
       "session_search" => OptimalSystemAgent.Tools.Builtins.SessionSearch.Tool,
       "progress_note" => OptimalSystemAgent.Tools.Builtins.ProgressNote.Tool,
+      "create_goal" => OptimalSystemAgent.Tools.Builtins.Goal.CreateTool,
+      "update_goal" => OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool,
 
       # ── Code / utility ─────────────────────────────────────────────────
       "repl" => OptimalSystemAgent.Tools.Builtins.REPL.Tool,

@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.PromptLoader do
     compactor_summary
     compactor_key_facts
     cortex_synthesis
+    goal_continuation
   )a
 
   # ── Public API ─────────────────────────────────────────────────

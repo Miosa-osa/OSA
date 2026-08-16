@@ -101,9 +101,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ProgressNote.Handler do
   # losing the cross-turn machine is a degradation, not a failure of the tool.
   @spec anchor_goal(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   defp anchor_goal(sid, goal) do
-    case OptimalSystemAgent.Agent.Loop.GoalTracker.start(sid, goal) do
-      %{goal: saved} when is_binary(saved) and saved != "" -> {:ok, saved}
-      _ -> ProgressLedger.set_goal(sid, goal)
+    # `anchor_new/3`, not `start/3`: this is a MODEL-authored anchor, and
+    # `start/3` would silently replace a live goal — resetting `turn_count`,
+    # `verify_run_count` and `stall_count` and handing the run a fresh budget.
+    # That is the one move a self-authored goal must not be able to make, so it
+    # refuses here exactly as `create_goal` does. The user's `/goal` still calls
+    # `start/3` and can re-anchor freely.
+    case OptimalSystemAgent.Agent.Loop.GoalTracker.anchor_new(sid, goal) do
+      {:ok, %{goal: saved}} when is_binary(saved) and saved != "" ->
+        {:ok, saved}
+
+      {:error, {:goal_active, snap}} ->
+        {:error, "a goal is already active and cannot be replaced while it is live: #{snap.goal}"}
+
+      _ ->
+        ProgressLedger.set_goal(sid, goal)
     end
   rescue
     _ -> ProgressLedger.set_goal(sid, goal)

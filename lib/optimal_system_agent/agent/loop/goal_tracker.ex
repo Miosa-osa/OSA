@@ -122,9 +122,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   @table :osa_goal_tracker
 
-  @type status :: :active | :paused | :completed | :off_track
+  @type status :: :active | :paused | :completed | :off_track | :blocked
   @type phase :: :idle | :planning | :executing
-  @type pause_reason :: :no_progress | :run_cap | :off_track | :user | nil
+  @type pause_reason :: :no_progress | :run_cap | :off_track | :user | :blocked | nil
 
   defmodule Snapshot do
     @moduledoc "Persisted per-session goal-tracker state."
@@ -140,6 +140,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             last_gap_fingerprint: integer() | nil,
             stall_count: non_neg_integer(),
             pause_reason: OptimalSystemAgent.Agent.Loop.GoalTracker.pause_reason(),
+            blocked_claims: non_neg_integer(),
+            blocked_claim_turn: non_neg_integer() | nil,
             history: [String.t()],
             updated_at: DateTime.t() | nil
           }
@@ -154,6 +156,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               last_gap_fingerprint: nil,
               stall_count: 0,
               pause_reason: nil,
+              blocked_claims: 0,
+              blocked_claim_turn: nil,
               history: [],
               updated_at: nil
   end
@@ -284,6 +288,156 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     log(session_id, tag(snap, "[goal-tracker] goal started: #{goal}"))
     emit(snap, :started)
     snap
+  end
+
+  @doc """
+  The MODEL-facing anchor. Unlike `start/3` — which is the USER's `/goal`, and
+  may re-anchor at will — this refuses while a goal is still unfinished.
+
+  Ported from Codex's `create_goal`, which fails with "cannot create a new goal
+  because this thread has an unfinished goal; complete the existing goal first"
+  and whose `update_goal` hardcodes `objective: None`. Between them the model
+  can author its objective exactly once and can never edit it afterwards.
+
+  That refusal IS the honesty mechanism. A self-authored definition of done is
+  only dangerous if it can be re-authored: the failure mode is not writing an
+  easy goal at t=0 (the panel still judges it against the founding request), it
+  is quietly swapping in an easier one at t=n once the hard one looks unwinnable
+  — which `start/3` would happily do, resetting `verify_run_count`, `stall_count`
+  and `turn_count` and handing the run a fresh budget in the bargain.
+
+  Returns `{:error, {:goal_active, snap}}` while a goal is `:active`/`:off_track`.
+  A `:paused`, `:blocked` or `:completed` goal may be superseded.
+  """
+  @spec anchor_new(String.t(), String.t(), keyword()) ::
+          {:ok, Snapshot.t()} | {:error, {:goal_active, Snapshot.t()}}
+  def anchor_new(session_id, goal, opts \\ [])
+
+  def anchor_new(session_id, goal, opts)
+      when is_binary(session_id) and is_binary(goal) and is_list(opts) do
+    case get(session_id) do
+      %Snapshot{status: status, goal: existing} = snap
+      when status in [:active, :off_track] and is_binary(existing) and existing != "" ->
+        {:error, {:goal_active, snap}}
+
+      _ ->
+        {:ok, start(session_id, goal, opts)}
+    end
+  end
+
+  @doc """
+  Record the model's claim that the goal is met.
+
+  This deliberately does NOT set `:completed`. Only `advance/2` with a
+  `:complete` verdict from the skeptic panel can do that, and this function
+  cannot reach it — all it does is make the next panel round DUE, by zeroing the
+  distance to the reverify cadence.
+
+  This is grok-build's rule, where `update_goal(completed: true)` completes the
+  goal only when the classifier is disabled entirely
+  (`UpdateGoalAck::CompletedWithoutClassifier`). Codex has no equivalent: there,
+  `update_goal(status: "complete")` writes `complete` straight to the database
+  and the only thing standing between a self-authored goal and a self-declared
+  success is the wording of the continuation prompt.
+
+  Returns `{:ok, snap}`, or `{:error, :not_live}` when there is no live goal.
+  """
+  @spec claim_complete(String.t()) :: {:ok, Snapshot.t()} | {:error, :not_live}
+  def claim_complete(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{status: status} = snap when status in [:active, :off_track] ->
+        snap = %{
+          snap
+          | rounds_since_verify: max(snap.rounds_since_verify, reverify_after()),
+            updated_at: DateTime.utc_now()
+        }
+
+        put(snap)
+        log(session_id, tag(snap, "[goal-tracker] completion claimed; verification forced"))
+        {:ok, snap}
+
+      _ ->
+        {:error, :not_live}
+    end
+  end
+
+  @doc """
+  Record the model's claim that it is blocked.
+
+  The claim only takes effect on the THIRD consecutive goal turn that carries
+  it. Both reference harnesses require exactly three, but only grok-build
+  enforces it in the harness rather than in prose — Codex states the rule in the
+  `update_goal` tool description and the continuation prompt and then trusts the
+  model to count, which a model that wants to stop has every reason not to do.
+
+  Consecutiveness is measured in goal TURNS, not calls: repeated claims inside
+  one turn cannot ratchet the streak, and a turn that passes without a claim
+  resets it to zero.
+
+  Returns `{:blocked, snap}` once the threshold is met, `{:pending, streak, snap}`
+  below it, or `{:error, :not_live}`.
+  """
+  @spec claim_blocked(String.t()) ::
+          {:blocked, Snapshot.t()} | {:pending, pos_integer(), Snapshot.t()} | {:error, :not_live}
+  def claim_blocked(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{status: status} = snap when status in [:active, :off_track] ->
+        streak = blocked_streak(snap)
+
+        snap = %{
+          snap
+          | blocked_claims: streak,
+            blocked_claim_turn: snap.turn_count,
+            updated_at: DateTime.utc_now()
+        }
+
+        if streak >= blocked_threshold() do
+          snap = %{snap | status: :blocked, phase: :idle, pause_reason: :blocked}
+          put(snap)
+
+          log(
+            session_id,
+            tag(snap, "[goal-tracker] goal blocked after #{streak} consecutive claims")
+          )
+
+          emit(snap, :blocked)
+          {:blocked, snap}
+        else
+          put(snap)
+
+          log(
+            session_id,
+            tag(snap, "[goal-tracker] blocked claim #{streak}/#{blocked_threshold()} recorded")
+          )
+
+          {:pending, streak, snap}
+        end
+
+      _ ->
+        {:error, :not_live}
+    end
+  end
+
+  # A claim already made this turn is idempotent, not cumulative. A claim on the
+  # turn immediately after the last one extends the streak; anything else starts
+  # a new one.
+  defp blocked_streak(%Snapshot{blocked_claim_turn: nil}), do: 1
+
+  defp blocked_streak(%Snapshot{blocked_claim_turn: last, turn_count: now, blocked_claims: n}) do
+    cond do
+      last == now -> max(n, 1)
+      last == now - 1 -> n + 1
+      true -> 1
+    end
+  end
+
+  @doc "Consecutive blocked claims required before a goal actually goes `:blocked`."
+  @spec blocked_threshold() :: pos_integer()
+  def blocked_threshold do
+    case Application.get_env(:optimal_system_agent, :goal_blocked_threshold, 3) do
+      n when is_integer(n) and n >= 1 -> n
+      _ -> 3
+    end
   end
 
   defp new_goal_id do
@@ -575,6 +729,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         last_gap_fingerprint: nil,
         stall_count: 0,
         rounds_since_verify: 0,
+        # "If the user resumes a goal that was previously marked blocked, treat
+        # the resumed run as a fresh blocked audit" — Codex's update_goal spec,
+        # and grok's behaviour. Carrying the streak across a resume would let the
+        # goal re-block on the first claim after the user asked for more work.
+        blocked_claims: 0,
+        blocked_claim_turn: nil,
         updated_at: DateTime.utc_now()
     }
 
@@ -642,6 +802,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   @spec off_track?(String.t()) :: boolean()
   def off_track?(session_id), do: status(session_id) == :off_track
+
+  @spec blocked?(String.t()) :: boolean()
+  def blocked?(session_id), do: status(session_id) == :blocked
 
   @doc """
   `true` when the loop should keep autonomously driving this goal: no
@@ -858,9 +1021,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     _ -> nil
   end
 
-  @statuses [:active, :paused, :completed, :off_track]
+  @statuses [:active, :paused, :completed, :off_track, :blocked]
   @phases [:idle, :planning, :executing]
-  @pause_reasons [:no_progress, :run_cap, :off_track, :user]
+  @pause_reasons [:no_progress, :run_cap, :off_track, :user, :blocked]
 
   defp encode(%Snapshot{} = snap) do
     %{
@@ -875,6 +1038,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "last_gap_fingerprint" => snap.last_gap_fingerprint,
       "stall_count" => snap.stall_count,
       "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
+      "blocked_claims" => snap.blocked_claims,
+      "blocked_claim_turn" => snap.blocked_claim_turn,
       "history" => snap.history,
       "updated_at" => snap.updated_at && DateTime.to_iso8601(snap.updated_at)
     }
@@ -896,6 +1061,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       last_gap_fingerprint: int_or_nil(Map.get(map, "last_gap_fingerprint")),
       stall_count: non_neg_int(Map.get(map, "stall_count")),
       pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),
+      blocked_claims: non_neg_int(Map.get(map, "blocked_claims")),
+      blocked_claim_turn: int_or_nil(Map.get(map, "blocked_claim_turn")),
       history: string_list(Map.get(map, "history")),
       updated_at: decode_datetime(Map.get(map, "updated_at"))
     }

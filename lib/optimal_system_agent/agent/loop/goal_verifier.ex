@@ -964,13 +964,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     lenses = lenses()
     working_dir = Map.get(state, :working_dir)
     delegation_depth = Map.get(state, :delegation_depth, 0)
+    contract = founding_contract(session_id, goal)
 
     configs =
       for idx <- 0..(n - 1) do
         lens = Enum.at(lenses, rem(idx, length(lenses)))
 
         %{
-          task: skeptic_prompt(goal, diff, idx, lens),
+          task: skeptic_prompt(goal, diff, idx, lens, contract),
           role: "goal-verifier-skeptic",
           name: "goal-skeptic-#{idx}-#{lens.key}",
           # What this worker IS, for the TUI roster. Without it the orchestrator
@@ -1121,7 +1122,72 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # The active lens set (data-driven so it is easy to extend/override).
   defp lenses, do: @lenses
 
-  defp skeptic_prompt(goal, diff, idx, lens) do
+  # The founding request, as recorded by `TaskBrief` when the goal was first
+  # anchored — NOT the objective the model is currently working to.
+  #
+  # This is the single most important input a panel judging a SELF-AUTHORED goal
+  # can have, and it is the thing Codex's design does not have at all: there, the
+  # completion audit is performed by the same model, in the same turn, against
+  # the objective that model wrote. The restatement is the only contract, so a
+  # goal narrowed at authoring time is narrowed for every judge that ever sees
+  # it.
+  #
+  # grok-build gets this right and the wording below is theirs
+  # (`templates/goal_verifier_prompt.md`): the objective is "the immutable
+  # contract", the derived checklist "may clarify but never narrow or override"
+  # it, and a self-serving criterion "is itself grounds to refute".
+  #
+  # Returns "" when there is no brief, or when the brief says nothing the goal
+  # text does not already say — in which case there is no second reading to
+  # compare against and the extra prompt weight would be noise.
+  defp founding_contract(session_id, goal) do
+    with true <- is_binary(session_id) and session_id != "",
+         {:ok, brief} <- OptimalSystemAgent.Agent.TaskBrief.load(session_id),
+         founding <- text(Map.get(brief, :goal)),
+         criteria <- text(Map.get(brief, :acceptance_criteria)),
+         block when block != "" <- contract_block(founding, criteria, text(goal)) do
+      block
+    else
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  catch
+    _, _ -> ""
+  end
+
+  defp contract_block(founding, criteria, goal) do
+    founding_part =
+      if founding != "" and founding != goal do
+        "\n\n## The founding request (authoritative)\n\n" <>
+          founding <>
+          "\n\nThe goal stated above is the agent's own restatement of this request. This " <>
+          "founding request is the immutable contract: the restatement and any criteria " <>
+          "derived from it may clarify it but may never narrow or override it. If the " <>
+          "restatement drops, softens, or redefines something this request asked for, that " <>
+          "is itself grounds to refute — judge against the request, not against the " <>
+          "easier version of it."
+      else
+        ""
+      end
+
+    criteria_part =
+      if criteria != "" and criteria != goal and criteria != founding do
+        "\n\n## Acceptance criteria recorded at goal creation\n\n" <>
+          criteria <>
+          "\n\nJudge each criterion met or unmet, but refute any requirement of the founding " <>
+          "request that these criteria omit. A criterion is a floor, never a ceiling."
+      else
+        ""
+      end
+
+    founding_part <> criteria_part
+  end
+
+  defp text(v) when is_binary(v), do: String.trim(v)
+  defp text(_), do: ""
+
+  defp skeptic_prompt(goal, diff, idx, lens, contract) do
     """
     You are an ADVERSARIAL, INDEPENDENT reviewer (skeptic ##{idx}, #{lens.title} lens) with NO \
     access to how this change was produced. Your job is to try to REFUTE the claim that the goal \
@@ -1144,6 +1210,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     ## Goal
 
     #{goal}
+    #{contract}
 
     ## Accumulated diff (working tree vs. last commit, may be truncated)
 
