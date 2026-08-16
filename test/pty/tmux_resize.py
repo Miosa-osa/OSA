@@ -44,6 +44,7 @@ STUB_PORT = 12793
 SESSION = "osa-resize-probe"
 
 BANDS = {
+    "welcome banner": "Welcome",
     "composer prompt": "❯",
     "hint row": "/ commands",
     "status bar": "ctx",
@@ -115,6 +116,8 @@ def main() -> int:
             before = capture(pane)
             if BANDS["composer prompt"] not in before:
                 return _skip("binary did not reach a composer inside tmux")
+            if BANDS["welcome banner"] not in before:
+                failures.append("welcome banner was absent before the resize")
 
             # The reported gesture. `resize-window` changes the pane geometry,
             # which is what a real drag of the outer terminal produces.
@@ -130,10 +133,10 @@ def main() -> int:
 
             for name, needle in BANDS.items():
                 n = after.count(needle)
-                if n > 1:
+                if n != 1:
                     failures.append(
-                        f"{name}: {n} copies after the drag (expected 1) — "
-                        "stranded chrome in tmux history"
+                        f"{name}: {n} copies after the drag (expected exactly 1) — "
+                        "chrome was either stranded or erased during resize replay"
                     )
 
             if failures:

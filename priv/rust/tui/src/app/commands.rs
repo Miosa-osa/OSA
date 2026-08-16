@@ -137,6 +137,7 @@ impl App {
                 // back on screen, so it clears with the rest. Leaving it would
                 // resurrect the whole conversation on the next resize.
                 self.committed.clear();
+                self.welcome_banner = None;
                 crate::app::exit_dump::clear();
                 self.attachments.clear();
                 // ...including everything that can PUT A MESSAGE BACK.
@@ -892,6 +893,7 @@ impl App {
                         output,
                         action: None,
                         command: "context".into(),
+                        effort: None,
                         goal: None,
                     }))
                 }
@@ -934,6 +936,7 @@ impl App {
                                     .into(),
                                 action: None,
                                 command: "compact".into(),
+                                effort: None,
                                 goal: None,
                             },
                         ))
@@ -962,6 +965,7 @@ impl App {
                         output: format!("Recap:\n{}", r.recap),
                         action: None,
                         command: "recap".into(),
+                        effort: None,
                         goal: None,
                     },
                 )),

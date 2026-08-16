@@ -38,9 +38,9 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
   @known_skill_categories ~w(core automation reasoning)
 
   # Config directory names scanned for a `skills/` subtree (Claude-compatible).
-  @external_cfg_dirs ~w(.osa .claude .agents .grok)
+  @external_cfg_dirs ~w(.osa .claude .agents .codex .grok)
   # User-scope config dirs other than .osa (whose skills dir is :skills_dir).
-  @user_ext_dirs ~w(.claude .agents .grok)
+  @user_ext_dirs ~w(.claude .agents .codex .grok)
   @skills_subdir "skills"
 
   # Path segments that must never be scanned for skills.

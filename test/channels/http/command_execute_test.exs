@@ -77,4 +77,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     assert conn.status == 200
     assert is_binary(Jason.decode!(conn.resp_body)["output"])
   end
+
+  test "/fast returns the authoritative post-command effort for persistent UI" do
+    previous = OptimalSystemAgent.Agent.Effort.current()
+    :ok = OptimalSystemAgent.Agent.Effort.set(:medium)
+
+    on_exit(fn -> OptimalSystemAgent.Agent.Effort.set(previous) end)
+
+    body = execute("fast").resp_body |> Jason.decode!()
+
+    assert body["effort"] == "fast"
+    assert OptimalSystemAgent.Agent.Effort.current() == :fast
+  end
 end

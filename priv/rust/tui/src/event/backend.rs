@@ -550,6 +550,12 @@ pub enum BackendEvent {
         reason: String,
     },
 
+    /// Human-facing backend notice that belongs in scrollback.
+    SystemNotice {
+        message: String,
+        level: String,
+    },
+
     // === Parse Warnings ===
     ParseWarning {
         message: String,

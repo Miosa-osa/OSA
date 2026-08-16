@@ -896,8 +896,9 @@ impl App {
                     // the model is never offered.
                     if !self.welcome_injected && !self.chat.has_messages {
                         self.welcome_injected = true;
-                        self.pending_welcome_banner =
-                            Some((tools.len(), Some(provider), Some(model)));
+                        let banner = (tools.len(), Some(provider), Some(model));
+                        self.pending_welcome_banner = Some(banner.clone());
+                        self.welcome_banner = Some(banner);
                         // Keep the status-bar folder label in lockstep with the
                         // banner: both show the real working dir the agent operates
                         // in, so the two surfaces can never disagree.
@@ -2376,6 +2377,10 @@ impl App {
             }
             BackendEvent::ParseWarning { message } => {
                 warn!("SSE parse warning: {}", message);
+            }
+            BackendEvent::SystemNotice { message, level } => {
+                self.chat.add_system_message(&message, &level);
+                self.recompute_layout();
             }
             BackendEvent::AutoModePaused {
                 blocked_count,

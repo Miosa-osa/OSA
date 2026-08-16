@@ -532,6 +532,11 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
 
         "system_event" => parse_system_event(data),
 
+        // Accounting and recovery telemetry is useful to backend observers but
+        // does not have a dedicated TUI surface. Recognise it explicitly so a
+        // healthy stream does not generate misleading "unknown event" warnings.
+        "cost_update" | "doom_loop_detected" => None,
+
         // The backend unwraps system_event sub-events: the SSE frame header
         // arrives as e.g. "orchestrator_agent_started" rather than "system_event".
         // Route these directly to the same parser.
@@ -1939,6 +1944,31 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "overdrive_resumed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("overdrive_resumed", e)),
+            };
+            if ev.message.trim().is_empty() {
+                None
+            } else {
+                Some(BackendEvent::SystemNotice {
+                    message: ev.message,
+                    level: "warning".to_string(),
+                })
+            }
+        }
+
+        // Internal bookkeeping events have no user-facing state to update.
+        // They are still known protocol members and must not be reported as
+        // parser failures.
+        "progress_ledger" | "cost_update" | "doom_loop_detected" => None,
+
         // Multi-agent workflow events may also arrive wrapped as a system_event
         // (with an `event` field). Delegate to the top-level parser, which builds
         // them from the same frame data.
@@ -1984,6 +2014,30 @@ mod tests {
             "idle timeout {:?} must not be tighter than 3 keepalive intervals",
             IDLE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn known_internal_events_do_not_become_parse_warnings() {
+        let direct = br#"{"type":"cost_update","session_cost_usd":0.42}"#;
+        assert!(parse_sse_event("cost_update", direct).is_none());
+
+        let progress = br#"{"type":"system_event","event":"progress_ledger","action":"append"}"#;
+        assert!(parse_sse_event("system_event", progress).is_none());
+
+        let doom = br#"{"type":"doom_loop_detected","tool_name":"file_read"}"#;
+        assert!(parse_sse_event("doom_loop_detected", doom).is_none());
+    }
+
+    #[test]
+    fn resumed_overdrive_is_a_visible_warning() {
+        let frame = br#"{"type":"system_event","event":"overdrive_resumed","message":"full auto restored"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert_eq!(message, "full auto restored");
+                assert_eq!(level, "warning");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
     }
 
     /// THE defect: a half-open connection yields neither bytes nor an error, so

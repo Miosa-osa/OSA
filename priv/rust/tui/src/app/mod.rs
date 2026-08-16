@@ -440,6 +440,10 @@ pub struct App {
     // Welcome banner (tool_count, provider, model) waiting to be pushed into the
     // terminal scrollback by the event loop via insert_before.
     pub pending_welcome_banner: Option<(usize, Option<String>, Option<String>)>,
+    /// Canonical inputs for rebuilding the startup banner after a destructive
+    /// source-backed resize replay. Unlike `pending_welcome_banner`, this is
+    /// retained after the first paint.
+    pub welcome_banner: Option<(usize, Option<String>, Option<String>)>,
 
     // Transcript viewer (Ctrl+O) — additive full-screen reader over the in-memory
     // conversation. `transcript_log` retains finalized messages as they drain into
@@ -835,6 +839,7 @@ impl App {
             welcome_injected: false,
             dir_session_resolved: false,
             pending_welcome_banner: None,
+            welcome_banner: None,
 
             transcript_log: Vec::new(),
             committed: Vec::new(),

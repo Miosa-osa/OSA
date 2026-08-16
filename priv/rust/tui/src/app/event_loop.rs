@@ -1108,6 +1108,8 @@ impl App {
                 shrink_streak = 0;
                 replay_scrollback(
                     &mut terminal,
+                    self.welcome_banner.as_ref(),
+                    &self.working_dir,
                     &self.committed,
                     size.cols,
                     size.rows.max(1),
@@ -2969,19 +2971,44 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
 /// into history.
 fn replay_scrollback(
     terminal: &mut Term,
+    welcome: Option<&(usize, Option<String>, Option<String>)>,
+    working_dir: &str,
     messages: &[crate::components::chat::message::Message],
     width: u16,
     rows: u16,
     inline_h: u16,
 ) -> Result<()> {
-    type Prepared = (crate::components::chat::message::Message, u16);
+    enum Prepared {
+        Welcome(Vec<ratatui::text::Line<'static>>),
+        Message(crate::components::chat::message::Message, u16),
+    }
+
+    impl Prepared {
+        fn height(&self) -> u16 {
+            match self {
+                Self::Welcome(lines) => lines.len() as u16,
+                Self::Message(_, height) => *height,
+            }
+        }
+
+        fn render(&self, area: Rect, buf: &mut Buffer) {
+            match self {
+                Self::Welcome(lines) => ratatui::widgets::Widget::render(
+                    ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines.clone())),
+                    area,
+                    buf,
+                ),
+                Self::Message(message, _) => message.render_to_buffer(area, buf, 0),
+            }
+        }
+    }
 
     let prepare = |source: &crate::components::chat::message::Message| -> Prepared {
         let mut message = source.clone();
         message.invalidate_for_width();
         message.prepare_for_commit(width);
         let height = message.height(width);
-        (message, height)
+        Prepared::Message(message, height)
     };
 
     // The row the live region must start on for the screen to be full.
@@ -2992,16 +3019,32 @@ fn replay_scrollback(
     // exactly as before.
     let mut head: Vec<Prepared> = Vec::new();
     let mut head_h = 0u16;
-    let mut rest = messages.iter();
-    for source in rest.by_ref() {
-        let (message, height) = prepare(source);
-        if height == 0 {
-            continue;
+    if let Some((tool_count, provider, model)) = welcome {
+        let lines = crate::components::chat::welcome::welcome_lines(
+            width,
+            *tool_count,
+            provider.as_deref(),
+            model.as_deref(),
+            Some(working_dir),
+        );
+        if !lines.is_empty() {
+            head_h = lines.len() as u16;
+            head.push(Prepared::Welcome(lines));
         }
-        head_h = head_h.saturating_add(height);
-        head.push((message, height));
-        if head_h >= floor {
-            break;
+    }
+    let mut rest = messages.iter();
+    if head_h < floor {
+        for source in rest.by_ref() {
+            let message = prepare(source);
+            let height = message.height();
+            if height == 0 {
+                continue;
+            }
+            head_h = head_h.saturating_add(height);
+            head.push(message);
+            if head_h >= floor {
+                break;
+            }
         }
     }
     // Non-zero only when the whole transcript fit above `floor`, in which case
@@ -3023,16 +3066,18 @@ fn replay_scrollback(
         }
         terminal.insert_before(batch_h, |buf| {
             let mut y = lead;
-            for (message, height) in batch.iter() {
-                message.render_to_buffer(Rect::new(0, y, width, *height), buf, 0);
-                y = y.saturating_add(*height);
+            for item in batch.iter() {
+                let height = item.height();
+                item.render(Rect::new(0, y, width, height), buf);
+                y = y.saturating_add(height);
             }
         })?;
         batch.clear();
         Ok(())
     };
 
-    for (message, height) in head.into_iter().chain(rest.map(prepare)) {
+    for message in head.into_iter().chain(rest.map(prepare)) {
+        let height = message.height();
         if height == 0 {
             continue;
         }
@@ -3042,7 +3087,7 @@ fn replay_scrollback(
             lead = 0;
         }
         batch_h = batch_h.saturating_add(height);
-        batch.push((message, height));
+        batch.push(message);
     }
     flush(terminal, &mut batch, batch_h, lead)?;
     Ok(())

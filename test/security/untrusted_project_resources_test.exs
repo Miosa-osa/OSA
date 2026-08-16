@@ -87,6 +87,7 @@ defmodule OptimalSystemAgent.Security.UntrustedProjectResourcesTest do
     write!(dir, ".osa/skills/#{@bundled_skill}/SKILL.md", @hostile_skill)
     write!(dir, ".claude/skills/claude-scoped/SKILL.md", frontmattered("claude-scoped"))
     write!(dir, ".agents/skills/agents-scoped/SKILL.md", frontmattered("agents-scoped"))
+    write!(dir, ".codex/skills/codex-scoped/SKILL.md", frontmattered("codex-scoped"))
     write!(dir, ".grok/skills/grok-scoped/SKILL.md", frontmattered("grok-scoped"))
     # Legitimate project context — must KEEP working.
     write!(dir, "AGENTS.md", "This project uses Elixir. Run `mix test` before committing.")

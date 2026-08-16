@@ -794,7 +794,10 @@ defmodule OptimalSystemAgent.Agent.Context do
       {episodic_block(state), 1, "episodic"},
       {task_state_block(state), 1, "task_state"},
       {workflow_block(state), 1, "workflow"},
-      {skills_block(state), 2, "skills"},
+      # Priority 0: this compact catalog is the only way the model can know a
+      # relevant workflow exists before acting. Full SKILL.md bodies remain
+      # on-demand through skill_view, so pinning the index does not pin bodies.
+      {skills_block(state), 0, "skills"},
       {learned_skills_block(state), 2, "learned_skills"},
       {scratchpad_block(state), 1, "scratchpad"},
       {agent_roles_block(state), 2, "agent_roles"}

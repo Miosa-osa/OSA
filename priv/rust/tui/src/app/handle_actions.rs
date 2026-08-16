@@ -498,6 +498,9 @@ impl App {
     ) {
         match result {
             Ok(resp) => {
+                if let Some(effort) = resp.effort.clone() {
+                    self.status.set_effort(Some(effort));
+                }
                 // A `/goal` answer is ACTED on, not merely printed: it carries
                 // the backend's own liveness verdict, and the end-of-turn poll
                 // decides from it whether another turn starts.
@@ -2882,6 +2885,7 @@ mod goal_routing_tests {
             output: String::new(),
             action: None,
             command: command.to_string(),
+            effort: None,
             goal,
         }
     }

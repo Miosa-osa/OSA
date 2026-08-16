@@ -69,6 +69,10 @@ defmodule OptimalSystemAgent.Events.StrandedEventsTest do
     "streaming_token" => "llm_client broadcasts directly (type: :streaming_token)",
     "thinking_delta" => "llm_client broadcasts directly (type: :thinking_delta)",
     "provider_retry" => "parsed as a system_event sub-event by the SSE route",
+    "cost_update" => "accounting broadcasts directly with type: :cost_update",
+    "doom_loop_detected" =>
+      "doom-loop recovery broadcasts directly with type: :doom_loop_detected",
+    "overdrive_resumed" => "agent loop broadcasts directly as a system_event",
     "background_agent_failed" => "background surface broadcasts directly",
     "background_agent_stalled" => "background surface broadcasts directly",
     # Broadcast as {:osa_event, %{type: :background_agent_completed}} — see
