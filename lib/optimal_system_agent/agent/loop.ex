@@ -1833,7 +1833,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
-  def handle_cast(:poke, state), do: {:noreply, state}
+  # A poke that lands on a non-idle loop. The NOTIFICATION is not lost — this
+  # clause drops the announcement, not the queue entry, and `drain/1` is the
+  # only thing that consumes one. What used to be missing was anybody asking
+  # again: the turn in flight would end, go idle, and never look. It looks now,
+  # from the tail of `run_and_reply/1` and from the plan-mode return, via
+  # `TaskNotifications.settle/1`.
+  #
+  # So this stays a no-op deliberately rather than re-queuing or retrying: two
+  # mechanisms racing to start the same synthetic turn is a worse failure than
+  # the one being fixed, and the turn boundary is the point where reading the
+  # result is actually useful.
+  def handle_cast(:poke, state) do
+    Logger.debug(
+      "[loop] poke for #{state.session_id} arrived mid-turn (status #{inspect(state.status)}) — " <>
+        "deferred to the turn boundary, not dropped"
+    )
+
+    {:noreply, state}
+  end
 
   @impl true
   def handle_cast({:rewind_conversation, messages, meta}, state) do
@@ -2116,6 +2134,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
         {:ok, plan_text, state} ->
           state = %{state | status: :idle}
 
+          # Plan mode is the turn-completion path that never enters
+          # `run_and_reply/1`, so it never reached that function's settle. A
+          # plan-mode turn is often the LONGEST turn in a session — the most
+          # time for a delegated child to finish behind it, and the most likely
+          # to strand its result.
+          _ = TaskNotifications.settle(state.session_id)
+
           # Plan-mode returns without going through run_and_reply, so no
           # :post_response fires — persist the plan here (tool_name "plan")
           # so it appears in /sessions resume, transcript, and recap. The
@@ -2265,6 +2290,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
         status: :idle,
         last_meta: meta
     }
+
+    # This turn is over and the loop is going idle. Anything a background child
+    # sent back after this turn's LAST step boundary has not been read by
+    # anyone, and the `:poke` that announced it — if it arrived while `status`
+    # was still non-`:idle` — was dropped by the catch-all below. Ask the queue
+    # itself; the poke is advisory, the queue is the fact. See
+    # `TaskNotifications.settle/1` for why this cannot spin.
+    _ = TaskNotifications.settle(state.session_id)
 
     Telemetry.emit_context_pressure(state)
 

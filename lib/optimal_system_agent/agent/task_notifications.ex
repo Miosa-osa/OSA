@@ -75,7 +75,72 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
 
   @doc "Whether any notifications are pending for `session_id`."
   @spec pending?(String.t()) :: boolean()
-  def pending?(session_id), do: count(session_id) > 0
+  def pending?(session_id) when is_binary(session_id), do: count(session_id) > 0
+  def pending?(_), do: false
+
+  @doc """
+  Ask whether a result is sitting unread for `session_id` and, if one is, poke
+  the loop so it gets read. Returns `:unread` or `:clear`.
+
+  ## The window this closes
+
+  This queue is drained at exactly two sites: a busy turn's step boundary
+  (`ReactLoop.inject_pending_task_notifications/1`) and the idle poke
+  (`Loop.handle_cast(:poke, %{status: :idle})`). A turn has a LAST step
+  boundary, and everything after it — the finalize block, and the whole
+  plan-mode return path, which never enters `run_and_reply/1` at all — runs with
+  `status` still non-`:idle`. A `:poke` landing in that window met the catch-all
+  `handle_cast(:poke, state)` and was dropped, with nothing re-poking.
+  `pending?/1` was the obvious guard and had no production caller, so no turn
+  boundary ever asked.
+
+  ## Why the queue and not the poke
+
+  The poke is ADVISORY; the queue is the FACT. Re-queuing a dropped poke would
+  fix only the pokes we know went missing. Asking the queue at every turn
+  completion also covers a poke that raced the status flip, and a future caller
+  that queues a result and forgets to poke at all — the failure mode that
+  produced this one.
+
+  This is called from the tail of a turn, so it never raises: a poke that cannot
+  be delivered (the loop is shutting down, its name is deregistered) leaves the
+  notification queued for the next incarnation, which is the same place a
+  dropped poke leaves it, and reports `:clear` rather than claiming a delivery
+  it did not make.
+
+  It cannot spin. `drain/1` is destructive, so the synthetic turn this poke
+  starts empties the queue, and that turn's own `settle/1` finds it clear.
+  """
+  @spec settle(String.t() | nil) :: :unread | :clear
+  def settle(session_id) when is_binary(session_id) do
+    if pending?(session_id) do
+      poker().poke(session_id)
+      :unread
+    else
+      :clear
+    end
+  rescue
+    e ->
+      Logger.debug("[TaskNotifications] settle/1 could not poke #{session_id}: #{inspect(e)}")
+      :clear
+  catch
+    kind, reason ->
+      Logger.debug("[TaskNotifications] settle/1 caught #{kind}: #{inspect(reason)}")
+      :clear
+  end
+
+  def settle(_), do: :clear
+
+  # Injected by the same convention `:background_manager` and `:subagent_roster`
+  # already use. Also breaks what would otherwise be a compile-time cycle back
+  # into `Agent.Loop`.
+  defp poker do
+    Application.get_env(
+      :optimal_system_agent,
+      :notification_poker,
+      OptimalSystemAgent.Agent.Loop
+    )
+  end
 
   @doc """
   Check-and-set the per-task \"notified\" flag. Returns `true` exactly once per
