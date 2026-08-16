@@ -92,4 +92,101 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgMetricsTest do
       assert hash == ToolArgMetrics.arg_hash(%{"path" => "/a"})
     end
   end
+
+  describe "assertion_lines/1" do
+    test "recovers the propositions a test file asserted, which the log did not carry" do
+      # Verbatim shape of `model-extraction-relu-logits`'s own test, the case
+      # docs/research/failure-taxonomy.md §2.1 could only describe in prose
+      # because the event log stored the path and not the content. Its test
+      # measured precision; the verifier measures recall. That is visible here
+      # and is visible nowhere in the artefacts of that run.
+      content = """
+      import numpy as np
+
+      def test_stolen_rows_are_real_neurons():
+          stolen = np.load('/app/stolen_A1.npy')
+          matched = count_matches(stolen, A1)
+          assert matched == stolen.shape[0], f"{matched}/{stolen.shape[0]} stolen rows matched"
+      """
+
+      assert [line] = ToolArgMetrics.assertion_lines(%{"path" => "t.py", "content" => content})
+      assert line =~ "matched == stolen.shape[0]"
+      # Indentation collapsed so the same assertion at two nesting depths
+      # compares equal across trials.
+      refute String.starts_with?(line, " ")
+    end
+
+    test "reads a file_edit's new_string, not only a whole-file write" do
+      args = %{
+        "path" => "/app/tests/test_x.py",
+        "old_string" => "pass",
+        "new_string" => "    assert out == expected"
+      }
+
+      assert ToolArgMetrics.assertion_lines(args) == ["assert out == expected"]
+    end
+
+    test "covers the assertion forms of the languages this corpus writes tests in" do
+      content = """
+      EXPECT_EQ(rc, 0);
+      expect(result).toBe(42);
+      assert_eq!(lhs, rhs);
+      if got != want { t.Fatalf("got %v want %v", got, want) }
+      require.NoError(t, err)
+      """
+
+      assert length(ToolArgMetrics.assertion_lines(args_for(content))) == 5
+    end
+
+    test "nil, not [], when the write carried no assertion" do
+      assert ToolArgMetrics.assertion_lines(args_for("def main():\n    return 0\n")) == nil
+    end
+
+    test "does not match a word that merely contains an assertion verb" do
+      # `reassert_all` and prose containing "expected" are the two false
+      # positives a bare substring match produces on real source.
+      content = "reassert_all(state)\n# the expected output is described above\n"
+      assert ToolArgMetrics.assertion_lines(args_for(content)) == nil
+    end
+
+    test "leaves every non-write tool call untouched" do
+      assert ToolArgMetrics.assertion_lines(%{"command" => "pytest -q && assert_something"}) ==
+               nil
+
+      assert ToolArgMetrics.assertion_lines(%{"path" => "/app/t.py"}) == nil
+      assert ToolArgMetrics.assertion_lines(nil) == nil
+    end
+
+    test "bounds what a single write can put on the event" do
+      content = String.duplicate("assert x == #{String.duplicate("y", 400)}\n", 50)
+      lines = ToolArgMetrics.assertion_lines(args_for(content))
+
+      assert length(lines) == 12
+      assert Enum.all?(lines, &(String.length(&1) <= 240))
+    end
+  end
+
+  defp args_for(content), do: %{"path" => "/app/tests/test_x.py", "content" => content}
+end
+
+defmodule OptimalSystemAgent.Agent.Loop.ToolArgMetricsKillSwitchTest do
+  @moduledoc """
+  Separate, `async: false`: the kill switch is read from the OS environment,
+  which is process-global, so exercising it inside the async module above could
+  silence assertion capture underneath any test running beside it.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias OptimalSystemAgent.Agent.Loop.ToolArgMetrics
+
+  test "OSA_ASSERTION_CAPTURE=0 removes it" do
+    args = %{"path" => "/app/tests/test_x.py", "content" => "assert 1 == 1\n"}
+    assert ToolArgMetrics.assertion_lines(args) == ["assert 1 == 1"]
+
+    System.put_env("OSA_ASSERTION_CAPTURE", "0")
+    on_exit(fn -> System.delete_env("OSA_ASSERTION_CAPTURE") end)
+
+    assert ToolArgMetrics.assertion_lines(args) == nil
+  end
 end

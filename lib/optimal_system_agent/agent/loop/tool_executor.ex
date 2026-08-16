@@ -282,6 +282,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp emit_tool_call_start(tool_call, arg_hint, state) do
     arg_bytes = tool_call_arg_bytes(tool_call.arguments)
     arg_hash = tool_call_arg_hash(tool_call.arguments)
+    assertions = tool_call_assertions(tool_call.arguments)
 
     Bus.emit(
       :tool_call,
@@ -296,6 +297,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         args: arg_hint,
         args_bytes: arg_bytes,
         args_hash: arg_hash,
+        # The propositions this call wrote down, when it wrote any. See
+        # `ToolArgMetrics.assertion_lines/1`: `nil` on every call that is not a
+        # write, so the event shape is unchanged for ~90% of the stream.
+        assertions: assertions,
         session_id: state.session_id,
         agent: state.session_id
       },
@@ -317,6 +322,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          args: arg_hint,
          args_bytes: arg_bytes,
          args_hash: arg_hash,
+         assertions: assertions,
          session_id: state.session_id
        }}
     )
@@ -1783,6 +1789,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # fields ride alongside it and carry the real quantities.
   defp tool_call_arg_bytes(args), do: ToolArgMetrics.arg_bytes(args)
   defp tool_call_arg_hash(args), do: ToolArgMetrics.arg_hash(args)
+
+  # The one fact `docs/research/failure-taxonomy.md` §2.5 named as unmeasurable
+  # from these artefacts. Pure instrumentation — nothing reads it to decide
+  # anything; `OSA_ASSERTION_CAPTURE=0` removes it.
+  defp tool_call_assertions(args), do: ToolArgMetrics.assertion_lines(args)
 
   defp file_was_read?(session_id, path) do
     try do

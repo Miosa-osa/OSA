@@ -35,9 +35,56 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgMetrics do
 
   Nothing here is on a hot path in any interesting sense — one JSON encode and
   one SHA-256 per tool call, against a call that is about to do I/O.
+
+  ## `assertion_lines/1` — the fact species 2 needs and the log did not carry
+
+  `docs/research/failure-taxonomy.md` §2.5 records a hard artefact limit:
+
+  > OSA's event log stores a `file_write`'s path but not its content, and
+  > `tool_call.args` is clipped at 60 bytes. No replay over this run can
+  > compare what a test *asserted* against what the task *required*, which is
+  > the only comparison that separates these nine from the solves.
+
+  Thirty candidate detectors have now been rejected against species 2 — twelve
+  in §2.4/§2.5 and eighteen more in `docs/design/iteration-discipline.md` —
+  and every one of them was a *shape* proxy standing in for that missing
+  content. `assertion_lines/1` records the content instead: the assertion
+  statements of what the model wrote, verbatim, on the `:tool_call` event.
+
+  It is pure instrumentation. It gates nothing, it costs the model no turns,
+  and it can therefore not fire on a solve. What it buys is that the next
+  species-2 question is answerable by reading the log rather than by inventing
+  a thirty-first proxy. `OSA_ASSERTION_CAPTURE=0` removes it.
   """
 
   @hash_prefix_bytes 16
+
+  # Assertion-bearing statement forms across the languages this benchmark
+  # corpus actually writes tests in. Anchored on a non-word boundary so
+  # `reassert_all` and a prose line containing "expected" do not match.
+  #
+  #   * `assert` — Python (`assert`, `self.assertEqual`), C/C++ (`assert(`),
+  #     Rust (`assert!`, `assert_eq!`), JS (`assert.strictEqual`).
+  #   * `EXPECT_` / `ASSERT_` — googletest.
+  #   * `expect(` — jest / chai / vitest.
+  #   * `t.Error` / `t.Fatal` — Go, which has no assert keyword and whose
+  #     failure statement IS the assertion.
+  #   * `require.` / `assert.` — testify.
+  @assertion_re ~r/(^|[^\w.])(assert\w*|EXPECT_\w+|ASSERT_\w+|expect\s*\(|t\.(Error|Fatal)f?\s*\(|require\.\w+)/
+
+  # Per-line clip. Long enough to carry an assertion and its message, short
+  # enough that a minified or generated line cannot dominate the event.
+  @assertion_line_chars 240
+
+  # Per-call cap. A test file with more assertions than this is described by
+  # its first `@max_assertion_lines`; the count is not the interesting part,
+  # the propositions are, and they repeat.
+  @max_assertion_lines 12
+
+  # Scan ceiling. `file_write` payloads in the corpus run to ~8 KB; this is an
+  # order of magnitude of headroom and a hard stop against a pathological
+  # single write on the telemetry path.
+  @max_scan_bytes 262_144
 
   @doc """
   Byte size of the arguments as JSON — the same quantity a competitor's
@@ -83,6 +130,73 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgMetrics do
     :crypto.hash(:sha256, payload)
     |> Base.encode16(case: :lower)
     |> binary_part(0, @hash_prefix_bytes * 2)
+  end
+
+  @doc """
+  The assertion statements carried by a write tool's payload, or `nil`.
+
+  Reads `"content"` (`file_write`, `file_transform`) and `"new_string"`
+  (`file_edit`, `multi_file_edit`) — the two keys through which every
+  assertion OSA has ever written reached disk. Any other argument shape
+  returns `nil`, so shell commands, reads and searches are untouched.
+
+  `nil` rather than `[]` when nothing matches: an absent field reads as "this
+  call carried no assertions", which is what it means, and keeps the event
+  unchanged for the overwhelming majority of calls.
+
+  Deliberately NOT a judgement. It does not decide whether the assertions are
+  adequate, whether they correspond to the task, or whether they are a test at
+  all — a `file_write` of production code containing `assert(ptr != NULL)`
+  will be recorded, correctly, as a line containing an assertion. Every attempt
+  so far to turn a shape like this into a verdict has been rejected under the
+  `scripts/failure_species.py` acceptance rule; this one stays a measurement.
+  """
+  @spec assertion_lines(any()) :: [String.t()] | nil
+  def assertion_lines(args) do
+    if capture_enabled?() do
+      args |> written_text() |> extract_assertions()
+    else
+      nil
+    end
+  end
+
+  defp written_text(%{"content" => c}) when is_binary(c), do: c
+  defp written_text(%{"new_string" => c}) when is_binary(c), do: c
+  defp written_text(_), do: nil
+
+  defp extract_assertions(nil), do: nil
+
+  defp extract_assertions(text) do
+    text
+    |> binary_slice(0, @max_scan_bytes)
+    |> String.split(["\r\n", "\n"])
+    |> Stream.filter(&Regex.match?(@assertion_re, &1))
+    |> Stream.map(&normalize_line/1)
+    |> Stream.reject(&(&1 == ""))
+    |> Enum.take(@max_assertion_lines)
+    |> case do
+      [] -> nil
+      lines -> lines
+    end
+  end
+
+  # Leading indentation and internal runs of whitespace collapse, so the same
+  # assertion written at two nesting depths compares equal across trials.
+  defp normalize_line(line) do
+    line
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
+    |> String.slice(0, @assertion_line_chars)
+  end
+
+  defp capture_enabled? do
+    case System.get_env("OSA_ASSERTION_CAPTURE") do
+      v when v in ["0", "false", "off", "no"] ->
+        false
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :assertion_capture, true) != false
+    end
   end
 
   # Maps become sorted {key, value} lists so encoding order is total. Every

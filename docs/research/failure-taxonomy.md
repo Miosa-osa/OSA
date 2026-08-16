@@ -111,6 +111,44 @@ matching `background_command_completed` at `done`. Fires on 12 trials, **0 of 49
 **[measured]**. `announced_next_action` catches the remaining wording-only cases including
 `fix-ocaml-gc`.
 
+#### 1a. The one time it fired on a solve, and why the rule survived it
+
+**[measured]**, 2026-08-16. `abandoned_background` fired on **`rstan-to-pystan`, a solved
+trial**, in `runs/osa-tb20-full89-9b57ee7d` — the first violation of the acceptance rule
+by any shipped detector. The rule was not wrong; **the replay's ledger was stale**.
+
+`Shell.BackgroundTask` makes completion notification exactly-once and arbitrates the
+poll-vs-broadcast race through `Agent.TaskNotifications.mark_notified`. When a
+`bash_output` poll wins that race the model is told and **the
+`background_command_completed` event is never broadcast**, so a ledger built from
+started-minus-completed strands a job that has ended. In this trial `bg_keh-scTV`
+(`/app/venv/bin/pip install "pystan==3.10.0" pandas numpy`) has a start and no completion —
+while the *next* background job starts reporting `running_count: 1`, not 2, and completes
+reporting `0`, and the eight foreground commands in between successfully import the
+packages that install produced. The install finished; only its event is missing.
+
+**Fixed** in `scripts/failure_species.py`: the ledger is reconciled against
+`running_count`, the runtime's own live count that already rides on both background events
+and is authoritative in a way a reconstructed ledger is not. Surplus entries are evicted
+oldest-first. Re-run afterwards: the 12 true positives of this run are unchanged, and
+**every run on disk now reports 0 detector hits on a solved trial**. Regression tests:
+`scripts/test_failure_species.py`.
+
+**Clause 0 of the verification gate never had this defect and never blocked a completion
+because of it.** `VerificationGate.unobserved_background/1` queries
+`BackgroundManager.list()` for live `:running` snapshots rather than replaying events.
+**[measured]**: across both 89-task runs all 77 `verification_gate_triggered` events carry
+`inadequate_test`, `unchecked_write` or `failing_check`; `unobserved_background` fired
+**zero** times, and the only gate firing on `rstan-to-pystan` was `inadequate_test`. The
+false positive was confined to offline triage.
+
+So this is **not** a thirteenth rejected candidate. The distinction that matters is the one
+`docs/design/iteration-discipline.md` §6 turns on: the rejected candidates are *proxies*
+that fail because solves exhibit the same shape, while `abandoned_background` tests a
+**directly observable fact** — is a process this session started still alive — which was
+misread by one consumer and read correctly by the other. A fact whose observation can be
+repaired is not in the same class as a proxy whose premise is false.
+
 **Fixable — this is the cheapest large win available.** The prompt paragraph is true only
 for an interactive session. It needs a session-mode conditional: when the run is
 non-interactive, "stop and let the notification wake you" must become "you are the only

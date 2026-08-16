@@ -195,20 +195,75 @@ def load_events(trial_dir: Path) -> list[dict]:
 
 
 def episode(events: list[dict]) -> dict:
-    """Reduce an event log to the few facts the detectors need."""
+    """Reduce an event log to the few facts the detectors need.
+
+    ## Why the background ledger is reconciled against `running_count`
+
+    A ledger built only from `background_command_started` minus
+    `background_command_completed` goes STALE, because the completion
+    broadcast is not guaranteed to reach the wire. `BackgroundTask` documents
+    the race itself: completion notification is exactly-once and "the
+    cross-process race -- a `bash_output` poll vs this broadcast -- is
+    arbitrated separately by the shared `Agent.TaskNotifications.mark_notified`
+    check-and-set". When the poll wins, the job is reported to the model and
+    the event is never emitted. The job ended; the ledger does not know.
+
+    That produced a detector hit on a SOLVED trial -- `rstan-to-pystan` in
+    `runs/osa-tb20-full89-9b57ee7d`, the first violation of the acceptance
+    rule at the top of this file. MEASURED, from that trial's own log:
+    `bg_keh-scTV` (`/app/venv/bin/pip install "pystan==3.10.0" pandas numpy`)
+    has a start and no completion, yet the NEXT background job starts with
+    `running_count: 1` -- not 2 -- and completes with `running_count: 0`. The
+    eight foreground commands in between successfully import the packages that
+    install produced. The install finished; only its event is missing.
+
+    `running_count` is the runtime's own live count at the moment the event was
+    emitted (`BackgroundManager.running_count/0`, inclusive of the job on a
+    start and exclusive on a completion), so it is authoritative in a way the
+    reconstructed ledger is not. Whenever the ledger holds more entries than
+    the runtime says are live, the surplus have ended without being observed
+    and the oldest are evicted -- a job that has outlived a later job's start
+    is the stale one.
+
+    The RULE is unchanged and was never wrong: claiming completion while a job
+    this session started is genuinely still running is still the species. Only
+    the replay's notion of "still running" is corrected.
+
+    Note this affects the replay detector ONLY. Clause 0 of the verification
+    gate (`VerificationGate.unobserved_background/1`) queries
+    `BackgroundManager.list()` for live `:running` snapshots rather than
+    replaying events, so it never had the stale-ledger defect and never
+    blocked this completion. MEASURED: across both 89-task runs, all 77
+    `verification_gate_triggered` events carry `inadequate_test`,
+    `unchecked_write` or `failing_check` -- `unobserved_background` fired zero
+    times, and the only gate firing on `rstan-to-pystan` was
+    `inadequate_test`.
+    """
     running: dict[str, str] = {}
     generations: list[int] = []
     final_response = None
     saw_done = False
     tool_calls = 0
+
+    def reconcile(event: dict) -> None:
+        """Drop ledger entries the runtime says are no longer live."""
+        live = event.get("running_count")
+        if not isinstance(live, int) or live < 0:
+            return
+        # dicts preserve insertion order, so this evicts oldest-first.
+        while len(running) > live:
+            running.pop(next(iter(running)))
+
     for e in events:
         t = e.get("type")
         if t == "tool_call":
             tool_calls += 1
         if t == "background_command_started":
             running[e["background_id"]] = str(e.get("command", ""))
+            reconcile(e)
         elif t == "background_command_completed":
             running.pop(e.get("background_id"), None)
+            reconcile(e)
         elif t == "llm_response":
             generations.append((e.get("usage") or {}).get("output_tokens") or 0)
         elif t == "agent_response":
