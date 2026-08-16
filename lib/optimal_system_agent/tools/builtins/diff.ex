@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
   @behaviour MiosaTools.Behaviour
 
   alias OptimalSystemAgent.Agent.Safety.PathPolicy
+  alias OptimalSystemAgent.Tools.BoundedCmd
 
   @impl true
   def safety, do: :read_only
@@ -80,10 +81,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
         {:error, "File not found: #{path_b}"}
 
       true ->
-        case System.cmd("diff", ["-u", expanded_a, expanded_b], stderr_to_stdout: true) do
-          {_output, 0} -> {:ok, "Files are identical"}
-          {output, 1} -> {:ok, output}
-          {output, code} -> {:error, "diff exited with code #{code}:\n#{output}"}
+        # `PathPolicy` and `File.exists?/1` both answer yes for a FIFO and for a
+        # path on a stalled network mount, and `diff` blocks forever on either.
+        # Same shape as the `rg` call that held a turn for 1h51m; bounded the
+        # same way. `{:timeout, why}` is an ERROR, never an empty diff — "Files
+        # are identical" for a comparison that never ran is the silent wrong
+        # answer this whole exercise is about.
+        case BoundedCmd.run("diff", ["-u", expanded_a, expanded_b],
+               label: "diff",
+               target: "#{path_a} vs #{path_b}"
+             ) do
+          {:ok, _output, 0} -> {:ok, "Files are identical"}
+          {:ok, output, 1} -> {:ok, output}
+          {:ok, output, code} -> {:error, "diff exited with code #{code}:\n#{output}"}
+          {:timeout, why} -> {:error, why}
         end
     end
   end
@@ -105,10 +116,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
       File.write!(file_a, text_a)
       File.write!(file_b, text_b)
 
-      case System.cmd("diff", ["-u", file_a, file_b], stderr_to_stdout: true) do
-        {_output, 0} -> {:ok, "Texts are identical"}
-        {output, 1} -> {:ok, output}
-        {output, code} -> {:error, "diff exited with code #{code}:\n#{output}"}
+      case BoundedCmd.run("diff", ["-u", file_a, file_b], label: "diff", target: "two temp files") do
+        {:ok, _output, 0} -> {:ok, "Texts are identical"}
+        {:ok, output, 1} -> {:ok, output}
+        {:ok, output, code} -> {:error, "diff exited with code #{code}:\n#{output}"}
+        {:timeout, why} -> {:error, why}
       end
     after
       File.rm(file_a)

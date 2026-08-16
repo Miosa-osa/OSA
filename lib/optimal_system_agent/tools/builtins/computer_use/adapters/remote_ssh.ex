@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.RemoteSSH do
 
   @behaviour OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared
 
   require Logger
@@ -256,14 +257,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.RemoteSSH do
 
     Logger.debug("[RemoteSSH] ssh #{Enum.join(ssh_args, " ")}")
 
-    case System.cmd("ssh", ssh_args, stderr_to_stdout: true) do
-      {output, 0} ->
+    # `ConnectTimeout=10` in `build_ssh_args/1` bounds the CONNECT, and nothing
+    # else. A host that accepts the connection and then never answers — a full
+    # disk, a hung X server, a remote command waiting on a stalled mount — holds
+    # this call forever, and holds the whole turn with it.
+    #
+    # The expiry is an ERROR, deliberately, and never `{:ok, ""}`. An
+    # unreachable host quietly returning empty output is a statement about the
+    # remote machine that nothing established: the model reads "no output" as
+    # "the command produced none", which is the same silent-wrong-answer defect
+    # as a hung search reported as "no matches", one layer further out.
+    case BoundedCmd.run("ssh", ssh_args, label: "ssh", target: "#{config[:host]}") do
+      {:ok, output, 0} ->
         {:ok, String.trim(output)}
 
-      {output, code} ->
+      {:ok, output, code} ->
         trimmed = String.trim(output)
         Logger.warning("[RemoteSSH] ssh exited #{code}: #{trimmed}")
         {:error, "SSH command failed (exit #{code}): #{trimmed}"}
+
+      {:timeout, why} ->
+        Logger.warning("[RemoteSSH] #{why}")
+        {:error, why}
     end
   rescue
     e ->
@@ -280,16 +295,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.RemoteSSH do
 
     Logger.debug("[RemoteSSH] scp #{Enum.join(scp_args, " ")}")
 
-    case System.cmd("scp", scp_args, stderr_to_stdout: true) do
-      {_, 0} ->
+    case BoundedCmd.run("scp", scp_args, label: "scp", target: "#{config[:host]}:#{remote_path}") do
+      {:ok, _, 0} ->
         # Best-effort remote cleanup — ignore errors
         ssh_cmd("rm -f #{remote_path}")
         {:ok, local_path}
 
-      {output, code} ->
+      {:ok, output, code} ->
         trimmed = String.trim(output)
         Logger.warning("[RemoteSSH] scp exited #{code}: #{trimmed}")
         {:error, "SCP failed (exit #{code}): #{trimmed}"}
+
+      # A screenshot transfer that stalled mid-stream leaves a truncated file on
+      # disk. Reporting the timeout rather than the path stops a later read from
+      # treating a partial PNG as the screen.
+      {:timeout, why} ->
+        Logger.warning("[RemoteSSH] #{why}")
+        _ = File.rm(local_path)
+        {:error, why}
     end
   rescue
     e ->

@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
 
   require Logger
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.AppAllowlist
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11
 
@@ -172,6 +173,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
 
   def launch(app) when is_binary(app) do
     if AppAllowlist.allowed?(app) do
+      # unbounded: deliberate — see LinuxX11.launch/1. This is a LAUNCH, not a
+      # query; a deadline would kill the application the operator asked for.
+      # Nothing waits on the result, so it cannot wedge a turn.
       _ = spawn(fn -> System.cmd("nohup", [app], stderr_to_stdout: true) end)
       Process.sleep(1500)
       :ok
@@ -182,9 +186,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
 
   def clipboard_get do
     if has?("wl-paste") do
-      case System.cmd("wl-paste", ["--no-newline"], stderr_to_stdout: false) do
-        {out, 0} -> {:ok, out}
-        {output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+      # `wl-paste` blocks on the compositor's data-offer handshake. A compositor
+      # that never answers hangs it, and an empty string would be indistinguishable
+      # from a genuinely empty clipboard.
+      case BoundedCmd.run("wl-paste", ["--no-newline"],
+             label: "wl-paste",
+             target: "the Wayland compositor",
+             stderr_to_stdout: false
+           ) do
+        {:ok, out, 0} -> {:ok, out}
+        {:ok, output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+        {:timeout, why} -> {:error, why}
       end
     else
       {:error, "clipboard_get unavailable (install wl-clipboard)"}
@@ -227,12 +239,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
       try do
         File.write!(tmp, text)
 
-        case System.cmd("sh", ["-c", "wl-copy < #{tmp}"], stderr_to_stdout: true) do
-          {_, 0} ->
+        case BoundedCmd.run("sh", ["-c", "wl-copy < #{tmp}"],
+               label: "wl-copy",
+               target: "the Wayland compositor"
+             ) do
+          {:ok, _, 0} ->
             :ok
 
-          {output, code} ->
+          {:ok, output, code} ->
             {:error, "clipboard write failed (exit #{code}): #{String.trim(output)}"}
+
+          {:timeout, why} ->
+            {:error, why}
         end
       after
         File.rm(tmp)
@@ -246,10 +264,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxWayland do
 
   defp has?(bin), do: System.find_executable(bin) != nil
 
+  # The generic dispatch every Wayland input primitive goes through
+  # (`ydotool`, `wtype`, `grim`). `ydotool` in particular blocks forever when
+  # its daemon socket exists but nothing is reading it.
   defp run(cmd, args, label) do
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
-      {_, 0} -> :ok
-      {output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+    case BoundedCmd.run(cmd, args, label: label, target: "the Wayland compositor") do
+      {:ok, _, 0} -> :ok
+      {:ok, output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "#{label} failed (is #{cmd} installed?): #{inspect(e)}"}

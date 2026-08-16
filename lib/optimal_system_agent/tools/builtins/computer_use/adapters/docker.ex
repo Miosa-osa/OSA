@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
 
   @behaviour OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared
 
   require Logger
@@ -222,18 +223,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
 
     full_command = "DISPLAY=#{display} #{command}"
 
-    case System.cmd(
-           "docker",
-           ["exec", container, "bash", "-c", full_command],
-           stderr_to_stdout: true
+    # A container whose runtime has wedged accepts the exec and never returns.
+    # The expiry is an error naming the container, never `{:ok, ""}` — an empty
+    # success here reads as "the command ran and printed nothing", which is a
+    # claim about the container that nothing established.
+    case BoundedCmd.run("docker", ["exec", container, "bash", "-c", full_command],
+           label: "docker exec",
+           target: container
          ) do
-      {output, 0} ->
+      {:ok, output, 0} ->
         {:ok, String.trim(output)}
 
-      {output, code} ->
+      {:ok, output, code} ->
         trimmed = String.trim(output)
         Logger.warning("docker exec exited #{code}: #{trimmed}")
         {:error, "docker exec failed (exit #{code}): #{trimmed}"}
+
+      {:timeout, why} ->
+        Logger.warning("[Docker] #{why}")
+        {:error, why}
     end
   rescue
     e ->
@@ -250,20 +258,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
     timestamp = System.system_time(:millisecond)
     local_path = Path.join(local_dir, "docker_screenshot_#{timestamp}.png")
 
-    case System.cmd(
-           "docker",
-           ["cp", "#{container}:#{container_path}", local_path],
-           stderr_to_stdout: true
+    case BoundedCmd.run("docker", ["cp", "#{container}:#{container_path}", local_path],
+           label: "docker cp",
+           target: "#{container}:#{container_path}"
          ) do
-      {_, 0} ->
+      {:ok, _, 0} ->
         # Best-effort cleanup — ignore errors
         docker_exec("rm -f #{container_path}")
         {:ok, local_path}
 
-      {output, code} ->
+      {:ok, output, code} ->
         trimmed = String.trim(output)
         Logger.warning("docker cp failed (exit #{code}): #{trimmed}")
         {:error, "docker cp failed (exit #{code}): #{trimmed}"}
+
+      # A stalled copy leaves a partial PNG on disk. Remove it rather than hand
+      # back a path a later read would treat as the screen.
+      {:timeout, why} ->
+        Logger.warning("[Docker] #{why}")
+        _ = File.rm(local_path)
+        {:error, why}
     end
   rescue
     e ->
@@ -273,12 +287,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
 
   # Returns true when the container is in the Running state.
   defp container_running?(container) do
-    case System.cmd(
-           "docker",
-           ["inspect", "-f", "{{.State.Running}}", container],
-           stderr_to_stdout: true
+    # A wedged daemon makes `inspect` hang. Both the timeout and a non-zero exit
+    # answer "not known to be running", which is the safe direction for a
+    # predicate whose true branch authorises sending input to a desktop.
+    case BoundedCmd.run("docker", ["inspect", "-f", "{{.State.Running}}", container],
+           label: "docker inspect",
+           target: container
          ) do
-      {output, 0} -> String.trim(output) == "true"
+      {:ok, output, 0} -> String.trim(output) == "true"
       _ -> false
     end
   rescue
@@ -287,20 +303,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
 
   # Same logic as container_running? but surfaces the error for with-chains.
   defp check_container_running(container) do
-    case System.cmd(
-           "docker",
-           ["inspect", "-f", "{{.State.Running}}", container],
-           stderr_to_stdout: true
+    case BoundedCmd.run("docker", ["inspect", "-f", "{{.State.Running}}", container],
+           label: "docker inspect",
+           target: container
          ) do
-      {output, 0} ->
+      {:ok, output, 0} ->
         if String.trim(output) == "true" do
           {:ok, true}
         else
           {:error, "Container #{container} is not running"}
         end
 
-      {output, _code} ->
+      {:ok, output, _code} ->
         {:error, "Container #{container} is not running: #{String.trim(output)}"}
+
+      # NOT folded into "is not running". A daemon that never answered has told
+      # us nothing about the container, and a with-chain that reads this as a
+      # clean "stopped" would send the operator looking at the wrong thing.
+      {:timeout, why} ->
+        {:error, why}
     end
   rescue
     e ->

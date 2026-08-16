@@ -10,6 +10,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
 
   @behaviour OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
+
   @doc """
   Escape a string for safe embedding inside AppleScript double-quoted strings.
   Backslashes first, then double quotes.
@@ -61,12 +63,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
           ["-x", path]
       end
 
-    case System.cmd("screencapture", args, stderr_to_stdout: true) do
-      {_, 0} ->
+    # `screencapture` waits on the window server. A machine at the login window,
+    # or one whose WindowServer has wedged, never answers.
+    case BoundedCmd.run("screencapture", args,
+           label: "screencapture",
+           target: "the macOS window server"
+         ) do
+      {:ok, _, 0} ->
         {:ok, path}
 
-      {output, _} ->
+      {:ok, output, _} ->
         {:error, "Screenshot failed: #{String.trim(output)}"}
+
+      # Returning `path` here would hand back a zero-byte or absent PNG that a
+      # later read would present as the screen.
+      {:timeout, why} ->
+        _ = File.rm(path)
+        {:error, why}
     end
   rescue
     e in ErlangError ->
@@ -172,10 +185,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
 
   defp osascript(script, label), do: run_cmd("osascript", ["-e", script], label)
 
+  # The generic dispatch for `osascript` and `cliclick`. An AppleScript that
+  # triggers a modal dialog blocks until somebody dismisses it, which on a
+  # headless or unattended Mac is never.
   defp run_cmd(cmd, args, label) do
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
-      {_, 0} -> :ok
-      {output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+    case BoundedCmd.run(cmd, args, label: label, target: "the macOS window server") do
+      {:ok, _, 0} -> :ok
+      {:ok, output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError ->

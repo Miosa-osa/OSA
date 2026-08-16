@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   require Logger
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{Adapter, Constants, Keyframe, Server}
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
@@ -431,16 +432,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp maybe_focus_window(window_name) when is_binary(window_name) do
     case Adapter.detect_platform() do
       :linux_x11 ->
-        case System.cmd("xdotool", ["search", "--name", window_name], stderr_to_stdout: true) do
-          {output, 0} ->
+        case BoundedCmd.run("xdotool", ["search", "--name", window_name],
+               label: "xdotool search",
+               target: window_name
+             ) do
+          {:ok, output, 0} ->
             case output |> String.split("\n", trim: true) |> List.first() do
               nil ->
                 :ok
 
               wid ->
-                System.cmd("xdotool", ["windowactivate", "--sync", String.trim(wid)],
-                  stderr_to_stdout: true
-                )
+                # `--sync` blocks until the window manager confirms the
+                # activation. A WM that never confirms — a modal grab, a
+                # crashed compositor — held this call, and therefore the whole
+                # turn, forever. This is a best-effort focus, so an expiry is
+                # simply not-focused rather than an error surfaced upward.
+                _ =
+                  BoundedCmd.run("xdotool", ["windowactivate", "--sync", String.trim(wid)],
+                    label: "xdotool windowactivate --sync",
+                    target: window_name
+                  )
 
                 Process.sleep(200)
             end

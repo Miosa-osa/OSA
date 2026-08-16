@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   require Logger
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.AppAllowlist
 
   @scroll_buttons %{"up" => "4", "down" => "5", "left" => "6", "right" => "7"}
@@ -88,11 +89,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
   def get_tree do
     script = atspi_script_path()
 
-    case System.cmd("python3", [script, "--max-depth", "10", "--max-elements", "100"],
-           stderr_to_stdout: true,
+    # AT-SPI2 walks the live accessibility tree over D-Bus. An application that
+    # stops answering its a11y calls hangs the walk with no error, forever.
+    case BoundedCmd.run("python3", [script, "--max-depth", "10", "--max-elements", "100"],
+           label: "AT-SPI2 tree walk",
+           target: "the desktop accessibility bus",
            env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
          ) do
-      {output, 0} ->
+      {:timeout, why} ->
+        {:error, why}
+
+      {:ok, output, 0} ->
         case Jason.decode(output) do
           {:ok, elements} when is_list(elements) -> {:ok, elements}
           {:ok, _} -> {:error, "AT-SPI2 returned invalid data"}
@@ -176,9 +183,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   @doc "Return the current pointer coordinates."
   def cursor do
-    case System.cmd("xdotool", ["getmouselocation", "--shell"], stderr_to_stdout: true) do
-      {out, 0} -> {:ok, parse_mouse_location(out)}
-      {output, code} -> {:error, "cursor failed (exit #{code}): #{String.trim(output)}"}
+    case BoundedCmd.run("xdotool", ["getmouselocation", "--shell"],
+           label: "xdotool getmouselocation",
+           target: "the X display"
+         ) do
+      {:ok, out, 0} -> {:ok, parse_mouse_location(out)}
+      {:ok, output, code} -> {:error, "cursor failed (exit #{code}): #{String.trim(output)}"}
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "cursor failed: #{inspect(e)}"}
@@ -186,9 +197,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   @doc "List open windows via wmctrl."
   def list_windows do
-    case System.cmd("wmctrl", ["-l"], stderr_to_stdout: true) do
-      {out, 0} -> {:ok, out}
-      {output, code} -> {:error, "list_windows failed (exit #{code}): #{String.trim(output)}"}
+    case BoundedCmd.run("wmctrl", ["-l"], label: "wmctrl -l", target: "the window manager") do
+      {:ok, out, 0} -> {:ok, out}
+      {:ok, output, code} -> {:error, "list_windows failed (exit #{code}): #{String.trim(output)}"}
+      # An empty window list would read as "nothing is open". It is not.
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "list_windows unavailable (install wmctrl): #{inspect(e)}"}
@@ -202,6 +215,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
   @doc "Launch an allowlisted application."
   def launch(app) when is_binary(app) do
     if AppAllowlist.allowed?(app) do
+      # unbounded: deliberate. This is a LAUNCH, not a query — the whole point
+      # is that the application outlives this call. A deadline here would kill
+      # the app the operator just asked for, 120s after it started. Nothing
+      # waits on this result, so it cannot wedge a turn.
       _ = spawn(fn -> System.cmd("nohup", [app], stderr_to_stdout: true) end)
       Process.sleep(1500)
       :ok
@@ -212,9 +229,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   @doc "Read the clipboard via xclip."
   def clipboard_get do
-    case System.cmd("xclip", ["-selection", "clipboard", "-o"], stderr_to_stdout: false) do
-      {out, 0} -> {:ok, out}
-      {output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+    # `xclip -o` blocks until the selection OWNER answers. An unresponsive owner
+    # window hangs it indefinitely, and an empty string would be indistinguishable
+    # from a genuinely empty clipboard.
+    case BoundedCmd.run("xclip", ["-selection", "clipboard", "-o"],
+           label: "xclip -o",
+           target: "the clipboard selection owner",
+           stderr_to_stdout: false
+         ) do
+      {:ok, out, 0} -> {:ok, out}
+      {:ok, output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError -> {:error, "clipboard_get unavailable (install xclip): #{inspect(e)}"}
@@ -246,12 +271,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
     try do
       File.write!(tmp, text)
 
-      case System.cmd("sh", ["-c", "xclip -selection clipboard < #{tmp}"], stderr_to_stdout: true) do
-        {_, 0} ->
+      case BoundedCmd.run("sh", ["-c", "xclip -selection clipboard < #{tmp}"],
+             label: "xclip clipboard write",
+             target: "the X display"
+           ) do
+        {:ok, _, 0} ->
           :ok
 
-        {output, code} ->
+        {:ok, output, code} ->
           {:error, "clipboard write failed (exit #{code}): #{String.trim(output)}"}
+
+        {:timeout, why} ->
+          {:error, why}
       end
     after
       File.rm(tmp)
@@ -346,10 +377,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   # ── Private ──────────────────────────────────────────────────────────
 
+  # The generic dispatch every input primitive goes through — `xdotool`,
+  # `wmctrl`, and in particular `xdotool windowactivate --sync`, which blocks
+  # until the window manager confirms and never returns if it does not.
   defp run_cmd(cmd, args, label) do
-    case System.cmd(cmd, args, stderr_to_stdout: true) do
-      {_, 0} -> :ok
-      {output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+    case BoundedCmd.run(cmd, args, label: label, target: "the X display") do
+      {:ok, _, 0} -> :ok
+      {:ok, output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+      {:timeout, why} -> {:error, why}
     end
   rescue
     e in ErlangError ->
