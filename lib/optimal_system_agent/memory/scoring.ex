@@ -116,6 +116,26 @@ defmodule OptimalSystemAgent.Memory.Scoring do
 
   def keyword_overlap(_, _), do: 0.0
 
+  @doc """
+  The RELEVANCE-ONLY component of `score/3` — Jaccard overlap between the
+  entry's stored keywords and `query_keywords`, with no category weight and no
+  recency mixed in.
+
+  `score/3` deliberately blends three signals, and two of them say nothing
+  about whether an entry has anything to do with the request: a `:decision`
+  entry saved moments ago scores `1.0*0.30 + 0.0 + 1.0*0.20 = 0.50` against a
+  query it shares not one word with. Callers that need to ask "is this related
+  AT ALL" — rather than "how should related things be ranked" — must ask it
+  separately, which is what this exists for. See `Memory.recall_hybrid/2`.
+
+  Returns a float in 0.0–1.0; `0.0` means no lexical evidence whatsoever.
+  """
+  @spec context_relevance(map(), [String.t()]) :: float()
+  def context_relevance(entry, query_keywords) when is_map(entry),
+    do: context_score(entry, query_keywords)
+
+  def context_relevance(_entry, _query_keywords), do: 0.0
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------

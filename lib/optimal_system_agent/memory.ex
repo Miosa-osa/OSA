@@ -280,6 +280,22 @@ defmodule OptimalSystemAgent.Memory do
   even though it wasn't keyword-matched — this second pool is what lets
   hybrid recall surface entries keyword search would never have looked at.
 
+  ## Recency is not a path in
+
+  The broad pool is gathered ONLY when there is a query embedding to score it
+  against (it exists to feed vector KNN, and its members are by construction
+  the ones lexical recall did not match), and a candidate that arrived solely
+  through it must show evidence of being related — non-zero keyword overlap,
+  or cosine similarity at or above `:semantic_floor` — before it is eligible.
+
+  Without that gate a memory reached the prompt on category weight and recency
+  alone: `Scoring.score/3` is `base*0.30 + context*0.50 + recency*0.20`, so a
+  freshly-saved `:decision` entry scores `0.50` against a query it shares not
+  one word with, clearing the `0.35` floor `Agent.Context` applies. MEASURED on
+  a real 60-entry store at production settings, 75% of injected entries shared
+  zero keywords with the request. Keyword-pool candidates are exempt from the
+  gate, so this never returns less than `recall/2` would.
+
   Options:
     - `:limit`       — max entries returned (default: 10)
     - `:category`    — filter by category atom or string
@@ -295,7 +311,12 @@ defmodule OptimalSystemAgent.Memory do
                        unavailable, so the fused score degrades EXACTLY to
                        the existing lexical/recency/category score.
     - `:candidate_pool` — how many broad-pool candidates (via `recent/1`) to
-                       consider for vector KNN (default: 100)
+                       consider for vector KNN (default: 100). Not gathered at
+                       all when there is no query embedding.
+    - `:semantic_floor` — cosine similarity a broad-pool-only candidate must
+                       reach to count as related (default `0.55`, override via
+                       `:memory_semantic_floor`). See "Recency is not a path
+                       in" above.
 
   Returns `{:ok, [entry, ...]}`, best first — same shape as `recall/2`, so it
   is a drop-in replacement at call sites. On ANY internal error (embedding
@@ -346,29 +367,37 @@ defmodule OptimalSystemAgent.Memory do
           scope: scope
         )
 
-      {:ok, broad_pool} = recent(candidate_pool)
+      # The query embedding is resolved BEFORE the broad pool is gathered,
+      # because it decides whether gathering one means anything. See
+      # `broad_pool/3`.
+      query_vector = maybe_embed_query(query, opts)
 
       broad_candidates =
-        broad_pool
-        |> filter_by(:category, category)
-        |> filter_by(:scope, scope)
+        query_vector
+        |> broad_pool(candidate_pool, category: category, scope: scope)
+
+      keyword_ids = MapSet.new(keyword_candidates, &entry_id/1)
+      floor = semantic_floor(opts)
 
       union_candidates =
         (keyword_candidates ++ broad_candidates)
         |> Enum.uniq_by(&entry_id/1)
 
-      {query_vector, vector_scores, embeddings} =
-        maybe_vector_score(query, union_candidates, opts)
+      {vector_scores, embeddings} = knn_scores(query_vector, union_candidates)
 
       vector_weight = if query_vector, do: vector_weight_opt, else: 0.0
       lexical_weight = 1.0 - vector_weight
 
       scored =
-        Enum.map(union_candidates, fn entry ->
+        union_candidates
+        |> Enum.map(fn entry ->
           lexical = Scoring.score(entry, expanded_keywords)
           vector_sim = Map.get(vector_scores, entry_id(entry), 0.0)
           fused = lexical * lexical_weight + vector_sim * vector_weight
           {fused, entry}
+        end)
+        |> Enum.filter(fn {_fused, entry} ->
+          related?(entry, expanded_keywords, vector_scores, keyword_ids, floor)
         end)
         |> maybe_filter_min_score(min_score)
         |> Enum.sort_by(&elem(&1, 0), :desc)
@@ -417,24 +446,108 @@ defmodule OptimalSystemAgent.Memory do
     end
   end
 
-  # Attempts to embed the query and KNN-score the candidate pool. Returns
-  # `{query_vector_or_nil, %{id => similarity}, %{id => vector}}`. Any
-  # failure (no provider, unreachable, bad response) yields
-  # `{nil, %{}, %{}}` — pure lexical fallback, never raises.
-  defp maybe_vector_score(query, candidates, opts) do
+  # Attempts to embed the query. `nil` on any failure (no provider,
+  # unreachable, bad response, past the deadline) — pure lexical fallback,
+  # never raises.
+  defp maybe_embed_query(query, opts) do
     if Search.available?() do
       case embed_within_deadline(query, opts) do
-        {:ok, query_vector} ->
-          {scored, embeddings} = Search.knn(query_vector, candidates)
-          sim_map = Map.new(scored, fn {sim, entry} -> {entry_id(entry), sim} end)
-          {query_vector, sim_map, embeddings}
-
-        {:error, _reason} ->
-          {nil, %{}, %{}}
+        {:ok, query_vector} -> query_vector
+        {:error, _reason} -> nil
       end
     else
-      {nil, %{}, %{}}
+      nil
     end
+  end
+
+  # KNN-score the candidate pool against the query vector. Returns
+  # `{%{id => similarity}, %{id => vector}}`, or empty maps when there is no
+  # query vector to score against.
+  defp knn_scores(nil, _candidates), do: {%{}, %{}}
+
+  defp knn_scores(query_vector, candidates) do
+    {scored, embeddings} = Search.knn(query_vector, candidates)
+    {Map.new(scored, fn {sim, entry} -> {entry_id(entry), sim} end), embeddings}
+  end
+
+  # The recency-bounded broad pool.
+  #
+  # This pool exists for ONE reason, stated in `recall_hybrid/2`'s docstring:
+  # to give vector KNN entries to look at that keyword search never retrieved.
+  # Its members are, by construction, the ones lexical recall did NOT match —
+  # so with no query vector to score them against, every one of them is noise
+  # that lexical scoring cannot distinguish from signal. Gathering it anyway
+  # was the defect: `Scoring.score/3` mixes category weight and recency in, and
+  # those two alone reach 0.50 against a query the entry shares nothing with,
+  # clearing the 0.35 floor `Agent.Context` applies. The result was that the
+  # "## Long-term Memory" block was in practice the most RECENTLY SAVED
+  # memories rather than the relevant ones.
+  #
+  # So: no query vector, no broad pool. Recall degrades to exactly what
+  # `recall/2` returns, which is what the docstring already promises is the
+  # floor for this function. It also saves a `recent/1` round-trip and scoring
+  # pass on every turn where the embedder is absent, misconfigured, or slower
+  # than the prompt-assembly deadline.
+  defp broad_pool(nil, _candidate_pool, _filters), do: []
+
+  defp broad_pool(_query_vector, candidate_pool, filters) do
+    {:ok, entries} = recent(candidate_pool)
+
+    entries
+    |> filter_by(:category, filters[:category])
+    |> filter_by(:scope, filters[:scope])
+  end
+
+  # Default cosine floor a BROAD-POOL-ONLY candidate must clear to count as
+  # semantically related.
+  #
+  # MEASURED against the operator's real 60-entry store with the live
+  # `nomic-embed-text` embedder: for queries the store genuinely answers, the
+  # true matches sit at cosine 0.55–0.84, while for queries it has nothing on
+  # ("tailwind dark mode convention", "goroutine leak detection", "pizza
+  # toppings") the single BEST candidate peaked at 0.43–0.50. This embedder has
+  # a high similarity floor — nothing scores near 0 — so a threshold is
+  # unavoidable, and 0.55 sits in the measured gap.
+  #
+  # Getting it wrong is bounded and one-directional: the lexical-evidence limb
+  # of `related?/5` is unconditional and every keyword-pool candidate bypasses
+  # this check entirely, so an ill-fitting floor costs the SEMANTIC bonus and
+  # degrades to `recall/2`'s keyword answer. It cannot drop a lexically
+  # relevant memory. Tunable for a different embedder via
+  # `:memory_semantic_floor`.
+  @default_semantic_floor 0.55
+
+  defp semantic_floor(opts) do
+    Keyword.get(opts, :semantic_floor) ||
+      Application.get_env(
+        :optimal_system_agent,
+        :memory_semantic_floor,
+        @default_semantic_floor
+      )
+  end
+
+  # Does this candidate have any evidence of being RELATED to the request, as
+  # opposed to merely recent and well-categorised?
+  #
+  # Keyword-pool candidates are exempt: they were retrieved by matching a query
+  # keyword in the first place, and exempting them keeps `recall_hybrid/2`'s
+  # standing guarantee that it never returns fewer results than `recall/2`
+  # would. Only broad-pool-only candidates — the ones that arrived on recency —
+  # have to show their work, via either limb:
+  #
+  #   * lexical  — non-zero keyword overlap with the expanded query
+  #   * semantic — cosine similarity at or above `semantic_floor/1`
+  #
+  # Recency still matters: it is 20% of `Scoring.score/3` and continues to rank
+  # related entries against each other, and a fact saved seconds ago is still
+  # reachable the moment it is plausibly on topic. What it can no longer do is
+  # buy a seat in the prompt on its own.
+  defp related?(entry, expanded_keywords, vector_scores, keyword_ids, floor) do
+    id = entry_id(entry)
+
+    MapSet.member?(keyword_ids, id) or
+      Scoring.context_relevance(entry, expanded_keywords) > 0.0 or
+      Map.get(vector_scores, id, 0.0) >= floor
   end
 
   defp maybe_filter_min_score(scored, min_score) when is_number(min_score),

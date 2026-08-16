@@ -224,6 +224,144 @@ defmodule OptimalSystemAgent.Memory.HybridRecallTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # The recency pool must not be an independent path into the prompt.
+  #
+  # `recall_hybrid/2` unions `recent(candidate_pool)` into its candidate set so
+  # vector KNN can score entries keyword search never looked at. That union used
+  # to be UNCONDITIONAL and ungated, so a broad-pool entry reached the prompt on
+  # category weight + recency alone: `Scoring.score/3` is
+  # `base*0.30 + context*0.50 + recency*0.20`, so a zero-overlap entry tops out
+  # at `1.0*0.30 + 0.0 + 1.0*0.20 = 0.50` — comfortably over the 0.35 floor
+  # `Agent.Context.Budget.memory_recall_min_score/0` applies.
+  #
+  # MEASURED on the operator's real 60-entry store at production settings
+  # (limit 6, min_score 0.35, live embeddings): 36 of 48 injected entries (75%)
+  # shared ZERO keywords with the request, and two prompts with no bearing on
+  # the store at all ("tailwind dark mode", "goroutine leak detection") returned
+  # 6/6 unrelated entries — 260 and 407 tokens of pure noise, paid every turn.
+  #
+  # Both directions are asserted here. The second is the one that catches an
+  # over-tightened gate: recency is still allowed to carry an entry in, but only
+  # when something also says it is RELATED.
+  describe "Memory.recall_hybrid/2 recency is not an independent path in" do
+    setup do
+      previous = Application.get_env(:optimal_system_agent, :embedding_provider)
+      Application.put_env(:optimal_system_agent, :embedding_provider, :none)
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:optimal_system_agent, :embedding_provider, previous)
+        else
+          Application.delete_env(:optimal_system_agent, :embedding_provider)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a zero-signal memory saved moments ago does not reach the prompt, but a relevant one does" do
+      # Saved LAST, so it is the newest row in the store and takes the maximum
+      # recency score. `:decision` is the highest category weight (1.00). This
+      # is the best case for the recency path and the worst case for the prompt:
+      # it has nothing whatsoever to do with the query below.
+      assert {:ok, relevant} =
+               Memory.save(
+                 "Recencygate the zzqretry helper in the zzqhttp client uses exponential backoff",
+                 category: :lesson
+               )
+
+      assert {:ok, noise} =
+               Memory.save(
+                 "Recencygate the zzqpizza order for the team lunch is placed on Fridays",
+                 category: :decision
+               )
+
+      assert {:ok, results} =
+               Memory.recall_hybrid("refactor the zzqretry helper in the zzqhttp client",
+                 limit: 6,
+                 min_score: 0.35
+               )
+
+      ids = Enum.map(results, & &1.id)
+
+      assert relevant.id in ids,
+             "a memory sharing real signal with the request must still reach the prompt"
+
+      refute noise.id in ids,
+             "a memory sharing zero signal with the request must not reach the prompt on " <>
+               "category weight and recency alone"
+    end
+  end
+
+  # The gate above must not become "lexical overlap or nothing" — that would
+  # delete the entire reason the broad pool exists (surfacing semantically
+  # close, lexically different memories) and no keyword-based test would notice.
+  describe "Memory.recall_hybrid/2 semantic evidence still admits a broad-pool entry" do
+    setup do
+      prev_provider = Application.get_env(:optimal_system_agent, :embedding_provider)
+      prev_fun = Application.get_env(:optimal_system_agent, :embedding_fun)
+
+      # Deterministic stand-in for the live embedder: texts about undoing a
+      # release land on one axis, everything else on the orthogonal one. Cosine
+      # is therefore exactly 1.0 or 0.0 — no network, no threshold guesswork.
+      Application.put_env(:optimal_system_agent, :embedding_provider, :ollama)
+
+      Application.put_env(:optimal_system_agent, :embedding_fun, fn text ->
+        if String.contains?(String.downcase(text), ["rollback", "undo a bad release", "revert"]) do
+          {:ok, [1.0, 0.0]}
+        else
+          {:ok, [0.0, 1.0]}
+        end
+      end)
+
+      on_exit(fn ->
+        Search.clear_cache()
+
+        if prev_provider,
+          do: Application.put_env(:optimal_system_agent, :embedding_provider, prev_provider),
+          else: Application.delete_env(:optimal_system_agent, :embedding_provider)
+
+        if prev_fun,
+          do: Application.put_env(:optimal_system_agent, :embedding_fun, prev_fun),
+          else: Application.delete_env(:optimal_system_agent, :embedding_fun)
+      end)
+
+      Search.clear_cache()
+      :ok
+    end
+
+    test "a lexically-unrelated but semantically-close memory reaches the prompt; a distant one does not" do
+      assert {:ok, close} =
+               Memory.save("Semgatealpha how we undo a bad release in production",
+                 category: :lesson
+               )
+
+      assert {:ok, distant} =
+               Memory.save("Semgatebeta favourite pizza toppings for the team lunch",
+                 category: :decision
+               )
+
+      # Deliberately shares NO keyword with either entry — no token in common,
+      # not even the test prefix, so the keyword pool comes back empty and both
+      # entries can only arrive via the broad (recency) pool. That is precisely
+      # the population the gate judges, and only the vector component can tell
+      # the two apart.
+      query = "zzqrollback zzqprocedure"
+
+      assert {:ok, results} = Memory.recall_hybrid(query, limit: 6, min_score: 0.0)
+      ids = Enum.map(results, & &1.id)
+
+      assert close.id in ids,
+             "vector KNN is the whole point of the broad pool — a semantically close " <>
+               "entry with zero keyword overlap must still reach the prompt"
+
+      refute distant.id in ids,
+             "a broad-pool entry that is neither lexically nor semantically related " <>
+               "must not reach the prompt"
+    end
+  end
+
   describe "Memory.recall_hybrid/2 signature parity with recall/2" do
     test "accepts the same limit/category/scope/min_score opts and returns {:ok, [entry,...]}" do
       assert {:ok, _entry} =
