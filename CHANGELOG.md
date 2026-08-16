@@ -9,6 +9,118 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.103] — displays as `v1.0.103`
+
+Three commits. **The resize defect is not fixed here.** Two of its prerequisites
+are, and the third commit removes a false alarm.
+
+### Fixed — the transcript was dropped, so there was nothing to re-lay-out
+
+The root cause of the resize damage, stated precisely: the commit loop's
+`drain_scrollback()` is a `mem::take`. Each finalized message was rendered
+through `insert_before` and then **dropped** at the end of the iteration. The
+only copy of the transcript lived in the terminal's native scrollback.
+
+So the re-layout was never wrong — there was nothing left to lay out. Every
+design discussion about "re-render on resize" was resting on a store that did
+not exist.
+
+`App::committed` now retains the `Message` values themselves — raw markdown
+`content`, `tool_data.lines` as styled `Line`s, survey pairs, and the flags that
+decide how a message draws — capped at 2000, oldest first, cleared by `/clear`.
+`Message::invalidate_for_width` is the re-layout primitive; `invalidate_cache`
+was insufficient because it clears the height memo while leaving
+`prerendered_body`, which was parsed at one specific width. The guard matters:
+`prerendered_body` is a cache only while the message still carries the `content`
+it was parsed from — for a Plan message and the live streaming preview it *is*
+the body, so clearing it would erase the message rather than re-wrap it.
+
+Two tests pin the properties that the user's report is made of: a retained table
+has **one** rule width across 120/100/80/60/100/120/60, and laying out at 60
+after a drag through 120/90/60/140/70 is **byte-identical** to laying out at 60
+directly. The reported damage is cumulative, and that second test is where
+cumulative damage would show.
+
+### Added — quitting leaves the conversation behind
+
+Rendered once **at the exit width**, printed after `LeaveAlternateScreen` from
+`restore_terminal` — the one function `/exit`, Ctrl-D, Ctrl-C, signals and the
+panic hook all funnel through. Bounded to 400 rows, with a header saying it is a
+tail and where the full record lives. Escapes stripped, so a half-open hyperlink
+cannot be inherited by the shell prompt. `exit_transcript` config key, on by
+default.
+
+It keeps its own mirror rather than reading `App::committed`, and the reason is
+worth recording: `Message` holds a `Cell` for its height memo, so it is not
+`Sync` and cannot live in a `static`, and the panic hook has no `&App`. The
+mirror stores role plus **raw source**, appended at the same choke point, so the
+rendering still happens at exit width. Forcing the other shape would have been a
+crash on the one path that must never crash — and this codebase has already
+shipped one defect of that family, the CLI calling `System.halt/1` and skipping
+its own transcript save, which left **1,684 of 3,029 spend files with no
+transcript**.
+
+`test/pty/vte_exit_dump.py` verifies both halves on real libvte through a real
+`/bin/sh`: three pre-launch markers survive, the shell's own post-exit marker
+proves OSA exited rather than wedged (a screen assertion cannot tell those
+apart), the reply appears twice — once live, once dumped — and no dumped row
+exceeds the terminal width.
+
+### Fixed — "OSA dies after four turns" was the reader, not OSA
+
+Measured on a 50-row terminal, turns 1–4 committed and turns 5–8 committed
+nothing, which read as the session going dead to input. It was the instrument.
+
+VTE row indices are **absolute over the whole ring**: row 0 is the first line
+the session ever emitted, `row_count` is the screen *height*, and the visible
+screen is the *last* `page_size` rows. Every VTE harness here read
+`get_text_range_format(TEXT, -20_000, 0, row_count, cols)` under a comment
+saying negative rows reach into scrollback. They do not — that range is **the
+first screenful of the session and nothing after it, for the entire run**. A
+shell printing 200 lines into a 24-row terminal reads back `row(0)=="LINE001"`,
+`row(23)=="LINE024"`, `row(-1)==""`.
+
+So "4 turns" was how many fit in the first 50 absolute rows, and the ceiling
+scaling with terminal height — the correlation that pointed at viewport math —
+was the reader's window being `row_count` tall. Every prompt reached the wire
+(12 of 12) and `insert_before` ran every turn with sane geometry.
+
+After correcting the reader: **25/25 turns at 50 rows, 20/20 at 24 rows** — the
+height that previously reported a ceiling of 1 — and 20/20 on an independent
+tmux `capture-pane` instrument with no libvte at all.
+
+Three further harness faults were found and fixed, each of which had silently
+produced green nonsense: `feed_child` delivers nothing under introspection;
+text-plus-Enter in one write trips the paste-burst detector so `\r` becomes a
+newline and prompts stack unsubmitted; and the stub hardcoded one `message_id`,
+so every reply after the first was dropped as a duplicate.
+
+### Known — not fixed
+
+**TUI resize still destroys the transcript.** OSA still runs inline, still wipes
+the on-screen transcript on resize, and committed rows in native scrollback still
+shred — 9 table rows becoming 18 physical rows, rules at two distinct widths,
+cells torn mid-word. A user dragging their window sees exactly what they saw
+before this release.
+
+The remaining work, in order: alternate screen as the main view; render
+`committed` into the viewport and re-lay-out on resize from source; scrolling;
+resize coalescing across a drag. Two pieces are already proven rather than new —
+`switch_to_full`/`switch_to_inline` run on every dialog open, and
+`transcript_viewer.rs` is already a scrollable full-screen reader that needs
+`committed` behind it instead of the lossy text log.
+
+**OSC-8 hyperlink survival remains unmeasured.** The VTE reader consumes escapes
+before they can be asserted on. Closing it needs a reader using VTE's per-cell
+`hyperlink_uri` attribute. Links are not expected to be a cost —
+`render/cells.rs` lays lines out at true visible width and attaches escapes to
+the following cell — but that is an expectation, not a measurement.
+
+Also unchanged from 1.0.102: nothing in this release is verified against a live
+provider, and the long-term memory block is recency rather than relevance.
+
+---
+
 ## [1.0.102] — displays as `v1.0.102`
 
 Thirteen commits, no benchmark claim. Every fix below came from an operator using
