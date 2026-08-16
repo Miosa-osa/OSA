@@ -362,6 +362,31 @@ toolchain on the target. It is **17 MB** and installs in about 20 s per trial.
    `dist-bullseye/` is built separately (`./build_release.sh --bullseye`) and
    never overwrites `dist/`.
 
+   **`install()` now picks between them, by asking the container.** Building the
+   variant was never the missing piece — *using* it was. `osa_agent.py` uploaded
+   `dist/` unconditionally, so on `osa-tb20-full89-f6981b61` both bullseye tasks
+   died in `install()` with ``erlexec: version `GLIBC_2.34' not found`` and were
+   charged to the harness: **two of that run's three harness faults, from a
+   variant that was sitting on disk**. `OsaAgent._artifact_for` runs `getconf
+   GNU_LIBC_VERSION` in the container and takes `dist-bullseye/` below glibc
+   2.34 (`MIN_GLIBC_FOR_DEFAULT_ARTIFACT`, read off the loader's own complaint).
+
+   It keys on the image, not on a task-name allowlist, so a future task on an
+   old base image is covered without an edit. When the version is unreadable, or
+   the bullseye variant has not been built, it keeps the default and logs why —
+   the failure mode is then exactly the pre-existing loud boot-check failure and
+   never a silent substitution. Verified on both tasks
+   (`runs/glibc-check-9b57ee7d`): `container glibc 2.31 < 2.34 -- using the
+   bullseye artefact`, boot check passes, no exception.
+
+   **Both variants must be rebuilt from the same commit**, or the two qemu tasks
+   are running different code from the other 87:
+
+   ```bash
+   ./build_release.sh            --from-commit <sha> --force
+   ./build_release.sh --bullseye --from-commit <sha> --force
+   ```
+
    **Vendored libraries.** `Dockerfile.release*` copies `libcrypto`/`libssl`/
    `libtinfo` out of the build image into `<release>/vendor/`. That is only
    useful if the loader looks there, so `install()` appends to the release's
@@ -650,10 +675,26 @@ An OpenRouter key does exist on this machine, so matching cline's serving path
 exactly is possible. It was priced and rejected. **The reason is OSA's own cost
 structure, and it is worth stating because it is a finding in itself.**
 
+> ⚠ **The prices in this section are superseded. Re-retrieved 2026-08-16 from
+> `GET /api/v1/models`: `z-ai/glm-5.2` is `$0.462/M prompt, $1.452/M
+> completion, $0.0858/M cache-read`, context 1,048,576.** That is 2.58x below
+> the figures below, so every projection here overstates by about the same
+> factor. The route price moved; it was not mis-read. `reprice.py:RATES` holds
+> the current table and is the thing to compute from — this passage is kept
+> because the *reasoning* below (uncached prefix resend is the cost driver) is
+> unchanged and the decision it records was made on the old numbers.
+>
+> Note also that $0.462/M is **3x below Z.ai's own first-party rate** for the
+> same model, so the OpenRouter aggregate route is not defaulting to the vendor
+> endpoint, and which of its many endpoints served any given call is not
+> recorded anywhere in our telemetry. Token-derived dollars on this route are a
+> lower bound; the account's billed figure is the sound one. See
+> `spend_watch.py`.
+
 Live OpenRouter pricing for `z-ai/glm-5.2`, retrieved from the models API rather
 than from a doc: **$1.19/M prompt, $3.74/M completion**, context 1,048,576.
 (`docs/research/benchmark-models.md` quotes $1.40/$4.40 — that is glm-**5.1**'s
-row.)
+row, and also Z.ai's own published GLM-5.2 rate; see `zai_models.ex`.)
 
 Against every per-task token count this harness has actually measured (13
 distinct tasks with non-zero telemetry):

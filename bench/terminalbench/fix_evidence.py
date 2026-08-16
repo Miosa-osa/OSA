@@ -109,6 +109,72 @@ RX_SERVERISH = re.compile(
 )
 
 
+#: Provider max-output ceiling, same constant and same justification as
+#: `scripts/failure_species.py`. Duplicated rather than imported because that
+#: module lives outside this package and this file is uploaded nowhere.
+MAX_OUTPUT_TOKENS = 32768
+
+#: ``(fix, signal keys, precondition keys, what the precondition means)``.
+#:
+#: The verdict rule, applied uniformly:
+#:
+#: * any signal key non-zero            -> **FIRED**
+#: * all signals zero, all preconds 0   -> **NOT NEEDED** (says nothing about the fix)
+#: * all signals zero, a precond > 0    -> **UNOBSERVED** (a finding)
+#: * no precondition is knowable        -> **NOT OBSERVABLE HERE**, stated as such
+#:
+#: A fix with an empty precondition tuple is one whose trigger this run cannot
+#: measure. Reporting that as NOT NEEDED would be a claim the artefacts do not
+#: support, so it gets its own bucket instead of being quietly folded into one
+#: of the other three.
+FIXES = (
+    ("file_grep: fallback is no longer silent",
+     ("file_grep_fallback_warned",), ("file_grep_calls",),
+     "file_grep was called at all"),
+    ("file_grep: an empty result names its backend",
+     ("file_grep_empty_named_backend",), ("file_grep_empty",),
+     "file_grep returned an empty result"),
+    ("file_grep: the fallback reports its file cap",
+     ("file_grep_capped",), ("file_grep_calls",),
+     "file_grep was called at all"),
+    ("truncation: a provider cut-off is detected, not delivered as the answer",
+     ("truncation_detected",), ("generation_at_output_ceiling",),
+     "a generation hit the output ceiling"),
+    ("background: the completion gate refuses a claim resting on unobserved work",
+     ("unobserved_background_gate", "gate_reason:unobserved_background"),
+     ("background_started",),
+     "a background command was started"),
+    ("background: bash_output can actually wait (`wait_ms`)",
+     ("background_wait", "bash_output_wait_ms_arg", "ev:background_wait_started"),
+     ("background_started",),
+     "a background command was started"),
+    ("services: the prompt names the daemonised form for a service deliverable",
+     ("daemonised_service_cmd",), ("background_serverish",),
+     "a server-shaped background command was started"),
+    ("loop: the announcement backstop nudges a turn that ended on 'I'll do X next'",
+     ("announcement_continue", "ev:announcement_continue"), (),
+     "not measurable from these artefacts"),
+    ("file_edit: the diff points at the region the edit touched",
+     ("file_edit_diff_note",), ("file_edit_calls",),
+     "an edit tool was called"),
+    ("loop: two edits to one file are serialised",
+     ("parallel_edit_serialised",), (),
+     "not measurable from these artefacts"),
+)
+
+
+def verdict(totals: Counter, signals: tuple, preconds: tuple) -> tuple[str, str]:
+    fired = sum(totals.get(k, 0) for k in signals)
+    if fired:
+        return "FIRED", f"{fired} occurrence(s)"
+    if not preconds:
+        return "NOT OBSERVABLE HERE", "no precondition is recoverable from the logs"
+    n = sum(totals.get(k, 0) for k in preconds)
+    if n:
+        return "UNOBSERVED", f"precondition occurred {n} time(s) and the signal is absent"
+    return "NOT NEEDED", "the precondition never occurred in this run"
+
+
 def trials(run_dir: Path):
     for agent in sorted(run_dir.glob("harbor/*/*/agent")):
         yield agent.parent.name.split("__")[0], agent
@@ -147,9 +213,30 @@ def scan(run_dir: Path) -> dict:
                     events_seen[name] += 1
                     row[f"ev:{name}"] += 1
                     samples.setdefault(f"ev:{name}", f"[{task}] {json.dumps(d)[:300]}")
+                    # The gate has several clauses and they are different fixes.
+                    # Counting the bare event as evidence for the background
+                    # clause would call it FIRED whenever the UNRELATED
+                    # `unchecked_write` clause ran -- measured on the smoke run,
+                    # where exactly that produced a false FIRED.
+                    if name == "verification_gate_triggered":
+                        row[f"gate_reason:{d.get('reason') or '?'}"] += 1
+                        row[f"gate_oracle:{d.get('oracle') or '?'}"] += 1
+                # The PRECONDITION for the truncation fix. A generation that
+                # reports exactly the provider ceiling was cut off rather than
+                # finished (`scripts/failure_species.py:MAX_OUTPUT_TOKENS`).
+                # Without this counter, "no truncation was detected" and "no
+                # truncation happened" are the same output, which is precisely
+                # the NOT NEEDED / UNOBSERVED distinction this file exists to
+                # make.
+                if t == "llm_response":
+                    ot = (d.get("usage") or {}).get("output_tokens") or 0
+                    if ot >= MAX_OUTPUT_TOKENS:
+                        row["generation_at_output_ceiling"] += 1
                 if t == "tool_call" and d.get("phase") == "start":
                     pending[d.get("tool_call_id")] = d
                     a = str(d.get("args", ""))
+                    if d.get("name") in ("file_edit", "file_transform"):
+                        row["file_edit_calls"] += 1
                     if d.get("name") == "bash_output" and "wait_ms" in a:
                         row["bash_output_wait_ms_arg"] += 1
                     # Species 3: the prompt now names the daemonised form for a
@@ -216,6 +303,24 @@ def main(argv: list[str]) -> int:
     for k in sorted(totals):
         n_tasks = sum(1 for r in out["per_task"].values() if r.get(k))
         print(f"| `{k}` | {totals[k]} | {n_tasks} |")
+
+    print("\n## per-fix verdict\n")
+    print("| fix | verdict | evidence | precondition |")
+    print("|---|---|---|---|")
+    verdicts = {}
+    for label, signals, preconds, precond_desc in FIXES:
+        v, why = verdict(totals, signals, preconds)
+        verdicts[label] = {"verdict": v, "evidence": why,
+                           "precondition": precond_desc}
+        print(f"| {label} | **{v}** | {why} | {precond_desc} |")
+    out["verdicts"] = verdicts
+
+    n_unobs = sum(1 for d in verdicts.values() if d["verdict"] == "UNOBSERVED")
+    if n_unobs:
+        print(f"\n> **{n_unobs} fix(es) are UNOBSERVED**: the situation they "
+              f"address happened in this run and the mechanism left no trace. "
+              f"That is a finding, not a null result, and each one is either a "
+              f"fix that did not fire or a signature this scraper has wrong.")
 
     print("\n## file_grep empty results (the false-negative surface)\n")
     empties = [g for g in out["grep_calls"] if g["empty"]]
