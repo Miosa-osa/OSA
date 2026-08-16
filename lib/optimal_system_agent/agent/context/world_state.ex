@@ -500,6 +500,19 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
     _ -> :ok
   end
 
+  # The table is created and OWNED by the application master
+  # (`Application.start/2`, phase 2) so it lives as long as the node. This
+  # branch is a fallback for callers that run without the app started (scripts,
+  # unit tests) — it must not be the production path.
+  #
+  # It used to be the only path, and an ETS table belongs to the process that
+  # created it. `assemble/3` is reached from transient processes — HTTP request
+  # processes, tool Tasks, subagent Tasks — so whichever one happened to touch
+  # the ledger first owned it, and destroyed it on exit. Every session's
+  # digests and payloads went with it: the next turn saw an empty ledger,
+  # re-emitted every live section as `:added`, and the append-only prefix that
+  # this module's whole design rests on was gone. Nothing logged, nothing
+  # failed; the turn just quietly lost its predecessor.
   defp ensure_table do
     case :ets.whereis(@ledger_table) do
       :undefined -> :ets.new(@ledger_table, [:named_table, :public, :set])

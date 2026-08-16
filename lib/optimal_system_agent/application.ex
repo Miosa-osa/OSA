@@ -192,6 +192,22 @@ defmodule OptimalSystemAgent.Application do
     # is what lets a pre-first-turn model switch resolve its session.
     :ets.new(:osa_runtime_sessions, [:named_table, :public, :set])
 
+    # ETS table for the per-session world-state ledger
+    # (Agent.Context.WorldState). Same failure as :osa_runtime_sessions above,
+    # with a worse payload: it was created lazily by whichever process first
+    # assembled a turn's context, and `assemble/3` is reached from transient
+    # processes (HTTP request processes, tool Tasks, subagent Tasks). When that
+    # process exited it took the table — and EVERY session's ledger — with it.
+    #
+    # The ledger is not a cache. It holds the digests that decide whether a
+    # section changed and the payloads that are replayed byte-for-byte to keep
+    # the prompt prefix stable. Losing it silently re-classifies every section
+    # as `:added`, so the model receives a second full copy of sections already
+    # in its history with no supersession notice — precisely the contradictory
+    # double-copy WorldState's notices exist to prevent — and the append-only
+    # prefix breaks, re-prefilling the whole conversation at full price.
+    :ets.new(:osa_world_state_ledger, [:named_table, :public, :set])
+
     # ETS table for read-before-write tracking — tracks which files have been read
     # per session so the pre_tool_use hook can nudge when writing unread files.
     :ets.new(:osa_files_read, [:named_table, :public, :set])
