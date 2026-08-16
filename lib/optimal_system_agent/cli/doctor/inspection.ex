@@ -816,11 +816,55 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     keys =
       by_layer |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.uniq() |> Enum.sort()
 
-    if keys == [] do
-      [row(:absent, "(no settings)", "-", "cascade", "every settings layer is empty")]
-    else
-      Enum.map(keys, fn key -> key_row(key, by_layer, paths) end)
+    rows =
+      if keys == [] do
+        [row(:absent, "(no settings)", "-", "cascade", "every settings layer is empty")]
+      else
+        Enum.map(keys, fn key -> key_row(key, by_layer, paths) end)
+      end
+
+    unparseable_pin_rows() ++ rows
+  end
+
+  # The rows above read the RAW layers. That is right for provenance and wrong
+  # for EFFECT: while any layer fails to parse, `Settings.merged/0` pins
+  # `permission_mode` to "ask" and `permissions.defaultMode` to "default", and
+  # nothing below would say so. Doctor would print the `bypassPermissions` the
+  # operator configured beside a runtime that is in fact asking — a diagnostic
+  # disagreeing with reality about permissions, which is worse than no
+  # diagnostic, because the operator reads it as confirmation.
+  #
+  # `Settings.unparseable_sources/0` exists to report exactly this and had no
+  # caller anywhere in `lib/`: the fail-closed pin was in force with no surface
+  # that admitted it. This is that surface.
+  defp unparseable_pin_rows do
+    case safe_unparseable() do
+      [] ->
+        []
+
+      paths ->
+        [
+          row(
+            :malformed,
+            "permission_mode",
+            Enum.join(paths, ", "),
+            "cascade (PINNED)",
+            "the settings file(s) named here exist but do not parse, so Settings.merged/0 " <>
+              "forces permission_mode=\"ask\" and permissions.defaultMode=\"default\" " <>
+              "REGARDLESS of the values reported below. The deny rules in the broken file(s) " <>
+              "cannot be recovered, so nothing is auto-approved while they are missing. Fix " <>
+              "the JSON and the pin lifts."
+          )
+        ]
     end
+  end
+
+  defp safe_unparseable do
+    Settings.unparseable_sources() |> Enum.filter(&is_binary/1)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp key_row(key, by_layer, paths) do

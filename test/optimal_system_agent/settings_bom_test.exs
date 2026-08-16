@@ -130,6 +130,27 @@ defmodule OptimalSystemAgent.SettingsBomTest do
       assert OptimalSystemAgent.Permissions.default_mode() == :ask
     end
 
+    test "`osa doctor` reports the pin instead of the value it overrides" do
+      # `Inspection`'s "effective keys" section walks the RAW layers, so left to
+      # itself it prints the `overdrive` the operator configured while
+      # `merged/0` returns "ask". A diagnostic that disagrees with the runtime
+      # about permissions is read as confirmation that the permissive value is
+      # live, which is the worst possible direction for it to be wrong in.
+      File.write!(".osa/settings.json", Jason.encode!(%{"permission_mode" => "overdrive"}))
+      File.write!(".osa/settings.local.json", "{ not json at all")
+      Settings.reset_cache()
+
+      %{sections: sections} = OptimalSystemAgent.CLI.Doctor.Inspection.report()
+      %{rows: rows} = Enum.find(sections, &(&1.title =~ "effective keys"))
+
+      pin = Enum.find(rows, &(&1.label == "permission_mode" and &1.layer =~ "PINNED"))
+
+      assert pin, "doctor reported the configured permission_mode with no word of the pin"
+      assert pin.status == :malformed
+      assert pin.detail =~ "ask"
+      assert pin.path =~ "settings.local.json", "the pin must name the file that broke"
+    end
+
     test "an empty settings file is absence, not corruption" do
       File.write!(".osa/settings.local.json", "   \n")
       Settings.reset_cache()
