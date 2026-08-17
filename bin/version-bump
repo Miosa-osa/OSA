@@ -106,6 +106,15 @@ fi
 
 echo "$NEW" > "$VERSION_FILE"
 
+# Keep the public install examples honest. The README advertises the latest
+# published release in both its badge and its pinned-install example, so a
+# release bump must update those references in the same tagged commit.
+README="$ROOT/README.md"
+if [ -f "$README" ]; then
+  awk -v old="v${CURRENT}" -v new="v${NEW}" \
+    '{gsub(old, new); print}' "$README" > "$README.tmp" && mv "$README.tmp" "$README"
+fi
+
 # Keep the Rust TUI crate version in lockstep — single source of truth.
 # Cargo/SemVer forbid leading zeros, so the crate version stays plain SemVer.
 CARGO_TOML="$ROOT/priv/rust/tui/Cargo.toml"
@@ -134,6 +143,7 @@ fi
 
 git add VERSION "$CARGO_TOML"
 [ -f "$CARGO_LOCK" ] && git add "$CARGO_LOCK"
+[ -f "$README" ] && git add "$README"
 git commit -m "bump: ${TAG}"
 git tag "$TAG"
 

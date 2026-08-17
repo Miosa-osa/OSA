@@ -422,8 +422,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       Task.async(fn ->
         res =
           case Providers.chat_stream(messages, callback, opts) do
-            {:ok, _} = success ->
-              success
+            :ok ->
+              # Callback-based streaming providers report the response through
+              # `callback` and return `:ok` when the stream closes normally.
+              # `Providers.chat_stream/3` documents exactly that contract.
+              :ok
 
             {:error, reason} = error ->
               # Try fallback chain on retryable errors
