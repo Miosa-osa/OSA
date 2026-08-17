@@ -624,6 +624,98 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     _ -> []
   end
 
+  @doc "Persist a durable runtime inbox lane for a session."
+  @spec save_inbox(String.t(), atom() | String.t(), [map()]) :: :ok | {:error, term()}
+  def save_inbox(session_id, lane, entries) when is_list(entries) do
+    lane = to_string(lane)
+    sanitized = Enum.filter(entries, &is_map/1)
+
+    result =
+      RecordLock.with_lock_strict(meta_path(session_id), fn ->
+        existing = read_json(meta_path(session_id)) || %{}
+        inbox = Map.get(existing, "runtime_inbox", %{})
+        inbox = if is_map(inbox), do: inbox, else: %{}
+
+        write_json(
+          meta_path(session_id),
+          Map.put(existing, "runtime_inbox", Map.put(inbox, lane, sanitized))
+        )
+      end)
+
+    outcome =
+      case result do
+        {:ok, value} -> value
+        {:error, :contended} -> {:error, :contended}
+      end
+
+    unless File.exists?(session_path(session_id)) do
+      _ = update_metadata(session_id, %{})
+    end
+
+    outcome
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
+  @doc "Load one durable runtime inbox lane, returning an empty list when absent."
+  @spec load_inbox(String.t(), atom() | String.t()) :: [map()]
+  def load_inbox(session_id, lane) do
+    lane = to_string(lane)
+
+    case read_json(meta_path(session_id)) do
+      %{"runtime_inbox" => inbox} when is_map(inbox) ->
+        case Map.get(inbox, lane, []) do
+          entries when is_list(entries) -> Enum.filter(entries, &is_map/1)
+          _ -> []
+        end
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc "Atomically append one entry to a durable runtime inbox lane."
+  @spec append_inbox(String.t(), atom() | String.t(), map()) :: :ok | {:error, term()}
+  def append_inbox(session_id, lane, entry) when is_map(entry) do
+    mutate_inbox(session_id, lane, fn entries -> entries ++ [entry] end)
+  end
+
+  @doc "Atomically acknowledge runtime inbox entries by their durable ids."
+  @spec acknowledge_inbox(String.t(), atom() | String.t(), [String.t()]) ::
+          :ok | {:error, term()}
+  def acknowledge_inbox(session_id, lane, ids) when is_list(ids) do
+    ids = MapSet.new(ids)
+
+    mutate_inbox(
+      session_id,
+      lane,
+      &Enum.reject(&1, fn entry -> MapSet.member?(ids, entry["id"]) end)
+    )
+  end
+
+  defp mutate_inbox(session_id, lane, fun) do
+    File.mkdir_p!(sessions_dir())
+    lane = to_string(lane)
+
+    result =
+      RecordLock.with_lock_strict(meta_path(session_id), fn ->
+        existing = read_json(meta_path(session_id)) || %{}
+        inbox = if is_map(existing["runtime_inbox"]), do: existing["runtime_inbox"], else: %{}
+        entries = if is_list(inbox[lane]), do: inbox[lane], else: []
+        updated = Map.put(inbox, lane, fun.(entries))
+        write_json(meta_path(session_id), Map.put(existing, "runtime_inbox", updated))
+      end)
+
+    case result do
+      {:ok, outcome} -> outcome
+      {:error, :contended} -> {:error, :contended}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
   @doc """
   Auto-save session state (called from hooks).
 

@@ -20,11 +20,13 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   ## Storage
 
   Rows are `{{session_id, seq}, text}` in the `:osa_steer_queue` `:ordered_set`,
-  where `seq` is a strictly-increasing monotonic integer, so `drain/1` returns
-  the queued directives in FIFO order and removes them (each steer is injected
-  exactly once, no matter which entry point enqueued it).
+  where `seq` is a strictly-increasing monotonic integer. Production consumers
+  reserve directives in FIFO order and acknowledge them only after persisting
+  their incorporation into the session transcript.
   """
   require Logger
+
+  alias OptimalSystemAgent.Agent.DurableInbox
 
   @table :osa_steer_queue
 
@@ -34,11 +36,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   Concurrent-safe and non-blocking; returns `:ok` even if the table is missing
   (feature simply degrades to a no-op rather than crashing the caller).
   """
-  @spec queue(String.t(), String.t()) :: :ok
+  @spec queue(String.t(), String.t()) :: :ok | {:error, term()}
   def queue(session_id, text) when is_binary(session_id) and is_binary(text) do
-    seq = :erlang.unique_integer([:monotonic, :positive])
-    :ets.insert(@table, {{session_id, seq}, text})
-    :ok
+    DurableInbox.append(@table, session_id, :steers, %{text: text})
   rescue
     ArgumentError ->
       Logger.warning("[steer] queue table missing — steer dropped for #{session_id}")
@@ -51,21 +51,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   """
   @spec drain(String.t()) :: [String.t()]
   def drain(session_id) when is_binary(session_id) do
-    # Select {seq, text} for this session, then delete each row by its full key.
-    match = [{{{session_id, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}]
-
-    case :ets.select(@table, match) do
-      [] ->
-        []
-
-      rows ->
-        rows
-        |> Enum.sort_by(fn {seq, _text} -> seq end)
-        |> Enum.map(fn {seq, text} ->
-          :ets.delete(@table, {session_id, seq})
-          text
-        end)
-    end
+    DurableInbox.drain(@table, session_id, :steers)
+    |> Enum.map(&(&1[:text] || &1["text"]))
+    |> Enum.filter(&is_binary/1)
   rescue
     ArgumentError -> []
   end
@@ -73,10 +61,30 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   @doc "Number of steer directives currently queued for `session_id`."
   @spec count(String.t()) :: non_neg_integer()
   def count(session_id) when is_binary(session_id) do
-    :ets.select_count(@table, [{{{session_id, :_}, :_}, [], [true]}])
+    DurableInbox.count(@table, session_id, :steers)
   rescue
     ArgumentError -> 0
   end
+
+  @doc false
+  def checkout(session_id) do
+    case DurableInbox.checkout(@table, session_id, :steers) do
+      :empty ->
+        :empty
+
+      {receipt, payloads} ->
+        texts = payloads |> Enum.map(&(&1[:text] || &1["text"])) |> Enum.filter(&is_binary/1)
+        {receipt, texts}
+    end
+  end
+
+  @doc false
+  def acknowledge(session_id, receipt) do
+    DurableInbox.acknowledge(@table, session_id, :steers, receipt)
+  end
+
+  @doc false
+  def release(session_id, receipt), do: DurableInbox.release(@table, session_id, receipt)
 
   @doc """
   Build the message list injected into the conversation for a set of steer

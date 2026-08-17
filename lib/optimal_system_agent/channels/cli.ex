@@ -229,7 +229,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
           end)
 
         unless filtered do
-          MessageQueue.enqueue(session_id, input)
+          case MessageQueue.submit(session_id, input) do
+            %{status: :queued, position: position} ->
+              IO.puts("#{IO.ANSI.faint()}  Queued at position #{position}#{IO.ANSI.reset()}")
+
+            _accepted ->
+              :ok
+          end
         end
       end
 

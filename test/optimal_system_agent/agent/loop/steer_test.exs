@@ -55,6 +55,15 @@ defmodule OptimalSystemAgent.Agent.Loop.SteerTest do
       assert Steer.drain(other) == ["theirs"]
     end
 
+    test "a steer survives loss of the live ETS projection", %{session_id: sid} do
+      :ok = Steer.queue(sid, "survive restart")
+
+      :ets.match_delete(:osa_steer_queue, {{sid, :_}, :_})
+
+      assert Steer.drain(sid) == ["survive restart"]
+      assert Steer.drain(sid) == []
+    end
+
     test "to_messages/1 renders each steer as a labelled system directive" do
       [msg] = Steer.to_messages(["do X instead"])
 

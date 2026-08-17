@@ -30,6 +30,13 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
             agent_busy: false,
             timer_ref: nil
 
+  @typedoc "Observable result of submitting user input to the session state machine."
+  @type submission :: %{
+          required(:status) => :accepted | :queued | :command,
+          required(:session_id) => String.t(),
+          optional(:position) => pos_integer()
+        }
+
   # ── Client API ───────────────────────────────────────────────────────
 
   def start_link(session_id) do
@@ -45,6 +52,17 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
     else
       GenServer.cast(via(session_id), {:enqueue, message, opts})
       session_id
+    end
+  end
+
+  @doc "Submit input and synchronously report whether it was accepted or queued."
+  @spec submit(String.t(), String.t(), keyword()) :: submission()
+  def submit(session_id, message, opts \\ []) do
+    if String.starts_with?(message, "/") do
+      Commands.dispatch(String.trim_leading(message, "/"), session_id)
+      %{status: :command, session_id: session_id}
+    else
+      GenServer.call(via(session_id), {:submit, message, opts})
     end
   end
 
@@ -88,22 +106,8 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
 
   @impl true
   def handle_cast({:enqueue, message, opts}, state) do
-    if state.agent_busy do
-      # Agent is working — queue for later (and mirror to disk for restart safety)
-      queued = state.queued ++ [{message, opts}]
-      persist_queue(state.session_id, queued)
-      {:noreply, %{state | queued: queued}}
-    else
-      # Cancel existing debounce timer
-      if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
-
-      # Add to pending batch
-      pending = state.pending ++ [{message, opts}]
-
-      # Start new debounce timer
-      ref = Process.send_after(self(), :flush, @debounce_ms)
-      {:noreply, %{state | pending: pending, timer_ref: ref}}
-    end
+    {_outcome, state} = accept(message, opts, state)
+    {:noreply, state}
   end
 
   @impl true
@@ -127,6 +131,11 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
     {:reply, state.queued != [] or state.pending != [], state}
   end
 
+  def handle_call({:submit, message, opts}, _from, state) do
+    {outcome, state} = accept(message, opts, state)
+    {:reply, outcome, state}
+  end
+
   @impl true
   def handle_info(:flush, state) do
     case state.pending do
@@ -144,6 +153,23 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  defp accept(message, opts, state) do
+    if state.agent_busy do
+      queued = state.queued ++ [{message, opts}]
+      persist_queue(state.session_id, queued)
+
+      {%{status: :queued, session_id: state.session_id, position: length(queued)},
+       %{state | queued: queued}}
+    else
+      if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+      pending = state.pending ++ [{message, opts}]
+      ref = Process.send_after(self(), :flush, @debounce_ms)
+
+      {%{status: :accepted, session_id: state.session_id},
+       %{state | pending: pending, timer_ref: ref}}
+    end
+  end
 
   defp dispatch_to_agent(message, opts, session_id) do
     Session.send_to_agent(message, session_id, opts)

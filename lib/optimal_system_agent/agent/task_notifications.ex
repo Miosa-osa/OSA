@@ -20,24 +20,26 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   Storage mirrors `Loop.Steer` — and for the same reason: the loop process is
   blocked in `handle_call` for the whole turn, so only ETS is visible mid-turn.
   Rows are `{{session_id, seq}, map}` in the `:osa_task_notifications`
-  `:ordered_set` (FIFO drain, destructive → exactly-once). The
+  `:ordered_set` (FIFO reserve, followed by durable acknowledgement). The
   `:osa_task_notified` set holds per-task check-and-set flags so a
   `bash_output` poll and the completion broadcast racing yield exactly ONE
   notification per task.
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.DurableInbox
+
   @table :osa_task_notifications
   @notified_table :osa_task_notified
+  @poke_table :osa_task_notification_pokes
+  @coalesce_ms 25
 
   @type notification :: map()
 
   @doc "Enqueue a task notification for `session_id`. Never raises."
-  @spec queue(String.t(), notification()) :: :ok
+  @spec queue(String.t(), notification()) :: :ok | {:error, term()}
   def queue(session_id, notification) when is_binary(session_id) and is_map(notification) do
-    seq = :erlang.unique_integer([:monotonic, :positive])
-    :ets.insert(@table, {{session_id, seq}, notification})
-    :ok
+    DurableInbox.append(@table, session_id, :task_notifications, notification)
   rescue
     ArgumentError ->
       Logger.warning("[task-notif] queue table missing — notification dropped for #{session_id}")
@@ -47,20 +49,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @doc "Remove and return all queued notifications for `session_id`, oldest first."
   @spec drain(String.t()) :: [notification()]
   def drain(session_id) when is_binary(session_id) do
-    match = [{{{session_id, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}]
-
-    case :ets.select(@table, match) do
-      [] ->
-        []
-
-      rows ->
-        rows
-        |> Enum.sort_by(fn {seq, _n} -> seq end)
-        |> Enum.map(fn {seq, notif} ->
-          :ets.delete(@table, {session_id, seq})
-          notif
-        end)
-    end
+    DurableInbox.drain(@table, session_id, :task_notifications)
   rescue
     ArgumentError -> []
   end
@@ -68,10 +57,21 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @doc "Number of notifications currently queued for `session_id`."
   @spec count(String.t()) :: non_neg_integer()
   def count(session_id) when is_binary(session_id) do
-    :ets.select_count(@table, [{{{session_id, :_}, :_}, [], [true]}])
+    DurableInbox.count(@table, session_id, :task_notifications)
   rescue
     ArgumentError -> 0
   end
+
+  @doc false
+  def checkout(session_id),
+    do: DurableInbox.checkout(@table, session_id, :task_notifications)
+
+  @doc false
+  def acknowledge(session_id, receipt),
+    do: DurableInbox.acknowledge(@table, session_id, :task_notifications, receipt)
+
+  @doc false
+  def release(session_id, receipt), do: DurableInbox.release(@table, session_id, receipt)
 
   @doc "Whether any notifications are pending for `session_id`."
   @spec pending?(String.t()) :: boolean()
@@ -108,8 +108,8 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   dropped poke leaves it, and reports `:clear` rather than claiming a delivery
   it did not make.
 
-  It cannot spin. `drain/1` is destructive, so the synthetic turn this poke
-  starts empties the queue, and that turn's own `settle/1` finds it clear.
+  It cannot spin. A consumer claims live entries before starting the synthetic
+  turn, then acknowledges them after persisting their incorporation.
   """
   @spec settle(String.t() | nil) :: :unread | :clear
   def settle(session_id) when is_binary(session_id) do
@@ -130,6 +130,32 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   end
 
   def settle(_), do: :clear
+
+  @doc "Wake the loop after a short deduplicated completion-coalescing window."
+  @spec poke_after_batch(String.t()) :: :ok
+  def poke_after_batch(session_id) when is_binary(session_id) do
+    if :ets.insert_new(@poke_table, {session_id, true}) do
+      case Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+             Process.sleep(@coalesce_ms)
+             :ets.delete(@poke_table, session_id)
+             poker().poke(session_id)
+           end) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          :ets.delete(@poke_table, session_id)
+          Logger.warning("[task-notif] could not schedule coalesced poke: #{inspect(reason)}")
+          poker().poke(session_id)
+      end
+    end
+
+    :ok
+  rescue
+    ArgumentError ->
+      poker().poke(session_id)
+      :ok
+  end
 
   # Injected by the same convention `:background_manager` and `:subagent_roster`
   # already use. Also breaks what would otherwise be a compile-time cycle back
@@ -160,7 +186,10 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   """
   @spec to_messages([notification()]) :: [map()]
   def to_messages(notifications) when is_list(notifications) do
-    Enum.map(notifications, fn n -> %{role: "system", content: to_xml(n)} end)
+    case notifications do
+      [] -> []
+      list -> [%{role: "system", content: Enum.map_join(list, "\n\n", &to_xml/1)}]
+    end
   end
 
   # Element order is fixed by the CC `constants/xml.ts` contract. Declared once

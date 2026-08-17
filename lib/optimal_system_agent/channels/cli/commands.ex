@@ -50,11 +50,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "fg" => {"Foreground a running agent/fleet node — switch the active session to it", :cmd_fg},
     "steer" => {"Inject a directive into the running turn (mid-turn steer)", :cmd_steer},
     "goal" => {"Anchor a goal the agent keeps working toward across turns", :cmd_goal},
+    "loop" => {"Repeat a prompt on an explicit interval until stopped", :cmd_loop},
     "sessions" => {"List recent sessions", :cmd_sessions},
     "tasks" => {"Show current tasks", :cmd_tasks},
     "plan" => {"Toggle plan mode", :cmd_plan},
     "doctor" => {"Run health check", :cmd_doctor},
     "export" => {"Export conversation as markdown", :cmd_export},
+    "save" => {"Save a readable snapshot of this session", :cmd_save},
     "version" => {"Show version and check for updates", :cmd_version},
     "release-notes" => {"Show what's new in this release", :cmd_release_notes},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
@@ -1621,6 +1623,57 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     e ->
       IO.puts("  #{@yellow}error: #{Exception.message(e)}#{@reset}\n")
       session_id
+  end
+
+  def cmd_save(args, session_id), do: cmd_export(args, session_id)
+
+  def cmd_loop(args, session_id) do
+    alias OptimalSystemAgent.Agent.LoopControl
+
+    IO.puts("")
+
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      [] ->
+        print_loop_status(LoopControl.status(session_id))
+
+      [verb] when verb in ["", "status", "show"] ->
+        print_loop_status(LoopControl.status(session_id))
+
+      [verb] when verb in ["stop", "off", "clear"] ->
+        :ok = LoopControl.stop(session_id)
+        IO.puts("  #{@green}✓#{@reset} Loop stopped")
+
+      [interval, prompt] ->
+        with {:ok, interval_ms} <- LoopControl.parse_interval(interval),
+             {:ok, loop} <- LoopControl.start(session_id, interval_ms, prompt) do
+          IO.puts("  #{@green}✓#{@reset} Loop active every #{interval}")
+          IO.puts("  #{@dim}#{loop["prompt"]}#{@reset}")
+          IO.puts("  #{@dim}/loop stop to cancel#{@reset}")
+        else
+          _ -> IO.puts("  #{@yellow}Usage: /loop <5s|5m|2h> <prompt> | stop | status#{@reset}")
+        end
+
+      _ ->
+        IO.puts("  #{@yellow}Usage: /loop <5s|5m|2h> <prompt> | stop | status#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    error ->
+      IO.puts("  #{@yellow}error: #{Exception.message(error)}#{@reset}\n")
+      session_id
+  end
+
+  defp print_loop_status(nil) do
+    IO.puts("  #{@dim}No operator loop is active for this session.#{@reset}")
+  end
+
+  defp print_loop_status(loop) do
+    seconds = div(loop["interval_ms"], 1_000)
+    IO.puts("  #{@bold}Operator loop#{@reset} every #{seconds}s")
+    IO.puts("  #{loop["prompt"]}")
+    IO.puts("  #{@dim}ticks: #{loop["tick_count"]} · /loop stop to cancel#{@reset}")
   end
 
   def cmd_effort(args, session_id) do

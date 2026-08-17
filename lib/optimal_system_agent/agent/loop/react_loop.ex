@@ -2615,26 +2615,47 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # them to state.messages as system directives. Returns state unchanged when
   # nothing is queued (the common per-step case).
   defp inject_pending_steer(%{session_id: sid} = state) do
-    case OptimalSystemAgent.Agent.Loop.Steer.drain(sid) do
-      [] ->
+    case OptimalSystemAgent.Agent.Loop.Steer.checkout(sid) do
+      :empty ->
         state
 
-      texts ->
-        Logger.info(
-          "[loop] Mid-turn steer: folded #{length(texts)} directive(s) into session #{sid} at iteration #{state.iteration}"
-        )
+      {receipt, texts} ->
+        if inbox_receipt_delivered?(state.messages, receipt) do
+          acknowledge_replayed(
+            fn -> OptimalSystemAgent.Agent.Loop.Steer.acknowledge(sid, receipt) end,
+            fn -> OptimalSystemAgent.Agent.Loop.Steer.release(sid, receipt) end
+          )
 
-        Bus.emit(:system_event, %{
-          event: :steer_injected,
-          session_id: sid,
-          iteration: state.iteration,
-          count: length(texts)
-        })
-
-        %{
           state
-          | messages: state.messages ++ OptimalSystemAgent.Agent.Loop.Steer.to_messages(texts)
-        }
+        else
+          Logger.info(
+            "[loop] Mid-turn steer: folded #{length(texts)} directive(s) into session #{sid} at iteration #{state.iteration}"
+          )
+
+          Bus.emit(:system_event, %{
+            event: :steer_injected,
+            session_id: sid,
+            iteration: state.iteration,
+            count: length(texts)
+          })
+
+          injected =
+            texts
+            |> OptimalSystemAgent.Agent.Loop.Steer.to_messages()
+            |> mark_inbox_receipt(receipt)
+
+          next_state = %{
+            state
+            | messages: state.messages ++ injected
+          }
+
+          persist_inbox_delivery(
+            state,
+            next_state,
+            fn -> OptimalSystemAgent.Agent.Loop.Steer.acknowledge(sid, receipt) end,
+            fn -> OptimalSystemAgent.Agent.Loop.Steer.release(sid, receipt) end
+          )
+        end
     end
   end
 
@@ -2644,29 +2665,92 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # background completions on its very next LLM call. Announces the drain on
   # the session topic so the TUI shows why the agent pivots.
   defp inject_pending_task_notifications(%{session_id: sid} = state) do
-    case OptimalSystemAgent.Agent.TaskNotifications.drain(sid) do
-      [] ->
+    case OptimalSystemAgent.Agent.TaskNotifications.checkout(sid) do
+      :empty ->
         state
 
-      notifs ->
-        Logger.info(
-          "[loop] Task notifications: folded #{length(notifs)} into session #{sid} at iteration #{state.iteration}"
-        )
+      {receipt, notifs} ->
+        if inbox_receipt_delivered?(state.messages, receipt) do
+          acknowledge_replayed(
+            fn -> OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt) end,
+            fn -> OptimalSystemAgent.Agent.TaskNotifications.release(sid, receipt) end
+          )
 
-        Bus.emit(:system_event, %{
-          event: :task_notification_injected,
-          session_id: sid,
-          iteration: state.iteration,
-          count: length(notifs)
-        })
-
-        OptimalSystemAgent.Agent.TaskNotifications.announce(sid, notifs)
-
-        %{
           state
-          | messages:
-              state.messages ++ OptimalSystemAgent.Agent.TaskNotifications.to_messages(notifs)
-        }
+        else
+          Logger.info(
+            "[loop] Task notifications: folded #{length(notifs)} into session #{sid} at iteration #{state.iteration}"
+          )
+
+          Bus.emit(:system_event, %{
+            event: :task_notification_injected,
+            session_id: sid,
+            iteration: state.iteration,
+            count: length(notifs)
+          })
+
+          OptimalSystemAgent.Agent.TaskNotifications.announce(sid, notifs)
+
+          injected =
+            notifs
+            |> OptimalSystemAgent.Agent.TaskNotifications.to_messages()
+            |> mark_inbox_receipt(receipt)
+
+          next_state = %{
+            state
+            | messages: state.messages ++ injected
+          }
+
+          persist_inbox_delivery(
+            state,
+            next_state,
+            fn -> OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt) end,
+            fn -> OptimalSystemAgent.Agent.TaskNotifications.release(sid, receipt) end
+          )
+        end
+    end
+  end
+
+  defp mark_inbox_receipt(messages, receipt),
+    do: Enum.map(messages, &Map.put(&1, :durable_inbox_ids, receipt))
+
+  defp inbox_receipt_delivered?(messages, receipt) do
+    delivered =
+      messages
+      |> Enum.flat_map(&(&1[:durable_inbox_ids] || &1["durable_inbox_ids"] || []))
+      |> MapSet.new()
+
+    Enum.all?(receipt, &MapSet.member?(delivered, &1))
+  end
+
+  defp acknowledge_replayed(acknowledge, release) do
+    case acknowledge.() do
+      :ok -> :ok
+      {:error, _reason} -> release.()
+    end
+  end
+
+  defp persist_inbox_delivery(previous_state, next_state, acknowledge, release) do
+    case OptimalSystemAgent.Agent.SessionPersistence.save(
+           next_state.session_id,
+           next_state.messages,
+           next_state.working_dir
+         ) do
+      :ok ->
+        case acknowledge.() do
+          :ok ->
+            next_state
+
+          {:error, reason} ->
+            release.()
+            Logger.error("[loop] durable inbox acknowledgement failed: #{inspect(reason)}")
+            next_state
+        end
+
+      {:error, reason} ->
+        release.()
+        Logger.error("[loop] durable inbox delivery failed: #{inspect(reason)}")
+        previous_state
     end
   end
 
