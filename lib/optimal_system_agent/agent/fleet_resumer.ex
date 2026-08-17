@@ -180,7 +180,7 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
   node. Selection uses the read-only probe — the lease itself is taken in
   `dispatch/3`, immediately before the run is restarted.
 
-  Options: `:alive_fun`, `:posture_fun`, `:claimable_fun`, `:budget` (see
+  Options: `:alive_fun`, `:posture_fun`, `:claimable_fun`, `:recoverable_fun`, `:budget` (see
   `resume_on_boot/1`). Deterministic and side-effect free — the unit-test seam
   for W3.
   """
@@ -189,10 +189,12 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
     alive_fun = Keyword.get(opts, :alive_fun, &default_alive?/1)
     posture_fun = Keyword.get(opts, :posture_fun, &default_autonomous?/1)
     claimable_fun = Keyword.get(opts, :claimable_fun, &RunStore.lease_claimable?/1)
+    recoverable_fun = Keyword.get(opts, :recoverable_fun, &default_recoverable?/1)
     budget = Keyword.get(opts, :budget, max_resumes())
 
     runs
     |> Enum.filter(fn r -> Map.get(r, :status) == :running end)
+    |> Enum.filter(fn r -> invoke_bool(recoverable_fun, r) end)
     |> Enum.filter(fn r -> invoke_bool(claimable_fun, r.agent_id) end)
     |> Enum.reject(fn r -> invoke_bool(alive_fun, r.agent_id) end)
     |> Enum.filter(fn r -> invoke_bool(posture_fun, r) end)
@@ -251,10 +253,10 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
 
               RunStore.release_lease(run.agent_id)
 
+              ExecutionControl.increment(run.agent_id, :failure_count)
+
               ExecutionControl.progress(run.agent_id, %{
                 recovery_state: "auto_resume_failed",
-                failure_count:
-                  Map.get(ExecutionControl.get(run.agent_id) || %{}, :failure_count, 0) + 1,
                 last_error: inspect(reason)
               })
 
@@ -335,6 +337,13 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
   def default_autonomous?(run) do
     posture = Map.get(run, :posture) || meta_posture(run)
     posture in [:autonomous, "autonomous"]
+  end
+
+  defp default_recoverable?(run) do
+    case ExecutionControl.get(run.agent_id) do
+      nil -> true
+      %{status: status} -> to_string(status) in ["running", "stalled"]
+    end
   end
 
   defp meta_posture(run) do

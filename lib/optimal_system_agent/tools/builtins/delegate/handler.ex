@@ -11,6 +11,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   a business rule, not a display concern.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Scratchpad
@@ -515,13 +517,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `mark_notified/1` is the same exactly-once token the subagent and shell
       # paths arbitrate on, keyed here by the stable batch id.
       if TaskNotifications.mark_notified(batch_id) do
-        TaskNotifications.queue(parent_id, %{
-          task_id: batch_id,
-          status: :completed,
-          summary: summary
-        })
+        case TaskNotifications.queue(parent_id, %{
+               task_id: batch_id,
+               status: :completed,
+               summary: summary
+             }) do
+          :ok ->
+            Loop.poke(parent_id)
 
-        Loop.poke(parent_id)
+          {:error, reason} ->
+            TaskNotifications.clear_notified(batch_id)
+            Logger.error("[delegate] durable fan-out delivery failed: #{inspect(reason)}")
+        end
       end
     end)
 

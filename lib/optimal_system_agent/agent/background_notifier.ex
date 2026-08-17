@@ -116,17 +116,21 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     # WS6 exactly-once: if a bash_output poll already showed the model the
     # terminal status, mark_notified/1 returns false and we skip the queue.
     if task_id == "" or TaskNotifications.mark_notified(task_id) do
-      TaskNotifications.queue(state.parent_id, %{
-        task_id: task_id,
-        status: ev[:status] || :done,
-        output_file: ev[:output_file],
-        summary: summary
-      })
+      case TaskNotifications.queue(state.parent_id, %{
+             task_id: task_id,
+             status: ev[:status] || :done,
+             output_file: ev[:output_file],
+             summary: summary
+           }) do
+        :ok ->
+          # Busy loop -> ReactLoop drains this beside Steer at its next step
+          # boundary. An idle loop uses a synthetic turn so the agent reacts.
+          TaskNotifications.poke_after_batch(state.parent_id)
 
-      # Busy loop → ReactLoop drains this beside Steer at its next step
-      # boundary; idle loop → the poke runs a synthetic turn so the agent
-      # reacts unprompted (the old inject-only path was never acted on).
-      TaskNotifications.poke_after_batch(state.parent_id)
+        {:error, reason} ->
+          TaskNotifications.clear_notified(task_id)
+          Logger.error("[BackgroundNotifier] durable command delivery failed: #{inspect(reason)}")
+      end
     end
 
     {:noreply, state}
@@ -187,12 +191,15 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
           OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
 
         {:error, reason} ->
+          TaskNotifications.clear_notified(task_id)
           OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :failed)
           OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
           Logger.error("[BackgroundNotifier] durable delivery failed: #{inspect(reason)}")
       end
 
-      TaskNotifications.poke_after_batch(parent_id)
+      if TaskNotifications.count(parent_id) > 0 do
+        TaskNotifications.poke_after_batch(parent_id)
+      end
     end
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")

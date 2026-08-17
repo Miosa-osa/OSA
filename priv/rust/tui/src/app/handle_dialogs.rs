@@ -1216,15 +1216,43 @@ impl App {
             return;
         };
 
+        if !self.agents.control_allowed(&id, action) {
+            self.toasts.push(
+                format!(
+                    "Agent {} cannot {} in its current state",
+                    id,
+                    action.replace('_', " ")
+                ),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+
         let client = self.client.clone();
+        let tx = self.event_tx.clone();
         let target = id.clone();
         tokio::spawn(async move {
-            let _ = client.control_agent(&target, action).await;
+            let result = client
+                .control_agent(&target, action)
+                .await
+                .map(|response| {
+                    response
+                        .pointer("/agent/available_controls")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .map_err(|error| error.to_string());
+
+            let _ = tx.send(Event::Backend(BackendEvent::AgentControlResult {
+                agent_id: target,
+                action: action.to_owned(),
+                result,
+            }));
         });
-        self.toasts.push(
-            format!("Agent {}: {} requested", id, action.replace('_', " ")),
-            crate::components::toast::ToastLevel::Info,
-        );
     }
 
     /// Dashboard/inline "stop" action in ROSTER index space: index 0 is the

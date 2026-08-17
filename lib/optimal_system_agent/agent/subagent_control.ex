@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
   small set of commands and receive a fresh durable snapshot in response.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Agent.{ExecutionControl, Loop, RunStore}
   alias OptimalSystemAgent.Orchestrator
 
@@ -34,7 +36,11 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
     action = to_string(action)
 
     if action in @actions do
-      with :ok <- apply_command(agent_id, action, params),
+      with {:ok, current} <- snapshot(agent_id),
+           true <-
+             action in current.available_controls ||
+               {:error, {:invalid_action_for_status, action, current.status}},
+           :ok <- apply_command(agent_id, action, params),
            {:ok, snapshot} <- snapshot(agent_id) do
         {:ok, snapshot}
       end
@@ -121,21 +127,36 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
   defp alive?(agent_id) do
     Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) != []
   rescue
-    _ -> false
+    error ->
+      Logger.error("[SubagentControl] liveness lookup failed: #{Exception.message(error)}")
+      false
+  end
+
+  @doc "Return the commands currently valid for a durable execution status."
+  @spec available_controls(atom() | String.t()) :: [String.t()]
+  def available_controls(status) do
+    status = to_string(status)
+
+    case status do
+      "running" ->
+        ~w(pause cancel_tool stop reassign)
+
+      "paused" ->
+        ~w(resume stop reassign)
+
+      status when status in ["stalled", "interrupted"] ->
+        ~w(retry resume stop reassign)
+
+      _ ->
+        ~w(retry resume reassign)
+    end
   end
 
   defp add_controls(snapshot) do
-    status = to_string(Map.get(snapshot, :status, "unknown"))
-
-    controls =
-      case status do
-        status when status in ["running", "paused", "stalled", "interrupted"] ->
-          ~w(pause resume cancel_tool stop reassign)
-
-        _ ->
-          ~w(retry resume reassign)
-      end
-
-    Map.put(snapshot, :available_controls, controls)
+    Map.put(
+      snapshot,
+      :available_controls,
+      available_controls(Map.get(snapshot, :status, "unknown"))
+    )
   end
 end

@@ -1838,6 +1838,7 @@ impl App {
                 retry_count,
                 failure_count,
                 delivery_status,
+                available_controls,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1856,6 +1857,7 @@ impl App {
                     retry_count,
                     failure_count,
                     delivery_status,
+                    available_controls,
                 );
                 // Codex-style live naming: during orchestration the leader spinner
                 // otherwise shows a generic flavor verb while sub-agents do the
@@ -1879,6 +1881,29 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
+            BackendEvent::AgentControlResult {
+                agent_id,
+                action,
+                result,
+            } => match result {
+                Ok(available_controls) => {
+                    self.agents
+                        .set_available_controls(&agent_id, available_controls);
+                    self.toasts.push(
+                        format!("Agent {}: {} accepted", agent_id, action.replace('_', " ")),
+                        crate::components::toast::ToastLevel::Success,
+                    );
+                }
+                Err(error) => self.toasts.push(
+                    format!(
+                        "Agent {}: {} failed: {}",
+                        agent_id,
+                        action.replace('_', " "),
+                        error
+                    ),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
             BackendEvent::OrchestratorAgentCompleted {
                 agent_name,
                 tool_uses,

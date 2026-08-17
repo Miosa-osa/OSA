@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.FleetResumer
+  alias OptimalSystemAgent.Agent.ExecutionControl
   alias OptimalSystemAgent.Agent.RunStore
 
   defp run(id, attrs \\ %{}) do
@@ -72,6 +73,20 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
         )
 
       assert Enum.map(selected, & &1.agent_id) == ["r"]
+    end
+
+    test "does not recover an operator-paused durable run" do
+      isolate_store()
+      :ok = ExecutionControl.start("paused", %{parent_session_id: "root", task: "t"})
+      :ok = ExecutionControl.progress("paused", %{status: :paused})
+
+      selected =
+        FleetResumer.qualifying_orphans([run("paused")],
+          alive_fun: fn _ -> false end,
+          posture_fun: fn _ -> true end
+        )
+
+      assert selected == []
     end
 
     test "budget caps the number of selected runs" do

@@ -209,6 +209,15 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     ArgumentError -> true
   end
 
+  @doc "Release a notification claim when durable queueing fails."
+  @spec clear_notified(String.t()) :: :ok
+  def clear_notified(task_id) when is_binary(task_id) do
+    :ets.delete(@notified_table, task_id)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   @doc """
   Build the injected message list: one system message per notification,
   wrapping a `<task-notification>` XML block (CC parity).

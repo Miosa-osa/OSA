@@ -175,6 +175,12 @@ pub enum BackendEvent {
         retry_count: u32,
         failure_count: u32,
         delivery_status: String,
+        available_controls: Vec<String>,
+    },
+    AgentControlResult {
+        agent_id: String,
+        action: String,
+        result: Result<Vec<String>, String>,
     },
     OrchestratorAgentCompleted {
         agent_name: String,

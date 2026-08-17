@@ -801,6 +801,7 @@ impl Agents {
                     retry_count: 0,
                     failure_count: 0,
                     delivery_status: String::new(),
+                    available_controls: Vec::new(),
                 });
             }
         }
@@ -877,6 +878,7 @@ impl Agents {
                 retry_count: 0,
                 failure_count: 0,
                 delivery_status: String::new(),
+                available_controls: Vec::new(),
             };
             // A row created from a frame about an agent that has been running
             // for a while starts with the age the backend reports, not zero.
@@ -938,6 +940,7 @@ impl Agents {
         retry_count: u32,
         failure_count: u32,
         delivery_status: String,
+        available_controls: Vec<String>,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == name) {
             entry.active_skills = active_skills;
@@ -952,6 +955,26 @@ impl Agents {
             if !delivery_status.is_empty() {
                 entry.delivery_status = delivery_status;
             }
+            entry.available_controls = available_controls;
+        }
+    }
+
+    pub fn control_allowed(&self, name: &str, action: &str) -> bool {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .is_some_and(|entry| {
+                entry.available_controls.is_empty()
+                    || entry
+                        .available_controls
+                        .iter()
+                        .any(|control| control == action)
+            })
+    }
+
+    pub fn set_available_controls(&mut self, name: &str, controls: Vec<String>) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == name) {
+            entry.available_controls = controls;
         }
     }
 
@@ -1081,6 +1104,7 @@ impl Agents {
                 retry_count: 0,
                 failure_count: 0,
                 delivery_status: String::new(),
+                available_controls: Vec::new(),
             };
             entry.anchor_elapsed(elapsed_ms);
             self.entries.push(entry);
@@ -2341,6 +2365,7 @@ mod tests {
             2,
             1,
             "acknowledged".into(),
+            vec!["retry".into(), "reassign".into()],
         );
 
         let summary = agents.entry_summary_at(1).unwrap();
@@ -2350,6 +2375,8 @@ mod tests {
         assert!(summary.contains("2 retries"), "summary: {summary}");
         assert!(summary.contains("1 failure"), "summary: {summary}");
         assert!(summary.contains("acknowledged"), "summary: {summary}");
+        assert!(agents.control_allowed("worker", "retry"));
+        assert!(!agents.control_allowed("worker", "pause"));
     }
 
     #[test]

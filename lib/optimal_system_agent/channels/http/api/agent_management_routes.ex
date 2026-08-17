@@ -100,7 +100,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
     json(conn, 200, %{hierarchy: root_nodes})
   end
 
-  # ── GET /:id — single agent definition ────────────────────────────
+  # GET /:id/runtime and /:id/control - delegated-run control plane
 
   get "/:id/runtime" do
     case SubagentControl.snapshot(conn.params["id"]) do

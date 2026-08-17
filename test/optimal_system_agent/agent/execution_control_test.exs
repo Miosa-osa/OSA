@@ -77,6 +77,13 @@ defmodule OptimalSystemAgent.Agent.ExecutionControlTest do
     assert snapshot.task == "Work"
   end
 
+  test "increments cumulative counters atomically" do
+    assert :ok = ExecutionControl.start("worker-counters", %{})
+    assert :ok = ExecutionControl.increment("worker-counters", :failure_count)
+    assert :ok = ExecutionControl.increment("worker-counters", :failure_count)
+    assert ExecutionControl.get("worker-counters").failure_count == 2
+  end
+
   test "durable delivery changes are replayed to the parent TUI" do
     Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:parent")
 

@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.ExecutionControl
+  alias OptimalSystemAgent.Agent.SubagentControl
   alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Agent.BackgroundNotifier
   alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
@@ -998,11 +999,12 @@ defmodule OptimalSystemAgent.Orchestrator do
           {:error, reason} ->
             record_terminal_skills(subagent_id)
 
+            ExecutionControl.increment(subagent_id, :failure_count)
+
             ExecutionControl.finish(subagent_id, :failed, %{
               duration_ms: duration_ms,
               tokens_used: final_run && final_run.tokens_used,
               tool_count: final_run && final_run.tool_count,
-              failure_count: 1,
               last_error: inspect(reason)
             })
 
@@ -1246,12 +1248,11 @@ defmodule OptimalSystemAgent.Orchestrator do
           |> Enum.reject(fn {_k, v} -> is_nil(v) end)
           |> Map.new()
 
-        previous = control
+        ExecutionControl.increment(agent_id, :retry_count)
 
         ExecutionControl.progress(agent_id, %{
           status: :running,
           recovery_state: "resumed",
-          retry_count: Map.get(previous, :retry_count, 0) + 1,
           last_recovery_instruction: message
         })
 
@@ -2017,7 +2018,6 @@ defmodule OptimalSystemAgent.Orchestrator do
       current_tool: run |> Map.get(:recent_actions, []) |> List.first(),
       tool_count: Map.get(run, :tool_count, 0),
       tokens_used: Map.get(run, :tokens_used, 0),
-      failure_count: 1,
       recovery_state: "inspect_retry_cancel_or_reassign",
       stalled_ms: stalled_ms
     })
@@ -2348,7 +2348,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               tool_uses: tool_count,
               tokens_used: forwarder_tokens(subagent_id),
               recent_actions: recent_actions(subagent_id),
-              # The backend's own clock for this run — see `run_elapsed_ms/1`. It
+              # The backend's own clock for this run - see `run_elapsed_ms/1`. It
               # rides on every progress frame so a client that connected late, or
               # reconnected, learns the real age alongside the tool count instead of
               # pairing a real count with a freshly-zeroed local timer.
@@ -2551,6 +2551,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   defp record_execution_progress(agent_id, current_tool, tool_count) do
     skills = ActiveSkills.list(agent_id)
+    control = ExecutionControl.get(agent_id) || %{}
 
     ExecutionControl.progress(agent_id, %{
       current_tool: current_tool,
@@ -2560,22 +2561,29 @@ defmodule OptimalSystemAgent.Orchestrator do
       skill_reason:
         if(skills == [],
           do: "no skill selected yet",
-          else: "selected by this subagent via skill_view for its delegated task"
+          else: selected_skill_reason(skills, control)
         )
     })
   end
 
   defp record_terminal_skills(agent_id) do
     skills = ActiveSkills.list(agent_id)
+    control = ExecutionControl.get(agent_id) || %{}
 
     ExecutionControl.progress(agent_id, %{
       active_skills: skills,
       skill_reason:
         if(skills == [],
           do: "no skill was selected for this task",
-          else: "selected by this subagent via skill_view for its delegated task"
+          else: selected_skill_reason(skills, control)
         )
     })
+  end
+
+  defp selected_skill_reason(skills, control) do
+    task = control |> Map.get(:task, "delegated task") |> to_string() |> String.slice(0, 120)
+
+    "subagent explicitly selected #{Enum.join(skills, ", ")} as relevant to: #{task}"
   end
 
   defp execution_event_fields(agent_id) do
@@ -2584,7 +2592,8 @@ defmodule OptimalSystemAgent.Orchestrator do
         %{}
 
       control ->
-        Map.take(control, [
+        control
+        |> Map.take([
           :active_skills,
           :model_reason,
           :skill_reason,
@@ -2592,6 +2601,10 @@ defmodule OptimalSystemAgent.Orchestrator do
           :failure_count,
           :delivery_status
         ])
+        |> Map.put(
+          :available_controls,
+          SubagentControl.available_controls(Map.get(control, :status, "unknown"))
+        )
     end
   end
 

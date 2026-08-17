@@ -142,6 +142,13 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
     refute TN.mark_notified(id)
   end
 
+  test "a failed durable enqueue can release the notification claim" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    assert TN.mark_notified(id)
+    assert :ok = TN.clear_notified(id)
+    assert TN.mark_notified(id)
+  end
+
   test "to_messages renders task-notification XML system messages" do
     [msg] =
       TN.to_messages([

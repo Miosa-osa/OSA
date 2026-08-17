@@ -108,6 +108,8 @@ pub struct AgentEntry {
     pub failure_count: u32,
     /// Parent delivery ledger state: pending, queued, or acknowledged.
     pub delivery_status: String,
+    /// Commands currently accepted by the backend for this durable state.
+    pub available_controls: Vec<String>,
 }
 
 /// A backend-reported phase, kept as a parsed enum so rendering decisions are

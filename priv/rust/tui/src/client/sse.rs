@@ -1108,6 +1108,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 failure_count: u32,
                 #[serde(default)]
                 delivery_status: String,
+                #[serde(default)]
+                available_controls: Vec<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -1124,6 +1126,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 retry_count: ev.retry_count,
                 failure_count: ev.failure_count,
                 delivery_status: ev.delivery_status,
+                available_controls: ev.available_controls,
             })
         }
 

@@ -9,7 +9,7 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   """
 
   alias OptimalSystemAgent.Agent.Tier
-  alias OptimalSystemAgent.Providers.{FallbackChain, ModelLimits, Registry}
+  alias OptimalSystemAgent.Providers.{FallbackChain, ImageBudget, ModelLimits, Registry}
 
   @large_context_phrases [
     "entire repository",
@@ -55,13 +55,21 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
     model_for = Keyword.get(opts, :model_for, &Tier.model_for/2)
     tool_call = Keyword.get(opts, :tool_call, &ModelLimits.tool_call/2)
     context_window = Keyword.get(opts, :context_window, &Registry.context_window/1)
+    vision_capable = Keyword.get(opts, :vision_capable, &ImageBudget.vision_capable?/2)
 
     selected =
       Enum.find_value(candidates, fn provider ->
         model = model_for.(tier, provider)
 
         if configured?.(provider) and
-             compatible?(requirements, provider, model, tool_call, context_window) do
+             compatible?(
+               requirements,
+               provider,
+               model,
+               tool_call,
+               context_window,
+               vision_capable
+             ) do
           {provider, model}
         end
       end) || {primary, model_for.(tier, primary)}
@@ -79,17 +87,19 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
     |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
   end
 
-  defp compatible?(requirements, provider, model, tool_call, context_window) do
+  defp compatible?(requirements, provider, model, tool_call, context_window, vision_capable) do
     tools_ok = :tools not in requirements or tool_call.(provider, model) != false
 
     context_ok =
       :large_context not in requirements or
         case context_window.(model) do
           size when is_integer(size) -> size >= 100_000
-          _ -> true
+          _ -> false
         end
 
-    tools_ok and context_ok
+    vision_ok = :vision not in requirements or vision_capable.(provider, model)
+
+    tools_ok and context_ok and vision_ok
   end
 
   defp candidate_providers(primary) do

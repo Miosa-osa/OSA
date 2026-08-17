@@ -73,6 +73,16 @@ defmodule OptimalSystemAgent.Agent.ExecutionControl do
     progress(agent_id, %{delivery_receipt: receipt, delivery_status: status})
   end
 
+  @doc "Atomically increment one cumulative execution counter."
+  @spec increment(String.t(), :retry_count | :failure_count) :: :ok | {:error, term()}
+  def increment(agent_id, counter)
+      when is_binary(agent_id) and counter in [:retry_count, :failure_count] do
+    mutate(agent_id, fn current ->
+      Map.update(current, counter, 1, &(&1 + 1))
+      |> Map.put(:updated_at, now())
+    end)
+  end
+
   @doc "Load one durable execution record."
   @spec get(String.t()) :: map() | nil
   def get(agent_id) when is_binary(agent_id) do
@@ -122,7 +132,11 @@ defmodule OptimalSystemAgent.Agent.ExecutionControl do
           skill_reason: Map.get(control, :skill_reason, ""),
           retry_count: Map.get(control, :retry_count, 0),
           failure_count: Map.get(control, :failure_count, 0),
-          delivery_status: Map.get(control, :delivery_status, "")
+          delivery_status: Map.get(control, :delivery_status, ""),
+          available_controls:
+            OptimalSystemAgent.Agent.SubagentControl.available_controls(
+              Map.get(control, :status, "unknown")
+            )
         }
 
         Phoenix.PubSub.broadcast(

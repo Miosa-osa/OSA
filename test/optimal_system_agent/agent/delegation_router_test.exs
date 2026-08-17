@@ -41,4 +41,35 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
              "Audit the entire repository and compare the attached screenshot"
            ) == [:tools, :large_context, :vision]
   end
+
+  test "routes an image task away from a model known to lack vision" do
+    routed =
+      DelegationRouter.resolve("Inspect the attached screenshot", %{provider: :first},
+        candidates: [:first, :second],
+        configured?: fn _ -> true end,
+        model_for: fn _, provider -> "#{provider}-model" end,
+        tool_call: fn _, _ -> true end,
+        context_window: fn _ -> 200_000 end,
+        vision_capable: fn provider, _ -> provider == :second end
+      )
+
+    assert routed.provider == :second
+    assert routed.model_requirements == ["tools", "vision"]
+  end
+
+  test "does not claim unknown context capacity satisfies a large-context task" do
+    routed =
+      DelegationRouter.resolve("Audit the entire repository", %{provider: :first},
+        candidates: [:first, :second],
+        configured?: fn _ -> true end,
+        model_for: fn _, provider -> "#{provider}-model" end,
+        tool_call: fn _, _ -> true end,
+        context_window: fn
+          "first-model" -> nil
+          "second-model" -> 200_000
+        end
+      )
+
+    assert routed.provider == :second
+  end
 end
