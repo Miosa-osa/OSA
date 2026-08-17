@@ -967,6 +967,11 @@ Skills are available immediately, no restart, no recompile. The Skills Registry
 hot-reloads on file change. Recurring behavior patterns (occurrence ≥ 5) are
 auto-promoted to skills by the SICA engine.
 
+OSA keeps the catalog compact and loads a full `SKILL.md` only after the agent selects it with `skill_view`.
+Selected skill names are checkpointed with the session and re-injected on every generation, so compaction or a backend restart cannot make a long-running agent forget the workflow it chose.
+When a selected skill body is no longer present in conversation context, OSA requires the agent to reload it with `skill_view` before taking another task action.
+Deleting the session removes that checkpoint.
+
 ---
 
 ## Project layout

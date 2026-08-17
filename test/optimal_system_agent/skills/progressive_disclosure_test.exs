@@ -4,6 +4,8 @@ defmodule OptimalSystemAgent.Skills.ProgressiveDisclosureTest do
   alias OptimalSystemAgent.Tools.Builtins.SkillView
   alias OptimalSystemAgent.Tools.Registry
   alias OptimalSystemAgent.Tools.Registry.SkillLoader
+  alias OptimalSystemAgent.Agent.ActiveSkills
+  alias OptimalSystemAgent.Tools.UseContext
 
   @skills_key {Registry, :skills}
 
@@ -100,8 +102,21 @@ defmodule OptimalSystemAgent.Skills.ProgressiveDisclosureTest do
 
   test "skill_view loads the selected body into the owning agent context" do
     assert {:ok, loaded} = SkillView.execute(%{"name" => "debugging"})
-    assert loaded =~ "# Active Skill: debugging"
+    assert loaded =~ "# Skill Preview: debugging"
+    assert loaded =~ "did not activate the skill"
     assert loaded =~ "REPRODUCE-FIRST-SENTINEL"
+  end
+
+  test "skill_view checkpoints the selection for its owning session" do
+    session_id = "skill-checkpoint-#{System.unique_integer([:positive])}"
+    on_exit(fn -> ActiveSkills.clear(session_id) end)
+
+    ctx = %UseContext{UseContext.empty() | session_id: session_id}
+    assert {:ok, loaded} = SkillView.execute(%{"name" => "debugging"}, ctx)
+    assert loaded =~ "REPRODUCE-FIRST-SENTINEL"
+
+    assert ActiveSkills.list(session_id) == ["debugging"]
+    assert ActiveSkills.exists?(session_id)
   end
 
   test "Codex user skills are a configured discovery root" do

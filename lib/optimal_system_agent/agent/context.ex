@@ -450,7 +450,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   # state. Everything else (memory, episodic, skills, learned skills) is RECALL
   # and competes within a bounded sub-budget capped to a fraction of the REAL
   # window. Labels owned by `WorldState.managed_labels/0` never reach this split.
-  @essential_labels ~w(task_brief runtime git_state task_state workflow)
+  @essential_labels ~w(task_brief active_skills runtime git_state task_state workflow)
 
   # `@dynamic_budget_floor` is declared with the other budget constants at the
   # top of the module — a module attribute read before its definition silently
@@ -771,6 +771,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       {bootstrap_block(), 0, "bootstrap"},
       {personality_block(), 0, "personality"},
       {task_brief_block(state), 0, "task_brief"},
+      {active_skills_block(state), 0, "active_skills"},
       {tool_process_block(state), 1, "tool_process"},
       # Priority 0: tiny and load-bearing. It carries the session id, the channel
       # and the resolved model identity — the same resolver /health and the TUI
@@ -1530,6 +1531,24 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp active_skills_block(state) do
+    case Map.get(state, :session_id) do
+      session_id when is_binary(session_id) ->
+        OptimalSystemAgent.Agent.ActiveSkills.context_block(
+          session_id,
+          Map.get(state, :messages, [])
+        )
+
+      _ ->
+        nil
+    end
+  rescue
+    error ->
+      "## Selected Skills Checkpoint Error\n\n" <>
+        "OSA could not inspect the selected-skill checkpoint (#{Exception.message(error)}). " <>
+        "Do not continue the task until the skill is selected again with `skill_view`."
   end
 
   defp task_state_block(state) do

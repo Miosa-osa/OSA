@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceRetentionTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.SessionPersistence
+  alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Settings
 
   @two_years_ago 63_072_000
@@ -51,7 +52,14 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceRetentionTest do
     File.write!(path, Jason.encode!(%{session_id: id, messages: []}))
 
     old = System.system_time(:second) - @two_years_ago
-    {_, 0} = System.cmd("touch", ["-d", "@#{old}", path])
+
+    old_datetime =
+      old
+      |> DateTime.from_unix!()
+      |> DateTime.to_naive()
+      |> NaiveDateTime.to_erl()
+
+    File.touch!(path, old_datetime)
     path
   end
 
@@ -88,6 +96,16 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceRetentionTest do
 
       assert {:ok, 1} = SessionPersistence.purge_expired()
       refute File.exists?(path)
+    end
+
+    test "purging an ancient session removes its selected-skill checkpoint", %{dir: dir} do
+      _path = write_ancient_session(dir, "expired-with-skills")
+      assert :ok = ActiveSkills.select("expired-with-skills", "diagnosing-bugs")
+      assert ActiveSkills.exists?("expired-with-skills")
+      Settings.set_session("cleanupPeriodDays", 30)
+
+      assert {:ok, 1} = SessionPersistence.purge_expired()
+      refute ActiveSkills.exists?("expired-with-skills")
     end
 
     test "a fresh session survives a positive window", %{dir: dir} do
