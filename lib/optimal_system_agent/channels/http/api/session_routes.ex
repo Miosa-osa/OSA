@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   require Logger
 
   alias OptimalSystemAgent.Runtime.SessionManager
+  alias OptimalSystemAgent.Channels.HTTP.SessionAccess
   alias OptimalSystemAgent.SDK.Memory
 
   plug(:match)
@@ -525,27 +526,33 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     session_id = conn.params["id"]
     user_id = conn.assigns[:user_id] || "anonymous"
 
-    # Same announcement semantics as GET /stream/:session_id in AgentRoutes:
-    # subscribing records the client-held id so pre-first-turn, session-scoped
-    # writes (model switch) resolve instead of 404ing. No Loop is started here.
-    SessionManager.track_session(session_id, %{user_id: user_id, channel: :sse})
+    case SessionAccess.authorize(session_id, user_id) do
+      :ok ->
+        # Same announcement semantics as GET /stream/:session_id in AgentRoutes:
+        # subscribing records the client-held id so pre-first-turn, session-scoped
+        # writes (model switch) resolve instead of 404ing. No Loop is started here.
+        SessionManager.track_session(session_id, %{user_id: user_id, channel: :sse})
 
-    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+        Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
 
-    conn =
-      conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      |> put_resp_header("connection", "keep-alive")
-      |> put_resp_header("x-accel-buffering", "no")
-      |> send_chunked(200)
+        conn =
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> put_resp_header("cache-control", "no-cache")
+          |> put_resp_header("connection", "keep-alive")
+          |> put_resp_header("x-accel-buffering", "no")
+          |> send_chunked(200)
 
-    {:ok, conn} =
-      chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
+        {:ok, conn} =
+          chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
-    Logger.debug("[SSE] /sessions/#{session_id}/stream opened by #{user_id}")
+        Logger.debug("[SSE] /sessions/#{session_id}/stream opened by #{user_id}")
 
-    session_sse_loop(conn, session_id)
+        session_sse_loop(conn, session_id)
+
+      {:error, :not_found} ->
+        json_error(conn, 404, "not_found", "Session not found")
+    end
   end
 
   # ── DELETE /sessions/:id ───────────────────────────────────────────

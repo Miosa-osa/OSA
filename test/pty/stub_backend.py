@@ -259,6 +259,13 @@ _HEALTH_GATE.set()
 _TURN_GATE = threading.Event()
 _TURN_GATE.set()
 
+# Number of upcoming SSE attaches that should answer 404. This reproduces the
+# real stale-session failure without stopping the backend: /health remains
+# healthy while only the requested session stream is gone.
+_SSE_REJECT_LOCK = threading.Lock()
+_SSE_REJECT_COUNT = 0
+_SSE_REJECT_SESSION_ID: str | None = None
+
 #: Longest a gated request will ever be held, whatever the test forgets to do.
 GATE_CEILING = 30.0
 
@@ -283,6 +290,27 @@ def hold_turn() -> None:
 
 def release_turn() -> None:
     _TURN_GATE.set()
+
+
+def reject_next_sse(count: int = 1, session_id: str | None = None) -> None:
+    """Make the next matching `count` session streams answer HTTP 404."""
+    global _SSE_REJECT_COUNT, _SSE_REJECT_SESSION_ID
+    with _SSE_REJECT_LOCK:
+        _SSE_REJECT_COUNT = count
+        _SSE_REJECT_SESSION_ID = session_id
+
+
+def _should_reject_sse(path: str) -> bool:
+    global _SSE_REJECT_COUNT
+    with _SSE_REJECT_LOCK:
+        if _SSE_REJECT_COUNT <= 0:
+            return False
+        if _SSE_REJECT_SESSION_ID is not None and not path.endswith(
+            f"/{_SSE_REJECT_SESSION_ID}"
+        ):
+            return False
+        _SSE_REJECT_COUNT -= 1
+        return True
 
 
 # --- pushing events down the SSE stream --------------------------------------
@@ -477,6 +505,9 @@ class _Handler(BaseHTTPRequestHandler):
             _HEALTH_GATE.wait(GATE_CEILING)
             return self._json(_HEALTH)
         if path.startswith("/api/v1/stream/"):
+            GETS.append(path)
+            if _should_reject_sse(path):
+                return self._json({"error": "session not found"}, status=404)
             return self._sse()
         if path == "/api/v1/commands":
             return self._json({"commands": []})

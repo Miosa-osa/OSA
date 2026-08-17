@@ -127,6 +127,17 @@ impl SseClient {
                     });
                     return;
                 }
+                Err(SseError::SessionNotFound) => {
+                    // A 404 is permanent for this session id. Retrying it with
+                    // network backoff only leaves the TUI stuck on
+                    // "Reconnecting…" for minutes. Hand recovery to the app,
+                    // which can create a replacement session and preserve any
+                    // queued prompt until that new stream is attached.
+                    let _ = self.send(BackendEvent::SseDisconnected {
+                        error: Some("session_not_found".to_string()),
+                    });
+                    return;
+                }
                 Err(SseError::Disconnected { err: e, connected }) => {
                     // D5: a drop that occurred AFTER the stream attached resets
                     // the budget (a recovered blip must not accumulate toward
@@ -206,6 +217,9 @@ impl SseClient {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SseError::AuthFailed);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(SseError::SessionNotFound);
         }
         if !status.is_success() {
             return Err(SseError::Disconnected {
@@ -303,6 +317,7 @@ fn next_reconnect_attempt(attempt: u32, connected: bool) -> u32 {
 enum SseError {
     AuthFailed,
     Cancelled,
+    SessionNotFound,
     /// A network/stream failure. `connected` is true when the failure happened
     /// AFTER the stream body was successfully attached (a mid-stream drop), so
     /// the reconnect loop can reset its backoff budget for a recovered blip
@@ -2153,6 +2168,40 @@ mod tests {
             }
             other => panic!("expected a mid-stream Disconnected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_missing_session_is_not_retried_as_a_network_failure() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            sock.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = SseClient::with_cancel(
+            "missing-session".to_string(),
+            format!("http://{addr}"),
+            String::new(),
+            tx,
+            CancellationToken::new(),
+        );
+
+        let result = client.connect_once().await;
+        server.await.unwrap();
+        assert!(
+            matches!(result, Err(SseError::SessionNotFound)),
+            "a permanent 404 must trigger session recovery, not ten reconnects: {result:?}"
+        );
     }
 
     #[test]

@@ -704,6 +704,7 @@ impl App {
         // composer (CC PromptInputQueuedCommands), so no toast: the user can
         // see and verify exactly what they queued, and recall it with ↑/Esc.
         self.input.set_queued_items(self.message_queue.clone());
+        self.activity.set_queued(self.message_queue.len());
         self.recompute_layout();
     }
 
@@ -755,6 +756,7 @@ impl App {
         }
         let next = self.message_queue.remove(0);
         self.input.set_queued_items(self.message_queue.clone());
+        self.activity.set_queued(self.message_queue.len());
         self.recompute_layout();
         // Re-enter the normal submit path so queued commands / shell / prompts
         // all behave exactly as if freshly typed at an Idle prompt.

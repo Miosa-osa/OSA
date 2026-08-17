@@ -184,6 +184,12 @@ impl App {
                     self.goal_intent = Some(crate::app::handle_actions::GoalIntent::Silent);
                     self.execute_backend_command_quiet("goal", "status");
                 }
+                // A prompt retained across a transient disconnect or a stale
+                // resumed-session recovery may run only after a real stream is
+                // attached. The disconnect path lands Idle and marks the turn
+                // done, but deliberately keeps the queue intact; this is the
+                // reliable boundary that drains it.
+                self.maybe_dequeue_message();
             }
             BackendEvent::SseDisconnected { error } => {
                 match error.as_deref() {
@@ -232,6 +238,24 @@ impl App {
                         // reconnect, no error, just clear any stale banner.
                         debug!("SSE cancelled by client");
                         self.sse_reconnecting = false;
+                    }
+                    Some("session_not_found") => {
+                        // The backend is healthy but this resumed session no
+                        // longer exists. Retrying the same stream can never
+                        // work. Preserve queued input, retire any in-flight
+                        // turn, and create a fresh session. SessionCreated will
+                        // attach its SSE stream; SseConnected drains the queue.
+                        warn!("SSE session no longer exists; creating a replacement session");
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                        }
+                        self.sse_reconnecting = false;
+                        self.toasts.push(
+                            "That session is no longer available. Starting a fresh session…"
+                                .into(),
+                            crate::components::toast::ToastLevel::Warning,
+                        );
+                        self.create_session();
                     }
                     Some("exhausted") => {
                         // Reconnect budget exhausted — honest terminal error.

@@ -188,7 +188,9 @@ defmodule OptimalSystemAgent.Providers.AnthropicEffortTest do
 
       # ...and the thinking block is STILL the reason: it is identical in all
       # five. Depth rides entirely on output_config.
-      assert bodies |> Enum.map(& &1.thinking) |> Enum.uniq() == [%{type: "adaptive"}]
+      assert bodies |> Enum.map(& &1.thinking) |> Enum.uniq() == [
+               %{type: "adaptive", display: "summarized"}
+             ]
 
       assert Enum.map(bodies, & &1.output_config) == [
                %{effort: "low"},

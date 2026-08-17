@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
+  alias OptimalSystemAgent.Channels.HTTP.SessionAccess
   alias OptimalSystemAgent.Runtime.SessionManager
   require Logger
 
@@ -46,7 +47,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
     session_id = conn.params["session_id"]
     user_id = conn.assigns[:user_id]
 
-    case validate_session_owner(session_id, user_id) do
+    case SessionAccess.authorize(session_id, user_id) do
       :ok ->
         # Opening the session's event stream is how a client ANNOUNCES a session
         # id it holds. The TUI mints its own id locally at startup
@@ -84,34 +85,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
 
   match _ do
     json_error(conn, 404, "not_found", "Agent endpoint not found")
-  end
-
-  # ── Session Ownership Validation ────────────────────────────────────
-
-  defp validate_session_owner(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, owner}] ->
-        cond do
-          user_id == "anonymous" ->
-            :ok
-
-          owner == user_id ->
-            :ok
-
-          true ->
-            Logger.warning(
-              "[API] Session ownership mismatch: session=#{session_id} owner=#{inspect(owner)} requester=#{inspect(user_id)}"
-            )
-
-            {:error, :not_found}
-        end
-
-      _ ->
-        # Session not in registry yet (not started or stored-only).
-        # Allow any authenticated user to connect — they'll receive
-        # events once the session starts processing.
-        :ok
-    end
   end
 
   # ── SSE Loop ────────────────────────────────────────────────────────
