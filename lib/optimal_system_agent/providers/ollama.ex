@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Providers.ToolCallParsers
+  alias OptimalSystemAgent.Utils.Mojibake
   alias OptimalSystemAgent.Utils.Text
 
   # Models known to handle tool calling well (name prefix → min size in GB)
@@ -1326,6 +1327,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def process_ndjson_line(line, callback, acc) do
     case Jason.decode(line) do
       {:ok, %{"message" => %{"content" => text}}} when is_binary(text) and text != "" ->
+        text = Mojibake.repair(text)
+
         # Split inline <think>…</think> reasoning out before emitting so the
         # tags + reasoning never leak into the visible answer.
         case Map.get(acc, :think) do

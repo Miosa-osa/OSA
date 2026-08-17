@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   require Logger
 
   alias OptimalSystemAgent.Store.Repo
+  alias OptimalSystemAgent.Utils.Mojibake
 
   schema "session_transcripts" do
     field(:session_id, :string)
@@ -273,7 +274,7 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   # ("[image]" placeholder per image block) so every turn survives
   # persistence. nil passes through so validate_required still catches
   # genuine caller bugs.
-  defp normalize_content(content) when is_binary(content), do: content
+  defp normalize_content(content) when is_binary(content), do: Mojibake.repair(content)
 
   defp normalize_content(content) when is_list(content) do
     content
