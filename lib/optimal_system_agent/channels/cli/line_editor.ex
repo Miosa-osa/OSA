@@ -17,6 +17,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   echo and terminal state tracking that conflicts with our own readline.
   """
 
+  alias OptimalSystemAgent.CLI.Width
+
   defstruct buffer: [],
             cursor: 0,
             history: [],
@@ -25,7 +27,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
             prompt: "",
             # fd for /dev/tty — used for BOTH raw byte reads AND writes
             tty: nil,
-            rendered_lines: 1
+            terminal_cols: 80
 
   @doc """
   Read a line of input with readline-style editing.
@@ -68,9 +70,11 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
           state = %__MODULE__{
             prompt: prompt,
             history: history,
-            tty: tty
+            tty: tty,
+            terminal_cols: terminal_columns()
           }
 
+          Process.put(:rendered_cursor_row, 0)
           tty_write(tty, prompt)
           result = input_loop(state)
           # Newline while still in raw mode (OPOST off → literal \r\n).
@@ -78,6 +82,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
           tty_write(tty, "\r\n")
           result
         after
+          Process.delete(:rendered_cursor_row)
           restore_stty(saved)
         end
 
@@ -94,9 +99,10 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         text = Enum.join(state.buffer)
         # Move cursor to the last rendered line so the caller's \r\n lands below
         # all content rather than overwriting a middle line.
-        line_count = length(String.split(text, "\n"))
-        {cursor_line, _} = cursor_position(state.buffer, state.cursor)
-        lines_below = line_count - 1 - cursor_line
+        layout =
+          visual_layout(text, Width.visible(state.prompt), state.terminal_cols, state.cursor)
+
+        lines_below = layout.rendered_rows - 1 - layout.cursor_row
 
         if lines_below > 0 do
           tty_write(state.tty, "\e[#{lines_below}B")
@@ -309,15 +315,16 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   defp redraw(state) do
     line = Enum.join(state.buffer)
     lines = String.split(line, "\n")
-    line_count = length(lines)
+    cols = terminal_columns(state.terminal_cols)
+    layout = visual_layout(line, Width.visible(state.prompt), cols, state.cursor)
 
-    # How many lines did we render last time? Use process dict since redraw
-    # is called for side-effects and does not return an updated state.
-    prev_rendered = Process.get(:rendered_lines, 1)
+    # Track the previous visual cursor row since redraw is side-effect-only and
+    # does not return an updated state.
+    prev_cursor_row = Process.get(:rendered_cursor_row, 0)
 
     # Move up to the first rendered line so we can overwrite everything.
-    if prev_rendered > 1 do
-      tty_write(state.tty, "\e[#{prev_rendered - 1}A")
+    if prev_cursor_row > 0 do
+      tty_write(state.tty, "\e[#{prev_cursor_row}A")
     end
 
     # Clear from here to end of screen.
@@ -332,33 +339,70 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     end
 
     # Position cursor on the correct line and column.
-    {cursor_line, cursor_col} = cursor_position(state.buffer, state.cursor)
-    lines_from_end = line_count - 1 - cursor_line
+    lines_from_end = layout.rendered_rows - 1 - layout.cursor_row
 
     if lines_from_end > 0 do
       tty_write(state.tty, "\e[#{lines_from_end}A")
     end
 
-    prefix_len = if cursor_line == 0, do: String.length(state.prompt), else: 2
     tty_write(state.tty, "\r")
 
-    if prefix_len + cursor_col > 0 do
-      tty_write(state.tty, "\e[#{prefix_len + cursor_col}C")
+    if layout.cursor_col > 0 do
+      tty_write(state.tty, "\e[#{layout.cursor_col}C")
     end
 
-    # Persist the rendered line count for the next redraw call.
-    Process.put(:rendered_lines, line_count)
+    Process.put(:rendered_cursor_row, layout.cursor_row)
   end
 
-  # Returns {line_number, column} of the cursor within a multi-line buffer.
-  # line_number is 0-based; column is the grapheme offset on that line.
-  defp cursor_position(buffer, cursor) do
-    chars_before = Enum.take(buffer, cursor)
-    text_before = Enum.join(chars_before)
-    lines_before = String.split(text_before, "\n")
-    line_num = length(lines_before) - 1
-    col = String.length(List.last(lines_before) || "")
-    {line_num, col}
+  @doc false
+  @spec visual_layout(String.t(), non_neg_integer(), pos_integer(), non_neg_integer()) :: map()
+  def visual_layout(text, prompt_width, terminal_cols, cursor)
+      when is_binary(text) and is_integer(prompt_width) and is_integer(terminal_cols) and
+             terminal_cols > 0 and is_integer(cursor) do
+    logical_lines = String.split(text, "\n")
+    before = text |> String.graphemes() |> Enum.take(max(cursor, 0)) |> Enum.join()
+    before_lines = String.split(before, "\n")
+    cursor_logical_line = length(before_lines) - 1
+    cursor_text = List.last(before_lines) || ""
+
+    rows_per_line =
+      logical_lines
+      |> Enum.with_index()
+      |> Enum.map(fn {logical, index} ->
+        prefix = if index == 0, do: prompt_width, else: 2
+        visual_rows(prefix + Width.visible(logical), terminal_cols)
+      end)
+
+    rows_before = rows_per_line |> Enum.take(cursor_logical_line) |> Enum.sum()
+    cursor_prefix = if cursor_logical_line == 0, do: prompt_width, else: 2
+    cursor_offset = cursor_prefix + Width.visible(cursor_text)
+    {cursor_wrap_row, cursor_col} = visual_cursor(cursor_offset, terminal_cols)
+
+    %{
+      rendered_rows: Enum.sum(rows_per_line),
+      cursor_row: rows_before + cursor_wrap_row,
+      cursor_col: cursor_col
+    }
+  end
+
+  defp visual_rows(width, cols), do: max(div(max(width, 1) - 1, cols) + 1, 1)
+
+  defp visual_cursor(0, _cols), do: {0, 0}
+
+  defp visual_cursor(offset, cols) do
+    case rem(offset, cols) do
+      0 -> {div(offset, cols) - 1, cols}
+      col -> {div(offset, cols), col}
+    end
+  end
+
+  defp terminal_columns(fallback \\ 80) do
+    case :io.columns() do
+      {:ok, cols} when is_integer(cols) and cols > 0 -> cols
+      _ -> fallback
+    end
+  rescue
+    _ -> fallback
   end
 
   # --- Tab Completion ---

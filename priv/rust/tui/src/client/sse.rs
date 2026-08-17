@@ -569,6 +569,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_converged"
         | "swarm_intelligence_completed"
         | "goal_verifier_round"
+        | "goal_tracker_transition"
         | "scratchpad_activity"
         | "hook_run"
         | "hook_blocked"
@@ -1529,6 +1530,42 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "goal_tracker_transition" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                action: String,
+                #[serde(default)]
+                status: String,
+                #[serde(default)]
+                phase: String,
+                #[serde(default)]
+                goal: Option<String>,
+                #[serde(default)]
+                goal_id: Option<String>,
+                #[serde(default)]
+                pause_reason: Option<String>,
+                #[serde(default)]
+                turn_count: u32,
+                #[serde(default)]
+                verify_run_count: u32,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("goal_tracker_transition", e)),
+            };
+            Some(BackendEvent::GoalTransition {
+                action: ev.action,
+                status: ev.status,
+                phase: ev.phase,
+                goal: ev.goal,
+                goal_id: ev.goal_id,
+                pause_reason: ev.pause_reason,
+                turn_count: ev.turn_count,
+                verify_run_count: ev.verify_run_count,
+            })
+        }
+
         "compaction_started" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -2189,6 +2226,26 @@ mod tests {
                 assert_eq!(verdict, "complete");
             }
             other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_authoritative_goal_tracker_transition() {
+        let data = br#"{"event":"goal_tracker_transition","action":"paused","status":"paused","phase":"idle","goal":"Ship the release","goal_id":"goal-1","pause_reason":"user","turn_count":3,"verify_run_count":1}"#;
+        match parse_sse_event("goal_tracker_transition", data) {
+            Some(BackendEvent::GoalTransition {
+                status,
+                goal,
+                pause_reason,
+                turn_count,
+                ..
+            }) => {
+                assert_eq!(status, "paused");
+                assert_eq!(goal.as_deref(), Some("Ship the release"));
+                assert_eq!(pause_reason.as_deref(), Some("user"));
+                assert_eq!(turn_count, 3);
+            }
+            other => panic!("expected goal transition, got {other:?}"),
         }
     }
 

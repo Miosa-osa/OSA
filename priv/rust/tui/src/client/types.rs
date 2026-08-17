@@ -361,6 +361,8 @@ pub struct GoalStatus {
     /// session has no tracker entry yet.
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
     /// The anchored goal text, as the backend stored it.
     #[serde(default)]
     pub goal: Option<String>,
@@ -369,6 +371,8 @@ pub struct GoalStatus {
     /// Turns the backend has counted against this goal.
     #[serde(default)]
     pub turn_count: u32,
+    #[serde(default)]
+    pub verify_run_count: u32,
     /// Why a `paused` goal paused: `no_progress` | `run_cap` | `off_track` |
     /// `user`. Names the stop condition so an exhausted goal is distinguishable
     /// from a finished one.

@@ -517,9 +517,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       # what the loop asks before it continues.
       active: GoalTracker.goal_loop?(session_id) and GoalTracker.continue?(session_id),
       status: snap && snap.status && to_string(snap.status),
+      phase: snap && snap.phase && to_string(snap.phase),
       goal: snap && snap.goal,
       goal_id: snap && snap.goal_id,
       turn_count: (snap && snap.turn_count) || 0,
+      verify_run_count: (snap && snap.verify_run_count) || 0,
       pause_reason: snap && snap.pause_reason && to_string(snap.pause_reason)
     }
 

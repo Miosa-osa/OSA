@@ -372,15 +372,8 @@ def gets_since(mark: int, path: str | None = None) -> list[str]:
 #: while the backend says the goal is active, instead of stopping when the
 #: model's last line happens to read `DONE`.
 _GOAL: dict = {
-    "output": "Goal anchored",
-    "goal": {
-        "active": True,
-        "status": "active",
-        "goal": "ship the parser",
-        "goal_id": "g-1",
-        "turn_count": 1,
-        "pause_reason": None,
-    },
+    "output": "No goal is active.",
+    "goal": None,
 }
 
 
@@ -401,6 +394,12 @@ def set_goal_state(active: bool, status: str, pause_reason: str | None = None,
 
 def reset_goal_state() -> None:
     set_goal_state(True, "active", output="Goal anchored")
+
+
+def clear_goal_state() -> None:
+    """Make reconnect goal sync report that this session has no goal."""
+    _GOAL["output"] = "No goal is active."
+    _GOAL["goal"] = None
 
 
 class _Handler(BaseHTTPRequestHandler):
