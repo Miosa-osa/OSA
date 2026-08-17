@@ -1259,6 +1259,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         session_id: snap.session_id,
         status: snap.status,
         phase: snap.phase,
+        goal: snap.goal,
+        goal_id: snap.goal_id,
         pause_reason: snap.pause_reason,
         turn_count: snap.turn_count,
         verify_run_count: snap.verify_run_count

@@ -35,6 +35,7 @@ from osa_pty import (  # noqa: E402
 from stub_backend import (  # noqa: E402
     CLEARED_SESSION_ID,
     StubBackend,
+    clear_goal_state,
     end_turn,
     get_mark,
     gets_since,
@@ -2771,7 +2772,14 @@ def test_goal_is_anchored_on_the_backend_not_graded_in_the_client(
             s.pump(SETTLE)
             s.write(b"\r")
 
-            body = _wait_post(s, mark, "/api/v1/commands/execute", '"goal"')
+            # Reconnect now performs a silent `/goal status` sync first. Wait
+            # for the criteria-bearing anchor, not merely the first goal POST.
+            body = _wait_post(
+                s,
+                mark,
+                "/api/v1/commands/execute",
+                "mix test passes",
+            )
             if body is None:
                 raise AssertionError(
                     "/goal never reached the backend. This is the shipped "
@@ -2841,6 +2849,35 @@ def test_goal_is_anchored_on_the_backend_not_graded_in_the_client(
                 )
     finally:
         reset_goal_state()
+
+
+def test_reconnect_restores_a_paused_goal_footer(backend: StubBackend) -> None:
+    """A durable goal remains visible and controllable after reopening OSA."""
+    set_goal_state(
+        False,
+        "paused",
+        pause_reason="user",
+        goal="publish the release",
+        output="Goal paused",
+    )
+    try:
+        with PtySession(backend.base_url, cols=120, rows=30) as s:
+            s.boot()
+            s.pump(1.0)
+            screen = "\n".join(s.lines())
+            if "Goal paused: publish the release" not in screen:
+                raise AssertionError(
+                    "reopening the TUI did not restore the paused goal description "
+                    "in the footer.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            if "/goal resume" not in screen:
+                raise AssertionError(
+                    "the paused goal footer did not expose its resume control.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        clear_goal_state()
 
 
 def test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan(
@@ -2974,6 +3011,7 @@ TESTS = [
     test_a_turn_that_goes_silent_says_so_instead_of_spinning_forever,
     test_a_turn_that_answers_nothing_says_so_instead_of_vanishing,
     test_goal_is_anchored_on_the_backend_not_graded_in_the_client,
+    test_reconnect_restores_a_paused_goal_footer,
     test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan,
 ]
 
@@ -2983,6 +3021,10 @@ def main() -> int:
     with StubBackend(STUB_PORT) as backend:
         for test in TESTS:
             name = test.__name__
+            # Every PTY session reconnects and asks for its durable goal
+            # snapshot. Tests that need a goal opt in explicitly so one test's
+            # tracker state cannot consume status-bar space in the next one.
+            clear_goal_state()
             sys.stdout.write(f"  {name} ... ")
             sys.stdout.flush()
             try:

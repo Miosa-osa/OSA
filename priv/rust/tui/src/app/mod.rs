@@ -12,12 +12,12 @@ mod handle_backend;
 mod handle_dialogs;
 pub mod key_normalize;
 mod keymap_dispatch;
+pub mod keys;
+pub mod layout;
 pub mod permission_queue;
 pub mod resume;
 pub mod self_update;
 pub mod settle_guard;
-pub mod keys;
-pub mod layout;
 pub mod state;
 pub mod stream_pace;
 pub mod stream_probe;
@@ -401,6 +401,10 @@ pub struct App {
     // own homework — while the backend's skeptic panel, stall detector and run
     // cap sat unused because `/goal` never reached them.
     pub goal: Option<String>,
+    /// Last authoritative backend snapshot. Kept after pursuit stops so the
+    /// footer can show paused, blocked, completed, or abandoned state instead
+    /// of disappearing precisely when the user needs the next command.
+    pub goal_status: Option<crate::client::types::GoalStatus>,
     /// Turns the TUI has auto-started toward the goal since it was anchored.
     ///
     /// This is the OUTER of three nested bounds, and the only one the TUI owns:
@@ -831,6 +835,7 @@ impl App {
 
             voice: VoiceState::new(),
             goal: None,
+            goal_status: None,
             goal_cycle: 0,
             goal_max_cycles,
             goal_intent: None,
@@ -1299,26 +1304,33 @@ impl App {
         }
     }
 
-    /// Reconcile the status-line active-goal indicator ("Working on: <goal> ·
-    /// 3m 40s") with the live goal state, once per frame. Stamps the goal-active
+    /// Reconcile the status-line goal indicator with the authoritative backend
+    /// snapshot once per frame. Stamps the goal-active
     /// Instant the first frame a goal is present so the elapsed counts from
     /// activation, and clears it the moment the goal clears so the timer resets
     /// (never leaks across goals). Overrides the plain "goal N/max" label that the
     /// `/goal` command path seeds, so the richer indicator is the single winner.
     pub(crate) fn sync_goal_indicator(&mut self) {
-        match self.goal.clone() {
-            Some(goal) => {
-                let since = *self.goal_activated_at.get_or_insert_with(Instant::now);
-                let elapsed = since.elapsed().as_secs();
-                self.status
-                    .set_goal_label(Some(compose_goal_label(&goal, elapsed)));
-            }
-            None => {
-                // Goal cleared: freeze/reset the timer and drop the chip.
-                if self.goal_activated_at.is_some() {
+        match self.goal_status.clone() {
+            Some(snapshot)
+                if snapshot
+                    .goal
+                    .as_deref()
+                    .is_some_and(|g| !g.trim().is_empty()) =>
+            {
+                let elapsed = if snapshot.active {
+                    let since = *self.goal_activated_at.get_or_insert_with(Instant::now);
+                    since.elapsed().as_secs()
+                } else {
                     self.goal_activated_at = None;
-                    self.status.set_goal_label(None);
-                }
+                    0
+                };
+                self.status
+                    .set_goal_label(Some(compose_goal_status_label(&snapshot, elapsed)));
+            }
+            _ => {
+                self.goal_activated_at = None;
+                self.status.set_goal_label(None);
             }
         }
     }
@@ -1384,6 +1396,26 @@ fn compose_goal_label(goal: &str, elapsed_secs: u64) -> String {
         shown,
         crate::components::status_bar::fmt_elapsed_compact(elapsed_secs)
     )
+}
+
+fn compose_goal_status_label(
+    snapshot: &crate::client::types::GoalStatus,
+    elapsed_secs: u64,
+) -> String {
+    let objective = snapshot.goal.as_deref().unwrap_or("").trim();
+    let shown = crate::util::fit_cols(objective, 36);
+    match snapshot.status.as_deref() {
+        Some("paused") => format!("Goal paused: {} · /goal resume", shown),
+        Some("blocked") => format!("Goal stalled: {} · /goal resume", shown),
+        Some("completed") => format!("Goal achieved: {} · /goal clear", shown),
+        Some("abandoned") => format!("Goal stopped: {} · /goal clear", shown),
+        _ if snapshot.active => format!(
+            "Pursuing: {} · {} · /goal pause",
+            shown,
+            crate::components::status_bar::fmt_elapsed_compact(elapsed_secs)
+        ),
+        _ => format!("Goal inactive: {} · /goal resume", shown),
+    }
 }
 
 pub(super) fn generate_session_id() -> String {
@@ -1535,7 +1567,8 @@ mod turn_active_tests {
 
 #[cfg(test)]
 mod goal_indicator_tests {
-    use super::compose_goal_label;
+    use super::{compose_goal_label, compose_goal_status_label};
+    use crate::client::types::GoalStatus;
 
     #[test]
     fn goal_label_shows_goal_and_nonzero_elapsed_once_activated() {
@@ -1562,6 +1595,47 @@ mod goal_indicator_tests {
         let label = compose_goal_label(&long, 5);
         assert!(label.contains('\u{2026}'), "long goal must be ellipsized");
         assert!(label.ends_with("\u{00b7} 5s"));
+    }
+
+    #[test]
+    fn active_goal_names_objective_elapsed_and_pause_control() {
+        let snapshot = GoalStatus {
+            active: true,
+            status: Some("active".into()),
+            goal: Some("ship the release".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            compose_goal_status_label(&snapshot, 220),
+            "Pursuing: ship the release · 3m 40s · /goal pause"
+        );
+    }
+
+    #[test]
+    fn paused_goal_remains_visible_with_resume_control() {
+        let snapshot = GoalStatus {
+            status: Some("paused".into()),
+            goal: Some("ship the release".into()),
+            pause_reason: Some("user".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            compose_goal_status_label(&snapshot, 0),
+            "Goal paused: ship the release · /goal resume"
+        );
+    }
+
+    #[test]
+    fn completed_goal_remains_visible_until_cleared() {
+        let snapshot = GoalStatus {
+            status: Some("completed".into()),
+            goal: Some("ship the release".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            compose_goal_status_label(&snapshot, 0),
+            "Goal achieved: ship the release · /goal clear"
+        );
     }
 }
 

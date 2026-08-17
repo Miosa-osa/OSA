@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   alias OptimalSystemAgent.Agent.SessionPersistence.Jsonl
   alias OptimalSystemAgent.Agent.SessionPersistence.RecordLock
+  alias OptimalSystemAgent.Utils.Mojibake
   alias OptimalSystemAgent.ConfigFile
 
   # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
@@ -167,7 +168,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
             restored =
               messages
               |> Enum.filter(&is_map/1)
-              |> Enum.map(fn m -> Map.new(m, fn {k, v} -> {safe_key(k), v} end) end)
+              |> Enum.map(&restore_message/1)
 
             {:ok, restored}
 
@@ -206,7 +207,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           session_id
           |> load_events()
           |> Enum.filter(&is_map/1)
-          |> Enum.map(fn m -> Map.new(m, fn {k, v} -> {safe_key(k), v} end) end)
+          |> Enum.map(&restore_message/1)
 
         # Recovery is a read that produces a record, so it must establish this
         # VM's write lineage exactly like the normal load path does. It did not,
@@ -935,7 +936,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           )
         end
 
-        Enum.map(events, &Map.get(&1, "msg", &1))
+        Enum.map(events, &(Map.get(&1, "msg", &1) |> repair_message()))
 
       _ ->
         []
@@ -952,6 +953,24 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  defp restore_message(message) do
+    message
+    |> Map.new(fn {key, value} -> {safe_key(key), value} end)
+    |> repair_message()
+  end
+
+  defp repair_message(message) when is_map(message) do
+    Map.new(message, fn
+      {key, value} when key in [:content, "content"] and is_binary(value) ->
+        {key, Mojibake.repair(value)}
+
+      pair ->
+        pair
+    end)
+  end
+
+  defp repair_message(message), do: message
 
   defp session_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")

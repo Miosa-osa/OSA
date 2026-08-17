@@ -438,6 +438,18 @@ pub enum BackendEvent {
         total: u32,
         gaps: Vec<String>,
     },
+    /// Authoritative backend goal lifecycle transition. Unlike the verifier
+    /// chip, this persists in the footer for active and stopped states.
+    GoalTransition {
+        action: String,
+        status: String,
+        phase: String,
+        goal: Option<String>,
+        goal_id: Option<String>,
+        pause_reason: Option<String>,
+        turn_count: u32,
+        verify_run_count: u32,
+    },
     SwarmIntelligenceConverged {
         swarm_id: String,
         round: u32,

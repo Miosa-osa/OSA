@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     push_notification
     subscribe_pr_registered
     goal_verifier_round
+    goal_tracker_transition
     verification_gate_triggered
     announcement_continue
     announcement_continue_exhausted

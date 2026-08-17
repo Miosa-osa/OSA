@@ -2110,6 +2110,11 @@ impl App {
         // Mirror the backend. `self.goal` is a CACHE of what the backend last
         // said, never an opinion of ours: `active` is `GoalTracker.goal_loop?/1
         // and continue?/1`, the same pair `ReactLoop` gates its own re-entry on.
+        self.goal_status = status
+            .goal
+            .as_ref()
+            .filter(|g| !g.trim().is_empty())
+            .map(|_| status.clone());
         self.goal = if status.active {
             status.goal.clone().filter(|g| !g.trim().is_empty())
         } else {
@@ -2184,15 +2189,11 @@ impl App {
         // The backend has authorized another turn. Only now does our own outer
         // bound get a say — it can stop early, never extend (see `goal_cycle`).
         if self.goal_cycle >= self.goal_max_cycles {
-            self.chat.add_system_message(
-                &format!(
-                    "Goal auto-continue reached its {}-turn cap while the backend still has the \
-                     goal active. Stopping here — the goal stays anchored, so sending any message \
-                     resumes work on it.",
-                    self.goal_max_cycles
-                ),
-                "warning",
-            );
+            self.pause_goal(&format!(
+                "Goal paused after the TUI's {}-turn safety cap. The goal stays anchored. \
+                 Use /goal resume to continue or /goal clear to forget it.",
+                self.goal_max_cycles
+            ));
             return false;
         }
 
@@ -2215,6 +2216,12 @@ impl App {
         }
         self.goal = None;
         self.goal_cycle = 0;
+        if let Some(snapshot) = self.goal_status.as_mut() {
+            snapshot.active = false;
+            snapshot.status = Some("paused".into());
+            snapshot.phase = Some("idle".into());
+            snapshot.pause_reason = Some("user".into());
+        }
         self.refresh_goal_status();
         self.chat.add_system_message(why, "info");
         self.goal_intent = Some(GoalIntent::Silent);
@@ -2223,14 +2230,7 @@ impl App {
 
     /// Sync the status-bar "goal N/max" indicator with the current state.
     fn refresh_goal_status(&mut self) {
-        if self.goal.is_some() {
-            self.status.set_goal_label(Some(format!(
-                "goal {}/{}",
-                self.goal_cycle, self.goal_max_cycles
-            )));
-        } else {
-            self.status.set_goal_label(None);
-        }
+        self.sync_goal_indicator();
     }
 
     /// Called at the end of each assistant turn. Asks the BACKEND whether the

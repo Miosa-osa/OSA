@@ -176,6 +176,14 @@ impl App {
                 // coordinator on. The backend echoes a coordinator_mode event,
                 // which drives the chip; "status" reads without mutating.
                 self.spawn_backend_command("coordinator", "status");
+                // Goal state is also backend-authoritative and durable. Pull a
+                // snapshot on every (re)connect so a resumed TUI immediately
+                // restores the active, paused, or completed footer instead of
+                // waiting for the user to type `/goal status`.
+                if self.goal_intent.is_none() {
+                    self.goal_intent = Some(crate::app::handle_actions::GoalIntent::Silent);
+                    self.execute_backend_command_quiet("goal", "status");
+                }
             }
             BackendEvent::SseDisconnected { error } => {
                 match error.as_deref() {
@@ -2677,6 +2685,42 @@ impl App {
                     }
                 };
                 self.status.set_goal_verification(state);
+            }
+            BackendEvent::GoalTransition {
+                status,
+                phase,
+                goal,
+                goal_id,
+                pause_reason,
+                turn_count,
+                verify_run_count,
+                ..
+            } => {
+                let active = matches!(status.as_str(), "active" | "off_track");
+                let snapshot = crate::client::types::GoalStatus {
+                    active,
+                    status: Some(status),
+                    phase: Some(phase),
+                    goal: goal.clone(),
+                    goal_id,
+                    turn_count,
+                    verify_run_count,
+                    pause_reason,
+                };
+                self.goal_status = goal
+                    .as_ref()
+                    .filter(|g| !g.trim().is_empty())
+                    .map(|_| snapshot);
+                self.goal = if active {
+                    goal.filter(|g| !g.trim().is_empty())
+                } else {
+                    None
+                };
+                if !active {
+                    self.goal_cycle = 0;
+                }
+                self.sync_goal_indicator();
+                self.recompute_layout();
             }
 
             // === Context compaction: make a multi-minute blocking step visible ===
