@@ -34,6 +34,9 @@ defmodule OptimalSystemAgent.Orchestrator do
   # no-cancel-issued, just-plain-stuck case.
   @default_subagent_timeout_ms 2 * 60 * 60 * 1000
 
+  @doc false
+  def runner_key(agent_id), do: "subagent-runner:" <> agent_id
+
   # Slack between the INNER join deadline (inside the task, in
   # `execute_and_collect/6`) and the OUTER one (`join_subagent_task/3`). The
   # inner path must always fire first: it is the only one that force-terminates
@@ -853,6 +856,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     {:ok, runner_pid} =
       Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+        Registry.register(OptimalSystemAgent.SessionRegistry, runner_key(subagent_id), nil)
+
         # Concurrency admission. `:max_fleet_agents` (default 16) was enforced ONLY
         # on the `fleet` path — `run_background/2`, which is where the `delegate`
         # tool's `background: true` lands, had no ceiling whatsoever, so a model
@@ -930,6 +935,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           })
 
           ExecutionControl.broadcast(subagent_id, parent_id)
+          RunStore.release_lease(subagent_id)
         else
           case result do
             {:error, reason} ->

@@ -129,12 +129,20 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
   defp await_stopped(_agent_id, 0), do: {:error, :pause_teardown_timeout}
 
   defp await_stopped(agent_id, attempts_left) do
-    if alive?(agent_id) do
+    if alive?(agent_id) or runner_alive?(agent_id) or not RunStore.lease_claimable?(agent_id) do
       Process.sleep(10)
       await_stopped(agent_id, attempts_left - 1)
     else
       :ok
     end
+  end
+
+  defp runner_alive?(agent_id) do
+    Registry.lookup(OptimalSystemAgent.SessionRegistry, Orchestrator.runner_key(agent_id)) != []
+  rescue
+    error ->
+      Logger.error("[SubagentControl] runner lookup failed: #{Exception.message(error)}")
+      true
   end
 
   defp alive?(agent_id) do
