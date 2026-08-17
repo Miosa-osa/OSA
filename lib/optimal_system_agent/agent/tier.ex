@@ -211,9 +211,15 @@ defmodule OptimalSystemAgent.Agent.Tier do
   """
   @spec model_for(tier(), atom()) :: String.t()
   def model_for(tier, :ollama) do
-    case ollama_tier_model(tier) do
-      nil -> auto_model(:ollama)
-      model -> model
+    case configured_model(:ollama) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        case ollama_tier_model(tier) do
+          nil -> auto_model(:ollama)
+          model -> model
+        end
     end
   end
 
@@ -365,8 +371,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
     case safe_list_ollama_models(url) do
       {:ok, models} when models != [] ->
-        sorted = Enum.sort_by(models, & &1.size, :desc)
-        mapping = assign_ollama_tiers(sorted)
+        mapping = assign_ollama_tiers(models)
         :persistent_term.put(:osa_ollama_tiers, mapping)
 
         Logger.info(
@@ -461,22 +466,31 @@ defmodule OptimalSystemAgent.Agent.Tier do
     end
   end
 
-  # Assign tiers from a size-sorted (descending) list of models.
+  # Assign tiers from chat-capable models, sorted by size descending.
   # User overrides take priority, then size-based assignment fills the rest.
   # With 1 model: all tiers use it.
   # With 2 models: elite=largest, specialist+utility=smallest.
   # With 3+: elite=largest, specialist=middle, utility=smallest.
-  defp assign_ollama_tiers([]), do: %{}
+  @doc false
+  @spec assign_ollama_tiers([map()]) :: map()
+  def assign_ollama_tiers(models) when is_list(models) do
+    models
+    |> Enum.filter(&agent_model?/1)
+    |> Enum.sort_by(& &1.size, :desc)
+    |> do_assign_ollama_tiers()
+  end
 
-  defp assign_ollama_tiers([only]) do
+  defp do_assign_ollama_tiers([]), do: %{}
+
+  defp do_assign_ollama_tiers([only]) do
     apply_overrides(%{elite: only.name, specialist: only.name, utility: only.name})
   end
 
-  defp assign_ollama_tiers([large, small]) do
+  defp do_assign_ollama_tiers([large, small]) do
     apply_overrides(%{elite: large.name, specialist: small.name, utility: small.name})
   end
 
-  defp assign_ollama_tiers([large | rest]) do
+  defp do_assign_ollama_tiers([large | rest]) do
     mid_idx = div(length(rest), 2)
     mid = Enum.at(rest, mid_idx)
     small = List.last(rest)
@@ -486,9 +500,19 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
   # Merge user overrides on top of size-based assignments
   defp apply_overrides(mapping) do
-    overrides = get_tier_overrides()
+    overrides =
+      get_tier_overrides()
+      |> Enum.filter(fn {_tier, model} -> agent_model?(%{name: model}) end)
+      |> Map.new()
+
     Map.merge(mapping, overrides)
   end
+
+  defp agent_model?(%{name: name}) when is_binary(name) do
+    OptimalSystemAgent.Providers.Ollama.model_supports_tools?(name)
+  end
+
+  defp agent_model?(_), do: false
 
   # Safe wrapper that doesn't crash if Ollama module isn't loaded or unreachable
   defp safe_list_ollama_models(url) do

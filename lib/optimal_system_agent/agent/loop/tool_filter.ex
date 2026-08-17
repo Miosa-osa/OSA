@@ -203,11 +203,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   # same defect `Agent.FastPath` records as "the only stage in filter/1 that
   # logged NOTHING".
   defp report_role_filter(tools, kept, tier, allowed, blocked) do
+    allowlist_matches_task_tool? =
+      not (is_list(allowed) and allowed != []) or
+        Enum.any?(tools, fn tool -> tool_name(tool) in allowed end)
+
     cond do
       kept == tools ->
         tools
 
-      kept == [] and tools != [] ->
+      not allowlist_matches_task_tool? and tools != [] ->
         # A `tools_allowed` typo or a stale tool name intersects to nothing, and
         # a zero-length schema array is not something native-tool providers
         # degrade from gracefully. Drop the unsatisfiable ALLOWLIST, keep the

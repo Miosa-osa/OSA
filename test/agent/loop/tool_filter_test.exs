@@ -166,7 +166,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
   # calls `delegate` and nests forever.
   describe "filter_for_role_allowlist/2" do
     defp advertised_tools do
-      ~w(file_read file_glob file_grep dir_list code_symbols shell_execute delegate tool_search)
+      ~w(file_read file_glob file_grep dir_list code_symbols shell_execute delegate tool_search skill_view list_skills)
       |> Enum.map(&%{name: &1})
     end
 
@@ -256,6 +256,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
       assert "file_read" in advertised
     end
 
+    test "subagents retain skill discovery tools through a role allowlist" do
+      tools = advertised_tools()
+      role = %{allowed_tools: ~w(file_read), blocked_tools: []}
+
+      advertised =
+        tools
+        |> ToolFilter.filter_for_role_allowlist(Map.put(role, :permission_tier, :subagent))
+        |> Enum.map(& &1.name)
+
+      assert "skill_view" in advertised
+      assert "list_skills" in advertised
+      assert OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?("skill_view", role)
+
+      assert OptimalSystemAgent.Agent.Loop.ToolExecutor.subagent_tool_allowed?(
+               "list_skills",
+               role
+             )
+    end
+
     # config/test.exs pins Logger to :warning, so an :info line is dropped
     # before capture. Raise the floor for the assertion, then put it back —
     # otherwise "does it report?" is untestable by construction.
@@ -279,7 +298,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
         end)
 
       assert log =~ "role tool gate active"
-      assert log =~ "advertising 2 of 8 tools"
+      assert log =~ "advertising 2 of 10 tools"
     end
 
     test "an unrestricted role logs nothing — the gate is inert, not quiet" do

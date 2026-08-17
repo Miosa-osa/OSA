@@ -94,6 +94,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       tool in @subagent_blocked_tools -> false
       # Per-agent denylist
       is_list(blocked) and tool in blocked -> false
+      # Skill discovery is part of every agent's task protocol. These read-only
+      # meta tools must survive role allowlists or a child can be instructed to
+      # select a skill while being structurally unable to inspect one.
+      tool in ["skill_view", "list_skills"] -> true
       # Per-agent allowlist (nil = all allowed)
       is_list(allowed) and allowed != [] -> tool in allowed
       # Default: allowed

@@ -1,7 +1,56 @@
 defmodule OptimalSystemAgent.Agent.TierTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Tier
+
+  describe "Ollama agent model selection" do
+    setup do
+      old_model = Application.get_env(:optimal_system_agent, :ollama_model)
+      old_tiers = :persistent_term.get(:osa_ollama_tiers, :missing)
+      old_overrides = :persistent_term.get(:osa_tier_overrides, :missing)
+
+      on_exit(fn ->
+        if old_model,
+          do: Application.put_env(:optimal_system_agent, :ollama_model, old_model),
+          else: Application.delete_env(:optimal_system_agent, :ollama_model)
+
+        restore_term(:osa_ollama_tiers, old_tiers)
+        restore_term(:osa_tier_overrides, old_overrides)
+      end)
+
+      :ok
+    end
+
+    test "the explicitly selected model beats stale automatic tier assignments" do
+      Application.put_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud")
+
+      :persistent_term.put(:osa_ollama_tiers, %{
+        elite: "llama3.2:3b",
+        specialist: "nomic-embed-text:latest",
+        utility: "qwen3-embedding:0.6b"
+      })
+
+      assert Tier.model_for(:specialist, :ollama) == "glm-5.2:cloud"
+    end
+
+    test "automatic tiers exclude embedding and undersized non-agent models" do
+      models = [
+        %{name: "llama3.2:3b", size: 2_019_393_189},
+        %{name: "qwen3-coder:480b-cloud", size: 382},
+        %{name: "qwen3-embedding:0.6b", size: 639_150_858},
+        %{name: "nomic-embed-text:latest", size: 274_302_450}
+      ]
+
+      assert Tier.assign_ollama_tiers(models) == %{
+               elite: "qwen3-coder:480b-cloud",
+               specialist: "qwen3-coder:480b-cloud",
+               utility: "qwen3-coder:480b-cloud"
+             }
+    end
+  end
+
+  defp restore_term(key, :missing), do: :persistent_term.erase(key)
+  defp restore_term(key, value), do: :persistent_term.put(key, value)
 
   # ── max_agents/1 ──────────────────────────────────────────────────
 

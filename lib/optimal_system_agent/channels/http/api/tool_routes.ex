@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
 
   alias OptimalSystemAgent.Tools.Registry, as: Tools
+  alias OptimalSystemAgent.Tools.Registry.SkillLoader
 
   plug(:match)
   plug(:dispatch)
@@ -570,7 +571,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
               name: name,
               description: Map.get(skill, :description, ""),
               triggers: Map.get(skill, :triggers, []),
-              has_instructions: Map.get(skill, :instructions, "") != ""
+              has_instructions: skill_has_instructions?(skill)
             }
           end)
 
@@ -583,6 +584,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
         conn |> put_resp_content_type("application/json") |> send_resp(200, body)
     end
+  end
+
+  defp skill_has_instructions?(skill) do
+    case Map.get(skill, :instructions) do
+      body when is_binary(body) and body != "" ->
+        true
+
+      _ ->
+        case Map.get(skill, :path) do
+          path when is_binary(path) ->
+            match?({:ok, body} when is_binary(body) and body != "", SkillLoader.load_body(path))
+
+          _ ->
+            false
+        end
+    end
+  rescue
+    _ -> false
   end
 
   # ── POST /respond (permissions) ────────────────────────────────────

@@ -740,6 +740,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
   """
   @spec active_skills_context() :: String.t() | nil
   def active_skills_context do
+    build_active_skills_context(nil)
+  end
+
+  defp build_active_skills_context(message) do
     skills = :persistent_term.get({__MODULE__, :skills}, %{})
 
     if map_size(skills) == 0 do
@@ -749,14 +753,16 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # the model-facing listing until a matching file is touched this session.
       touched = touched_paths()
 
-      active =
+      surfaced =
         skills
         |> SkillLoader.list_for_model(touched)
         |> SkillLoader.reject_disabled()
 
-      if active == [] do
+      if surfaced == [] do
         nil
       else
+        active = rank_skills_for_message(surfaced, message)
+
         lines =
           Enum.map_join(active, "\n", fn skill ->
             description =
@@ -772,7 +778,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
           "Before acting on any non-trivial task, scan this compact catalog. " <>
           "If a skill is relevant or partially relevant, say which skill you are using, " <>
           "call `skill_view` to load its full instructions, and follow them before using " <>
-          "other task tools. Never guess a skill body from its description. Do not create " <>
+          "other task tools. If no listed skill clearly fits, call `list_skills` to search " <>
+          "the full library before proceeding. This applies to parent agents and subagents. " <>
+          "Never guess a skill body from its description. Do not create " <>
           "a new skill unless the user asks or the completed workflow is genuinely reusable.\n\n" <>
           lines
       end
@@ -792,7 +800,30 @@ defmodule OptimalSystemAgent.Tools.Registry do
   def active_skills_context(nil), do: active_skills_context()
   def active_skills_context(""), do: active_skills_context()
 
-  def active_skills_context(message) when is_binary(message), do: active_skills_context()
+  def active_skills_context(message) when is_binary(message),
+    do: build_active_skills_context(message)
+
+  defp rank_skills_for_message(skills, message) when is_binary(message) and message != "" do
+    query = String.downcase(message)
+
+    skills
+    |> Enum.map(fn skill ->
+      searchable =
+        [skill.name, skill.description, Enum.join(List.wrap(skill.triggers), " ")]
+        |> Enum.join(" ")
+
+      trigger_bonus = if trigger_match?(skill, query), do: 2.0, else: 0.0
+      {skill, trigger_bonus + OptimalSystemAgent.Skills.Ranker.relevance(searchable, message)}
+    end)
+    |> Enum.filter(fn {_skill, score} -> score > 0.0 end)
+    |> Enum.sort_by(fn {_skill, score} -> score end, :desc)
+    |> Enum.take(12)
+    |> Enum.map(&elem(&1, 0))
+  rescue
+    _ -> Enum.take(skills, 12)
+  end
+
+  defp rank_skills_for_message(skills, _message), do: skills
 
   @doc """
   Match a message against all loaded skill trigger keywords.
