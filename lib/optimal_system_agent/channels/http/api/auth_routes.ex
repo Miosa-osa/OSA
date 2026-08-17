@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AuthRoutes do
     with :ok <- verify_login_secret(conn) do
       user_id =
         get_in(conn.body_params, ["user_id"]) ||
-          "tui_#{System.unique_integer([:positive])}"
+          default_user_id()
 
       token = Auth.generate_token(%{"user_id" => user_id})
       refresh = Auth.generate_refresh_token(%{"user_id" => user_id})
@@ -106,6 +106,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AuthRoutes do
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────
+
+  # Local OSA is one user talking to one loopback-only daemon. A random id here
+  # made that same person become a different session owner after every fresh
+  # login, especially after an ephemeral JWT secret rotated on backend restart.
+  # Keep remote fallback behaviour isolated; authenticated deployments should
+  # continue sending an explicit account id.
+  defp default_user_id do
+    if Auth.loopback_only?(),
+      do: "local",
+      else: "tui_#{System.unique_integer([:positive])}"
+  end
 
   # Returns :ok when the request is allowed to proceed, {:error, :unauthorized}
   # when the secret check fails.

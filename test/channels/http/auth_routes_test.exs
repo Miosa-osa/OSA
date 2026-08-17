@@ -72,14 +72,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthRoutesTest do
       assert body["expires_in"] == 900
     end
 
-    test "auto-generates user_id when not provided" do
+    test "uses the stable local identity when user_id is not provided" do
       conn = json_post("/login", %{})
 
       assert conn.status == 200
       body = decode_body(conn)
       assert is_binary(body["token"])
-      # token must be a valid JWT (3 segments)
-      assert length(String.split(body["token"], ".")) == 3
+      assert {:ok, claims} = Auth.verify_token(body["token"])
+      assert claims["user_id"] == "local"
     end
 
     test "returned token is verifiable" do
