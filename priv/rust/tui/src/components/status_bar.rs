@@ -406,12 +406,17 @@ pub struct StatusBar {
     session_title: Option<String>,
     /// "goal N/max" indicator when a /goal auto-continue loop is active.
     goal_label: Option<String>,
+    /// Skills explicitly activated for this session, shown on their own row so
+    /// narrow terminals never hide the workflow the agent is following.
+    active_skills: Vec<String>,
     /// Transient goal-verification indicator, rendered next to the goal line.
     /// None ⇒ no verifier round this turn ⇒ chip omitted.
     goal_verify: Option<GoalVerifyState>,
     /// Reasoning effort ("fast"|"medium"|"high"|"xhigh"|"ultra") from `/health.effort`.
     /// None ⇒ backend didn't report it ⇒ the chip is omitted.
     effort: Option<String>,
+    /// Provider-normalized effective reasoning state from `/health.reasoning`.
+    reasoning: Option<String>,
     /// Billing snapshot from `/health.billing`. None ⇒ omit the spend chip.
     billing: Option<crate::client::types::HealthBilling>,
     /// WS12 — % of usable context left before auto-compact (backend
@@ -488,8 +493,10 @@ impl StatusBar {
             cwd_basename,
             session_title: None,
             goal_label: None,
+            active_skills: Vec::new(),
             goal_verify: None,
             effort: None,
+            reasoning: None,
             billing: None,
             percent_left: None,
             context_low: false,
@@ -562,6 +569,10 @@ impl StatusBar {
         self.effort.clone()
     }
 
+    pub fn set_reasoning(&mut self, reasoning: Option<String>) {
+        self.reasoning = reasoning.filter(|s| !s.trim().is_empty());
+    }
+
     /// Set (or clear with None) the billing spend/limit chip.
     pub fn set_billing(&mut self, billing: Option<crate::client::types::HealthBilling>) {
         self.billing = billing;
@@ -572,11 +583,25 @@ impl StatusBar {
         self.goal_label = label;
     }
 
+    pub fn add_active_skill(&mut self, skill: String) {
+        let skill = crate::render::sanitize::scrub_untrusted_line(&skill);
+        let skill = skill.trim();
+        if skill.is_empty() {
+            return;
+        }
+        self.active_skills.retain(|existing| existing != skill);
+        self.active_skills.push(skill.to_string());
+    }
+
+    pub fn clear_active_skills(&mut self) {
+        self.active_skills.clear();
+    }
+
     /// Two ordinary status rows, plus one dedicated goal row while a durable
     /// goal exists. Keeping this measurement on the component makes the layout
     /// reserve exactly what `draw` paints.
     pub fn desired_height(&self) -> u16 {
-        if self.goal_label.is_some() { 3 } else { 2 }
+        2 + u16::from(self.goal_label.is_some()) + u16::from(!self.active_skills.is_empty())
     }
 
     /// Set (or clear with None) the transient goal-verification indicator.
@@ -1021,11 +1046,14 @@ impl Component for StatusBar {
         // A goal owns its own row. It used to be appended to the already-dense
         // primary status line, where normal terminal widths clipped the goal
         // text and often left only a dangling `/` from `/goal pause`.
-        let row_constraints = if self.goal_label.is_some() {
-            vec![Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)]
-        } else {
-            vec![Constraint::Length(1), Constraint::Length(1)]
-        };
+        let mut row_constraints = vec![Constraint::Length(1)];
+        if self.goal_label.is_some() {
+            row_constraints.push(Constraint::Length(1));
+        }
+        if !self.active_skills.is_empty() {
+            row_constraints.push(Constraint::Length(1));
+        }
+        row_constraints.push(Constraint::Length(1));
         let rows = RLayout::default()
             .direction(Direction::Vertical)
             .constraints(row_constraints)
@@ -1038,7 +1066,12 @@ impl Component for StatusBar {
             width: r.width.saturating_sub(1),
             ..*r
         });
-        let permission_row_index = if self.goal_label.is_some() { 2 } else { 1 };
+        let skill_row_index = 1 + usize::from(self.goal_label.is_some());
+        let skill_row = (!self.active_skills.is_empty()).then(|| Rect {
+            width: rows[skill_row_index].width.saturating_sub(1),
+            ..rows[skill_row_index]
+        });
+        let permission_row_index = rows.len().saturating_sub(1);
         let row1 = rows
             .get(permission_row_index)
             .map(|r| Rect { width: r.width.saturating_sub(1), ..*r })
@@ -1361,6 +1394,18 @@ impl Component for StatusBar {
             );
         }
 
+        if let Some(reasoning) = self.reasoning.as_ref() {
+            let state = if reasoning.starts_with("on:") { "think:on" } else { "think:off" };
+            push_segment_if_fits(
+                &mut spans,
+                vec![
+                    Span::styled(" \u{2502} ", theme.status_sep()),
+                    Span::styled(state, theme.faint()),
+                ],
+                row0.width,
+            );
+        }
+
         // MCP chip (`3 MCP`). U-T26. Omitted when no servers.
         if let Some(mcp) = mcp_label(self.mcp_count) {
             let style = Style::default().fg(theme.colors.primary);
@@ -1472,6 +1517,24 @@ impl Component for StatusBar {
                 )))
                 .style(theme.status_bar()),
                 goal_area,
+            );
+        }
+
+        if let Some(skill_area) = skill_row {
+            let visible = self.active_skills.iter().take(3).cloned().collect::<Vec<_>>();
+            let hidden = self.active_skills.len().saturating_sub(visible.len());
+            let label = if hidden == 0 {
+                visible.join(", ")
+            } else {
+                format!("{} +{}", visible.join(", "), hidden)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("Using: {}", label),
+                    Style::default().fg(Color::Cyan),
+                )))
+                .style(theme.status_bar()),
+                skill_area,
             );
         }
 
@@ -1982,6 +2045,30 @@ mod status_bar_tests {
             fast.contains("effort:fast"),
             "a /fast change must be immediately visible: {fast:?}"
         );
+    }
+
+    #[test]
+    fn active_skill_uses_a_dedicated_row_at_narrow_width() {
+        let mut sb = StatusBar::new();
+        sb.set_provider_info("openrouter", "anthropic/claude-opus-5");
+        sb.set_permission_mode(PermissionMode::BypassPermissions);
+        sb.add_active_skill("diagnosing-bugs".into());
+
+        assert_eq!(sb.desired_height(), 3);
+        let text = render_sb_at(&sb, 42, 3);
+        assert!(text.contains("Using: diagnosing-bugs"), "skill row missing: {text:?}");
+        assert!(text.contains("overdrive"), "permission row missing: {text:?}");
+
+        for skill in ["review", "tdd", "security-auditor"] {
+            sb.add_active_skill(skill.into());
+        }
+        let overflow = render_sb_at(&sb, 60, 3);
+        assert!(overflow.contains("+1"), "hidden skill count missing: {overflow:?}");
+
+        sb.clear_active_skills();
+        assert_eq!(sb.desired_height(), 2);
+        let cleared = render_sb_at(&sb, 60, 2);
+        assert!(!cleared.contains("Using:"), "skills leaked across sessions: {cleared:?}");
     }
 
     #[test]

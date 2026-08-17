@@ -29,6 +29,10 @@ pub struct HealthResponse {
     /// `Option` + `default` keep older backends (which omit it) decodable.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Provider-normalized effective reasoning state, including the rule that selected it.
+    /// Examples: `on:catalog:high`, `off:model_unsupported`, `on:config`.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Spend/limit snapshot from the backend Budget. `null` when Budget is
     /// unavailable; individual limits are `null` when uncapped.
     #[serde(default)]

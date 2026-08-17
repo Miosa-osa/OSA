@@ -357,6 +357,14 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/sessions/:id/health
+    pub async fn get_session_health(&self, id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/health", id))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
     /// GET /api/v1/sessions/:id/context — token-usage breakdown for the session.
     pub async fn get_context(&self, id: &str) -> Result<ContextStats> {
         let resp = self

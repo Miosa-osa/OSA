@@ -193,7 +193,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         prefix_blocked(message)
 
       :allow ->
-        run_tool(tool_call, state)
+        run_with_heartbeat(tool_call, state)
 
       {:ask, request_id, summary} ->
         # DEFAULT 'ask' mode: park the executing process, emit a
@@ -206,10 +206,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         # route (Codex funnels approval rejections through the same
         # RespondToModel channel).
         case await_permission(tool_call, state, request_id, summary) do
-          :allow -> run_tool(tool_call, state)
+          :allow -> run_with_heartbeat(tool_call, state)
           {:blocked, message} -> message
           {:steer, text} -> text
         end
+    end
+  end
+
+  defp run_with_heartbeat(tool_call, state) do
+    heartbeat = OptimalSystemAgent.Agent.Loop.ToolHeartbeat.start(tool_call, state)
+
+    try do
+      run_tool(tool_call, state)
+    after
+      OptimalSystemAgent.Agent.Loop.ToolHeartbeat.stop(heartbeat)
     end
   end
 

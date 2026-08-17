@@ -764,18 +764,21 @@ defmodule OptimalSystemAgent.Tools.Registry do
         active = rank_skills_for_message(surfaced, message)
 
         lines =
-          Enum.map_join(active, "\n", fn skill ->
+          active
+          |> Enum.with_index()
+          |> Enum.map_join("\n", fn {skill, index} ->
             description =
               skill.description
               |> to_string()
               |> String.replace(~r/\s+/, " ")
               |> String.slice(0, 120)
 
-            "- **#{skill.name}**: #{description}"
+            recommendation = if index < 3 and is_binary(message), do: " (recommended)", else: ""
+            "- **#{skill.name}**#{recommendation}: #{description}"
           end)
 
         "## Skills (mandatory)\n\n" <>
-          "Before acting on any non-trivial task, scan this compact catalog. " <>
+          "Before acting on any non-trivial task, scan this compact, task-ranked catalog. " <>
           "If a skill is relevant or partially relevant, say which skill you are using, " <>
           "call `skill_view` to load its full instructions, and follow them before using " <>
           "other task tools. If no listed skill clearly fits, call `list_skills` to search " <>
@@ -804,21 +807,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
     do: build_active_skills_context(message)
 
   defp rank_skills_for_message(skills, message) when is_binary(message) and message != "" do
-    query = String.downcase(message)
+    recommendations =
+      OptimalSystemAgent.Skills.Advisor.recommend(skills, message, limit: 12)
 
-    skills
-    |> Enum.map(fn skill ->
-      searchable =
-        [skill.name, skill.description, Enum.join(List.wrap(skill.triggers), " ")]
-        |> Enum.join(" ")
-
-      trigger_bonus = if trigger_match?(skill, query), do: 2.0, else: 0.0
-      {skill, trigger_bonus + OptimalSystemAgent.Skills.Ranker.relevance(searchable, message)}
-    end)
-    |> Enum.filter(fn {_skill, score} -> score > 0.0 end)
-    |> Enum.sort_by(fn {_skill, score} -> score end, :desc)
-    |> Enum.take(12)
-    |> Enum.map(&elem(&1, 0))
+    Enum.map(recommendations, & &1.skill)
   rescue
     _ -> Enum.take(skills, 12)
   end

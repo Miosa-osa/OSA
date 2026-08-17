@@ -438,6 +438,41 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             }
         }
 
+        "skill_selected" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                skill: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("skill_selected", e)),
+            };
+            Some(BackendEvent::SkillSelected { skill: ev.skill })
+        }
+
+        "tool_heartbeat" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                name: String,
+                #[serde(default)]
+                elapsed_ms: u64,
+                #[serde(default)]
+                stalled: bool,
+                #[serde(default)]
+                tool_call_id: Option<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("tool_heartbeat", e)),
+            };
+            Some(BackendEvent::ToolHeartbeat {
+                name: ev.name,
+                elapsed_ms: ev.elapsed_ms,
+                stalled: ev.stalled,
+                tool_call_id: ev.tool_call_id,
+            })
+        }
+
         "command_output_delta" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -2231,6 +2266,32 @@ mod tests {
                 delay_ms: 4000,
                 reason,
             }) => assert_eq!(reason, "timeout"),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_skill_selection_and_tool_heartbeat() {
+        match parse_sse_event("skill_selected", br#"{"skill":"diagnosing-bugs"}"#) {
+            Some(BackendEvent::SkillSelected { skill }) => {
+                assert_eq!(skill, "diagnosing-bugs");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let heartbeat = br#"{"name":"shell_execute","elapsed_ms":31000,"stalled":true,"tool_call_id":"call-7"}"#;
+        match parse_sse_event("tool_heartbeat", heartbeat) {
+            Some(BackendEvent::ToolHeartbeat {
+                name,
+                elapsed_ms,
+                stalled,
+                tool_call_id,
+            }) => {
+                assert_eq!(name, "shell_execute");
+                assert_eq!(elapsed_ms, 31_000);
+                assert!(stalled);
+                assert_eq!(tool_call_id.as_deref(), Some("call-7"));
+            }
             other => panic!("unexpected: {:?}", other),
         }
     }

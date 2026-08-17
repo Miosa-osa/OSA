@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.HealthUpdateTest do
     assert update["available"] == false
     assert Map.has_key?(update, "current_version")
     assert Map.get(update, "latest_version") == nil
+    assert Map.has_key?(body, "reasoning")
   end
 
   test "surfaces a stubbed newer version as available:true with current + latest" do

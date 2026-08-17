@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
+  alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Channels.HTTP.SessionAccess
   alias OptimalSystemAgent.Runtime.SessionManager
   require Logger
@@ -76,11 +77,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
         {:ok, conn} =
           chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
+        replay_active_skills(session_id)
+
         sse_loop(conn, session_id)
 
       {:error, :not_found} ->
         json_error(conn, 404, "not_found", "Session not found")
     end
+  end
+
+  defp replay_active_skills(session_id) do
+    Enum.each(ActiveSkills.list(session_id), fn skill ->
+      send(self(), {:osa_event, %{type: :skill_selected, skill: skill}})
+    end)
   end
 
   match _ do

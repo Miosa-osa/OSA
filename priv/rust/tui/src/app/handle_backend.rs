@@ -143,12 +143,33 @@ impl App {
             BackendEvent::HealthResult(result) => {
                 self.handle_health_result(result);
             }
+            BackendEvent::SessionHealthResult(Ok(health)) => {
+                let status = health
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let action = health
+                    .get("recovery_action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("inspect_session");
+                if matches!(status, "degraded" | "recoverable") {
+                    self.toasts.push(
+                        format!("Session {} - {}", status, action.replace('_', " ")),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
+            }
+            BackendEvent::SessionHealthResult(Err(error)) => {
+                debug!("session health check failed: {}", error);
+            }
             BackendEvent::LoginResult(result) => {
                 self.handle_login_result(result);
             }
             BackendEvent::SseConnected { session_id } => {
                 info!("SSE connected: {}", session_id);
                 self.sse_reconnecting = false;
+                self.status.clear_active_skills();
+                self.check_session_health();
                 self.sidebar.set_session(&self.session_id);
                 // Load commands and tools after SSE connection
                 self.load_commands();
@@ -754,6 +775,26 @@ impl App {
                     self.chat.finalize_tool(&name, tool_call_id.as_deref());
                 }
                 debug!("Tool result: {} (success={})", name, success);
+            }
+            BackendEvent::SkillSelected { skill } => {
+                self.status.add_active_skill(skill);
+            }
+            BackendEvent::ToolHeartbeat {
+                name,
+                elapsed_ms,
+                stalled,
+                ..
+            } => {
+                if stalled {
+                    self.toasts.push(
+                        format!(
+                            "{} has been running for {}s. It is still connected; press Esc to interrupt.",
+                            name,
+                            elapsed_ms / 1_000
+                        ),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
             }
             BackendEvent::LlmRequest {
                 iteration,
@@ -1372,6 +1413,7 @@ impl App {
                     if let Some(effort) = resp.effort.clone() {
                         self.status.set_effort(Some(effort));
                     }
+                    self.check_health();
                     self.toasts.push(
                         format!("Model: {}/{}", resp.provider, resp.model),
                         crate::components::toast::ToastLevel::Info,

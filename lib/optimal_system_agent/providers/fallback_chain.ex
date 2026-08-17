@@ -16,7 +16,7 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
-  alias OptimalSystemAgent.Providers.{ErrorCatalog, Resilience, RetryClassifier}
+  alias OptimalSystemAgent.Providers.{ErrorCatalog, ModelLimits, Resilience, RetryClassifier}
   alias OptimalSystemAgent.Events.Bus
 
   @default_chain [:anthropic, :openai, :groq, :ollama]
@@ -218,7 +218,18 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   defp try_providers([provider | rest], messages, opts, errors) do
     opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
 
-    case Providers.chat(messages, opts_with_provider) do
+    result =
+      if capability_compatible?(provider, opts_with_provider) do
+        Providers.chat(messages, opts_with_provider)
+      else
+        :capability_mismatch
+      end
+
+    case result do
+      :capability_mismatch ->
+        Logger.warning("[fallback] #{provider} skipped: selected model lacks required tools")
+        try_providers(rest, messages, opts, errors ++ [{provider, :capability_mismatch}])
+
       {:ok, result} ->
         if errors != [] do
           Logger.info("[fallback] Succeeded with #{provider} after #{length(errors)} failure(s)")
@@ -249,15 +260,33 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   defp try_stream_providers([provider | rest], messages, callback, opts, errors) do
     opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
 
-    case Providers.chat_stream(messages, callback, opts_with_provider) do
-      {:ok, result} ->
+    result =
+      if capability_compatible?(provider, opts_with_provider) do
+        Providers.chat_stream(messages, callback, opts_with_provider)
+      else
+        :capability_mismatch
+      end
+
+    case result do
+      :capability_mismatch ->
+        Logger.warning("[fallback] #{provider} skipped: selected model lacks required tools")
+
+        try_stream_providers(
+          rest,
+          messages,
+          callback,
+          opts,
+          errors ++ [{provider, :capability_mismatch}]
+        )
+
+      :ok ->
         if errors != [] do
           Logger.info(
             "[fallback] Stream succeeded with #{provider} after #{length(errors)} failure(s)"
           )
         end
 
-        {:ok, result, provider}
+        {:ok, :stream_started, provider}
 
       {:error, reason} ->
         if retryable_error?(reason) do
@@ -280,6 +309,24 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         opts,
         errors ++ [{provider, Exception.message(e)}]
       )
+  end
+
+  @doc false
+  def capability_compatible?(provider, opts) do
+    tools_required? = Keyword.get(opts, :tools, []) != []
+
+    if tools_required? do
+      model =
+        Keyword.get(opts, :model) ||
+          case Providers.provider_info(provider) do
+            {:ok, info} -> info.default_model
+            _ -> nil
+          end
+
+      not (is_binary(model) and ModelLimits.tool_call(provider, model) == false)
+    else
+      true
+    end
   end
 
   @doc """

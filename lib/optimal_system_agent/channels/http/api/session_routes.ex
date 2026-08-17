@@ -345,6 +345,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   # ── GET /sessions/:id ──────────────────────────────────────────────
 
+  get "/:id/health" do
+    session_id = conn.params["id"]
+    json(conn, 200, OptimalSystemAgent.Agent.SessionHealth.snapshot(session_id))
+  end
+
   get "/:id" do
     session_id = conn.params["id"]
 
@@ -546,6 +551,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         {:ok, conn} =
           chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
+        replay_active_skills(session_id)
+
         Logger.debug("[SSE] /sessions/#{session_id}/stream opened by #{user_id}")
 
         session_sse_loop(conn, session_id)
@@ -553,6 +560,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       {:error, :not_found} ->
         json_error(conn, 404, "not_found", "Session not found")
     end
+  end
+
+  defp replay_active_skills(session_id) do
+    Enum.each(OptimalSystemAgent.Agent.ActiveSkills.list(session_id), fn skill ->
+      send(self(), {:osa_event, %{type: :skill_selected, skill: skill}})
+    end)
   end
 
   # ── DELETE /sessions/:id ───────────────────────────────────────────

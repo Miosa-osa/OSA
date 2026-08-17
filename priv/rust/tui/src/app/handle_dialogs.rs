@@ -835,6 +835,11 @@ impl App {
         // Reflect the new effort on the status line immediately — the backend
         // /health value was only a startup snapshot, and this is a live change.
         self.status.set_effort(Some(level.to_string()));
+        self.status.set_reasoning(Some(if level == "off" {
+            "off".to_string()
+        } else {
+            format!("on:{}", level)
+        }));
         self.toasts.push(
             format!("Reasoning: {}", level),
             crate::components::toast::ToastLevel::Info,

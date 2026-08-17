@@ -85,6 +85,15 @@ pub enum BackendEvent {
         success: bool,
         tool_call_id: Option<String>,
     },
+    SkillSelected {
+        skill: String,
+    },
+    ToolHeartbeat {
+        name: String,
+        elapsed_ms: u64,
+        stalled: bool,
+        tool_call_id: Option<String>,
+    },
 
     /// Live stdout/stderr from a still-running foreground shell command
     /// (`command_output_delta`). Emitted at most ~4/sec while the command runs
@@ -575,6 +584,7 @@ pub enum BackendEvent {
 
     // === HTTP Response Results ===
     HealthResult(Result<HealthResponse, String>),
+    SessionHealthResult(Result<serde_json::Value, String>),
     LoginResult(Result<LoginResponse, String>),
     OrchestrateResult(Result<OrchestrateResponse, String>),
     CommandsLoaded(Result<Vec<CommandEntry>, String>),

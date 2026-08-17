@@ -79,6 +79,7 @@ impl App {
                 // spend/limits. Both are Option — a field the backend didn't
                 // send simply leaves its chip off (no "effort:" / "$" shown).
                 self.status.set_effort(health.effort.clone());
+                self.status.set_reasoning(health.reasoning.clone());
                 self.status.set_billing(health.billing.clone());
 
                 // Update-available signal (Codex parity: understated, no
@@ -1245,6 +1246,19 @@ impl App {
                 Err(e) => BackendEvent::HealthResult(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    pub fn check_session_health(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            let result = client
+                .get_session_health(&session_id)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Event::Backend(BackendEvent::SessionHealthResult(result)));
         });
     }
 

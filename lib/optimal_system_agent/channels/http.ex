@@ -148,6 +148,18 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         :exit, _ -> "medium"
       end
 
+    reasoning =
+      try do
+        OptimalSystemAgent.Observability.current_reasoning(%{
+          provider: provider_atom,
+          model: model_name
+        })
+      rescue
+        _ -> nil
+      catch
+        :exit, _ -> nil
+      end
+
     # Billing / budget snapshot. OSA has no subscription/plan concept in code,
     # so `subscription` is always nil — the only spend model is the local
     # Budget GenServer (daily/monthly USD spend + limits). Returns nil entirely
@@ -163,6 +175,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         model: model_name,
         context_window: context_window,
         effort: effort,
+        reasoning: reasoning,
         # TUI presentation config from ~/.osa/config.toml [tui] (theme/verbosity).
         # This is the backend config surface the TUI reads at startup; the getters
         # fall back to the documented defaults ("dark" / "normal") when unset.

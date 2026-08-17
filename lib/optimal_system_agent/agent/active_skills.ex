@@ -3,9 +3,10 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
   Durable record of the skills selected by an agent for a session.
 
   Skill bodies are loaded progressively and remain outside the permanent system
-  prompt. This store records only their names. The context builder rehydrates
-  those names on every generation, so compaction cannot make the agent forget
-  which operating instructions it deliberately selected.
+  prompt. This store records their names plus a content hash and selection time.
+  The context builder rehydrates that identity on every generation, so
+  compaction cannot make the agent forget which operating instructions it
+  selected and a changed SKILL.md cannot silently replace the selected version.
   """
 
   require Logger
@@ -21,24 +22,35 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
   def select(session_id, skill_name)
       when is_binary(session_id) and session_id != "" and is_binary(skill_name) and
              skill_name != "" do
-    mutate(session_id, fn names ->
-      names
-      |> Enum.reject(&(&1 == skill_name))
-      |> Kernel.++([skill_name])
-      |> Enum.take(-@max_skills)
-    end)
+    with {:ok, snapshot} <- snapshot(skill_name) do
+      mutate(session_id, fn snapshots ->
+        snapshots
+        |> Enum.reject(&(&1.name == skill_name))
+        |> Kernel.++([snapshot])
+        |> Enum.take(-@max_skills)
+      end)
+    end
   end
 
   @spec list(String.t()) :: [String.t()]
   def list(session_id) when is_binary(session_id) do
-    case load(session_id) do
-      {:ok, names} -> names
+    case snapshots(session_id) do
+      {:ok, entries} -> Enum.map(entries, & &1.name)
       {:error, _reason} -> []
     end
   end
 
   @spec load(String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def load(session_id) when is_binary(session_id) do
+    case snapshots(session_id) do
+      {:ok, entries} -> {:ok, Enum.map(entries, & &1.name)}
+      error -> error
+    end
+  end
+
+  @doc "Load the durable name/hash/version snapshots for a session."
+  @spec snapshots(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def snapshots(session_id) when is_binary(session_id) do
     case File.read(path(session_id)) do
       {:ok, bytes} -> decode(bytes)
       {:error, :enoent} -> {:ok, []}
@@ -54,28 +66,46 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
 
   @spec context_block(String.t(), [map()]) :: String.t() | nil
   def context_block(session_id, messages \\ []) when is_binary(session_id) do
-    case load(session_id) do
+    case snapshots(session_id) do
       {:ok, []} ->
         nil
 
-      {:ok, names} ->
-        missing = Enum.reject(names, &body_present?(messages, &1))
+      {:ok, entries} ->
+        names = Enum.map(entries, & &1.name)
+        changed = Enum.filter(entries, &changed?/1)
+        missing = Enum.reject(entries, &body_present?(messages, &1.name))
 
         reload =
-          case missing do
-            [] ->
+          cond do
+            changed != [] ->
+              versions = Enum.map_join(changed, ", ", &"`#{&1.name}`")
+
+              "The installed body changed since selection for #{versions}. " <>
+                "Before any further task action, reload " <>
+                Enum.map_join(changed, ", ", &"`skill_view` for `#{&1.name}`") <> "."
+
+            missing == [] ->
               "Their instruction bodies are present in the current conversation."
 
-            _ ->
-              calls = Enum.map_join(missing, ", ", &"`skill_view` for `#{&1}`")
+            true ->
+              calls = Enum.map_join(missing, ", ", &"`skill_view` for `#{&1.name}`")
 
               "Their instruction bodies are absent, likely because of compaction or restart. " <>
                 "Before any further task action, reload #{calls}."
           end
 
-        "## Selected Skills\n\n" <>
-          "These skills remain active for this task across compaction and restart. " <>
-          reload <> "\n\n" <> Enum.map_join(names, "\n", &"- **#{&1}**")
+        block =
+          "## Selected Skills\n\n" <>
+            "These skills remain active for this task across compaction and restart. " <>
+            reload <> "\n\n" <> Enum.map_join(names, "\n", &"- **#{&1}**")
+
+        :telemetry.execute(
+          [:osa, :skills, :context],
+          %{count: length(entries), bytes: byte_size(block)},
+          %{session_id: session_id, reload_required: missing != [] or changed != []}
+        )
+
+        block
 
       {:error, reason} ->
         Logger.error("[active_skills] checkpoint unavailable: #{inspect(reason)}")
@@ -90,8 +120,8 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
     record_path = path(session_id)
 
     case RecordLock.with_lock_strict(record_path, fn ->
-           names =
-             case load(session_id) do
+           snapshots =
+             case snapshots(session_id) do
                {:ok, loaded} ->
                  loaded
 
@@ -104,7 +134,7 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
                  []
              end
 
-           AtomicFile.write(record_path, Jason.encode!(%{version: 1, skills: fun.(names)}))
+           AtomicFile.write(record_path, Jason.encode!(%{version: 2, skills: fun.(snapshots)}))
          end) do
       {:ok, result} -> result
       {:error, :contended} -> {:error, :contended}
@@ -113,11 +143,12 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
 
   defp decode(bytes) do
     case Jason.decode(bytes) do
-      {:ok, %{"skills" => names}} when is_list(names) ->
+      {:ok, %{"skills" => entries}} when is_list(entries) ->
         {:ok,
-         names
-         |> Enum.filter(&(is_binary(&1) and &1 != ""))
-         |> Enum.uniq()
+         entries
+         |> Enum.map(&decode_entry/1)
+         |> Enum.reject(&is_nil/1)
+         |> Enum.uniq_by(& &1.name)
          |> Enum.take(-@max_skills)}
 
       {:ok, invalid} ->
@@ -127,6 +158,42 @@ defmodule OptimalSystemAgent.Agent.ActiveSkills do
         {:error, {:invalid_json, Exception.message(reason)}}
     end
   end
+
+  defp decode_entry(name) when is_binary(name) and name != "",
+    do: %{name: name, hash: nil, selected_at: nil}
+
+  defp decode_entry(%{"name" => name} = entry) when is_binary(name) and name != "" do
+    %{name: name, hash: entry["hash"], selected_at: entry["selected_at"]}
+  end
+
+  defp decode_entry(_), do: nil
+
+  defp snapshot(skill_name) do
+    case Registry.load_skill_body(skill_name) do
+      {:ok, body} ->
+        {:ok,
+         %{
+           name: skill_name,
+           hash: body_hash(body),
+           selected_at: DateTime.utc_now() |> DateTime.to_iso8601()
+         }}
+
+      {:error, reason} ->
+        {:error, {:skill_body_unavailable, skill_name, reason}}
+    end
+  end
+
+  defp changed?(%{hash: nil}), do: false
+
+  defp changed?(%{name: name, hash: expected}) do
+    case Registry.load_skill_body(name) do
+      {:ok, body} -> body_hash(body) != expected
+      _ -> true
+    end
+  end
+
+  defp body_hash(body),
+    do: :crypto.hash(:sha256, String.trim(body)) |> Base.encode16(case: :lower)
 
   defp body_present?(messages, skill_name) do
     with {:ok, body} <- Registry.load_skill_body(skill_name) do

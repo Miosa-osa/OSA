@@ -968,9 +968,18 @@ hot-reloads on file change. Recurring behavior patterns (occurrence ≥ 5) are
 auto-promoted to skills by the SICA engine.
 
 OSA keeps the catalog compact and loads a full `SKILL.md` only after the agent selects it with `skill_view`.
-Selected skill names are checkpointed with the session and re-injected on every generation, so compaction or a backend restart cannot make a long-running agent forget the workflow it chose.
+Before complex work, a metadata-only advisor ranks likely skills for the current request without loading the library's instruction bodies into context.
+Its short-lived cache is invalidated by metadata changes, and telemetry reports ranking time, cache hits, candidate counts, selected body size, and the bytes added back to context.
+Selected skill names, content hashes, and selection times are checkpointed with the session and re-injected on every generation, so compaction or a backend restart cannot make a long-running agent forget the workflow it chose or silently adopt changed instructions.
 When a selected skill body is no longer present in conversation context, OSA requires the agent to reload it with `skill_view` before taking another task action.
+The TUI shows active selections as `Using: diagnose` and restores that row when its session stream reconnects.
 Deleting the session removes that checkpoint.
+
+Long-running tools emit lightweight heartbeat frames so the TUI can distinguish useful work from a disconnected backend and surface a stalled-call recovery hint without killing legitimate builds.
+`GET /api/v1/sessions/:id/health` reports whether a session is live, healthy, degraded, recoverable, or missing, including transcript, durable-event, and selected-skill diagnostics plus the appropriate recovery action, and the TUI checks it after reconnecting.
+Provider reasoning state is normalized into a stable on/off signal for the TUI, while the configured effort tier remains visible separately.
+OpenRouter model identifiers reuse the matching vendor's native catalog context, tool-call, vision, and reasoning capability metadata, so routing decisions do not degrade merely because a model is addressed through the gateway.
+Fallback routing skips a provider when its selected model is authoritatively known to lack tools required by the active turn.
 
 ---
 

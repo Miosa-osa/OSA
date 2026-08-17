@@ -41,14 +41,68 @@ defmodule OptimalSystemAgent.Agent.ActiveSkillsTest do
     refute block =~ "Before any further task action"
   end
 
-  test "selection is ordered, deduplicated, and bounded", %{session_id: sid} do
-    for n <- 1..14, do: assert(:ok = ActiveSkills.select(sid, "skill-#{n}"))
-    assert :ok = ActiveSkills.select(sid, "skill-5")
+  test "context injection reports its bounded context cost", %{session_id: sid} do
+    ref = make_ref()
+    parent = self()
 
-    names = ActiveSkills.list(sid)
-    assert length(names) == 12
-    assert List.last(names) == "skill-5"
-    assert Enum.count(names, &(&1 == "skill-5")) == 1
+    :telemetry.attach(
+      "active-skills-context-#{inspect(ref)}",
+      [:osa, :skills, :context],
+      fn event, measurements, metadata, _ ->
+        send(parent, {ref, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("active-skills-context-#{inspect(ref)}") end)
+    assert :ok = ActiveSkills.select(sid, "diagnosing-bugs")
+    assert is_binary(ActiveSkills.context_block(sid, []))
+
+    assert_receive {^ref, [:osa, :skills, :context], %{count: 1, bytes: bytes}, metadata}
+    assert bytes > 0
+    assert metadata.session_id == sid
+    assert metadata.reload_required
+  end
+
+  test "selection persists a body hash and requires reload after the body changes", %{
+    session_id: sid
+  } do
+    assert :ok = ActiveSkills.select(sid, "diagnosing-bugs")
+    assert {:ok, [%{name: "diagnosing-bugs", hash: hash}]} = ActiveSkills.snapshots(sid)
+    assert is_binary(hash) and byte_size(hash) == 64
+
+    skill = OptimalSystemAgent.Tools.Registry.get_skill("diagnosing-bugs")
+    original = File.read!(skill.path)
+    on_exit(fn -> File.write!(skill.path, original) end)
+    File.write!(skill.path, original <> "\ntemporary version change\n")
+
+    assert ActiveSkills.context_block(sid, []) =~ "installed body changed since selection"
+  end
+
+  test "selection is ordered, deduplicated, and bounded", %{session_id: sid} do
+    names =
+      OptimalSystemAgent.Tools.Registry.list_skills()
+      |> Enum.map(&(&1[:name] || &1["name"]))
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+      |> Enum.take(14)
+
+    assert length(names) == 14
+    for name <- names, do: assert(:ok = ActiveSkills.select(sid, name))
+    repeated = Enum.at(names, 4)
+    assert :ok = ActiveSkills.select(sid, repeated)
+
+    selected = ActiveSkills.list(sid)
+    assert length(selected) == 12
+    assert List.last(selected) == repeated
+    assert Enum.count(selected, &(&1 == repeated)) == 1
+  end
+
+  test "selection refuses a versionless checkpoint", %{session_id: sid} do
+    assert {:error, {:skill_body_unavailable, "missing-skill", :not_found}} =
+             ActiveSkills.select(sid, "missing-skill")
+
+    refute ActiveSkills.exists?(sid)
   end
 
   test "invalid durable state is visible and fails closed", %{session_id: sid} do

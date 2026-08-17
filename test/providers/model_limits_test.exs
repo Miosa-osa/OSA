@@ -37,6 +37,11 @@ defmodule OptimalSystemAgent.Providers.ModelLimitsTest do
       assert ModelLimits.reasoning(:openai, "o3") == true
     end
 
+    test "resolves OpenRouter vendor-prefixed model ids through native catalog metadata" do
+      assert ModelLimits.tool_call(:openrouter, "anthropic/claude-sonnet-4-6") == true
+      assert ModelLimits.reasoning(:openrouter, "openai/o3") == true
+    end
+
     test "returns nil when the catalog has no entry (caller uses its own heuristic)" do
       assert ModelLimits.tool_call(:ollama, "unknown-local-model-xyz") == nil
       assert ModelLimits.reasoning(:ollama, "unknown-local-model-xyz") == nil

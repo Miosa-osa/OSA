@@ -82,6 +82,11 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
             doc:
               "Current reasoning effort: \"fast\" | \"medium\" | \"high\" | \"xhigh\" | \"ultra\".\n`Option` + `default` keep older backends (which omit it) decodable."
           ),
+          f("reasoning", {:option, :string},
+            default: true,
+            doc:
+              "Provider-normalized effective reasoning state, including the rule that selected it.\nExamples: `on:catalog:high`, `off:model_unsupported`, `on:config`."
+          ),
           f("billing", {:option, {:struct, "HealthBilling"}},
             default: true,
             doc:

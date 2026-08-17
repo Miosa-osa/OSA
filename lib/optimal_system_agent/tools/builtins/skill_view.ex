@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
   alias OptimalSystemAgent.Tools.Registry
   alias OptimalSystemAgent.Tools.Registry.{SkillLoader, SkillUsage}
   alias OptimalSystemAgent.Agent.ActiveSkills
+  alias OptimalSystemAgent.Events.Bus
 
   @impl true
   def name, do: "skill_view"
@@ -78,6 +79,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
   def execute(_, _ctx), do: {:error, "skill_view requires a non-empty skill name"}
 
   defp load(skill, path, ctx) do
+    started = System.monotonic_time(:microsecond)
+    session_id = Map.get(ctx, :session_id)
+    reload? = is_binary(session_id) and skill.name in ActiveSkills.list(session_id)
+
     cond do
       not SkillLoader.within_roots?(path) ->
         {:error, "Skill path is outside the configured skill roots."}
@@ -92,12 +97,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
 
             case checkpoint_selection(ctx, skill.name) do
               :ok ->
+                emit_selected(ctx, skill.name)
+
+                :telemetry.execute(
+                  [:osa, :skills, :selected],
+                  %{
+                    count: 1,
+                    body_bytes: byte_size(body),
+                    duration_us: System.monotonic_time(:microsecond) - started,
+                    persistence_failed: 0
+                  },
+                  %{skill: skill.name, session_id: session_id, reload: reload?}
+                )
+
                 {:ok,
                  "# Active Skill: #{skill.name}\n\n" <>
                    "You selected this skill for the current task. Follow these instructions " <>
                    "before continuing.\n\n#{String.trim(body)}"}
 
               {:error, reason} ->
+                :telemetry.execute(
+                  [:osa, :skills, :selected],
+                  %{
+                    count: 0,
+                    body_bytes: byte_size(body),
+                    duration_us: System.monotonic_time(:microsecond) - started,
+                    persistence_failed: 1
+                  },
+                  %{skill: skill.name, session_id: session_id, reload: reload?}
+                )
+
                 {:error,
                  "Loaded '#{skill.name}' but could not checkpoint its selection: #{inspect(reason)}"}
             end
@@ -113,6 +142,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
        do: ActiveSkills.select(session_id, skill_name)
 
   defp checkpoint_selection(_ctx, _skill_name), do: {:error, :missing_session_id}
+
+  defp emit_selected(%{session_id: session_id}, skill_name)
+       when is_binary(session_id) and session_id != "" do
+    payload = %{type: :skill_selected, skill: skill_name, session_id: session_id}
+    Bus.emit(:skill_selected, payload)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, payload}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp emit_selected(_ctx, _skill_name), do: :ok
 
   defp preview(skill, path) do
     cond do

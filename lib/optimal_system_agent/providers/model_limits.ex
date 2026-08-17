@@ -173,7 +173,22 @@ defmodule OptimalSystemAgent.Providers.ModelLimits do
   defp find_model(provider, model) do
     safe(fn -> Catalog.model(to_string(provider), model) end) ||
       safe(fn -> Catalog.find(model) end) ||
+      safe(fn -> find_gateway_model(model) end) ||
       safe(fn -> Catalog.find(strip_tag(model)) end)
+  end
+
+  # OpenRouter names models as `vendor/model`. models.dev stores the native
+  # model id under that vendor, so an exact gateway id lookup often misses even
+  # though the capability is known. Preserve both halves and perform a scoped
+  # vendor lookup so equal native ids from different vendors cannot collide.
+  defp find_gateway_model(model) do
+    case String.split(model, "/", parts: 2) do
+      [vendor, native_id] when vendor != "" and native_id != "" ->
+        Catalog.model(vendor, native_id)
+
+      _ ->
+        nil
+    end
   end
 
   defp strip_tag(model) do
