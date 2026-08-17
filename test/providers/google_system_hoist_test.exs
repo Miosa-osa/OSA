@@ -191,7 +191,10 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
   # ── Dispatch-level: assert the real serialized wire body ───────────────────
   describe "chat/2 dispatch (stubbed HTTP)" do
     setup do
-      base = String.to_integer(System.get_env("OSA_HTTP_PORT") || "10331")
+      base =
+        String.to_integer(System.get_env("OSA_HTTP_PORT") || "10331") +
+          rem(System.unique_integer([:positive]), 10_000)
+
       test_pid = self()
       {server, port} = start_stub(base, test_pid, 0)
 
@@ -209,14 +212,14 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
           do: Application.put_env(:optimal_system_agent, :google_api_key, prev_key),
           else: Application.delete_env(:optimal_system_agent, :google_api_key)
 
-        Process.exit(server, :normal)
+        Supervisor.stop(server)
       end)
 
       :ok
     end
 
     test "the body actually sent keeps the steering nudge last, in contents" do
-      Google.chat(steering_history(), model: @model)
+      assert {:ok, _response} = Google.chat(steering_history(), model: @model)
 
       assert_receive {:captured_body, body}, 5_000
 
@@ -233,7 +236,7 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
     end
 
     test "auth still goes in the x-goog-api-key header, not a ?key= query param" do
-      Google.chat(steering_history(), model: @model)
+      assert {:ok, _response} = Google.chat(steering_history(), model: @model)
 
       assert_receive {:captured_request, req}, 5_000
 
@@ -243,7 +246,7 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
     end
 
     test "a request with no system message sends no systemInstruction at all" do
-      Google.chat([%{role: "user", content: "hi"}], model: @model)
+      assert {:ok, _response} = Google.chat([%{role: "user", content: "hi"}], model: @model)
 
       assert_receive {:captured_body, body}, 5_000
 
@@ -252,7 +255,11 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
     end
 
     test "thinking config is still emitted for Gemini 3.x (no regression)" do
-      Google.chat([%{role: "user", content: "hi"}], model: @model, reasoning_effort: "high")
+      assert {:ok, _response} =
+               Google.chat([%{role: "user", content: "hi"}],
+                 model: @model,
+                 reasoning_effort: "high"
+               )
 
       assert_receive {:captured_body, body}, 5_000
       assert body["generationConfig"]["thinkingLevel"] == "high"
@@ -280,6 +287,7 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
             startup_log: false
           )
 
+        Process.unlink(server)
         {server, port}
 
       {:error, _} ->
