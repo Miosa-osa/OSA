@@ -166,6 +166,19 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
     assert TN.count(session) == 1
   end
 
+  test "takes over a notification claim whose owner died" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    session = "session-" <> id
+    owner = spawn(fn -> :ok end)
+    ref = Process.monitor(owner)
+    assert_receive {:DOWN, ^ref, :process, ^owner, _reason}
+
+    :ets.insert(:osa_task_notified, {id, :claiming, owner, System.monotonic_time(:millisecond)})
+
+    assert :ok = TN.queue_once(session, %{task_id: id, status: :completed, summary: "done"})
+    assert TN.count(session) == 1
+  end
+
   test "to_messages renders task-notification XML system messages" do
     [msg] =
       TN.to_messages([

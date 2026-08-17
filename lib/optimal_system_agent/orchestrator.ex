@@ -950,7 +950,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               :ok
           end
 
-          # WS7 — structured usage + output-file for the <task-notification> the
+          # WS7 - structured usage + output-file for the <task-notification> the
           # parent model receives (CC enqueueAgentNotification parity).
           final_run = RunStore.get(subagent_id)
 
@@ -960,7 +960,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
           # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
           # the persisted spend record) and was already being appended to the
-          # FOREGROUND delegate result — but a background run rode no event
+          # FOREGROUND delegate result - but a background run rode no event
           # carrying it, so the panel could only ever show a whole-task estimate.
           # `nil` when no spend was recorded: unknown and zero are different facts
           # and the TUI renders them differently.

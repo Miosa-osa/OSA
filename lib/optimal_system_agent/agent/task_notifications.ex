@@ -33,8 +33,9 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @notified_table :osa_task_notified
   @poke_table :osa_task_notification_pokes
   @coalesce_ms 25
-  @claim_retries 20
+  @claim_retries 1_200
   @claim_retry_ms 5
+  @claim_lease_ms 5_000
 
   @type notification :: map()
 
@@ -233,7 +234,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   end
 
   defp claim_and_queue(session_id, task_id, notification, retries_left) do
-    claim = {task_id, :claiming, System.system_time(:millisecond)}
+    claim = {task_id, :claiming, self(), monotonic_ms()}
 
     if :ets.insert_new(@notified_table, claim) do
       case queue(session_id, notification) do
@@ -255,9 +256,14 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
 
   defp await_claim(session_id, task_id, notification, retries_left) do
     case :ets.lookup(@notified_table, task_id) do
-      [{^task_id, :claiming, _}] ->
-        Process.sleep(@claim_retry_ms)
-        claim_and_queue(session_id, task_id, notification, retries_left - 1)
+      [{^task_id, :claiming, owner, claimed_at} = stale_claim] ->
+        if not Process.alive?(owner) or monotonic_ms() - claimed_at >= @claim_lease_ms do
+          :ets.delete_object(@notified_table, stale_claim)
+          claim_and_queue(session_id, task_id, notification, retries_left - 1)
+        else
+          Process.sleep(@claim_retry_ms)
+          claim_and_queue(session_id, task_id, notification, retries_left - 1)
+        end
 
       [] ->
         claim_and_queue(session_id, task_id, notification, retries_left - 1)
@@ -266,6 +272,8 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
         :already_notified
     end
   end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   @doc """
   Build the injected message list: one system message per notification,

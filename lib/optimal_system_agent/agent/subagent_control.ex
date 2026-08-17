@@ -58,9 +58,11 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
 
   defp apply_command(agent_id, "resume", params) do
     if alive?(agent_id) do
+      Loop.cancel(agent_id)
+    end
+
+    with :ok <- await_stopped(agent_id, 100) do
       :ets.delete(:osa_agent_pause_flags, agent_id)
-      ExecutionControl.progress(agent_id, %{status: :running, recovery_state: "live_resumed"})
-    else
       resume(agent_id, Map.get(params, "message") || Map.get(params, :message))
     end
   rescue
@@ -123,6 +125,17 @@ defmodule OptimalSystemAgent.Agent.SubagentControl do
   end
 
   defp resume(agent_id, message), do: Orchestrator.resume_subagent(agent_id, message)
+
+  defp await_stopped(_agent_id, 0), do: {:error, :pause_teardown_timeout}
+
+  defp await_stopped(agent_id, attempts_left) do
+    if alive?(agent_id) do
+      Process.sleep(10)
+      await_stopped(agent_id, attempts_left - 1)
+    else
+      :ok
+    end
+  end
 
   defp alive?(agent_id) do
     Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) != []
