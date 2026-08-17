@@ -56,6 +56,7 @@ and points you at the from-source script below.
 ✓ Warm background backend       ✓ Cross-session memory + learning
 ✓ Full chat TUI                 ✓ 82 built-in tools, deferred-loaded
 ✓ 27 providers + fallback       ✓ Nothing leaves your machine unless you say so
+✓ Proactive skill discovery     ✓ Durable goals, queues, and recovery
 ```
 
 <details>
@@ -130,7 +131,7 @@ you.
 you type a message
    │  HTTP POST → 127.0.0.1:9089
    ▼
-engine classifies the signal, builds context, picks a model tier
+engine classifies the signal, ranks relevant skills, builds context, picks a model tier
    │
    ▼
 ReAct loop:  think → call a tool → observe → repeat
@@ -142,7 +143,9 @@ tokens, tool results, and diffs stream back over SSE (live) into the TUI
 
 Everything the agent produces (reasoning, tool calls, file diffs, sub-agent
 activity) is streamed as it happens, so the TUI always mirrors the engine's
-real state. For the full pipeline (compaction, fallback chains, hooks,
+real state. Skill use, goal state, tool stalls, context occupancy, normalized
+reasoning state, and reconnect health remain visible without widening the
+terminal. For the full pipeline (compaction, fallback chains, hooks,
 guardrails) see [Architecture](#architecture) below.
 
 ---
@@ -276,8 +279,10 @@ both, so everything above is reachable from the same prompt.
 ### Reading model performance
 
 The permanent footer stays deliberately small so it remains stable while the terminal resizes.
-It shows the active model, current context occupancy, and a reasoning-effort chip only when the effort differs from the default `medium` tier.
+It shows the active model, current context occupancy, normalized reasoning state, and a reasoning-effort chip only when the effort differs from the default `medium` tier.
 Running `/fast`, for example, makes `effort:fast` appear immediately.
+Active skills use a separate `Using:` row, with a `+N` count when more selections are active than fit comfortably.
+That row is cleared and rebuilt from the attached session after reconnecting, so it never leaks labels from another conversation.
 
 The activity row reports what matters during a turn: elapsed time, current output flow, thinking state, retries, stalls, and the interrupt control.
 It does not repeat the latest request's input-token count because that number is the full prompt sent to the model, not cumulative session usage, and duplicating it beside the context meter is misleading.
@@ -409,6 +414,10 @@ Stop or interrupt any agent from the same view. Cancelling an agent cascades
 transitively to every sub-agent it spawned; a sibling can hand its context to
 another via peer-resume, and worktree work is snapshotted to a durable git ref
 before teardown so it stays inspectable even when discarded.
+Parent agents and sub-agents independently rank the compact skill catalog for
+their own task, then load only the selected `SKILL.md` body through `skill_view`.
+Each selection is checkpointed against that session, so one agent's workflow
+does not bleed into another agent's context.
 
 ### Plan mode, goal tracking, and rewind
 
@@ -700,7 +709,11 @@ same thing at launch. Retired model ids are tracked and rejected up front rather
 than 404-ing mid-turn.
 
 When a call rate-limits or fails, OSA walks a configurable fallback chain and
-reconnects mid-stream, the turn keeps going.
+reconnects mid-stream, so the turn keeps going.
+OpenRouter model identifiers inherit context, reasoning, vision, and tool-call
+capabilities from the matching vendor-scoped native catalog entry.
+When tools are required, fallback routing skips models authoritatively known not
+to support tool calls instead of sending a turn that cannot complete.
 
 ### Autonomous Task Orchestration
 
@@ -808,7 +821,7 @@ until needed, discoverable via `tool_search`):
 | **Agents** | `delegate`, `fleet`, `orchestrate`, `create_agent`, `list_agents`, `send_message`, `message_agent`, `team_create`, `team_delete`, `team_tasks`, `task_write`, `task_output`, `task_stop`, `task_wait`, `task_resume`, `spawn_conversation` |
 | **Multi-agent** | `mixture_of_agents`, `peer_review`, `peer_negotiate_task`, `peer_claim_region`, `cross_team_query` |
 | **Plan / worktree** | `enter_plan_mode`, `exit_plan_mode`, `enter_worktree`, `exit_worktree`, `rollback`, `verify_loop`, `start_speculative` |
-| **Skills** | `create_skill`, `save_skill`, `use_skill`, `find_skill`, `list_skills`, `skill_manager`, `use_tool` |
+| **Skills** | `skill_view`, `create_skill`, `save_skill`, `use_skill`, `find_skill`, `list_skills`, `skill_manager`, `use_tool` |
 | **Reporting** | `brief`, `progress_note`, `monitor`, `push_notification`, `send_user_file`, `subscribe_pr`, `remote_trigger` |
 | **Config / meta** | `config`, `cron`, `sleep`, `tool_search`, `budget_status`, `ask_user` |
 
@@ -831,7 +844,7 @@ one.
 | Long-term | SQLite + ETS | Relevance scoring: keyword match + signal weight + recency |
 | Episodic | ETS | Per-session event tracking, capped at 1000 events |
 | Vault | SQLite | Structured, typed memory with fact extraction and injection |
-| Skills | File system | Patterns with occurrence ≥ 5 auto-generate skill files (SICA) |
+| Skills | File system + session checkpoint | Patterns with occurrence ≥ 5 auto-generate skill files (SICA); active selections retain their name, body hash, and selection time |
 
 **SICA learning cycle:** See → Introspect → Capture → Adapt. OSA observes what
 works across sessions and converts recurring patterns into reusable skills
@@ -878,7 +891,7 @@ interact with any GUI application.
 
 | Channel | Notes |
 |---|---|
-| **Rust TUI** | Primary terminal UI: onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions with frecency ranking + ghost-text, LaTeX/table rendering, desktop notifications, and a fixed-height streaming viewport |
+| **Rust TUI** | Primary terminal UI: onboarding wizard, model picker, sessions, command palette, agent tree, skill and goal rows, normalized reasoning/effort state, tool-stall and recovery notices, `!` shell, `@` mentions with frecency ranking + ghost-text, LaTeX/table rendering, desktop notifications, and a fixed-height streaming viewport |
 | **Elixir CLI** | REPL: streaming, task display, diff view, Ctrl+R search, multi-line input |
 | **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
 | **Telegram** | Long-polling, typing indicators, markdown conversion |
@@ -933,6 +946,8 @@ with ultra effort"*).
 Higher effort means more visible thinking in the indicator; `ultra` additionally
 enables the fan-out dynamic-workflow orchestration described in
 [Agent Fleet & Dynamic Workflows](#agent-fleet--dynamic-workflows).
+The footer keeps effort and provider-normalized reasoning as separate signals,
+and refreshes both after `/reasoning`, `/effort`, `/fast`, or a model switch.
 
 ### Scheduler
 
@@ -1176,6 +1191,8 @@ Tables, code fences, the composer, thinking output, activity, goals, and status 
 The status footer uses progressive disclosure at narrow widths.
 The context label survives first, its decorative meter shortens when necessary, and optional effort, MCP, and version chips render only when each complete chip fits.
 Active goals use their own row so their description and controls do not compete with model and context information.
+Active skills also use their own row, collapse excess selections into `+N`, and replay from the current session after SSE reconnect.
+Tool heartbeats and session-health recovery notices appear in transient activity or notification surfaces rather than expanding the permanent footer.
 
 `test/pty/test_resize.py` exercises the release binary through a real pseudo-terminal, while `test/pty/vte_content_reflow.py` covers the libvte behavior used by GNOME Terminal and Tilix.
 
