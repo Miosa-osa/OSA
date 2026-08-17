@@ -228,7 +228,9 @@ impl ApiClient {
     /// POST /api/v1/auth/logout
     pub async fn logout(&self) -> Result<()> {
         // Best-effort server logout
-        let _ = self.post("/api/v1/auth/logout", &serde_json::json!({})).await;
+        let _ = self
+            .post("/api/v1/auth/logout", &serde_json::json!({}))
+            .await;
 
         // Always clear local state
         {
@@ -316,9 +318,7 @@ impl ApiClient {
     /// GET /api/v1/rewind/:session_id — list recent rewind checkpoints
     /// (conversation + code snapshots taken before each user prompt).
     pub async fn list_rewind_checkpoints(&self, session_id: &str) -> Result<Vec<RewindCheckpoint>> {
-        let resp = self
-            .get(&format!("/api/v1/rewind/{}", session_id))
-            .await?;
+        let resp = self.get(&format!("/api/v1/rewind/{}", session_id)).await?;
         let wrapper: serde_json::Value = resp.json().await?;
         let checkpoints: Vec<RewindCheckpoint> =
             serde_json::from_value(wrapper.get("checkpoints").cloned().unwrap_or_default())?;
@@ -359,9 +359,7 @@ impl ApiClient {
 
     /// GET /api/v1/sessions/:id/health
     pub async fn get_session_health(&self, id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .get(&format!("/api/v1/sessions/{}/health", id))
-            .await?;
+        let resp = self.get(&format!("/api/v1/sessions/{}/health", id)).await?;
         Ok(resp.json().await?)
     }
 
@@ -435,9 +433,7 @@ impl ApiClient {
     }
 
     /// GET /api/v1/workspace/identity — git-root-aware workspace name for chrome.
-    pub async fn get_workspace_identity(
-        &self,
-    ) -> Result<crate::client::types::WorkspaceIdentity> {
+    pub async fn get_workspace_identity(&self) -> Result<crate::client::types::WorkspaceIdentity> {
         Ok(self.get("/api/v1/workspace/identity").await?.json().await?)
     }
 
@@ -566,7 +562,9 @@ impl ApiClient {
     }
 
     pub async fn get_session_messages(&self, id: &str) -> Result<Vec<SessionMessage>> {
-        let resp = self.get(&format!("/api/v1/sessions/{}/messages", id)).await?;
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/messages", id))
+            .await?;
         let wrapper: serde_json::Value = resp.json().await?;
         let messages: Vec<SessionMessage> =
             serde_json::from_value(wrapper.get("messages").cloned().unwrap_or_default())?;
@@ -757,6 +755,17 @@ impl ApiClient {
         Ok(())
     }
 
+    /// POST /api/v1/agents/:id/control - durable subagent lifecycle command.
+    pub async fn control_agent(&self, id: &str, action: &str) -> Result<serde_json::Value> {
+        let response = self
+            .post(
+                &format!("/api/v1/agents/{}/control", id),
+                &serde_json::json!({ "action": action }),
+            )
+            .await?;
+        Ok(response.json().await?)
+    }
+
     /// GET /api/v1/runs/:id/transcript — full sidechain transcript for a
     /// subagent run (nested Ctrl+O expansion / dashboard view).
     pub async fn agent_transcript(&self, id: &str) -> Result<String> {
@@ -839,11 +848,7 @@ impl ApiClient {
     }
 
     /// POST /api/v1/sessions/:id/survey/skip
-    pub async fn skip_survey(
-        &self,
-        session_id: &str,
-        survey_id: &str,
-    ) -> Result<()> {
+    pub async fn skip_survey(&self, session_id: &str, survey_id: &str) -> Result<()> {
         let body = serde_json::json!({ "survey_id": survey_id });
         let _ = self
             .post(
@@ -1072,7 +1077,6 @@ impl ApiClient {
         }
     }
 
-
     // =========================================================================
     // Local config store (~/.osa/.env)
     // =========================================================================
@@ -1099,11 +1103,7 @@ impl ApiClient {
             let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
             if let Some((k, v)) = trimmed.split_once('=') {
                 let key = k.trim().to_string();
-                let val = v
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string();
+                let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
                 if !key.is_empty() {
                     map.insert(key, val);
                 }
@@ -1169,10 +1169,7 @@ impl ApiClient {
     /// retry can never double-submit a mutation and `try_clone()` always
     /// succeeds. Max 3 attempts with a short 120ms/240ms backoff so the UI
     /// never hangs.
-    async fn send_retry(
-        &self,
-        req_builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response> {
+    async fn send_retry(&self, req_builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let mut attempt: u32 = 0;
         loop {
             let rb = req_builder
@@ -1180,11 +1177,7 @@ impl ApiClient {
                 .expect("idempotent GET has a cloneable (bodyless) request");
             match rb.send().await {
                 Ok(resp) => return Ok(resp),
-                Err(e)
-                    if attempt < 2
-                        && !e.is_timeout()
-                        && (e.is_connect() || e.is_request()) =>
-                {
+                Err(e) if attempt < 2 && !e.is_timeout() && (e.is_connect() || e.is_request()) => {
                     attempt += 1;
                     debug!(
                         "transport error (stale socket?), retry {}/2: {}",
@@ -1218,11 +1211,7 @@ impl ApiClient {
             let retry_clone = pending.try_clone();
             match pending.send().await {
                 Ok(resp) => return Ok(resp),
-                Err(e)
-                    if attempt < 2
-                        && !e.is_timeout()
-                        && (e.is_connect() || e.is_request()) =>
-                {
+                Err(e) if attempt < 2 && !e.is_timeout() && (e.is_connect() || e.is_request()) => {
                     let Some(next) = retry_clone else {
                         return Err(e.into());
                     };
@@ -1379,7 +1368,9 @@ impl ApiClient {
         body: &T,
     ) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.send_retry_body(self.http.post(&url).json(body)).await?;
+        let resp = self
+            .send_retry_body(self.http.post(&url).json(body))
+            .await?;
         Ok(resp)
     }
 
@@ -1400,11 +1391,7 @@ impl ApiClient {
     }
 
     /// POST JSON with auth header.
-    async fn post<T: serde::Serialize>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<reqwest::Response> {
+    async fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<reqwest::Response> {
         self.post_with_timeout(path, body, None).await
     }
 
@@ -1442,11 +1429,7 @@ impl ApiClient {
     }
 
     /// PUT JSON with auth header.
-    async fn put<T: serde::Serialize>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<reqwest::Response> {
+    async fn put<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.put(&url).json(body);
         if let Ok(token) = self.auth.read().await.require_token() {
@@ -1801,7 +1784,10 @@ mod health_check_retry_tests {
 
     /// Serve one request with an arbitrary status + JSON body, reporting the
     /// request line the client actually sent.
-    async fn serve_once(status_line: &'static str, body: &'static str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    async fn serve_once(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{}", addr);
@@ -1829,15 +1815,21 @@ mod health_check_retry_tests {
 
     #[tokio::test]
     async fn resolve_session_returns_the_full_id_and_hits_the_resolve_route() {
-        let (base_url, line_rx) =
-            serve_once("200 OK", "{\"id\":\"session-1785-abcdef\",\"ref\":\"session-1785\"}").await;
+        let (base_url, line_rx) = serve_once(
+            "200 OK",
+            "{\"id\":\"session-1785-abcdef\",\"ref\":\"session-1785\"}",
+        )
+        .await;
         let client = make_client(base_url);
 
         let resolved = client.resolve_session("session-1785").await;
         assert_eq!(resolved.unwrap(), "session-1785-abcdef");
 
         let line = line_rx.await.expect("server observed a request");
-        assert_eq!(line, "GET /api/v1/sessions/resolve?id=session-1785 HTTP/1.1");
+        assert_eq!(
+            line,
+            "GET /api/v1/sessions/resolve?id=session-1785 HTTP/1.1"
+        );
     }
 
     #[tokio::test]
@@ -1852,7 +1844,11 @@ mod health_check_retry_tests {
         let client = make_client(base_url);
 
         let err = client.resolve_session("nope").await.unwrap_err();
-        assert!(err.to_string().contains("No session matches"), "got: {}", err);
+        assert!(
+            err.to_string().contains("No session matches"),
+            "got: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -1865,7 +1861,11 @@ mod health_check_retry_tests {
         let client = make_client(base_url);
 
         let err = client.resolve_session("ses").await.unwrap_err();
-        assert!(err.to_string().contains("Use more characters"), "got: {}", err);
+        assert!(
+            err.to_string().contains("Use more characters"),
+            "got: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -1889,7 +1889,10 @@ mod health_check_retry_tests {
 
     #[test]
     fn error_details_pass_through_when_there_is_nothing_to_unwrap() {
-        assert_eq!(extract_error_details("connection refused"), "connection refused");
+        assert_eq!(
+            extract_error_details("connection refused"),
+            "connection refused"
+        );
         // Valid JSON with no details field: keep the full context.
         let raw = r#"HTTP 500 from /x: {"error":"boom"}"#;
         assert_eq!(extract_error_details(raw), raw);
@@ -1900,7 +1903,10 @@ mod health_check_retry_tests {
 
     #[test]
     fn query_encoding_escapes_everything_that_could_restructure_the_url() {
-        assert_eq!(percent_encode_query("session-1785_abc.def~x"), "session-1785_abc.def~x");
+        assert_eq!(
+            percent_encode_query("session-1785_abc.def~x"),
+            "session-1785_abc.def~x"
+        );
         assert_eq!(percent_encode_query("a&b=c"), "a%26b%3Dc");
         assert_eq!(percent_encode_query("a b"), "a%20b");
         assert_eq!(percent_encode_query("a#b"), "a%23b");

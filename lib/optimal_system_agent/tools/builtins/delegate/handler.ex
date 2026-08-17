@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Tier
+  alias OptimalSystemAgent.Agent.DelegationRouter
   alias OptimalSystemAgent.Agent.DelegationPolicy
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.TaskNotifications
@@ -178,7 +179,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         _ -> nil
       end
 
-    %{
+    config = %{
       # Inject the SHARED scratchpad directory into the worker's task (CC
       # scratchpadDir dependency-injection parity). The worker resolves the same
       # directory at runtime because its own `scratchpad` tool walks the
@@ -232,6 +233,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
       timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms"))
     }
+
+    DelegationRouter.resolve(child_task, config)
   end
 
   @doc """

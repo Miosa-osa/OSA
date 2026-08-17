@@ -169,6 +169,12 @@ pub enum BackendEvent {
         recent_actions: Vec<String>,
         /// Backend-clock age of the run — see `OrchestratorAgentStarted`.
         elapsed_ms: Option<u64>,
+        active_skills: Vec<String>,
+        model_reason: String,
+        skill_reason: String,
+        retry_count: u32,
+        failure_count: u32,
+        delivery_status: String,
     },
     OrchestratorAgentCompleted {
         agent_name: String,

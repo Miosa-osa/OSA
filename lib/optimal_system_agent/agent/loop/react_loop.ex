@@ -2672,7 +2672,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       {receipt, notifs} ->
         if inbox_receipt_delivered?(state.messages, receipt) do
           acknowledge_replayed(
-            fn -> OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt) end,
+            fn ->
+              OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt, notifs)
+            end,
             fn -> OptimalSystemAgent.Agent.TaskNotifications.release(sid, receipt) end
           )
 
@@ -2704,7 +2706,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           persist_inbox_delivery(
             state,
             next_state,
-            fn -> OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt) end,
+            fn ->
+              OptimalSystemAgent.Agent.TaskNotifications.acknowledge(sid, receipt, notifs)
+            end,
             fn -> OptimalSystemAgent.Agent.TaskNotifications.release(sid, receipt) end
           )
         end

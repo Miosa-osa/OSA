@@ -71,6 +71,35 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     do: DurableInbox.acknowledge(@table, session_id, :task_notifications, receipt)
 
   @doc false
+  def acknowledge(session_id, receipt, notifications) when is_list(notifications) do
+    case acknowledge(session_id, receipt) do
+      :ok ->
+        receipt_id = Enum.map_join(receipt, ",", &to_string/1)
+
+        Enum.each(notifications, fn notification ->
+          case notification[:task_id] || notification["task_id"] do
+            id when is_binary(id) and id != "" ->
+              OptimalSystemAgent.Agent.ExecutionControl.delivery(
+                id,
+                receipt_id,
+                :acknowledged
+              )
+
+              OptimalSystemAgent.Agent.ExecutionControl.broadcast(id, session_id)
+
+            _ ->
+              :ok
+          end
+        end)
+
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  @doc false
   def release(session_id, receipt), do: DurableInbox.release(@table, session_id, receipt)
 
   @doc "Whether any notifications are pending for `session_id`."

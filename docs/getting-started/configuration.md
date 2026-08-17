@@ -200,6 +200,8 @@ persist-and-reference behavior.
 |-----------|---------|-------------|
 | `subagent_worktree_snapshot` | `false` | When `true`, a sub-agent's isolated git worktree is snapshotted to a durable git ref before teardown (merge or discard), instead of only merging or discarding. |
 | `subagent_worktree_snapshot_ref_prefix` | `"refs/osa/subagent-snapshots"` | Git ref namespace the snapshot is written under. |
+| `fleet_resume_on_boot` | `true` | Recover orphaned autonomous subagents from durable transcripts after a backend restart. Set to `false` to require manual recovery. |
+| `fleet_resume_max` | `10` | Maximum number of orphaned autonomous subagents recovered during one backend boot. |
 | `max_blocking_wait_depth` | `3` | Maximum nesting depth for `task_wait` join-barrier calls — an agent blocking on other agents that are themselves blocking cannot nest deeper than this before the wait is denied outright. |
 
 ---

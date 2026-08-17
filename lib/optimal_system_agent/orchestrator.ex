@@ -15,6 +15,8 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.ExecutionControl
+  alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Agent.BackgroundNotifier
   alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
   alias OptimalSystemAgent.Events.Bus
@@ -245,6 +247,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       # handler when this run was seeded from a peer's saved context rather
       # than a fresh spawn or a parent-fork.
       resumed_from: Map.get(config, :resumed_from)
+    })
+
+    ensure_execution_control(subagent_id, config, %{
+      parent_session_id: parent_id,
+      task: task,
+      role: role,
+      provider: provider,
+      model: model
     })
 
     Logger.info(
@@ -820,6 +830,15 @@ defmodule OptimalSystemAgent.Orchestrator do
       phase_detail: "waiting for a concurrency slot"
     })
 
+    ensure_execution_control(subagent_id, config, %{
+      parent_session_id: parent_id,
+      task: Map.get(config, :task, ""),
+      role: role,
+      provider: Map.get(config, :provider),
+      model: Map.get(config, :model),
+      recovery_state: "restartable"
+    })
+
     start_stall_watcher(parent_id, subagent_id, display_name, role)
 
     # The wall clock the USER experiences starts here, at dispatch — not at
@@ -931,6 +950,14 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         case result do
           {:ok, response} ->
+            record_terminal_skills(subagent_id)
+
+            ExecutionControl.finish(subagent_id, :completed, %{
+              duration_ms: duration_ms,
+              tokens_used: final_run && final_run.tokens_used,
+              tool_count: final_run && final_run.tool_count
+            })
+
             Bus.emit(:system_event, %{
               event: :background_agent_completed,
               session_id: parent_id,
@@ -969,6 +996,16 @@ defmodule OptimalSystemAgent.Orchestrator do
             )
 
           {:error, reason} ->
+            record_terminal_skills(subagent_id)
+
+            ExecutionControl.finish(subagent_id, :failed, %{
+              duration_ms: duration_ms,
+              tokens_used: final_run && final_run.tokens_used,
+              tool_count: final_run && final_run.tool_count,
+              failure_count: 1,
+              last_error: inspect(reason)
+            })
+
             Bus.emit(:system_event, %{
               event: :background_agent_failed,
               session_id: parent_id,
@@ -1192,16 +1229,31 @@ defmodule OptimalSystemAgent.Orchestrator do
             message
           end
 
+        control = ExecutionControl.get(agent_id) || %{}
+
         config =
           %{
             task: task,
             role: run.role,
             agent_id: agent_id,
             fork_messages: transcript,
-            working_dir: working_dir
+            working_dir: working_dir,
+            provider: Map.get(control, :provider),
+            model: Map.get(control, :model),
+            model_reason: Map.get(control, :model_reason),
+            model_requirements: Map.get(control, :model_requirements)
           }
           |> Enum.reject(fn {_k, v} -> is_nil(v) end)
           |> Map.new()
+
+        previous = control
+
+        ExecutionControl.progress(agent_id, %{
+          status: :running,
+          recovery_state: "resumed",
+          retry_count: Map.get(previous, :retry_count, 0) + 1,
+          last_recovery_instruction: message
+        })
 
         run_background(run.parent_session_id, config)
     end
@@ -1960,6 +2012,16 @@ defmodule OptimalSystemAgent.Orchestrator do
         "for #{minutes}m"
     )
 
+    ExecutionControl.progress(subagent_id, %{
+      status: :stalled,
+      current_tool: run |> Map.get(:recent_actions, []) |> List.first(),
+      tool_count: Map.get(run, :tool_count, 0),
+      tokens_used: Map.get(run, :tokens_used, 0),
+      failure_count: 1,
+      recovery_state: "inspect_retry_cancel_or_reassign",
+      stalled_ms: stalled_ms
+    })
+
     payload = %{
       event: :background_agent_stalled,
       session_id: parent_id,
@@ -2274,21 +2336,28 @@ defmodule OptimalSystemAgent.Orchestrator do
       when phase in ["start", :start] ->
         action = format_action(tool_name, args)
         RunStore.progress(subagent_id, action, tool_count)
+        record_execution_progress(subagent_id, action, tool_count)
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_progress",
-          agent_name: subagent_id,
-          current_action: action,
-          tool_uses: tool_count,
-          tokens_used: forwarder_tokens(subagent_id),
-          recent_actions: recent_actions(subagent_id),
-          # The backend's own clock for this run — see `run_elapsed_ms/1`. It
-          # rides on every progress frame so a client that connected late, or
-          # reconnected, learns the real age alongside the tool count instead of
-          # pairing a real count with a freshly-zeroed local timer.
-          elapsed_ms: run_elapsed_ms(subagent_id),
-          description: ""
-        })
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: action,
+              tool_uses: tool_count,
+              tokens_used: forwarder_tokens(subagent_id),
+              recent_actions: recent_actions(subagent_id),
+              # The backend's own clock for this run — see `run_elapsed_ms/1`. It
+              # rides on every progress frame so a client that connected late, or
+              # reconnected, learns the real age alongside the tool count instead of
+              # pairing a real count with a freshly-zeroed local timer.
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
 
         # The THIRD silence, and the one the brief names first: a tool that runs
         # for minutes (a build, a test suite, a large grep) emits nothing between
@@ -2308,17 +2377,24 @@ defmodule OptimalSystemAgent.Orchestrator do
       when phase in ["end", :end] ->
         new_count = tool_count + 1
         RunStore.progress(subagent_id, to_string(tool_name), new_count)
+        record_execution_progress(subagent_id, nil, new_count)
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_progress",
-          agent_name: subagent_id,
-          current_action: to_string(tool_name),
-          tool_uses: new_count,
-          tokens_used: forwarder_tokens(subagent_id),
-          recent_actions: recent_actions(subagent_id),
-          elapsed_ms: run_elapsed_ms(subagent_id),
-          description: ""
-        })
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: to_string(tool_name),
+              tool_uses: new_count,
+              tokens_used: forwarder_tokens(subagent_id),
+              recent_actions: recent_actions(subagent_id),
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
 
         # A finished tool means the agent has gone back to the model, and it
         # will emit nothing again until the NEXT tool starts.
@@ -2457,6 +2533,66 @@ defmodule OptimalSystemAgent.Orchestrator do
   # Bounded overhead on one side, unrecoverable data loss on the other: default on.
   defp subagent_worktree_snapshot? do
     Application.get_env(:optimal_system_agent, :subagent_worktree_snapshot, true) == true
+  end
+
+  defp ensure_execution_control(agent_id, config, attrs) do
+    if ExecutionControl.get(agent_id) do
+      ExecutionControl.progress(agent_id, attrs)
+    else
+      ExecutionControl.start(
+        agent_id,
+        attrs
+        |> Map.put(:model_reason, Map.get(config, :model_reason, "tier default"))
+        |> Map.put(:model_requirements, Map.get(config, :model_requirements, ["tools"]))
+        |> Map.put(:skill_reason, "subagent selects skills independently for its task")
+      )
+    end
+  end
+
+  defp record_execution_progress(agent_id, current_tool, tool_count) do
+    skills = ActiveSkills.list(agent_id)
+
+    ExecutionControl.progress(agent_id, %{
+      current_tool: current_tool,
+      tool_count: tool_count,
+      tokens_used: forwarder_tokens(agent_id),
+      active_skills: skills,
+      skill_reason:
+        if(skills == [],
+          do: "no skill selected yet",
+          else: "selected by this subagent via skill_view for its delegated task"
+        )
+    })
+  end
+
+  defp record_terminal_skills(agent_id) do
+    skills = ActiveSkills.list(agent_id)
+
+    ExecutionControl.progress(agent_id, %{
+      active_skills: skills,
+      skill_reason:
+        if(skills == [],
+          do: "no skill was selected for this task",
+          else: "selected by this subagent via skill_view for its delegated task"
+        )
+    })
+  end
+
+  defp execution_event_fields(agent_id) do
+    case ExecutionControl.get(agent_id) do
+      nil ->
+        %{}
+
+      control ->
+        Map.take(control, [
+          :active_skills,
+          :model_reason,
+          :skill_reason,
+          :retry_count,
+          :failure_count,
+          :delivery_status
+        ])
+    end
   end
 
   defp emit_event(parent_session_id, event_data) do

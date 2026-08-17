@@ -97,6 +97,17 @@ pub struct AgentEntry {
     /// nothing for minutes. `None` only when no phase was ever reported (an
     /// older backend, or a foreground/fleet path that does not emit them).
     pub phase: Option<AgentPhase>,
+    /// Skills selected by this subagent's own session.
+    pub active_skills: Vec<String>,
+    /// Why capability routing selected this model.
+    pub model_reason: String,
+    /// Why the current workflow skill was selected.
+    pub skill_reason: String,
+    /// Durable execution counters beyond tool/token totals.
+    pub retry_count: u32,
+    pub failure_count: u32,
+    /// Parent delivery ledger state: pending, queued, or acknowledged.
+    pub delivery_status: String,
 }
 
 /// A backend-reported phase, kept as a parsed enum so rendering decisions are

@@ -175,13 +175,22 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     task_id = to_string(agent_id)
 
     if task_id in ["", "unknown"] or TaskNotifications.mark_notified(task_id) do
-      TaskNotifications.queue(parent_id, %{
-        task_id: task_id,
-        status: outcome,
-        summary: summary,
-        output_file: Map.get(ev, :output_file),
-        usage: usage
-      })
+      case TaskNotifications.queue(parent_id, %{
+             task_id: task_id,
+             status: outcome,
+             summary: summary,
+             output_file: Map.get(ev, :output_file),
+             usage: usage
+           }) do
+        :ok ->
+          OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :queued)
+          OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
+
+        {:error, reason} ->
+          OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :failed)
+          OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
+          Logger.error("[BackgroundNotifier] durable delivery failed: #{inspect(reason)}")
+      end
 
       TaskNotifications.poke_after_batch(parent_id)
     end

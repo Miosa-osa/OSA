@@ -474,7 +474,7 @@ impl Agents {
                 _ if e.current_action.is_empty() => "starting…".to_string(),
                 _ => e.current_action.clone(),
             };
-            format!(
+            let mut summary = format!(
                 "{} — {} · {} tool{} · {} tok · {}",
                 who,
                 action,
@@ -482,7 +482,26 @@ impl Agents {
                 if e.tool_uses == 1 { "" } else { "s" },
                 e.tokens_used,
                 crate::util::fmt_elapsed(e.elapsed_secs()),
-            )
+            );
+            if !e.active_skills.is_empty() {
+                summary.push_str(&format!("\nUsing: {}", e.active_skills.join(", ")));
+            }
+            if !e.model_reason.is_empty() {
+                summary.push_str(&format!("\nWhy model: {}", e.model_reason));
+            }
+            if !e.skill_reason.is_empty() {
+                summary.push_str(&format!("\nWhy skill: {}", e.skill_reason));
+            }
+            if e.retry_count > 0 || e.failure_count > 0 {
+                summary.push_str(&format!(
+                    "\nRecovery: {} retries · {} failures",
+                    e.retry_count, e.failure_count
+                ));
+            }
+            if !e.delivery_status.is_empty() {
+                summary.push_str(&format!("\nParent delivery: {}", e.delivery_status));
+            }
+            summary
         })
     }
 
@@ -776,6 +795,12 @@ impl Agents {
                     result_summary: None,
                     cost_usd: None,
                     phase: None,
+                    active_skills: Vec::new(),
+                    model_reason: String::new(),
+                    skill_reason: String::new(),
+                    retry_count: 0,
+                    failure_count: 0,
+                    delivery_status: String::new(),
                 });
             }
         }
@@ -846,6 +871,12 @@ impl Agents {
                 result_summary: None,
                 cost_usd: None,
                 phase: None,
+                active_skills: Vec::new(),
+                model_reason: String::new(),
+                skill_reason: String::new(),
+                retry_count: 0,
+                failure_count: 0,
+                delivery_status: String::new(),
             };
             // A row created from a frame about an agent that has been running
             // for a while starts with the age the backend reports, not zero.
@@ -893,6 +924,33 @@ impl Agents {
             }
             if !subject.is_empty() && entry.subject.is_empty() {
                 entry.subject = subject;
+            }
+        }
+    }
+
+    /// Update durable control-plane facts without disturbing lifecycle state.
+    pub fn agent_runtime(
+        &mut self,
+        name: &str,
+        active_skills: Vec<String>,
+        model_reason: String,
+        skill_reason: String,
+        retry_count: u32,
+        failure_count: u32,
+        delivery_status: String,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == name) {
+            entry.active_skills = active_skills;
+            if !model_reason.is_empty() {
+                entry.model_reason = model_reason;
+            }
+            if !skill_reason.is_empty() {
+                entry.skill_reason = skill_reason;
+            }
+            entry.retry_count = retry_count;
+            entry.failure_count = failure_count;
+            if !delivery_status.is_empty() {
+                entry.delivery_status = delivery_status;
             }
         }
     }
@@ -1017,6 +1075,12 @@ impl Agents {
                 result_summary: None,
                 cost_usd: None,
                 phase: Some(parsed),
+                active_skills: Vec::new(),
+                model_reason: String::new(),
+                skill_reason: String::new(),
+                retry_count: 0,
+                failure_count: 0,
+                delivery_status: String::new(),
             };
             entry.anchor_elapsed(elapsed_ms);
             self.entries.push(entry);
@@ -1709,7 +1773,9 @@ mod tests {
             4,
             4213,
             "scanning modules",
-            vec![], None,);
+            vec![],
+            None,
+        );
 
         let lines = render_lines(&a, 70, 12);
         let joined = lines.join("\n");
@@ -1795,7 +1861,14 @@ mod tests {
         // the pad must be computed by CHAR width — a byte-len pad shorted the rule
         // and left a ragged gap before the edge.
         let mut a = Agents::new();
-        a.agent_started("w1", "researcher", "", "s1", Some("alpha".to_string()), None);
+        a.agent_started(
+            "w1",
+            "researcher",
+            "",
+            "s1",
+            Some("alpha".to_string()),
+            None,
+        );
         a.agent_started("w2", "coder", "", "s2", Some("beta".to_string()), None);
 
         let w = 72u16;
@@ -1895,9 +1968,19 @@ mod tests {
                 4,
                 4_200,
                 "scanning modules",
-                vec![], None,); // ↓4.2k
+                vec![],
+                None,
+            ); // ↓4.2k
             a.agent_started("w2", "coder", "", "building the crate", None, None);
-            a.agent_progress("w2", "compiling render.rs", 7, 5_100, "building", vec![], None); // ↓5.1k
+            a.agent_progress(
+                "w2",
+                "compiling render.rs",
+                7,
+                5_100,
+                "building",
+                vec![],
+                None,
+            ); // ↓5.1k
 
             let cells = render_cells(&a, w, 12);
 
@@ -1952,7 +2035,9 @@ mod tests {
             4,
             4_200,
             "scanning modules",
-            vec![], None,); // ↓4.2k
+            vec![],
+            None,
+        ); // ↓4.2k
            // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
         a.agent_started("w2", "研究者", "", "x".repeat(120), None, None);
         a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![], None); // ↓3.3k
@@ -2245,6 +2330,29 @@ mod tests {
     }
 
     #[test]
+    fn selected_agent_summary_explains_runtime_choices_and_recovery() {
+        let mut agents = Agents::new();
+        agents.agent_started("worker", "researcher", "gpt-5", "debug resize", None, None);
+        agents.agent_runtime(
+            "worker",
+            vec!["diagnose".into()],
+            "selected for tools and large context".into(),
+            "matched debugging task".into(),
+            2,
+            1,
+            "acknowledged".into(),
+        );
+
+        let summary = agents.entry_summary_at(1).unwrap();
+        assert!(summary.contains("Using: diagnose"), "summary: {summary}");
+        assert!(summary.contains("Why model"), "summary: {summary}");
+        assert!(summary.contains("Why skill"), "summary: {summary}");
+        assert!(summary.contains("2 retries"), "summary: {summary}");
+        assert!(summary.contains("1 failure"), "summary: {summary}");
+        assert!(summary.contains("acknowledged"), "summary: {summary}");
+    }
+
+    #[test]
     fn header_never_calls_unfinished_agents_completed() {
         // A roster with nothing confirmed-running but rows that never ended used
         // to fall through to the `N agents completed` tally.
@@ -2282,7 +2390,9 @@ mod tests {
             "w1",
             "explorer",
             "awaiting_model",
-            "waiting for the first response from glm-4.7", None,);
+            "waiting for the first response from glm-4.7",
+            None,
+        );
         if let Some(e) = a.entries.iter_mut().find(|e| e.name == "w1") {
             e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 30);
         }
@@ -2322,7 +2432,9 @@ mod tests {
             "w1",
             "explorer",
             "starting",
-            "creating an isolated worktree", None,);
+            "creating an isolated worktree",
+            None,
+        );
         assert_eq!(
             a.entries[0].status,
             AgentStatus::Running,

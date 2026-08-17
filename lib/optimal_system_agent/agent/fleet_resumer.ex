@@ -41,10 +41,10 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
   phases. Reconciliation is gated the same way inside
   `RunStore.reconcile_stale_running/1`.
 
-  ## Opt-in and budget
+  ## Recovery policy and budget
 
-  Re-dispatch is **opt-in** and safe-by-default: it only runs when the app-env
-  flag `:fleet_resume_on_boot` is truthy (default `false`). Reconciliation of
+  Re-dispatch is enabled by default for autonomous runs and can be disabled with
+  the app-env flag `:fleet_resume_on_boot`. Reconciliation of
   stale rows ALWAYS runs at boot regardless of the flag, since inflated counts
   are never desirable — note that the flag has never gated the cancellation half
   (the `if enabled` in `resume_on_boot/1` closes before it), so before the
@@ -68,7 +68,7 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.{ExecutionControl, RunStore}
 
   # Default per-boot cap on how many orphaned runs are re-dispatched.
   @default_max 10
@@ -236,6 +236,12 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
           case invoke_resume(resume_fun, run.agent_id) do
             {:ok, _} ->
               Logger.info("[FleetResumer] re-dispatched orphan #{run.agent_id}")
+
+              ExecutionControl.progress(run.agent_id, %{
+                status: :running,
+                recovery_state: "auto_resumed_after_backend_restart"
+              })
+
               {[run.agent_id | ok], err, skipped}
 
             {:error, reason} ->
@@ -244,6 +250,14 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
               )
 
               RunStore.release_lease(run.agent_id)
+
+              ExecutionControl.progress(run.agent_id, %{
+                recovery_state: "auto_resume_failed",
+                failure_count:
+                  Map.get(ExecutionControl.get(run.agent_id) || %{}, :failure_count, 0) + 1,
+                last_error: inspect(reason)
+              })
+
               {ok, [run.agent_id | err], skipped}
           end
 
@@ -252,6 +266,10 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
             "[FleetResumer] not resuming #{run.agent_id}: owned by another live process " <>
               "(#{inspect(reason)})"
           )
+
+          ExecutionControl.progress(run.agent_id, %{
+            recovery_state: "owned_by_another_live_backend"
+          })
 
           {ok, err, [run.agent_id | skipped]}
       end
@@ -349,7 +367,7 @@ defmodule OptimalSystemAgent.Agent.FleetResumer do
   end
 
   defp enabled? do
-    Application.get_env(:optimal_system_agent, :fleet_resume_on_boot, false) == true
+    Application.get_env(:optimal_system_agent, :fleet_resume_on_boot, true) == true
   end
 
   defp max_resumes do

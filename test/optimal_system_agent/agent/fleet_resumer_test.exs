@@ -104,6 +104,26 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
   end
 
   describe "resume_on_boot/1 coordination" do
+    test "autonomous crash recovery is enabled by default and can be disabled" do
+      isolate_store()
+      previous = Application.get_env(:optimal_system_agent, :fleet_resume_on_boot)
+      Application.delete_env(:optimal_system_agent, :fleet_resume_on_boot)
+
+      on_exit(fn ->
+        if is_nil(previous),
+          do: Application.delete_env(:optimal_system_agent, :fleet_resume_on_boot),
+          else: Application.put_env(:optimal_system_agent, :fleet_resume_on_boot, previous)
+      end)
+
+      summary =
+        FleetResumer.resume_on_boot(
+          runs: [],
+          alive_fun: fn _ -> false end
+        )
+
+      assert summary.enabled == true
+    end
+
     test "when disabled, resumes nothing but still reconciles ghosts" do
       # Seed a stale running row in the real (test-isolated) RunStore.
       isolate_store()

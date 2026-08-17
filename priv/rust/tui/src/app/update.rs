@@ -1,6 +1,4 @@
-use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers,
-};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use tracing::warn;
 
 use super::App;
@@ -87,7 +85,6 @@ pub(crate) fn paste_is_file_paths(text: &str) -> bool {
     true
 }
 
-
 /// True only for the two keys that dismiss a read-only overlay: Esc, or an
 /// unmodified `q`. Enter/Space/other keys (and Ctrl/Alt-chorded `q`) return
 /// false so a stray keypress — or key-noise a terminal emits when a click is
@@ -122,9 +119,7 @@ impl App {
                 self.adopt_frame_size(crate::app::frame_size::FrameSize::from_resize_event(w, h));
                 false
             }
-            Event::Terminal(CrosstermEvent::Key(key))
-                if key.kind == KeyEventKind::Press =>
-            {
+            Event::Terminal(CrosstermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key)
             }
             Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
@@ -651,12 +646,16 @@ impl App {
                     self.view_selected_dashboard_item();
                 }
             }
-            (KeyCode::Char('c'), KeyModifiers::NONE)
-            | (KeyCode::Char('x'), KeyModifiers::NONE) => {
+            (KeyCode::Char('c'), KeyModifiers::NONE) | (KeyCode::Char('x'), KeyModifiers::NONE) => {
                 if count > 0 {
                     self.stop_selected_dashboard_item();
                 }
             }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => self.control_selected_agent("retry"),
+            (KeyCode::Char('p'), KeyModifiers::NONE) => self.control_selected_agent("pause"),
+            (KeyCode::Char('u'), KeyModifiers::NONE) => self.control_selected_agent("resume"),
+            (KeyCode::Char('a'), KeyModifiers::NONE) => self.control_selected_agent("reassign"),
+            (KeyCode::Char('t'), KeyModifiers::NONE) => self.control_selected_agent("cancel_tool"),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.close_agents_dashboard();
             }
@@ -700,9 +699,7 @@ impl App {
             self.agents_dashboard_selected = count.saturating_sub(1);
         }
         match (key.code, key.modifiers) {
-            (KeyCode::Esc, _)
-            | (KeyCode::Right, _)
-            | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            (KeyCode::Esc, _) | (KeyCode::Right, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.exit_fleet_select();
             }
             (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
@@ -720,10 +717,14 @@ impl App {
                 // index 0 → detach_to_main); on a worker it opens its transcript.
                 self.view_selected_dashboard_item();
             }
-            (KeyCode::Char('x'), KeyModifiers::NONE)
-            | (KeyCode::Char('c'), KeyModifiers::NONE) => {
+            (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 self.stop_selected_dashboard_item();
             }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => self.control_selected_agent("retry"),
+            (KeyCode::Char('p'), KeyModifiers::NONE) => self.control_selected_agent("pause"),
+            (KeyCode::Char('u'), KeyModifiers::NONE) => self.control_selected_agent("resume"),
+            (KeyCode::Char('a'), KeyModifiers::NONE) => self.control_selected_agent("reassign"),
+            (KeyCode::Char('t'), KeyModifiers::NONE) => self.control_selected_agent("cancel_tool"),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.exit_fleet_select();
             }
@@ -792,7 +793,8 @@ impl App {
     /// confirm-accept path and the already-acked fast path.
     pub(crate) fn enter_overdrive(&mut self) {
         use crate::components::status_bar::PermissionMode;
-        self.status.set_permission_mode(PermissionMode::BypassPermissions);
+        self.status
+            .set_permission_mode(PermissionMode::BypassPermissions);
         self.config.skip_permissions = true;
         self.sidebar.set_yolo_mode(true);
         self.spawn_backend_command("dangerous_mode", "on");
@@ -899,9 +901,7 @@ impl App {
         ) {
             let _ = execute!(
                 out,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                )
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             );
         }
         self.force_redraw = true;
@@ -1020,8 +1020,7 @@ impl App {
         // and non-rebindable. A match consumes the key; a decline falls through
         // to the remaining hardcoded arms and the composer.
         if key.code != KeyCode::Esc {
-            if let Some(quit) =
-                self.resolve_keymap(crate::config::keybindings::Context::Idle, key)
+            if let Some(quit) = self.resolve_keymap(crate::config::keybindings::Context::Idle, key)
             {
                 return quit;
             }
@@ -1155,9 +1154,9 @@ impl App {
             // dropdown) — let it fall through to the input rather than opening a
             // separate modal, so the path is inserted in place.
             _ => {
-                let action =
-                    self.input
-                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                let action = self
+                    .input
+                    .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
                 // The input may have grown or shrunk (Shift+Enter newline, paste,
                 // clear) — recompute so the box height tracks the content instead
                 // of staying stuck at its previous size.
@@ -1359,9 +1358,9 @@ impl App {
             // the keybinding map (Global context, resolve_keymap above).
             // Chat scrolling is delegated to the host terminal's native scrollback.
             _ => {
-                let action =
-                    self.input
-                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                let action = self
+                    .input
+                    .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
                 // The input may have grown or shrunk (Shift+Enter newline, paste,
                 // submit/clear) — recompute so the box height tracks the content
                 // instead of staying stuck at its previous size.
@@ -1485,7 +1484,11 @@ impl App {
             VoiceEvent::RecordingStopped => {
                 self.stop_recording();
             }
-            VoiceEvent::DownloadProgress { label, downloaded, total } => {
+            VoiceEvent::DownloadProgress {
+                label,
+                downloaded,
+                total,
+            } => {
                 let pct = if total > 0 {
                     ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
                 } else {
@@ -1498,7 +1501,8 @@ impl App {
                 );
             }
             VoiceEvent::AudioLevel(level) => {
-                self.status.set_audio_level((level * 100.0).clamp(0.0, 100.0) as u8);
+                self.status
+                    .set_audio_level((level * 100.0).clamp(0.0, 100.0) as u8);
             }
             VoiceEvent::HandsFreeRestart => {
                 if self.voice.hands_free && !self.voice.recording {

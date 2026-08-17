@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
   require Logger
 
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
+  alias OptimalSystemAgent.Agent.SubagentControl
 
   plug(:match)
   plug(:dispatch)
@@ -97,6 +98,33 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
       |> Enum.map(fn name -> build_node(name, tree_map) end)
 
     json(conn, 200, %{hierarchy: root_nodes})
+  end
+
+  # ── GET /:id — single agent definition ────────────────────────────
+
+  get "/:id/runtime" do
+    case SubagentControl.snapshot(conn.params["id"]) do
+      {:ok, snapshot} -> json(conn, 200, snapshot)
+      {:error, :not_found} -> json_error(conn, 404, "not_found", "Agent run not found")
+    end
+  end
+
+  post "/:id/control" do
+    action = conn.body_params["action"]
+
+    case SubagentControl.command(conn.params["id"], action, conn.body_params) do
+      {:ok, snapshot} ->
+        json(conn, 200, %{status: "accepted", agent: snapshot})
+
+      {:error, :not_found} ->
+        json_error(conn, 404, "not_found", "Agent run not found")
+
+      {:error, {:unsupported_action, value}} ->
+        json_error(conn, 400, "unsupported_action", "Unsupported agent action: #{value}")
+
+      {:error, reason} ->
+        json_error(conn, 409, "control_failed", inspect(reason))
+    end
   end
 
   # ── GET /:id — single agent definition ────────────────────────────
