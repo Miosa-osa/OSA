@@ -370,16 +370,17 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   """
   @spec exists?(String.t()) :: boolean()
   def exists?(session_id) when is_binary(session_id) do
-    Enum.any?(
-      [
-        session_path(session_id),
-        spend_path(session_id),
-        meta_path(session_id),
-        updates_path(session_id),
-        OptimalSystemAgent.Agent.Loop.GoalTracker.store_path(session_id)
-      ],
-      &File.exists?/1
-    )
+    OptimalSystemAgent.Agent.ActiveSkills.exists?(session_id) or
+      Enum.any?(
+        [
+          session_path(session_id),
+          spend_path(session_id),
+          meta_path(session_id),
+          updates_path(session_id),
+          OptimalSystemAgent.Agent.Loop.GoalTracker.store_path(session_id)
+        ],
+        &File.exists?/1
+      )
   rescue
     _ -> false
   end
@@ -397,6 +398,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     _ = File.rm(meta_path(session_id))
     _ = File.rm(spend_path(session_id))
     _ = File.rm(pin_path(session_id))
+    _ = OptimalSystemAgent.Agent.ActiveSkills.clear(session_id)
     forget_rev(session_id)
     File.rm(path)
   end
@@ -452,6 +454,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
                   _ = File.rm(RecordLock.lock_path(path))
                   _ = File.rm(meta_path(session_id))
                   _ = File.rm(spend_path(session_id))
+                  _ = OptimalSystemAgent.Agent.ActiveSkills.clear(session_id)
                   forget_rev(session_id)
                   File.rm(path) == :ok
                 end

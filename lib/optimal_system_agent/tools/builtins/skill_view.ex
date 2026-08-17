@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
 
   alias OptimalSystemAgent.Tools.Registry
   alias OptimalSystemAgent.Tools.Registry.{SkillLoader, SkillUsage}
+  alias OptimalSystemAgent.Agent.ActiveSkills
 
   @impl true
   def name, do: "skill_view"
@@ -52,20 +53,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
   @impl true
   def execute(%{"name" => name}) when is_binary(name) and name != "" do
     case Registry.get_skill(name) do
+      %{path: path} = skill when is_binary(path) -> preview(skill, path)
+      nil -> {:error, "Skill '#{name}' not found. Call list_skills to inspect the catalog."}
+      _ -> {:error, "Skill '#{name}' has no readable SKILL.md path."}
+    end
+  end
+
+  def execute(_), do: {:error, "skill_view preview requires a non-empty skill name"}
+
+  @impl true
+  def execute(%{"name" => name}, ctx) when is_binary(name) and name != "" do
+    case Registry.get_skill(name) do
       nil ->
         {:error, "Skill '#{name}' not found. Call list_skills to inspect the catalog."}
 
       %{path: path} = skill when is_binary(path) ->
-        load(skill, path)
+        load(skill, path, ctx)
 
       _skill ->
         {:error, "Skill '#{name}' has no readable SKILL.md path."}
     end
   end
 
-  def execute(_), do: {:error, "skill_view requires a non-empty skill name"}
+  def execute(_, _ctx), do: {:error, "skill_view requires a non-empty skill name"}
 
-  defp load(skill, path) do
+  defp load(skill, path, ctx) do
     cond do
       not SkillLoader.within_roots?(path) ->
         {:error, "Skill path is outside the configured skill roots."}
@@ -78,13 +90,48 @@ defmodule OptimalSystemAgent.Tools.Builtins.SkillView do
           {:ok, body} ->
             SkillUsage.record_use(skill.name)
 
-            {:ok,
-             "# Active Skill: #{skill.name}\n\n" <>
-               "You selected this skill for the current task. Follow these instructions " <>
-               "before continuing.\n\n#{String.trim(body)}"}
+            case checkpoint_selection(ctx, skill.name) do
+              :ok ->
+                {:ok,
+                 "# Active Skill: #{skill.name}\n\n" <>
+                   "You selected this skill for the current task. Follow these instructions " <>
+                   "before continuing.\n\n#{String.trim(body)}"}
+
+              {:error, reason} ->
+                {:error,
+                 "Loaded '#{skill.name}' but could not checkpoint its selection: #{inspect(reason)}"}
+            end
 
           {:error, reason} ->
             {:error, "Could not load '#{skill.name}': #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp checkpoint_selection(%{session_id: session_id}, skill_name)
+       when is_binary(session_id) and session_id != "",
+       do: ActiveSkills.select(session_id, skill_name)
+
+  defp checkpoint_selection(_ctx, _skill_name), do: {:error, :missing_session_id}
+
+  defp preview(skill, path) do
+    cond do
+      not SkillLoader.within_roots?(path) ->
+        {:error, "Skill path is outside the configured skill roots."}
+
+      SkillLoader.disabled?(path) ->
+        {:error, "Skill '#{skill.name}' is disabled."}
+
+      true ->
+        case SkillLoader.load_body(path) do
+          {:ok, body} ->
+            {:ok,
+             "# Skill Preview: #{skill.name}\n\n" <>
+               "This direct preview has no owning session and did not activate the skill. " <>
+               "Runtime agents activate it through the session-aware tool path.\n\n#{String.trim(body)}"}
+
+          {:error, reason} ->
+            {:error, "Could not preview '#{skill.name}': #{inspect(reason)}"}
         end
     end
   end
