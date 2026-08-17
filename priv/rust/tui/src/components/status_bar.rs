@@ -558,6 +558,13 @@ impl StatusBar {
         self.goal_label = label;
     }
 
+    /// Two ordinary status rows, plus one dedicated goal row while a durable
+    /// goal exists. Keeping this measurement on the component makes the layout
+    /// reserve exactly what `draw` paints.
+    pub fn desired_height(&self) -> u16 {
+        if self.goal_label.is_some() { 3 } else { 2 }
+    }
+
     /// Set (or clear with None) the transient goal-verification indicator.
     pub fn set_goal_verification(&mut self, state: Option<GoalVerifyState>) {
         self.goal_verify = state;
@@ -997,17 +1004,29 @@ impl Component for StatusBar {
     fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = style::theme();
 
-        // Split into two rows: status line + permission/shell line.
+        // A goal owns its own row. It used to be appended to the already-dense
+        // primary status line, where normal terminal widths clipped the goal
+        // text and often left only a dangling `/` from `/goal pause`.
+        let row_constraints = if self.goal_label.is_some() {
+            vec![Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)]
+        } else {
+            vec![Constraint::Length(1), Constraint::Length(1)]
+        };
         let rows = RLayout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .constraints(row_constraints)
             .split(area);
         // Reserve a 1-column right gutter on both status rows so the right-most
         // segment (version chip / bg counter) never clips mid-glyph against the
         // terminal edge — parity with draw_context_hint's gutter (edd66d5).
         let row0 = Rect { width: rows[0].width.saturating_sub(1), ..rows[0] };
+        let goal_row = self.goal_label.as_ref().and_then(|_| rows.get(1)).map(|r| Rect {
+            width: r.width.saturating_sub(1),
+            ..*r
+        });
+        let permission_row_index = if self.goal_label.is_some() { 2 } else { 1 };
         let row1 = rows
-            .get(1)
+            .get(permission_row_index)
             .map(|r| Rect { width: r.width.saturating_sub(1), ..*r })
             .unwrap_or(row0);
         let area = row0; // special-case single-line indicators render into row 0
@@ -1227,15 +1246,6 @@ impl Component for StatusBar {
             ));
         }
 
-        // Active /goal auto-continue loop: "◎ goal N/max".
-        if let Some(ref goal_label) = self.goal_label {
-            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            spans.push(Span::styled(
-                format!("\u{25CE} {}", goal_label),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ));
-        }
-
         // Goal-verification indicator — the agent judging its own work. One
         // compact, understated chip tied to the goal line: dim for the common
         // verifying/on-track cases, warning for a gap, error for off-track.
@@ -1413,6 +1423,17 @@ impl Component for StatusBar {
             Paragraph::new(Line::from(spans)).style(theme.status_bar()),
             row0,
         );
+
+        if let (Some(goal_label), Some(goal_area)) = (self.goal_label.as_ref(), goal_row) {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("\u{25CE} {}", goal_label),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )))
+                .style(theme.status_bar()),
+                goal_area,
+            );
+        }
 
         // ── Row 1: permission / shell / background line ─────────────────
         //   ⏵⏵ bypass permissions on · N shells · N bg
@@ -1868,8 +1889,12 @@ mod status_bar_tests {
 
     /// Flatten a fully-configured StatusBar's cells to one string.
     fn render_sb(sb: &StatusBar) -> String {
+        render_sb_at(sb, 120, 2)
+    }
+
+    fn render_sb_at(sb: &StatusBar, width: u16, height: u16) -> String {
         use ratatui::{backend::TestBackend, Terminal};
-        let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
         term.draw(|f| sb.draw(f, f.area())).unwrap();
         term.backend()
             .buffer()
@@ -1877,6 +1902,25 @@ mod status_bar_tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn narrow_goal_gets_an_aligned_dedicated_row_with_complete_controls() {
+        let mut sb = StatusBar::new();
+        sb.set_provider_info("anthropic", "claude-opus-5");
+        sb.set_cwd_path("/work/miosa");
+        sb.set_effort(Some("medium".into()));
+        sb.set_mcp(12);
+        sb.set_permission_mode(PermissionMode::BypassPermissions);
+        sb.set_goal_label(Some(
+            "Pursuing: Complete the MIOSA Forge product: m… · 3m 54s · /goal pause"
+                .into(),
+        ));
+
+        let text = render_sb_at(&sb, 100, 3);
+        assert!(text.contains("Pursuing: Complete the MIOSA Forge product"), "goal description was clipped: {text:?}");
+        assert!(text.contains("/goal pause"), "goal control was clipped: {text:?}");
+        assert!(text.contains("overdrive (full auto) on"), "permission row disappeared: {text:?}");
     }
 
     #[test]
