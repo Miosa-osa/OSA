@@ -28,6 +28,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Minimum model size (in bytes) to enable tool calling — ~14B params ≈ 8GB on disk
   @tool_min_size 7_000_000_000
 
+  @local_url "http://localhost:11434"
+
   @impl true
   def name, do: :ollama
 
@@ -142,13 +144,58 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     e -> {:error, Exception.message(e)}
   end
 
+  @doc false
+  @spec resolve_request_url(String.t(), String.t() | nil, [String.t()]) :: String.t()
+  def resolve_request_url(configured_url, model, local_model_names) do
+    if String.starts_with?(configured_url, "https://") and cloud_model?(model) and
+         model in local_model_names do
+      @local_url
+    else
+      configured_url
+    end
+  end
+
+  defp request_url(configured_url, model) do
+    if String.starts_with?(configured_url, "https://") and cloud_model?(model) do
+      local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
+
+      # Hosted tags are not guaranteed to appear in /api/tags even when the
+      # signed daemon can serve them. /api/show is Ollama's authoritative
+      # per-model capability check and does not start a generation.
+      local_model_names =
+        case Req.post("#{local_url}/api/show",
+               json: %{model: model},
+               receive_timeout: 750,
+               retry: false
+             ) do
+          {:ok, %{status: 200}} -> [model]
+          _ -> []
+        end
+
+      case resolve_request_url(configured_url, model, local_model_names) do
+        @local_url ->
+          Logger.info("[Ollama] Routing hosted tag #{model} through the signed local daemon")
+
+          local_url
+
+        url ->
+          url
+      end
+    else
+      configured_url
+    end
+  rescue
+    _ -> configured_url
+  end
+
   @impl true
   def chat(messages, opts \\ []) do
-    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-
     model =
       Keyword.get(opts, :model) ||
         Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+
+    configured_url = Application.get_env(:optimal_system_agent, :ollama_url, @local_url)
+    url = request_url(configured_url, model)
 
     with :ok <- context_floor_error(model, opts) do
       do_chat(url, model, messages, opts)
@@ -219,12 +266,13 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # the local ceiling only to non-cloud tags, so an Ollama Cloud model passes
     # this untouched.
     with :ok <- context_floor_error(model, opts) do
-      do_chat_stream(messages, callback, opts)
+      do_chat_stream(messages, callback, opts, model)
     end
   end
 
-  defp do_chat_stream(messages, callback, opts) do
-    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+  defp do_chat_stream(messages, callback, opts, model) do
+    configured_url = Application.get_env(:optimal_system_agent, :ollama_url, @local_url)
+    url = request_url(configured_url, model)
 
     # Ollama Cloud (HTTPS) — streaming via Erlang port + curl --no-buffer.
     # Req/Finch pool gets stuck after boot failures with HTTPS endpoints,
@@ -232,10 +280,6 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # NDJSON streaming. Each JSON line contains a token delta.
     if String.starts_with?(url, "https://") do
       Logger.info("[Ollama] Cloud URL detected — streaming via curl port")
-
-      model =
-        Keyword.get(opts, :model) ||
-          Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
       tools = Keyword.get(opts, :tools, [])
 

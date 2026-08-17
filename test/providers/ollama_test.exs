@@ -5,6 +5,40 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
   alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Utils.Text
 
+  describe "resolve_request_url/3" do
+    test "routes a cloud tag through the signed local daemon when it is available there" do
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "glm-5.2:cloud",
+               ["glm-5.2:cloud", "llama3.2:3b"]
+             ) == "http://localhost:11434"
+    end
+
+    test "keeps direct cloud routing when the local daemon does not list the tag" do
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "glm-5.2:cloud",
+               ["llama3.2:3b"]
+             ) == "https://ollama.com"
+    end
+
+    test "does not reroute local-weight models to a different daemon" do
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "llama3.2:3b",
+               ["llama3.2:3b"]
+             ) == "https://ollama.com"
+    end
+
+    test "preserves an already-local configured URL" do
+      assert Ollama.resolve_request_url(
+               "http://ollama.internal:11434",
+               "glm-5.2:cloud",
+               ["glm-5.2:cloud"]
+             ) == "http://ollama.internal:11434"
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # model_supports_tools?/1
   # ---------------------------------------------------------------------------
