@@ -46,6 +46,7 @@ from stub_backend import (  # noqa: E402
     push_sse,
     release_health,
     release_turn,
+    reject_next_sse,
     reset_goal_state,
     set_claude_cli_state,
     set_goal_state,
@@ -1550,6 +1551,62 @@ def test_a_stale_backend_says_so_instead_of_relabelling_the_tui(
                 "no mismatch notice, so a stale daemon is still silent.\n"
                 f"--- rendered screen ---\n{s.dump()}"
             )
+
+
+def test_a_missing_session_recovers_without_a_reconnect_loop(
+    backend: StubBackend,
+) -> None:
+    """A healthy backend plus a missing session must create a replacement.
+
+    This is the exact production failure from the report: `/health` returned
+    healthy while `GET /api/v1/stream/<session>` returned 404. Treating that
+    permanent response as a network blip left the footer saying
+    `Reconnecting to backend...` while retrying the same impossible URL.
+
+    The first stream attach is rejected. A correct client creates one fresh
+    session, attaches its stream, and returns to a usable composer without any
+    backend restart or user input.
+    """
+    mark = post_mark()
+    get_start = get_mark()
+    reject_next_sse(session_id="pty-stub-session")
+    with PtySession(backend.base_url, cols=100, rows=30) as s:
+        s.boot()
+
+        waited = 0.0
+        session_posts = []
+        while waited < 5.0:
+            s.pump(0.1)
+            waited += 0.1
+            session_posts = posts_since(mark, "/api/v1/sessions")
+            streams = [
+                path
+                for path in gets_since(get_start)
+                if path.startswith("/api/v1/stream/")
+            ]
+            replacement_streams = [
+                path for path in streams if path.endswith("/pty-stub-session")
+            ]
+            if len(session_posts) >= 2 and len(replacement_streams) >= 2:
+                break
+
+        if len(session_posts) != 2:
+            raise AssertionError(
+                "a missing stream did not create exactly one replacement "
+                f"session; saw {len(session_posts)} session creates.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        if len(replacement_streams) != 2:
+            raise AssertionError(
+                "the replacement session did not attach exactly one fresh "
+                f"stream after the rejected one; saw {streams}.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+        if "Reconnecting to backend" in "\n".join(s.lines()):
+            raise AssertionError(
+                "the TUI recovered but left the reconnect banner visible.\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
         screen = s.dump()
         if "osa stop" in screen:
             raise AssertionError(
@@ -3005,6 +3062,7 @@ TESTS = [
     test_claude_code_is_installed_and_signed_in_without_leaving_osa,
     test_connecting_splash_does_not_trap_the_user,
     test_a_stale_backend_says_so_instead_of_relabelling_the_tui,
+    test_a_missing_session_recovers_without_a_reconnect_loop,
     test_a_draft_typed_while_connecting_survives_into_the_composer,
     test_a_slow_second_escape_still_interrupts,
     test_one_stray_escape_still_does_not_kill_a_turn,
