@@ -2446,6 +2446,7 @@ impl App {
             survey,
             popup: self.input.popup_desired_height(),
             input: self.input.desired_height(w),
+            status: self.status.desired_height(),
             // Keep one roster row alive while a subagent is. Not while the band
             // merely has rows to draw — a roster of finished agents is history,
             // and history loses to the plan like everything else on the ladder.

@@ -2861,7 +2861,7 @@ def test_reconnect_restores_a_paused_goal_footer(backend: StubBackend) -> None:
         output="Goal paused",
     )
     try:
-        with PtySession(backend.base_url, cols=120, rows=30) as s:
+        with PtySession(backend.base_url, cols=100, rows=30) as s:
             s.boot()
             s.pump(1.0)
             screen = "\n".join(s.lines())
@@ -2874,6 +2874,15 @@ def test_reconnect_restores_a_paused_goal_footer(backend: StubBackend) -> None:
             if "/goal resume" not in screen:
                 raise AssertionError(
                     "the paused goal footer did not expose its resume control.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+            rows = s.lines()
+            goal_row = next(i for i, row in enumerate(rows) if "Goal paused:" in row)
+            status_row = next(i for i, row in enumerate(rows) if "% ctx" in row)
+            if goal_row == status_row:
+                raise AssertionError(
+                    "the goal is still appended to the crowded primary status row "
+                    "instead of owning an aligned row underneath it.\n"
                     f"--- rendered screen ---\n{s.dump()}"
                 )
     finally:
