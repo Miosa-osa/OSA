@@ -110,6 +110,15 @@ defmodule OptimalSystemAgent.Agent.Context.EvictionTest do
   end
 
   test "a session with room evicts nothing" do
+    # Isolate from the host's installed skills catalog: the recall block is
+    # hard-capped, so a large real catalog truncates (an eviction) regardless of
+    # window room, making this host-dependent. Empty the registry for a
+    # deterministic check; on_exit restores it.
+    skills_key = {OptimalSystemAgent.Tools.Registry, :skills}
+    prev_skills = :persistent_term.get(skills_key, %{})
+    :persistent_term.put(skills_key, %{})
+    on_exit(fn -> :persistent_term.put(skills_key, prev_skills) end)
+
     roomy = %{
       session_id: "evict-roomy-#{:erlang.unique_integer([:positive])}",
       channel: :cli,
