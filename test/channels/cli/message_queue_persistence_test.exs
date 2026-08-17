@@ -78,5 +78,16 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueuePersistenceTest do
 
       refute MessageQueue.has_queued?(id)
     end
+
+    test "submit reports accepted versus queued instead of making the UI guess", %{id: id} do
+      {:ok, pid} = MessageQueue.start_link(id)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert %{status: :accepted, session_id: ^id} = MessageQueue.submit(id, "first")
+      :sys.replace_state(pid, &%{&1 | agent_busy: true})
+
+      assert %{status: :queued, session_id: ^id, position: 1} =
+               MessageQueue.submit(id, "second")
+    end
   end
 end

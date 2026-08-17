@@ -3,6 +3,12 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
 
   alias OptimalSystemAgent.Agent.TaskNotifications, as: TN
 
+  defmodule TestPoker do
+    def poke(session_id) do
+      send(:persistent_term.get({__MODULE__, session_id}), {:poke, session_id})
+    end
+  end
+
   setup do
     # Tables are app-owned in production; create them here when the app
     # isn't started (they die with the test process, which is fine).
@@ -12,6 +18,10 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
 
     if :ets.whereis(:osa_task_notified) == :undefined do
       :ets.new(:osa_task_notified, [:named_table, :public, :set])
+    end
+
+    if :ets.whereis(:osa_task_notification_pokes) == :undefined do
+      :ets.new(:osa_task_notification_pokes, [:named_table, :public, :set])
     end
 
     {:ok, sid: "tn-test-" <> Integer.to_string(System.unique_integer([:positive]))}
@@ -33,6 +43,97 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
 
     assert [%{task_id: "mine"}] = TN.drain(sid)
     assert [%{task_id: "theirs"}] = TN.drain(sid <> "-other")
+  end
+
+  test "queued results survive loss of the live ETS projection", %{sid: sid} do
+    :ok = TN.queue(sid, %{task_id: "durable", status: :done})
+
+    :ets.match_delete(:osa_task_notifications, {{sid, :_}, :_})
+
+    assert [%{task_id: "durable"}] = TN.drain(sid)
+    assert TN.drain(sid) == []
+  end
+
+  test "checkout survives a consumer crash before acknowledgement", %{sid: sid} do
+    :ok = TN.queue(sid, %{task_id: "reserved", status: :done})
+
+    assert {receipt, [%{task_id: "reserved"}]} = TN.checkout(sid)
+
+    # A consumer incorporated nothing and died. Its ETS claim disappears, but
+    # the durable ledger still owns the fact, so the replacement can reserve it.
+    :ets.match_delete(:osa_task_notifications, {{sid, :_}, :_})
+    assert {restored_receipt, [%{task_id: "reserved"}]} = TN.checkout(sid)
+    assert restored_receipt == receipt
+
+    assert :ok = TN.acknowledge(sid, restored_receipt)
+    assert :empty = TN.checkout(sid)
+  end
+
+  test "simultaneous completions are coalesced into one context fragment" do
+    [message] =
+      TN.to_messages([
+        %{task_id: "one", status: :done},
+        %{task_id: "two", status: :done}
+      ])
+
+    assert message.content =~ "<task-id>one</task-id>"
+    assert message.content =~ "<task-id>two</task-id>"
+  end
+
+  test "completion pokes in one window are delivered once", %{sid: sid} do
+    key = {TestPoker, sid}
+    previous = Application.get_env(:optimal_system_agent, :notification_poker)
+    :persistent_term.put(key, self())
+    Application.put_env(:optimal_system_agent, :notification_poker, TestPoker)
+
+    on_exit(fn ->
+      :persistent_term.erase(key)
+
+      if previous do
+        Application.put_env(:optimal_system_agent, :notification_poker, previous)
+      else
+        Application.delete_env(:optimal_system_agent, :notification_poker)
+      end
+    end)
+
+    :ok = TN.poke_after_batch(sid)
+    :ok = TN.poke_after_batch(sid)
+    :ok = TN.poke_after_batch(sid)
+
+    assert_receive {:poke, ^sid}, 250
+    refute_receive {:poke, ^sid}, 75
+  end
+
+  test "concurrent producers cannot overwrite one another's durable entries", %{sid: sid} do
+    1..20
+    |> Task.async_stream(fn id -> TN.queue(sid, %{task_id: "task-#{id}"}) end,
+      max_concurrency: 20,
+      timeout: 5_000
+    )
+    |> Enum.each(fn result -> assert result == {:ok, :ok} end)
+
+    :ets.match_delete(:osa_task_notifications, {{sid, :_}, :_})
+
+    ids = sid |> TN.drain() |> Enum.map(& &1.task_id) |> MapSet.new()
+    assert ids == MapSet.new(Enum.map(1..20, &"task-#{&1}"))
+  end
+
+  test "concurrent checkouts cannot reserve the same entry twice", %{sid: sid} do
+    for id <- 1..20 do
+      :ok = TN.queue(sid, %{task_id: "claim-#{id}"})
+    end
+
+    results =
+      1..2
+      |> Task.async_stream(fn _ -> TN.checkout(sid) end, max_concurrency: 2)
+      |> Enum.flat_map(fn
+        {:ok, :empty} -> []
+        {:ok, {_receipt, notifications}} -> notifications
+      end)
+
+    ids = Enum.map(results, & &1.task_id)
+    assert length(ids) == 20
+    assert length(Enum.uniq(ids)) == 20
   end
 
   test "mark_notified is check-and-set: true exactly once" do

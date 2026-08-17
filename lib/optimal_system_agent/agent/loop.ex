@@ -1834,12 +1834,35 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # which guarantees no double injection.
   @impl true
   def handle_cast({:steer, _text}, state) do
-    case Steer.drain(state.session_id) do
-      [] ->
+    case Steer.checkout(state.session_id) do
+      :empty ->
         {:noreply, state}
 
-      texts ->
-        {:noreply, %{state | messages: state.messages ++ Steer.to_messages(texts)}}
+      {receipt, texts} ->
+        if inbox_receipt_delivered?(state.messages, receipt) do
+          acknowledge_replayed(
+            receipt,
+            fn ->
+              Steer.acknowledge(state.session_id, receipt)
+            end,
+            fn -> Steer.release(state.session_id, receipt) end
+          )
+
+          {:noreply, state}
+        else
+          injected = mark_inbox_receipt(Steer.to_messages(texts), receipt)
+          messages = state.messages ++ injected
+
+          case persist_inbox_delivery(
+                 state,
+                 messages,
+                 fn -> Steer.acknowledge(state.session_id, receipt) end,
+                 fn -> Steer.release(state.session_id, receipt) end
+               ) do
+            :ok -> {:noreply, %{state | messages: messages}}
+            {:error, _reason} -> {:noreply, state}
+          end
+        end
     end
   end
 
@@ -1852,26 +1875,90 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # iteration resets to 0 exactly like TurnPipeline does for a real turn.
   @impl true
   def handle_cast(:poke, %{status: :idle} = state) do
-    case TaskNotifications.drain(state.session_id) do
-      [] ->
+    case TaskNotifications.checkout(state.session_id) do
+      :empty ->
         {:noreply, state}
 
-      notifs ->
-        TaskNotifications.announce(state.session_id, notifs)
+      {receipt, notifs} ->
+        if inbox_receipt_delivered?(state.messages, receipt) do
+          acknowledge_replayed(
+            receipt,
+            fn ->
+              TaskNotifications.acknowledge(state.session_id, receipt)
+            end,
+            fn -> TaskNotifications.release(state.session_id, receipt) end
+          )
 
-        state = %{
-          state
-          | messages: state.messages ++ TaskNotifications.to_messages(notifs),
-            iteration: 0,
-            status: :processing,
-            current_input: "[background task notification]"
-        }
+          {:noreply, state}
+        else
+          TaskNotifications.announce(state.session_id, notifs)
+          injected = mark_inbox_receipt(TaskNotifications.to_messages(notifs), receipt)
 
-        # Same turn, same reasoning as handle_call({:process, _}) — see
-        # `during_turn/1`: this callback blocks in LLMClient exactly like a real
-        # turn does, so exit trapping must be off for its duration.
-        {:reply, _reply, state} = during_turn(fn -> run_and_reply(state) end)
-        {:noreply, state}
+          next_state = %{
+            state
+            | messages: state.messages ++ injected,
+              iteration: 0,
+              status: :processing,
+              current_input: "[background task notification]"
+          }
+
+          case persist_inbox_delivery(
+                 next_state,
+                 next_state.messages,
+                 fn -> TaskNotifications.acknowledge(state.session_id, receipt) end,
+                 fn -> TaskNotifications.release(state.session_id, receipt) end
+               ) do
+            :ok ->
+              # Same turn, same reasoning as handle_call({:process, _}) — see
+              # `during_turn/1`: this callback blocks in LLMClient exactly like a real
+              # turn does, so exit trapping must be off for its duration.
+              {:reply, _reply, final_state} = during_turn(fn -> run_and_reply(next_state) end)
+              {:noreply, final_state}
+
+            {:error, _reason} ->
+              {:noreply, state}
+          end
+        end
+    end
+  end
+
+  defp mark_inbox_receipt(messages, receipt) do
+    Enum.map(messages, &Map.put(&1, :durable_inbox_ids, receipt))
+  end
+
+  defp inbox_receipt_delivered?(messages, receipt) do
+    delivered =
+      messages
+      |> Enum.flat_map(&(&1[:durable_inbox_ids] || &1["durable_inbox_ids"] || []))
+      |> MapSet.new()
+
+    Enum.all?(receipt, &MapSet.member?(delivered, &1))
+  end
+
+  defp acknowledge_replayed(_receipt, acknowledge, release) do
+    case acknowledge.() do
+      :ok -> :ok
+      {:error, _reason} -> release.()
+    end
+  end
+
+  defp persist_inbox_delivery(state, messages, acknowledge, release) do
+    case SessionPersistence.save(state.session_id, messages, state.working_dir) do
+      :ok ->
+        case acknowledge.() do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            release.()
+            Logger.error("[loop] durable inbox acknowledgement failed: #{inspect(reason)}")
+            :ok
+        end
+
+      {:error, reason} = error ->
+        release.()
+        Logger.error("[loop] durable inbox delivery failed: #{inspect(reason)}")
+        error
     end
   end
 

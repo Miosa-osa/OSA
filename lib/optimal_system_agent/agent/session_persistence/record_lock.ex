@@ -66,6 +66,26 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence.RecordLock do
     end
   end
 
+  @doc "Run only while holding the lock, returning contention instead of writing unlocked."
+  @spec with_lock_strict(String.t(), (-> term())) :: {:ok, term()} | {:error, :contended}
+  def with_lock_strict(path, fun) when is_function(fun, 0) do
+    lock = lock_path(path)
+    _ = File.mkdir_p(Path.dirname(lock))
+
+    case acquire(lock, @max_tries) do
+      {:ok, fd} ->
+        try do
+          {:ok, fun.()}
+        after
+          :file.close(fd)
+          File.rm(lock)
+        end
+
+      :error ->
+        {:error, :contended}
+    end
+  end
+
   @doc "Lock sidecar path for a record path."
   @spec lock_path(String.t()) :: String.t()
   def lock_path(path), do: path <> ".lock"

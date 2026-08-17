@@ -243,6 +243,10 @@ defmodule OptimalSystemAgent.Application do
     # the same reason as :osa_steer_queue. See Agent.TaskNotifications.
     :ets.new(:osa_task_notifications, [:named_table, :public, :ordered_set])
 
+    # One short-lived latch per session coalesces same-tick background
+    # completions before waking an idle loop.
+    :ets.new(:osa_task_notification_pokes, [:named_table, :public, :set])
+
     # WS6 — per-task "notified" check-and-set flags ({task_id, ts}) so a
     # bash_output poll and the completion broadcast race to exactly ONE
     # <task-notification> per task.

@@ -10,8 +10,8 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
 
   This GenServer subscribes to a parent session's PubSub topic and, on each
   completion/failure, queues a `<task-notification>` via
-  `Agent.TaskNotifications.queue/2` and pokes the parent Loop
-  (`Loop.poke/1`): a BUSY loop folds the notification in at its next ReAct
+  `Agent.TaskNotifications.queue/2` and schedules one coalesced parent wake:
+  a BUSY loop folds the notification in at its next ReAct
   step boundary (beside the steer drain), an IDLE loop reacts with a
   synthetic turn — mirroring Claude Code's background completion resume.
 
@@ -23,7 +23,6 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.TaskNotifications
 
   # --- Client API ---
@@ -127,7 +126,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
       # Busy loop → ReactLoop drains this beside Steer at its next step
       # boundary; idle loop → the poke runs a synthetic turn so the agent
       # reacts unprompted (the old inject-only path was never acted on).
-      Loop.poke(state.parent_id)
+      TaskNotifications.poke_after_batch(state.parent_id)
     end
 
     {:noreply, state}
@@ -184,7 +183,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
         usage: usage
       })
 
-      Loop.poke(parent_id)
+      TaskNotifications.poke_after_batch(parent_id)
     end
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")
@@ -235,7 +234,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
       summary: summary
     })
 
-    Loop.poke(parent_id)
+    TaskNotifications.poke_after_batch(parent_id)
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject_stall failed: #{Exception.message(e)}")
   end

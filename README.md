@@ -258,10 +258,11 @@ type. The ones worth knowing:
 
 ```
 session    /new      /clear    /resume   /continue /session  /fork     /rename
-           /tag      /sessions /recap    /rewind   /undo     /retry    /export
+           /tag      /sessions /recap    /rewind   /undo     /retry    /export /save
 model      /model    /models   /reasoning /effort  /fast     /coordinator
 context    /context  /usage    /compact  /cost     /files    /memory
-work       /plan     /goal     /steer    /bg       /fg       /agents   /tasks
+work       /plan     /goal     /loop     /steer    /bg       /fg       /agents
+           /tasks
 project    /map      /init     /trust    /add-dir  /skills   /tools
 config     /setup    /config   /permissions /hooks /mcp      /sandbox  /channels
            /theme    /keybindings /verbose /a11y   /persona  /customize
@@ -288,6 +289,8 @@ Use the on-demand views for diagnosis instead of packing every metric into perma
 | `/context` | Current context occupancy and token breakdown |
 | `/cost` | Session token accounting and estimated spend |
 | `/usage` | Provider account quota and reported usage |
+| `/save` | A readable Markdown snapshot under `~/.osa/exports` |
+| `/loop 5m <prompt>` | Repeat a prompt through the durable session queue until `/loop stop` |
 | `/status` | Active provider, model, session, tools, and permission state |
 | `/reasoning` or `/effort` | Changing the speed-versus-depth tradeoff |
 
