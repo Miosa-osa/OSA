@@ -1,10 +1,10 @@
 import Config
 
-# ── Guarantee SHELL for the erlexec (:exec) port program ─────────────────
+# Guarantee SHELL for the erlexec (:exec) port program.
 # erlexec's native port hard-exits (status 4) at startup when SHELL is unset
 # or empty (erlexec c_src/exec.cpp: "SHELL environment variable not set!").
-# Non-login environments — CI, systemd units, minimal containers, test
-# runners — often don't export SHELL, which crashes the whole OpenComputers
+# Non-login environments such as CI, systemd units, minimal containers, and test
+# runners often don't export SHELL, which crashes the whole OpenComputers
 # subsystem on boot. runtime.exs runs before the app tree (and :exec) start,
 # so default it here to a real shell.
 if System.get_env("SHELL") in [nil, ""] do
