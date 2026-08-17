@@ -22,6 +22,20 @@ const TITLE_MIN_COLS: usize = 16;
 /// Upper bound so a long title cannot dominate row 0 on a wide terminal.
 const TITLE_MAX_COLS: usize = 32;
 
+fn spans_cols(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| cols(span.content.as_ref())).sum()
+}
+
+/// Append an optional status segment only when it fits in full. Ratatui clips
+/// overflowing lines cell-by-cell, which previously left fragments such as
+/// `effort:med` or `12 MC` after a resize. A chip is useful as a whole or it is
+/// omitted.
+fn push_segment_if_fits<'a>(spans: &mut Vec<Span<'a>>, segment: Vec<Span<'a>>, width: u16) {
+    if spans_cols(spans) + spans_cols(&segment) <= width as usize {
+        spans.extend(segment);
+    }
+}
+
 /// Tool-permission mode. OSA's Shift+Tab cycle is
 /// `ask → auto-edit → plan → overdrive (full auto)`. `Auto` is retained as a
 /// separate tier driven by the `/auto` command (the safety guardian) but is not
@@ -1200,7 +1214,11 @@ impl Component for StatusBar {
                 ));
             }
         } else {
-            let (bar_filled, bar_empty) = braille_bar(disp_ratio, 8);
+            // Keep the context label intact on narrow panes. The meter loses
+            // cells before its meaning is clipped, preserving `N% ctx` as the
+            // stable core while retaining the full 8-cell bar when space allows.
+            let bar_cells = if area.width < 50 { 4 } else { 8 };
+            let (bar_filled, bar_empty) = braille_bar(disp_ratio, bar_cells);
             if !bar_filled.is_empty() {
                 spans.push(Span::styled(bar_filled, Style::default().fg(ctx_color)));
             }
@@ -1317,11 +1335,14 @@ impl Component for StatusBar {
             }
         }
 
-        // Reasoning-effort chip (`effort:medium`). Faint for fast/medium; the
-        // heavier high/xhigh/ultra tiers get the accent color so a costly setting
-        // is visible at a glance. Omitted entirely when the backend didn't report.
-        if let Some(ref effort) = self.effort {
-            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+        // Non-default reasoning-effort chip. Medium is the quiet default; fast
+        // and the heavier tiers remain visible so commands such as `/fast` have
+        // immediate, persistent confirmation.
+        if let Some(effort) = self
+            .effort
+            .as_ref()
+            .filter(|effort| effort.as_str() != "medium")
+        {
             let heavy = matches!(effort.as_str(), "high" | "xhigh" | "ultra");
             let style = if heavy {
                 Style::default()
@@ -1330,14 +1351,27 @@ impl Component for StatusBar {
             } else {
                 theme.faint()
             };
-            spans.push(Span::styled(format!("effort:{}", effort), style));
+            push_segment_if_fits(
+                &mut spans,
+                vec![
+                    Span::styled(" \u{2502} ", theme.status_sep()),
+                    Span::styled(format!("effort:{}", effort), style),
+                ],
+                row0.width,
+            );
         }
 
         // MCP chip (`3 MCP`). U-T26. Omitted when no servers.
         if let Some(mcp) = mcp_label(self.mcp_count) {
-            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
             let style = Style::default().fg(theme.colors.primary);
-            spans.push(Span::styled(mcp, style));
+            push_segment_if_fits(
+                &mut spans,
+                vec![
+                    Span::styled(" \u{2502} ", theme.status_sep()),
+                    Span::styled(mcp, style),
+                ],
+                row0.width,
+            );
         }
 
         // Hook chip (`hooks 54 ok, 19 failed`). Omitted until a hook has run.
@@ -1413,11 +1447,17 @@ impl Component for StatusBar {
 
         // Persistent OSA version chip (single build-time source — never stale).
         // Right-most element so it's the first to be clipped on narrow panes.
-        spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-        spans.push(Span::styled(
-            format!("v{}", crate::config::osa_version_display()),
-            theme.faint(),
-        ));
+        push_segment_if_fits(
+            &mut spans,
+            vec![
+                Span::styled(" \u{2502} ", theme.status_sep()),
+                Span::styled(
+                    format!("v{}", crate::config::osa_version_display()),
+                    theme.faint(),
+                ),
+            ],
+            row0.width,
+        );
 
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(theme.status_bar()),
@@ -1921,6 +1961,57 @@ mod status_bar_tests {
         assert!(text.contains("Pursuing: Complete the MIOSA Forge product"), "goal description was clipped: {text:?}");
         assert!(text.contains("/goal pause"), "goal control was clipped: {text:?}");
         assert!(text.contains("overdrive (full auto) on"), "permission row disappeared: {text:?}");
+    }
+
+    #[test]
+    fn default_effort_is_quiet_but_non_default_effort_is_visible() {
+        let mut sb = StatusBar::new();
+        sb.set_provider_info("anthropic", "claude-opus-5");
+        sb.set_context(0.17, 170_000, 1_000_000);
+
+        sb.set_effort(Some("medium".into()));
+        let default = render_sb_at(&sb, 100, 2);
+        assert!(
+            !default.contains("effort:medium"),
+            "the default effort is permanent footer noise: {default:?}"
+        );
+
+        sb.set_effort(Some("fast".into()));
+        let fast = render_sb_at(&sb, 100, 2);
+        assert!(
+            fast.contains("effort:fast"),
+            "a /fast change must be immediately visible: {fast:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_status_rows_never_clip_optional_chips() {
+        let mut sb = StatusBar::new();
+        sb.set_provider_info("anthropic", "claude-opus-5");
+        sb.set_cwd_path("/work/miosa");
+        sb.set_context(0.17, 170_000, 1_000_000);
+        sb.set_effort(Some("fast".into()));
+        sb.set_mcp(12);
+
+        for width in [40u16, 60, 80, 100] {
+            let text = render_sb_at(&sb, width, 2);
+            assert!(
+                text.contains("ctx"),
+                "context disappeared at {width}: {text:?}"
+            );
+            if text.contains("effort:") {
+                assert!(
+                    text.contains("effort:fast"),
+                    "effort chip clipped at {width}: {text:?}"
+                );
+            }
+            if text.contains("12 M") {
+                assert!(
+                    text.contains("12 MCP"),
+                    "MCP chip clipped at {width}: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]

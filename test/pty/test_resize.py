@@ -122,11 +122,12 @@ def assert_single_live_region_with_transcript(session: PtySession, context: str)
 
 def test_fast_updates_the_persistent_effort_chip(backend: StubBackend) -> None:
     """The backend can change effort after startup; the status bar must adopt
-    the command response instead of remaining frozen at the health snapshot."""
+    the command response instead of remaining frozen at the health snapshot.
+    The default medium tier stays quiet, while a non-default tier is explicit."""
     with PtySession(backend.base_url, cols=100, rows=30) as s:
         s.boot()
-        if "effort:medium" not in "\n".join(s.lines()):
-            raise AssertionError(f"startup effort was not medium:\n{s.dump()}")
+        if "effort:medium" in "\n".join(s.lines()):
+            raise AssertionError(f"default effort should stay quiet:\n{s.dump()}")
 
         s.write(b"/fast")
         s.pump(0.2)

@@ -1747,11 +1747,9 @@ impl Component for Activity {
 
         // (The turn timer is already the leading part, bound to the interrupt hint.)
 
-        // Item 4 — input + cache breakdown, so the count reflects the true
-        // context-window number, not output-only.
-        if self.input_tokens > 0 {
-            parts.push(format!("\u{2191} {} in", format_count(self.input_tokens as usize)));
-        }
+        // Input tokens describe the full prompt sent on the latest request.
+        // The footer context meter and `/context` own that information. Showing
+        // it here as `↑ N in` duplicated the meter and looked cumulative.
         let cached = self.cache_read_tokens + self.cache_write_tokens;
         if cached > 0 {
             parts.push(format!("\u{26A1} {} cached", format_count(cached as usize)));
@@ -2190,6 +2188,19 @@ mod activity_tests {
     }
 
     #[test]
+    fn activity_row_does_not_duplicate_prompt_context_tokens() {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = Verbosity::Verbose;
+        act.set_tokens(534_500, 3_000);
+        let text = render_activity_text(&act);
+        assert!(
+            !text.contains("534.5k in") && !text.contains("534,500 in"),
+            "request input belongs in the context view, not permanent activity chrome: {text:?}"
+        );
+    }
+
+    #[test]
     fn spinner_verb_is_stable_for_a_turn() {
         let mut act = Activity::new();
         act.start();
@@ -2322,9 +2333,9 @@ mod activity_tests {
     }
 
     #[test]
-    fn token_sum_includes_input_and_cache() {
-        // Item 4 — the true total sums input + output + reasoning + cache r/w,
-        // not output-only, and the input/cache figures surface on the row.
+    fn token_sum_includes_input_and_cache_without_duplicating_context() {
+        // The internal total still includes input + output + reasoning + cache
+        // r/w. Only the duplicate input display leaves the activity row.
         let mut act = Activity::new();
         act.start();
         act.set_tokens_detailed(1000, 200, 50, 4000, 100);
@@ -2336,7 +2347,7 @@ mod activity_tests {
             "true total must exceed output-only"
         );
         let text = render_activity_text(&act);
-        assert!(text.contains("in"), "input tokens must surface, got: {text:?}");
+        assert!(!text.contains("1.0k in"), "input context leaked onto the row: {text:?}");
         assert!(text.contains("cached"), "cache tokens must surface");
     }
 
@@ -2842,7 +2853,7 @@ mod activity_tests {
         assert!(wide.contains("queued"), "{wide}");
 
         // Narrower: the queue counter is gone, the stall notice is not.
-        let mid = render_activity_text_sized(&wedged, 92, 1);
+        let mid = render_activity_text_sized(&wedged, 80, 1);
         assert!(
             mid.contains("no response for"),
             "the stall notice was dropped before a queue counter: {mid}"
