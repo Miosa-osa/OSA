@@ -22,6 +22,11 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
   setup do
     original = if File.exists?(@env_path), do: File.read!(@env_path), else: nil
 
+    # Start each test from a clean slate so write_config/* assertions don't
+    # accumulate onto the developer's real ~/.osa/.env (leaks provider keys and
+    # OSA_MODEL); on_exit restores the original below.
+    File.rm(@env_path)
+
     on_exit(fn ->
       case original do
         nil -> File.rm(@env_path)
