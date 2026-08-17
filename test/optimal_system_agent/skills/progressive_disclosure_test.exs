@@ -68,6 +68,36 @@ defmodule OptimalSystemAgent.Skills.ProgressiveDisclosureTest do
     refute catalog =~ "Active Skill"
   end
 
+  test "message-aware catalog ranks relevant skills ahead of a large library" do
+    debugging = :persistent_term.get(@skills_key)["debugging"]
+
+    irrelevant =
+      for i <- 1..80, into: %{} do
+        name = "aaa-unrelated-#{String.pad_leading(Integer.to_string(i), 3, "0")}"
+
+        {name,
+         %{
+           debugging
+           | name: name,
+             description: "Prepare an unrelated weekly calendar summary"
+         }}
+      end
+
+    :persistent_term.put(@skills_key, Map.put(irrelevant, "debugging", debugging))
+
+    catalog = Registry.active_skills_context("diagnose a hard software bug")
+
+    assert catalog =~ "**debugging**"
+    assert catalog =~ "If no listed skill clearly fits, call `list_skills`"
+    assert length(String.split(catalog, "\n")) < 40
+  end
+
+  test "catalog tells every agent how to search when the shortlist has no match" do
+    catalog = Registry.active_skills_context("compose a baroque symphony")
+
+    assert catalog =~ "If no listed skill clearly fits, call `list_skills`"
+  end
+
   test "skill_view loads the selected body into the owning agent context" do
     assert {:ok, loaded} = SkillView.execute(%{"name" => "debugging"})
     assert loaded =~ "# Active Skill: debugging"
