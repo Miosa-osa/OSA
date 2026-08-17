@@ -2772,7 +2772,14 @@ def test_goal_is_anchored_on_the_backend_not_graded_in_the_client(
             s.pump(SETTLE)
             s.write(b"\r")
 
-            body = _wait_post(s, mark, "/api/v1/commands/execute", '"goal"')
+            # Reconnect now performs a silent `/goal status` sync first. Wait
+            # for the criteria-bearing anchor, not merely the first goal POST.
+            body = _wait_post(
+                s,
+                mark,
+                "/api/v1/commands/execute",
+                "mix test passes",
+            )
             if body is None:
                 raise AssertionError(
                     "/goal never reached the backend. This is the shipped "
