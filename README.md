@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.064-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.108-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-82-blue.svg)](#built-in-tools)
@@ -48,7 +48,7 @@ setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.064` (`$env:OSA_VERSION = "v1.0.064"` on
+specific release with `OSA_VERSION=v1.0.108` (`$env:OSA_VERSION = "v1.0.108"` on
 Windows). On any other platform (macOS Intel, Linux arm64) the installer stops
 and points you at the from-source script below.
 
@@ -272,6 +272,29 @@ system     /doctor   /status   /metrics  /version  /update   /release-notes
 Some commands are served by the engine and some by the TUI; the palette merges
 both, so everything above is reachable from the same prompt.
 
+### Reading model performance
+
+The permanent footer stays deliberately small so it remains stable while the terminal resizes.
+It shows the active model, current context occupancy, and a reasoning-effort chip only when the effort differs from the default `medium` tier.
+Running `/fast`, for example, makes `effort:fast` appear immediately.
+
+The activity row reports what matters during a turn: elapsed time, current output flow, thinking state, retries, stalls, and the interrupt control.
+It does not repeat the latest request's input-token count because that number is the full prompt sent to the model, not cumulative session usage, and duplicating it beside the context meter is misleading.
+
+Use the on-demand views for diagnosis instead of packing every metric into permanent chrome:
+
+| Command | Use it for |
+|---|---|
+| `/context` | Current context occupancy and token breakdown |
+| `/cost` | Session token accounting and estimated spend |
+| `/usage` | Provider account quota and reported usage |
+| `/status` | Active provider, model, session, tools, and permission state |
+| `/reasoning` or `/effort` | Changing the speed-versus-depth tradeoff |
+
+For quick conversational work, use `fast`.
+Keep `medium` for normal coding and tool use, move to `high` or `xhigh` for difficult multi-step reasoning, and reserve `ultra` for work that benefits from maximum reasoning or dynamic workflow fan-out.
+Model latency, cost, and answer quality are separate signals, so compare them on the same task rather than treating token count alone as performance.
+
 ### `/map` — see the whole repo, not just the checkout
 
 `/map` renders the structure of the workspace you are in: its components, the
@@ -391,7 +414,10 @@ you approve, with the plan itself written to a durable file so it survives a
 context reset or restart. For long autonomous runs, an independent read-only
 goal verifier periodically checks whether your actual *goal* was met (not
 just whether a file compiled) and a cross-turn goal tracker auto-pauses on a
-stall instead of spinning forever. **Esc Esc** also drives the unified
+stall instead of spinning forever. While a durable goal is active, the TUI gives
+it a dedicated footer row with its elapsed time and `/goal pause`, `/goal resume`,
+or `/goal stop` control, so the goal remains readable without widening the
+terminal. **Esc Esc** also drives the unified
 `/rewind`: jump back to any previous turn (code + conversation, or either
 alone), see a diff of what's about to change, and undo the rewind itself if
 you change your mind.
@@ -1124,25 +1150,17 @@ table was owned by whichever process created it, and being reached from transien
 processes meant the first one to exit destroyed every session's ledger. Fixed in
 this release. **Both benchmark arms predate the fix.**
 
-### Known break as of 1.0.102 — TUI resize
+### TUI resize status
 
-Resizing the terminal destroys the on-screen transcript. Outside a multiplexer
-OSA wipes the screen on resize and rebuilds; measured in real libvte, prose
-partially survives while **bordered tables and code fences are absent from the
-transcript entirely**. The wipe is deliberate — it prevents a worse defect where
-erasing on VTE scrolls content into history instead, depositing a stacked copy
-per drag step.
+The resize break documented in 1.0.102 is fixed.
+OSA now owns the visible transcript, reflows retained content at the new width, keeps live surfaces at stable measured heights, and redraws from state instead of relying on terminal scrollback behavior.
+Tables, code fences, the composer, thinking output, activity, goals, and status rows therefore resize as one layout rather than leaving stacked or duplicated frames behind.
 
-The fix is to own the scrollback and re-render the retained transcript at the new
-width. That is 1.0.103. Hyperlinks are **not** a cost of that change: OSA's
-renderer already lays lines out at true visible width and attaches escapes to the
-following cell, so an owned scrollback keeps OSC-8 intact.
+The status footer uses progressive disclosure at narrow widths.
+The context label survives first, its decorative meter shortens when necessary, and optional effort, MCP, and version chips render only when each complete chip fits.
+Active goals use their own row so their description and controls do not compete with model and context information.
 
-`test/pty/vte_content_reflow.py` is the instrument; it drives the release binary
-inside the library GNOME Terminal and Tilix use. It measures the wipe, not the
-terminal's reflow of already-committed rows, and it cannot see OSC-8 — stated
-because both existing test paths are structurally blind to reflow, which is how
-31 passing PTY tests coexisted with a broken screen.
+`test/pty/test_resize.py` exercises the release binary through a real pseudo-terminal, while `test/pty/vte_content_reflow.py` covers the libvte behavior used by GNOME Terminal and Tilix.
 
 ### Prefix cost as of 1.0.101
 
