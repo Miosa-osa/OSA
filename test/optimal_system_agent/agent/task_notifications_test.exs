@@ -149,6 +149,23 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
     assert TN.mark_notified(id)
   end
 
+  test "racing producers durably enqueue one notification" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    session = "session-" <> id
+    notification = %{task_id: id, status: :completed, summary: "done"}
+
+    results =
+      1..8
+      |> Task.async_stream(fn _ -> TN.queue_once(session, notification) end,
+        max_concurrency: 8,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == :ok)) == 1
+    assert TN.count(session) == 1
+  end
+
   test "to_messages renders task-notification XML system messages" do
     [msg] =
       TN.to_messages([

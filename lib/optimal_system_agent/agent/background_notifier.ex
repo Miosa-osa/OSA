@@ -115,22 +115,22 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
 
     # WS6 exactly-once: if a bash_output poll already showed the model the
     # terminal status, mark_notified/1 returns false and we skip the queue.
-    if task_id == "" or TaskNotifications.mark_notified(task_id) do
-      case TaskNotifications.queue(state.parent_id, %{
-             task_id: task_id,
-             status: ev[:status] || :done,
-             output_file: ev[:output_file],
-             summary: summary
-           }) do
-        :ok ->
-          # Busy loop -> ReactLoop drains this beside Steer at its next step
-          # boundary. An idle loop uses a synthetic turn so the agent reacts.
-          TaskNotifications.poke_after_batch(state.parent_id)
+    case TaskNotifications.queue_once(state.parent_id, %{
+           task_id: task_id,
+           status: ev[:status] || :done,
+           output_file: ev[:output_file],
+           summary: summary
+         }) do
+      :ok ->
+        # Busy loop -> ReactLoop drains this beside Steer at its next step
+        # boundary. An idle loop uses a synthetic turn so the agent reacts.
+        TaskNotifications.poke_after_batch(state.parent_id)
 
-        {:error, reason} ->
-          TaskNotifications.clear_notified(task_id)
-          Logger.error("[BackgroundNotifier] durable command delivery failed: #{inspect(reason)}")
-      end
+      :already_notified ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[BackgroundNotifier] durable command delivery failed: #{inspect(reason)}")
     end
 
     {:noreply, state}
@@ -178,28 +178,25 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     # and the other skips — mirroring the `background_command_completed` guard.
     task_id = to_string(agent_id)
 
-    if task_id in ["", "unknown"] or TaskNotifications.mark_notified(task_id) do
-      case TaskNotifications.queue(parent_id, %{
-             task_id: task_id,
-             status: outcome,
-             summary: summary,
-             output_file: Map.get(ev, :output_file),
-             usage: usage
-           }) do
-        :ok ->
-          OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :queued)
-          OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
-
-        {:error, reason} ->
-          TaskNotifications.clear_notified(task_id)
-          OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :failed)
-          OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
-          Logger.error("[BackgroundNotifier] durable delivery failed: #{inspect(reason)}")
-      end
-
-      if TaskNotifications.count(parent_id) > 0 do
+    case TaskNotifications.queue_once(parent_id, %{
+           task_id: task_id,
+           status: outcome,
+           summary: summary,
+           output_file: Map.get(ev, :output_file),
+           usage: usage
+         }) do
+      :ok ->
+        OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :queued)
+        OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
         TaskNotifications.poke_after_batch(parent_id)
-      end
+
+      :already_notified ->
+        :ok
+
+      {:error, reason} ->
+        OptimalSystemAgent.Agent.ExecutionControl.delivery(task_id, nil, :failed)
+        OptimalSystemAgent.Agent.ExecutionControl.broadcast(task_id, parent_id)
+        Logger.error("[BackgroundNotifier] durable delivery failed: #{inspect(reason)}")
     end
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")

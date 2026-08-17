@@ -72,19 +72,31 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
              ) do
           {provider, model}
         end
-      end) || {primary, model_for.(tier, primary)}
+      end)
 
-    {provider, model} = selected
+    case selected do
+      {provider, model} ->
+        reason =
+          "selected #{provider}/#{model} for task requirements: " <>
+            describe_requirements(requirements)
 
-    reason =
-      "selected #{provider}/#{model} for task requirements: " <>
-        describe_requirements(requirements)
+        config
+        |> Map.put(:provider, provider)
+        |> Map.put(:model, model)
+        |> Map.put(:model_reason, reason)
+        |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
 
-    config
-    |> Map.put(:provider, provider)
-    |> Map.put(:model, model)
-    |> Map.put(:model_reason, reason)
-    |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
+      nil ->
+        requirements_text = describe_requirements(requirements)
+
+        config
+        |> Map.put(
+          :routing_error,
+          "no configured model is known to satisfy: #{requirements_text}"
+        )
+        |> Map.put(:model_reason, "delegation blocked because no capable model was found")
+        |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
+    end
   end
 
   defp compatible?(requirements, provider, model, tool_call, context_window, vision_capable) do

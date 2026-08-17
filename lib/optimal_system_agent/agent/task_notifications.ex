@@ -33,6 +33,8 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @notified_table :osa_task_notified
   @poke_table :osa_task_notification_pokes
   @coalesce_ms 25
+  @claim_retries 20
+  @claim_retry_ms 5
 
   @type notification :: map()
 
@@ -44,6 +46,18 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     ArgumentError ->
       Logger.warning("[task-notif] queue table missing — notification dropped for #{session_id}")
       :ok
+  end
+
+  @doc "Claim and durably enqueue one task notification exactly once."
+  @spec queue_once(String.t(), notification()) :: :ok | :already_notified | {:error, term()}
+  def queue_once(session_id, notification) when is_binary(session_id) and is_map(notification) do
+    task_id = to_string(notification[:task_id] || notification["task_id"] || "")
+
+    if task_id in ["", "unknown"] do
+      queue(session_id, notification)
+    else
+      claim_and_queue(session_id, task_id, notification, @claim_retries)
+    end
   end
 
   @doc "Remove and return all queued notifications for `session_id`, oldest first."
@@ -204,7 +218,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   """
   @spec mark_notified(String.t()) :: boolean()
   def mark_notified(task_id) when is_binary(task_id) do
-    :ets.insert_new(@notified_table, {task_id, System.system_time(:millisecond)})
+    :ets.insert_new(@notified_table, {task_id, :notified, System.system_time(:millisecond)})
   rescue
     ArgumentError -> true
   end
@@ -216,6 +230,41 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  defp claim_and_queue(session_id, task_id, notification, retries_left) do
+    claim = {task_id, :claiming, System.system_time(:millisecond)}
+
+    if :ets.insert_new(@notified_table, claim) do
+      case queue(session_id, notification) do
+        :ok ->
+          :ets.insert(@notified_table, {task_id, :notified, System.system_time(:millisecond)})
+          :ok
+
+        {:error, reason} = error ->
+          :ets.delete_object(@notified_table, claim)
+          Logger.error("[task-notif] durable claim failed for #{task_id}: #{inspect(reason)}")
+          error
+      end
+    else
+      await_claim(session_id, task_id, notification, retries_left)
+    end
+  end
+
+  defp await_claim(_session_id, _task_id, _notification, 0), do: {:error, :claim_timeout}
+
+  defp await_claim(session_id, task_id, notification, retries_left) do
+    case :ets.lookup(@notified_table, task_id) do
+      [{^task_id, :claiming, _}] ->
+        Process.sleep(@claim_retry_ms)
+        claim_and_queue(session_id, task_id, notification, retries_left - 1)
+
+      [] ->
+        claim_and_queue(session_id, task_id, notification, retries_left - 1)
+
+      _ ->
+        :already_notified
+    end
   end
 
   @doc """

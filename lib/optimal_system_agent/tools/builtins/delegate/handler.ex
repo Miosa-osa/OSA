@@ -516,19 +516,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
       # `mark_notified/1` is the same exactly-once token the subagent and shell
       # paths arbitrate on, keyed here by the stable batch id.
-      if TaskNotifications.mark_notified(batch_id) do
-        case TaskNotifications.queue(parent_id, %{
-               task_id: batch_id,
-               status: :completed,
-               summary: summary
-             }) do
-          :ok ->
-            Loop.poke(parent_id)
+      case TaskNotifications.queue_once(parent_id, %{
+             task_id: batch_id,
+             status: :completed,
+             summary: summary
+           }) do
+        :ok ->
+          Loop.poke(parent_id)
 
-          {:error, reason} ->
-            TaskNotifications.clear_notified(batch_id)
-            Logger.error("[delegate] durable fan-out delivery failed: #{inspect(reason)}")
-        end
+        :already_notified ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("[delegate] durable fan-out delivery failed: #{inspect(reason)}")
       end
     end)
 

@@ -72,4 +72,20 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
 
     assert routed.provider == :second
   end
+
+  test "blocks delegation when no configured model satisfies the requirements" do
+    routed =
+      DelegationRouter.resolve("Inspect the attached screenshot", %{provider: :first},
+        candidates: [:first],
+        configured?: fn _ -> true end,
+        model_for: fn _, _ -> "text-only" end,
+        tool_call: fn _, _ -> true end,
+        context_window: fn _ -> 200_000 end,
+        vision_capable: fn _, _ -> false end
+      )
+
+    assert routed.routing_error =~ "no configured model"
+    assert routed.model_reason =~ "blocked"
+    refute Map.has_key?(routed, :model)
+  end
 end
