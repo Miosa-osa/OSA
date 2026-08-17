@@ -81,7 +81,7 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
         assert cfg == %{type: "adaptive"}
 
         body = Anthropic.maybe_add_thinking(%{model: @opus}, cfg)
-        assert body.thinking == %{type: "adaptive"}
+        assert body.thinking == %{type: "adaptive", display: "summarized"}
       end
     end
 
@@ -91,7 +91,7 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
       assert cfg == %{type: "adaptive"}
 
       body = Anthropic.maybe_add_thinking(%{model: @opus}, cfg)
-      assert body.thinking == %{type: "adaptive"}
+      assert body.thinking == %{type: "adaptive", display: "summarized"}
     end
 
     test "opus at fast → no thinking block" do
@@ -108,7 +108,7 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
         assert cfg == %{type: "adaptive"}
 
         body = Anthropic.maybe_add_thinking(%{model: @sonnet}, cfg)
-        assert body.thinking == %{type: "adaptive"}
+        assert body.thinking == %{type: "adaptive", display: "summarized"}
       end
     end
 

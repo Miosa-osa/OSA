@@ -17,7 +17,15 @@ defmodule OptimalSystemAgent.Providers.AnthropicThinkingTest do
       thinking = %{type: "adaptive"}
 
       result = Anthropic.maybe_add_thinking(body, thinking)
-      assert result.thinking == %{type: "adaptive"}
+      assert result.thinking == %{type: "adaptive", display: "summarized"}
+    end
+
+    test "requests a visible thinking summary for Claude 5" do
+      body = %{model: "claude-opus-5", max_tokens: 16_000}
+
+      result = Anthropic.maybe_add_thinking(body, %{type: "adaptive"})
+
+      assert result.thinking == %{type: "adaptive", display: "summarized"}
     end
 
     test "no-ops when thinking is nil" do

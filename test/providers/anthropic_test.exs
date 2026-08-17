@@ -309,7 +309,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
     test "adds adaptive thinking" do
       body = %{model: "test"}
       result = Anthropic.maybe_add_thinking(body, %{type: "adaptive"})
-      assert result.thinking == %{type: "adaptive"}
+      assert result.thinking == %{type: "adaptive", display: "summarized"}
     end
 
     test "adds enabled thinking with minimum 1024 budget" do

@@ -1279,7 +1279,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def maybe_add_thinking(body, nil), do: body
 
   def maybe_add_thinking(body, %{type: "adaptive"}) do
-    Map.put(body, :thinking, %{type: "adaptive"})
+    # Claude 5 still reasons when `display` is omitted, but Anthropic defaults
+    # current adaptive models to `omitted`: no readable `thinking_delta` events
+    # are streamed, so the TUI appears to skip thinking only for Claude. Ask
+    # for the provider's safe summarized view. This never exposes raw chain of
+    # thought; Anthropic generates the display summary separately.
+    Map.put(body, :thinking, %{type: "adaptive", display: "summarized"})
   end
 
   def maybe_add_thinking(body, %{type: "enabled", budget_tokens: budget}) do
