@@ -219,3 +219,7 @@ config :optimal_system_agent,
 # run would leak it. Tests that exercise StayAwake opt back in with an explicit
 # harmless command.
 config :optimal_system_agent, :stay_awake_command, :disabled
+
+# The MCP memory watchdog samples child RSS by shelling out to `ps`. Tests must
+# not fire it on a timer; the cases that exercise it call the functions directly.
+config :optimal_system_agent, :mcp_memory_check_ms, nil
