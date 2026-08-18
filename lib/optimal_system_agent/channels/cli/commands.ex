@@ -3276,7 +3276,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   # ── Sandbox backend switch ───────────────────────────────────────────
 
-  @sandbox_backends ~w(host docker e2b miosa vercel)
+  @sandbox_backends ~w(host docker e2b miosa miosa_cli vercel)
 
   def cmd_sandbox(args, session_id) do
     IO.puts("")
@@ -3285,8 +3285,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       "" ->
         show_sandbox_status()
 
+      "setup " <> target ->
+        setup_sandbox(normalize_backend_name(target))
+
+      "setup" ->
+        setup_sandbox(to_string(SandboxRouter.backend_name()))
+
       name ->
-        switch_sandbox(String.downcase(name))
+        switch_sandbox(normalize_backend_name(name))
     end
 
     IO.puts("")
@@ -3316,6 +3322,94 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
     IO.puts("  #{@dim}Active: #{active} · mode: #{SandboxRouter.mode()}#{@reset}")
     IO.puts("  #{@dim}Usage: /sandbox <#{Enum.join(@sandbox_backends, "|")}>#{@reset}")
+  end
+
+  # `/sandbox setup <backend>` — say exactly why a backend is unavailable and
+  # exactly what fixes it. Selecting an unavailable backend and getting silence
+  # is the dead end this replaces; `mix osa.sandbox.setup` cannot fill the gap
+  # because the shipped release bundles ERTS and has no mix.
+  defp setup_sandbox(name) do
+    if name in @sandbox_backends do
+      IO.puts("  #{@bold}Set up: #{name}#{@reset}")
+      IO.puts("")
+
+      checks = sandbox_checks(name)
+      Enum.each(checks, &print_sandbox_check/1)
+
+      IO.puts("")
+
+      case Enum.find(checks, fn {ok, _label, fix} -> not ok and fix != nil end) do
+        nil ->
+          IO.puts("  #{@green}Ready.#{@reset} #{@dim}Select it with /sandbox #{name}#{@reset}")
+
+        {_ok, _label, fix} ->
+          IO.puts("  #{@bold}Next:#{@reset} #{@cyan}#{fix}#{@reset}")
+      end
+    else
+      IO.puts("  #{@yellow}error: unknown backend '#{name}'#{@reset}")
+      IO.puts("  #{@dim}Valid: #{Enum.join(@sandbox_backends, ", ")}#{@reset}")
+    end
+  end
+
+  defp print_sandbox_check({ok, label, _fix}) do
+    mark = if ok, do: "#{@green}\u2713#{@reset}", else: "#{@yellow}\u2717#{@reset}"
+    IO.puts("  #{mark} #{label}")
+  end
+
+  # {passed?, human label, command that fixes it (nil when nothing to do)}
+  defp sandbox_checks("host") do
+    [{true, "Runs directly on this machine - nothing to set up", nil}]
+  end
+
+  defp sandbox_checks("docker") do
+    docker = System.find_executable("docker")
+
+    running? =
+      docker != nil and
+        match?({_, 0}, System.cmd(docker, ["info"], stderr_to_stdout: true))
+
+    [
+      {docker != nil, "docker on PATH", "install Docker Desktop"},
+      {running?, "docker daemon reachable", "start Docker Desktop"}
+    ]
+  end
+
+  defp sandbox_checks("miosa_cli") do
+    alias OptimalSystemAgent.Sandbox.MiosaCli
+
+    path = MiosaCli.cli_path()
+
+    [
+      {path != nil, "miosa CLI on PATH#{if path, do: " (#{path})", else: ""}",
+       "npm install -g @miosa/cli"},
+      {MiosaCli.credential_present?(), "authenticated (~/.miosa/config.json)", "miosa login"}
+    ]
+  end
+
+  defp sandbox_checks("miosa") do
+    key = System.get_env("MIOSA_PLATFORM_API_KEY")
+
+    [
+      {key not in [nil, ""], "MIOSA_PLATFORM_API_KEY set",
+       "export MIOSA_PLATFORM_API_KEY=... (or use the miosa_cli backend, which reads `miosa login`)"}
+    ]
+  end
+
+  defp sandbox_checks("e2b") do
+    key = System.get_env("E2B_API_KEY")
+    [{key not in [nil, ""], "E2B_API_KEY set", "export E2B_API_KEY=..."}]
+  end
+
+  defp sandbox_checks("vercel") do
+    key = System.get_env("VERCEL_TOKEN")
+    [{key not in [nil, ""], "VERCEL_TOKEN set", "export VERCEL_TOKEN=..."}]
+  end
+
+  defp sandbox_checks(_), do: []
+
+  # `miosa-cli` reads better than `miosa_cli` at a prompt; accept either.
+  defp normalize_backend_name(name) do
+    name |> String.trim() |> String.downcase() |> String.replace("-", "_")
   end
 
   defp switch_sandbox(name) do

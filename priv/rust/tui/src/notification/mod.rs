@@ -6,6 +6,7 @@
 //!   - [`progress`] U-T12 OSC 9;4 taskbar progress + keepalive.
 //!   - [`inhibit`]  U-T15 sleep inhibitor for long turns.
 //!   - [`sound`]    U-T16 focus-gated audio attention cue.
+//!   - [`system`]   native OS notification (macOS Notification Centre / libnotify).
 //!   - [`kitty`]    U-T17 kitty 3-part click-to-focus notification; U-B3 keyboard re-push gate.
 //!   - [`macos`]    U-T13 CoreGraphics Shift-probe for Shift+Enter recovery.
 //!
@@ -56,6 +57,7 @@ pub mod kitty;
 pub mod macos;
 pub mod progress;
 pub mod sound;
+pub mod system;
 
 #[allow(unused_imports)]
 pub use inhibit::SleepInhibitor;
@@ -69,6 +71,10 @@ pub enum NotifyChannel {
     TerminalBell,
     /// Rich kitty click-to-focus notification (falls back to bell off-kitty).
     Kitty,
+    /// Native OS notification (macOS Notification Centre / Linux libnotify).
+    /// The only channel that reaches a user whose terminal is not on screen -
+    /// which is the user a turn-complete notification exists for.
+    System,
     /// Notifications fully disabled.
     None,
 }
@@ -80,6 +86,7 @@ impl NotifyChannel {
         match s.trim().to_ascii_lowercase().as_str() {
             "none" | "off" | "disabled" => NotifyChannel::None,
             "kitty" => NotifyChannel::Kitty,
+            "system" | "native" | "desktop" | "notification" => NotifyChannel::System,
             "bell" | "terminal_bell" | "terminal-bell" | "" => NotifyChannel::TerminalBell,
             _ => NotifyChannel::TerminalBell,
         }
@@ -116,7 +123,7 @@ impl NotificationConfig {
         let channel = std::env::var("OSA_NOTIFY_CHANNEL")
             .ok()
             .map(|v| NotifyChannel::parse(&v))
-            .unwrap_or_default();
+            .unwrap_or_else(default_channel);
         Self {
             channel,
             hooks: Vec::new(),
@@ -153,8 +160,30 @@ pub fn on_turn_complete(cfg: &mut NotificationConfig) {
             kitty::notify(id, TITLE, MESSAGE);
             sound::attention_cue(false);
         }
+        NotifyChannel::System => {
+            // Degrade to the bell rather than leaving someone who stepped away
+            // with no signal at all, if the notifier vanished since startup.
+            if !system::notify(TITLE, MESSAGE) {
+                sound::attention_cue(false);
+            }
+        }
     }
     run_hooks(&cfg.hooks, TITLE, MESSAGE);
+}
+
+/// The channel used when the operator has not chosen one.
+///
+/// A bell is the safe universal default, but on a machine that can post a real
+/// notification it is also a *worse* one: the whole point of the turn-complete
+/// signal is to reach someone who is not looking at the terminal, and a BEL in
+/// a window on another Space reaches nobody. Prefer the native channel where it
+/// exists and keep the bell everywhere else.
+pub fn default_channel() -> NotifyChannel {
+    if system::available() {
+        NotifyChannel::System
+    } else {
+        NotifyChannel::TerminalBell
+    }
 }
 
 /// Run each user notification hook as a detached shell command. Best-effort:
@@ -198,7 +227,39 @@ mod tests {
     fn enabled_flag() {
         assert!(NotifyChannel::TerminalBell.is_enabled());
         assert!(NotifyChannel::Kitty.is_enabled());
+        assert!(NotifyChannel::System.is_enabled());
         assert!(!NotifyChannel::None.is_enabled());
+    }
+
+    #[test]
+    fn the_native_channel_is_selectable_by_several_obvious_names() {
+        for name in ["system", "native", "desktop", "notification", "SYSTEM", " Native "] {
+            assert_eq!(
+                NotifyChannel::parse(name),
+                NotifyChannel::System,
+                "{name:?} should select the native channel"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_prefers_a_real_notification_over_a_bell_when_one_is_possible() {
+        // A BEL in a terminal on another Space reaches nobody, which is exactly
+        // the user this notification is for.
+        let expected = if system::available() {
+            NotifyChannel::System
+        } else {
+            NotifyChannel::TerminalBell
+        };
+        assert_eq!(default_channel(), expected);
+    }
+
+    #[test]
+    fn an_explicit_choice_still_beats_the_default() {
+        // Someone who asked for a bell must keep getting a bell even on a
+        // machine that could post a native notification.
+        assert_eq!(NotifyChannel::parse("bell"), NotifyChannel::TerminalBell);
+        assert_eq!(NotifyChannel::parse("none"), NotifyChannel::None);
     }
 
     #[test]

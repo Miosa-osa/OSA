@@ -440,10 +440,25 @@ mod tests {
         false
     }
 
+    /// Absolute path to a system binary.
+    ///
+    /// `/bin` and `/usr/bin` are not interchangeable, and the split is not the
+    /// same on every platform: `true`/`false` live in `/usr/bin` on macOS and
+    /// `/bin` on Linux, while `test` is the other way round. Hardcoding either
+    /// layout gives a suite that passes in CI and fails on half the laptops
+    /// that run it, so resolve at call time and say so loudly when neither hit.
+    fn sys_bin(name: &str) -> String {
+        ["/bin", "/usr/bin"]
+            .iter()
+            .map(|dir| format!("{dir}/{name}"))
+            .find(|path| std::path::Path::new(path).exists())
+            .unwrap_or_else(|| panic!("no system `{name}` in /bin or /usr/bin"))
+    }
+
     #[test]
     fn a_child_that_prints_is_visible_on_the_pane() {
         let mut pane = PtyPane::spawn(
-            "/bin/echo",
+            &sys_bin("echo"),
             &["hello-from-the-pty".to_string()],
             &[],
             10,
@@ -455,14 +470,14 @@ mod tests {
 
     #[test]
     fn a_child_that_exits_zero_reports_success_not_merely_not_running() {
-        let mut pane = PtyPane::spawn("/bin/true", &[], &[], 10, 40);
+        let mut pane = PtyPane::spawn(&sys_bin("true"), &[], &[], 10, 40);
         assert!(wait_for(&mut pane, |p| !p.status().is_running()));
         assert!(pane.status().succeeded(), "got {:?}", pane.status());
     }
 
     #[test]
     fn a_child_that_exits_nonzero_is_not_reported_as_success() {
-        let mut pane = PtyPane::spawn("/bin/false", &[], &[], 10, 40);
+        let mut pane = PtyPane::spawn(&sys_bin("false"), &[], &[], 10, 40);
         assert!(wait_for(&mut pane, |p| !p.status().is_running()));
         assert!(!pane.status().succeeded(), "got {:?}", pane.status());
         assert!(matches!(pane.status(), PtyStatus::Exited { code } if *code != 0));
@@ -481,7 +496,7 @@ mod tests {
     #[test]
     fn the_child_sees_a_tty_which_is_the_entire_point() {
         // `test -t 0` is true only on a terminal. On a pipe this exits 1.
-        let mut pane = PtyPane::spawn("/usr/bin/test", &["-t".to_string(), "0".to_string()], &[], 10, 40);
+        let mut pane = PtyPane::spawn(&sys_bin("test"), &["-t".to_string(), "0".to_string()], &[], 10, 40);
         assert!(wait_for(&mut pane, |p| !p.status().is_running()));
         assert!(
             pane.status().succeeded(),
@@ -493,7 +508,7 @@ mod tests {
     #[test]
     fn typed_bytes_reach_the_child_and_come_back_as_echo() {
         // `cat` echoes its input back through the pty's line discipline.
-        let mut pane = PtyPane::spawn("/bin/cat", &[], &[], 10, 60);
+        let mut pane = PtyPane::spawn(&sys_bin("cat"), &[], &[], 10, 60);
         std::thread::sleep(std::time::Duration::from_millis(200));
         for ch in "ping".chars() {
             pane.send_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -550,7 +565,7 @@ mod tests {
 
     #[test]
     fn resizing_moves_both_the_kernel_window_and_our_emulator() {
-        let mut pane = PtyPane::spawn("/bin/cat", &[], &[], 10, 40);
+        let mut pane = PtyPane::spawn(&sys_bin("cat"), &[], &[], 10, 40);
         pane.resize(24, 100);
         let p = pane.parser.lock().unwrap();
         assert_eq!(p.screen().size(), (24, 100));

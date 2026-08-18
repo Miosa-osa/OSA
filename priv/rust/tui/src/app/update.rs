@@ -404,6 +404,13 @@ impl App {
                         self.exit_overlay();
                         self.execute_backend_command("sandbox", &name);
                     }
+                    Some(SandboxAction::Setup(name)) => {
+                        // Close first: the diagnostic renders into chat, which
+                        // the overlay would otherwise cover.
+                        self.sandbox_picker = None;
+                        self.exit_overlay();
+                        self.execute_backend_command("sandbox", &format!("setup {name}"));
+                    }
                     Some(SandboxAction::Close) => {
                         self.sandbox_picker = None;
                         self.exit_overlay();

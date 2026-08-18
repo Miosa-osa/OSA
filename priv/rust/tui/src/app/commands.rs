@@ -13,8 +13,8 @@ use crate::event::Event;
 pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "Show the command menu"),
     ("clear", "Clear the conversation view"),
-    ("model", "Switch the active model"),
-    ("models", "Browse and pick a model"),
+    ("model", "Choose a provider, then one of its models"),
+    ("models", "Pick a model from the current provider"),
     ("provider", "Choose a provider — connect an account or paste a key"),
     ("sessions", "Browse sessions"),
     ("resume", "Resume a past session"),
@@ -261,7 +261,11 @@ impl App {
                     self.open_keybindings_viewer();
                 }
             }
+            // `/models` and `/model` used to be the same command. They now
+            // name different things: `/models` is "the models I can pick right
+            // now", `/model` (and `/provider`) is "which provider".
             "/models" => {
+                self.models_jump_pending = true;
                 self.load_models();
             }
             "/model" => {

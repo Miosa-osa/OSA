@@ -661,6 +661,44 @@ impl ModelPicker {
         None
     }
 
+    /// `/models` — skip the provider step and open the ACTIVE provider's model
+    /// list directly.
+    ///
+    /// Returns `None` (leaving the provider list on screen) when the active
+    /// provider cannot be resolved or is not configured yet. Dropping an
+    /// operator who typed `/models` onto an unrequested key-entry screen is a
+    /// worse answer than the list they can navigate.
+    pub fn jump_to_current_provider_models(&mut self) -> Option<ModelPickerAction> {
+        let current = self.current_provider.clone();
+
+        // The header carries the RUNTIME provider ("ollama"), while the catalog
+        // is keyed by id ("ollama_cloud" / "ollama_local"). Map forwards rather
+        // than comparing the two namespaces directly, and prefer a ready row
+        // when several ids share one runtime name.
+        let mut candidates: Vec<usize> = self
+            .providers
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.id == current || Self::runtime_provider(&p.id) == current
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        candidates.sort_by_key(|&i| !self.is_ready(&self.providers[i]));
+
+        let idx = *candidates.first()?;
+        if !self.is_ready(&self.providers[idx].clone()) {
+            return None;
+        }
+
+        // Deliberately NOT touching `prov_cursor`: it indexes the rendered
+        // list (which carries a synthetic "Default" row and honours the
+        // filter), while `activate_provider` takes an index into `providers`.
+        // Assigning one to the other moves the highlight to an unrelated row.
+        self.activate_provider(idx)
+    }
+
     /// Enter pressed on a provider row: drill into models (ready) or open the
     /// key screen (needs a key).
     fn activate_provider(&mut self, idx: usize) -> Option<ModelPickerAction> {
@@ -3316,5 +3354,160 @@ mod dynamic_catalog_wait_tests {
             PickerMode::Providers,
             "a failed fetch must not strand the dialog on \"Loading…\""
         );
+    }
+}
+
+#[cfg(test)]
+mod models_jump_tests {
+    //! `/models` and `/model` used to be one command. `/models` now means
+    //! "the models I can pick right now", which requires skipping the provider
+    //! step and landing on the ACTIVE provider's catalog.
+    use super::*;
+    use crate::client::types::{DetectedProvidersResponse, OllamaLocalStatus};
+
+    fn dynamic_provider(id: &str, name: &str) -> OnboardingProvider {
+        OnboardingProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            group: "bring_your_own".to_string(),
+            requires_key: serde_json::Value::Bool(false),
+            base_url: Some("http://localhost:11434".to_string()),
+            models: serde_json::Value::String("dynamic".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn keyed_provider(id: &str, name: &str) -> OnboardingProvider {
+        OnboardingProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            group: "bring_your_own".to_string(),
+            requires_key: serde_json::Value::Bool(true),
+            models: serde_json::Value::String("dynamic".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn ollama_reachable() -> DetectedProvidersResponse {
+        DetectedProvidersResponse {
+            detected: vec![],
+            ollama_local: Some(OllamaLocalStatus {
+                reachable: true,
+                url: "http://localhost:11434".to_string(),
+                model_count: 3,
+            }),
+        }
+    }
+
+    #[test]
+    fn jumping_maps_the_runtime_provider_onto_its_catalog_id() {
+        // The header says "ollama"; the catalog is keyed "ollama_local".
+        // Comparing those two namespaces directly finds nothing.
+        let mut picker = ModelPicker::new_provider_first(
+            vec![dynamic_provider("ollama_local", "Ollama Local")],
+            Some(ollama_reachable()),
+            "ollama".to_string(),
+            "qwen3:8b".to_string(),
+        );
+
+        let action = picker.jump_to_current_provider_models();
+
+        assert!(
+            matches!(action, Some(ModelPickerAction::LoadProviderModels { ref provider, .. }) if provider == "ollama_local"),
+            "expected a catalog fetch for ollama_local, got {action:?}"
+        );
+        assert_eq!(picker.mode, PickerMode::LoadingModels);
+    }
+
+    #[test]
+    fn an_unconfigured_provider_leaves_the_provider_list_up() {
+        // Never drop someone who typed `/models` onto a key screen they did
+        // not ask for - show them the list they can actually navigate.
+        let mut picker = ModelPicker::new_provider_first(
+            vec![keyed_provider("anthropic", "Anthropic")],
+            None,
+            "anthropic".to_string(),
+            "claude-opus-5".to_string(),
+        );
+
+        assert!(picker.jump_to_current_provider_models().is_none());
+        assert_eq!(picker.mode, PickerMode::Providers);
+    }
+
+    #[test]
+    fn an_unknown_provider_is_not_a_crash() {
+        let mut picker = ModelPicker::new_provider_first(
+            vec![dynamic_provider("ollama_local", "Ollama Local")],
+            Some(ollama_reachable()),
+            "some-provider-that-left-the-catalog".to_string(),
+            "whatever".to_string(),
+        );
+
+        assert!(picker.jump_to_current_provider_models().is_none());
+        assert_eq!(picker.mode, PickerMode::Providers);
+    }
+
+    #[test]
+    fn a_ready_id_wins_when_several_share_one_runtime_name() {
+        // `openai` and `custom` both map to the runtime name "openai", but
+        // only one of them can be opened: `openai` needs a key that is not
+        // present, `custom` declares its key optional. Order in the catalog
+        // must not decide this - readiness must.
+        let mut needs_key = keyed_provider("openai", "OpenAI");
+        needs_key.models = serde_json::Value::String("dynamic".to_string());
+
+        let mut optional_key = dynamic_provider("custom", "Custom endpoint");
+        optional_key.requires_key = serde_json::Value::String("optional".to_string());
+
+        let mut picker = ModelPicker::new_provider_first(
+            // Deliberately listed unready-first.
+            vec![needs_key, optional_key],
+            None,
+            "openai".to_string(),
+            "gpt-5".to_string(),
+        );
+
+        let action = picker.jump_to_current_provider_models();
+
+        assert!(
+            matches!(action, Some(ModelPickerAction::LoadProviderModels { ref provider, .. }) if provider == "custom"),
+            "the ready id should win regardless of catalog order, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn ollama_cloud_counts_as_ready_through_the_local_daemon() {
+        // Device identity: a signed-in local daemon makes Ollama Cloud usable
+        // with no stored key, so `/models` opens it rather than a key screen.
+        let mut picker = ModelPicker::new_provider_first(
+            vec![keyed_provider("ollama_cloud", "Ollama Cloud")],
+            Some(ollama_reachable()),
+            "ollama".to_string(),
+            "glm-5.2:cloud".to_string(),
+        );
+
+        assert!(picker.jump_to_current_provider_models().is_some());
+        assert_eq!(picker.mode, PickerMode::LoadingModels);
+    }
+
+    #[test]
+    fn jumping_does_not_disturb_the_provider_highlight() {
+        // `prov_cursor` indexes the RENDERED list (synthetic "Default" row,
+        // filter applied); `activate_provider` indexes `providers`. Writing
+        // one into the other moved the highlight to an unrelated row.
+        let mut picker = ModelPicker::new_provider_first(
+            vec![
+                keyed_provider("anthropic", "Anthropic"),
+                dynamic_provider("ollama_local", "Ollama Local"),
+            ],
+            Some(ollama_reachable()),
+            "ollama".to_string(),
+            "qwen3:8b".to_string(),
+        );
+        picker.prov_cursor = 0;
+
+        picker.jump_to_current_provider_models();
+
+        assert_eq!(picker.prov_cursor, 0, "the jump must not move the highlight");
     }
 }

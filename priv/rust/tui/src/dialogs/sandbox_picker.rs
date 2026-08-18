@@ -10,9 +10,12 @@
 //! Stateful: the app owns one [`SandboxPicker`] built from GET
 //! `/api/v1/sandboxes`. [`SandboxPicker::handle_key`] moves the cursor
 //! (Up/Down/j/k) and returns a [`SandboxAction`] on Enter (apply the selected
-//! backend — the app layer POSTs / persists + re-fetches) or Esc (close).
+//! backend — the app layer POSTs / persists + re-fetches), `s` (run the
+//! selected backend's setup diagnostic) or Esc (close).
 //! Unavailable backends can still be selected (matching the CLI `/sandbox`),
 //! but are rendered dimmed so the operator sees the risk before committing.
+//! The highlighted unavailable row also advertises `[s] set up`, so a backend
+//! that needs credentials or a daemon can be fixed from where it is noticed.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -48,6 +51,10 @@ pub struct SandboxBackend {
 pub enum SandboxAction {
     /// Apply the named backend (app layer persists + re-fetches).
     Apply(String),
+    /// Run the named backend's setup diagnostic. Offered only for a backend
+    /// that is currently unavailable - selecting one and getting silence is the
+    /// dead end this exists to remove.
+    Setup(String),
     /// Dismiss without changing the backend.
     Close,
 }
@@ -91,6 +98,10 @@ impl SandboxPicker {
                 None
             }
             KeyCode::Enter => self.selected().map(|b| SandboxAction::Apply(b.name.clone())),
+            KeyCode::Char('s') => self
+                .selected()
+                .filter(|b| !b.available)
+                .map(|b| SandboxAction::Setup(b.name.clone())),
             KeyCode::Esc => Some(SandboxAction::Close),
             _ => None,
         }
@@ -177,13 +188,20 @@ impl SandboxPicker {
             // name column (fixed 9) then display name, then availability tag.
             let id = truncate_chars(&b.name, 9);
             let name_col = format!("{id:<9}");
-            let (avail_txt, avail_color) = if b.available {
-                ("available", c.success)
+            // Surface the fix on the row the operator is actually looking at.
+            // Tagging every unavailable row would just be noise.
+            let (avail_txt, avail_color): (String, Color) = if b.available {
+                ("available".to_string(), c.success)
+            } else if is_cursor {
+                ("unavailable \u{2192} [s] set up".to_string(), c.warning)
             } else {
-                ("unavailable", c.dim)
+                ("unavailable".to_string(), c.dim)
             };
-            // Budget: cursor(2)+marker(2)+name(9)+gap(2)+avail(~11) reserved.
-            let reserved = 2 + 2 + 9 + 2 + avail_txt.len() + 1;
+            // Budget: cursor(2)+marker(2)+name(9)+gap(2)+avail reserved. The tag
+            // is no longer a fixed width, and carries a non-ASCII arrow, so
+            // measure it in columns rather than bytes.
+            let avail_w = crate::util::cols(&avail_txt);
+            let reserved = 2 + 2 + 9 + 2 + avail_w + 1;
             let disp_room = max_w.saturating_sub(reserved);
             let mut spans = vec![
                 Span::styled(cursor_char, Style::default().fg(c.primary)),
@@ -203,12 +221,12 @@ impl SandboxPicker {
             // char-count sum under-measures them and the `available` tag lands
             // past the right edge.
             let used: usize = spans.iter().map(|s| crate::util::cols(&s.content)).sum();
-            let pad = max_w.saturating_sub(used + avail_txt.len());
+            let pad = max_w.saturating_sub(used + avail_w);
             if pad > 0 {
                 spans.push(Span::raw(" ".repeat(pad)));
             }
             spans.push(Span::styled(
-                avail_txt,
+                avail_txt.clone(),
                 Style::default().fg(avail_color),
             ));
             put(
@@ -253,12 +271,30 @@ impl SandboxPicker {
                     Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" apply  ", Style::default().fg(c.dim)),
+            ]
+            .into_iter()
+            .chain(
+                self.selected()
+                    .filter(|b| !b.available)
+                    .map(|_| {
+                        vec![
+                            Span::styled(
+                                "s",
+                                Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" set up  ", Style::default().fg(c.dim)),
+                        ]
+                    })
+                    .unwrap_or_default(),
+            )
+            .chain(vec![
                 Span::styled(
                     "esc",
                     Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" close", Style::default().fg(c.dim)),
-            ])),
+            ])
+            .collect::<Vec<_>>())),
             Rect::new(inner.x, hint_y, iw, 1),
         );
     }
@@ -355,4 +391,86 @@ mod sandbox_picker_tests {
         assert!(s.chars().count() <= 6);
         assert!(s.ends_with('\u{2026}'));
     }
+    /// Flatten a render to text so footer/row affordances can be asserted.
+    fn render_to_text(p: &SandboxPicker, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| p.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn setup_is_offered_only_where_it_would_do_something() {
+        let mut p = SandboxPicker::new(sample(), "optional".into());
+
+        // `host` is available - there is nothing to set up, so `s` must not
+        // hijack the key.
+        p.cursor = 0;
+        assert_eq!(p.selected().map(|b| b.name.as_str()), Some("host"));
+        assert_eq!(p.handle_key(key(KeyCode::Char('s'))), None);
+
+        // `docker` is unavailable - `s` offers the diagnostic.
+        p.cursor = 1;
+        assert_eq!(
+            p.handle_key(key(KeyCode::Char('s'))),
+            Some(SandboxAction::Setup("docker".into()))
+        );
+    }
+
+    #[test]
+    fn setup_does_not_move_the_cursor_or_apply() {
+        let mut p = SandboxPicker::new(sample(), "optional".into());
+        p.cursor = 2;
+        let before = p.cursor;
+        assert_eq!(
+            p.handle_key(key(KeyCode::Char('s'))),
+            Some(SandboxAction::Setup("e2b".into()))
+        );
+        assert_eq!(p.cursor, before, "setup must not double as navigation");
+    }
+
+    #[test]
+    fn an_empty_picker_ignores_the_setup_key() {
+        let mut p = SandboxPicker::new(Vec::new(), "optional".into());
+        assert_eq!(p.handle_key(key(KeyCode::Char('s'))), None);
+    }
+
+    #[test]
+    fn the_highlighted_unavailable_row_advertises_the_fix() {
+        let mut p = SandboxPicker::new(sample(), "optional".into());
+
+        // Highlighted + unavailable: the affordance is visible, so an operator
+        // is never left guessing why a backend cannot be selected.
+        p.cursor = 1;
+        let text = render_to_text(&p, 80, 14);
+        assert!(text.contains("set up"), "no setup affordance: {text:?}");
+
+        // Highlighted + available: no setup offered anywhere.
+        p.cursor = 0;
+        let available = render_to_text(&p, 80, 14);
+        assert!(
+            !available.contains("set up"),
+            "setup offered for an available backend: {available:?}"
+        );
+    }
+
+    #[test]
+    fn the_setup_affordance_never_clips_the_availability_column() {
+        let mut p = SandboxPicker::new(sample(), "optional".into());
+        p.cursor = 1;
+        // The tag grew and carries a non-ASCII arrow; a byte-length budget used
+        // to push the column past the right edge.
+        for (w, h) in [(40u16, 14u16), (60, 14), (80, 14), (200, 20)] {
+            let text = render_to_text(&p, w, h);
+            assert!(
+                text.contains("unavailable"),
+                "availability column vanished at {w}: {text:?}"
+            );
+        }
+    }
+
 }

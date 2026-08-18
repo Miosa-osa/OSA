@@ -1533,6 +1533,26 @@ impl App {
                     );
                     self.model_picker = Some(picker);
                     self.enter_overlay(AppState::ModelPicker);
+
+                    // `/models` asked to skip the provider step. Consume the
+                    // intent unconditionally so a later `/model` cannot inherit
+                    // it, and drive the same drill-in Enter would.
+                    if std::mem::take(&mut self.models_jump_pending) {
+                        if let Some(action) = self
+                            .model_picker
+                            .as_mut()
+                            .and_then(|p| p.jump_to_current_provider_models())
+                        {
+                            if let crate::dialogs::model_picker::ModelPickerAction::LoadProviderModels {
+                                provider,
+                                base_url,
+                                api_key,
+                            } = action
+                            {
+                                self.load_provider_models(provider, base_url, api_key);
+                            }
+                        }
+                    }
                     // Ordered AFTER the picker exists, not fired alongside the
                     // catalog fetch. Both reads are cheap and independent, so
                     // racing them looks free — but the usage reply routinely
@@ -1542,6 +1562,11 @@ impl App {
                     self.load_provider_usage();
                 }
                 Err(e) => {
+                    // The offline catalog is too thin to drill into, so a
+                    // pending `/models` is dropped here rather than left to be
+                    // inherited by whatever opens the picker next.
+                    self.models_jump_pending = false;
+
                     // Hotfix: a failed fetch must never leave the newcomer
                     // with no picker at all. Open a small offline fallback
                     // catalog (paste-key providers + local Ollama) so setup
