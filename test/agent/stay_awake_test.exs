@@ -23,7 +23,14 @@ defmodule OptimalSystemAgent.Agent.StayAwakeTest do
     {:ok, pid} = StayAwake.start_link(name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      # Teardown must never be the thing that fails a test. One case stops the
+      # server itself, and `Process.alive?/1` is a check-then-act race against
+      # a process that may exit in between, so the stop is guarded too.
+      try do
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
 
       case previous do
         nil -> Application.delete_env(:optimal_system_agent, :stay_awake_command)
@@ -116,11 +123,16 @@ defmodule OptimalSystemAgent.Agent.StayAwakeTest do
       assert %{port: nil} = release(name, "s1")
     end
 
-    test "the public API never raises when the server is not running" do
-      # The loop calls these on every turn; they must not be able to fail it.
+    test "the public API never raises, whatever the globally named server is doing" do
+      # The loop calls these on every turn, so they must not be able to fail a
+      # turn. These hit the MODULE-named server, which is supervised in a
+      # running app and absent otherwise - both must be safe, and neither may
+      # raise. `held?/0` is asserted as a boolean rather than as false: under a
+      # started application the supervised server legitimately owns that state,
+      # and pinning it here would just assert on a neighbour.
       assert :ok = StayAwake.acquire("no-server-running")
       assert :ok = StayAwake.release("no-server-running")
-      refute StayAwake.held?()
+      assert is_boolean(StayAwake.held?())
     end
   end
 end
