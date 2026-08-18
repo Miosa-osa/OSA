@@ -55,6 +55,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   require Logger
 
   alias OptimalSystemAgent.Agent.Scheduler.{CronEngine, Persistence, JobExecutor, Heartbeat}
+  alias OptimalSystemAgent.Agent.StayAwake
   alias OptimalSystemAgent.Agent.Scheduler.CronPresets
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.System.AtomicFile
@@ -508,6 +509,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     # executing was a minute the matcher never evaluated — those jobs simply
     # never fired, with no log and no backfill.
     state = schedule_cron_check(state)
+    reconcile_stay_awake(state)
     {:noreply, run_cron_check(state)}
   end
 
@@ -961,4 +963,73 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     Process.send_after(self(), :cron_check, @cron_tick_ms)
     %{state | next_cron_at: DateTime.add(DateTime.utc_now(), @cron_tick_ms, :millisecond)}
   end
+  # ── Keeping the machine awake for work that fires on its own ──────────
+  #
+  # `Agent.StayAwake` holds an OS sleep inhibitor for the length of a TURN, which
+  # is enough for a task someone is waiting on. It is not enough for a proactive
+  # agent: a cron due at 3am, or a heartbeat 30 minutes out, spends almost all of
+  # its life between turns, and a laptop that idles out in that gap simply never
+  # fires the job.
+  #
+  # The backfill ceiling above (@max_backfill_minutes) is the symptom of exactly
+  # this — it exists because the machine DOES suspend and ticks DO get missed.
+  # Backfill replays at most an hour; a night of sleep silently drops the rest.
+  # Holding the inhibitor while proactive work is configured stops the ticks
+  # being missed in the first place.
+  #
+  # Scoped to real work, deliberately: the hold is taken only when the operator
+  # has an ENABLED cron job, an ENABLED trigger, or an unchecked HEARTBEAT.md
+  # task. Configuring one of those IS the opt-in — nobody schedules a 3am job and
+  # then wants the machine asleep at 3am. With none configured the hold is
+  # released, so OSA does not keep a laptop awake for a scheduler that has
+  # nothing to do.
+  #
+  # Reconciled on the one-minute tick rather than on every mutation: acquire and
+  # release are both idempotent, so a single convergent check cannot drift out of
+  # step the way a dozen mutation sites would.
+  @proactive_holder "scheduler:proactive"
+
+  defp reconcile_stay_awake(state) do
+    if proactive_work?(state) do
+      StayAwake.acquire(@proactive_holder)
+    else
+      StayAwake.release(@proactive_holder)
+    end
+
+    :ok
+  rescue
+    # Never let keeping the machine awake be the reason a tick fails.
+    _ -> :ok
+  end
+
+  @doc """
+  Whether anything is configured that must fire without a person present.
+
+  Enabled cron jobs, enabled triggers, or an unchecked HEARTBEAT.md task.
+  """
+  @spec proactive_work?(%__MODULE__{}) :: boolean()
+  def proactive_work?(%__MODULE__{} = state) do
+    any_enabled?(state.cron_jobs) or any_enabled?(state.triggers_raw) or
+      pending_heartbeat_task?()
+  end
+
+  # A missing "enabled" key means enabled: `add_job/1` only puts the default in
+  # on the way through, and a hand-edited CRONS.json may omit it entirely.
+  defp any_enabled?(entries) when is_list(entries) do
+    Enum.any?(entries, fn
+      %{"enabled" => false} -> false
+      %{} -> true
+      _ -> false
+    end)
+  end
+
+  defp any_enabled?(_), do: false
+
+  defp pending_heartbeat_task? do
+    case File.read(heartbeat_path()) do
+      {:ok, contents} -> String.contains?(contents, "- [ ]")
+      _ -> false
+    end
+  end
+
 end

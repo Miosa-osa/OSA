@@ -213,3 +213,9 @@ config :optimal_system_agent,
   rewind_checkpoint_dir: Path.join(test_state_dir, "rewind"),
   verification_checkpoint_dir: Path.join(test_state_dir, "verification_checkpoints"),
   commands_dir: Path.join(test_state_dir, "commands")
+
+# The suite must never spawn a real OS sleep inhibitor: `caffeinate` would keep
+# the developer's machine awake for as long as the run takes, and a killed test
+# run would leak it. Tests that exercise StayAwake opt back in with an explicit
+# harmless command.
+config :optimal_system_agent, :stay_awake_command, :disabled

@@ -8,14 +8,79 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature
 
-  # Runtime-tunable (not compile_env) so the absolute tool-call cap can be
-  # raised for an hours-long autonomous run without recompiling. Default raised
-  # to 2000 — a genuine backstop just above realistic multi-hour volume, not a
-  # premature stop at 100.
-  defp max_total_tool_calls,
-    do: Application.get_env(:optimal_system_agent, :doom_loop_max_calls, 2000)
-
+  # Declared before first use: a module attribute read above its definition is
+  # `nil`, which turned the warning-threshold arithmetic into `max * nil`.
   @warn_threshold_pct 0.80
+
+  # Session tool-call ceiling. UNLIMITED unless an operator asks for a limit.
+  #
+  # An absolute count cannot distinguish "working for a long time" from "stuck".
+  # Whatever number is chosen, a healthy unattended run eventually reaches it and
+  # is halted for the crime of still going - and the halt is reported as a safety
+  # stop, which reads as though the agent misbehaved. 2000 halted a normal run
+  # after a few hours; 25_000 only moves the same wall further out.
+  #
+  # Runaway is a SHAPE, not a volume: the same call repeated, no forward
+  # progress, the same failure signature again and again, reasoning with no
+  # tool calls. `IdenticalCall`, `Stall`, `FailureSignature`, `ReasoningOnly`
+  # and `Escalation` all read that shape directly and halt within seconds,
+  # regardless of session age. They are the stop condition. A counter is not.
+  #
+  # A limit is still available for callers that genuinely want one - CI jobs,
+  # evals, cost-bounded sandboxes - via `OSA_MAX_TOOL_CALLS` (which wins, since
+  # an unattended run cannot be rescued by editing application config) or
+  # `config :optimal_system_agent, :doom_loop_max_calls, <int>`.
+  # A very large finite number rather than `:infinity`. Codex, for reference,
+  # ships no tool-call ceiling at all. A finite value keeps the cap printable,
+  # comparable and assertable, and still stops a true runaway eventually rather
+  # than burning forever; at a sustained 30 calls a minute this is roughly 23
+  # days of continuous work, so no real session reaches it.
+  @unbounded_tool_calls 1_000_000
+
+  @doc false
+  def max_total_tool_calls do
+    case env_max_tool_calls() do
+      nil -> Application.get_env(:optimal_system_agent, :doom_loop_max_calls, @unbounded_tool_calls)
+      value -> value
+    end
+  end
+
+  # `OSA_MAX_TOOL_CALLS`. Accepts a positive integer, or an explicit word for
+  # "no limit". Junk and non-positive values are ignored rather than obeyed:
+  # obeying a cap of 0 would halt the first tool call of the run.
+  defp env_max_tool_calls do
+    case System.get_env("OSA_MAX_TOOL_CALLS") do
+      nil ->
+        nil
+
+      value ->
+        case value |> String.trim() |> String.downcase() do
+          unlimited when unlimited in ~w(unlimited none off infinity infinite) ->
+            :infinity
+
+          trimmed ->
+            case Integer.parse(trimmed) do
+              {n, ""} when n > 0 -> n
+              _ -> nil
+            end
+        end
+    end
+  end
+
+  # Explicit rather than leaning on Elixir term ordering, under which
+  # `5 >= :infinity` happens to be false. True, but accidental.
+  defp call_cap_reached?(_total, :infinity), do: false
+  defp call_cap_reached?(total, max) when is_integer(max), do: total >= max
+  defp call_cap_reached?(_total, _max), do: false
+
+  # No ceiling means no "approaching the ceiling" to warn about.
+  @doc false
+  def warn_threshold_for(max), do: warn_threshold(max)
+
+  defp warn_threshold(:infinity), do: nil
+  defp warn_threshold(max) when is_integer(max), do: trunc(max * @warn_threshold_pct)
+  defp warn_threshold(_), do: nil
+
 
   @moduledoc """
   Doom loop detection for the agent loop — a coordinator over independent
@@ -76,7 +141,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     state = Map.put(state, :total_tool_calls, new_total)
 
     max_calls = max_total_tool_calls()
-    warn_at = trunc(max_calls * @warn_threshold_pct)
+    warn_at = warn_threshold(max_calls)
 
     # --- Identical-call detection ---
     # Catches the model spamming the same tool+args back-to-back even when the
@@ -100,10 +165,10 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
          # silent no-op, wasting a whole detection pass.
          {:ok, state} <- ReasoningOnly.check(tool_calls, state) do
       cond do
-        new_total >= max_calls ->
+        call_cap_reached?(new_total, max_calls) ->
           handle_call_cap_exceeded(new_total, max_calls, state)
 
-        new_total >= warn_at and new_total - call_count < warn_at ->
+        is_integer(warn_at) and new_total >= warn_at and new_total - call_count < warn_at ->
           Logger.warning(
             "[doom] Approaching tool call limit (#{new_total}/#{max_calls}) " <>
               "(session: #{state.session_id})"
@@ -130,7 +195,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
       How to proceed:
       - If the task is incomplete, start a new session and continue from where you left off.
-      - If you need a higher limit, adjust `doom_loop_max_calls` in your application config.
+      - To raise the limit for a long unattended run, set `OSA_MAX_TOOL_CALLS` (for
+        example `OSA_MAX_TOOL_CALLS=50000`) before starting OSA, or set
+        `doom_loop_max_calls` in application config.
       """
       |> String.trim()
 

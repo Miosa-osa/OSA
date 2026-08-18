@@ -66,6 +66,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.TurnPipeline
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.SessionPersistence
+  alias OptimalSystemAgent.Agent.StayAwake
   alias OptimalSystemAgent.Agent.TaskNotifications
 
   defstruct [
@@ -2333,6 +2334,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
+    # Keep the machine awake for the length of the turn. Released in the recap
+    # below, and released automatically if this process dies first - StayAwake
+    # monitors its holders, so a crashed loop cannot pin the machine awake.
+    StayAwake.acquire(state.session_id)
+
     turn_started_ms = System.monotonic_time(:millisecond)
     # Per-turn baselines: `state.messages` and `state.total_tool_calls` both
     # accumulate for the whole session, so the end-of-turn recap must diff
@@ -2555,6 +2561,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       "osa:session:#{state.session_id}",
       {:osa_event, %{type: :done, session_id: state.session_id}}
     )
+
+    StayAwake.release(state.session_id)
 
     # Turn completed successfully — the per-step durable log for this turn is no
     # longer needed for resume. Clear it so files stay per-turn and small; the
