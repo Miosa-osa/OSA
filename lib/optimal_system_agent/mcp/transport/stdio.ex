@@ -56,7 +56,7 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   # a beat after spawn; a short probe lets that settle before we cache the group.
   @pgid_probe_ms 200
 
-  defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil, reap: false, pgid: nil]
+  defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil, reap: false, pgid: nil, mem_warned: false]
 
   # ── Transport API ─────────────────────────────────────────────────────
 
@@ -113,6 +113,7 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
           )
 
         if reap?, do: Process.send_after(self(), :cache_pgid, @pgid_probe_ms)
+        schedule_memory_check()
 
         {:ok, %__MODULE__{port: port, owner: owner, ref: ref, name: name, exe: exe, reap: reap?}}
 
@@ -173,6 +174,24 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
 
   def handle_info(:cache_pgid, state) do
     {:noreply, ensure_pgid(state)}
+  end
+
+  # ── Memory watchdog ───────────────────────────────────────────────────
+  #
+  # An MCP server is an arbitrary third-party program that OSA spawns and then
+  # keeps alive for the whole session. Nothing here used to bound how large one
+  # could get, so a single leaking server could exhaust the host: an `axon serve
+  # --watch` child was measured growing 3.17 GB/hour and reached ~103 GB, at
+  # which point macOS began Jetsam-killing applications and the machine had to
+  # be force-restarted. OSA did not cause the leak, but it hosted it unbounded,
+  # which is the part we own.
+  #
+  # A restarted MCP server costs one reconnect. An exhausted machine costs the
+  # whole session and everything else the operator had open, so the trade is not
+  # close.
+  def handle_info(:memory_check, state) do
+    schedule_memory_check()
+    {:noreply, check_memory(state)}
   end
 
   # The OWNER (the process that started us, and the one we deliver to) died —
@@ -346,6 +365,147 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   # SIGKILL the whole process group (leader + grandchildren). `kill -KILL -<pgid>`
   # targets a group; guarded so a degenerate pgid can never signal init or this
   # very node's own group.
+  # Sampling interval and the two ceilings. Any of them set to nil disables the
+  # corresponding behaviour; `:mcp_memory_check_ms` set to nil disables the
+  # watchdog entirely.
+  @doc false
+  def memory_check_ms,
+    do: Application.get_env(:optimal_system_agent, :mcp_memory_check_ms, 60_000)
+
+  @doc false
+  def memory_soft_mb,
+    do: Application.get_env(:optimal_system_agent, :mcp_memory_soft_mb, 2_048)
+
+  @doc false
+  def memory_hard_mb,
+    do: Application.get_env(:optimal_system_agent, :mcp_memory_hard_mb, 6_144)
+
+  defp schedule_memory_check do
+    case memory_check_ms() do
+      ms when is_integer(ms) and ms > 0 -> Process.send_after(self(), :memory_check, ms)
+      _ -> :ok
+    end
+  end
+
+  defp check_memory(state) do
+    state = ensure_pgid(state)
+
+    case child_rss_mb(state) do
+      nil ->
+        state
+
+      mb ->
+        cond do
+          exceeds?(mb, memory_hard_mb()) ->
+            halt_for_memory(state, mb)
+
+          exceeds?(mb, memory_soft_mb()) and not state.mem_warned ->
+            Logger.warning(
+              "[mcp:#{state.name}] using #{mb} MB (soft limit #{memory_soft_mb()} MB). " <>
+                "It will be restarted at #{memory_hard_mb()} MB."
+            )
+
+            emit_memory_event(state, :mcp_memory_warning, mb, memory_soft_mb())
+            %{state | mem_warned: true}
+
+          # Dropped back under the soft line - re-arm the warning so a server
+          # that sawtooths reports each excursion instead of only the first.
+          not exceeds?(mb, memory_soft_mb()) and state.mem_warned ->
+            %{state | mem_warned: false}
+
+          true ->
+            state
+        end
+    end
+  end
+
+  defp halt_for_memory(state, mb) do
+    Logger.error(
+      "[mcp:#{state.name}] using #{mb} MB, over the #{memory_hard_mb()} MB hard limit — " <>
+        "stopping it before it exhausts the host. It will reconnect on next use."
+    )
+
+    emit_memory_event(state, :mcp_memory_limit_exceeded, mb, memory_hard_mb())
+    reap_group(state)
+
+    if is_port(state.port) do
+      try do
+        Port.close(state.port)
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    # Same close path as any other exit, so the owner's existing reconnect
+    # handling applies rather than a second, parallel restart mechanism.
+    notify_closed(state, {:memory_limit_exceeded, mb, memory_hard_mb()})
+    exit({:shutdown, :memory_limit_exceeded})
+  end
+
+  @doc false
+  def exceeds?(_mb, limit) when not is_integer(limit), do: false
+  def exceeds?(mb, limit), do: mb >= limit
+
+  defp emit_memory_event(state, event, mb, limit_mb) do
+    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+      event: event,
+      server: state.name,
+      rss_mb: mb,
+      limit_mb: limit_mb
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Resident size of the whole child process group, in MB.
+  #
+  # The group, not just the leader: MCP servers routinely fork (npx -> node,
+  # uv -> python), and the leader alone can look idle while a grandchild is the
+  # one growing. Falls back to the port's own os_pid when no group is cached.
+  @doc false
+  def child_rss_mb(state) do
+    case rss_kb_for(state) do
+      nil -> nil
+      kb -> div(kb, 1024)
+    end
+  end
+
+  @doc false
+  def rss_kb_for(%{pgid: pgid}) when is_integer(pgid) and pgid > 1 do
+    sum_rss(["-o", "rss=", "-g", to_string(pgid)])
+  end
+
+  def rss_kb_for(%{port: port}) when is_port(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} -> sum_rss(["-o", "rss=", "-p", to_string(os_pid)])
+      _ -> nil
+    end
+  end
+
+  def rss_kb_for(_), do: nil
+
+  defp sum_rss(args) do
+    case System.cmd("ps", args, stderr_to_stdout: true) do
+      {out, 0} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.map(&(&1 |> String.trim() |> Integer.parse()))
+        |> Enum.reduce(nil, fn
+          {n, _}, acc -> (acc || 0) + n
+          :error, acc -> acc
+        end)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
   defp reap_group(%{pgid: pgid}) when is_integer(pgid) and pgid > 1 do
     if killpg_safe?(pgid) do
       _ = System.cmd("kill", ["-s", "KILL", "--", "-#{pgid}"], stderr_to_stdout: true)

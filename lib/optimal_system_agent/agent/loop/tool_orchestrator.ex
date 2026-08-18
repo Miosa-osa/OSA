@@ -427,7 +427,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
             ms -> System.monotonic_time(:millisecond) + ms
           end
 
-        collect_tasks(tasks, [], sid, deadline)
+        collect_tasks(tasks, [], sid, deadline, new_progress())
       end
     end)
   end
@@ -443,9 +443,39 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   # Poll-await a batch: finishes normally, hard-kills every still-running task
   # the moment the session's cancel flag appears (WS5 interrupt), or kills on
   # deadline (parity with the old async_stream on_timeout: :kill_task).
-  defp collect_tasks([], done, _sid, _deadline), do: Enum.reverse(done)
+  # ── Stall reporting ───────────────────────────────────────────────────
+  #
+  # `timeout_ms` defaults to `:infinity` (react_loop.ex), deliberately: a
+  # generic wrapper cannot know whether it is timing a 200 ms file read or a
+  # multi-agent dispatch that legitimately runs for hours, and an agent expected
+  # to work unattended must not be killed for taking a long time.
+  #
+  # But with no deadline this loop polls forever and says NOTHING. A single
+  # wedged tool call therefore hangs the whole turn in total silence: no output,
+  # no error, nothing written to the session log, and the composer simply
+  # returns as though the turn had finished. Observed in the wild - a turn
+  # stopped dead after `serialising 2 of 4 batched call(s)` and the backend
+  # never logged another line, while `/health` still answered 200.
+  #
+  # Silence is the bug, not the duration. So this reports instead of killing:
+  # every reporting interval a call is still running, it says which one and for
+  # how long, on the log and on the Bus. A long tool becomes visible progress;
+  # a stuck tool becomes something the operator can see and interrupt. No
+  # ceiling is introduced, so nothing that legitimately runs long is at risk.
+  @default_stall_report_ms 60_000
 
-  defp collect_tasks(pending, done, sid, deadline) do
+  defp stall_report_ms,
+    do: Application.get_env(:optimal_system_agent, :tool_stall_report_ms, @default_stall_report_ms)
+
+  defp new_progress do
+    now = System.monotonic_time(:millisecond)
+    %{started: now, last_report: now}
+  end
+
+  @doc false
+  def collect_tasks([], done, _sid, _deadline, _progress), do: Enum.reverse(done)
+
+  def collect_tasks(pending, done, sid, deadline, progress) do
     cond do
       cancelled?(sid) ->
         killed =
@@ -470,6 +500,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
         Enum.reverse(done) ++ timed_out
 
       true ->
+        progress = maybe_report_stall(pending, sid, progress)
         yielded = Task.yield_many(Enum.map(pending, &elem(&1, 1)), @poll_interval_ms)
         results = Map.new(yielded, fn {task, res} -> {task.ref, res} end)
 
@@ -492,8 +523,46 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
             end
           end)
 
-        collect_tasks(Enum.reverse(still_pending), newly_done, sid, deadline)
+        collect_tasks(Enum.reverse(still_pending), newly_done, sid, deadline, progress)
     end
+  end
+
+  @doc false
+  def stall_report_interval_ms, do: stall_report_ms()
+
+  # Emit at most one report per interval, naming every call still in flight.
+  defp maybe_report_stall(pending, sid, %{started: started, last_report: last} = progress) do
+    now = System.monotonic_time(:millisecond)
+
+    if now - last >= stall_report_ms() do
+      elapsed_s = div(now - started, 1000)
+      names = pending |> Enum.map(&Map.get(elem(&1, 0), :name)) |> Enum.uniq() |> Enum.join(", ")
+
+      Logger.warning(
+        "[tool_orchestrator] still running after #{elapsed_s}s: #{names} " <>
+          "(session: #{inspect(sid)}). Not a timeout - reporting so a wedged " <>
+          "call cannot stall a turn in silence."
+      )
+
+      emit_stall(sid, names, elapsed_s, length(pending))
+      %{progress | last_report: now}
+    else
+      progress
+    end
+  end
+
+  defp emit_stall(sid, names, elapsed_s, count) do
+    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+      event: :tool_call_stalled,
+      session_id: sid,
+      tools: names,
+      elapsed_s: elapsed_s,
+      pending: count
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp cancelled?(sid) when is_binary(sid) do
