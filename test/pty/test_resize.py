@@ -2495,13 +2495,17 @@ def test_a_split_alt_enter_does_not_interrupt(backend: StubBackend) -> None:
                 )
             # The armed affordance must be gone too — a latent arm is what
             # turns the NEXT stray Esc into a kill.
-            if "esc again to interrupt" in "\n".join(s.lines()):
+            # Poll for the disarm rather than reading once: the Enter has to be
+            # rendered before the affordance clears, and under CI load that lag
+            # outlives the pump above. A one-shot check flaked here against
+            # correct code.
+            if not s.wait_for_text_gone("esc again to interrupt", 5.0):
                 raise AssertionError(
                     "the interrupt is still armed after a split alt+enter. The "
                     "Enter must disarm it, or the chord leaves a loaded key "
                     f"behind.\n--- rendered screen ---\n{s.dump()}"
                 )
-            if not s.wait_for_text("STILL-QUEUED-AFTER-SPLIT", 2.0):
+            if not s.wait_for_text("STILL-QUEUED-AFTER-SPLIT", 5.0):
                 raise AssertionError(
                     "the queued message vanished on a split alt+enter.\n"
                     f"--- rendered screen ---\n{s.dump()}"

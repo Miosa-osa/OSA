@@ -6,9 +6,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Constants do
   @tool_name "multi_file_edit"
   def tool_name, do: @tool_name
 
-  @default_allowed_paths ["~", "/tmp"]
-  def default_allowed_paths, do: @default_allowed_paths
-
   # Single shared policy — see `Agent.Safety.PathPolicy`.
   defdelegate blocked_write_paths,
     to: OptimalSystemAgent.Agent.Safety.PathPolicy,

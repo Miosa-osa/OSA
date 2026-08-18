@@ -65,7 +65,7 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
         end
 
       session ->
-        exec_in_session(session, command, timeout(opts))
+        exec_in_session(session, command, timeout(opts), opts)
     end
   end
 
@@ -200,7 +200,7 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
   @impl GenServer
   def handle_call({:exec, command, opts}, _from, state) do
     with {:ok, session, state} <- ensure_session(state, opts) do
-      reply = exec_in_session(session, command, timeout(opts))
+      reply = exec_in_session(session, command, timeout(opts), opts)
       {:reply, reply, maybe_invalidate_session(state, reply)}
     else
       {:error, reason, state} -> {:reply, {:error, reason}, state}
@@ -250,17 +250,70 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
 
   # --- Private ---
 
-  defp exec_in_session(%{id: id, key: key}, command, timeout) do
+  # Two defects lived here, both of which made this backend quietly wrong rather
+  # than visibly broken, and both of which `:miosa_cli` avoids by delegating to
+  # the CLI:
+  #
+  #   * `working_dir` was accepted by callers and then dropped. Host and Docker
+  #     both honour it, so the same command ran in a different directory
+  #     depending only on which backend was selected. The platform accepts the
+  #     directory as BOTH `cwd` and `dir`, and the official client additionally
+  #     prefixes `cd <dir> && ` - all three are sent here for the same reason it
+  #     does: the belt is cheap and the braces are cheaper than a silent
+  #     wrong-directory write.
+  #
+  #   * `exit_code` was discarded and stdout/stderr concatenated, so a FAILED
+  #     command was reported to the model as `{:ok, output}`. The agent could
+  #     not tell a passing build from a failing one.
+  defp exec_in_session(session, command, timeout), do: exec_in_session(session, command, timeout, [])
+
+  defp exec_in_session(%{id: id, key: key}, command, timeout, opts) do
     Logger.info("[Sandbox.MIOSA] exec: #{String.slice(command, 0, 80)}")
     secs = div(timeout, 1000)
+    cwd = Keyword.get(opts, :working_dir)
+
+    body =
+      %{command: with_cwd(command, cwd), timeout: secs}
+      |> maybe_put_cwd(cwd)
 
     case request(:post, "/sandboxes/#{id}/exec", key,
-           json: %{command: command, timeout: secs},
+           json: body,
            receive_timeout: timeout + 5_000
          ) do
-      {:ok, %{"stdout" => out} = b} -> {:ok, out <> (b["stderr"] || "")}
+      {:ok, %{} = b} -> {:ok, format_exec(b)}
       {:ok, other} -> {:ok, to_string_body(other)}
       {:error, reason} -> {:error, "MIOSA exec failed: #{reason}"}
+    end
+  end
+
+  defp with_cwd(command, nil), do: command
+  defp with_cwd(command, ""), do: command
+  defp with_cwd(command, cwd), do: "cd #{shell_quote(cwd)} && #{command}"
+
+  defp maybe_put_cwd(body, cwd) when is_binary(cwd) and cwd != "",
+    do: body |> Map.put(:cwd, cwd) |> Map.put(:dir, cwd)
+
+  defp maybe_put_cwd(body, _), do: body
+
+  defp shell_quote(s), do: "'" <> String.replace(s, "'", "'\\''") <> "'"
+
+  # Keep stdout and stderr separable, and never report a non-zero exit as a
+  # plain success.
+  defp format_exec(%{} = b) do
+    out = to_string(b["stdout"] || "")
+    err = to_string(b["stderr"] || "")
+
+    text =
+      case {out, err} do
+        {"", ""} -> ""
+        {o, ""} -> o
+        {"", e} -> e
+        {o, e} -> o <> "\n" <> e
+      end
+
+    case b["exit_code"] do
+      code when is_integer(code) and code != 0 -> text <> "\n[exit code: #{code}]"
+      _ -> text
     end
   end
 

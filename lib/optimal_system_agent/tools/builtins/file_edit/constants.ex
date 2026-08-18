@@ -12,11 +12,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Constants do
   @tool_name "file_edit"
   def tool_name, do: @tool_name
 
-  # Paths that are allowed as both read and write targets (same set as FileRead
-  # so that the "read before edit" invariant can always succeed on allowed files).
-  @default_allowed_paths ["~", "/tmp"]
-  def default_allowed_paths, do: @default_allowed_paths
-
   # Files that must never be read from, and locations that must never be
   # written to. Both lists now come from `Agent.Safety.PathPolicy`, the single
   # shared policy — these accessors are descriptions for prompts and tests. Use
