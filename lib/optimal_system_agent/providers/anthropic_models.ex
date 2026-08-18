@@ -315,18 +315,59 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   equally valid and is what OSA offers. Both resolve here. Longest id wins so a
   short id can never shadow a longer, more specific one.
   """
+  # Bare aliases the Claude Code CLI accepts for `--model`, mapped to the
+  # catalogue id each names.
+  #
+  # A subscriber on the `claude_cli` provider selects "fable", not
+  # "claude-fable-5" — that is the vocabulary `claude --help` documents and what
+  # OSA passes through to `--model`. Nothing downstream recognised the bare
+  # form, so `resolve/1` returned nil and every lookup keyed on it fell through:
+  # `Registry.context_window/1` missed the catalogue, then PROBED OLLAMA for the
+  # window of a Claude model, and the TUI divided real usage by a denominator
+  # belonging to no model at all — a fresh session opened at "36% ctx".
+  #
+  # Deliberately the undated FAMILY id, never a dated snapshot. Which concrete
+  # snapshot an alias resolves to is Claude Code's decision and changes without
+  # OSA being involved (see `Providers.ClaudeCLI`), so a dated mapping here
+  # would be a confident lie the first time Anthropic ships a new one. The
+  # family id is stable and is what the catalogue is keyed by. For the exact
+  # snapshot actually served, `ClaudeCLI.last_resolved_model/0` reports what
+  # came back on `message_start`.
+  @cli_aliases %{
+    "fable" => "claude-fable-5",
+    "opus" => "claude-opus-5",
+    "sonnet" => "claude-sonnet-5",
+    "haiku" => "claude-haiku-4-5"
+  }
+
+  @doc "The bare `--model` aliases this catalogue understands."
+  @spec cli_aliases() :: %{String.t() => String.t()}
+  def cli_aliases, do: @cli_aliases
+
   @spec resolve(String.t() | nil) :: model() | nil
   def resolve(id) when is_binary(id) do
     case model(id) do
       nil ->
         down = String.downcase(id)
 
-        @models
-        |> Enum.filter(&String.starts_with?(down, &1.id))
-        |> Enum.max_by(&String.length(&1.id), fn -> nil end)
+        prefix_match =
+          @models
+          |> Enum.filter(&String.starts_with?(down, &1.id))
+          |> Enum.max_by(&String.length(&1.id), fn -> nil end)
+
+        # Alias last: a real id, and the dated-suffix match above, must always
+        # win over the alias table.
+        prefix_match || alias_match(down)
 
       found ->
         found
+    end
+  end
+
+  defp alias_match(down) do
+    case Map.fetch(@cli_aliases, down) do
+      {:ok, canonical} -> model(canonical)
+      :error -> nil
     end
   end
 
