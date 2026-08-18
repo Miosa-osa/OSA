@@ -1688,7 +1688,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}#{config.description}#{@reset}")
         IO.puts("")
         IO.puts("  #{@dim}Thinking budget:#{@reset} #{config.thinking_budget} tokens")
-        IO.puts("  #{@dim}Max iterations:#{@reset}  #{config.max_iterations}")
+        IO.puts("  #{@dim}Max iterations:#{@reset}  #{effort_iteration_display()}")
         IO.puts("  #{@dim}Temperature:#{@reset}     #{config.temperature}")
         IO.puts("")
         IO.puts("  #{@dim}Usage: /effort fast|medium|high|xhigh|ultra#{@reset}")
@@ -1733,12 +1733,31 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
     IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
-    IO.puts("  #{@dim}Iterations:#{@reset} #{config.max_iterations}")
+    IO.puts("  #{@dim}Iterations:#{@reset} #{effort_iteration_display()}")
     IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
     IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")
 
     IO.puts("")
     session_id
+  end
+
+  # What the iteration ceiling ACTUALLY is, not what the effort ladder says.
+  #
+  # Effort no longer governs run length: it sets thinking depth, response
+  # ceiling and temperature, while the loop reads
+  # `config :optimal_system_agent, :max_iterations` and otherwise runs
+  # effectively unbounded (see `Loop.ReactLoop`). The ladder still carries a
+  # per-tier `max_iterations` for callers that ask for one, so printing it here
+  # advertised a cap that no longer applies - `/fast` announced "Iterations: 50"
+  # while the real ceiling was six figures.
+  #
+  # A number nobody enforces is worse than no number: it invites the operator to
+  # structure work around a limit that is not there.
+  defp effort_iteration_display do
+    case Application.get_env(:optimal_system_agent, :max_iterations) do
+      n when is_integer(n) and n > 0 -> to_string(n)
+      _ -> "unlimited"
+    end
   end
 
   def cmd_coordinator(_args, session_id) do

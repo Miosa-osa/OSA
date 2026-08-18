@@ -27,7 +27,12 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
             prompt: "",
             # fd for /dev/tty — used for BOTH raw byte reads AND writes
             tty: nil,
-            terminal_cols: 80
+            terminal_cols: 80,
+            # Grapheme index the current selection started at, or nil when
+            # nothing is selected. The selected range is always the span
+            # between this and `cursor`, in either direction, so a drag
+            # leftwards selects exactly what a drag rightwards would.
+            selection_anchor: nil
 
   @doc """
   Read a line of input with readline-style editing.
@@ -75,6 +80,12 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
           }
 
           Process.put(:rendered_cursor_row, 0)
+          # SGR mouse reporting (1006) with button+drag events (1002). Without
+          # these the terminal never reports clicks at all, which is why the
+          # editor was keyboard-only. Disabled again in the `after` block so a
+          # crash cannot leave the terminal emitting mouse escapes into the
+          # user's shell.
+          tty_write(tty, "\e[?1002h\e[?1006h")
           tty_write(tty, prompt)
           result = input_loop(state)
           # Newline while still in raw mode (OPOST off → literal \r\n).
@@ -82,6 +93,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
           tty_write(tty, "\r\n")
           result
         after
+          tty_write(tty, "\e[?1006l\e[?1002l")
           Process.delete(:rendered_cursor_row)
           restore_stty(saved)
         end
@@ -158,6 +170,27 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         redraw(state)
         input_loop(state)
 
+      # Left button pressed (0) — move the cursor there and start a selection
+      # anchored at the click. Any previous selection is dropped: a fresh click
+      # is how a user cancels one.
+      {:mouse, 0, col, row, true} ->
+        index = click_index(state, row, col)
+        state = %{state | cursor: index, selection_anchor: index}
+        redraw(state)
+        input_loop(state)
+
+      # Left button dragged (32) — extend the selection to here, keeping the
+      # anchor where the press landed.
+      {:mouse, 32, col, row, true} ->
+        state = %{state | cursor: click_index(state, row, col)}
+        redraw(state)
+        input_loop(state)
+
+      # Release and every other button: no cursor movement. A right-click or
+      # scroll must not silently relocate the caret mid-edit.
+      {:mouse, _button, _col, _row, _press} ->
+        input_loop(state)
+
       :backspace ->
         state = delete_backward(state)
         redraw(state)
@@ -228,12 +261,42 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   # --- Buffer operations ---
 
-  defp insert_char(state, ch) do
-    {before, after_cursor} = Enum.split(state.buffer, state.cursor)
-    %{state | buffer: before ++ [ch] ++ after_cursor, cursor: state.cursor + 1, history_index: -1}
+  # Typing over a selection REPLACES it, which is what makes "select the wrong
+  # word, type the right one" work. Without this the new character is inserted
+  # and the selection silently survives, so the next keystroke deletes text the
+  # user thought they had already replaced.
+  defp insert_char(%{selection_anchor: anchor, cursor: cursor} = state, ch)
+       when not is_nil(anchor) and anchor != cursor do
+    {buffer, cursor} = delete_selection(state.buffer, anchor, cursor)
+
+    state
+    |> Map.merge(%{buffer: buffer, cursor: cursor, selection_anchor: nil})
+    |> insert_char(ch)
   end
 
-  defp delete_backward(%{cursor: 0} = state), do: state
+  defp insert_char(state, ch) do
+    {before, after_cursor} = Enum.split(state.buffer, state.cursor)
+
+    %{
+      state
+      | buffer: before ++ [ch] ++ after_cursor,
+        cursor: state.cursor + 1,
+        history_index: -1,
+        selection_anchor: nil
+    }
+  end
+
+  # A live selection is deleted as a UNIT, so Backspace on selected text removes
+  # the selection rather than one character from its edge. This clause has to
+  # come first, including at cursor 0 - a selection anchored to the right of
+  # position 0 is still deletable there.
+  defp delete_backward(%{selection_anchor: anchor, cursor: cursor} = state)
+       when not is_nil(anchor) and anchor != cursor do
+    {buffer, cursor} = delete_selection(state.buffer, anchor, cursor)
+    %{state | buffer: buffer, cursor: cursor, selection_anchor: nil}
+  end
+
+  defp delete_backward(%{cursor: 0} = state), do: %{state | selection_anchor: nil}
 
   defp delete_backward(state) do
     {before, after_cursor} = Enum.split(state.buffer, state.cursor)
@@ -243,6 +306,12 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       | buffer: Enum.take(before, length(before) - 1) ++ after_cursor,
         cursor: state.cursor - 1
     }
+  end
+
+  defp delete_forward(%{selection_anchor: anchor, cursor: cursor} = state)
+       when not is_nil(anchor) and anchor != cursor do
+    {buffer, cursor} = delete_selection(state.buffer, anchor, cursor)
+    %{state | buffer: buffer, cursor: cursor, selection_anchor: nil}
   end
 
   defp delete_forward(state) do
@@ -314,7 +383,9 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp redraw(state) do
     line = Enum.join(state.buffer)
-    lines = String.split(line, "\n")
+    # Selection highlight is applied per line; layout still measures the PLAIN
+    # text, because the escape codes occupy no columns.
+    lines = decorate_lines(line, state.selection_anchor, state.cursor)
     cols = terminal_columns(state.terminal_cols)
     layout = visual_layout(line, Width.visible(state.prompt), cols, state.cursor)
 
@@ -385,6 +456,199 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     }
   end
 
+  @doc """
+  The grapheme index a click at `{row, col}` refers to — the inverse of
+  `visual_layout/4`.
+
+  Defined BY `visual_layout/4` rather than by re-deriving the arithmetic: it
+  walks candidate cursor positions and picks the one the renderer would draw
+  closest to the click. That is O(n) layouts per click, which is nothing at
+  human click rates, and it buys the property that matters — the mapping cannot
+  disagree with the rendering, because it IS the rendering.
+
+  Re-deriving it independently is how you get a prompt-prefix counted twice on
+  the first row and every click landing one column off.
+
+  `row` and `col` are 0-based and relative to the first row of the prompt.
+  """
+  @spec index_at(String.t(), non_neg_integer(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
+          non_neg_integer()
+  def index_at(text, prompt_width, terminal_cols, row, col)
+      when is_binary(text) and is_integer(prompt_width) and is_integer(terminal_cols) and
+             terminal_cols > 0 do
+    last = text |> String.graphemes() |> length()
+
+    0..last
+    |> Enum.min_by(fn index ->
+      layout = visual_layout(text, prompt_width, terminal_cols, index)
+      # Row dominates: a click on row 2 must never resolve to row 1, however
+      # close the columns happen to be.
+      abs(layout.cursor_row - row) * (terminal_cols + 1) + abs(layout.cursor_col - col)
+    end)
+  end
+
+  @doc """
+  Parse the payload of an SGR mouse report (`ESC [ <` already consumed).
+
+  The wire form is `button ; col ; row (M|m)` — `M` press, `m` release — with
+  1-based col/row. Returns 0-based coordinates so they compose with
+  `index_at/5`, or `:unknown` for anything unrecognised, so a malformed report
+  is discarded rather than moving the cursor somewhere arbitrary.
+  """
+  @spec parse_sgr_mouse(String.t()) ::
+          {:mouse, non_neg_integer(), non_neg_integer(), non_neg_integer(), boolean()} | :unknown
+  def parse_sgr_mouse(payload) when is_binary(payload) do
+    with [rest, final] <- split_mouse_final(payload),
+         [b, c, r] <- String.split(rest, ";"),
+         {button, ""} <- Integer.parse(b),
+         {mouse_col, ""} <- Integer.parse(c),
+         {mouse_row, ""} <- Integer.parse(r),
+         true <- button >= 0 and mouse_col >= 1 and mouse_row >= 1 do
+      {:mouse, button, mouse_col - 1, mouse_row - 1, final == "M"}
+    else
+      _ -> :unknown
+    end
+  end
+
+  def parse_sgr_mouse(_), do: :unknown
+
+  defp split_mouse_final(payload) do
+    case String.last(payload) do
+      f when f in ["M", "m"] -> [String.slice(payload, 0..-2//1), f]
+      _ -> :no_final
+    end
+  end
+
+  @doc """
+  The logical lines of `text`, each with its slice of the selection wrapped in
+  reverse video.
+
+  Applied PER LINE rather than once around the whole span. The renderer writes a
+  `\\r\\n` and a continuation prefix between lines, so a single reverse-video
+  region opened before a newline would keep the attribute switched on across the
+  break and paint the prefix — and, on some terminals, the rest of the row — as
+  selected. Re-opening per line keeps the highlight on exactly the characters
+  that are selected.
+
+  Returns plain lines when nothing is selected, so the renderer can call this
+  unconditionally.
+  """
+  @spec decorate_lines(String.t(), non_neg_integer() | nil, non_neg_integer()) :: [String.t()]
+  def decorate_lines(text, anchor, cursor) do
+    case selection_range(anchor, cursor) do
+      nil ->
+        String.split(text, "\n")
+
+      {start, len} ->
+        sel_end = start + len
+
+        text
+        |> String.split("\n")
+        |> Enum.reduce({[], 0}, fn line, {acc, offset} ->
+          length_in_graphemes = line |> String.graphemes() |> length()
+          line_end = offset + length_in_graphemes
+
+          decorated = decorate_line(line, max(start - offset, 0), min(sel_end, line_end) - offset)
+
+          # +1 for the newline that was split out, so offsets stay aligned with
+          # grapheme indices in the original text.
+          {[decorated | acc], line_end + 1}
+        end)
+        |> elem(0)
+        |> Enum.reverse()
+    end
+  end
+
+  # `from`/`to` are grapheme offsets within THIS line; an empty or inverted span
+  # means the selection does not touch it.
+  defp decorate_line(line, from, to) when to <= from, do: line
+
+  defp decorate_line(line, from, to) do
+    graphemes = String.graphemes(line)
+    {before, rest} = Enum.split(graphemes, from)
+    {selected, tail} = Enum.split(rest, to - from)
+
+    case Enum.join(selected) do
+      "" -> line
+      sel -> Enum.join(before) <> "\e[7m" <> sel <> "\e[27m" <> Enum.join(tail)
+    end
+  end
+
+  @doc """
+  The selected span as `{start, length}`, or `nil` when nothing is selected.
+
+  Normalised so a drag leftwards selects exactly what the same drag rightwards
+  would: the anchor may sit on either side of the cursor.
+  """
+  @spec selection_range(non_neg_integer() | nil, non_neg_integer()) ::
+          {non_neg_integer(), pos_integer()} | nil
+  def selection_range(nil, _cursor), do: nil
+
+  def selection_range(anchor, cursor) when anchor == cursor, do: nil
+
+  def selection_range(anchor, cursor) do
+    start = min(anchor, cursor)
+    {start, abs(cursor - anchor)}
+  end
+
+  @doc """
+  Remove the selected span from `buffer`, returning `{buffer, cursor}`.
+
+  The cursor lands at the START of the removed span — where the text used to
+  begin — which is what every other editor does and what makes "select, then
+  type the replacement" work.
+
+  Returns the buffer untouched when there is no selection, so callers can route
+  every delete through this without checking first.
+  """
+  @spec delete_selection([String.t()], non_neg_integer() | nil, non_neg_integer()) ::
+          {[String.t()], non_neg_integer()}
+  def delete_selection(buffer, anchor, cursor) do
+    case selection_range(anchor, cursor) do
+      nil ->
+        {buffer, cursor}
+
+      {start, len} ->
+        # Split at the START and drop `len` from the tail half. Splitting at the
+        # wrong half here deletes the text on the other side of the selection -
+        # which looks like the editor eating the line you did not touch.
+        {before, rest} = Enum.split(buffer, start)
+        {before ++ Enum.drop(rest, len), start}
+    end
+  end
+
+  @doc """
+  Split `text` into `{before, selected, after}` for rendering.
+
+  Used to wrap the selected span in reverse video without the renderer needing
+  to know how selections are represented.
+  """
+  @spec selection_split(String.t(), non_neg_integer() | nil, non_neg_integer()) ::
+          {String.t(), String.t(), String.t()}
+  def selection_split(text, anchor, cursor) do
+    case selection_range(anchor, cursor) do
+      nil ->
+        {text, "", ""}
+
+      {start, len} ->
+        graphemes = String.graphemes(text)
+        {before, rest} = Enum.split(graphemes, start)
+        {selected, rest} = Enum.split(rest, len)
+        {Enum.join(before), Enum.join(selected), Enum.join(rest)}
+    end
+  end
+
+  # Terminal (row, col) → grapheme index, against the text as currently drawn.
+  defp click_index(state, row, col) do
+    index_at(
+      Enum.join(state.buffer),
+      Width.visible(state.prompt),
+      max(state.terminal_cols, 1),
+      row,
+      col
+    )
+  end
+
   defp visual_rows(width, cols), do: max(div(max(width, 1) - 1, cols) + 1, 1)
 
   defp visual_cursor(0, _cols), do: {0, 0}
@@ -396,14 +660,56 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     end
   end
 
+  # Width of the real terminal, in columns.
+  #
+  # `:io.columns/0` is asked first and almost always FAILS here: this readline
+  # reads a raw `/dev/tty` fd directly, bypassing `prim_tty`, and the Erlang IO
+  # system then answers `{:error, :enotsup}`. The old code fell straight to a
+  # hardcoded 80, so on any wider terminal the wrap arithmetic used the wrong
+  # column count and long input wrapped early with its tail invisible - the
+  # defect reported in #121.
+  #
+  # `stty size` is asked next, against the same `/dev/tty` the editor already
+  # opens for raw-mode control, so it reports the width of the terminal actually
+  # in use rather than whatever the BEAM thinks it has.
   defp terminal_columns(fallback \\ 80) do
     case :io.columns() do
       {:ok, cols} when is_integer(cols) and cols > 0 -> cols
+      _ -> stty_columns(fallback)
+    end
+  rescue
+    _ -> stty_columns(fallback)
+  end
+
+  defp stty_columns(fallback) do
+    case run_stty(["size"]) do
+      {:ok, output} -> parse_stty_size(output, fallback)
       _ -> fallback
     end
   rescue
     _ -> fallback
   end
+
+  @doc """
+  Columns from `stty size` output, which prints `"<rows> <cols>"`.
+
+  Split out as a pure function so the parsing IS testable. The shell-out itself
+  needs a live terminal fd and cannot run under `mix test`, but that is no
+  reason for the string handling - the part that actually goes wrong - to be
+  untested too.
+  """
+  @spec parse_stty_size(String.t(), pos_integer()) :: pos_integer()
+  def parse_stty_size(output, fallback) when is_binary(output) do
+    with [_rows, cols] <- output |> String.trim() |> String.split(~r/\s+/, parts: 2),
+         {n, _} <- Integer.parse(cols),
+         true <- n > 0 do
+      n
+    else
+      _ -> fallback
+    end
+  end
+
+  def parse_stty_size(_, fallback), do: fallback
 
   # --- Tab Completion ---
 
@@ -631,8 +937,32 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   # CSI sequences: ESC [ ...
+  # Read an SGR mouse report byte by byte until its final `M`/`m`.
+  #
+  # Bounded at 32 bytes: a well-formed report is ~12, and an unbounded read on a
+  # malformed sequence would block the editor forever waiting for a terminator
+  # that never arrives.
+  defp read_sgr_mouse(_tty, acc) when byte_size(acc) > 32, do: :unknown
+
+  defp read_sgr_mouse(tty, acc) do
+    case :file.read(tty, 1) do
+      {:ok, <<c::binary-size(1)>>} when c in ["M", "m"] ->
+        parse_sgr_mouse(acc <> c)
+
+      {:ok, <<c::binary-size(1)>>} ->
+        read_sgr_mouse(tty, acc <> c)
+
+      _ ->
+        :unknown
+    end
+  end
+
   defp read_csi(tty) do
     case :file.read(tty, 1) do
+      # SGR mouse: ESC [ < button ; col ; row (M|m)
+      {:ok, <<"<">>} ->
+        read_sgr_mouse(tty, "")
+
       {:ok, <<"A">>} ->
         :up
 
