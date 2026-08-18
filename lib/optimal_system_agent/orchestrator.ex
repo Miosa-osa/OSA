@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.ExecutionControl
+  alias OptimalSystemAgent.Agent.SubagentControl
+  alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Agent.BackgroundNotifier
   alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
   alias OptimalSystemAgent.Events.Bus
@@ -30,6 +33,9 @@ defmodule OptimalSystemAgent.Orchestrator do
   # the child's GenServer (loop.ex) — this timeout is the backstop for the
   # no-cancel-issued, just-plain-stuck case.
   @default_subagent_timeout_ms 2 * 60 * 60 * 1000
+
+  @doc false
+  def runner_key(agent_id), do: "subagent-runner:" <> agent_id
 
   # Slack between the INNER join deadline (inside the task, in
   # `execute_and_collect/6`) and the OUTER one (`join_subagent_task/3`). The
@@ -193,6 +199,8 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   @spec run_subagent(map()) :: {:ok, String.t()} | {:error, term()}
+  def run_subagent(%{routing_error: reason}), do: {:error, {:no_capable_model, reason}}
+
   def run_subagent(config) do
     task = Map.fetch!(config, :task)
     parent_id = Map.fetch!(config, :parent_session_id)
@@ -245,6 +253,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       # handler when this run was seeded from a peer's saved context rather
       # than a fresh spawn or a parent-fork.
       resumed_from: Map.get(config, :resumed_from)
+    })
+
+    ensure_execution_control(subagent_id, config, %{
+      parent_session_id: parent_id,
+      task: task,
+      role: role,
+      provider: provider,
+      model: model
     })
 
     Logger.info(
@@ -753,7 +769,10 @@ defmodule OptimalSystemAgent.Orchestrator do
   emits `:background_agent_completed` or `:background_agent_failed` on
   the Events.Bus, which the CLI and SSE consumers can display.
   """
-  @spec run_background(String.t(), map()) :: {:ok, String.t()}
+  @spec run_background(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def run_background(_parent_id, %{routing_error: reason}),
+    do: {:error, {:no_capable_model, reason}}
+
   def run_background(parent_id, config) do
     config = Map.put(config, :parent_session_id, parent_id)
     role = Map.get(config, :role, "background")
@@ -820,6 +839,15 @@ defmodule OptimalSystemAgent.Orchestrator do
       phase_detail: "waiting for a concurrency slot"
     })
 
+    ensure_execution_control(subagent_id, config, %{
+      parent_session_id: parent_id,
+      task: Map.get(config, :task, ""),
+      role: role,
+      provider: Map.get(config, :provider),
+      model: Map.get(config, :model),
+      recovery_state: "restartable"
+    })
+
     start_stall_watcher(parent_id, subagent_id, display_name, role)
 
     # The wall clock the USER experiences starts here, at dispatch — not at
@@ -828,6 +856,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     {:ok, runner_pid} =
       Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+        Registry.register(OptimalSystemAgent.SessionRegistry, runner_key(subagent_id), nil)
+
         # Concurrency admission. `:max_fleet_agents` (default 16) was enforced ONLY
         # on the `fleet` path — `run_background/2`, which is where the `delegate`
         # tool's `background: true` lands, had no ceiling whatsoever, so a model
@@ -891,113 +921,146 @@ defmodule OptimalSystemAgent.Orchestrator do
         # minutes it spent queued were measured by nobody and belonged to no
         # interval. Both numbers are now stated, and they mean different things.
         elapsed_ms = System.monotonic_time(:millisecond) - dispatched_at
+        final_run = RunStore.get(subagent_id)
 
         # If the run raised before it could mark itself terminal, reap the RunStore
         # entry so GET /runs never sticks on :running.
-        case result do
-          {:error, reason} ->
-            case RunStore.get(subagent_id) do
-              %{status: :running} ->
-                RunStore.complete(subagent_id, %{
-                  agent_id: subagent_id,
-                  status: :failed,
-                  summary: "background agent failed: #{inspect(reason)}",
-                  duration_ms: duration_ms
-                })
+        if operator_controlled?(subagent_id) do
+          record_terminal_skills(subagent_id)
 
-              _ ->
-                :ok
-            end
+          ExecutionControl.progress(subagent_id, %{
+            duration_ms: duration_ms,
+            tokens_used: final_run && final_run.tokens_used,
+            tool_count: final_run && final_run.tool_count
+          })
 
-          _ ->
-            :ok
-        end
+          ExecutionControl.broadcast(subagent_id, parent_id)
+          RunStore.release_lease(subagent_id)
+        else
+          case result do
+            {:error, reason} ->
+              case RunStore.get(subagent_id) do
+                %{status: :running} ->
+                  RunStore.complete(subagent_id, %{
+                    agent_id: subagent_id,
+                    status: :failed,
+                    summary: "background agent failed: #{inspect(reason)}",
+                    duration_ms: duration_ms
+                  })
 
-        # WS7 — structured usage + output-file for the <task-notification> the
-        # parent model receives (CC enqueueAgentNotification parity).
-        final_run = RunStore.get(subagent_id)
+                _ ->
+                  :ok
+              end
 
-        usage = reported_usage(final_run, duration_ms)
+            _ ->
+              :ok
+          end
 
-        output_file = RunStore.transcript_path_for(subagent_id)
+          # WS7 - structured usage + output-file for the <task-notification> the
+          # parent model receives (CC enqueueAgentNotification parity).
+          final_run = RunStore.get(subagent_id)
 
-        # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
-        # the persisted spend record) and was already being appended to the
-        # FOREGROUND delegate result — but a background run rode no event
-        # carrying it, so the panel could only ever show a whole-task estimate.
-        # `nil` when no spend was recorded: unknown and zero are different facts
-        # and the TUI renders them differently.
-        cost_usd = reported_cost_usd(subagent_id)
+          usage = reported_usage(final_run, duration_ms)
 
-        case result do
-          {:ok, response} ->
-            Bus.emit(:system_event, %{
-              event: :background_agent_completed,
-              session_id: parent_id,
-              agent_id: subagent_id,
-              display_name: display_name,
-              role: role,
-              result: String.slice(response, 0, 500),
-              duration_ms: duration_ms
-            })
+          output_file = RunStore.transcript_path_for(subagent_id)
 
-            Phoenix.PubSub.broadcast(
-              OptimalSystemAgent.PubSub,
-              "osa:session:#{parent_id}",
-              {:osa_event,
-               %{
-                 type: :background_agent_completed,
-                 agent_id: subagent_id,
-                 display_name: display_name,
-                 role: role,
-                 result: String.slice(response, 0, 500),
-                 duration_ms: duration_ms,
-                 elapsed_ms: elapsed_ms,
-                 usage: usage,
-                 cost_usd: cost_usd,
-                 output_file: output_file
-               }}
-            )
+          # What this teammate actually cost. `run_cost_usd/1` is durable (it reads
+          # the persisted spend record) and was already being appended to the
+          # FOREGROUND delegate result - but a background run rode no event
+          # carrying it, so the panel could only ever show a whole-task estimate.
+          # `nil` when no spend was recorded: unknown and zero are different facts
+          # and the TUI renders them differently.
+          cost_usd = reported_cost_usd(subagent_id)
 
-            emit_agent_finished(
-              parent_id,
-              subagent_id,
-              display_name,
-              duration_ms,
-              nil,
-              :completed
-            )
+          case result do
+            {:ok, response} ->
+              record_terminal_skills(subagent_id)
 
-          {:error, reason} ->
-            Bus.emit(:system_event, %{
-              event: :background_agent_failed,
-              session_id: parent_id,
-              agent_id: subagent_id,
-              display_name: display_name,
-              role: role,
-              error: inspect(reason),
-              duration_ms: duration_ms
-            })
+              ExecutionControl.finish(subagent_id, :completed, %{
+                duration_ms: duration_ms,
+                tokens_used: final_run && final_run.tokens_used,
+                tool_count: final_run && final_run.tool_count
+              })
 
-            Phoenix.PubSub.broadcast(
-              OptimalSystemAgent.PubSub,
-              "osa:session:#{parent_id}",
-              {:osa_event,
-               %{
-                 type: :background_agent_failed,
-                 agent_id: subagent_id,
-                 display_name: display_name,
-                 role: role,
-                 error: inspect(reason),
-                 duration_ms: duration_ms,
-                 elapsed_ms: elapsed_ms,
-                 usage: usage,
-                 cost_usd: cost_usd,
-                 output_file: output_file
-               }}
-            )
+              Bus.emit(:system_event, %{
+                event: :background_agent_completed,
+                session_id: parent_id,
+                agent_id: subagent_id,
+                display_name: display_name,
+                role: role,
+                result: String.slice(response, 0, 500),
+                duration_ms: duration_ms
+              })
 
-            emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :failed)
+              Phoenix.PubSub.broadcast(
+                OptimalSystemAgent.PubSub,
+                "osa:session:#{parent_id}",
+                {:osa_event,
+                 %{
+                   type: :background_agent_completed,
+                   agent_id: subagent_id,
+                   display_name: display_name,
+                   role: role,
+                   result: String.slice(response, 0, 500),
+                   duration_ms: duration_ms,
+                   elapsed_ms: elapsed_ms,
+                   usage: usage,
+                   cost_usd: cost_usd,
+                   output_file: output_file
+                 }}
+              )
+
+              emit_agent_finished(
+                parent_id,
+                subagent_id,
+                display_name,
+                duration_ms,
+                nil,
+                :completed
+              )
+
+            {:error, reason} ->
+              record_terminal_skills(subagent_id)
+
+              ExecutionControl.increment(subagent_id, :failure_count)
+
+              ExecutionControl.finish(subagent_id, :failed, %{
+                duration_ms: duration_ms,
+                tokens_used: final_run && final_run.tokens_used,
+                tool_count: final_run && final_run.tool_count,
+                last_error: inspect(reason)
+              })
+
+              Bus.emit(:system_event, %{
+                event: :background_agent_failed,
+                session_id: parent_id,
+                agent_id: subagent_id,
+                display_name: display_name,
+                role: role,
+                error: inspect(reason),
+                duration_ms: duration_ms
+              })
+
+              Phoenix.PubSub.broadcast(
+                OptimalSystemAgent.PubSub,
+                "osa:session:#{parent_id}",
+                {:osa_event,
+                 %{
+                   type: :background_agent_failed,
+                   agent_id: subagent_id,
+                   display_name: display_name,
+                   role: role,
+                   error: inspect(reason),
+                   duration_ms: duration_ms,
+                   elapsed_ms: elapsed_ms,
+                   usage: usage,
+                   cost_usd: cost_usd,
+                   output_file: output_file
+                 }}
+              )
+
+              emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :failed)
+          end
         end
       end)
 
@@ -1041,20 +1104,24 @@ defmodule OptimalSystemAgent.Orchestrator do
 
       receive do
         {:DOWN, ^ref, :process, _pid, reason} ->
-          # A clean exit means the task ran to the end of its body and has
-          # already broadcast its own terminal event.
-          if reason != :normal do
-            report_runner_death(parent_id, subagent_id, display_name, role, reason)
+          if operator_controlled?(subagent_id) do
+            :ok
           else
-            # Even a `:normal` exit is only trustworthy if a terminal row
-            # exists. A task killed while `:brutal_kill`-shutting-down its
-            # supervisor can report `:normal`; the row is the evidence.
-            case RunStore.get(subagent_id) do
-              %{status: :running} ->
-                report_runner_death(parent_id, subagent_id, display_name, role, :normal)
+            # A clean exit means the task ran to the end of its body and has
+            # already broadcast its own terminal event.
+            if reason != :normal do
+              report_runner_death(parent_id, subagent_id, display_name, role, reason)
+            else
+              # Even a `:normal` exit is only trustworthy if a terminal row
+              # exists. A task killed while `:brutal_kill`-shutting-down its
+              # supervisor can report `:normal`; the row is the evidence.
+              case RunStore.get(subagent_id) do
+                %{status: :running} ->
+                  report_runner_death(parent_id, subagent_id, display_name, role, :normal)
 
-              _ ->
-                :ok
+                _ ->
+                  :ok
+              end
             end
           end
       end
@@ -1192,16 +1259,30 @@ defmodule OptimalSystemAgent.Orchestrator do
             message
           end
 
+        control = ExecutionControl.get(agent_id) || %{}
+
         config =
           %{
             task: task,
             role: run.role,
             agent_id: agent_id,
             fork_messages: transcript,
-            working_dir: working_dir
+            working_dir: working_dir,
+            provider: Map.get(control, :provider),
+            model: Map.get(control, :model),
+            model_reason: Map.get(control, :model_reason),
+            model_requirements: Map.get(control, :model_requirements)
           }
           |> Enum.reject(fn {_k, v} -> is_nil(v) end)
           |> Map.new()
+
+        ExecutionControl.increment(agent_id, :retry_count)
+
+        ExecutionControl.progress(agent_id, %{
+          status: :running,
+          recovery_state: "resumed",
+          last_recovery_instruction: message
+        })
 
         run_background(run.parent_session_id, config)
     end
@@ -1960,6 +2041,15 @@ defmodule OptimalSystemAgent.Orchestrator do
         "for #{minutes}m"
     )
 
+    ExecutionControl.progress(subagent_id, %{
+      status: :stalled,
+      current_tool: run |> Map.get(:recent_actions, []) |> List.first(),
+      tool_count: Map.get(run, :tool_count, 0),
+      tokens_used: Map.get(run, :tokens_used, 0),
+      recovery_state: "inspect_retry_cancel_or_reassign",
+      stalled_ms: stalled_ms
+    })
+
     payload = %{
       event: :background_agent_stalled,
       session_id: parent_id,
@@ -2274,21 +2364,28 @@ defmodule OptimalSystemAgent.Orchestrator do
       when phase in ["start", :start] ->
         action = format_action(tool_name, args)
         RunStore.progress(subagent_id, action, tool_count)
+        record_execution_progress(subagent_id, action, tool_count)
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_progress",
-          agent_name: subagent_id,
-          current_action: action,
-          tool_uses: tool_count,
-          tokens_used: forwarder_tokens(subagent_id),
-          recent_actions: recent_actions(subagent_id),
-          # The backend's own clock for this run — see `run_elapsed_ms/1`. It
-          # rides on every progress frame so a client that connected late, or
-          # reconnected, learns the real age alongside the tool count instead of
-          # pairing a real count with a freshly-zeroed local timer.
-          elapsed_ms: run_elapsed_ms(subagent_id),
-          description: ""
-        })
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: action,
+              tool_uses: tool_count,
+              tokens_used: forwarder_tokens(subagent_id),
+              recent_actions: recent_actions(subagent_id),
+              # The backend's own clock for this run - see `run_elapsed_ms/1`. It
+              # rides on every progress frame so a client that connected late, or
+              # reconnected, learns the real age alongside the tool count instead of
+              # pairing a real count with a freshly-zeroed local timer.
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
 
         # The THIRD silence, and the one the brief names first: a tool that runs
         # for minutes (a build, a test suite, a large grep) emits nothing between
@@ -2308,17 +2405,24 @@ defmodule OptimalSystemAgent.Orchestrator do
       when phase in ["end", :end] ->
         new_count = tool_count + 1
         RunStore.progress(subagent_id, to_string(tool_name), new_count)
+        record_execution_progress(subagent_id, nil, new_count)
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_progress",
-          agent_name: subagent_id,
-          current_action: to_string(tool_name),
-          tool_uses: new_count,
-          tokens_used: forwarder_tokens(subagent_id),
-          recent_actions: recent_actions(subagent_id),
-          elapsed_ms: run_elapsed_ms(subagent_id),
-          description: ""
-        })
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: to_string(tool_name),
+              tool_uses: new_count,
+              tokens_used: forwarder_tokens(subagent_id),
+              recent_actions: recent_actions(subagent_id),
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
 
         # A finished tool means the agent has gone back to the model, and it
         # will emit nothing again until the NEXT tool starts.
@@ -2457,6 +2561,89 @@ defmodule OptimalSystemAgent.Orchestrator do
   # Bounded overhead on one side, unrecoverable data loss on the other: default on.
   defp subagent_worktree_snapshot? do
     Application.get_env(:optimal_system_agent, :subagent_worktree_snapshot, true) == true
+  end
+
+  defp ensure_execution_control(agent_id, config, attrs) do
+    if ExecutionControl.get(agent_id) do
+      ExecutionControl.progress(agent_id, attrs)
+    else
+      ExecutionControl.start(
+        agent_id,
+        attrs
+        |> Map.put(:model_reason, Map.get(config, :model_reason, "tier default"))
+        |> Map.put(:model_requirements, Map.get(config, :model_requirements, ["tools"]))
+        |> Map.put(:skill_reason, "subagent selects skills independently for its task")
+      )
+    end
+  end
+
+  defp record_execution_progress(agent_id, current_tool, tool_count) do
+    skills = ActiveSkills.list(agent_id)
+    control = ExecutionControl.get(agent_id) || %{}
+
+    ExecutionControl.progress(agent_id, %{
+      current_tool: current_tool,
+      tool_count: tool_count,
+      tokens_used: forwarder_tokens(agent_id),
+      active_skills: skills,
+      skill_reason:
+        if(skills == [],
+          do: "no skill selected yet",
+          else: selected_skill_reason(skills, control)
+        )
+    })
+  end
+
+  defp record_terminal_skills(agent_id) do
+    skills = ActiveSkills.list(agent_id)
+    control = ExecutionControl.get(agent_id) || %{}
+
+    ExecutionControl.progress(agent_id, %{
+      active_skills: skills,
+      skill_reason:
+        if(skills == [],
+          do: "no skill was selected for this task",
+          else: selected_skill_reason(skills, control)
+        )
+    })
+  end
+
+  defp selected_skill_reason(skills, control) do
+    task = control |> Map.get(:task, "delegated task") |> to_string() |> String.slice(0, 120)
+
+    "subagent explicitly selected #{Enum.join(skills, ", ")} as relevant to: #{task}"
+  end
+
+  defp operator_controlled?(agent_id) do
+    case ExecutionControl.get(agent_id) do
+      %{status: status} ->
+        to_string(status) in ["paused", "interrupted", "cancelled", "reassigned"]
+
+      _ ->
+        false
+    end
+  end
+
+  defp execution_event_fields(agent_id) do
+    case ExecutionControl.get(agent_id) do
+      nil ->
+        %{}
+
+      control ->
+        control
+        |> Map.take([
+          :active_skills,
+          :model_reason,
+          :skill_reason,
+          :retry_count,
+          :failure_count,
+          :delivery_status
+        ])
+        |> Map.put(
+          :available_controls,
+          SubagentControl.available_controls(Map.get(control, :status, "unknown"))
+        )
+    end
   end
 
   defp emit_event(parent_session_id, event_data) do

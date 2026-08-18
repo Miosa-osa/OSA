@@ -11,6 +11,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   a business rule, not a display concern.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Scratchpad
@@ -19,6 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Tier
+  alias OptimalSystemAgent.Agent.DelegationRouter
   alias OptimalSystemAgent.Agent.DelegationPolicy
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.TaskNotifications
@@ -178,7 +181,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         _ -> nil
       end
 
-    %{
+    config = %{
       # Inject the SHARED scratchpad directory into the worker's task (CC
       # scratchpadDir dependency-injection parity). The worker resolves the same
       # directory at runtime because its own `scratchpad` tool walks the
@@ -232,6 +235,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
       timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms"))
     }
+
+    DelegationRouter.resolve(child_task, config)
   end
 
   @doc """
@@ -511,14 +516,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
       # `mark_notified/1` is the same exactly-once token the subagent and shell
       # paths arbitrate on, keyed here by the stable batch id.
-      if TaskNotifications.mark_notified(batch_id) do
-        TaskNotifications.queue(parent_id, %{
-          task_id: batch_id,
-          status: :completed,
-          summary: summary
-        })
+      case TaskNotifications.queue_once(parent_id, %{
+             task_id: batch_id,
+             status: :completed,
+             summary: summary
+           }) do
+        :ok ->
+          Loop.poke(parent_id)
 
-        Loop.poke(parent_id)
+        :already_notified ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("[delegate] durable fan-out delivery failed: #{inspect(reason)}")
       end
     end)
 

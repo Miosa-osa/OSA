@@ -272,8 +272,7 @@ impl App {
                         }
                         self.sse_reconnecting = false;
                         self.toasts.push(
-                            "That session is no longer available. Starting a fresh session…"
-                                .into(),
+                            "That session is no longer available. Starting a fresh session…".into(),
                             crate::components::toast::ToastLevel::Warning,
                         );
                         self.create_session();
@@ -1807,8 +1806,14 @@ impl App {
                 batch_id,
                 elapsed_ms,
             } => {
-                self.agents
-                    .agent_started(&agent_name, &role, &model, &subject, batch_id, elapsed_ms);
+                self.agents.agent_started(
+                    &agent_name,
+                    &role,
+                    &model,
+                    &subject,
+                    batch_id,
+                    elapsed_ms,
+                );
                 // Short human label, never the raw `agent:session-…:osa-x` key.
                 let short = crate::components::agents::short_agent_label(&agent_name);
                 let display = if role.is_empty() {
@@ -1827,6 +1832,13 @@ impl App {
                 subject,
                 recent_actions,
                 elapsed_ms,
+                active_skills,
+                model_reason,
+                skill_reason,
+                retry_count,
+                failure_count,
+                delivery_status,
+                available_controls,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1836,6 +1848,16 @@ impl App {
                     &subject,
                     recent_actions,
                     elapsed_ms,
+                );
+                self.agents.agent_runtime(
+                    &agent_name,
+                    active_skills,
+                    model_reason,
+                    skill_reason,
+                    retry_count,
+                    failure_count,
+                    delivery_status,
+                    available_controls,
                 );
                 // Codex-style live naming: during orchestration the leader spinner
                 // otherwise shows a generic flavor verb while sub-agents do the
@@ -1859,6 +1881,29 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
+            BackendEvent::AgentControlResult {
+                agent_id,
+                action,
+                result,
+            } => match result {
+                Ok(available_controls) => {
+                    self.agents
+                        .set_available_controls(&agent_id, available_controls);
+                    self.toasts.push(
+                        format!("Agent {}: {} accepted", agent_id, action.replace('_', " ")),
+                        crate::components::toast::ToastLevel::Success,
+                    );
+                }
+                Err(error) => self.toasts.push(
+                    format!(
+                        "Agent {}: {} failed: {}",
+                        agent_id,
+                        action.replace('_', " "),
+                        error
+                    ),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
             BackendEvent::OrchestratorAgentCompleted {
                 agent_name,
                 tool_uses,

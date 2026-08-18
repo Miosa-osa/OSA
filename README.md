@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.112-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.113-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-82-blue.svg)](#built-in-tools)
@@ -48,7 +48,7 @@ setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.112` (`$env:OSA_VERSION = "v1.0.112"` on
+specific release with `OSA_VERSION=v1.0.113` (`$env:OSA_VERSION = "v1.0.113"` on
 Windows). On any other platform (macOS Intel, Linux arm64) the installer stops
 and points you at the from-source script below.
 
@@ -774,15 +774,14 @@ reported. Turn it off with `config :optimal_system_agent, post_edit_verify: [ena
 OSA can fan out into a **fleet** of independent, full-power agents and watch them
 live from a Claude-Code-style roster under the composer.
 
-**The fleet roster.** Beneath the composer sits a live roster of every running
-agent. `main` is always row 0, rendered in green, the home node you always return
-to and never killable. Each spawned node shows its agent-type, a one-line live
-activity summary, wall-clock elapsed, and cumulative tokens (`↓ 107.3k`), all
-updated every tick. Press **←** to move focus from the composer into the roster,
-**↑/↓** to select a node, **Enter** to attach (the transcript view switches to
-that node's live stream, so you watch it think and act in real time), and **x**
-to stop it. Attaching is a read view: it never pauses the node or steals its
-input. Selecting `main` + Enter returns you to your own conversation.
+**The fleet roster.** Beneath the composer sits a live roster of every running agent.
+`main` is always row 0, rendered in green, the home node you always return to and never killable.
+Each spawned node shows its agent type, active skills, current tool or activity, wall-clock elapsed, cumulative tokens, retries, failures, and parent-delivery state.
+Open a selected node's summary to see why its model and skills were chosen.
+Press **←** to move focus from the composer into the roster, **↑/↓** to select a node, and **Enter** to attach to its live transcript.
+Use **p** to pause, **u** to resume, **r** to retry, **t** to cancel its current tool, **a** to reassign its task, and **x** to stop it.
+Attaching is a read view and never pauses the node or steals its input.
+Selecting `main` and pressing Enter returns you to your own conversation.
 
 **Full-power spawn.** Every fleet node is a complete OSA agent loop, not a
 restricted worker, its own conversation, its own token budget, and full tools,
@@ -791,12 +790,11 @@ allowlist of its **custom agent-type** (`general-purpose`, `code-reviewer`, …)
 so a `code-reviewer` node comes up with the reviewer prompt and read-only tools,
 not a generic clone.
 
-**Automatic, not manual.** Spawning is the agent's own decision, it invokes the
-`fleet` tool itself when a task benefits from parallel peers. `←` (browse the
-roster) and `/fg` are optional *viewing* controls, not something you run to make
-the fleet happen. Nodes coordinate through a shared scratchpad, and each node's
-budget (spend plus cap) is checkpointed, so a cap survives a crash or restart
-instead of resetting to zero.
+**Automatic, not manual.** Spawning is the agent's own decision when a task benefits from parallel peers.
+Delegation routes each task to a tool-capable model and records the selection rationale.
+Nodes coordinate through a shared scratchpad, and each node's budget and execution-control record are checkpointed.
+After a full backend restart, orphaned autonomous nodes are recovered from their durable transcripts under the same agent IDs unless `fleet_resume_on_boot` is disabled.
+Completion delivery uses durable receipts so the parent can acknowledge a result without losing it or injecting it twice after a crash.
 
 **Dynamic workflows (ultra only).** At the top effort tier, `ultra`, OSA unlocks
 dynamic workflows: fan-out orchestration that spreads a list of work across the

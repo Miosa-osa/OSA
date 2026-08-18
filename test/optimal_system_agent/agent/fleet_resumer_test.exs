@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.FleetResumer
+  alias OptimalSystemAgent.Agent.ExecutionControl
   alias OptimalSystemAgent.Agent.RunStore
 
   defp run(id, attrs \\ %{}) do
@@ -74,6 +75,20 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
       assert Enum.map(selected, & &1.agent_id) == ["r"]
     end
 
+    test "does not recover an operator-paused durable run" do
+      isolate_store()
+      :ok = ExecutionControl.start("paused", %{parent_session_id: "root", task: "t"})
+      :ok = ExecutionControl.progress("paused", %{status: :paused})
+
+      selected =
+        FleetResumer.qualifying_orphans([run("paused")],
+          alive_fun: fn _ -> false end,
+          posture_fun: fn _ -> true end
+        )
+
+      assert selected == []
+    end
+
     test "budget caps the number of selected runs" do
       runs = for n <- 1..10, do: run("r#{n}")
 
@@ -104,6 +119,26 @@ defmodule OptimalSystemAgent.Agent.FleetResumerTest do
   end
 
   describe "resume_on_boot/1 coordination" do
+    test "autonomous crash recovery is enabled by default and can be disabled" do
+      isolate_store()
+      previous = Application.get_env(:optimal_system_agent, :fleet_resume_on_boot)
+      Application.delete_env(:optimal_system_agent, :fleet_resume_on_boot)
+
+      on_exit(fn ->
+        if is_nil(previous),
+          do: Application.delete_env(:optimal_system_agent, :fleet_resume_on_boot),
+          else: Application.put_env(:optimal_system_agent, :fleet_resume_on_boot, previous)
+      end)
+
+      summary =
+        FleetResumer.resume_on_boot(
+          runs: [],
+          alive_fun: fn _ -> false end
+        )
+
+      assert summary.enabled == true
+    end
+
     test "when disabled, resumes nothing but still reconciles ghosts" do
       # Seed a stale running row in the real (test-isolated) RunStore.
       isolate_store()

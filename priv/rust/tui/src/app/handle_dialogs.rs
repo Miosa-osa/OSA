@@ -185,9 +185,9 @@ impl App {
                             match client.rename_session(&id, &new_title).await {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    let _ = tx.send(Event::Backend(
-                                        BackendEvent::CommandResult(Err(e.to_string())),
-                                    ));
+                                    let _ = tx.send(Event::Backend(BackendEvent::CommandResult(
+                                        Err(e.to_string()),
+                                    )));
                                 }
                             }
                         });
@@ -503,8 +503,9 @@ impl App {
     /// current row is pre-selected and its swatch shows immediately.
     pub(crate) fn open_theme_picker(&mut self) {
         if self.state.can_transition_to(AppState::ThemePicker) {
-            self.theme_picker =
-                Some(crate::dialogs::theme_picker::ThemePicker::new(self.config.theme.clone()));
+            self.theme_picker = Some(crate::dialogs::theme_picker::ThemePicker::new(
+                self.config.theme.clone(),
+            ));
             self.enter_overlay(AppState::ThemePicker);
         }
     }
@@ -550,7 +551,9 @@ impl App {
         tokio::spawn(async move {
             let ev = match client.get_permission_rules().await {
                 Ok(r) => crate::event::backend::BackendEvent::PermissionRulesLoaded(Ok(r)),
-                Err(e) => crate::event::backend::BackendEvent::PermissionRulesLoaded(Err(e.to_string())),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::PermissionRulesLoaded(Err(e.to_string()))
+                }
             };
             let _ = tx.send(crate::event::Event::Backend(ev));
         });
@@ -635,7 +638,9 @@ impl App {
         tokio::spawn(async move {
             let ev = match client.list_skills().await {
                 Ok(r) => crate::event::backend::BackendEvent::SkillsBrowserLoaded(Ok(r)),
-                Err(e) => crate::event::backend::BackendEvent::SkillsBrowserLoaded(Err(e.to_string())),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::SkillsBrowserLoaded(Err(e.to_string()))
+                }
             };
             let _ = tx.send(crate::event::Event::Backend(ev));
         });
@@ -702,7 +707,9 @@ impl App {
         tokio::spawn(async move {
             let ev = match client.get_channels().await {
                 Ok(r) => crate::event::backend::BackendEvent::ChannelsListLoaded(Ok(r)),
-                Err(e) => crate::event::backend::BackendEvent::ChannelsListLoaded(Err(e.to_string())),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::ChannelsListLoaded(Err(e.to_string()))
+                }
             };
             let _ = tx.send(crate::event::Event::Backend(ev));
         });
@@ -734,9 +741,9 @@ impl App {
         tokio::spawn(async move {
             let event = match client.list_rewind_checkpoints(&sid).await {
                 Ok(cps) => crate::event::backend::BackendEvent::RewindCheckpointsLoaded(Ok(cps)),
-                Err(e) => crate::event::backend::BackendEvent::RewindCheckpointsLoaded(Err(
-                    e.to_string(),
-                )),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::RewindCheckpointsLoaded(Err(e.to_string()))
+                }
             };
             let _ = tx.send(crate::event::Event::Backend(event));
         });
@@ -945,7 +952,11 @@ impl App {
     }
 
     /// Persist + apply a single committed config value.
-    fn apply_config_value(&mut self, field: crate::dialogs::config_editor::ConfigField, value: &str) {
+    fn apply_config_value(
+        &mut self,
+        field: crate::dialogs::config_editor::ConfigField,
+        value: &str,
+    ) {
         use crate::components::status_bar::PermissionMode;
         use crate::dialogs::config_editor::ConfigField;
 
@@ -1049,14 +1060,16 @@ impl App {
                         let client = self.client.clone();
                         let request = crate::client::types::SurveyAnswerRequest {
                             survey_id: result.survey_id.clone(),
-                            answers: result.answers.iter().map(|a| {
-                                crate::client::types::SurveyAnswerEntry {
+                            answers: result
+                                .answers
+                                .iter()
+                                .map(|a| crate::client::types::SurveyAnswerEntry {
                                     question_index: a.question_index,
                                     question_text: a.question_text.clone(),
                                     selected: a.selected.clone(),
                                     free_text: a.free_text.clone(),
-                                }
-                            }).collect(),
+                                })
+                                .collect(),
                             session_id: session_id.clone(),
                         };
                         tokio::spawn(async move {
@@ -1192,6 +1205,56 @@ impl App {
         }
     }
 
+    /// Apply one durable runtime command to the selected subagent.
+    pub(super) fn control_selected_agent(&mut self, action: &'static str) {
+        let idx = self.agents_dashboard_selected;
+        let Some(id) = self.agents.agent_id_at(idx) else {
+            self.toasts.push(
+                "Select a subagent first".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+            return;
+        };
+
+        if !self.agents.control_allowed(&id, action) {
+            self.toasts.push(
+                format!(
+                    "Agent {} cannot {} in its current state",
+                    id,
+                    action.replace('_', " ")
+                ),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let target = id.clone();
+        tokio::spawn(async move {
+            let result = client
+                .control_agent(&target, action)
+                .await
+                .map(|response| {
+                    response
+                        .pointer("/agent/available_controls")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .map_err(|error| error.to_string());
+
+            let _ = tx.send(Event::Backend(BackendEvent::AgentControlResult {
+                agent_id: target,
+                action: action.to_owned(),
+                result,
+            }));
+        });
+    }
+
     /// Dashboard/inline "stop" action in ROSTER index space: index 0 is the
     /// synthetic `main` root (never cancellable → hint), `1..=entry_count`
     /// cancel a sub-agent (backend `task_stop` equivalent), and the rest stop a
@@ -1233,12 +1296,12 @@ impl App {
                 let tx = self.event_tx.clone();
                 tokio::spawn(async move {
                     let ev = match client.agent_transcript(&id).await {
-                        Ok(text) => crate::event::backend::BackendEvent::AgentTranscript(Ok((
-                            id, text,
-                        ))),
-                        Err(e) => crate::event::backend::BackendEvent::AgentTranscript(Err(
-                            e.to_string(),
-                        )),
+                        Ok(text) => {
+                            crate::event::backend::BackendEvent::AgentTranscript(Ok((id, text)))
+                        }
+                        Err(e) => {
+                            crate::event::backend::BackendEvent::AgentTranscript(Err(e.to_string()))
+                        }
                     };
                     let _ = tx.send(crate::event::Event::Backend(ev));
                 });

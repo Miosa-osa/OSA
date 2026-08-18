@@ -142,6 +142,43 @@ defmodule OptimalSystemAgent.Agent.TaskNotificationsTest do
     refute TN.mark_notified(id)
   end
 
+  test "a failed durable enqueue can release the notification claim" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    assert TN.mark_notified(id)
+    assert :ok = TN.clear_notified(id)
+    assert TN.mark_notified(id)
+  end
+
+  test "racing producers durably enqueue one notification" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    session = "session-" <> id
+    notification = %{task_id: id, status: :completed, summary: "done"}
+
+    results =
+      1..8
+      |> Task.async_stream(fn _ -> TN.queue_once(session, notification) end,
+        max_concurrency: 8,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == :ok)) == 1
+    assert TN.count(session) == 1
+  end
+
+  test "takes over a notification claim whose owner died" do
+    id = "task-" <> Integer.to_string(System.unique_integer([:positive]))
+    session = "session-" <> id
+    owner = spawn(fn -> :ok end)
+    ref = Process.monitor(owner)
+    assert_receive {:DOWN, ^ref, :process, ^owner, _reason}
+
+    :ets.insert(:osa_task_notified, {id, :claiming, owner, System.monotonic_time(:millisecond)})
+
+    assert :ok = TN.queue_once(session, %{task_id: id, status: :completed, summary: "done"})
+    assert TN.count(session) == 1
+  end
+
   test "to_messages renders task-notification XML system messages" do
     [msg] =
       TN.to_messages([

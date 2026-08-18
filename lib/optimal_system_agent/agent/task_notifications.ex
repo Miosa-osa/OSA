@@ -33,6 +33,9 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @notified_table :osa_task_notified
   @poke_table :osa_task_notification_pokes
   @coalesce_ms 25
+  @claim_retries 1_200
+  @claim_retry_ms 5
+  @claim_lease_ms 5_000
 
   @type notification :: map()
 
@@ -44,6 +47,18 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
     ArgumentError ->
       Logger.warning("[task-notif] queue table missing — notification dropped for #{session_id}")
       :ok
+  end
+
+  @doc "Claim and durably enqueue one task notification exactly once."
+  @spec queue_once(String.t(), notification()) :: :ok | :already_notified | {:error, term()}
+  def queue_once(session_id, notification) when is_binary(session_id) and is_map(notification) do
+    task_id = to_string(notification[:task_id] || notification["task_id"] || "")
+
+    if task_id in ["", "unknown"] do
+      queue(session_id, notification)
+    else
+      claim_and_queue(session_id, task_id, notification, @claim_retries)
+    end
   end
 
   @doc "Remove and return all queued notifications for `session_id`, oldest first."
@@ -69,6 +84,35 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   @doc false
   def acknowledge(session_id, receipt),
     do: DurableInbox.acknowledge(@table, session_id, :task_notifications, receipt)
+
+  @doc false
+  def acknowledge(session_id, receipt, notifications) when is_list(notifications) do
+    case acknowledge(session_id, receipt) do
+      :ok ->
+        receipt_id = Enum.map_join(receipt, ",", &to_string/1)
+
+        Enum.each(notifications, fn notification ->
+          case notification[:task_id] || notification["task_id"] do
+            id when is_binary(id) and id != "" ->
+              OptimalSystemAgent.Agent.ExecutionControl.delivery(
+                id,
+                receipt_id,
+                :acknowledged
+              )
+
+              OptimalSystemAgent.Agent.ExecutionControl.broadcast(id, session_id)
+
+            _ ->
+              :ok
+          end
+        end)
+
+        :ok
+
+      error ->
+        error
+    end
+  end
 
   @doc false
   def release(session_id, receipt), do: DurableInbox.release(@table, session_id, receipt)
@@ -175,10 +219,61 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   """
   @spec mark_notified(String.t()) :: boolean()
   def mark_notified(task_id) when is_binary(task_id) do
-    :ets.insert_new(@notified_table, {task_id, System.system_time(:millisecond)})
+    :ets.insert_new(@notified_table, {task_id, :notified, System.system_time(:millisecond)})
   rescue
     ArgumentError -> true
   end
+
+  @doc "Release a notification claim when durable queueing fails."
+  @spec clear_notified(String.t()) :: :ok
+  def clear_notified(task_id) when is_binary(task_id) do
+    :ets.delete(@notified_table, task_id)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp claim_and_queue(session_id, task_id, notification, retries_left) do
+    claim = {task_id, :claiming, self(), monotonic_ms()}
+
+    if :ets.insert_new(@notified_table, claim) do
+      case queue(session_id, notification) do
+        :ok ->
+          :ets.insert(@notified_table, {task_id, :notified, System.system_time(:millisecond)})
+          :ok
+
+        {:error, reason} = error ->
+          :ets.delete_object(@notified_table, claim)
+          Logger.error("[task-notif] durable claim failed for #{task_id}: #{inspect(reason)}")
+          error
+      end
+    else
+      await_claim(session_id, task_id, notification, retries_left)
+    end
+  end
+
+  defp await_claim(_session_id, _task_id, _notification, 0), do: {:error, :claim_timeout}
+
+  defp await_claim(session_id, task_id, notification, retries_left) do
+    case :ets.lookup(@notified_table, task_id) do
+      [{^task_id, :claiming, owner, claimed_at} = stale_claim] ->
+        if not Process.alive?(owner) or monotonic_ms() - claimed_at >= @claim_lease_ms do
+          :ets.delete_object(@notified_table, stale_claim)
+          claim_and_queue(session_id, task_id, notification, retries_left - 1)
+        else
+          Process.sleep(@claim_retry_ms)
+          claim_and_queue(session_id, task_id, notification, retries_left - 1)
+        end
+
+      [] ->
+        claim_and_queue(session_id, task_id, notification, retries_left - 1)
+
+      _ ->
+        :already_notified
+    end
+  end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   @doc """
   Build the injected message list: one system message per notification,

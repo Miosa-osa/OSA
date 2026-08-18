@@ -377,11 +377,14 @@ impl Agents {
                 } else {
                     theme.recede()
                 };
-                let agent_type = if !entry.role.is_empty() {
+                let mut agent_type = if !entry.role.is_empty() {
                     entry.role.clone()
                 } else {
                     entry.name.clone()
                 };
+                if !entry.active_skills.is_empty() {
+                    agent_type.push_str(&format!(" [{}]", entry.active_skills.join(",")));
+                }
                 let type_style = if selected {
                     theme.plan_selected()
                 } else {
@@ -1005,7 +1008,7 @@ impl Agents {
 
         // Footer hint.
         lines.push(Line::from(Span::styled(
-            "↑/↓ select   enter view   c/x stop   Esc/q close",
+            "↑/↓ select   enter view   r retry   p/u pause/resume   t stop tool   a reassign   x stop   Esc close",
             theme.faint(),
         )));
 

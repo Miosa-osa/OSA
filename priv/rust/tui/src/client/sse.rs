@@ -1096,6 +1096,20 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 recent_actions: Vec<String>,
                 #[serde(default)]
                 elapsed_ms: Option<u64>,
+                #[serde(default)]
+                active_skills: Vec<String>,
+                #[serde(default)]
+                model_reason: String,
+                #[serde(default)]
+                skill_reason: String,
+                #[serde(default)]
+                retry_count: u32,
+                #[serde(default)]
+                failure_count: u32,
+                #[serde(default)]
+                delivery_status: String,
+                #[serde(default)]
+                available_controls: Vec<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -1106,6 +1120,13 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 subject: ev.description,
                 recent_actions: ev.recent_actions,
                 elapsed_ms: ev.elapsed_ms,
+                active_skills: ev.active_skills,
+                model_reason: ev.model_reason,
+                skill_reason: ev.skill_reason,
+                retry_count: ev.retry_count,
+                failure_count: ev.failure_count,
+                delivery_status: ev.delivery_status,
+                available_controls: ev.available_controls,
             })
         }
 
@@ -2651,6 +2672,31 @@ mod tests {
                 assert!(message.contains("no progress"));
             }
             other => panic!("stall must not fall through to ParseWarning: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn progress_carries_subagent_control_plane_state() {
+        let frame = br#"{"event":"orchestrator_agent_progress","agent_name":"worker","current_action":"shell_execute","tool_uses":4,"tokens_used":1200,"active_skills":["diagnose"],"model_reason":"tools and large context","skill_reason":"matched debugging task","retry_count":2,"failure_count":1,"delivery_status":"acknowledged"}"#;
+
+        match parse_sse_event("orchestrator_agent_progress", frame) {
+            Some(BackendEvent::OrchestratorAgentProgress {
+                active_skills,
+                model_reason,
+                skill_reason,
+                retry_count,
+                failure_count,
+                delivery_status,
+                ..
+            }) => {
+                assert_eq!(active_skills, vec!["diagnose"]);
+                assert_eq!(model_reason, "tools and large context");
+                assert_eq!(skill_reason, "matched debugging task");
+                assert_eq!(retry_count, 2);
+                assert_eq!(failure_count, 1);
+                assert_eq!(delivery_status, "acknowledged");
+            }
+            other => panic!("unexpected: {:?}", other),
         }
     }
 

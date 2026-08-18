@@ -85,6 +85,9 @@ defmodule OptimalSystemAgent.Agent.ActiveSkillsTest do
       |> Enum.map(&(&1[:name] || &1["name"]))
       |> Enum.filter(&is_binary/1)
       |> Enum.uniq()
+      |> Enum.filter(fn name ->
+        match?({:ok, _body}, OptimalSystemAgent.Tools.Registry.load_skill_body(name))
+      end)
       |> Enum.take(14)
 
     assert length(names) == 14

@@ -478,11 +478,11 @@ defmodule OptimalSystemAgent.Application do
           end
         end
 
-        # W3/D3 — boot-time fleet recovery. Runs AFTER the supervision tree is up
+        # W3/D3 - boot-time fleet recovery. Runs AFTER the supervision tree is up
         # (SessionRegistry available) so re-dispatch can spawn live loops.
         # Reconciles stale `:running` rows whose owning process died with the
-        # previous daemon — so the /runs roster + fleet counts aren't inflated by
-        # ghosts — and, when opted in via `:fleet_resume_on_boot` (default off),
+        # previous daemon - so the /runs roster + fleet counts aren't inflated by
+        # ghosts - and, unless disabled via `:fleet_resume_on_boot`,
         # re-dispatches qualifying orphaned autonomous runs under their original
         # ids from the durable per-node snapshots. Budget-capped, best-effort.
         OptimalSystemAgent.Agent.FleetResumer.resume_on_boot()

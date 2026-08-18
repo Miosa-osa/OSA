@@ -1884,7 +1884,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           acknowledge_replayed(
             receipt,
             fn ->
-              TaskNotifications.acknowledge(state.session_id, receipt)
+              TaskNotifications.acknowledge(state.session_id, receipt, notifs)
             end,
             fn -> TaskNotifications.release(state.session_id, receipt) end
           )
@@ -1905,7 +1905,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           case persist_inbox_delivery(
                  next_state,
                  next_state.messages,
-                 fn -> TaskNotifications.acknowledge(state.session_id, receipt) end,
+                 fn -> TaskNotifications.acknowledge(state.session_id, receipt, notifs) end,
                  fn -> TaskNotifications.release(state.session_id, receipt) end
                ) do
             :ok ->
