@@ -168,7 +168,13 @@ defmodule OptimalSystemAgent.Sandbox.MiosaCliTest do
       assert :miosa_cli in names
     end
 
-    test "detection finds the CLI even with no sandbox env vars set" do
+    test "a CLI sign-in does NOT silently redirect shell commands off the machine" do
+      # Detection feeds `backend/0`, which `shell_execute` consults to decide
+      # whether a command runs locally or in a cloud sandbox. Auto-detecting
+      # `:miosa_cli` from a `miosa login` therefore meant that merely being
+      # signed in sent every shell command to a remote host - observed in
+      # testing, where a `printf` came back HTTP 502. Selecting the backend is
+      # consent; signing into a CLI is not.
       fake_cli()
       write_cli_config(~s({"api_key": "msk_test"}))
 
@@ -176,7 +182,12 @@ defmodule OptimalSystemAgent.Sandbox.MiosaCliTest do
         assert System.get_env(var) in [nil, ""], "#{var} leaked into this test"
       end
 
-      assert Router.detect_backend() == :miosa_cli
+      assert Router.detect_backend() == :host
+    end
+
+    test "it is still selectable explicitly" do
+      # Reverting auto-detection must not make the backend unreachable.
+      assert :miosa_cli in Enum.map(Router.list_backends(), & &1.name)
     end
   end
 end

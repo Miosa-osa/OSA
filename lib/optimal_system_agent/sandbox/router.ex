@@ -20,9 +20,9 @@ defmodule OptimalSystemAgent.Sandbox.Router do
      `~/.osa/sandbox.json`).
   2. Otherwise, env-var auto-detection (see `detect_backend/0`), preferring
      MIOSA (the recommended default) when several backends are configured.
-  3. Otherwise, a local probe for backends that carry no env var — currently
-     `:miosa_cli`, which is authenticated through `~/.miosa/config.json`.
-  4. Otherwise, `:host` (no sandbox).
+  3. Otherwise, `:host` (no sandbox). `:miosa_cli` is NOT auto-detected from a
+     `miosa login`: detection decides whether shell commands leave the machine,
+     and a sign-in is not consent to that. Select it explicitly.
 
   The Router owns selection, config loading, and host-fallback only — each
   backend is a self-contained module implementing `Sandbox.Behaviour`.
@@ -48,10 +48,18 @@ defmodule OptimalSystemAgent.Sandbox.Router do
     {"VERCEL_TOKEN", :vercel}
   ]
 
-  # Credential-free detection, tried before @env_detection. `miosa login` leaves
-  # no environment variable behind, so an operator who is already authenticated
-  # through the CLI would otherwise be detected as having no sandbox at all.
-  @detectors [{:miosa_cli, Sandbox.MiosaCli}]
+  # NO credential-free auto-detection. It was tried and reverted.
+  #
+  # `:miosa_cli` reports itself available whenever `miosa login` has been run,
+  # and detection feeds `backend/0`, which `shell_execute` consults to decide
+  # whether a command runs LOCALLY or in a cloud sandbox. Probing therefore
+  # meant that merely being signed into the CLI silently redirected every shell
+  # command off the operator's machine — observed in testing, where a `printf`
+  # went to a remote sandbox and came back HTTP 502.
+  #
+  # Being signed into a CLI is not consent to execute somewhere else. Selecting
+  # the backend (`/sandbox miosa_cli`, `~/.osa/sandbox.json`, or the env vars
+  # above) is, and stays required.
 
   @doc "Get the currently configured backend module."
   def backend do
@@ -250,24 +258,9 @@ defmodule OptimalSystemAgent.Sandbox.Router do
   `:sandbox_backend` is set in application env / `~/.osa/sandbox.json`.
   """
   def detect_backend do
-    Enum.find_value(@env_detection, fn {env, backend} ->
+    Enum.find_value(@env_detection, :host, fn {env, backend} ->
       if System.get_env(env) not in [nil, ""], do: backend
-    end) || detect_by_probe() || :host
-  end
-
-  # Backends that advertise themselves through something other than an env var
-  # (the MIOSA CLI keeps its credential in ~/.miosa/config.json). Probing is a
-  # local file/PATH check, never a network call, so this stays cheap.
-  defp detect_by_probe do
-    Enum.find_value(@detectors, fn {backend, mod} ->
-      if safe_available?(mod), do: backend
     end)
-  end
-
-  defp safe_available?(mod) do
-    mod.available?()
-  rescue
-    _ -> false
   end
 
   defp configured_backend do
