@@ -393,6 +393,12 @@ defmodule OptimalSystemAgent.Application do
           # (HTTP message dispatch, background learning, etc.)
           {Task.Supervisor, name: OptimalSystemAgent.TaskSupervisor},
 
+          # Holds an OS sleep inhibitor while a turn is in flight. The TUI has
+          # its own, but the daemon is what actually runs the work and outlives
+          # any attached terminal, so an unattended overnight run needs this one
+          # or the machine idles out mid-turn.
+          OptimalSystemAgent.Agent.StayAwake,
+
           # Out-of-band account sign-ins. Needed by any surface that cannot
           # block for the length of a device-code grant — which is every
           # surface except a terminal that owns stdin. Started here, right

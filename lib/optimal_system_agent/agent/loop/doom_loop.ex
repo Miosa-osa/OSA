@@ -8,12 +8,51 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature
 
-  # Runtime-tunable (not compile_env) so the absolute tool-call cap can be
-  # raised for an hours-long autonomous run without recompiling. Default raised
-  # to 2000 — a genuine backstop just above realistic multi-hour volume, not a
-  # premature stop at 100.
-  defp max_total_tool_calls,
-    do: Application.get_env(:optimal_system_agent, :doom_loop_max_calls, 2000)
+  # Absolute session tool-call backstop.
+  #
+  # Sizing: this must not be reachable by a run that is merely WORKING, only by
+  # one that is running away. A sustained agent averages roughly 10-30 tool
+  # calls a minute, so a 12-hour unattended run lands in the 7k-20k range. The
+  # previous 2000 sat *inside* that band - it halted a healthy overnight run
+  # after a few hours and reported it as a safety stop, which is the worst
+  # possible framing for "you were working too long".
+  #
+  # 25_000 clears a 12-hour run with headroom. Runaway is caught by the pattern
+  # detectors (IdenticalCall, Stall, FailureSignature, ReasoningOnly,
+  # Escalation), which fire in seconds on a spinning loop and do not care how
+  # long the session has been alive. This count is only the last-resort net
+  # under all of them.
+  #
+  # Order matters: the environment variable wins, because an unattended run that
+  # trips the cap at 3am cannot be rescued by editing application config.
+  @default_max_tool_calls 25_000
+
+  @doc false
+  def max_total_tool_calls do
+    case env_max_tool_calls() do
+      nil ->
+        Application.get_env(
+          :optimal_system_agent,
+          :doom_loop_max_calls,
+          @default_max_tool_calls
+        )
+
+      n ->
+        n
+    end
+  end
+
+  # `OSA_MAX_TOOL_CALLS`. A junk or non-positive value is ignored rather than
+  # obeyed: silently running with a cap of 0 would halt the first tool call.
+  defp env_max_tool_calls do
+    with value when is_binary(value) <- System.get_env("OSA_MAX_TOOL_CALLS"),
+         {n, ""} <- Integer.parse(String.trim(value)),
+         true <- n > 0 do
+      n
+    else
+      _ -> nil
+    end
+  end
 
   @warn_threshold_pct 0.80
 
@@ -130,7 +169,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
       How to proceed:
       - If the task is incomplete, start a new session and continue from where you left off.
-      - If you need a higher limit, adjust `doom_loop_max_calls` in your application config.
+      - To raise the limit for a long unattended run, set `OSA_MAX_TOOL_CALLS` (for
+        example `OSA_MAX_TOOL_CALLS=50000`) before starting OSA, or set
+        `doom_loop_max_calls` in application config.
       """
       |> String.trim()
 
