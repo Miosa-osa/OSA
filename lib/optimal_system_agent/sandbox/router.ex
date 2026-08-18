@@ -20,7 +20,9 @@ defmodule OptimalSystemAgent.Sandbox.Router do
      `~/.osa/sandbox.json`).
   2. Otherwise, env-var auto-detection (see `detect_backend/0`), preferring
      MIOSA (the recommended default) when several backends are configured.
-  3. Otherwise, `:host` (no sandbox).
+  3. Otherwise, a local probe for backends that carry no env var — currently
+     `:miosa_cli`, which is authenticated through `~/.miosa/config.json`.
+  4. Otherwise, `:host` (no sandbox).
 
   The Router owns selection, config loading, and host-fallback only — each
   backend is a self-contained module implementing `Sandbox.Behaviour`.
@@ -34,6 +36,7 @@ defmodule OptimalSystemAgent.Sandbox.Router do
     docker: Sandbox.Docker,
     e2b: Sandbox.E2B,
     miosa: Sandbox.MIOSA,
+    miosa_cli: Sandbox.MiosaCli,
     vercel: Sandbox.Vercel
   }
 
@@ -44,6 +47,11 @@ defmodule OptimalSystemAgent.Sandbox.Router do
     {"E2B_API_KEY", :e2b},
     {"VERCEL_TOKEN", :vercel}
   ]
+
+  # Credential-free detection, tried before @env_detection. `miosa login` leaves
+  # no environment variable behind, so an operator who is already authenticated
+  # through the CLI would otherwise be detected as having no sandbox at all.
+  @detectors [{:miosa_cli, Sandbox.MiosaCli}]
 
   @doc "Get the currently configured backend module."
   def backend do
@@ -155,6 +163,15 @@ defmodule OptimalSystemAgent.Sandbox.Router do
             })
           end
 
+          if cli_config = config["miosa_cli"] do
+            Application.put_env(:optimal_system_agent, :sandbox_miosa_cli, %{
+              sandbox_id: cli_config["sandbox_id"],
+              size: cli_config["size"],
+              idle_timeout: cli_config["idle_timeout"],
+              timeout: cli_config["timeout"]
+            })
+          end
+
           if vercel_config = config["vercel"] do
             Application.put_env(:optimal_system_agent, :sandbox_vercel, %{
               token: vercel_config["token"],
@@ -233,9 +250,24 @@ defmodule OptimalSystemAgent.Sandbox.Router do
   `:sandbox_backend` is set in application env / `~/.osa/sandbox.json`.
   """
   def detect_backend do
-    Enum.find_value(@env_detection, :host, fn {env, backend} ->
+    Enum.find_value(@env_detection, fn {env, backend} ->
       if System.get_env(env) not in [nil, ""], do: backend
+    end) || detect_by_probe() || :host
+  end
+
+  # Backends that advertise themselves through something other than an env var
+  # (the MIOSA CLI keeps its credential in ~/.miosa/config.json). Probing is a
+  # local file/PATH check, never a network call, so this stays cheap.
+  defp detect_by_probe do
+    Enum.find_value(@detectors, fn {backend, mod} ->
+      if safe_available?(mod), do: backend
     end)
+  end
+
+  defp safe_available?(mod) do
+    mod.available?()
+  rescue
+    _ -> false
   end
 
   defp configured_backend do

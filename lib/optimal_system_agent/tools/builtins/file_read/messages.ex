@@ -38,6 +38,60 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Messages do
   """
   @spec missing(String.t(), String.t()) :: String.t()
   def missing(display_path, expanded) do
+    case skill_redirect(display_path) do
+      nil -> missing_file(display_path, expanded)
+      redirect -> redirect
+    end
+  end
+
+  @doc """
+  A guessed skill path, answered with the real one.
+
+  The model-facing catalogue lists skills by NAME and tells the caller to load
+  them with `skill_view`. A caller that reaches for `file_read` instead has to
+  invent a path, and skills resolve across four config directories at three
+  scopes (`<cwd>/.claude/skills`, `~/.agents/skills`, the bundled tree, …), so
+  the invented path is usually wrong. The generic "does not exist" reply then
+  sends it to `dir_list` on a parent that does not exist either, and the caller
+  keeps guessing: one observed session burned eighteen reads across two wrong
+  roots for four skills that were all correctly registered the whole time.
+
+  Returns `nil` unless the path really is a miss for a known skill, so nothing
+  else in `file_read` changes shape.
+  """
+  @spec skill_redirect(String.t()) :: String.t() | nil
+  def skill_redirect(display_path) do
+    with name when is_binary(name) <- skill_name_from_path(display_path),
+         %{path: real} <- lookup_skill(name) do
+      "#{display_path} does not exist, but the skill \"#{name}\" does — its instructions " <>
+        "live at #{real}. Load it with `skill_view` (`name: \"#{name}\"`) rather than " <>
+        "reading the file: skills resolve across several config directories and scopes, " <>
+        "so their paths cannot be guessed from the name."
+    else
+      _ -> nil
+    end
+  end
+
+  # `<anything>/skills/<name>/SKILL.md` — the shape a caller invents when it has
+  # a skill name and wants a file.
+  defp skill_name_from_path(display_path) do
+    case Enum.reverse(Path.split(display_path)) do
+      [file, name, "skills" | _] ->
+        if String.downcase(file) == "skill.md", do: name, else: nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp lookup_skill(name) do
+    :persistent_term.get({OptimalSystemAgent.Tools.Registry, :skills}, %{})
+    |> Map.get(name)
+  rescue
+    _ -> nil
+  end
+
+  defp missing_file(display_path, expanded) do
     case PathResolve.suggestions(expanded, Constants.max_suggestions()) do
       {:no_parent, dir} ->
         "#{display_path} does not exist — and neither does its parent directory #{dir}, " <>

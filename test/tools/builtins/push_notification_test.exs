@@ -1,5 +1,10 @@
 defmodule OptimalSystemAgent.Tools.Builtins.PushNotificationTest do
-  use ExUnit.Case, async: true
+  # NOT async: the delivery seams and the OSA_NOTIFY_* overrides are process-wide
+  # (Application env + environment variables). Running this module concurrently
+  # with anything that notifies would let one test's injected runner leak into
+  # another's - the shape of flake that is worst to debug because it only shows
+  # up under load.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Tools.Builtins.PushNotification.{Constants, Handler, Tool, UI}
   alias OptimalSystemAgent.Tools.UseContext
@@ -121,9 +126,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotificationTest do
 
   # ── Handler.execute/2 ────────────────────────────────────────────────
 
+  # These used to call the real notifier. On macOS that meant every `mix test`
+  # posted "MyTitle / b" to the operator's Notification Centre - a suite you
+  # cannot run while working. The runner is injected instead, which also makes
+  # the delivery contract assertable rather than merely "ok or error".
   describe "execute/2" do
-    # We can only assert on the shape of the return — the actual OS call
-    # may or may not succeed in CI. Both success and graceful error are ok.
+    setup do
+      test_pid = self()
+
+      Application.put_env(:optimal_system_agent, :notification_runner, fn cmd, args ->
+        send(test_pid, {:cmd, cmd, args})
+        {"", 0}
+      end)
+
+      # Frontmost-app detection must not reach the OS either; default to "not a
+      # terminal" so the focus gate stays open unless a test closes it.
+      Application.put_env(:optimal_system_agent, :notification_executables, %{})
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :notification_runner)
+        Application.delete_env(:optimal_system_agent, :notification_executables)
+        System.delete_env("OSA_NO_NOTIFY")
+        System.delete_env("OSA_NOTIFY_WHEN_FOCUSED")
+        System.delete_env("OSA_NOTIFY_SENDER")
+      end)
+
+      # Keep the focus gate out of the way of the delivery tests.
+      System.put_env("OSA_NOTIFY_WHEN_FOCUSED", "1")
+      :ok
+    end
+
     test "returns ok or error tuple (platform-dependent)", %{ctx: ctx} do
       result =
         Handler.execute(%{"title" => "Test", "body" => "OSA test", "urgency" => "low"}, ctx)
@@ -136,6 +168,126 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotificationTest do
         {:ok, msg} -> assert msg =~ "MyTitle"
         {:error, _} -> :ok
       end
+    end
+
+    @tag :macos_only
+    test "prefers terminal-notifier when it is installed", %{ctx: ctx} do
+      if :os.type() == {:unix, :darwin} do
+        Application.put_env(:optimal_system_agent, :notification_executables, %{
+          "terminal-notifier" => "/opt/homebrew/bin/terminal-notifier"
+        })
+
+        assert {:ok, _} = Handler.execute(%{"title" => "T", "body" => "B"}, ctx)
+
+        assert_receive {:cmd, "/opt/homebrew/bin/terminal-notifier", args}
+        assert "-title" in args and "T" in args
+        assert "-message" in args and "B" in args
+        # One rolling slot instead of a growing column of toasts.
+        assert "-group" in args
+      end
+    end
+
+    @tag :macos_only
+    test "falls back to osascript when terminal-notifier is absent", %{ctx: ctx} do
+      if :os.type() == {:unix, :darwin} do
+        assert {:ok, _} = Handler.execute(%{"title" => "T", "body" => "B"}, ctx)
+
+        assert_receive {:cmd, "osascript", ["-e", script]}
+        assert script =~ "display notification"
+        assert script =~ "OSA"
+      end
+    end
+
+    @tag :macos_only
+    test "OSA_NOTIFY_SENDER supplies the icon and click target", %{ctx: ctx} do
+      if :os.type() == {:unix, :darwin} do
+        Application.put_env(:optimal_system_agent, :notification_executables, %{
+          "terminal-notifier" => "/usr/local/bin/terminal-notifier"
+        })
+
+        System.put_env("OSA_NOTIFY_SENDER", "com.github.wez.wezterm")
+
+        assert {:ok, _} = Handler.execute(%{"title" => "T", "body" => "B"}, ctx)
+
+        assert_receive {:cmd, _, args}
+        # `-activate` is the flag that still works on current macOS; without it
+        # the toast is not clickable at all.
+        assert "-activate" in args
+        assert "-sender" in args
+        assert Enum.count(args, &(&1 == "com.github.wez.wezterm")) == 2
+      end
+    end
+
+    test "OSA_NO_NOTIFY silences delivery entirely", %{ctx: ctx} do
+      System.put_env("OSA_NO_NOTIFY", "1")
+
+      assert {:ok, msg} = Handler.execute(%{"title" => "T", "body" => "B"}, ctx)
+      assert msg =~ "suppressed"
+      refute_receive {:cmd, _, _}
+    end
+  end
+
+  describe "focus gate" do
+    setup do
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :notification_runner)
+        System.delete_env("OSA_NOTIFY_WHEN_FOCUSED")
+      end)
+
+      :ok
+    end
+
+    test "a notification is pointless when you are already looking at the screen" do
+      if :os.type() == {:unix, :darwin} do
+        Application.put_env(:optimal_system_agent, :notification_runner, fn
+          "lsappinfo", ["front"] -> {"ASN:0x0-0xb60b6:", 0}
+          "lsappinfo", _ -> {~s("CFBundleIdentifier"="com.github.wez.wezterm"), 0}
+          _, _ -> {"", 0}
+        end)
+
+        assert Handler.focus_suppressed?("normal")
+      end
+    end
+
+    test "a critical notification is never withheld" do
+      Application.put_env(:optimal_system_agent, :notification_runner, fn
+        "lsappinfo", ["front"] -> {"ASN:0x0-0xb60b6:", 0}
+        "lsappinfo", _ -> {~s("CFBundleIdentifier"="com.github.wez.wezterm"), 0}
+        _, _ -> {"", 0}
+      end)
+
+      refute Handler.focus_suppressed?("critical")
+    end
+
+    test "a non-terminal frontmost app does not suppress" do
+      Application.put_env(:optimal_system_agent, :notification_runner, fn
+        "lsappinfo", ["front"] -> {"ASN:0x0-0x1234:", 0}
+        "lsappinfo", _ -> {~s("CFBundleIdentifier"="com.apple.Safari"), 0}
+        _, _ -> {"", 0}
+      end)
+
+      refute Handler.focus_suppressed?("normal")
+    end
+
+    test "OSA_NOTIFY_WHEN_FOCUSED opts out of the gate" do
+      System.put_env("OSA_NOTIFY_WHEN_FOCUSED", "1")
+      refute Handler.focus_suppressed?("normal")
+    end
+
+    test "a broken detector fails open rather than swallowing notifications" do
+      Application.put_env(:optimal_system_agent, :notification_runner, fn _, _ ->
+        {"lsappinfo: command not found", 127}
+      end)
+
+      refute Handler.terminal_frontmost?()
+    end
+
+    test "parses the bundle id out of lsappinfo output" do
+      assert Handler.parse_bundle_id(~s("CFBundleIdentifier"="com.apple.Terminal")) ==
+               "com.apple.Terminal"
+
+      assert Handler.parse_bundle_id("nothing useful here") == nil
+      assert Handler.parse_bundle_id(nil) == nil
     end
   end
 

@@ -118,6 +118,10 @@ pub struct App {
     pub quit_dialog: QuitConfirm,
     pub palette: CommandPalette,
     pub model_picker: Option<ModelPicker>,
+    /// `/models` asked for this provider's model list, not the provider list.
+    /// The catalog fetch is the same either way, so the intent has to survive
+    /// the round-trip and be applied when the picker is built.
+    pub models_jump_pending: bool,
     pub session_browser: Option<SessionBrowser>,
     pub onboarding: Option<OnboardingWizard>,
     pub plan_review: Option<PlanReview>,
@@ -734,6 +738,7 @@ impl App {
             quit_dialog: QuitConfirm::new(),
             palette: CommandPalette::new(),
             model_picker: None,
+            models_jump_pending: false,
             session_browser: None,
             onboarding: None,
             plan_review: None,

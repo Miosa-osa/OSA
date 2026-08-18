@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
   """
   use ExUnit.Case, async: false
 
+  alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Providers.Ollama
 
@@ -157,11 +158,33 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
       # The point of the field is that a run which does not record the condition
       # cannot be set beside a published figure. A provider answering nil when
       # it has a real answer is the same silence this whole change is about.
-      assert "on:" <> _ =
-               Observability.current_reasoning(%{
-                 provider: :anthropic,
-                 model: "claude-opus-4-6"
-               })
+      #
+      # Effort is pinned because reasoning is legitimately OFF under fast mode,
+      # so this assertion is about the ambient effort level as much as about
+      # Anthropic. `Effort.current/0` reads a process override, then the session
+      # settings layer, then application env - and a sibling test that restores
+      # only the last of those still leaves the decision changed underneath this
+      # one. The process override shadows all three and needs no teardown, so
+      # the test cannot be perturbed by, or perturb, anything else.
+      Effort.with_process_override(:medium, fn ->
+        assert "on:" <> _ =
+                 Observability.current_reasoning(%{
+                   provider: :anthropic,
+                   model: "claude-opus-4-6"
+                 })
+      end)
+    end
+
+    test "the same provider reports reasoning OFF under fast mode" do
+      # The other side of the pin above: this is the state that was silently
+      # being asserted as "on" whenever fast mode leaked in from elsewhere.
+      Effort.with_process_override(:fast, fn ->
+        assert "off:fast_mode" =
+                 Observability.current_reasoning(%{
+                   provider: :anthropic,
+                   model: "claude-opus-4-6"
+                 })
+      end)
     end
   end
 end
