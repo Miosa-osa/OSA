@@ -33,13 +33,20 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoopCapTest do
     :ok
   end
 
-  describe "the default backstop" do
-    test "clears a 12-hour run at a sustained pace" do
+  describe "the default" do
+    test "is far beyond anything a real session reaches" do
+      # Codex ships no tool-call ceiling at all. Ours stays finite so it can be
+      # printed, compared and asserted, but must be unreachable in practice: at
+      # a sustained 30 calls a minute a 12-hour run needs ~21_600.
       cap = DoomLoop.max_total_tool_calls()
 
-      # 12h at a brisk 20 calls/min. The cap is a runaway net, not a clock.
-      assert cap >= 12 * 60 * 20,
-             "cap #{cap} halts a healthy 12-hour run before it finishes"
+      assert is_integer(cap)
+      assert cap >= 1_000_000, "cap #{cap} is reachable by a long healthy run"
+    end
+
+    test "a 12-hour run at a brisk pace does not come close" do
+      twelve_hours_at_30_per_min = 12 * 60 * 30
+      assert twelve_hours_at_30_per_min < DoomLoop.max_total_tool_calls() / 10
     end
   end
 
@@ -64,25 +71,38 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoopCapTest do
     end
   end
 
+  describe "asking for unlimited explicitly" do
+    test "the word forms all mean no limit" do
+      for word <- ~w(unlimited none off infinity infinite UNLIMITED  None ) do
+        System.put_env(@env, word)
+
+        assert DoomLoop.max_total_tool_calls() == :infinity,
+               "#{inspect(word)} should mean no limit at all"
+      end
+    end
+  end
+
   describe "a bad override is ignored, not obeyed" do
     test "junk falls back to the default" do
-      default = DoomLoop.max_total_tool_calls()
-
       for junk <- ["", "   ", "lots", "12abc", "1e6"] do
         System.put_env(@env, junk)
 
-        assert DoomLoop.max_total_tool_calls() == default,
+        assert DoomLoop.max_total_tool_calls() == default(),
                "#{inspect(junk)} was not rejected"
       end
     end
 
     test "zero and negatives are rejected rather than halting the first tool call" do
-      default = DoomLoop.max_total_tool_calls()
-
       for bad <- ["0", "-1", "-5000"] do
         System.put_env(@env, bad)
-        assert DoomLoop.max_total_tool_calls() == default, "#{bad} was obeyed"
+        assert DoomLoop.max_total_tool_calls() == default(), "#{bad} was obeyed"
       end
     end
+  end
+
+  # The value with no override in play.
+  defp default do
+    System.delete_env(@env)
+    DoomLoop.max_total_tool_calls()
   end
 end

@@ -111,14 +111,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
+  # Unlimited unless an operator asks for a limit.
+  #
+  # Effort governs how hard the model thinks per step - thinking budget,
+  # response ceiling, temperature. It has no business governing how LONG a task
+  # may take. Tying the two together meant an autonomous run was halted for
+  # being long rather than for being wrong: the same task, at the same quality,
+  # succeeded or failed purely on which effort tier happened to be selected.
+  #
+  # For a proactive agent that is expected to work unattended for hours, an
+  # iteration count is a clock that eventually fires on healthy work. Runaway is
+  # a SHAPE - repeating the same call, making no progress, failing the same way -
+  # and the DoomLoop detectors read that shape directly, in seconds, regardless
+  # of how many iterations have elapsed. Those are the stop condition. This is
+  # not.
+  #
+  # `config :optimal_system_agent, :max_iterations, <int>` still imposes one for
+  # callers that want a bounded run (single-shot CI jobs, evals, sandboxes).
+  #
+  # The default is a very large finite number rather than `:infinity`. Codex,
+  # for reference, ships no iteration, turn or step limit at all - its config
+  # surface is model, approval policy, sandbox mode and reasoning effort, and
+  # the loop simply runs until the model stops. A finite ceiling keeps the value
+  # printable, comparable and assertable, and still stops a true runaway
+  # eventually instead of burning forever; at a brisk 30 iterations a minute
+  # this is roughly 23 days of continuous work, so nothing real reaches it.
+  @unbounded_iterations 1_000_000
+
   defp max_iterations do
-    # Explicit config wins; otherwise fall back to the effort ceiling. Effort
-    # should RAISE the ceiling for effort-driven callers, never clamp an
-    # explicit `:max_iterations` config down (the old `min/2` made the 200
-    # config knob a no-op, silently capping autonomous runs at ~30 turns).
-    Application.get_env(:optimal_system_agent, :max_iterations) ||
-      Effort.max_iterations()
+    Application.get_env(:optimal_system_agent, :max_iterations) || @unbounded_iterations
   end
+
+  # Explicit rather than leaning on Elixir term ordering, under which
+  # `5 >= :infinity` happens to be false. That is true but accidental, and a
+  # reader should not have to know it to be sure the loop cannot stop early.
+  defp iteration_cap_reached?(_iter, :infinity), do: false
+  defp iteration_cap_reached?(iter, max) when is_integer(max), do: iter >= max
+  defp iteration_cap_reached?(_iter, _max), do: false
 
   defp max_response_tokens do
     # Check for bumped max_tokens from output token recovery.
@@ -247,7 +276,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           :control
         )
 
-      iter >= max_iter ->
+      iteration_cap_reached?(iter, max_iter) ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
 
         # Typed terminal event (item 9) so consumers render the iteration-cap stop
