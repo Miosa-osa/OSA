@@ -12,9 +12,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.NotebookEdit.Constants do
   @actions ~w(read add_cell edit_cell delete_cell move_cell)
   def actions, do: @actions
 
-  @default_allowed_paths ["~", "/tmp"]
-  def default_allowed_paths, do: @default_allowed_paths
-
   # Single shared policy — see `Agent.Safety.PathPolicy`.
   defdelegate sensitive_paths,
     to: OptimalSystemAgent.Agent.Safety.PathPolicy,

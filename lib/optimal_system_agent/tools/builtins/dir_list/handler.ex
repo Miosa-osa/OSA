@@ -110,10 +110,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
   defp format_size(n) when n < 1_048_576, do: "#{Float.round(n / 1_024, 1)}K"
   defp format_size(n), do: "#{Float.round(n / 1_048_576, 1)}M"
 
-  # Shared read allowlist — configured roots PLUS the session workspace. A
-  # private copy here was blind to the session's `working_dir`.
-  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
-
   # The shared structural predicate, not a substring scan over
   # `Constants.sensitive_paths/0` — that accessor now returns human-readable
   # DESCRIPTIONS of the rules for prompts and tests, and matching against them
@@ -124,13 +120,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Handler do
   end
 
   defp allowed?(expanded_path) do
-    check_path =
-      if String.ends_with?(expanded_path, "/"),
-        do: expanded_path,
-        else: expanded_path <> "/"
-
-    Enum.any?(allowed_paths(), fn allowed ->
-      String.starts_with?(check_path, allowed)
-    end)
+    # Canonicalise before comparing - the roots are canonical, so an
+    # unresolved path lands in the wrong namespace and /tmp is denied
+    # on macOS. See PathPolicy.within_read_roots?/1.
+    OptimalSystemAgent.Agent.Safety.PathPolicy.within_read_roots?(expanded_path)
   end
 end

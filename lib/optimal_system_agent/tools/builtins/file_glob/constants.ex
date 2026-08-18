@@ -9,9 +9,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Constants do
   @tool_name "file_glob"
   def tool_name, do: @tool_name
 
-  @default_allowed_paths ["~", "/tmp"]
-  def default_allowed_paths, do: @default_allowed_paths
-
   @sensitive_paths [
     ".ssh/id_rsa",
     ".ssh/id_ed25519",

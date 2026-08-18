@@ -103,6 +103,11 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
   # ordinary work.
   @dotenv_doc_suffixes ~w(example sample template dist default defaults)
 
+  # `/private/tmp` is NOT listed here even though the write list carries it:
+  # `normalize_roots/1` canonicalises every root, so "/tmp" already becomes
+  # "/private/tmp/" on macOS. The write list's extra entry is redundant rather
+  # than load-bearing. What was actually broken was the CALLER side - see
+  # `within_read_roots?/1`.
   @default_read_roots ["~", "/tmp"]
   @default_write_roots ["~", "/tmp", "/private/tmp"]
 
@@ -435,6 +440,34 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
       other -> other
     end
   end
+
+  @doc """
+  Whether `path` sits under a configured read root.
+
+  Canonicalises `path` first, which is the whole point: `read_roots/0` returns
+  canonical roots (`normalize_roots/1` resolves every symlink), so comparing a
+  merely `Path.expand`-ed path against them puts the two sides in different
+  namespaces. On macOS `/tmp` canonicalises to `/private/tmp`, so
+  `String.starts_with?("/tmp/x/", "/private/tmp/")` is false and a legitimate
+  read is denied with "outside allowed paths".
+
+  Five handlers had each written this comparison themselves and five got it
+  wrong the same way. Callers should use this rather than reimplementing it.
+  """
+  @spec within_read_roots?(term()) :: boolean()
+  def within_read_roots?(path), do: within?(path, read_roots())
+
+  @doc "Whether `path` sits under a configured write root. See `within_read_roots?/1`."
+  @spec within_write_roots?(term()) :: boolean()
+  def within_write_roots?(path), do: within?(path, write_roots())
+
+  defp within?(path, roots) do
+    check = path |> canonical() |> slash_terminate()
+    Enum.any?(roots, &String.starts_with?(check, &1))
+  end
+
+  defp slash_terminate(""), do: ""
+  defp slash_terminate(p), do: if(String.ends_with?(p, "/"), do: p, else: p <> "/")
 
   defp normalize_roots(roots) do
     Enum.map(roots, fn root ->

@@ -9,9 +9,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Constants do
   @tool_name "dir_list"
   def tool_name, do: @tool_name
 
-  @default_allowed_paths ["~", "/tmp"]
-  def default_allowed_paths, do: @default_allowed_paths
-
   # Single shared policy — see `Agent.Safety.PathPolicy`. This accessor is a
   # description for prompts/tests; decisions go through `PathPolicy.sensitive?/1`.
   defdelegate sensitive_paths,

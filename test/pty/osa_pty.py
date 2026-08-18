@@ -259,6 +259,25 @@ class PtySession:
                 return True
         return False
 
+    def wait_for_text_gone(self, needle: str, timeout: float) -> bool:
+        """Pump until `needle` is NO LONGER on the rendered screen.
+
+        Asserting an absence with a single read is a race: the action that
+        removes the text has to be rendered first, and under CI load that lag
+        is longer than the pump that preceded the check. A one-shot `not in`
+        therefore fails intermittently while the code is correct — which is
+        exactly how `test_a_split_alt_enter_does_not_interrupt` flaked, passing
+        on rerun against identical code.
+
+        Returns True as soon as the text is gone, False if it never goes.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if needle not in "\n".join(self.lines()):
+                return True
+            self.pump(0.1)
+        return needle not in "\n".join(self.lines())
+
     def wait_exit(self, timeout: float) -> bool:
         """Pump until the child process exits, or give up.
 

@@ -539,16 +539,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Handler do
     {:ok, "Symbols in #{path}:\n#{lines}"}
   end
 
-  # Shared read allowlist — configured roots PLUS the session workspace. A
-  # private copy here was blind to the session's `working_dir`.
-  defp allowed_paths, do: OptimalSystemAgent.Agent.Safety.PathPolicy.read_roots()
-
   defp path_allowed?(expanded_path) do
-    check_path =
-      if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-    Enum.any?(allowed_paths(), fn allowed ->
-      String.starts_with?(check_path, allowed)
-    end)
+    # Canonicalise before comparing - the roots are canonical, so an
+    # unresolved path lands in the wrong namespace and /tmp is denied
+    # on macOS. See PathPolicy.within_read_roots?/1.
+    OptimalSystemAgent.Agent.Safety.PathPolicy.within_read_roots?(expanded_path)
   end
 end
