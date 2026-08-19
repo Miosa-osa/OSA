@@ -750,9 +750,16 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
 
     test "the isolation flags are actually passed, since the loop depends on them", %{dir: dir} do
       argv_file = Path.join(dir, "argv.txt")
+      prompt_copy = Path.join(dir, "prompt.txt")
 
+      # The system prompt arrives as a file path after --system-prompt-file;
+      # copy its content out before the request's temp dir is removed.
       stub(dir, "claude", """
       printf '%s\\n' "$@" > #{argv_file}
+      while [ $# -gt 1 ]; do
+        if [ "$1" = "--system-prompt-file" ]; then cp "$2" #{prompt_copy}; fi
+        shift
+      done
       cat > /dev/null
       echo '{"type":"result","is_error":false,"result":"ok"}'
       """)
@@ -766,12 +773,16 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       argv = File.read!(argv_file) |> String.split("\n")
 
       for flag <-
-            ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt) do
+            ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt-file) do
         assert flag in argv,
                "#{flag} is what keeps Claude Code from running its own agent instead of answering OSA's"
       end
 
-      assert "OSA prompt" in argv,
+      refute "OSA prompt" in argv,
+             "the system prompt must not travel on argv — `ps` is readable by every " <>
+               "local user, and Linux caps a single argv element at 128KiB (E2BIG)"
+
+      assert File.read!(prompt_copy) =~ "OSA prompt",
              "OSA's system prompt must replace Claude Code's, not be dropped"
     end
 

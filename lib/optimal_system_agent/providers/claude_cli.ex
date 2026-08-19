@@ -19,7 +19,7 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
       --tools ""            no built-in Claude Code tools
       --setting-sources ""  no user/project settings, hooks, or CLAUDE.md
       --strict-mcp-config   no MCP servers from the user's config
-      --system-prompt …     OSA's system prompt REPLACES Claude Code's
+      --system-prompt-file …  OSA's system prompt REPLACES Claude Code's
       --no-session-persistence
       --max-turns 1
 
@@ -167,9 +167,9 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
       system_prompt = build_system_prompt(system, tools)
       stdin_line = stream_json_user(render_turns(turns))
 
-      with {:ok, dir, file} <- write_stdin(stdin_line) do
+      with {:ok, dir, file, prompt_file} <- write_request_files(stdin_line, system_prompt) do
         try do
-          args = cli_args(bin, model, system_prompt, callback != nil)
+          args = cli_args(bin, model, prompt_file, callback != nil)
           spawn_and_collect(sh, args, file, callback, timeout(opts))
         after
           File.rm_rf(dir)
@@ -205,7 +205,13 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
       Application.get_env(:optimal_system_agent, :claude_cli_timeout_ms, @default_timeout_ms)
   end
 
-  defp cli_args(bin, model, system_prompt, streaming?) do
+  # The system prompt travels as a file, not an argv element. Linux caps a
+  # single argv string at 128KiB (MAX_ARG_STRLEN); OSA's built prompt —
+  # SYSTEM.md plus the tool protocol plus per-session injections — sits near
+  # that ceiling and has crossed it, at which point execve fails with E2BIG
+  # (errno 7) before the CLI even starts. A file has no such ceiling, and it
+  # also keeps the prompt out of `ps` output, same as the conversation.
+  defp cli_args(bin, model, system_prompt_file, streaming?) do
     base = [
       bin,
       "-p",
@@ -226,8 +232,8 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
       "",
       "--strict-mcp-config",
       "--no-session-persistence",
-      "--system-prompt",
-      system_prompt
+      "--system-prompt-file",
+      system_prompt_file
     ]
 
     if streaming?, do: base ++ ["--include-partial-messages"], else: base
@@ -251,7 +257,7 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     ]
   end
 
-  # stdin comes from a file (see `write_stdin/1`); stderr goes to a second
+  # stdin comes from a file (see `write_request_files/2`); stderr goes to a second
   # file rather than being merged into stdout, because stdout is a
   # newline-delimited JSON channel and an interleaved diagnostic would corrupt
   # whichever event it landed in the middle of. Reading it after exit costs
@@ -752,14 +758,16 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     }) <> "\n"
   end
 
-  # ── stdin file ──────────────────────────────────────────────────────────
+  # ── request files ───────────────────────────────────────────────────────
 
-  # The conversation is written to a private file rather than passed on the
-  # command line. The directory is created 0700 before the file exists, so
-  # there is no window in which the default umask exposes it — the same
-  # from-birth rule `SubscriptionStore` follows for tokens, applied here
-  # because a prompt can carry just as much of the user's private code.
-  defp write_stdin(line) do
+  # The conversation and the system prompt are written to private files
+  # rather than passed on the command line — the prompt because argv would
+  # both publish it via `ps` and hit MAX_ARG_STRLEN (see `cli_args/4`). The
+  # directory is created 0700 before any file exists, so there is no window
+  # in which the default umask exposes them — the same from-birth rule
+  # `SubscriptionStore` follows for tokens, applied here because a prompt can
+  # carry just as much of the user's private code.
+  defp write_request_files(stdin_line, system_prompt) do
     dir =
       Path.join(
         System.tmp_dir!(),
@@ -769,11 +777,16 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     with :ok <- File.mkdir_p(dir),
          :ok <- File.chmod(dir, 0o700),
          file = Path.join(dir, "input.jsonl"),
-         :ok <- File.write(file, line),
-         :ok <- File.chmod(file, 0o600) do
-      {:ok, dir, file}
+         :ok <- File.write(file, stdin_line),
+         :ok <- File.chmod(file, 0o600),
+         prompt_file = Path.join(dir, "system_prompt.md"),
+         :ok <- File.write(prompt_file, system_prompt),
+         :ok <- File.chmod(prompt_file, 0o600) do
+      {:ok, dir, file, prompt_file}
     else
-      {:error, reason} -> {:error, {:tmp_write_failed, reason}}
+      {:error, reason} ->
+        File.rm_rf(dir)
+        {:error, {:tmp_write_failed, reason}}
     end
   end
 
@@ -801,6 +814,18 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     base = if status, do: base <> " (HTTP #{status})", else: base
     if detail == "", do: base <> ".", else: base <> ": " <> detail
   end
+
+  # Exit status 7 with silent stderr is almost always not the CLI at all:
+  # execve failed with E2BIG (errno 7, "argument list too long") because an
+  # argv element crossed Linux's 128KiB MAX_ARG_STRLEN, and the Erlang port
+  # forker reports the errno as the exit status. `cli_args/4` no longer puts
+  # anything unbounded on argv, so this should be historical — but if it
+  # fires, say what it means instead of sending the user to auth.
+  def error_message({:cli_exit, 7, ""}),
+    do:
+      "Claude Code could not be launched: a command-line argument exceeded the OS limit " <>
+        "(E2BIG, errno 7). This is an OSA bug — the request never reached Claude. " <>
+        "Please report it with the session that triggered it."
 
   def error_message({:cli_exit, status, ""}),
     do:
