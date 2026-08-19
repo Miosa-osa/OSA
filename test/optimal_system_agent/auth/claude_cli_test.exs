@@ -748,11 +748,64 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       assert stdin =~ marker
     end
 
-    test "the isolation flags are actually passed, since the loop depends on them", %{dir: dir} do
-      argv_file = Path.join(dir, "argv.txt")
+    test "image blocks ride the stream-json user message as content blocks", %{dir: dir} do
+      stdin_file = Path.join(dir, "stdin.txt")
 
       stub(dir, "claude", """
+      cat > #{stdin_file}
+      echo '{"type":"result","is_error":false,"result":"ok"}'
+      """)
+
+      b64 = Base.encode64("not-really-a-png")
+
+      assert {:ok, _} =
+               ClaudeCli.chat([
+                 %{
+                   role: "user",
+                   content: [
+                     %{type: "text", text: "what is in this screenshot?"},
+                     %{
+                       type: "image",
+                       source: %{type: "base64", media_type: "image/png", data: b64}
+                     }
+                   ]
+                 }
+               ])
+
+      %{"message" => %{"content" => content}} = Jason.decode!(File.read!(stdin_file))
+
+      assert [%{"type" => "text", "text" => text} | images] = content
+      assert text =~ "what is in this screenshot?"
+
+      assert [
+               %{
+                 "type" => "image",
+                 "source" => %{
+                   "type" => "base64",
+                   "media_type" => "image/png",
+                   "data" => ^b64
+                 }
+               }
+             ] = images,
+             "the image must reach the CLI as an Anthropic-shape content block"
+    end
+
+    test "supports_image_content? is declared, so the registry stops flattening images" do
+      assert ClaudeCli.supports_image_content?()
+    end
+
+    test "the isolation flags are actually passed, since the loop depends on them", %{dir: dir} do
+      argv_file = Path.join(dir, "argv.txt")
+      prompt_copy = Path.join(dir, "prompt.txt")
+
+      # The system prompt arrives as a file path after --system-prompt-file;
+      # copy its content out before the request's temp dir is removed.
+      stub(dir, "claude", """
       printf '%s\\n' "$@" > #{argv_file}
+      while [ $# -gt 1 ]; do
+        if [ "$1" = "--system-prompt-file" ]; then cp "$2" #{prompt_copy}; fi
+        shift
+      done
       cat > /dev/null
       echo '{"type":"result","is_error":false,"result":"ok"}'
       """)
@@ -766,12 +819,16 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       argv = File.read!(argv_file) |> String.split("\n")
 
       for flag <-
-            ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt) do
+            ~w(--tools --setting-sources --strict-mcp-config --no-session-persistence --system-prompt-file) do
         assert flag in argv,
                "#{flag} is what keeps Claude Code from running its own agent instead of answering OSA's"
       end
 
-      assert "OSA prompt" in argv,
+      refute "OSA prompt" in argv,
+             "the system prompt must not travel on argv — `ps` is readable by every " <>
+               "local user, and Linux caps a single argv element at 128KiB (E2BIG)"
+
+      assert File.read!(prompt_copy) =~ "OSA prompt",
              "OSA's system prompt must replace Claude Code's, not be dropped"
     end
 
