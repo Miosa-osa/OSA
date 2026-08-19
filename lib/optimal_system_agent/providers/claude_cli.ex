@@ -165,7 +165,7 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
       tools = Keyword.get(opts, :tools) || []
 
       system_prompt = build_system_prompt(system, tools)
-      stdin_line = stream_json_user(render_turns(turns))
+      stdin_line = stream_json_user(render_turns(turns), collect_images(turns))
 
       with {:ok, dir, file, prompt_file} <- write_request_files(stdin_line, system_prompt) do
         try do
@@ -638,7 +638,7 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     {system, rest} =
       Enum.split_with(messages, fn m -> to_string(role_of(m)) == "system" end)
 
-    {system |> Enum.map_join("\n\n", &to_string(content_of(&1) || "")) |> String.trim(), rest}
+    {system |> Enum.map_join("\n\n", &prompt_text_of/1) |> String.trim(), rest}
   end
 
   @doc """
@@ -714,7 +714,7 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
 
     case history do
       [] ->
-        to_string(content_of(last) || "")
+        prompt_text_of(last)
 
       _ ->
         transcript = Enum.map_join(history, "\n\n", &render_turn/1)
@@ -728,14 +728,14 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
 
         Now respond to this latest message:
 
-        #{to_string(content_of(last) || "")}
+        #{prompt_text_of(last)}
         """
     end
   end
 
   defp render_turn(message) do
     role = to_string(role_of(message))
-    content = to_string(content_of(message) || "")
+    content = prompt_text_of(message)
 
     case role do
       "assistant" -> "[assistant]\n#{content}"
@@ -751,11 +751,92 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
     end
   end
 
-  defp stream_json_user(text) do
+  defp stream_json_user(text, image_blocks) do
     Jason.encode!(%{
       "type" => "user",
-      "message" => %{"role" => "user", "content" => [%{"type" => "text", "text" => text}]}
+      "message" => %{
+        "role" => "user",
+        "content" => [%{"type" => "text", "text" => text} | image_blocks]
+      }
     }) <> "\n"
+  end
+
+  @doc """
+  Declared so `Registry.normalize_message_content/3` passes image-bearing
+  block lists through instead of flattening them to a placeholder sentence.
+
+  The CLI's `--input-format stream-json` accepts Anthropic-style `image`
+  content blocks in the user message (verified against CLI 2.1.235: a base64
+  PNG sent this way was described correctly by the model). Text-only block
+  lists still arrive flattened — only messages that actually contain an image
+  reach this provider as lists, which `collect_images/1` and `text_of/1`
+  handle.
+  """
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
+
+  # Every image block across the conversation, in order, normalized to the
+  # string-keyed Anthropic wire shape the CLI accepts. The transcript text
+  # references attachments where they occurred; the pixels ride alongside as
+  # content blocks on the single flattened user message — same trade as the
+  # transcript itself (fidelity of placement traded for statelessness).
+  @doc false
+  @spec collect_images(list()) :: list(map())
+  def collect_images(turns) do
+    turns
+    |> Enum.flat_map(fn m ->
+      case content_of(m) do
+        blocks when is_list(blocks) -> blocks
+        _ -> []
+      end
+    end)
+    |> Enum.flat_map(fn block ->
+      case get(block, :source) do
+        source when is_map(source) ->
+          if to_string(get(block, :type) || "") == "image" do
+            [
+              %{
+                "type" => "image",
+                "source" =>
+                  %{
+                    "type" => get(source, :type),
+                    "media_type" => get(source, :media_type),
+                    "data" => get(source, :data),
+                    "url" => get(source, :url)
+                  }
+                  |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+                  |> Map.new()
+              }
+            ]
+          else
+            []
+          end
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  # Content as prompt text. A message that kept its block list (the image
+  # carve-out) still contributes its text parts to the transcript; the image
+  # blocks travel separately via `collect_images/1`.
+  defp prompt_text_of(message) do
+    case content_of(message) do
+      blocks when is_list(blocks) ->
+        blocks
+        |> Enum.map(fn b ->
+          case get(b, :text) do
+            t when is_binary(t) -> t
+            _ -> nil
+          end
+        end)
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      other ->
+        to_string(other || "")
+    end
   end
 
   # ── request files ───────────────────────────────────────────────────────

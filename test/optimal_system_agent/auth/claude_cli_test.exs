@@ -748,6 +748,52 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
       assert stdin =~ marker
     end
 
+    test "image blocks ride the stream-json user message as content blocks", %{dir: dir} do
+      stdin_file = Path.join(dir, "stdin.txt")
+
+      stub(dir, "claude", """
+      cat > #{stdin_file}
+      echo '{"type":"result","is_error":false,"result":"ok"}'
+      """)
+
+      b64 = Base.encode64("not-really-a-png")
+
+      assert {:ok, _} =
+               ClaudeCli.chat([
+                 %{
+                   role: "user",
+                   content: [
+                     %{type: "text", text: "what is in this screenshot?"},
+                     %{
+                       type: "image",
+                       source: %{type: "base64", media_type: "image/png", data: b64}
+                     }
+                   ]
+                 }
+               ])
+
+      %{"message" => %{"content" => content}} = Jason.decode!(File.read!(stdin_file))
+
+      assert [%{"type" => "text", "text" => text} | images] = content
+      assert text =~ "what is in this screenshot?"
+
+      assert [
+               %{
+                 "type" => "image",
+                 "source" => %{
+                   "type" => "base64",
+                   "media_type" => "image/png",
+                   "data" => ^b64
+                 }
+               }
+             ] = images,
+             "the image must reach the CLI as an Anthropic-shape content block"
+    end
+
+    test "supports_image_content? is declared, so the registry stops flattening images" do
+      assert ClaudeCli.supports_image_content?()
+    end
+
     test "the isolation flags are actually passed, since the loop depends on them", %{dir: dir} do
       argv_file = Path.join(dir, "argv.txt")
       prompt_copy = Path.join(dir, "prompt.txt")
