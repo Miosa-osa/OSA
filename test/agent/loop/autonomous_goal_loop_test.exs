@@ -376,11 +376,11 @@ defmodule OptimalSystemAgent.Agent.Loop.AutonomousGoalLoopTest do
   # ---------------------------------------------------------------------------
 
   describe "stalls that look like progress" do
-    test "two rounds citing the same gap pause the goal and stop the loop" do
+    test "repeated identical gaps with no work landing pause the goal and stop the loop" do
       session_id = sid()
       GoalTracker.start(session_id, "ship the exporter")
 
-      # Same concrete identifier both rounds — different prose, same gap. The
+      # Same concrete identifier every round — different prose, same gap. The
       # fingerprint is over extracted identifiers precisely so re-worded prose
       # does not read as progress.
       inject_panel([
@@ -391,17 +391,53 @@ defmodule OptimalSystemAgent.Agent.Loop.AutonomousGoalLoopTest do
 
       state = %{session_id: session_id, working_dir: File.cwd!(), messages: []}
 
-      {r1, _} = GoalVerifier.verify(state)
-      GoalTracker.advance(session_id, r1)
-
-      {r2, _} = GoalVerifier.verify(state)
-      snap = GoalTracker.advance(session_id, r2)
+      # This used to pause after TWO rounds. It no longer does, and must not: a
+      # goal spans many plans, so its remaining gaps stay identical while real
+      # work lands on an earlier plan. Pausing on two matching gap lists
+      # false-paused healthy runs — one reported case showed "Plan 6/6 ✔"
+      # beside "no measurable progress".
+      #
+      # A stall now requires the gaps to repeat AND no work to land, held for
+      # the threshold. `total_tool_calls` is pinned so nothing lands here.
+      snap =
+        Enum.reduce(1..8, nil, fn _, _ ->
+          {r, _} = GoalVerifier.verify(state)
+          GoalTracker.advance(session_id, r, 7)
+        end)
 
       assert snap.status == :paused
       assert snap.pause_reason == :no_progress
 
       refute ReactLoop.goal_continue_due?(%{session_id: session_id}),
              "a stalled goal must stop driving the loop"
+
+      GoalTracker.reset(session_id)
+    end
+
+    test "the same repeated gaps do NOT pause while work is landing" do
+      session_id = sid()
+      GoalTracker.start(session_id, "ship the exporter")
+
+      inject_panel([
+        vote(true, "lib/exporter.ex still has no dump/1"),
+        vote(true, "lib/exporter.ex is missing dump/1"),
+        vote(true, "no dump/1 in lib/exporter.ex")
+      ])
+
+      state = %{session_id: session_id, working_dir: File.cwd!(), messages: []}
+
+      # Identical gaps every round, but the tool-call count climbs — the shape
+      # of a big goal being worked through one plan at a time.
+      Enum.each([10, 30, 75, 121, 210], fn calls ->
+        {r, _} = GoalVerifier.verify(state)
+        GoalTracker.advance(session_id, r, calls)
+      end)
+
+      refute GoalTracker.paused?(session_id),
+             "paused a goal that was demonstrably doing work"
+
+      assert ReactLoop.goal_continue_due?(%{session_id: session_id}) ||
+               GoalTracker.snapshot(session_id).status == :active
 
       GoalTracker.reset(session_id)
     end

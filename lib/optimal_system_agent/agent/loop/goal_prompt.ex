@@ -75,7 +75,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPrompt do
     |> replace("criteria_block", criteria_block(session_id, goal))
     |> replace("turn_count", to_string(Map.get(snap, :turn_count, 0)))
     |> replace("verify_run_count", to_string(Map.get(snap, :verify_run_count, 0)))
-    |> replace("max_runs", to_string(max_runs()))
+    |> replace("max_runs", GoalTracker.max_runs_label())
   end
 
   # Tolerate both `{{ key }}` and `{{key}}` so a hand-edited user override does
@@ -123,12 +123,6 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPrompt do
   end
 
   defp escape_xml(_), do: ""
-
-  defp max_runs do
-    GoalTracker.max_runs()
-  rescue
-    _ -> 12
-  end
 
   # Retained from the pre-port inline message so a missing template still
   # restates the goal verbatim and still demands evidence.

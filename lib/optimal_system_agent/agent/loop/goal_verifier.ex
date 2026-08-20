@@ -239,6 +239,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     runs = Map.get(state, :goal_verifier_runs, 0)
 
     session_id != nil and
+      # GoalVerifier's OWN per-turn cap (:goal_verifier_max_runs, default 3) —
+      # deliberately NOT GoalTracker's lifetime cap. They are separate knobs and
+      # conflating them silently disabled this one.
       runs < max_runs() and
       not stalled?(state) and
       has_accumulated_work?(session_id)
@@ -369,7 +372,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       {:candidate_complete, _meta} ->
         state = clear_blocker(state)
         {result, state} = verify(state)
-        GoalTracker.advance(Map.get(state, :session_id), result)
+        # Session-wide tool-call count as the work marker: if it moved since
+        # the last verification, work landed and this round is not a stall,
+        # however familiar the remaining gaps look.
+        GoalTracker.advance(
+          Map.get(state, :session_id),
+          result,
+          Map.get(state, :total_tool_calls)
+        )
 
         case result.verdict do
           :complete ->
