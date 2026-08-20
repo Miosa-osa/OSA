@@ -208,13 +208,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   # cross-turn stall auto-pause (mirrors GOAL_CLASSIFIER_STALL_THRESHOLD).
   # Consecutive rounds with UNCHANGED gaps AND no work landed before pausing.
   #
-  # Was 2, which false-paused constantly. A goal spans many plans, so while the
-  # agent works through plan 1 of 3 the goal's remaining gaps ("plans 2 and 3
-  # outstanding") are identical every round - because they genuinely are still
-  # outstanding. Two rounds of that and the goal paused, even with a plan just
-  # completed 6/6. "Same gaps" is the NORMAL state of making progress on a large
-  # goal; it is not evidence of a stall.
-  @default_stall_threshold 5
+  # Two is deliberate and unchanged: what was wrong was never the count, it was
+  # that the count advanced on gaps alone. A goal spans many plans, so while the
+  # agent works through plan 1 of 3 the goal's gaps ("plans 2 and 3 outstanding")
+  # are identical every round — because they genuinely are. Two rounds of that
+  # paused the goal with a plan just completed 6/6.
+  #
+  # With `work_landed?/2` vetoing those rounds, two consecutive rounds where
+  # NOTHING moved is a fair definition of stuck.
+  @default_stall_threshold 2
 
   @history_max 32
 
@@ -816,20 +818,27 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         count = snap.stall_count + 1
         {count, count >= stall_threshold()}
 
-      # Work landed. Reset the streak outright rather than decaying it: a goal
-      # that is moving should not carry a penalty from rounds when it was not.
-      work_landed? ->
-        {0, false}
-
+      # Work landed, or the gaps moved. Either way this round is progress, so
+      # the streak restarts at 1 — the same reset the gap-only rule used, so
+      # "two rounds where nothing moved" still means two, not three.
       true ->
-        {0, false}
+        {1, 1 >= stall_threshold()}
     end
   end
 
-  # Unknown marker (caller passed none, or first round) is NOT treated as "no
-  # work" - absence of evidence must not read as evidence of a stall.
-  defp work_landed?(nil, _current), do: true
-  defp work_landed?(_previous, nil), do: true
+  # With NO work information, fall back to the gap-only rule.
+  #
+  # The first attempt treated an unknown marker as "work landed", reasoning that
+  # absence of evidence should not read as evidence of a stall. In effect that
+  # disabled stall detection outright for every `advance/2` caller — a goal
+  # spinning on the same blocker forever would never be caught. The safety net
+  # has to survive callers that cannot report progress.
+  #
+  # So: a marker is only allowed to VETO a stall, never to cause one. When one
+  # is present and has moved, work landed. When it is absent we know nothing
+  # extra, and the gap fingerprint is the best signal available.
+  defp work_landed?(nil, _current), do: false
+  defp work_landed?(_previous, nil), do: false
   defp work_landed?(previous, current), do: current > previous
 
   defp steer_replan(session_id, result) do

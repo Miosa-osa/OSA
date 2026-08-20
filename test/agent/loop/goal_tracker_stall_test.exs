@@ -57,18 +57,20 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerStallTest do
       start(s)
       gaps = ["blocked on the same thing"]
 
-      # Two rounds with nothing moving...
-      GoalTracker.advance(s, incomplete(gaps), 5)
+      # One round establishes the fingerprint, a second with nothing moving is
+      # one strike short of the pause.
       GoalTracker.advance(s, incomplete(gaps), 5)
       refute GoalTracker.paused?(s)
 
-      # ...then work lands. The streak must clear, not merely decay.
-      GoalTracker.advance(s, incomplete(gaps), 6)
-      assert GoalTracker.snapshot(s).stall_count == 0
-
-      # And the goal survives another quiet round afterwards.
+      # Work lands — the streak restarts, so this round is not the second
+      # strike. Asserting the observable property rather than the counter: what
+      # matters is that the goal is not paused, and cannot be paused by the
+      # NEXT quiet round either.
       GoalTracker.advance(s, incomplete(gaps), 6)
       refute GoalTracker.paused?(s)
+
+      GoalTracker.advance(s, incomplete(gaps), 7)
+      refute GoalTracker.paused?(s), "work landing failed to hold off the pause"
     end
   end
 
@@ -83,24 +85,36 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerStallTest do
     end
   end
 
-  describe "absence of evidence is not evidence of a stall" do
-    test "a caller that passes no work marker cannot trigger a pause" do
-      # `advance/2` has no marker. Treating "unknown" as "no work" would make
-      # every legacy caller stall a healthy goal.
+  describe "a work marker can veto a stall, never cause one" do
+    test "with no marker the gap-only rule still applies" do
+      # `advance/2` carries no marker. Treating unknown as "work landed" would
+      # disable stall detection entirely for every such caller — a goal spinning
+      # on one blocker forever would never be caught. The safety net has to
+      # survive callers that cannot report progress.
       s = sid()
       start(s)
       gaps = ["unchanged"]
 
-      for _ <- 1..8, do: GoalTracker.advance(s, incomplete(gaps))
+      for _ <- 1..4, do: GoalTracker.advance(s, incomplete(gaps))
 
-      refute GoalTracker.paused?(s),
-             "advance/2 stalled a goal it has no progress information about"
+      assert GoalTracker.paused?(s),
+             "advance/2 lost stall detection: #{inspect(GoalTracker.snapshot(s))}"
+    end
+
+    test "a moving marker vetoes what would otherwise be a stall" do
+      s = sid()
+      start(s)
+      gaps = ["unchanged"]
+
+      for calls <- [10, 40, 90, 150], do: GoalTracker.advance(s, incomplete(gaps), calls)
+
+      refute GoalTracker.paused?(s), "a moving marker failed to veto the stall"
     end
   end
 
   describe "the threshold" do
-    test "tolerates more than two quiet rounds" do
-      # Two was the old value and it false-paused constantly.
+    test "two rounds where NOTHING moved is a stall" do
+      # The count was never the bug; advancing it on gaps alone was.
       s = sid()
       start(s)
       gaps = ["quiet"]
@@ -108,7 +122,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerStallTest do
       GoalTracker.advance(s, incomplete(gaps), 3)
       GoalTracker.advance(s, incomplete(gaps), 3)
 
-      refute GoalTracker.paused?(s), "paused after only two quiet rounds"
+      assert GoalTracker.paused?(s)
     end
   end
 

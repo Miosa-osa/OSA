@@ -12,6 +12,24 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
 
+  # The lifetime verification-round cap is OFF by default: counting rounds
+  # punished thoroughness, and Codex bounds a goal by token budget and elapsed
+  # time instead. These cases exercise the cap itself, so they ask for one -
+  # which is what "opt-in" means.
+  setup do
+    previous = Application.fetch_env(:optimal_system_agent, :goal_tracker_max_runs)
+    Application.put_env(:optimal_system_agent, :goal_tracker_max_runs, 12)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:optimal_system_agent, :goal_tracker_max_runs, v)
+        :error -> Application.delete_env(:optimal_system_agent, :goal_tracker_max_runs)
+      end
+    end)
+
+    :ok
+  end
+
   setup do
     sid = "goal-verifier-test-#{System.unique_integer([:positive])}"
     Ledger.reset(sid)
