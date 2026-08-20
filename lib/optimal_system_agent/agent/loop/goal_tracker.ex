@@ -125,7 +125,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   @type status :: :active | :paused | :completed | :off_track | :blocked | :abandoned
   @type phase :: :idle | :planning | :executing
   @type pause_reason ::
-          :no_progress | :run_cap | :off_track | :user | :blocked | :abandoned | nil
+          :no_progress | :run_cap | :usage_limits | :off_track | :user | :blocked | :abandoned | nil
 
   defmodule Snapshot do
     @moduledoc "Persisted per-session goal-tracker state."
@@ -139,6 +139,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             rounds_since_verify: non_neg_integer(),
             verify_run_count: non_neg_integer(),
             last_gap_fingerprint: integer() | nil,
+            last_work_marker: non_neg_integer() | nil,
+            token_budget: pos_integer() | nil,
+            tokens_at_start: non_neg_integer() | nil,
+            tokens_used: non_neg_integer(),
+            started_at: DateTime.t() | nil,
             stall_count: non_neg_integer(),
             pause_reason: OptimalSystemAgent.Agent.Loop.GoalTracker.pause_reason(),
             blocked_claims: non_neg_integer(),
@@ -156,6 +161,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               rounds_since_verify: 0,
               verify_run_count: 0,
               last_gap_fingerprint: nil,
+              last_work_marker: nil,
+              # Opt-in, nullable — mirrors Codex's `token_budget`, whose own tool
+              # doc says "Omit unless explicitly requested". A goal with no
+              # budget is unbounded; the ceiling is a thing the operator asks
+              # for, not a default that ambushes a long run.
+              token_budget: nil,
+              tokens_at_start: nil,
+              tokens_used: 0,
+              started_at: nil,
               stall_count: 0,
               pause_reason: nil,
               blocked_claims: 0,
@@ -170,7 +184,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   # Lifetime run cap ACROSS THE WHOLE GOAL (all turns), distinct from
   # GoalVerifier's own smaller PER-TURN cap (@max_runs = 3 there).
-  @default_max_runs 12
+  # Lifetime verification-round cap. OFF by default.
+  #
+  # Counting verification rounds is the wrong shape for bounding a goal, and
+  # Codex does not do it: its `thread_goals` carries an OBJECTIVE and an
+  # optional `token_budget` ("Omit unless explicitly requested"), and its goal
+  # tool reports "status, budgets, token and elapsed-time usage, remaining token
+  # budget". Cost and elapsed time are the real resources; a round count is a
+  # proxy that punishes thoroughness — verifying more often made a goal MORE
+  # likely to be killed, which is backwards.
+  #
+  # A goal now ends for a reason, not for a count: achieved, off-track,
+  # genuinely stalled (unchanged gaps AND no work landing), out of budget
+  # (`max_budget_usd`, opt-in), or stopped by the operator. Set
+  # `:goal_tracker_max_runs` to re-impose a ceiling for a bounded run.
+  @default_max_runs :infinity
 
   # Turns to wait between goal-verification rounds once the goal has already
   # been verified at least once (mirrors GOAL_REVERIFY_AFTER_DEFAULT = 8).
@@ -178,7 +206,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   # Consecutive identical gap fingerprints (across turns) that trip the
   # cross-turn stall auto-pause (mirrors GOAL_CLASSIFIER_STALL_THRESHOLD).
-  @default_stall_threshold 2
+  # Consecutive rounds with UNCHANGED gaps AND no work landed before pausing.
+  #
+  # Was 2, which false-paused constantly. A goal spans many plans, so while the
+  # agent works through plan 1 of 3 the goal's remaining gaps ("plans 2 and 3
+  # outstanding") are identical every round - because they genuinely are still
+  # outstanding. Two rounds of that and the goal paused, even with a plan just
+  # completed 6/6. "Same gaps" is the NORMAL state of making progress on a large
+  # goal; it is not evidence of a stall.
+  @default_stall_threshold 5
 
   @history_max 32
 
@@ -277,6 +313,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       phase: :executing,
       goal_id: goal_id,
       goal: goal,
+      # Both nil unless the caller asked for a budget. An unbudgeted goal runs
+      # until it is achieved, goes off-track, genuinely stalls, or the operator
+      # stops it - never until a counter runs out.
+      token_budget: normalize_budget(Keyword.get(opts, :token_budget)),
+      tokens_at_start: Keyword.get(opts, :tokens_used),
+      tokens_used: 0,
+      started_at: DateTime.utc_now(),
       updated_at: DateTime.utc_now()
     }
 
@@ -666,7 +709,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   `:system_event` (`event: :goal_tracker_transition`) for the TUI/telemetry.
   """
   @spec advance(String.t(), GoalVerifier.Result.t()) :: Snapshot.t()
-  def advance(session_id, %GoalVerifier.Result{} = result) when is_binary(session_id) do
+  def advance(session_id, result), do: advance(session_id, result, nil)
+
+  @doc """
+  As `advance/2`, with a monotonic `work_marker` describing how much work has
+  landed for this session (the session-wide tool-call count).
+
+  Stall detection needs it. Judging progress by the gap list alone cannot
+  distinguish "nothing happened" from "real work happened but the goal is big
+  enough that the same gaps are still outstanding" - and the second is the
+  normal case for any multi-plan goal. When the marker has moved, work landed,
+  and the round is not a stall however familiar the gaps look.
+  """
+  @spec advance(String.t(), GoalVerifier.Result.t(), non_neg_integer() | nil) :: Snapshot.t()
+  def advance(session_id, %GoalVerifier.Result{} = result, work_marker)
+      when is_binary(session_id) do
     snap = ensure(session_id)
 
     snap = %{
@@ -676,12 +733,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         updated_at: DateTime.utc_now()
     }
 
-    snap = apply_verdict(snap, result)
+    snap = apply_verdict(snap, result, work_marker)
     put(snap)
     snap
   end
 
-  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :complete} = result) do
+  defp apply_verdict(snap, result, work_marker \\ nil)
+
+  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :complete} = result, _work) do
     snap = %{
       snap
       | status: :completed,
@@ -694,17 +753,22 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     transition(snap, "goal COMPLETED — #{result.reason}")
   end
 
-  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :off_track} = result) do
+  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :off_track} = result, _work) do
     snap = %{snap | status: :off_track, phase: :planning}
     steer_replan(snap.session_id, result)
     transition(snap, "goal OFF-TRACK — #{result.reason}; re-plan nudge queued")
   end
 
-  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete} = result) do
+  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete} = result, work_marker) do
     fingerprint = gap_fingerprint(result.gaps)
-    {stall_count, stalled?} = advance_stall(snap, fingerprint)
+    {stall_count, stalled?} = advance_stall(snap, fingerprint, work_marker)
 
-    snap = %{snap | last_gap_fingerprint: fingerprint, stall_count: stall_count}
+    snap = %{
+      snap
+      | last_gap_fingerprint: fingerprint,
+        last_work_marker: work_marker || snap.last_work_marker,
+        stall_count: stall_count
+    }
 
     cond do
       stalled? ->
@@ -715,7 +779,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             Enum.join(result.gaps, "; ")
         )
 
-      snap.verify_run_count >= max_runs() ->
+      run_cap_reached?(snap.verify_run_count) ->
         snap
         |> Map.merge(%{status: :paused, pause_reason: :run_cap})
         |> transition(
@@ -732,8 +796,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   # Fail-closed default for a malformed/unexpected result — treat as
   # incomplete-with-no-gaps rather than silently completing.
-  defp apply_verdict(snap, other) do
-    apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete, reason: inspect(other)})
+  defp apply_verdict(snap, other, work_marker) do
+    apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete, reason: inspect(other)}, work_marker)
   end
 
   # `count` tracks consecutive occurrences (in a row, ACROSS TURNS) of the
@@ -741,16 +805,32 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   # the default of 2 trips on the SECOND consecutive round citing the
   # identical gap set — mirrors `GoalVerifier.advance_stall/3` and grok's
   # `record_classifier_stall`.
-  defp advance_stall(%Snapshot{last_gap_fingerprint: last, stall_count: prev}, fingerprint) do
+  # A round only counts toward a stall when the gaps are unchanged AND no work
+  # landed since the last verification. Either one moving is progress.
+  defp advance_stall(%Snapshot{} = snap, fingerprint, work_marker) do
+    same_gaps? = snap.last_gap_fingerprint != nil and snap.last_gap_fingerprint == fingerprint
+    work_landed? = work_landed?(snap.last_work_marker, work_marker)
+
     cond do
-      last != nil and last == fingerprint ->
-        count = prev + 1
+      same_gaps? and not work_landed? ->
+        count = snap.stall_count + 1
         {count, count >= stall_threshold()}
 
+      # Work landed. Reset the streak outright rather than decaying it: a goal
+      # that is moving should not carry a penalty from rounds when it was not.
+      work_landed? ->
+        {0, false}
+
       true ->
-        {1, 1 >= stall_threshold()}
+        {0, false}
     end
   end
+
+  # Unknown marker (caller passed none, or first round) is NOT treated as "no
+  # work" - absence of evidence must not read as evidence of a stall.
+  defp work_landed?(nil, _current), do: true
+  defp work_landed?(_previous, nil), do: true
+  defp work_landed?(previous, current), do: current > previous
 
   defp steer_replan(session_id, result) do
     gaps = gaps_block(result.gaps)
@@ -1018,6 +1098,101 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   @spec max_runs() :: pos_integer()
   def max_runs do
     Application.get_env(:optimal_system_agent, :goal_tracker_max_runs, @default_max_runs)
+  end
+
+  @doc "Human-readable verification cap: a number, or \"unlimited\"."
+  @spec max_runs_label() :: String.t()
+  def max_runs_label do
+    case max_runs() do
+      n when is_integer(n) and n > 0 -> to_string(n)
+      _ -> "unlimited"
+    end
+  end
+
+  @doc false
+  @spec runs_remaining?(non_neg_integer()) :: boolean()
+  def runs_remaining?(runs), do: not run_cap_reached?(runs)
+
+  # A budget must be a positive integer or absent. A zero or negative value is
+  # discarded rather than obeyed: honouring 0 would end the goal before its
+  # first turn, which is never what anyone meant by "set a budget".
+  defp normalize_budget(n) when is_integer(n) and n > 0, do: n
+  defp normalize_budget(_), do: nil
+
+  @doc """
+  Record cumulative token usage for the session and pause the goal when it has
+  consumed its budget.
+
+  Cost and elapsed time are the real resources a long goal spends, so they are
+  what bounds it — mirroring Codex, whose goal tool reports "status, budgets,
+  token and elapsed-time usage, remaining token budget" and pauses on
+  `usage >= token_budget`. An unbudgeted goal is never paused by this.
+  """
+  @spec note_usage(String.t(), non_neg_integer()) :: Snapshot.t()
+  def note_usage(session_id, cumulative_tokens)
+      when is_binary(session_id) and is_integer(cumulative_tokens) do
+    snap = ensure(session_id)
+    baseline = snap.tokens_at_start || cumulative_tokens
+    used = max(cumulative_tokens - baseline, 0)
+
+    snap = %{
+      snap
+      | tokens_at_start: baseline,
+        tokens_used: used,
+        updated_at: DateTime.utc_now()
+    }
+
+    snap =
+      if snap.status == :active and budget_exhausted?(snap) do
+        snap
+        |> Map.merge(%{status: :paused, pause_reason: :usage_limits})
+        |> transition(
+          "goal PAUSED (usage_limits) — spent #{used} of #{snap.token_budget} token budget"
+        )
+      else
+        snap
+      end
+
+    put(snap)
+    snap
+  end
+
+  @doc "Whether a budgeted goal has spent it. Always false with no budget."
+  @spec budget_exhausted?(Snapshot.t()) :: boolean()
+  def budget_exhausted?(%Snapshot{token_budget: nil}), do: false
+
+  def budget_exhausted?(%Snapshot{token_budget: budget, tokens_used: used})
+      when is_integer(budget) and budget > 0,
+      do: used >= budget
+
+  def budget_exhausted?(_), do: false
+
+  @doc """
+  Tokens left on a budgeted goal, or `:unlimited`.
+
+  Reported rather than merely enforced: an operator who set a budget should be
+  able to see it draining, not discover it at the moment the goal stops.
+  """
+  @spec budget_remaining(Snapshot.t()) :: non_neg_integer() | :unlimited
+  def budget_remaining(%Snapshot{token_budget: nil}), do: :unlimited
+
+  def budget_remaining(%Snapshot{token_budget: budget, tokens_used: used}),
+    do: max(budget - used, 0)
+
+  @doc "Wall-clock seconds since the goal was anchored, or nil."
+  @spec elapsed_seconds(Snapshot.t()) :: non_neg_integer() | nil
+  def elapsed_seconds(%Snapshot{started_at: nil}), do: nil
+
+  def elapsed_seconds(%Snapshot{started_at: started}),
+    do: max(DateTime.diff(DateTime.utc_now(), started, :second), 0)
+
+  @doc false
+  @spec run_cap_reached?(non_neg_integer()) :: boolean()
+  def run_cap_reached?(runs) do
+    case max_runs() do
+      n when is_integer(n) and n > 0 -> runs >= n
+      _ -> false
+    end
   end
 
   @spec reverify_after() :: pos_integer()

@@ -111,7 +111,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
     "cannot create a new goal because this session has an unfinished goal; " <>
       "complete the existing goal first.\n\nActive objective: #{snap.goal}\n" <>
       "Status: #{snap.status}. Turns spent: #{snap.turn_count}. " <>
-      "Verification rounds: #{snap.verify_run_count}/#{GoalTracker.max_runs()}.\n\n" <>
+      "Verification rounds: #{snap.verify_run_count}/#{GoalTracker.max_runs_label()}.\n\n" <>
       "The objective cannot be edited or replaced while it is live — that freeze is " <>
       "what stops a hard goal being quietly traded for an easy one.\n\n" <>
       "Ways out, in order:\n" <>
@@ -222,7 +222,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
            "Abandoned objective: #{snap.goal}\n\n" <>
            "You may now anchor the new work with #{Constants.create_tool_name()}. The " <>
            "successor goal inherits the #{snap.turn_count} turn(s) and " <>
-           "#{snap.verify_run_count}/#{GoalTracker.max_runs()} verification round(s) already " <>
+           "#{snap.verify_run_count}/#{GoalTracker.max_runs_label()} verification round(s) already " <>
            "spent: abandoning changes what this run is working on, not how much budget it " <>
            "has left.\n\n" <>
            "Tell the user plainly that the previous objective was abandoned and why — a " <>

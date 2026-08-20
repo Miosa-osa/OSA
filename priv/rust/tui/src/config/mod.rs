@@ -214,11 +214,33 @@ fn default_theme() -> String {
 }
 
 fn default_request_timeout_secs() -> u64 {
-    900
+    // 4 hours, not 15 minutes.
+    //
+    // This is a client-side guard against a backend that has stopped
+    // answering, not a budget on how long work may take. At 900s it was the
+    // latter: a Docker image rebuild, a full re-index or a long test run
+    // exceeds fifteen minutes routinely, and when it did the turn was killed
+    // AND any `/goal` auto-continue loop was paused with it - so an
+    // unattended run died on a healthy long step.
+    //
+    // A wedged turn is now visible without this: the tool orchestrator reports
+    // any call still running every 60s, naming it. So the guard can be generous
+    // and still catch a genuinely dead backend the same day.
+    14_400
 }
 
 fn default_goal_max_cycles() -> u32 {
-    25
+    // How many turns a `/goal` auto-continue loop will drive before stopping.
+    //
+    // 25 is a handful of turns for anything real: the reported run had 121 tool
+    // calls across a six-step plan and was nowhere near finished. A goal that
+    // spans several plans needs orders of magnitude more, and the loop already
+    // has proper stop conditions - the goal completing, going off-track, or
+    // genuinely stalling (unchanged gaps AND no work landing).
+    //
+    // Kept finite rather than unlimited so a misconfigured loop cannot drive
+    // turns forever unattended, but high enough that no healthy run reaches it.
+    1_000
 }
 
 impl Default for Config {
