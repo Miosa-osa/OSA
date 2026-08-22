@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.Resilience
   alias OptimalSystemAgent.Agent.Trajectory
+  alias OptimalSystemAgent.Utils.Mojibake
 
   # If no streaming token arrives for this long, the connection is treated as
   # dead. NOT a total-duration cap — an active stream can run indefinitely.
@@ -281,6 +282,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # Every provider's streamed text funnels through here before it reaches
+        # the screen, the partial buffer, or the persisted transcript — so this
+        # is the ONE place to undo the UTF-8-as-Latin-1 corruption some backends
+        # emit (an em-dash arriving as the bytes for "â€""). Doing it per
+        # provider left gaps: the local Ollama path repaired, its cloud path
+        # (glm-*:cloud) did not, and every other provider not at all. `repair/1`
+        # is conservative — it only rewrites text that re-decodes to valid UTF-8
+        # with fewer mojibake markers, so clean tokens and legitimately accented
+        # text pass through untouched.
+        text = Mojibake.repair(text)
         # One-way door: this byte is about to be on the user's screen. Past this
         # point a same-provider retry would re-emit it into the SAME live
         # callback and the user would watch the paragraph appear twice, so the
@@ -330,6 +341,21 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       {:done, result} ->
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
+
+        # Repair the FINAL assembled content, not just the live deltas. This is
+        # the string that is persisted to the transcript and re-rendered on
+        # resume; the deltas above fix the live view, this fixes the copy that
+        # outlives the turn. A provider that sends all its content in one final
+        # chunk (some cloud models do) is only covered here.
+        result =
+          case result do
+            %{content: content} when is_binary(content) ->
+              %{result | content: Mojibake.repair(content)}
+
+            _ ->
+              result
+          end
+
         # Broadcast token usage via PubSub for TUI status bar
         # `|| %{}`: a provider that reports `usage: nil` is a present key, so
         # the Map.get/3 default does not fire and the `usage != %{}` guard
@@ -365,7 +391,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # read — .env dumps, Authorization headers, key material. It lands in
         # terminal scrollback and in persisted session state, so it gets the
         # same redaction every other user-visible provider text gets.
-        text = Trajectory.redact(text)
+        text = text |> Mojibake.repair() |> Trajectory.redact()
 
         Bus.emit(:system_event, %{
           event: :thinking_delta,
