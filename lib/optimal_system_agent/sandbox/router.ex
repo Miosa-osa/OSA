@@ -214,7 +214,18 @@ defmodule OptimalSystemAgent.Sandbox.Router do
 
       {:ok, mod} ->
         if mod.available?() do
-          apply(mod, fun, args)
+          # Health-check cloud backends before executing commands so the agent
+          # doesn't try to run a 20-minute nmap scan against a sandbox that's
+          # still booting or has a dead command transport. Host and Docker
+          # (local) don't need this — they're either up or they error fast.
+          if cloud_backend?(mod) and fun == :execute do
+            case Sandbox.Health.wait_for_ready(mod, []) do
+              {:ok, :ready} -> apply(mod, fun, args)
+              {:error, reason} -> {:error, reason}
+            end
+          else
+            apply(mod, fun, args)
+          end
         else
           handle_unavailable(mod, fun, args)
         end
@@ -223,6 +234,15 @@ defmodule OptimalSystemAgent.Sandbox.Router do
         handle_invalid_backend(reason, fun, args)
     end
   end
+
+  # Cloud backends need a readiness check; local ones (host, docker) don't.
+  # Only check known cloud backends — unknown/custom modules skip the health
+  # check so they don't break in tests or with custom backends.
+  defp cloud_backend?(Sandbox.E2B), do: true
+  defp cloud_backend?(Sandbox.MIOSA), do: true
+  defp cloud_backend?(Sandbox.MiosaCli), do: true
+  defp cloud_backend?(Sandbox.Vercel), do: true
+  defp cloud_backend?(_), do: false
 
   defp handle_unavailable(mod, fun, args) do
     if mode() == :required do
