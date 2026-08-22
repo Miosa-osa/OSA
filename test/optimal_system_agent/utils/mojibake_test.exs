@@ -24,4 +24,21 @@ defmodule OptimalSystemAgent.Utils.MojibakeTest do
   test "repairs the single-pass form whose controls render as a lone a-circumflex" do
     assert Mojibake.repair("paused â I spent time") == "paused — I spent time"
   end
+
+  # The exact production failure: glm-*:cloud (and other backends) emit an
+  # em-dash's UTF-8 bytes (E2 80 94) already reinterpreted as Latin-1 and
+  # re-encoded, so each byte becomes its own two-byte UTF-8 char. Pin the raw
+  # byte sequence so a future refactor of the marker heuristic cannot silently
+  # stop repairing the case that prompted the fix.
+  test "reverses a byte-for-byte double-encoded em-dash" do
+    corrupt =
+      <<0xE2, 0x80, 0x94>>
+      |> :binary.bin_to_list()
+      |> Enum.map_join(fn b -> <<b::utf8>> end)
+
+    assert String.valid?(corrupt),
+           "the corruption is valid UTF-8, which is why it survives to display"
+
+    assert Mojibake.repair(corrupt) == <<0xE2, 0x80, 0x94>>
+  end
 end
