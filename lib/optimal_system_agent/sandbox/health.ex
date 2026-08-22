@@ -111,7 +111,11 @@ defmodule OptimalSystemAgent.Sandbox.Health do
   # ── Single health check ──────────────────────────────────────────────
 
   defp check_once(backend, timeout_ms) do
-    if not function_exported?(backend, :available?, 0) or not backend.available?() do
+    # `Code.ensure_loaded?/1` first: a bare `function_exported?/3` answers false
+    # for a module that has not been LOADED yet, so under lazy code loading a
+    # perfectly good backend would read as "unavailable" on the first call.
+    if not (Code.ensure_loaded?(backend) and function_exported?(backend, :available?, 0)) or
+         not backend.available?() do
       {:error, "backend unavailable"}
     else
       task =

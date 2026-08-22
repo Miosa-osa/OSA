@@ -1052,13 +1052,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         # `max` is a BYTE budget; String.slice/3 counts CHARACTERS, so multibyte
         # output could pass ~4x the cap. binary_part keeps the cap honest, and
         # `ensure_utf8/1` below repairs the codepoint that either cut may split.
-        head_bytes = trunc(max * @truncate_head_ratio)
-        tail_bytes = max - head_bytes
+        # Reserve the marker's bytes INSIDE the budget so the whole result
+        # honours `max`, not `max + marker`. The marker now carries a
+        # saved-output path (variable length), which pushed the total over the
+        # cap the old head+tail=max split assumed. Measure it once and split
+        # the remaining budget head/tail.
+        marker = elision_marker(0, 0, saved_path)
+        content_budget = max(max - byte_size(marker), 0)
+        head_bytes = trunc(content_budget * @truncate_head_ratio)
+        tail_bytes = content_budget - head_bytes
 
         head = binary_part(output, 0, head_bytes)
         tail = binary_part(output, byte_size(output) - tail_bytes, tail_bytes)
 
-        omitted_bytes = byte_size(output) - max
+        omitted_bytes = byte_size(output) - content_budget
 
         omitted_lines =
           output
