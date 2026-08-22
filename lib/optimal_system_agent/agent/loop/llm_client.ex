@@ -13,12 +13,31 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Providers.Resilience
   alias OptimalSystemAgent.Agent.Trajectory
 
-  # If no streaming token arrives for this long, the connection is dead.
-  # This is NOT a total-duration cap — active streams can run indefinitely.
-  # 300s matches the curl --max-time and port-level timeout in ollama.ex.
-  # Large models (nemotron-super) can take 2-3 min to produce the first token
-  # on complex multi-tool requests.
-  @idle_timeout_ms 300_000
+  # If no streaming token arrives for this long, the connection is treated as
+  # dead. NOT a total-duration cap — an active stream can run indefinitely.
+  #
+  # Raised from 300s. Five minutes of silence is not reliable evidence of a dead
+  # connection: a loaded provider, a large model on a long multi-tool request, or
+  # a queue behind a rate limit all go quiet for longer than that while perfectly
+  # healthy. Observed failure — a background agent that had ALREADY finished its
+  # work (67 pages built, 157 tests passing, zero type errors) was killed
+  # mid-sentence writing its final report:
+  #
+  #     partial: "Zero TypeScript errors. Let me run the full test suite:"
+  #
+  # The stream died, the agent looked stalled, and two hours later it was
+  # reported as a `:timeout` failure with its completed results discarded. The
+  # cost of waiting longer is a slower report on a genuinely dead socket; the
+  # cost of waiting too little is throwing away finished work.
+  @default_idle_timeout_ms 1_800_000
+
+  defp idle_timeout_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :llm_stream_idle_timeout_ms,
+      @default_idle_timeout_ms
+    )
+  end
 
   # Process-dictionary key holding the id of the assistant message currently
   # being generated. See `mint_message_id/1`.
@@ -227,7 +246,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   The stream can run for hours as long as tokens keep arriving. If the
   connection goes silent (no text_delta, thinking_delta, or done event
-  for #{@idle_timeout_ms}ms), the call is killed and an error returned.
+  for `:llm_stream_idle_timeout_ms`), the call is killed and an error returned.
 
   Returns {:ok, result} | {:error, reason}.
   """
@@ -490,8 +509,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         res
       end)
 
-    # Watchdog: polls heartbeat every 10s, kills if no progress for @idle_timeout_ms
-    idle_timeout = Keyword.get(opts, :idle_timeout, @idle_timeout_ms)
+    # Watchdog: polls heartbeat every 10s, kills if no progress for the idle timeout
+    idle_timeout = Keyword.get(opts, :idle_timeout, idle_timeout_ms())
 
     watchdog =
       spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)

@@ -164,6 +164,63 @@ defmodule OptimalSystemAgent.Tools.DelegationVisibilityTest do
       refute_received {:osa_event, %{type: :background_agent_stalled}}
     end
 
+    test "repeat reports escalate and back off instead of repeating one number" do
+      # BEFORE: every report measured from `last_change_at`, which the watcher
+      # reset each time it reported — so a stall of any age always announced the
+      # threshold ("no progress for 15 minutes", five times over), and it
+      # announced it once per threshold period forever, costing the parent a
+      # turn each time.
+      parent_id = "stall-parent-#{System.unique_integer([:positive])}"
+      agent_id = "agent:#{parent_id}:1"
+
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}")
+      start_run(parent_id, agent_id)
+      Orchestrator.start_stall_watcher(parent_id, agent_id, "worker", "background")
+
+      assert_receive {:osa_event, %{type: :background_agent_stalled} = first}, 2_000
+      assert_receive {:osa_event, %{type: :background_agent_stalled} = second}, 2_000
+
+      # Escalation: the stall is measured from when progress actually stopped,
+      # so each report is strictly older than the last.
+      assert second.stalled_ms > first.stalled_ms
+
+      # Backoff: the second report waited at least twice the threshold (40ms)
+      # after the first, rather than one threshold period.
+      assert second.stalled_ms - first.stalled_ms >= 80
+
+      OptimalSystemAgent.Agent.RunStore.complete(agent_id, %{
+        agent_id: agent_id,
+        status: :completed,
+        summary: "done",
+        duration_ms: 1
+      })
+    end
+
+    test "progress resets the backoff so a new stall reports promptly" do
+      parent_id = "stall-parent-#{System.unique_integer([:positive])}"
+      agent_id = "agent:#{parent_id}:1"
+
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}")
+      start_run(parent_id, agent_id)
+      Orchestrator.start_stall_watcher(parent_id, agent_id, "worker", "background")
+
+      assert_receive {:osa_event, %{type: :background_agent_stalled} = first}, 2_000
+
+      # Work lands: the stall is over, so the NEXT stall must be timed from
+      # scratch, not continue the previous stall's clock or its backoff.
+      OptimalSystemAgent.Agent.RunStore.progress(agent_id, "recovered", 1)
+
+      assert_receive {:osa_event, %{type: :background_agent_stalled} = fresh}, 2_000
+      assert fresh.stalled_ms < first.stalled_ms + 500
+
+      OptimalSystemAgent.Agent.RunStore.complete(agent_id, %{
+        agent_id: agent_id,
+        status: :completed,
+        summary: "done",
+        duration_ms: 1
+      })
+    end
+
     test "the watcher stops once the run reaches a terminal status" do
       parent_id = "stall-parent-#{System.unique_integer([:positive])}"
       agent_id = "agent:#{parent_id}:1"
@@ -202,6 +259,47 @@ defmodule OptimalSystemAgent.Tools.DelegationVisibilityTest do
     test "a run with no recorded spend reports 0.0, never crashes" do
       assert Orchestrator.run_cost_usd("no-such-run-#{System.unique_integer([:positive])}") == 0.0
       assert Orchestrator.run_cost_usd(nil) == 0.0
+    end
+  end
+
+  describe "salvaging a failed run's completed work" do
+    test "salvage_text/1 returns the child's last assistant text" do
+      messages = [
+        %{role: "user", content: "build it"},
+        %{role: "assistant", content: "starting"},
+        %{role: "assistant", content: "157 beta tests pass. Zero TypeScript errors."}
+      ]
+
+      assert Orchestrator.salvage_text(messages) =~ "157 beta tests pass"
+    end
+
+    test "salvage_text/1 ignores blank trailing turns and bad input" do
+      assert Orchestrator.salvage_text([%{role: "assistant", content: "   "}]) == nil
+      assert Orchestrator.salvage_text([%{role: "user", content: "hi"}]) == nil
+      assert Orchestrator.salvage_text(nil) == nil
+    end
+
+    test "a timed-out run reports the work it finished, not just :timeout" do
+      # BEFORE: the parent was told only "failed after 7205022ms: :timeout" for a
+      # child that had in fact completed the task, so re-doing all of it looked
+      # like the only option.
+      result =
+        Orchestrator.failure_result("agent:1", "parent", "background", :timeout,
+          commands_run: ["npm test"],
+          salvaged: "157 beta tests pass. Zero TypeScript errors."
+        )
+
+      assert result.status == :failed
+      assert result.summary =~ "157 beta tests pass"
+      assert result.summary =~ "may be incomplete"
+      assert result.commands_run == ["npm test"]
+    end
+
+    test "a failure with nothing to salvage reads exactly as it did before" do
+      result = Orchestrator.failure_result("agent:1", "parent", "background", :timeout)
+
+      refute result.summary =~ "Work recorded"
+      assert result.commands_run == []
     end
   end
 end
