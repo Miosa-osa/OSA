@@ -2,11 +2,11 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
   @moduledoc """
   Docker sandbox backend — runs code in isolated containers.
 
-  Security hardening:
+  Security hardening (defaults — all configurable):
   - `--cap-drop ALL` — drop all Linux capabilities
-  - `--network none` — no network access
-  - `--read-only` — read-only root filesystem
-  - `--pids-limit 100` — prevent fork bombs
+  - `--network none` — no network access (set `network: true` to enable)
+  - `--read-only` — read-only root filesystem (set `read_only: false` to disable)
+  - `--pids-limit 100` — prevent fork bombs (raise for tools that spawn processes)
   - `--memory 256m` — memory limit
   - Workspace mounted at /workspace
 
@@ -24,6 +24,28 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
     }
   }
   ```
+
+  ## Pentest profile
+
+  For penetration testing, the sandbox needs network access, a writable
+  filesystem (scan output, screenshots, PoCs), and higher resource limits:
+
+  ```json
+  {
+    "backend": "docker",
+    "docker": {
+      "image": "osa/pentest:latest",
+      "memory": "2g",
+      "network": true,
+      "read_only": false,
+      "pids_limit": 500,
+      "timeout": 300000
+    }
+  }
+  ```
+
+  Build the pentest image first:
+  `docker build -t osa/pentest:latest -f docker/pentest/Dockerfile docker/pentest/`
 
   Or in application config:
   ```elixir
@@ -55,6 +77,51 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
   @impl true
   def name, do: "docker"
 
+  @doc """
+  Build the `docker run` argument list from config and command opts.
+
+  Pure function — no side effects, no Docker required. Extracted so the
+  argument-building logic is unit-testable without Docker installed.
+
+  ## Config keys (from `:sandbox_docker` application env)
+
+    * `:image`       — Docker image (default: #{@default_image})
+    * `:memory`      — memory limit (default: #{@default_memory})
+    * `:network`     — `true` enables networking, anything else → `--network none`
+    * `:read_only`   — `false` disables `--read-only`, anything else → `--read-only`
+    * `:pids_limit`  — process limit (default: 100)
+    * `:timeout`     — wall-clock timeout in ms (default: #{@default_timeout})
+
+  ## Opts (per-call)
+
+    * `:image`       — overrides config image
+    * `:working_dir`  — host dir to mount at /workspace
+  """
+  @spec build_run_args(map(), keyword(), String.t()) :: [String.t()]
+  def build_run_args(config, opts, command) do
+    image = Keyword.get(opts, :image, config[:image] || @default_image)
+    memory = config[:memory] || @default_memory
+    working_dir = Keyword.get(opts, :working_dir)
+    network = if config[:network] == true, do: [], else: ["--network", "none"]
+    read_only = if config[:read_only] == false, do: [], else: ["--read-only"]
+    pids_limit = to_string(config[:pids_limit] || 100)
+
+    docker_args =
+      ["run", "--rm", "--cap-drop", "ALL"] ++
+        read_only ++
+        ["--pids-limit", pids_limit, "--memory", memory] ++ network
+
+    docker_args =
+      if working_dir do
+        docker_args ++ ["-v", "#{working_dir}:/workspace", "-w", "/workspace"]
+      else
+        docker_args
+      end
+
+    docker_args = docker_args ++ ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+    docker_args ++ [image, "sh", "-c", command]
+  end
+
   @impl true
   def execute(command, opts \\ []) do
     if not available?() do
@@ -63,36 +130,7 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
       config = sandbox_config()
       image = Keyword.get(opts, :image, config[:image] || @default_image)
       timeout = Keyword.get(opts, :timeout, config[:timeout] || @default_timeout)
-      memory = config[:memory] || @default_memory
-      working_dir = Keyword.get(opts, :working_dir)
-      network = if config[:network] == true, do: [], else: ["--network", "none"]
-
-      # Build docker run command
-      docker_args =
-        [
-          "run",
-          "--rm",
-          "--cap-drop",
-          "ALL",
-          "--read-only",
-          "--pids-limit",
-          "100",
-          "--memory",
-          memory
-        ] ++ network
-
-      # Mount working directory if provided
-      docker_args =
-        if working_dir do
-          docker_args ++ ["-v", "#{working_dir}:/workspace", "-w", "/workspace"]
-        else
-          docker_args
-        end
-
-      # Mount tmpfs for /tmp (read-only root needs writable tmp)
-      docker_args = docker_args ++ ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
-
-      docker_args = docker_args ++ [image, "sh", "-c", command]
+      docker_args = build_run_args(config, opts, command)
 
       Logger.info("[Sandbox.Docker] Running in #{image}: #{String.slice(command, 0, 80)}")
 

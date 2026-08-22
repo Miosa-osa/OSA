@@ -21,6 +21,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Sandbox
   alias OptimalSystemAgent.Shell.BackgroundManager
+  alias OptimalSystemAgent.Shell.BackgroundTracker
+  alias OptimalSystemAgent.Shell.TerminalOutputSaver
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
   #
@@ -264,8 +266,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         end
 
         # The prompt is read once, at the top of the session; this text arrives
-        # at the exact moment the model has just created the thing it is about
-        # to make a promise about, so it is where the condition belongs.
+        # at the exact moment the model has just created the thing it is about to
+        # make a promise about, so it is where the condition belongs.
         #
         # It does NOT claim a notification will arrive. That claim is true only
         # in a persistent session — `BackgroundNotifier` → `Loop.poke/1` — and
@@ -273,6 +275,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         # model answers. The old text asserted it unconditionally and 10
         # Terminal-Bench episodes ended on the strength of it
         # (`docs/research/failure-taxonomy.md` §1).
+        #
+        # Output-file tracking: if the command writes to files (nmap -oN,
+        # nuclei -o, shell >, tee), tell the agent which files to wait for
+        # before reading them. Prevents reading half-written scan output.
+        output_files = BackgroundTracker.extract_output_files(command)
+
+        output_files_msg =
+          if length(output_files) > 0 do
+            "\n\nThis command writes to: #{Enum.join(output_files, ", ")}\n" <>
+              "Do NOT file_read these files until the command finishes — they may be incomplete. " <>
+              "Call bash_output with background_id \"#{id}\" and a wait_ms to block until done."
+          else
+            ""
+          end
+
         {:ok,
          "Started background command.\n" <>
            "- background_id: #{id}\n" <>
@@ -287,7 +304,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
            "you, but only if something drives another turn after it finishes — that does " <>
            "not happen in a one-shot or headless run, which ends when you give your final " <>
            "answer. Do not end a turn promising to report this later.\n" <>
-           "To stop it, call bash_output with kill=true."}
+           "To stop it, call bash_output with kill=true." <> output_files_msg}
 
       {:error, reason} ->
         {:error, "Failed to start background command: #{reason}"}
@@ -1008,6 +1025,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp maybe_truncate(output) do
     max = Constants.max_output_bytes()
 
+    # When output exceeds the limit, save the full untruncated output to a
+    # file before truncating, so the agent can file_read the complete output
+    # later. Critical for pentest scans that produce thousands of lines.
+    saved_path =
+      if byte_size(output) > max do
+        case TerminalOutputSaver.maybe_save(output, scope_id: scope_id()) do
+          {:saved, path, _msg} -> path
+          :not_needed -> nil
+        end
+      else
+        nil
+      end
+
     bounded =
       if byte_size(output) > max do
         # HEAD AND TAIL, not head only.
@@ -1022,20 +1052,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         # `max` is a BYTE budget; String.slice/3 counts CHARACTERS, so multibyte
         # output could pass ~4x the cap. binary_part keeps the cap honest, and
         # `ensure_utf8/1` below repairs the codepoint that either cut may split.
-        head_bytes = trunc(max * @truncate_head_ratio)
-        tail_bytes = max - head_bytes
+        # Reserve the marker's bytes INSIDE the budget so the whole result
+        # honours `max`, not `max + marker`. The marker now carries a
+        # saved-output path (variable length), which pushed the total over the
+        # cap the old head+tail=max split assumed. Measure it once and split
+        # the remaining budget head/tail.
+        marker = elision_marker(0, 0, saved_path)
+        content_budget = max(max - byte_size(marker), 0)
+        head_bytes = trunc(content_budget * @truncate_head_ratio)
+        tail_bytes = content_budget - head_bytes
 
         head = binary_part(output, 0, head_bytes)
         tail = binary_part(output, byte_size(output) - tail_bytes, tail_bytes)
 
-        omitted_bytes = byte_size(output) - max
+        omitted_bytes = byte_size(output) - content_budget
 
         omitted_lines =
           output
           |> binary_part(head_bytes, omitted_bytes)
           |> count_newlines()
 
-        head <> elision_marker(omitted_bytes, omitted_lines) <> tail
+        head <> elision_marker(omitted_bytes, omitted_lines, saved_path) <> tail
       else
         output
       end
@@ -1045,9 +1082,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     ensure_utf8(bounded)
   end
 
-  defp elision_marker(omitted_bytes, omitted_lines) do
-    "\n\n[... output truncated: #{omitted_lines} lines / #{omitted_bytes} bytes omitted from the middle; " <>
-      "the head and the tail are shown in full ...]\n\n"
+  defp elision_marker(omitted_bytes, omitted_lines, saved_path \\ nil) do
+    base =
+      "\n\n[... output truncated: #{omitted_lines} lines / #{omitted_bytes} bytes omitted from the middle; " <>
+        "the head and the tail are shown in full ...]\n\n"
+
+    case saved_path do
+      nil ->
+        base
+
+      path ->
+        base <>
+          "\nFull output saved to #{path} — use file_read to access the complete output.\n\n"
+    end
   end
 
   defp count_newlines(bin), do: count_newlines(bin, 0)
@@ -1062,4 +1109,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp scrub_utf8(<<>>, acc), do: Enum.reverse(acc)
   defp scrub_utf8(<<c::utf8, rest::binary>>, acc), do: scrub_utf8(rest, [<<c::utf8>> | acc])
   defp scrub_utf8(<<_bad, rest::binary>>, acc), do: scrub_utf8(rest, [<<0xFFFD::utf8>> | acc])
+
+  # Best-effort scope ID for TerminalOutputSaver per-chat directory isolation.
+  # Falls back to "unscoped" when no session context is available.
+  defp scope_id, do: "osa-shell"
 end

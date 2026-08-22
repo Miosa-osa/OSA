@@ -1,0 +1,63 @@
+{
+  "name": "Web Application Assessment",
+  "description": "Deep web application penetration test: map the app, test all OWASP Top 10 vulnerability classes against live endpoints, attempt exploitation with evidence capture, and produce a findings report",
+  "steps": [
+    {
+      "name": "Application Mapping",
+      "description": "Crawl the web application with katana/gospider to map all pages, forms, API endpoints, and static resources. Identify authentication mechanisms, session handling, and input vectors. Document the application's structure and functionality.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "web_fetch"],
+      "acceptance_criteria": "Complete sitemap of the application with all pages, forms, API endpoints, auth mechanisms, and input vectors documented"
+    },
+    {
+      "name": "Authentication Testing",
+      "description": "Test authentication: password policy, session token entropy, token expiry, refresh token rotation, logout behavior, brute-force protection, credential stuffing resistance, and JWT validation (alg confusion, claim tampering, expiry bypass, key confusion).",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "code_sandbox"],
+      "acceptance_criteria": "Auth mechanisms tested, any weak password policies, session issues, JWT vulnerabilities, or brute-force gaps documented with evidence"
+    },
+    {
+      "name": "Injection Testing",
+      "description": "Test every input that reaches a database, shell, template engine, or filesystem for: SQL injection (sqlmap + manual), command injection, XSS (stored/reflected/DOM), SSTI, XXE, path traversal, and LDAP injection. Test both form fields and API parameters.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "code_sandbox", "file_write"],
+      "acceptance_criteria": "All input paths tested for injection, vulnerabilities identified with reproduction steps and evidence"
+    },
+    {
+      "name": "Access Control Testing",
+      "description": "Test for IDOR by manipulating object IDs, privilege escalation by modifying role parameters, missing authorization checks on protected endpoints, and forced browsing to authenticated pages without login.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "code_sandbox"],
+      "acceptance_criteria": "All access control paths tested, IDOR and privilege escalation vectors documented with proof"
+    },
+    {
+      "name": "SSRF + CSRF + Logic Testing",
+      "description": "Test for SSRF (internal endpoint access, cloud metadata at 169.254.169.254, blind via interactsh), CSRF on state-changing actions, and business logic flaws (price manipulation, race conditions, workflow bypass).",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "code_sandbox"],
+      "acceptance_criteria": "SSRF, CSRF, and logic vulnerabilities identified or ruled out with evidence"
+    },
+    {
+      "name": "Automated Scanning",
+      "description": "Run nuclei (high/critical templates), nikto, and wpscan (if WordPress) against the application. Cross-reference automated findings with manual testing to eliminate false positives.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute"],
+      "acceptance_criteria": "Automated scan results documented, false positives filtered out, confirmed findings merged with manual testing results"
+    },
+    {
+      "name": "Exploitation + Evidence",
+      "description": "For each confirmed vulnerability, attempt exploitation and capture evidence: screenshots via agent-browser, HTTP request/response pairs, command output. Use task-unique PoC filenames. Demonstrate impact without causing damage.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "browser", "file_write", "code_sandbox"],
+      "delegate_to": "exploit-developer",
+      "acceptance_criteria": "Each exploitable vulnerability has a working PoC, captured evidence, and documented impact"
+    },
+    {
+      "name": "Web App Findings Report",
+      "description": "Compile all web application findings into a structured report with executive summary, application overview, findings (severity/CVSS/CWE/target/proof/impact/remediation), and prioritized fix recommendations.",
+      "signal_mode": "ASSIST",
+      "tools_needed": ["file_write"],
+      "acceptance_criteria": "Complete web app assessment report with all findings, CVSS scores, evidence, and concrete remediation steps"
+    }
+  ]
+}
