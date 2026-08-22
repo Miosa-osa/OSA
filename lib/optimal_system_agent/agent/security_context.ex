@@ -106,7 +106,11 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
   def sandbox_environment_block(state) do
     if security_task_active?(state) do
       backend = Router.backend()
-      backend_name = if function_exported?(backend, :name, 0), do: backend.name(), else: "unknown"
+
+      backend_name =
+        if Code.ensure_loaded?(backend) and function_exported?(backend, :name, 0),
+          do: backend.name(),
+          else: "unknown"
 
       is_cloud =
         backend not in [OptimalSystemAgent.Sandbox.Host, OptimalSystemAgent.Sandbox.Docker]
