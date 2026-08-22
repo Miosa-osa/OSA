@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   They get their own context window, model selection, and tool access.
   """
   require Logger
+  import Bitwise, only: [bsl: 2]
 
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Tier
@@ -32,7 +33,16 @@ defmodule OptimalSystemAgent.Orchestrator do
   # mechanism for an explicit user cancel is `Loop.cancel/1` force-terminating
   # the child's GenServer (loop.ex) — this timeout is the backstop for the
   # no-cancel-issued, just-plain-stuck case.
-  @default_subagent_timeout_ms 2 * 60 * 60 * 1000
+  # Raised from 2h. This is the "just plain stuck, no cancel issued" backstop,
+  # and at two hours it was firing on work that was merely long: a background
+  # agent building 67 pages and running 157 tests hit it and was reported as
+  # `:timeout` with its finished results thrown away.
+  #
+  # An agent expected to work unattended for a shift needs a backstop measured
+  # in shifts. Still finite so a truly wedged child cannot be held forever, and
+  # still overridable per call (`timeout_ms:` / `await_timeout:`) or globally via
+  # `:subagent_await_timeout_ms` for a deliberately bounded job.
+  @default_subagent_timeout_ms 12 * 60 * 60 * 1000
 
   @doc false
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
@@ -1726,6 +1736,8 @@ defmodule OptimalSystemAgent.Orchestrator do
           failure_result(subagent_id, parent_id, role, reason,
             duration_ms: duration_ms,
             files_changed: files_changed,
+            commands_run: commands_run,
+            salvaged: salvage_text(child_messages),
             tool_count: tool_uses,
             tokens_used: tokens_used,
             worktree: worktree_info,
@@ -1945,7 +1957,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   @spec start_stall_watcher(String.t(), String.t(), String.t(), String.t()) :: :ok
   def start_stall_watcher(parent_id, subagent_id, display_name, role) do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
-      watch_for_stall(parent_id, subagent_id, display_name, role, nil, now_ms())
+      watch_for_stall(parent_id, subagent_id, display_name, role, nil, progressing())
     end)
 
     :ok
@@ -1955,7 +1967,39 @@ defmodule OptimalSystemAgent.Orchestrator do
     :exit, _ -> :ok
   end
 
-  defp watch_for_stall(parent_id, subagent_id, display_name, role, last_print, last_change_at) do
+  # Backoff for repeat stall reports.
+  #
+  # Every report costs the parent a turn: it wakes up, reads the alert, and
+  # decides. A truly wedged child used to generate one of those every threshold
+  # period forever — the transcript that prompted this had the same "no progress
+  # for 15 minutes" line five times over, each one interrupting the parent with
+  # information it already had. The observation still continues (a stall that
+  # ends must be noticed), but the *reporting* rate decays: threshold, 2x,
+  # 4x, ... capped so the parent is never told more than once an hour about a
+  # stall it has already been told about.
+  @max_stall_report_gap_ms 60 * 60 * 1000
+
+  defp stall_report_gap_ms(phase, reports) do
+    base = stall_threshold_ms(phase)
+    # Cap the shift before computing so a long-lived watcher cannot build a
+    # bignum here.
+    scale = Bitwise.bsl(1, min(reports, 16))
+    min(base * scale, max(@max_stall_report_gap_ms, base))
+  end
+
+  # `stall` carries the watcher's own state, separate from the run's:
+  #
+  #   :last_change_at - when the run's fingerprint last moved OR when we last
+  #                     reported. This is the report clock only.
+  #   :since          - the FIRST moment progress stopped, nil while progressing.
+  #                     Reports are measured from here so they ESCALATE; measuring
+  #                     from :last_change_at made every report say the same
+  #                     "15 minutes" no matter how long the stall had really
+  #                     lasted, so an operator could not tell a fresh stall from
+  #                     a two-hour-old one.
+  #   :reports        - how many times we have already reported THIS stall, which
+  #                     drives the backoff above. Reset whenever work lands.
+  defp watch_for_stall(parent_id, subagent_id, display_name, role, last_print, stall) do
     Process.sleep(stall_poll_interval_ms())
 
     case RunStore.get(subagent_id) do
@@ -1968,7 +2012,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       # life — the one component that could have explained the silence was the
       # first thing the silence took out.)
       %{status: :running, phase: :queued} ->
-        watch_for_stall(parent_id, subagent_id, display_name, role, last_print, now_ms())
+        watch_for_stall(parent_id, subagent_id, display_name, role, last_print, progressing())
 
       %{status: :running} = run ->
         print = progress_fingerprint(run)
@@ -1976,16 +2020,18 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         cond do
           print != last_print ->
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, now_ms())
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, progressing())
 
-          now_ms() - last_change_at >= stall_threshold_ms(phase) ->
+          now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) ->
+            since = stall.since || stall.last_change_at
+
             emit_stall(
               parent_id,
               subagent_id,
               display_name,
               role,
               phase,
-              now_ms() - last_change_at,
+              now_ms() - since,
               run
             )
 
@@ -1996,13 +2042,17 @@ defmodule OptimalSystemAgent.Orchestrator do
             # after — including a run that recovered and stalled again, and
             # including one that never came back at all. Continuing costs one
             # poll every 30s and means the observation keeps up with reality.
-            # The change clock is reset to NOW so the next report cannot come
-            # until another full threshold has elapsed — one report per
-            # threshold period, not one per 30-second poll.
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, now_ms())
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
+              last_change_at: now_ms(),
+              since: since,
+              reports: stall.reports + 1
+            })
 
           true ->
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, last_change_at)
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
+              stall
+              | since: stall.since || stall.last_change_at
+            })
         end
 
       # Terminal, or the row was pruned: nothing left to watch.
@@ -2014,6 +2064,10 @@ defmodule OptimalSystemAgent.Orchestrator do
   catch
     :exit, _ -> :ok
   end
+
+  # Fresh watcher state: work just landed (or is yet to land), so nothing is
+  # stalled and any earlier stall's backoff is forgotten.
+  defp progressing, do: %{last_change_at: now_ms(), since: nil, reports: 0}
 
   defp progress_fingerprint(run) do
     {Map.get(run, :tool_count, 0), Map.get(run, :tokens_used, 0),
@@ -2220,9 +2274,13 @@ defmodule OptimalSystemAgent.Orchestrator do
       parent_session_id: parent_id,
       role: role,
       status: status,
-      summary: "Subagent #{role} #{verb}: #{failure_reason_text(reason)}",
+      summary:
+        with_salvage(
+          "Subagent #{role} #{verb}: #{failure_reason_text(reason)}",
+          Keyword.get(opts, :salvaged)
+        ),
       files_changed: Keyword.get(opts, :files_changed, []),
-      commands_run: [],
+      commands_run: Keyword.get(opts, :commands_run, []),
       tool_count: Keyword.get(opts, :tool_count, 0),
       tokens_used: Keyword.get(opts, :tokens_used, 0),
       duration_ms: Keyword.get(opts, :duration_ms, 0),
@@ -2231,6 +2289,45 @@ defmodule OptimalSystemAgent.Orchestrator do
       resumed_from: Keyword.get(opts, :resumed_from)
     })
   end
+
+  # A subagent that fails at the END of its work has still DONE the work, and
+  # the parent needs to know that before it decides to re-dispatch. The case
+  # that motivated this: a background agent built 67 pages, ran 157 passing
+  # tests and reached zero type errors, then tripped a join timeout while
+  # writing its final report — and the only thing the parent was told was
+  # "failed after 7205022ms: :timeout". It had no way to learn that the task
+  # was in fact complete, so the obvious next move was to redo all of it.
+  defp with_salvage(summary, nil), do: summary
+  defp with_salvage(summary, ""), do: summary
+
+  defp with_salvage(summary, salvaged) when is_binary(salvaged) do
+    summary <>
+      "\n\nWork recorded before it stopped (recovered from the transcript, " <>
+      "may be incomplete):\n" <> salvaged
+  end
+
+  defp with_salvage(summary, _), do: summary
+
+  @salvage_limit 4_000
+
+  @doc false
+  @spec salvage_text([map()]) :: String.t() | nil
+  def salvage_text(messages) when is_list(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value(fn
+      %{role: "assistant", content: content} when is_binary(content) ->
+        case String.trim(content) do
+          "" -> nil
+          text -> String.slice(text, 0, @salvage_limit)
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  def salvage_text(_), do: nil
 
   @doc """
   Terminal `RunStore` status for a non-completion reason.
