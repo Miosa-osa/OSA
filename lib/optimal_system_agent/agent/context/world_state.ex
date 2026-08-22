@@ -168,7 +168,27 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
     },
     %{id: :apps, label: "commands", name: "slash-command catalog", semantics: :plain, rank: 3},
     %{id: :tools, label: "tool_process", name: "tool-usage", semantics: :replace, rank: 0},
-    %{id: :agent_roles, label: "agent_roles", name: "subagent roster", semantics: :plain, rank: 3}
+    %{
+      id: :agent_roles,
+      label: "agent_roles",
+      name: "subagent roster",
+      semantics: :plain,
+      rank: 3
+    },
+    %{
+      id: :sec_posture,
+      label: "security_posture",
+      name: "security posture",
+      semantics: :replace,
+      rank: 0
+    },
+    %{
+      id: :sandbox_env,
+      label: "sandbox_environment",
+      name: "sandbox environment",
+      semantics: :replace,
+      rank: 0
+    }
   ]
 
   @doc """
