@@ -801,7 +801,11 @@ defmodule OptimalSystemAgent.Agent.Context do
       {skills_block(state), 0, "skills"},
       {learned_skills_block(state), 2, "learned_skills"},
       {scratchpad_block(state), 1, "scratchpad"},
-      {agent_roles_block(state), 2, "agent_roles"}
+      {agent_roles_block(state), 2, "agent_roles"},
+      # Security context: injected only when a security task is active.
+      # Priority 0 so it never loses the budget race to advisory blocks.
+      {security_posture_block(state), 0, "security_posture"},
+      {sandbox_environment_block(state), 0, "sandbox_environment"}
     ]
     |> Enum.reject(fn {content, _, _} -> is_nil(content) or content == "" end)
   end
@@ -2008,5 +2012,21 @@ defmodule OptimalSystemAgent.Agent.Context do
     else
       nil
     end
+  end
+
+  defp security_posture_block(state) do
+    OptimalSystemAgent.Agent.SecurityContext.security_posture_block(state)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp sandbox_environment_block(state) do
+    OptimalSystemAgent.Agent.SecurityContext.sandbox_environment_block(state)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
   end
 end
