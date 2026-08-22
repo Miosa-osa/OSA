@@ -76,6 +76,8 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
     pdf_password_protected:
       "The PDF is password protected · Unlock it or convert it to text first.",
     pdf_invalid: "The PDF file is not valid · Convert it to text first and try again.",
+    content_filter:
+      "Content was flagged by the provider's safety filter · This can happen with security-related content. The request was not sent. Try rephrasing or use a different provider.",
     refusal:
       "The provider declined this request (usage policy) · Try rephrasing the request or a different approach.",
     ssl_error:
@@ -310,6 +312,14 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
 
       String.contains?(down, "pdf specified was not valid") ->
         :pdf_invalid
+
+      String.contains?(down, "content_filter") or
+        String.contains?(down, "content-filter") or
+        String.contains?(down, "content policy") or
+        String.contains?(down, "prohibited content") or
+        String.contains?(down, "content blocked") or
+          (String.contains?(down, "safety") and String.contains?(down, "block")) ->
+        :content_filter
 
       String.contains?(down, "usage policy") or String.contains?(down, "refusal") ->
         :refusal

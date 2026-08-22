@@ -93,6 +93,7 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
     :tool_use_mismatch,
     :duplicate_tool_use,
     :refusal,
+    :content_filter,
     :pdf_too_large,
     :pdf_password_protected,
     :pdf_invalid,
