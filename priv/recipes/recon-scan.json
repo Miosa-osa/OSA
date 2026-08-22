@@ -1,0 +1,48 @@
+{
+  "name": "Reconnaissance Scan",
+  "description": "Fast reconnaissance of a target: passive OSINT, subdomain enumeration, port scanning, service fingerprinting, directory discovery, and structured attack surface map. No exploitation — discovery only.",
+  "steps": [
+    {
+      "name": "Passive Recon",
+      "description": "WHOIS, DNS records (A, MX, TXT, NS), certificate transparency via crt.sh, Shodan lookup, Wayback Machine archived URLs, search engine dorking (site:, filetype:, inurl:), GitHub dorks for leaked secrets and config files.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "web_search", "web_fetch", "code_sandbox"],
+      "acceptance_criteria": "Passive intelligence gathered: WHOIS, DNS, CT subdomains, Shodan services, archived URLs, leaked-credential findings"
+    },
+    {
+      "name": "Subdomain Enumeration + Alive Check",
+      "description": "Run subfinder for subdomain discovery, pipe through httpx for alive check with status codes, titles, and tech detection. Deduplicate and sort results.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute"],
+      "acceptance_criteria": "Complete subdomain list with alive/dead status, HTTP status codes, page titles, and detected technologies"
+    },
+    {
+      "name": "Port Scanning",
+      "description": "Fast port scan with naabu (top 1000 ports), then targeted full scan with nmap (-sS -sV -O) on high-value hosts. Document all open ports with service versions.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute"],
+      "acceptance_criteria": "All open ports documented with service name, version, and host — structured as a table"
+    },
+    {
+      "name": "Web Fingerprinting",
+      "description": "For each live web host: run whatweb for tech detection, wafw00f for WAF detection, curl for security headers, check robots.txt and sitemap.xml. Identify framework, server, CMS, and WAF.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute", "web_fetch"],
+      "acceptance_criteria": "Each live web host fingerprinted: framework, server version, CMS, WAF presence, security headers, robots/sitemap content"
+    },
+    {
+      "name": "Directory + Parameter Discovery",
+      "description": "Directory fuzzing with ffuf (raft-medium-directories), file discovery (raft-medium-files), API endpoint discovery, and hidden parameter discovery with arjun. Filter by interesting status codes (200, 301, 401, 403).",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["shell_execute"],
+      "acceptance_criteria": "Discovered directories, files, API endpoints, and hidden parameters documented with status codes and notes"
+    },
+    {
+      "name": "Attack Surface Map",
+      "description": "Compile all recon findings into a structured attack surface map: live hosts, open ports, web apps, technologies, WAF, discovered paths, and recommended next steps for vulnerability testing.",
+      "signal_mode": "ASSIST",
+      "tools_needed": ["file_write"],
+      "acceptance_criteria": "Structured recon report with attack surface summary, subdomain table, port table, directory table, WAF/tech findings, and prioritized next steps"
+    }
+  ]
+}
