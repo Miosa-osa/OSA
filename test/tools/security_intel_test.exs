@@ -568,7 +568,55 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
 
     test "parameters enum includes new collector actions" do
       enum = get_in(SecurityIntel.parameters(), ["properties", "action", "enum"])
-      for a <- ~w(js_secrets oob_start http_repeat class_queue_assert skeptic_promote entry_fanout codefix_open_pr) do
+      for a <- ~w(js_secrets oob_start http_repeat class_queue_assert skeptic_promote entry_fanout codefix_open_pr exploit_oracle anomaly_assert_clear eval_score) do
+        assert a in enum
+      end
+    end
+
+    test "exploit_oracle confirms mysql error body", %{ctx: ctx} do
+      {:ok, body} =
+        run("exploit_oracle", ctx, %{
+          "finding" => %{"class" => "sqli", "body" => "You have an error in your SQL syntax mysql", "status" => 200}
+        })
+
+      assert body =~ "oracle=confirmed"
+    end
+
+    test "anomaly dismiss without hop fails closed", %{ctx: ctx} do
+      {:ok, rec} =
+        run("anomaly_record", ctx, %{"target" => "https://example.com/x", "kind" => "http_500"})
+
+      id = rec |> String.split() |> Enum.at(1)
+
+      assert {:error, reason} = run("anomaly_dismiss", ctx, %{"key" => id})
+      assert reason =~ "one hop"
+    end
+
+    test "validation_submit rejects confirmed without evidence", %{ctx: ctx} do
+      assert {:error, reason} =
+               run("validation_submit", ctx, %{
+                 "finding" => %{
+                   "verdict" => "confirmed",
+                   "affected_asset" => "https://example.com/q",
+                   "weakness_class" => "sqli"
+                 }
+               })
+
+      assert reason =~ "evidence"
+    end
+
+    test "action_review asks user on rm -rf", %{ctx: ctx} do
+      {:ok, body} =
+        run("action_review", ctx, %{
+          "finding" => %{"action" => "rm -rf /tmp/poc", "kind" => "shell", "user_text" => "clean up"}
+        })
+
+      assert body =~ "ask_user"
+    end
+
+    test "enum includes HackerAI steals" do
+      enum = get_in(SecurityIntel.parameters(), ["properties", "action", "enum"])
+      for a <- ~w(validation_submit action_review sandbox_pull) do
         assert a in enum
       end
     end
