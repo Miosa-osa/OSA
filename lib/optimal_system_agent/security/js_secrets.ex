@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.JsSecrets do
   @moduledoc """
   Rip high-signal secrets and internal URLs out of JavaScript bundles.
 
-  Nullenc0de / Google VRP class: downloaded webpack chunks and source maps
+  Downloaded webpack chunks and source maps
   leak cloud keys, JWTs, and intranet endpoints. Regex only, no network, no
   payloads. Hits are unique on `{kind, value}` and capped at 200.
   """

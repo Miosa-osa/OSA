@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Security.AnomalyQueue do
   @moduledoc """
-  XBow chaining rule as code.
+  The follow-one-hop chaining rule as code.
 
   A 500, odd SSRF clue, tiny upload, or off-scope redirect is a CLUE.
   It may not be dismissed until one more hop is recorded (or it is
@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Security.AnomalyQueue do
   """
 
   @table :osa_security_anomaly
-  @bing_rule "follow one hop before dismissing (XBow Bing rule)"
+  @bing_rule "follow one hop before dismissing (a 5xx/odd response is a clue)"
   @not_found "anomaly not found"
   @not_open "anomaly not open"
 
@@ -92,7 +92,7 @@ defmodule OptimalSystemAgent.Security.AnomalyQueue do
   @doc """
   Dismiss a clue.
 
-  Only allowed when `hops >= 1`. Otherwise errors with the XBow Bing rule.
+  Only allowed when `hops >= 1`. Otherwise errors with the follow-one-hop rule.
   """
   @spec dismiss(String.t(), String.t()) :: :ok | {:error, String.t()}
   def dismiss(session_id, id) when is_binary(session_id) and is_binary(id) do
