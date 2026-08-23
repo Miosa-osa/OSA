@@ -43,6 +43,8 @@ defmodule OptimalSystemAgent.Providers.ModelLimits do
     # tokens, not the 8,192 recorded here previously.
     "openai/gpt-oss-120b" => 65_536,
     "openai/gpt-oss-20b" => 65_536,
+    # OpenRouter stealth model Ox Alpha: published 131,072-token output cap.
+    "stealth/ox-alpha" => 131_072,
     "llama-3.3-70b-versatile" => 32_768,
     "llama-3.1-8b-instant" => 131_072,
     # Cohere
