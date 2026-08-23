@@ -328,6 +328,8 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
     alias OptimalSystemAgent.Providers.GoogleModels
     alias OptimalSystemAgent.Providers.OllamaCloud
     alias OptimalSystemAgent.Providers.OpenAIModels
+    alias OptimalSystemAgent.Providers.XAIModels
+    alias OptimalSystemAgent.Providers.ZaiModels
 
     case provider do
       p when p in [:anthropic, :claude_cli, :bedrock, "anthropic", "claude_cli", "bedrock"] ->
@@ -343,12 +345,23 @@ defmodule OptimalSystemAgent.Providers.ImageBudget do
       p when p in [:ollama_cloud, :ollama, "ollama_cloud", "ollama"] ->
         [OllamaCloud]
 
-      # A gateway serves every vendor, so all four are candidates and the first
+      # xAI (grok-4.x) and z.ai / Zhipu (GLM) both ship first-hand `vision:`
+      # flags OSA maintains, but neither was wired here — so a vision-capable
+      # grok-4.6 or GLM-4.5V fell through to the upstream catalog, and when that
+      # was stale or missing the id, its image was silently dropped. Consult
+      # OSA's own catalogue for them, same as the four above.
+      p when p in [:xai, "xai"] ->
+        [XAIModels]
+
+      p when p in [:zhipu, :zai, :glm, "zhipu", "zai", "glm"] ->
+        [ZaiModels]
+
+      # A gateway serves every vendor, so all candidates are asked and the first
       # that recognises the id answers. This is a union, never a veto: a
       # catalogue that does not know the model returns nil and the next one is
       # asked.
       _ ->
-        [AnthropicModels, OpenAIModels, GoogleModels, OllamaCloud]
+        [AnthropicModels, OpenAIModels, GoogleModels, OllamaCloud, XAIModels, ZaiModels]
     end
   end
 
