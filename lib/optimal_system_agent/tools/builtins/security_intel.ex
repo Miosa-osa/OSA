@@ -45,7 +45,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     StructuredNotes,
     ShadowGraph,
     TaskDifficultyAssessment,
-    VulnDeduplication
+    VulnDeduplication,
+    Playbook,
+    SarifReport,
+    CodeFix,
+    ChainSummary
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -84,7 +88,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "graph_hosts",
             "graph_services",
             "tda",
-            "dedup"
+            "dedup",
+            "playbook_start",
+            "playbook_current",
+            "playbook_advance",
+            "playbook_phases",
+            "playbook_set_status",
+            "sarif_generate",
+            "codefix_record",
+            "codefix_get",
+            "codefix_list",
+            "codefix_report",
+            "summary_build",
+            "summary_load"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -172,6 +188,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "cve" => %{"type" => "string"},
             "dependency_metadata" => %{"type" => "object"}
           }
+        },
+        "playbook_id" => %{
+          "type" => "string",
+          "enum" => ["web_app", "network", "full_engagement"],
+          "description" => "playbook_start: which playbook to start"
+        },
+        "phase_status" => %{
+          "type" => "string",
+          "enum" => ["pending", "in_progress", "complete", "skipped"],
+          "description" => "playbook_set_status: status to set on the current phase"
+        },
+        "fix" => %{
+          "type" => "object",
+          "description" => "codefix_record: a code fix to record for a finding",
+          "properties" => %{
+            "finding_key" => %{"type" => "string"},
+            "file_path" => %{"type" => "string"},
+            "fix_before" => %{"type" => "string"},
+            "fix_after" => %{"type" => "string"},
+            "language" => %{"type" => "string"},
+            "explanation" => %{"type" => "string"}
+          }
         }
       },
       "required" => ["action"]
@@ -208,6 +246,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "graph_services" -> do_graph_services(session_id, input)
       "tda" -> do_tda(input)
       "dedup" -> do_dedup(session_id, input)
+      "playbook_start" -> do_playbook_start(session_id, input)
+      "playbook_current" -> do_playbook_current(session_id)
+      "playbook_advance" -> do_playbook_advance(session_id)
+      "playbook_phases" -> do_playbook_phases(session_id)
+      "playbook_set_status" -> do_playbook_set_status(session_id, input)
+      "sarif_generate" -> do_sarif_generate(session_id, input)
+      "codefix_record" -> do_codefix_record(session_id, input)
+      "codefix_get" -> do_codefix_get(session_id, input)
+      "codefix_list" -> do_codefix_list(session_id)
+      "codefix_report" -> do_codefix_report(session_id)
+      "summary_build" -> do_summary_build(session_id)
+      "summary_load" -> do_summary_load(session_id)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -419,6 +469,162 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   defp do_dedup(_session_id, _input),
     do: {:error, "dedup requires 'candidate' parameter"}
+
+  # ── Playbook ────────────────────────────────────────────────────────────
+
+  defp do_playbook_start(session_id, %{"playbook_id" => pb_id}) do
+    pb_atom = if is_binary(pb_id), do: String.to_atom(pb_id), else: pb_id
+
+    case Playbook.start(session_id, pb_atom) do
+      {:ok, pb} ->
+        {:ok, phase} = Playbook.current(session_id)
+
+        {:ok,
+         "Started playbook '#{pb.name}' (#{length(pb.phases)} phases).\n\n" <>
+           Playbook.render_phase(phase)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_playbook_start(_session_id, _input),
+    do: {:error, "playbook_start requires 'playbook_id' (web_app, network, or full_engagement)"}
+
+  defp do_playbook_current(session_id) do
+    case Playbook.current(session_id) do
+      {:ok, phase} -> {:ok, Playbook.render_phase(phase)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_playbook_advance(session_id) do
+    case Playbook.advance(session_id) do
+      {:ok, phase} ->
+        {:ok,
+         "Advanced to phase #{phase.index + 1}: #{phase.name}\n\n" <> Playbook.render_phase(phase)}
+
+      :complete ->
+        {:ok, "Playbook complete — all phases finished."}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_playbook_phases(session_id) do
+    case Playbook.phases(session_id) do
+      {:ok, phases} ->
+        body =
+          phases
+          |> Enum.map(fn p -> "  #{p.index + 1}. [#{p.status}] #{p.name}" end)
+          |> Enum.join("\n")
+
+        {:ok, "Phases:\n#{body}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_playbook_set_status(session_id, %{"phase_status" => status}) do
+    status_atom = if is_binary(status), do: String.to_atom(status), else: status
+
+    case Playbook.set_status(session_id, status_atom) do
+      :ok -> {:ok, "Phase status set to #{status_atom}."}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_playbook_set_status(_session_id, _input),
+    do: {:error, "playbook_set_status requires 'phase_status'"}
+
+  # ── SARIF ───────────────────────────────────────────────────────────────
+
+  defp do_sarif_generate(session_id, input) do
+    to_file = Map.get(input, "to_file", false)
+
+    case SarifReport.generate(session_id, to_file: to_file) do
+      {:ok, %{report: report, path: path}} ->
+        {:ok,
+         "SARIF report written to #{path}. #{length(report["runs"] |> hd() |> Map.get("results", []))} result(s)."}
+
+      {:ok, report} ->
+        results = report["runs"] |> hd() |> Map.get("results", [])
+
+        {:ok,
+         "SARIF report generated (#{length(results)} result(s)). Use to_file=true to write to disk."}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ── CodeFix ────────────────────────────────────────────────────────────
+
+  defp do_codefix_record(session_id, %{"fix" => fix}) do
+    case CodeFix.record(session_id, fix) do
+      {:ok, fix} ->
+        {:ok, "Code fix recorded for finding '#{fix.finding_key}' on #{fix.file_path}."}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_codefix_record(_session_id, _input),
+    do: {:error, "codefix_record requires 'fix' parameter"}
+
+  defp do_codefix_get(session_id, %{"key" => finding_key}) do
+    case CodeFix.get(session_id, finding_key) do
+      {:ok, fix} -> {:ok, CodeFix.render_diff(fix)}
+      :not_found -> {:ok, "No code fix recorded for finding '#{finding_key}'."}
+    end
+  end
+
+  defp do_codefix_get(_session_id, _input),
+    do: {:error, "codefix_get requires 'key' (finding key)"}
+
+  defp do_codefix_list(session_id) do
+    case CodeFix.list(session_id) do
+      {:ok, []} ->
+        {:ok, "No code fixes recorded."}
+
+      {:ok, fixes} ->
+        body = Enum.map_join(fixes, "\n", fn f -> "  • #{f.finding_key} — #{f.file_path}" end)
+        {:ok, "#{length(fixes)} code fix(es):\n#{body}"}
+    end
+  end
+
+  defp do_codefix_report(session_id) do
+    CodeFix.render_report(session_id)
+  end
+
+  # ── ChainSummary ────────────────────────────────────────────────────────
+
+  defp do_summary_build(session_id) do
+    with {:ok, _} <- NotesStore.ensure_started(session_id) do
+      notes = NotesStore.list(session_id)
+      graph = NotesStore.graph(session_id)
+
+      phase =
+        case Playbook.current(session_id) do
+          {:ok, p} -> Map.take(p, [:name, :status, :entry_criteria, :exit_criteria])
+          _ -> nil
+        end
+
+      summary = ChainSummary.build(session_id, notes: notes, graph: graph, phase: phase)
+      ChainSummary.save(session_id, summary)
+      {:ok, ChainSummary.render(summary)}
+    end
+  end
+
+  defp do_summary_load(session_id) do
+    case ChainSummary.load(session_id) do
+      {:ok, summary} -> {:ok, ChainSummary.render(summary)}
+      {:error, _} -> {:ok, "No saved summary for this session. Call summary_build first."}
+    end
+  end
 
   # ── Helpers ─────────────────────────────────────────────────────────────
 

@@ -539,6 +539,19 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     VULNERABILITY DEDUPLICATION — before reporting a new vulnerability, call `dedup` with the candidate finding. Checks the session's existing findings: dependency-CVE fast path (same CVE + same package = duplicate), then structural comparison (same endpoint + target + vuln type). "When uncertain, lean towards NOT duplicate" — reporting two distinct findings is better than silently merging different vulnerabilities.
 
     DISCIPLINE: record findings as notes AS YOU GO, not at the end. The graph and dedup only work if notes are current. A stale graph leads to redundant work and missed lateral movement.
+
+    PHASED PLAYBOOKS — start a playbook at the beginning of an engagement to get a structured phase-by-phase methodology:
+    - `playbook_start` with playbook_id (web_app, network, or full_engagement).
+    - `playbook_current` to see the current phase, its entry/exit criteria, and guidance.
+    - `playbook_advance` when the current phase's exit criteria are met.
+    - `playbook_phases` to see the full phase list with statuses.
+    Each phase has entry criteria (what must be true to start), exit criteria (what must be true to finish), and guidance (the methodology to apply). Advance only when exit criteria are genuinely met — don't skip phases.
+
+    CHAIN SUMMARIZATION — when the engagement grows long and context is getting heavy, call `summary_build` to produce a compact running summary (hosts, creds, vulns, insights, phase, open questions) that preserves the strategic picture. `summary_load` retrieves the last saved summary. Use this before context compaction would lose engagement state.
+
+    SARIF REPORT — at the reporting phase, call `sarif_generate` (with to_file=true to write to disk) to produce a SARIF 2.1.0 JSON report of all vulnerability findings. SARIF is the industry-standard format consumed by GitHub Code Scanning, Azure DevOps, and SIEM pipelines.
+
+    CODE FIXES — for each vulnerability with a concrete remediation, call `codefix_record` with a fix_before/fix_after code diff and an explanation. `codefix_report` renders all fixes as a unified-diff report section. A finding with a concrete fix is far more actionable than prose remediation guidance — include the actual code change, not "you should sanitize input".
     </security_intelligence_layer>
     """
   end

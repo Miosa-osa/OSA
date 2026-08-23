@@ -62,7 +62,13 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       # Security intelligence — per-session structured-notes store (ETS-backed
       # GenServer per session, keyed by session id). Started lazily by
       # Security.NotesStore.ensure_started/1; the Registry must exist up front.
-      {Registry, keys: :unique, name: OptimalSystemAgent.Security.NotesStoreRegistry}
+      {Registry, keys: :unique, name: OptimalSystemAgent.Security.NotesStoreRegistry},
+
+      # Security intelligence — per-session stores for playbook state, code-fix
+      # records, and steer directives. Same pattern as NotesStoreRegistry.
+      {Registry, keys: :unique, name: OptimalSystemAgent.Security.PlaybookStoreRegistry},
+      {Registry, keys: :unique, name: OptimalSystemAgent.Security.CodeFixStoreRegistry},
+      {Registry, keys: :unique, name: OptimalSystemAgent.Security.SteerStoreRegistry}
     ]
 
     children
