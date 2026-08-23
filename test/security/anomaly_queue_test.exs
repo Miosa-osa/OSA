@@ -3,14 +3,14 @@ defmodule OptimalSystemAgent.Security.AnomalyQueueTest do
 
   alias OptimalSystemAgent.Security.AnomalyQueue
 
-  @bing_rule "follow one hop before dismissing (XBow Bing rule)"
+  @bing_rule "follow one hop before dismissing (a 5xx/odd response is a clue)"
 
   setup do
     sid = "aq-#{System.unique_integer([:positive])}"
     {:ok, session_id: sid}
   end
 
-  test "record 500, dismiss immediately errors with the Bing-rule phrase", %{session_id: sid} do
+  test "record 500, dismiss immediately errors with the follow-one-hop phrase", %{session_id: sid} do
     assert {:ok, rec} =
              AnomalyQueue.record(sid, %{target: "/upload", kind: :http_500, note: "500 on POST"})
 
