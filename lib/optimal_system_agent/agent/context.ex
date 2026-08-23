@@ -244,8 +244,24 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    max_tok = max_tokens()
-    static_tokens = Soul.static_token_count()
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    model = Map.get(state, :model) || get_active_model(provider)
+
+    max_tok =
+      case Map.get(state, :effective_context_window) do
+        n when is_integer(n) and n > 0 ->
+          n
+
+        _ ->
+          OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider)
+      end
+
+    lite? = small_window?(model, provider)
+    variant = static_base_variant(provider, lite?)
+    static_tokens = Soul.static_token_count(variant)
 
     # Gather dynamic blocks for individual cost breakdown
     blocks = gather_dynamic_blocks(state)
@@ -271,6 +287,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     {ws, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok, emit: false)
     dynamic_tokens = estimate_tokens(ws) + estimate_tokens(volatile)
     tool_tokens = tool_schema_tokens()
+    tool_result = tool_result_tokens(conversation)
     total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve + tool_tokens
 
     %{
@@ -280,14 +297,23 @@ defmodule OptimalSystemAgent.Agent.Context do
       static_base_tokens: static_tokens,
       dynamic_context_tokens: dynamic_tokens,
       tool_schema_tokens: tool_tokens,
+      tool_result_tokens: tool_result,
       system_prompt_budget: max_tok - reserve - conversation_tokens,
       system_prompt_actual: static_tokens + dynamic_tokens + tool_tokens,
       total_tokens: total_tokens,
-      utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
+      utilization_pct:
+        if(max_tok > 0, do: Float.round(total_tokens / max_tok * 100, 1), else: 0.0),
       headroom: max_tok - total_tokens,
       blocks: block_details
     }
   end
+
+  @doc """
+  Tokens currently spent on the native `tools` array. Public so `/context`
+  and a model-swap fit check can see the same number the budget uses.
+  """
+  @spec tool_schema_token_count() :: non_neg_integer()
+  def tool_schema_token_count, do: tool_schema_tokens()
 
   # Tokens spent on the native `tools` array of the request.
   #
@@ -325,6 +351,20 @@ defmodule OptimalSystemAgent.Agent.Context do
   rescue
     _ -> 0
   end
+
+  defp tool_result_tokens(messages) when is_list(messages) do
+    Enum.reduce(messages, 0, fn msg, acc ->
+      role = Map.get(msg, :role) || Map.get(msg, "role")
+
+      if role in ["tool", :tool] do
+        acc + estimate_tokens_messages([msg])
+      else
+        acc
+      end
+    end)
+  end
+
+  defp tool_result_tokens(_), do: 0
 
   @doc """
   `true` when the model's REAL resolved context window is small enough to need
@@ -1798,16 +1838,17 @@ defmodule OptimalSystemAgent.Agent.Context do
     git_info = cached_git_info()
     date = Date.utc_today() |> Date.to_iso8601()
 
-    # Session-accurate provider/model — NOT the global default. On a
-    # provider-switched session (via /model or state.provider) the global
-    # config default is wrong, which would tell the agent it is running on a
-    # model it is not. Prefer the session's own provider/model, falling back
-    # to the config default only when the session has not pinned them.
-    provider =
-      Map.get(state, :provider) ||
-        Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-
-    model = Map.get(state, :model) || get_active_model(provider)
+    # Resolve identity through the ONE canonical resolver `Runtime.Identity`,
+    # the same one `runtime_block/1` and the TUI status bar use. This block
+    # used to resolve model/provider on its own (`state.model ||
+    # get_active_model/1`), which fell back to the provider's CONFIG DEFAULT
+    # when the session had not pinned `state.model` — so on an OpenRouter
+    # session actually running `stealth/ox-alpha` this line announced
+    # `anthropic/claude-opus-5` (the openrouter default), directly
+    # contradicting the runtime block and the footer. Two identity lines that
+    # disagree let the model pick the wrong one and confidently misreport what
+    # it is. One resolver, one answer.
+    %{model: model, provider: provider} = OptimalSystemAgent.Runtime.Identity.resolve(state)
 
     {os_family, os_name} = :os.type()
     platform = "#{os_family}/#{os_name}"
