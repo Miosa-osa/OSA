@@ -31,7 +31,7 @@ pub enum MessageType {
 }
 
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
-const HELP_LINE_COUNT: u16 = 52;
+const HELP_LINE_COUNT: u16 = 53;
 
 /// Sentinel [`ToolCallData::name`] marking a turn-separator carrier.
 ///
