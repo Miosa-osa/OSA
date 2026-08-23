@@ -2,9 +2,9 @@ defmodule OptimalSystemAgent.Security.TrafficIngest do
   @moduledoc """
   Turn API contracts and captured HTTP into finding notes.
 
-  Strix's HTTP intercepting proxy is the thing that lets an agent *see*
+  An HTTP intercepting proxy is the thing that lets an agent *see*
   traffic. OSA does not ship a live MITM. This module is the ingest half:
-  HAR (Chrome/Caido/Burp export) and OpenAPI/Swagger specs become endpoint
+  HAR (browser/proxy export) and OpenAPI/Swagger specs become endpoint
   notes the rest of the intelligence layer already understands, so the agent
   tests declared surface instead of crawling blind.
   """

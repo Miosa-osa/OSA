@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.Steer do
   @moduledoc """
   Interactive steering for live security runs (Tier 3 #14).
 
-  Adapted from Strix's interactive-steering feature. While a pentest is in
+  While a pentest is in
   flight, the user can redirect the agent mid-run — narrow scope, change
   target priority, stop a noisy scan, ask to pivot to a different finding.
   The steer directive is stored per-session and read at the next agent-loop

@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.Playbook do
   @moduledoc """
   Phased pentest playbooks (Tier 3 #10).
 
-  Adapted from PentestAgent's playbook system. A playbook is an ordered
+  A playbook is an ordered
   sequence of phases an engagement moves through, each with entry criteria
   (what must be true to start the phase), exit criteria (what must be true to
   consider it complete), and guidance (the methodology to apply). The agent

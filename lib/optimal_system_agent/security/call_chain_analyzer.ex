@@ -94,7 +94,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
     * `:runner` - `fn messages -> {:ok, text} | {:error, reason}`, the LLM call.
     * `:max_depth` - call-chain hops before the trace stops (default #{@default_max_depth}).
     * `:mode` - `:legacy` (default: one trace, then judge every class) or
-      `:per_class` (Vulnhuntr: class-focused trace, judge after each hop).
+      `:per_class` (class-focused trace, judge after each hop).
 
   Returns `{:ok, [finding]}`. Findings are only those the judge marked
   exploitable; each carries a CVSS score when the judge supplied a vector.
@@ -185,7 +185,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
     end
   end
 
-  # ── per_class: Vulnhuntr secondary hops (trace + judge per class) ───────────
+  # ── per_class: secondary hops (trace + judge per class) ────────────────────
 
   defp analyze_per_class(entry, content, classes, reader, runner, max_depth) do
     classes
@@ -355,7 +355,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
          "next_symbols": [{"name": "<function/method/file>", "code_line": "<the exact line it appears on>"}]}
 
     `next_symbols` may also be a list of name strings. Prefer the object form:
-    the exact `code_line` is how a resolver disambiguates (Vulnhuntr/Jedi).
+    the exact `code_line` is how a resolver disambiguates.
     Do not request standard-library or third-party package internals - reason
     from what you know. If the file neither takes user input nor forwards data
     anywhere interesting, return empty arrays. Do not speculate about symbols
@@ -446,7 +446,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   defp class_focus(:deserialization), do: "user input deserialized into objects"
   defp class_focus(_), do: "untrusted input reaching a dangerous operation"
 
-  # Vulnhuntr secondary prompts carry class-specific bypass *patterns* (not
+  # Secondary prompts carry class-specific bypass *patterns* (not
   # a payload cookbook). Keep them short and sink-focused.
   defp class_bypass_hint(:sqli),
     do: "Look for string concat / interpolation into SQL, second-order use, and ORM raw()."
@@ -506,7 +506,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   defp confidence_numeric(_, :low), do: 3
   defp confidence_numeric(_, _), do: 5
 
-  # Vulnhuntr: non-remote entries cannot claim high certainty.
+  # Non-remote entries cannot claim high certainty.
   defp cap_remote_confidence(source, band, numeric) do
     if remote_entry?(source) do
       {band, numeric}

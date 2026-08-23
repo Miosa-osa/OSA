@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.HttpReplay do
   @moduledoc """
   HTTP intercept/replay without a MITM daemon.
 
-  Strix's proxy lets an agent list, view, and repeat captured requests.
+  An intercepting proxy lets an agent list, view, and repeat captured requests.
   OSA does not ship a live intercepting proxy. This module is the replay
   half: HAR ingest keeps full request records (method, url, headers,
   postData, status), not just TrafficIngest notes, plus a RoE-gated

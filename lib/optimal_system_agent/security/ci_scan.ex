@@ -17,7 +17,7 @@ defmodule OptimalSystemAgent.Security.CiScan do
 
   @entry_names ~w(router.ex router.go app.py application.py main.py index.js index.ts server.js server.ts app.js app.ts main.go main.rs Application.java routes.rb urls.py)
 
-  # Vulnhuntr seeds on files that *handle requests*, not files named app.py.
+  # Seed on files that *handle requests*, not files named app.py.
   @handler_re ~r{@(app|router|get|post|put|patch|delete)\.|APIRouter|FastAPI|flask\.Flask|express\(\)|chi\.NewRouter|http\.HandleFunc|gin\.(Default|New)|mux\.NewRouter|plug :match|ActionController|createServer\(}i
 
   @sink_re ~r/os\.system|subprocess|eval\(|exec\(|innerHTML|document\.write|cursor\.execute|pickle\.loads|yaml\.load\(|unserialize\(|render_template_string|Runtime\.getRuntime\(\)\.exec|:erlang\.binary_to_term/i

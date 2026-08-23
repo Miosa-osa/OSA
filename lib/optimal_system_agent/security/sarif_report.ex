@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.SarifReport do
   @moduledoc """
   SARIF 2.1.0 report output for pentest findings (Tier 3 #11).
 
-  Adapted from Strix's SARIF report generator. Renders the session's
+  Renders the session's
   vulnerability findings into a valid SARIF (Static Analysis Results
   Interchange Format) 2.1.0 JSON document — the industry-standard format
   for exchanging security findings between tools, consumed by GitHub Code

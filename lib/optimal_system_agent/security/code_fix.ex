@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.CodeFix do
   @moduledoc """
   Code fix as part of vulnerability reporting (Tier 3 #15).
 
-  Adapted from Strix's fix_before/fix_after pattern. A vulnerability report is
+  A vulnerability report is
   far more actionable when it includes the concrete remediation as a code
   diff, not just prose ("you should sanitize input"). This module records a
   fix_before/fix_after pair for a finding, renders it as a unified diff, and
