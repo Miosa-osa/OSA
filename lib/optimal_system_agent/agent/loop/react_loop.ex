@@ -1410,6 +1410,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # answer. Extracted so both the clean `true ->` path and the GoalVerifier
   # `{:pass, _}` path share one copy of the stop-hook dispatch.
   defp finish_turn(content, state) do
+    content =
+      if VerificationGate.blocked_finish?(state, content) do
+        VerificationGate.finish_receipt(state, content)
+      else
+        content
+      end
+
     case run_stop_hooks(content, state) do
       {:continue, inject_msg, state} ->
         state = %{

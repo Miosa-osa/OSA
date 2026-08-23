@@ -221,6 +221,8 @@ pub struct ContextStats {
     #[serde(default)]
     pub tool_result_tokens: u64,
     #[serde(default)]
+    pub tool_schema_tokens: u64,
+    #[serde(default)]
     pub max_tokens: u64,
     #[serde(default)]
     pub used_tokens: u64,

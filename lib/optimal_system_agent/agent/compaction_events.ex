@@ -52,7 +52,7 @@ defmodule OptimalSystemAgent.Agent.CompactionEvents do
   alias OptimalSystemAgent.Events.Bus
 
   @typedoc "What asked for this compaction."
-  @type trigger :: :auto | :manual
+  @type trigger :: :auto | :manual | :model_switch
 
   @doc """
   Compaction is starting. `tokens_before` is the pre-compaction estimate.

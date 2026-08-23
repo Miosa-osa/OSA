@@ -43,17 +43,24 @@ defmodule OptimalSystemAgent.Agent.Context.ToolSchemaBudgetTest do
 
     expected =
       b.static_base_tokens + b.dynamic_context_tokens + b.conversation_tokens +
-        b.response_reserve + b.tool_schema_tokens
+        b.tool_result_tokens + b.response_reserve + b.tool_schema_tokens
 
     assert b.total_tokens == expected,
            "total must account for every component that is actually sent"
+  end
+
+  test "occupied_tokens excludes the response reserve" do
+    b = budget()
+
+    assert b.occupied_tokens == b.total_tokens - b.response_reserve
+    assert b.occupied_tokens + b.response_reserve == b.total_tokens
   end
 
   test "headroom and utilization are computed from the corrected total" do
     b = budget()
 
     assert b.headroom == b.max_tokens - b.total_tokens
-    assert_in_delta b.utilization_pct, b.total_tokens / b.max_tokens * 100, 0.11
+    assert_in_delta b.utilization_pct, b.occupied_tokens / b.max_tokens * 100, 0.11
   end
 
   test "repeated calls agree — the cache cannot drift from the tool set" do

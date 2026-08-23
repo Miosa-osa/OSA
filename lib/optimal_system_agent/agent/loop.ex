@@ -1484,9 +1484,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         :ets.insert(:osa_session_provider_overrides, {state.session_id, provider_atom, model})
 
-        {:reply, {:ok, %{provider: provider_atom, model: model, context_window: ecw}},
-         %{state | provider: provider_atom, model: model, effective_context_window: ecw}}
+        {new_state, info} =
+          OptimalSystemAgent.Agent.Loop.ModelSwap.apply(state, provider_atom, model, ecw)
+
+        {:reply, {:ok, info}, new_state}
     end
+  end
+
+  def handle_call(:context_budget, _from, state) do
+    budget = OptimalSystemAgent.Agent.Context.token_budget(state)
+    {:reply, {:ok, budget}, state}
   end
 
   # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and

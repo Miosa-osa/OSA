@@ -61,6 +61,72 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     |> apply_small_window_budget(state)
     |> repin_discovered(state)
     |> apply_ask_user_gate(state)
+    |> pin_session_order(state)
+  end
+
+  # LAST. Anthropic caches the tools array as the first bytes of the prompt
+  # prefix; a hit requires identical JSON bytes. FastPath and the small-window
+  # budget reorder. After the first filter of a session the name ORDER is
+  # pinned; later calls of the same session return that order. Names that
+  # were not in the pin (ToolDiscovery.widen/2) append at the tail.
+  defp pin_session_order(tools, state) do
+    names = Enum.map(tools, &tool_name/1)
+
+    case session_pin(state) do
+      nil ->
+        remember_pin(state, names)
+        tools
+
+      order ->
+        reordered = reorder_by_pin(tools, order)
+        remember_pin(state, Enum.map(reordered, &tool_name/1))
+        reordered
+    end
+  end
+
+  defp session_pin(state) do
+    case Map.get(state, :pinned_tool_order) do
+      names when is_list(names) and names != [] ->
+        names
+
+      _ ->
+        case pin_key(state) do
+          nil -> nil
+          key -> Process.get(key)
+        end
+    end
+  end
+
+  defp pin_key(state) do
+    case Map.get(state, :session_id) do
+      id when is_binary(id) and id != "" -> {:osa_tool_filter_order, id}
+      _ -> nil
+    end
+  end
+
+  defp remember_pin(state, names) do
+    case pin_key(state) do
+      nil -> :ok
+      key -> Process.put(key, names)
+    end
+
+    :ok
+  end
+
+  defp reorder_by_pin(tools, order) do
+    by_name = Map.new(tools, fn t -> {tool_name(t), t} end)
+    present = MapSet.new(Map.keys(by_name))
+
+    pinned =
+      order
+      |> Enum.filter(&MapSet.member?(present, &1))
+      |> Enum.uniq()
+      |> Enum.map(&Map.fetch!(by_name, &1))
+
+    pinned_names = MapSet.new(order)
+    extras = Enum.reject(tools, fn t -> MapSet.member?(pinned_names, tool_name(t)) end)
+
+    pinned ++ extras
   end
 
   # LAST, deliberately — after `repin_discovered/2`.

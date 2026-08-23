@@ -41,6 +41,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
     "context" => {"Show context window usage", :cmd_context},
+    "revert" => {"Restore files to N mutating-tool steps ago (transcript kept)", :cmd_revert},
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
     "skills" => {"List, run, enable, disable, or create a skill", :cmd_skill},
@@ -307,13 +308,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                   {provider, m}
               end
 
-            case GenServer.call(pid, {:swap_provider, provider, model_name}) do
+            case GenServer.call(pid, {:swap_provider, provider, model_name}, swap_call_timeout()) do
               {:ok, info} ->
-                ctx = ProviderRegistry.effective_context_window(info.model, info.provider)
-
-                IO.puts(
-                  "  #{@green}#{@reset} Switched to #{info.model} #{@dim}(#{info.provider}, #{format_context_window(ctx)} ctx)#{@reset}"
-                )
+                print_model_switch(info)
 
               {:error, reason} ->
                 IO.puts("  #{@yellow}error: #{reason}#{@reset}")
@@ -495,14 +492,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp swap_to(provider, model, session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{pid, _}] ->
-        case GenServer.call(pid, {:swap_provider, provider, model}) do
+        case GenServer.call(pid, {:swap_provider, provider, model}, swap_call_timeout()) do
           {:ok, info} ->
-            ctx = ProviderRegistry.effective_context_window(info.model, info.provider)
-
-            IO.puts(
-              "  #{@green}#{@reset} Switched to #{info.model} #{@dim}(#{info.provider}, #{format_context_window(ctx)} ctx)#{@reset}"
-            )
-
+            print_model_switch(info)
             :ok
 
           {:error, reason} ->
@@ -675,71 +667,54 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   def cmd_context(_args, session_id) do
     IO.puts("")
 
-    max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-    static_tokens = OptimalSystemAgent.Soul.static_token_count()
+    budget =
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+        [{pid, _}] ->
+          case GenServer.call(pid, :context_budget) do
+            {:ok, b} -> b
+            _ -> nil
+          end
 
-    case Loop.get_state(session_id) do
-      {:ok, state} ->
+        _ ->
+          nil
+      end
+
+    case {budget, Loop.get_state(session_id)} do
+      {b, _} when is_map(b) ->
+        print_context_budget(b)
+
+      {_, {:ok, state}} ->
+        max_tokens = state[:effective_context_window] || 0
+        static_tokens = OptimalSystemAgent.Soul.static_token_count()
         total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
-        conversation_tokens = max(total_tokens - static_tokens, 0)
-        available = max(max_tokens - total_tokens, 0)
-        pct = if max_tokens > 0, do: round(total_tokens / max_tokens * 100), else: 0
+        tool_schema = OptimalSystemAgent.Agent.Context.tool_schema_token_count()
 
-        IO.puts("  #{@bold}Context Window Usage (#{pct}%)#{@reset}")
-
-        # Bar
-        bar_width = 50
-        filled = round(pct / 100 * bar_width)
-        empty = bar_width - filled
-
-        bar_color =
-          cond do
-            pct >= 90 -> @red
-            pct >= 70 -> @yellow
-            true -> @green
-          end
-
-        IO.puts("  #{@dim}┌#{String.duplicate("─", bar_width)}┐#{@reset}")
-
-        IO.puts(
-          "  #{@dim}│#{bar_color}#{String.duplicate("█", filled)}#{@dim}#{String.duplicate("░", empty)}#{@reset}#{@dim}│#{@reset}"
-        )
-
-        IO.puts("  #{@dim}└#{String.duplicate("─", bar_width)}┘#{@reset}")
-        IO.puts("")
-
-        IO.puts(
-          "  #{@dim}System prompt:#{@reset}  #{pad_num(static_tokens)} tokens (#{round(static_tokens / max(max_tokens, 1) * 100)}%)"
-        )
-
-        IO.puts(
-          "  #{@dim}Conversation:#{@reset}   #{pad_num(conversation_tokens)} tokens (#{round(conversation_tokens / max(max_tokens, 1) * 100)}%)"
-        )
-
-        IO.puts(
-          "  #{@dim}Available:#{@reset}      #{pad_num(available)} tokens (#{round(available / max(max_tokens, 1) * 100)}%)"
-        )
-
-        IO.puts("  #{@dim}Total:#{@reset}          #{pad_num(max_tokens)} tokens")
-
-        # Compaction stats
-        try do
-          comp_stats = Compactor.stats()
-
-          if comp_stats[:compaction_count] && comp_stats[:compaction_count] > 0 do
-            IO.puts("")
-            IO.puts("  #{@dim}Compressions:#{@reset}   #{comp_stats[:compaction_count]}")
-
-            IO.puts(
-              "  #{@dim}Tokens saved:#{@reset}   #{format_tokens(comp_stats[:tokens_saved] || 0)}"
-            )
-          end
-        rescue
-          _ -> :ok
-        end
+        print_context_budget(%{
+          max_tokens: max_tokens,
+          static_base_tokens: static_tokens,
+          conversation_tokens: max(total_tokens - static_tokens, 0),
+          tool_schema_tokens: tool_schema,
+          tool_result_tokens: 0,
+          total_tokens: total_tokens
+        })
 
       _ ->
         IO.puts("  #{@dim}No active session#{@reset}")
+    end
+
+    try do
+      comp_stats = Compactor.stats()
+
+      if comp_stats[:compaction_count] && comp_stats[:compaction_count] > 0 do
+        IO.puts("")
+        IO.puts("  #{@dim}Compressions:#{@reset}   #{comp_stats[:compaction_count]}")
+
+        IO.puts(
+          "  #{@dim}Tokens saved:#{@reset}   #{format_tokens(comp_stats[:tokens_saved] || 0)}"
+        )
+      end
+    rescue
+      _ -> :ok
     end
 
     IO.puts("")
@@ -749,6 +724,162 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@yellow}error: context info unavailable#{@reset}\n")
       session_id
   end
+
+  def cmd_revert(args, session_id) do
+    IO.puts("")
+    trimmed = String.trim(args || "")
+
+    cwd =
+      OptimalSystemAgent.Workspace.Cwd.session_dir(session_id) ||
+        OptimalSystemAgent.Workspace.Cwd.get()
+
+    cond do
+      trimmed in ["list", "ls"] ->
+        steps = OptimalSystemAgent.Agent.StepSnapshot.list(session_id, cwd: cwd)
+
+        if steps == [] do
+          IO.puts("  #{@dim}No filesystem step snapshots in this session.#{@reset}")
+        else
+          IO.puts("  #{@bold}Filesystem step snapshots#{@reset}")
+
+          Enum.each(steps, fn step ->
+            IO.puts("  #{@cyan}#{step.n}#{@reset}  #{@dim}#{step.ref}#{@reset}")
+          end)
+        end
+
+      trimmed == "" or match?({n, ""} when n >= 1, Integer.parse(trimmed)) ->
+        n =
+          case Integer.parse(trimmed) do
+            {i, ""} -> i
+            _ -> 1
+          end
+
+        case OptimalSystemAgent.Agent.StepSnapshot.revert(session_id, n, cwd: cwd) do
+          {:ok, result} ->
+            IO.puts(
+              "  #{@green}#{@reset} Restored filesystem to step #{result.restored_n} #{@dim}(transcript kept)#{@reset}"
+            )
+
+          {:error, _reason} ->
+            case OptimalSystemAgent.Agent.StepRevert.revert(session_id, n) do
+              {:ok, result} ->
+                IO.puts(
+                  "  #{@green}#{@reset} Reverted #{n} file step(s) → checkpoint #{result.checkpoint_id}"
+                )
+
+                IO.puts("  #{@dim}Transcript kept.#{@reset}")
+
+              {:error, :not_enough_checkpoints} ->
+                IO.puts(
+                  "  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}"
+                )
+
+              {:error, reason} ->
+                IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+            end
+        end
+
+      true ->
+        IO.puts("  #{@dim}Usage: /revert N#{@reset}  (restore files N mutating-tool steps ago)")
+        IO.puts("         #{@dim}/revert list#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: revert failed#{@reset}\n")
+      session_id
+  end
+
+  defp swap_call_timeout do
+    Application.get_env(:optimal_system_agent, :compaction_timeout_ms, 120_000) + 30_000
+  end
+
+  defp print_model_switch(info) do
+    ctx = info[:context_window] || 0
+    model = info[:model]
+    provider = info[:provider]
+
+    IO.puts(
+      "  #{@green}#{@reset} Switched to #{model} #{@dim}(#{provider}, #{format_context_window(ctx)} ctx)#{@reset}"
+    )
+
+    before = info[:tokens_before] || 0
+    afterc = info[:tokens_after] || before
+
+    if info[:compacted] do
+      IO.puts(
+        "  #{@yellow}Compacted#{@reset} #{format_tokens(before)} → #{format_tokens(afterc)} to fit the new window"
+      )
+    else
+      IO.puts(
+        "  #{@dim}Transcript kept:#{@reset} #{format_tokens(afterc)} / #{format_context_window(ctx)}"
+      )
+    end
+
+    if is_binary(info[:warning]) and info.warning != "" do
+      IO.puts("  #{@yellow}warning:#{@reset} #{info.warning}")
+    end
+  end
+
+  defp print_context_budget(b) do
+    max_tokens = b[:max_tokens] || 0
+    total_tokens = b[:occupied_tokens] || b[:total_tokens] || 0
+    static_tokens = b[:static_base_tokens] || 0
+    conversation_tokens = b[:conversation_tokens] || 0
+    tool_schema = b[:tool_schema_tokens] || 0
+    tool_results = b[:tool_result_tokens] || 0
+    available = max(max_tokens - total_tokens, 0)
+    pct = if max_tokens > 0, do: round(total_tokens / max_tokens * 100), else: 0
+
+    IO.puts("  #{@bold}Context Window Usage (#{pct}%)#{@reset}")
+
+    bar_width = 50
+    filled = min(bar_width, round(pct / 100 * bar_width))
+    empty = bar_width - filled
+
+    bar_color =
+      cond do
+        pct >= 90 -> @red
+        pct >= 70 -> @yellow
+        true -> @green
+      end
+
+    IO.puts("  #{@dim}┌#{String.duplicate("─", bar_width)}┐#{@reset}")
+
+    IO.puts(
+      "  #{@dim}│#{bar_color}#{String.duplicate("█", filled)}#{@dim}#{String.duplicate("░", empty)}#{@reset}#{@dim}│#{@reset}"
+    )
+
+    IO.puts("  #{@dim}└#{String.duplicate("─", bar_width)}┘#{@reset}")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}System prompt:#{@reset}  #{pad_num(static_tokens)} tokens (#{pct_of(static_tokens, max_tokens)}%)"
+    )
+
+    IO.puts(
+      "  #{@dim}Tool schemas:#{@reset}   #{pad_num(tool_schema)} tokens (#{pct_of(tool_schema, max_tokens)}%)"
+    )
+
+    IO.puts(
+      "  #{@dim}Tool results:#{@reset}   #{pad_num(tool_results)} tokens (#{pct_of(tool_results, max_tokens)}%)"
+    )
+
+    IO.puts(
+      "  #{@dim}Conversation:#{@reset}   #{pad_num(conversation_tokens)} tokens (#{pct_of(conversation_tokens, max_tokens)}%)"
+    )
+
+    IO.puts(
+      "  #{@dim}Available:#{@reset}      #{pad_num(available)} tokens (#{pct_of(available, max_tokens)}%)"
+    )
+
+    IO.puts("  #{@dim}Total:#{@reset}          #{pad_num(max_tokens)} tokens")
+  end
+
+  defp pct_of(_n, max) when not is_integer(max) or max <= 0, do: 0
+  defp pct_of(n, max), do: round(n / max * 100)
 
   # `/memory` — no arg: stats + recent overview. Verbs: `save <text>` persists
   # a note, `search <q>` / `recall <q>` query the store. The TUI advertises

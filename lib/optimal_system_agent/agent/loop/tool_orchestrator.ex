@@ -101,9 +101,63 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     # Restore original input order — model expects results in submission order
     by_id = Map.new(fresh, fn {tc, r} -> {tc.id, {tc, r}} end)
 
-    Enum.map(tool_calls, fn tc ->
-      Map.get(by_id, tc.id, {tc, error_result(tc, "Tool not executed")})
-    end)
+    ordered =
+      Enum.map(tool_calls, fn tc ->
+        Map.get(by_id, tc.id, {tc, error_result(tc, "Tool not executed")})
+      end)
+
+    _ = maybe_record_step_snapshot(ordered, state)
+    ordered
+  end
+
+  @step_snapshot_tools ~w(file_edit file_write multi_file_edit file_create notebook_edit)
+
+  defp maybe_record_step_snapshot(pairs, state) when is_list(pairs) do
+    paths =
+      Enum.flat_map(pairs, fn {tc, result} ->
+        name = to_string(Map.get(tc, :name) || "")
+
+        if name in @step_snapshot_tools and step_ok?(result) do
+          step_paths(tc)
+        else
+          []
+        end
+      end)
+
+    if paths != [] do
+      cwd = Map.get(state, :working_dir) || File.cwd!()
+      sid = Map.get(state, :session_id)
+
+      if is_binary(sid) do
+        _ = OptimalSystemAgent.Agent.StepSnapshot.record(sid, cwd, paths: Enum.uniq(paths))
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp step_ok?(%{success: true}), do: true
+  defp step_ok?(%{"success" => true}), do: true
+  defp step_ok?({:ok, _}), do: true
+  defp step_ok?(_), do: false
+
+  defp step_paths(tc) do
+    args = Map.get(tc, :arguments) || Map.get(tc, :args) || %{}
+
+    cond do
+      is_binary(args["path"] || args[:path]) ->
+        [args["path"] || args[:path]]
+
+      is_list(args["edits"] || args[:edits]) ->
+        (args["edits"] || args[:edits])
+        |> Enum.map(fn e -> e["path"] || e[:path] end)
+        |> Enum.reject(&is_nil/1)
+
+      true ->
+        []
+    end
   end
 
   # Subagent turns are excluded for the same reason `Reminders` excludes them:

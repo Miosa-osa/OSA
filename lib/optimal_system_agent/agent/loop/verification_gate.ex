@@ -173,8 +173,10 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     * `NO_RUNNABLE_TEST: <reason>` in the answer releases clause 3 — explicit,
       logged, and unavailable for clause 2.
     * Re-prompts are capped per turn, reset by
-      `TurnPipeline.reset_per_turn_fields/1`. After the cap the gate steps
-      aside unconditionally.
+      `TurnPipeline.reset_per_turn_fields/1`. After the cap the loop no
+      longer re-prompts, but `blocked_finish?/2` still rewrites a text-only
+      "done" into a receipt while `:unchecked_write` or `:failing_check`
+      is live.
 
   This complements `Guardrails.needs_verification_gate?/1` (which targets the
   *zero-successful-tools* case) by covering the *wrote-but-never-checked* case.
@@ -343,6 +345,80 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   end
 
   def needs_verification?(_, _), do: false
+
+  @doc """
+  True when the re-prompt budget is exhausted AND a file-mutating turn still
+  has unchecked writes or a failing check.
+
+  The loop used to yield after one pushback: the model's "done" sentence
+  became the user-visible answer. This flag is the remaining receipt hole —
+  finish_turn must replace that sentence rather than looping forever.
+  """
+  @spec blocked_finish?(map(), String.t() | nil) :: boolean()
+  def blocked_finish?(state, content) when is_map(state) do
+    sid = Map.get(state, :session_id)
+
+    if is_binary(sid) do
+      reprompts = Map.get(state, :verification_gate_prompts, 0)
+      {reason, scale} = triaged(sid, reprompts, content)
+
+      reason in [:unchecked_write, :failing_check] and
+        reprompts >= cap_for(scale) and
+        (reason == :failing_check or pending_code_writes?(sid))
+    else
+      false
+    end
+  end
+
+  def blocked_finish?(_, _), do: false
+
+  @doc """
+  Operator-visible finish when `blocked_finish?/2` is true. Prefixed so the
+  model's victory sentence cannot be the last thing the user reads.
+  """
+  @spec finish_receipt(map(), String.t() | nil) :: String.t()
+  def finish_receipt(state, content) when is_map(state) do
+    sid = Map.get(state, :session_id)
+    reprompts = Map.get(state, :verification_gate_prompts, 0)
+    {reason, _scale} = if is_binary(sid), do: triaged(sid, reprompts, content), else: {nil, :none}
+
+    body = content |> to_string() |> String.trim()
+
+    case reason do
+      :failing_check ->
+        "Checks are still failing. This is not a verified completion.\n\n" <> body
+
+      _ ->
+        files = (sid && VerificationEvidence.pending_files(sid)) || []
+
+        names =
+          files
+          |> Enum.map(&Path.basename(to_string(&1)))
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.take(6)
+
+        file_bit =
+          case names do
+            [] -> "files this turn"
+            [one] -> one
+            many -> Enum.join(many, ", ")
+          end
+
+        "I edited #{file_bit} and did not run a check. " <>
+          "This is not a verified completion.\n\n" <>
+          body
+    end
+  end
+
+  def finish_receipt(_state, content), do: to_string(content || "")
+
+  defp pending_code_writes?(session_id) do
+    session_id
+    |> VerificationEvidence.pending_files()
+    |> Enum.any?(&VerificationEvidence.code_file?/1)
+  rescue
+    _ -> false
+  end
 
   @doc """
   Which of the three questions is unanswered, in priority order, or `nil`.

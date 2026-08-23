@@ -27,6 +27,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("fg", "Bring a backgrounded turn to the foreground"),
     ("agents", "Background-agent dashboard"),
     ("rewind", "Restore code/conversation from a checkpoint"),
+    ("revert", "Restore files N mutating-tool steps ago (transcript kept)"),
     ("fork", "Fork this session, keeping history"),
     ("compact", "Compact the conversation to free context"),
     ("recap", "Summarize the session so far"),
@@ -818,6 +819,25 @@ impl App {
                 // a checkpoint snapshotted before an earlier prompt.
                 self.load_rewind_checkpoints();
             }
+            "/revert" => {
+                match arg {
+                    "list" | "ls" => self.do_step_revert_list(),
+                    "" => {
+                        let output = "Usage: /revert N  (restore files N mutating-tool steps ago)\n       /revert list".to_string();
+                        self.toasts.push(
+                            output,
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
+                    other => match other.parse::<u32>() {
+                        Ok(n) if n >= 1 => self.do_step_revert(n),
+                        _ => self.toasts.push(
+                            "Usage: /revert N  (N is a positive integer)".into(),
+                            crate::components::toast::ToastLevel::Warning,
+                        ),
+                    },
+                }
+            }
             "/update" => {
                 // Self-update via the installed `osa` launcher's rollback-safe
                 // staged updater. Runs in the background (non-blocking, cancel-
@@ -842,6 +862,50 @@ impl App {
         if self.activity.a11y() {
             self.chat.add_system_message(msg, "info");
         }
+    }
+
+    fn do_step_revert_list(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.list_step_snapshots(&sid).await {
+                Ok(msg) => BackendEvent::CommandResult(Ok(
+                    crate::client::types::CommandExecuteResponse {
+                        kind: "info".into(),
+                        output: msg,
+                        action: None,
+                        command: "revert".into(),
+                        effort: None,
+                        goal: None,
+                    },
+                )),
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    fn do_step_revert(&self, steps: u32) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.revert_steps(&sid, steps).await {
+                Ok(msg) => BackendEvent::CommandResult(Ok(
+                    crate::client::types::CommandExecuteResponse {
+                        kind: "info".into(),
+                        output: msg,
+                        action: None,
+                        command: "revert".into(),
+                        effort: None,
+                        goal: None,
+                    },
+                )),
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
     }
 
     pub(crate) fn switch_model(&self, provider: &str, model: &str) {
@@ -884,12 +948,13 @@ impl App {
                         0.0
                     };
                     let output = format!(
-                        "Context: {}/{} tokens ({:.0}%)\n  conversation: {}\n  system: {}\n  tool results: {}",
+                        "Context: {}/{} tokens ({:.0}%)\n  conversation: {}\n  system: {}\n  tool schemas: {}\n  tool results: {}",
                         c.used_tokens,
                         c.max_tokens,
                         pct,
                         c.conversation_tokens,
                         c.system_tokens,
+                        c.tool_schema_tokens,
                         c.tool_result_tokens
                     );
                     BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {

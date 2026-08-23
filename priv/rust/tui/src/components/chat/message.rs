@@ -997,6 +997,7 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  /fg", "Bring a backgrounded turn back to the foreground"),
         ("  /agents", "Background-agent dashboard (running + finished)"),
         ("  /rewind", "Restore code/conversation from a checkpoint"),
+        ("  /revert N", "Restore files N mutating-tool steps ago"),
         ("  /theme <name>", "Switch theme"),
         ("  /verbose", "Toggle tool detail"),
         ("  /yolo", "Toggle auto-approve (dangerous)"),

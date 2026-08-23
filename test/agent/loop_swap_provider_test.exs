@@ -78,4 +78,17 @@ defmodule OptimalSystemAgent.Agent.LoopSwapProviderTest do
     assert {:reply, {:error, _msg}, ^unchanged} =
              Loop.handle_call({:swap_provider, "ollama", nil}, self(), state)
   end
+
+  test "swap reply reports occupancy and compacted=false when there is nothing to fold" do
+    state = base_state(%{last_input_tokens: 40_000, messages: []})
+
+    assert {:reply, {:ok, info}, new_state} =
+             Loop.handle_call({:swap_provider, "ollama", "qwen3:8b"}, self(), state)
+
+    assert info.compacted == false
+    assert info.tokens_before == 40_000
+    assert is_integer(info.context_window)
+    assert new_state.model == "qwen3:8b"
+    assert new_state.messages == []
+  end
 end

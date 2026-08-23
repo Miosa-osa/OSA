@@ -112,22 +112,17 @@ defmodule OptimalSystemAgent.Soul do
   """
   @spec invalidate_static_base() :: :ok
   def invalidate_static_base do
-    clear_variant(:static_base, :static_token_count)
-    clear_variant(:static_base_lite, :static_token_count_lite)
-    clear_variant(:static_base_native, :static_token_count_native)
+    clear_variant(:static_base, :static_token_count, :static_base_fp)
+    clear_variant(:static_base_lite, :static_token_count_lite, :static_base_lite_fp)
+    clear_variant(:static_base_native, :static_token_count_native, :static_base_native_fp)
     :ok
   end
 
-  defp clear_variant(base_key, count_key) do
-    case :persistent_term.get({__MODULE__, base_key}, nil) do
-      nil ->
-        :ok
-
-      _cached ->
-        :persistent_term.put({__MODULE__, base_key}, nil)
-        :persistent_term.put({__MODULE__, count_key}, 0)
-        :ok
-    end
+  defp clear_variant(base_key, count_key, fp_key) do
+    :persistent_term.put({__MODULE__, base_key}, nil)
+    :persistent_term.put({__MODULE__, count_key}, 0)
+    :persistent_term.put({__MODULE__, fp_key}, nil)
+    :ok
   end
 
   @doc """
@@ -139,10 +134,7 @@ defmodule OptimalSystemAgent.Soul do
   """
   @spec static_base() :: String.t()
   def static_base do
-    case :persistent_term.get({__MODULE__, :static_base}, nil) do
-      nil -> interpolate_and_cache()
-      cached -> cached
-    end
+    cached_or_build(:full, :static_base, :static_token_count, :static_base_fp)
   end
 
   @doc "Returns the token count of the cached static base."
@@ -209,17 +201,16 @@ defmodule OptimalSystemAgent.Soul do
   def static_base(:full), do: static_base()
 
   def static_base(:lite) do
-    case :persistent_term.get({__MODULE__, :static_base_lite}, nil) do
-      nil -> interpolate_and_cache(:lite)
-      cached -> cached
-    end
+    cached_or_build(:lite, :static_base_lite, :static_token_count_lite, :static_base_lite_fp)
   end
 
   def static_base(:native_tools) do
-    case :persistent_term.get({__MODULE__, :static_base_native}, nil) do
-      nil -> interpolate_and_cache(:native_tools)
-      cached -> cached
-    end
+    cached_or_build(
+      :native_tools,
+      :static_base_native,
+      :static_token_count_native,
+      :static_base_native_fp
+    )
   end
 
   @doc "Token count of the given static-base variant. See `static_base/1`."
@@ -295,41 +286,81 @@ defmodule OptimalSystemAgent.Soul do
 
   # ── Static Base Assembly ───────────────────────────────────────────
 
+  # Serve the cached static base only when the toolbox fingerprint still
+  # matches. A cold start that interpolated before MCP/plugin tools finished
+  # registering used to pin a 9k prompt for the life of the BEAM while a
+  # later start of the same install cached 16k — byte-unstable prefix, cache
+  # miss on every first turn of a "quiet" session.
+  defp cached_or_build(variant, base_key, count_key, fp_key) do
+    hold_for_session_toolbox()
+    fp = tools_fingerprint(variant)
+
+    case :persistent_term.get({__MODULE__, base_key}, nil) do
+      cached when is_binary(cached) and cached != "" ->
+        if :persistent_term.get({__MODULE__, fp_key}, nil) == fp do
+          cached
+        else
+          interpolate_and_cache(variant, base_key, count_key, fp_key, fp)
+        end
+
+      _ ->
+        interpolate_and_cache(variant, base_key, count_key, fp_key, fp)
+    end
+  end
+
   defp interpolate_and_cache do
-    base = build_base(tools_content())
-
-    token_count = estimate_tokens(base)
-    :persistent_term.put({__MODULE__, :static_base}, base)
-    :persistent_term.put({__MODULE__, :static_token_count}, token_count)
-
-    Logger.info("[Soul] Static base cached: #{token_count} tokens")
-    base
+    cached_or_build(:full, :static_base, :static_token_count, :static_base_fp)
   end
 
   # LITE variant — same template, but only the core-tool allowlist is inlined
   # (ToolsSection.build(:lite)). Cached in its own persistent_term slot.
-  defp interpolate_and_cache(:lite) do
-    base = build_base(tools_content(:lite))
-
+  defp interpolate_and_cache(variant, base_key, count_key, fp_key, fp) do
+    base = build_base(tools_content(variant))
     token_count = estimate_tokens(base)
-    :persistent_term.put({__MODULE__, :static_base_lite}, base)
-    :persistent_term.put({__MODULE__, :static_token_count_lite}, token_count)
 
-    Logger.info("[Soul] Static base (lite) cached: #{token_count} tokens")
+    :persistent_term.put({__MODULE__, base_key}, base)
+    :persistent_term.put({__MODULE__, count_key}, token_count)
+    :persistent_term.put({__MODULE__, fp_key}, fp)
+
+    Logger.info("[Soul] Static base (#{variant}) cached: #{token_count} tokens fp=#{fp}")
     base
   end
 
-  # NATIVE-TOOLS variant — same template and same tool set as the full base,
-  # minus the spans the request's own tool definitions already carry.
-  defp interpolate_and_cache(:native_tools) do
-    base = build_base(tools_content(:native_tools))
+  defp tools_fingerprint(variant) do
+    names = registry_tool_names()
+    :erlang.phash2({variant, names})
+  end
 
-    token_count = estimate_tokens(base)
-    :persistent_term.put({__MODULE__, :static_base_native}, base)
-    :persistent_term.put({__MODULE__, :static_token_count_native}, token_count)
+  defp registry_tool_names do
+    OptimalSystemAgent.Tools.Registry.list_active()
+    |> Enum.map(fn t -> t[:name] || t["name"] || Map.get(t, :name) end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort()
+  rescue
+    _ -> []
+  end
 
-    Logger.info("[Soul] Static base (native tools) cached: #{token_count} tokens")
-    base
+  # Registry.init sets `{Registry, :toolbox_ready}` after publishing
+  # builtin_tools. Soul.load runs before that GenServer starts, so a first
+  # static_base/1 during boot would otherwise cache against an empty
+  # list_active. Wait briefly; tests and a fully-booted node skip the sleep.
+  defp hold_for_session_toolbox do
+    if toolbox_ready?(), do: :ok, else: wait_for_toolbox(40)
+  end
+
+  defp wait_for_toolbox(0), do: :ok
+
+  defp wait_for_toolbox(n) do
+    if toolbox_ready?() do
+      :ok
+    else
+      Process.sleep(10)
+      wait_for_toolbox(n - 1)
+    end
+  end
+
+  defp toolbox_ready? do
+    :persistent_term.get({OptimalSystemAgent.Tools.Registry, :toolbox_ready}, false) == true
   end
 
   # Interpolate SYSTEM.md with the given pre-rendered tool-definitions block plus
@@ -451,6 +482,8 @@ defmodule OptimalSystemAgent.Soul do
   defp tools_content do
     ToolsSection.build()
   end
+
+  defp tools_content(:full), do: tools_content()
 
   # LITE tools section: only the core allowlist inlined, everything else deferred.
   defp tools_content(:lite) do
