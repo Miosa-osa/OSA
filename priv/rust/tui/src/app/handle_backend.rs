@@ -1035,6 +1035,7 @@ impl App {
                         system_tokens: stats.system_tokens,
                         conversation_tokens: stats.conversation_tokens,
                         tool_result_tokens: stats.tool_result_tokens,
+                        tool_schema_tokens: stats.tool_schema_tokens,
                         max_tokens: stats.max_tokens,
                         used_tokens: stats.used_tokens,
                     });
@@ -1410,9 +1411,22 @@ impl App {
             BackendEvent::ModelSwitched(result) => match result {
                 Ok(resp) => {
                     self.set_identity(&resp.provider, &resp.model);
-                    // Reset context bar with new model's window size
+                    // Keep occupancy. Zeroing used tokens on switch made the
+                    // bar lie: the transcript is still in the session, only
+                    // the ceiling changed (and may have been compacted).
+                    let used = resp
+                        .tokens_after
+                        .or(resp.tokens_before)
+                        .unwrap_or(0);
                     if let Some(ctx) = resp.context_window {
-                        self.status.set_context(0.0, 0, ctx);
+                        let ratio = if ctx > 0 {
+                            used as f64 / ctx as f64
+                        } else {
+                            0.0
+                        };
+                        self.status.set_context(ratio, used, ctx);
+                        self.sidebar.set_context(ratio);
+                        self.sidebar.set_context_window(ctx, used);
                     }
                     // A2 — refresh the effort chip so it reflects the new model's
                     // reasoning effort instead of staying stuck on the previous
@@ -1422,10 +1436,21 @@ impl App {
                         self.status.set_effort(Some(effort));
                     }
                     self.check_health();
-                    self.toasts.push(
-                        format!("Model: {}/{}", resp.provider, resp.model),
-                        crate::components::toast::ToastLevel::Info,
-                    );
+                    let toast = model_switch_toast(&resp);
+                    let level = if resp.compacted.unwrap_or(false) {
+                        crate::components::toast::ToastLevel::Warning
+                    } else {
+                        crate::components::toast::ToastLevel::Info
+                    };
+                    self.toasts.push(toast, level);
+                    if let Some(w) = resp.warning.clone() {
+                        if !w.is_empty() {
+                            self.toasts.push(
+                                w,
+                                crate::components::toast::ToastLevel::Warning,
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -3651,6 +3676,39 @@ fn pending_key(name: &str, tool_call_id: Option<&str>) -> String {
 /// run twice concurrently), so prefer the owning call id.
 fn live_output_key(command: &str, tool_call_id: Option<&str>) -> String {
     tool_call_id.unwrap_or(command).to_string()
+}
+
+fn model_switch_toast(resp: &crate::client::types::ModelSwitchResponse) -> String {
+    let ident = format!("{}/{}", resp.provider, resp.model);
+    let compacted = resp.compacted.unwrap_or(false);
+    let before = resp.tokens_before.unwrap_or(0);
+    let after = resp.tokens_after.unwrap_or(before);
+    let window = resp.context_window.unwrap_or(0);
+
+    if compacted {
+        format!(
+            "Switched to {ident}. Compacted {} → {} to fit {} ctx.",
+            fmt_tokens(before),
+            fmt_tokens(after),
+            fmt_tokens(window)
+        )
+    } else if window > 0 {
+        format!(
+            "Switched to {ident}. Transcript kept ({} / {} ctx).",
+            fmt_tokens(after),
+            fmt_tokens(window)
+        )
+    } else {
+        format!("Switched to {ident}.")
+    }
+}
+
+fn fmt_tokens(n: u64) -> String {
+    if n >= 10_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Write a completion ping to the terminal via the channel-selected notifier

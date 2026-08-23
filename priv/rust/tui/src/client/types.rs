@@ -478,6 +478,20 @@ pub struct ModelSwitchResponse {
     /// after a switch (A2). Absent ⇒ the chip is left as-is.
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub old_provider: Option<String>,
+    #[serde(default)]
+    pub old_model: Option<String>,
+    #[serde(default)]
+    pub old_context_window: Option<u64>,
+    #[serde(default)]
+    pub tokens_before: Option<u64>,
+    #[serde(default)]
+    pub tokens_after: Option<u64>,
+    #[serde(default)]
+    pub compacted: Option<bool>,
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 // === Classify ===

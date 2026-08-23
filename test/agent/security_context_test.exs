@@ -133,5 +133,12 @@ defmodule OptimalSystemAgent.Agent.SecurityContextTest do
       # On host, we still get scan methodology and finding quality
       assert String.contains?(result, "finding_quality")
     end
+
+    test "injects execution environment and untrusted-output rules" do
+      state = %{messages: [%{content: "pentest example.com"}], session_id: "test-16"}
+      result = SecurityContext.sandbox_environment_block(state)
+      assert result =~ "execution_environment" or result =~ "localhost"
+      assert result =~ "finding_quality"
+    end
   end
 end

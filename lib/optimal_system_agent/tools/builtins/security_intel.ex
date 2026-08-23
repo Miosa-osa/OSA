@@ -72,7 +72,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     LoginPreflight,
     FindingSkeptic,
     EntryFanout,
-    CodeFixPr
+    CodeFixPr,
+    ExploitOracle,
+    SymbolResolver,
+    LoginSession,
+    ProxyCapture,
+    FixVerify,
+    AnomalyQueue,
+    EvalHarness,
+    ValidationResult,
+    ActionReviewer,
+    SandboxArtifacts,
+    ExecutionEnvironment
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -160,7 +171,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "login_preflight",
             "skeptic_promote",
             "entry_fanout",
-            "codefix_open_pr"
+            "codefix_open_pr",
+            "exploit_oracle",
+            "proxy_ingest",
+            "proxy_start",
+            "login_session_put",
+            "login_session_assert",
+            "fix_verify",
+            "anomaly_record",
+            "anomaly_hop",
+            "anomaly_dismiss",
+            "anomaly_assert_clear",
+            "eval_score",
+            "validation_submit",
+            "action_review",
+            "sandbox_pull"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -475,6 +500,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "skeptic_promote" -> do_skeptic_promote(input)
       "entry_fanout" -> do_entry_fanout(input)
       "codefix_open_pr" -> do_codefix_open_pr(session_id, input)
+      "exploit_oracle" -> do_exploit_oracle(input)
+      "proxy_ingest" -> do_proxy_ingest(session_id, input)
+      "proxy_start" -> do_proxy_start(session_id, input)
+      "login_session_put" -> do_login_session_put(session_id, input)
+      "login_session_assert" -> do_login_session_assert(session_id, input)
+      "fix_verify" -> do_fix_verify(input)
+      "anomaly_record" -> do_anomaly_record(session_id, input)
+      "anomaly_hop" -> do_anomaly_hop(session_id, input)
+      "anomaly_dismiss" -> do_anomaly_dismiss(session_id, input)
+      "anomaly_assert_clear" -> do_anomaly_assert_clear(session_id)
+      "eval_score" -> do_eval_score(input)
+      "validation_submit" -> do_validation_submit(ctx, input)
+      "action_review" -> do_action_review(input)
+      "sandbox_pull" -> do_sandbox_pull(input)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -643,11 +682,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
         _ -> :per_class
       end
 
+    root = Map.get(wb, "root") || Map.get(input, "root")
+
+    reader =
+      if is_binary(root) and File.dir?(root) do
+        SymbolResolver.reader(root)
+      else
+        fn _ -> :not_found end
+      end
+
     opts = [
       entry: Map.get(wb, "entry", "<entry>"),
       content: content,
       vuln_classes: classes,
-      mode: mode
+      mode: mode,
+      reader: reader
     ]
 
     case CallChainAnalyzer.analyze(opts) do
@@ -1298,6 +1347,206 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp do_exploit_oracle(input) do
+    receipt = Map.get(input, "finding") || Map.get(input, "note") || input
+
+    {verdict, reasons} = ExploitOracle.judge(receipt)
+    {:ok, "oracle=#{verdict} reasons=#{Enum.join(reasons, "; ")}"}
+  end
+
+  defp do_proxy_ingest(session_id, input) do
+    cond do
+      is_binary(Map.get(input, "path")) and input["path"] != "" ->
+        format_proxy(ProxyCapture.ingest_dump(session_id, input["path"]))
+
+      is_binary(Map.get(input, "payload")) ->
+        format_proxy(ProxyCapture.ingest_har_blob(session_id, input["payload"]))
+
+      true ->
+        {:error, "proxy_ingest requires path or payload"}
+    end
+  end
+
+  defp format_proxy({:ok, rec}), do: {:ok, "proxy ingested count=#{rec.count} path=#{rec.path || "-"}"}
+  defp format_proxy({:error, reason}), do: {:error, reason}
+
+  defp do_proxy_start(session_id, _input) do
+    case ProxyCapture.start(session_id) do
+      {:ok, rec} -> {:ok, "proxy #{rec.status} port=#{rec.port || "-"}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_login_session_put(session_id, input) do
+    attrs = Map.get(input, "note") || input
+
+    case LoginSession.put(session_id, attrs) do
+      {:ok, _} -> {:ok, "login session stored"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_login_session_assert(session_id, input) do
+    class = input |> Map.get("vuln_class") |> safe_atom()
+
+    case LoginSession.assert_ready(session_id, class) do
+      :ok -> {:ok, "login session ready for #{class}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_fix_verify(input) do
+    finding = Map.get(input, "finding") || %{}
+    apply? = Map.get(input, "apply") in [true, "true"]
+    fix = Map.get(input, "fix")
+
+    opts = [apply: apply?]
+    opts = if is_map(fix), do: Keyword.put(opts, :fix, stringify_keys_to_atoms(fix)), else: opts
+
+    case FixVerify.verify(finding, opts) do
+      {:ok, rec} ->
+        {:ok,
+         "fix_verify verified=#{rec.verified_fixed?} before=#{rec.before} after=#{rec.after} #{rec.reason}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_anomaly_record(session_id, input) do
+    attrs = Map.get(input, "note") || input
+
+    case AnomalyQueue.record(session_id, attrs) do
+      {:ok, rec} -> {:ok, "anomaly #{rec.id} kind=#{rec.kind} hops=0 open"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_anomaly_hop(session_id, input) do
+    id = Map.get(input, "req_id") || Map.get(input, "key")
+    note = Map.get(input, "payload") || "hop"
+
+    if is_binary(id) and id != "" do
+      case AnomalyQueue.hop(session_id, id, to_string(note)) do
+        {:ok, rec} -> {:ok, "anomaly #{rec.id} hops=#{rec.hops}"}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, "anomaly_hop requires key or req_id"}
+    end
+  end
+
+  defp do_anomaly_dismiss(session_id, input) do
+    id = Map.get(input, "req_id") || Map.get(input, "key")
+
+    if is_binary(id) and id != "" do
+      case AnomalyQueue.dismiss(session_id, id) do
+        :ok -> {:ok, "anomaly #{id} dismissed"}
+        {:ok, _} -> {:ok, "anomaly #{id} dismissed"}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, "anomaly_dismiss requires key or req_id"}
+    end
+  end
+
+  defp do_anomaly_assert_clear(session_id) do
+    case AnomalyQueue.assert_clear(session_id) do
+      :ok -> {:ok, "no open anomalies"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_eval_score(input) do
+    catalog = Map.get(input, "path") || Map.get(input, "root")
+    findings = Map.get(input, "finding")
+
+    findings_list =
+      cond do
+        is_list(findings) -> findings
+        is_map(findings) -> [findings]
+        true -> []
+      end
+
+    with {:ok, cat} <- EvalHarness.load_catalog(catalog) do
+      rec = EvalHarness.score(cat, findings_list)
+
+      {:ok,
+       "eval precision=#{rec.precision} recall=#{rec.recall} f0.5=#{rec.f0_5} tp=#{rec.true_positives} fp=#{rec.false_positives} fn=#{rec.false_negatives}"}
+    end
+  end
+
+  defp do_validation_submit(ctx, input) do
+    payload = Map.get(input, "finding") || Map.get(input, "note") || input
+    validator_id = ctx.session_id || Map.get(input, "key")
+
+    payload =
+      if is_map(payload) and is_binary(validator_id) do
+        Map.put_new(payload, "validator_id", validator_id)
+      else
+        payload
+      end
+
+    case ValidationResult.parse(payload) do
+      {:ok, result} ->
+        finding = ValidationResult.to_finding(result)
+
+        case FindingSkeptic.promote(finding) do
+          {:ok, promoted} ->
+            {:ok, "validation accepted verdict=#{result.verdict} status=#{promoted.status}"}
+
+          {:error, reasons} ->
+            {:ok,
+             "validation recorded verdict=#{result.verdict}; not report-confirmed: " <>
+               Enum.join(reasons, "; ")}
+        end
+
+      {:error, reasons} ->
+        {:error, "validation_submit invalid: " <> Enum.join(reasons, "; ")}
+    end
+  end
+
+  defp do_action_review(input) do
+    req = Map.get(input, "finding") || Map.get(input, "roe_action") || input
+
+    case ActionReviewer.review(req) do
+      {:ok, rec} ->
+        {:ok, "action_review verdict=#{rec.verdict} source=#{rec.source} #{rec.reason}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_sandbox_pull(input) do
+    root = Map.get(input, "root") || File.cwd!()
+    dest = Map.get(input, "path") || Path.join(File.cwd!(), "sandbox-artifacts")
+    files = sandbox_pull_paths(input)
+
+    case SandboxArtifacts.pull(root, files, dest: dest) do
+      {:ok, rec} ->
+        {:ok,
+         "sandbox_pull copied=#{length(rec.copied)} blocked=#{length(rec.blocked)}\n" <>
+           inspect(rec)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp sandbox_pull_paths(input) do
+    cond do
+      is_list(Map.get(input, "changed_files")) -> input["changed_files"]
+      is_binary(Map.get(input, "payload")) ->
+        case Jason.decode(input["payload"]) do
+          {:ok, list} when is_list(list) -> Enum.map(list, &to_string/1)
+          _ -> String.split(input["payload"], "\n", trim: true)
+        end
+      is_binary(Map.get(input, "needle")) -> [input["needle"]]
+      true -> []
     end
   end
 

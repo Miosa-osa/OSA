@@ -36,6 +36,7 @@ pub struct ContextStats {
     pub system_tokens: u64,
     pub conversation_tokens: u64,
     pub tool_result_tokens: u64,
+    pub tool_schema_tokens: u64,
     pub max_tokens: u64,
     pub used_tokens: u64,
 }
@@ -132,11 +133,12 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
     let cats = [
         Category { label: "Conversation", tokens: stats.conversation_tokens, color: c.secondary },
         Category { label: "System prompt", tokens: stats.system_tokens, color: c.primary },
+        Category { label: "Tool schemas", tokens: stats.tool_schema_tokens, color: c.success },
         Category { label: "Tool results", tokens: stats.tool_result_tokens, color: c.warning },
     ];
 
-    // title-gap(1) bar(1) gap(1) 3 rows(3) sep(1) TOTAL(1) gap(1) footer(1) = 10.
-    let content_h: u16 = 11;
+    // title-gap(1) bar(1) gap(1) 4 rows(4) sep(1) TOTAL(1) gap(1) footer(1) = 11.
+    let content_h: u16 = 12;
     let w = DIALOG_W.min(area.width);
     let h = (content_h + 2).min(area.height);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -268,8 +270,9 @@ mod context_breakdown_tests {
             system_tokens: 8_400,
             conversation_tokens: 61_200,
             tool_result_tokens: 24_600,
+            tool_schema_tokens: 13_500,
             max_tokens: 200_000,
-            used_tokens: 94_200,
+            used_tokens: 107_700,
         }
     }
 
@@ -278,11 +281,11 @@ mod context_breakdown_tests {
         let cases = [
             stats(),
             // max == 0 must not divide-by-zero anywhere.
-            ContextStats { system_tokens: 10, conversation_tokens: 20, tool_result_tokens: 5, max_tokens: 0, used_tokens: 35 },
+            ContextStats { system_tokens: 10, conversation_tokens: 20, tool_result_tokens: 5, tool_schema_tokens: 0, max_tokens: 0, used_tokens: 35 },
             // Over-full window (used > max): percentages clamp, bar stays in-track.
-            ContextStats { system_tokens: 120_000, conversation_tokens: 120_000, tool_result_tokens: 90_000, max_tokens: 200_000, used_tokens: 330_000 },
+            ContextStats { system_tokens: 120_000, conversation_tokens: 120_000, tool_result_tokens: 90_000, tool_schema_tokens: 13_500, max_tokens: 200_000, used_tokens: 343_500 },
             // Empty session.
-            ContextStats { system_tokens: 0, conversation_tokens: 0, tool_result_tokens: 0, max_tokens: 200_000, used_tokens: 0 },
+            ContextStats { system_tokens: 0, conversation_tokens: 0, tool_result_tokens: 0, tool_schema_tokens: 0, max_tokens: 200_000, used_tokens: 0 },
         ];
         for s in &cases {
             for (w, h) in [(1u16, 1u16), (10, 4), (40, 12), (70, 20), (200, 60)] {

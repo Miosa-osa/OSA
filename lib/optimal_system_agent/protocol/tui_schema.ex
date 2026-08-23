@@ -258,6 +258,7 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
           f("system_tokens", :u64, default: true),
           f("conversation_tokens", :u64, default: true),
           f("tool_result_tokens", :u64, default: true),
+          f("tool_schema_tokens", :u64, default: true),
           f("max_tokens", :u64, default: true),
           f("used_tokens", :u64, default: true)
         ]

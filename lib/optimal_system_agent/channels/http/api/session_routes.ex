@@ -402,30 +402,54 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     try do
       session_id = conn.params["id"]
 
-      case SessionManager.get_state(session_id) do
-        {:ok, state} ->
-          # Ceiling is the model's REAL usable window (provider-aware), not a
-          # hardcoded 128k config default, so the breakdown agrees with the
-          # status-bar meter. When the window is genuinely unknown this is 0 and
-          # the TUI renders tokens-used with no percentage (see context_ceiling/1).
-          max_tokens = context_ceiling(state)
-          total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
-          static_tokens = OptimalSystemAgent.Soul.static_token_count()
-          conversation_tokens = max(total_tokens - static_tokens, 0)
+      case SessionManager.context_budget(session_id) do
+        {:ok, budget} ->
+          max_tokens = budget[:max_tokens] || 0
+          used = budget[:occupied_tokens] || 0
 
           body =
             Jason.encode!(%{
-              system_tokens: static_tokens,
-              conversation_tokens: conversation_tokens,
-              tool_result_tokens: 0,
+              system_tokens: budget[:static_base_tokens] || 0,
+              conversation_tokens: budget[:conversation_tokens] || 0,
+              tool_result_tokens: budget[:tool_result_tokens] || 0,
+              tool_schema_tokens: budget[:tool_schema_tokens] || 0,
               max_tokens: max_tokens,
-              used_tokens: total_tokens,
-              # Explicit signal for clients that would otherwise read the 0 as
-              # "empty window" rather than "window not known".
-              context_window_known: max_tokens > 0
+              used_tokens: used,
+              context_window_known: is_integer(max_tokens) and max_tokens > 0
             })
 
           conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+        {:error, :not_found} ->
+          case SessionManager.get_state(session_id) do
+            {:ok, state} ->
+              max_tokens = context_ceiling(state)
+              total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+              static_tokens = OptimalSystemAgent.Soul.static_token_count()
+              conversation_tokens = max(total_tokens - static_tokens, 0)
+              tool_schema_tokens = OptimalSystemAgent.Agent.Context.tool_schema_token_count()
+
+              body =
+                Jason.encode!(%{
+                  system_tokens: static_tokens,
+                  conversation_tokens: conversation_tokens,
+                  tool_result_tokens: 0,
+                  tool_schema_tokens: tool_schema_tokens,
+                  max_tokens: max_tokens,
+                  used_tokens: total_tokens,
+                  context_window_known: max_tokens > 0
+                })
+
+              conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+            _ ->
+              json_error(
+                conn,
+                404,
+                "session_not_found",
+                "Session #{session_id} not found or not active"
+              )
+          end
 
         _ ->
           json_error(
@@ -1046,13 +1070,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         case SessionManager.swap_provider(session_id, provider, model) do
           {:ok, info} ->
             resp =
-              Jason.encode!(%{
-                status: "ok",
-                session_id: session_id,
-                provider: to_string(info.provider),
-                model: info.model,
-                context_window: info.context_window
-              })
+              Jason.encode!(
+                %{
+                  status: "ok",
+                  session_id: session_id,
+                  provider: to_string(info.provider),
+                  model: info.model,
+                  context_window: info.context_window
+                }
+                |> put_present("old_provider", info[:old_provider] && to_string(info.old_provider))
+                |> put_present("old_model", info[:old_model])
+                |> put_present("old_context_window", info[:old_context_window])
+                |> put_present("tokens_before", info[:tokens_before])
+                |> put_present("tokens_after", info[:tokens_after])
+                |> put_present("compacted", info[:compacted])
+                |> put_present("compaction_reason", info[:compaction_reason])
+                |> put_present("warning", info[:warning])
+              )
 
             conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
@@ -1095,6 +1129,96 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
           {:error, reason} ->
             json_error(conn, 500, "swap_failed", inspect(reason))
+        end
+    end
+  end
+
+  # ── GET /sessions/:id/steps ────────────────────────────────────────────
+  #
+  # List filesystem step snapshots (hidden refs). Transcript is not involved.
+
+  get "/:id/steps" do
+    session_id = conn.params["id"]
+
+    cwd =
+      OptimalSystemAgent.Workspace.Cwd.session_dir(session_id) ||
+        OptimalSystemAgent.Workspace.Cwd.get()
+
+    steps =
+      session_id
+      |> OptimalSystemAgent.Agent.StepSnapshot.list(cwd: cwd)
+      |> Enum.map(fn step ->
+        %{
+          n: step.n,
+          ref: step.ref,
+          commit: step.commit
+        }
+      end)
+
+    json(conn, 200, %{
+      session_id: session_id,
+      steps: steps,
+      message:
+        if steps == [] do
+          "No filesystem step snapshots in this session."
+        else
+          nil
+        end
+    })
+  end
+
+  # ── POST /sessions/:id/revert ──────────────────────────────────────────
+  #
+  # Restore files N mutating-tool steps ago. Transcript stays.
+
+  post "/:id/revert" do
+    session_id = conn.params["id"]
+    body = conn.body_params || %{}
+    steps = parse_positive_int(body["steps"] || body["n"] || 1)
+
+    cwd =
+      OptimalSystemAgent.Workspace.Cwd.session_dir(session_id) ||
+        OptimalSystemAgent.Workspace.Cwd.get()
+
+    case OptimalSystemAgent.Agent.StepSnapshot.revert(session_id, steps, cwd: cwd) do
+      {:ok, result} ->
+        json(conn, 200, %{
+          status: "ok",
+          session_id: session_id,
+          steps: steps,
+          restored_n: result.restored_n,
+          checkpoint_id: result.commit,
+          message:
+            "Reverted #{steps} file step(s) to step #{result.restored_n}. Transcript kept."
+        })
+
+      {:error, _} ->
+        case OptimalSystemAgent.Agent.StepRevert.revert(session_id, steps) do
+          {:ok, result} ->
+            json(conn, 200, %{
+              status: "ok",
+              session_id: session_id,
+              steps: result.steps,
+              checkpoint_id: result.checkpoint_id,
+              tool: result.tool,
+              files: result.files,
+              message:
+                "Reverted #{result.steps} file step(s) to checkpoint #{result.checkpoint_id}. Transcript kept."
+            })
+
+          {:error, :not_enough_checkpoints} ->
+            json_error(
+              conn,
+              400,
+              "not_enough_checkpoints",
+              "Not enough file checkpoints to revert #{steps} step(s)"
+            )
+
+          {:error, :invalid_steps} ->
+            json_error(conn, 400, "invalid_steps", "steps must be a positive integer")
+
+          {:error, reason} ->
+            json_error(conn, 500, "revert_failed", inspect(reason))
         end
     end
   end
@@ -1521,4 +1645,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       &(Atom.to_string(&1) == name)
     )
   end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  defp parse_positive_int(n) when is_integer(n) and n >= 1, do: n
+  defp parse_positive_int(n) when is_binary(n) do
+    case Integer.parse(n) do
+      {i, ""} when i >= 1 -> i
+      _ -> 1
+    end
+  end
+  defp parse_positive_int(_), do: 1
 end

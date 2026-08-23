@@ -606,6 +606,46 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/sessions/:id/steps — list filesystem step snapshots.
+    pub async fn list_step_snapshots(&self, session_id: &str) -> Result<String> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/steps", session_id))
+            .await?;
+        let v: serde_json::Value = resp.json().await?;
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            return Ok(msg.to_string());
+        }
+        let steps = v.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        if steps.is_empty() {
+            Ok("No filesystem step snapshots in this session.".into())
+        } else {
+            let lines: Vec<String> = steps
+                .iter()
+                .filter_map(|s| {
+                    let n = s.get("n")?.as_u64()?;
+                    let reference = s.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                    Some(format!("{n}  {reference}"))
+                })
+                .collect();
+            Ok(format!("Filesystem step snapshots\n{}", lines.join("\n")))
+        }
+    }
+
+    /// POST /api/v1/sessions/:id/revert — restore files N mutating-tool
+    /// steps ago. Transcript stays.
+    pub async fn revert_steps(&self, session_id: &str, steps: u32) -> Result<String> {
+        let body = serde_json::json!({ "steps": steps });
+        let resp = self
+            .post(&format!("/api/v1/sessions/{}/revert", session_id), &body)
+            .await?;
+        let v: serde_json::Value = resp.json().await?;
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            Ok(msg.to_string())
+        } else {
+            Ok(format!("Reverted {steps} file step(s). Transcript kept."))
+        }
+    }
+
     // -- Classify --
 
     /// POST /api/v1/classify

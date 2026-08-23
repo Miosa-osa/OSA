@@ -31,7 +31,7 @@ pub enum MessageType {
 }
 
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
-const HELP_LINE_COUNT: u16 = 52;
+const HELP_LINE_COUNT: u16 = 53;
 
 /// Sentinel [`ToolCallData::name`] marking a turn-separator carrier.
 ///
@@ -997,6 +997,7 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  /fg", "Bring a backgrounded turn back to the foreground"),
         ("  /agents", "Background-agent dashboard (running + finished)"),
         ("  /rewind", "Restore code/conversation from a checkpoint"),
+        ("  /revert N", "Restore files N mutating-tool steps ago"),
         ("  /theme <name>", "Switch theme"),
         ("  /verbose", "Toggle tool detail"),
         ("  /yolo", "Toggle auto-approve (dangerous)"),
