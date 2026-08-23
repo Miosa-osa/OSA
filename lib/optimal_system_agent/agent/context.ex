@@ -1841,16 +1841,17 @@ defmodule OptimalSystemAgent.Agent.Context do
     git_info = cached_git_info()
     date = Date.utc_today() |> Date.to_iso8601()
 
-    # Session-accurate provider/model — NOT the global default. On a
-    # provider-switched session (via /model or state.provider) the global
-    # config default is wrong, which would tell the agent it is running on a
-    # model it is not. Prefer the session's own provider/model, falling back
-    # to the config default only when the session has not pinned them.
-    provider =
-      Map.get(state, :provider) ||
-        Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-
-    model = Map.get(state, :model) || get_active_model(provider)
+    # Resolve identity through the ONE canonical resolver `Runtime.Identity`,
+    # the same one `runtime_block/1` and the TUI status bar use. This block
+    # used to resolve model/provider on its own (`state.model ||
+    # get_active_model/1`), which fell back to the provider's CONFIG DEFAULT
+    # when the session had not pinned `state.model` — so on an OpenRouter
+    # session actually running `stealth/ox-alpha` this line announced
+    # `anthropic/claude-opus-5` (the openrouter default), directly
+    # contradicting the runtime block and the footer. Two identity lines that
+    # disagree let the model pick the wrong one and confidently misreport what
+    # it is. One resolver, one answer.
+    %{model: model, provider: provider} = OptimalSystemAgent.Runtime.Identity.resolve(state)
 
     {os_family, os_name} = :os.type()
     platform = "#{os_family}/#{os_name}"
