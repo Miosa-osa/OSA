@@ -42,7 +42,7 @@ defmodule OptimalSystemAgent.Security.ExecutionEnvironment do
   @doc """
   True only for `:host`.
 
-  Docker localhost is the container (same as HackerAI). Cloud localhost is
+  Docker localhost is the container. Cloud localhost is
   the sandbox. Ask has no terminal.
   """
   @spec can_reach_localhost?(kind()) :: boolean()
@@ -122,7 +122,7 @@ defmodule OptimalSystemAgent.Security.ExecutionEnvironment do
   def prompt(other), do: prompt(kind(other))
 
   @doc """
-  HackerAI `local_machine_access` rule.
+  The local-machine-access rule.
 
   Switching sandbox does not auto-connect to the laptop. For local or
   dev-server targets the operator must run with the host backend or

@@ -614,7 +614,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
       assert body =~ "ask_user"
     end
 
-    test "enum includes HackerAI steals" do
+    test "enum includes the operator-mechanics actions" do
       enum = get_in(SecurityIntel.parameters(), ["properties", "action", "enum"])
       for a <- ~w(validation_submit action_review sandbox_pull) do
         assert a in enum

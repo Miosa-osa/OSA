@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Security.ProxyCapture do
   Record a HAR dump from an operator-run proxy. Do not ship Caido or a MITM.
 
   Capture path:
-  1. Operator (or sandbox) runs mitmproxy/caido and dumps HAR.
+  1. Operator (or sandbox) runs an intercepting proxy and dumps HAR.
   2. This module records the dump path and ingests into HttpReplay when
      `HttpReplay.ingest_har/2` is available.
   3. Optional start/stop talks to `mitmdump` only through an injected

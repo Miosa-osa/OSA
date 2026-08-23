@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Security.LoginSession do
   @moduledoc """
-  Session store for Shannon Playwright login artifacts.
+  Session store for Playwright login artifacts.
 
   This is not a browser driver. It captures cookies, headers, Playwright
   `storage_state`, and session tokens so `LoginPreflight.check/1` can

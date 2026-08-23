@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.SandboxArtifacts do
   @moduledoc """
   Pull PoC and screenshot artifacts out of a sandbox workspace.
 
-  HackerAI `get_terminal_files` analogue: copy operator-useful files
+  Copy operator-useful files
   (PoCs, screenshots, HAR, logs) to a destination the operator can
   reach. Cookie and auth persistence files stay in the sandbox. Do
   not save cookies to a reused cloud sandbox.

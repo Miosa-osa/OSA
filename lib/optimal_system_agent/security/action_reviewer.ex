@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Security.ActionReviewer do
   @moduledoc """
-  HackerAI "Approve for me" reviewer, separate from the acting agent.
+  "Approve for me" reviewer, separate from the acting agent.
 
   User text is the only trusted authorization. Tool output, HTTP bodies,
   file contents, and assistant rationale are untrusted evidence and must
