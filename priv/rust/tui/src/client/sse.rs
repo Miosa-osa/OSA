@@ -11,6 +11,14 @@ use crate::event::backend::BackendEvent;
 use crate::event::Event;
 
 const MAX_RECONNECTS: u32 = 10;
+
+// Cold-start warm-up: until the stream has EVER attached, the backend is
+// presumed to be still booting, so poll fast and attach the instant it answers
+// instead of sleeping out the mid-session exponential backoff (which starts at
+// 2s and cascaded a ~2.3s boot into a ~6s wait). Time-bounded rather than
+// attempt-bounded so a slow boot still succeeds: 250ms x 120 = a 30s window.
+const WARMUP_POLL: Duration = Duration::from_millis(250);
+const WARMUP_MAX_POLLS: u32 = 120;
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MB
 
 /// How long an attached stream may go completely silent before we treat it as
@@ -97,6 +105,10 @@ impl SseClient {
 
     async fn run_with_reconnect(&self) {
         let mut attempt: u32 = 0;
+        // Flips true the first time a stream actually attaches. Until then we
+        // are in cold-start warm-up (backend still booting) and poll fast.
+        let mut ever_connected = false;
+        let mut warmup_polls: u32 = 0;
 
         loop {
             if self.cancel.is_cancelled() {
@@ -139,6 +151,47 @@ impl SseClient {
                     return;
                 }
                 Err(SseError::Disconnected { err: e, connected }) => {
+                    if connected {
+                        ever_connected = true;
+                    }
+
+                    // Cold-start warm-up path: the stream has never attached, so
+                    // the backend is still coming up. Poll fast (fixed 250ms) and
+                    // attach the moment it answers, instead of paying the
+                    // mid-session exponential backoff for a process we KNOW is
+                    // booting. Bounded by time (WARMUP_MAX_POLLS) so a backend
+                    // that never comes up still surfaces an honest error.
+                    if !ever_connected {
+                        warmup_polls += 1;
+
+                        if warmup_polls > WARMUP_MAX_POLLS {
+                            error!(
+                                "SSE never attached after {} warm-up polls: {:?}",
+                                WARMUP_MAX_POLLS, e
+                            );
+                            let _ = self.send(BackendEvent::SseDisconnected {
+                                error: Some("exhausted".to_string()),
+                            });
+                            return;
+                        }
+
+                        let _ = self.send(BackendEvent::SseReconnecting {
+                            attempt: warmup_polls,
+                        });
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(WARMUP_POLL) => {}
+                            _ = self.cancel.cancelled() => {
+                                let _ = self.send(BackendEvent::SseDisconnected {
+                                    error: Some("cancelled".to_string()),
+                                });
+                                return;
+                            }
+                        }
+
+                        continue;
+                    }
+
                     // D5: a drop that occurred AFTER the stream attached resets
                     // the budget (a recovered blip must not accumulate toward
                     // exhaustion); only genuine back-to-back connect FAILURES
