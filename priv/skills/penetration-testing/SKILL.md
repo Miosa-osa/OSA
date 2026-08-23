@@ -192,6 +192,17 @@ duration, concurrency. Deduplicate findings across tools.
 
 4. **CVE mapping**: `searchsploit <product> <version>` or `cvemap`
 
+5. **Whitebox 0-day pass (when you have the source - do this, it is the strongest position):**
+   - Start a `:whitebox` playbook (`security_intel` `playbook_start` playbook_id=`whitebox`)
+   - Discover entry points (routes, request parsers, deserializers)
+   - `whitebox_analyze`: LLM-guided source→sink call-chain tracing (Vulnhuntr-style).
+     A finding is only real when the judge names the exact source, exact sink, and
+     why sanitization that is actually in the code does not neutralize it
+   - `variant_scan`: seed from a known bug/CVE/patch and hunt similar unpatched sites
+   - Every finding gets a CVSS v3.1 vector, a CWE, and evidence before it is report-grade
+     (`cvss_score`, `report_gate`)
+   - This pass is read-only over source. It never needs a live target.
+
 ### Phase 4: Exploitation
 
 **Delegate to `exploit-developer`** for custom exploit writing, or run inline:
@@ -300,12 +311,41 @@ trivy, zaproxy, smbclient, enum4linux, impacket, bloodhound, hashcat, john,
 binwalk, chromium, agent-browser, SecLists, Python (pwntools, paramiko,
 requests, pyjwt, shodan).
 
+## Rules of Engagement (hard gate for live actions)
+
+Load a signed-in-session RoE before any packet to a target:
+
+- `roe_load` with allowed CIDRs/hosts/domains, forbidden action classes, optional time window
+- `roe_check` every `shell_execute` / `pty` against the target
+- Blast radius: read-only → intrusive → credential-access → persistence → destructive
+- Default-forbidden: `:destructive`, `:persistence`
+- Out of scope, forbidden class, or outside the window → **block**, do not "just this once"
+- Whitebox/CI/variant analysis do not need RoE (source you already have)
+
+## CTF mode
+
+Playbook `:ctf`. Goal is recon → understand → flag, then stop. Stay on the
+challenge host. Record the flag as an artifact note. No persistence, no extra
+pivoting.
+
+## CI / continuous-scan mode
+
+Playbook `:ci_scan`. Headless, no live network:
+
+1. Discover entry files in the checkout
+2. Whitebox + static sink scan
+3. `report_gate` strips anything missing CVSS + CWE + evidence
+4. Fail the job on eligible critical/high; publish SARIF
+
+`osa` can run this via `security_intel` action `ci_scan`.
+
 ## Safety Boundaries
 
-- Stay within declared scope — never expand to unrelated third-party assets
+- Stay within declared scope - never expand to unrelated third-party assets
 - Request confirmation before: destructive commands, data exfiltration,
   persistence installation, anything that could disrupt service
 - If running on local-host (no Docker), request confirmation before any
   command that affects the host OS
 - Clean up after engagement: remove web shells, close connections, delete PoCs
 - Do NOT scan targets you don't have permission to test
+- Do NOT install implants, C2, or persistence. Assessment, not occupation.

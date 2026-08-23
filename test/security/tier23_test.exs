@@ -142,11 +142,17 @@ defmodule OptimalSystemAgent.Security.PlaybookTest do
   end
 
   describe "definitions" do
-    test "has three built-in playbooks" do
+    test "includes core and 0-day playbooks" do
       ids = Playbook.available()
       assert :web_app in ids
       assert :network in ids
       assert :full_engagement in ids
+      assert :whitebox in ids
+      assert :ctf in ids
+      assert :ci_scan in ids
+      assert :cloud_engagement in ids
+      assert :kubernetes in ids
+      assert :active_directory in ids
     end
 
     test "web_app has 6 phases" do
@@ -157,6 +163,18 @@ defmodule OptimalSystemAgent.Security.PlaybookTest do
     test "full_engagement has 8 phases" do
       {:ok, pb} = Playbook.get(:full_engagement)
       assert Playbook.phase_count(pb) == 8
+    end
+
+    test "whitebox, ctf, and ci_scan playbooks are well-formed" do
+      {:ok, wb} = Playbook.get(:whitebox)
+      {:ok, ctf} = Playbook.get(:ctf)
+      {:ok, ci} = Playbook.get(:ci_scan)
+      assert Playbook.phase_count(wb) == 5
+      assert Playbook.phase_count(ctf) == 4
+      assert Playbook.phase_count(ci) == 4
+      {:ok, phase} = Playbook.phase_at(wb, 0)
+      assert phase.entry_criteria != []
+      assert phase.guidance =~ "Whitebox"
     end
 
     test "unknown playbook returns error" do

@@ -49,7 +49,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     Playbook,
     SarifReport,
     CodeFix,
-    ChainSummary
+    ChainSummary,
+    Cvss,
+    CweCatalog,
+    CallChainAnalyzer,
+    RoeGuard
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -100,7 +104,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "codefix_list",
             "codefix_report",
             "summary_build",
-            "summary_load"
+            "summary_load",
+            "whitebox_scan",
+            "cvss_score",
+            "cwe_lookup",
+            "roe_check"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -191,7 +199,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
         },
         "playbook_id" => %{
           "type" => "string",
-          "enum" => ["web_app", "network", "full_engagement"],
+          "enum" => [
+            "web_app",
+            "network",
+            "full_engagement",
+            "whitebox",
+            "ctf",
+            "ci_scan",
+            "cloud_engagement",
+            "kubernetes",
+            "active_directory"
+          ],
           "description" => "playbook_start: which playbook to start"
         },
         "phase_status" => %{
@@ -209,6 +227,53 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "fix_after" => %{"type" => "string"},
             "language" => %{"type" => "string"},
             "explanation" => %{"type" => "string"}
+          }
+        },
+        "whitebox" => %{
+          "type" => "object",
+          "description" =>
+            "whitebox_scan: source-to-sink 0-day analysis of a source file. Provide the entry file's content; the analyzer traces tainted input to dangerous sinks and reports exploitable findings with CVSS.",
+          "properties" => %{
+            "entry" => %{"type" => "string", "description" => "path label of the entry file"},
+            "content" => %{
+              "type" => "string",
+              "description" => "source of the entry file (required)"
+            },
+            "vuln_classes" => %{
+              "type" => "array",
+              "items" => %{"type" => "string"},
+              "description" => "subset of classes to hunt (default: all)"
+            }
+          }
+        },
+        "cvss_vector" => %{
+          "type" => "string",
+          "description" =>
+            "cvss_score: a CVSS v3.1 base vector to score, e.g. CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        },
+        "vuln_class" => %{
+          "type" => "string",
+          "description" =>
+            "cwe_lookup: a vuln class (sqli, idor, ssrf, xss, ...) to map to CWE/OWASP/typical CVSS"
+        },
+        "roe" => %{
+          "type" => "object",
+          "description" =>
+            "roe_check: the rules-of-engagement contract to check an action against",
+          "properties" => %{
+            "targets" => %{"type" => "array", "items" => %{"type" => "string"}},
+            "forbidden" => %{"type" => "array", "items" => %{"type" => "string"}},
+            "max_blast" => %{"type" => "string"}
+          }
+        },
+        "roe_action" => %{
+          "type" => "object",
+          "description" =>
+            "roe_check: the proposed action — either a shell `command` (auto-classified) or an explicit `blast` class, plus a `target`",
+          "properties" => %{
+            "command" => %{"type" => "string"},
+            "blast" => %{"type" => "string"},
+            "target" => %{"type" => "string"}
           }
         }
       },
@@ -258,6 +323,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "codefix_report" -> do_codefix_report(session_id)
       "summary_build" -> do_summary_build(session_id)
       "summary_load" -> do_summary_load(session_id)
+      "whitebox_scan" -> do_whitebox_scan(session_id, input)
+      "cvss_score" -> do_cvss_score(input)
+      "cwe_lookup" -> do_cwe_lookup(input)
+      "roe_check" -> do_roe_check(input)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -406,6 +475,173 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   # ── TDA ─────────────────────────────────────────────────────────────────
 
+  defp do_whitebox_scan(session_id, input) do
+    wb = Map.get(input, "whitebox", %{})
+    content = Map.get(wb, "content")
+
+    classes =
+      case Map.get(wb, "vuln_classes") do
+        list when is_list(list) and list != [] ->
+          Enum.map(list, &safe_atom/1) |> Enum.filter(&(&1 in CallChainAnalyzer.vuln_classes()))
+
+        _ ->
+          CallChainAnalyzer.vuln_classes()
+      end
+
+    opts = [
+      entry: Map.get(wb, "entry", "<entry>"),
+      content: content,
+      vuln_classes: classes
+    ]
+
+    case CallChainAnalyzer.analyze(opts) do
+      {:ok, []} ->
+        {:ok,
+         "Whitebox scan complete: no exploitable source-to-sink chains found in the provided file."}
+
+      {:ok, findings} ->
+        # Record each exploitable finding as a vulnerability note so it flows
+        # into the graph, dedup, and SARIF report like any other finding.
+        Enum.each(findings, fn f -> record_whitebox_finding(session_id, f) end)
+
+        body =
+          findings
+          |> Enum.map(&format_whitebox_finding/1)
+          |> Enum.join("\n\n")
+
+        {:ok, "Whitebox scan found #{length(findings)} exploitable chain(s):\n\n" <> body}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp record_whitebox_finding(session_id, f) do
+    # `:vulnerability` notes require a non-empty target and at least one of
+    # cve/weaknesses. Guarantee both: fall back to the CWE id, then to the
+    # class label, so a finding always records even when the judge left the
+    # sink blank or the class has no catalogued CWE.
+    weaknesses =
+      [CweCatalog.cwe(f.vuln_class), to_string(f.vuln_class)]
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.uniq()
+
+    target = if f.sink in [nil, ""], do: to_string(f.vuln_class), else: f.sink
+
+    # Stable key from class+source+sink so re-scanning the same chain replaces
+    # rather than duplicates the note (cheap dedup for repeated whitebox runs).
+    digest =
+      :crypto.hash(:sha256, "#{f.vuln_class}|#{f.source}|#{f.sink}")
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 12)
+
+    key = "whitebox:#{f.vuln_class}:#{digest}"
+
+    with {:ok, _} <- NotesStore.ensure_started(session_id) do
+      NotesStore.put(session_id, key, %{
+        category: :vulnerability,
+        content: "#{f.vuln_class}: #{f.reasoning}",
+        confidence: f.confidence,
+        status: :potential,
+        target: target,
+        source: f.source,
+        weaknesses: weaknesses,
+        metadata: %{
+          vuln_class: to_string(f.vuln_class),
+          call_chain: f.call_chain,
+          poc: f.poc,
+          cvss_vector: f.cvss_vector,
+          cvss_score: f.cvss_score,
+          severity: f.severity && to_string(f.severity)
+        }
+      })
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp format_whitebox_finding(f) do
+    score = if f.cvss_score, do: " (CVSS #{f.cvss_score} #{f.severity})", else: ""
+
+    """
+    [#{f.vuln_class}]#{score} confidence=#{f.confidence}
+      source: #{f.source}
+      sink:   #{f.sink}
+      chain:  #{Enum.join(f.call_chain, " -> ")}
+      why:    #{f.reasoning}
+      poc:    #{f.poc}
+    """
+  end
+
+  defp do_cvss_score(input) do
+    case Cvss.score(Map.get(input, "cvss_vector", "")) do
+      {:ok, %{base_score: score, severity: sev, vector: v}} ->
+        {:ok, "CVSS #{score} (#{sev})\nvector: #{v}"}
+
+      {:error, reason} ->
+        {:error, "Invalid CVSS vector: #{reason}"}
+    end
+  end
+
+  defp do_cwe_lookup(input) do
+    class = input |> Map.get("vuln_class", "") |> safe_atom()
+
+    case CweCatalog.lookup(class) do
+      %{cwe: cwe, name: name, owasp: owasp, typical_cvss: vector} ->
+        {:ok, "#{cwe} #{name}\nOWASP: #{owasp}\nTypical CVSS: #{vector}"}
+
+      _ ->
+        {:error,
+         "No CWE mapping for #{inspect(class)}. Known: #{CweCatalog.classes() |> Enum.map_join(", ", &to_string/1)}"}
+    end
+  end
+
+  defp do_roe_check(input) do
+    contract = parse_roe_contract(Map.get(input, "roe"))
+    action = parse_roe_action(Map.get(input, "roe_action", %{}))
+
+    {verdict, reason} = RoeGuard.check(contract, action)
+
+    {:ok,
+     "RoE verdict: #{verdict}\nblast: #{action.blast}\ntarget: #{action[:target] || "-"}\nreason: #{reason}"}
+  end
+
+  defp parse_roe_contract(nil), do: nil
+
+  defp parse_roe_contract(%{} = roe) do
+    %{
+      targets: Map.get(roe, "targets", []),
+      forbidden: roe |> Map.get("forbidden", []) |> Enum.map(&safe_atom/1),
+      max_blast: roe |> Map.get("max_blast") |> safe_atom_or_nil()
+    }
+    |> Enum.reject(fn {_, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp parse_roe_action(%{} = a) do
+    blast =
+      case Map.get(a, "blast") do
+        b when is_binary(b) and b != "" -> safe_atom(b)
+        _ -> a |> Map.get("command", "") |> RoeGuard.classify()
+      end
+
+    %{blast: blast, target: Map.get(a, "target")}
+  end
+
+  defp safe_atom(s) when is_binary(s) do
+    String.to_existing_atom(s)
+  rescue
+    ArgumentError -> :unknown
+  end
+
+  defp safe_atom(a) when is_atom(a), do: a
+  defp safe_atom(_), do: :unknown
+
+  defp safe_atom_or_nil(nil), do: nil
+  defp safe_atom_or_nil(s), do: safe_atom(s)
+
   defp do_tda(input) do
     opts = %{
       steps_remaining: Map.get(input, "steps_remaining", 10),
@@ -489,7 +725,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
   end
 
   defp do_playbook_start(_session_id, _input),
-    do: {:error, "playbook_start requires 'playbook_id' (web_app, network, or full_engagement)"}
+    do:
+      {:error,
+       "playbook_start requires 'playbook_id' (web_app, network, full_engagement, whitebox, ctf, ci_scan, cloud_engagement, kubernetes, active_directory)"}
 
   defp do_playbook_current(session_id) do
     case Playbook.current(session_id) do

@@ -48,6 +48,8 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     cve cvss injection xss ssrf xxe reverse.shell shellcode payload
     privilege.escalation oscp bug.bounty security.assessment red.team
     attack.surface osint shodan fingerprint bruteforce
+    whitebox 0-day zeroday call.chain taint ctf sarif kev idor
+    kubernetes rbac active.directory bloodhound
   )
 
   @security_skills ~w(penetration-testing security-audit)
@@ -541,7 +543,7 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     DISCIPLINE: record findings as notes AS YOU GO, not at the end. The graph and dedup only work if notes are current. A stale graph leads to redundant work and missed lateral movement.
 
     PHASED PLAYBOOKS — start a playbook at the beginning of an engagement to get a structured phase-by-phase methodology:
-    - `playbook_start` with playbook_id (web_app, network, or full_engagement).
+    - `playbook_start` with playbook_id (web_app, network, full_engagement, whitebox, ctf, ci_scan, cloud_engagement, kubernetes, active_directory).
     - `playbook_current` to see the current phase, its entry/exit criteria, and guidance.
     - `playbook_advance` when the current phase's exit criteria are met.
     - `playbook_phases` to see the full phase list with statuses.
@@ -552,6 +554,8 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     SARIF REPORT — at the reporting phase, call `sarif_generate` (with to_file=true to write to disk) to produce a SARIF 2.1.0 JSON report of all vulnerability findings. SARIF is the industry-standard format consumed by GitHub Code Scanning, Azure DevOps, and SIEM pipelines.
 
     CODE FIXES — for each vulnerability with a concrete remediation, call `codefix_record` with a fix_before/fix_after code diff and an explanation. `codefix_report` renders all fixes as a unified-diff report section. A finding with a concrete fix is far more actionable than prose remediation guidance — include the actual code change, not "you should sanitize input".
+
+    WHITEBOX 0-DAY — when you have the source, this is the strongest pass. `whitebox_analyze` traces user input to sinks. `variant_scan` hunts similar unpatched sites from a known bug. `ci_scan` is the headless CI form. `cvss_score` + `report_gate` make a finding report-grade (CVSS vector, CWE, evidence). `roe_load` / `roe_check` are the hard gate before any live-target command.
     </security_intelligence_layer>
     """
   end

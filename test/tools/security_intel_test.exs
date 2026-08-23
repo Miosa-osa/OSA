@@ -399,4 +399,59 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
       NotesStore.stop("default")
     end
   end
+
+  describe "cvss_score / cwe_lookup / roe_check actions" do
+    test "cvss_score scores a valid vector and reports severity", %{ctx: ctx} do
+      {:ok, body} =
+        run("cvss_score", ctx, %{"cvss_vector" => "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"})
+
+      assert body =~ "9.8"
+      assert body =~ "critical"
+    end
+
+    test "cvss_score refuses a malformed vector instead of fabricating a score", %{ctx: ctx} do
+      assert {:error, reason} = run("cvss_score", ctx, %{"cvss_vector" => "garbage"})
+      assert reason =~ "Invalid CVSS"
+    end
+
+    test "cwe_lookup maps a class to CWE/OWASP/typical CVSS", %{ctx: ctx} do
+      {:ok, body} = run("cwe_lookup", ctx, %{"vuln_class" => "sqli"})
+      assert body =~ "CWE-89"
+      assert body =~ "A03"
+    end
+
+    test "cwe_lookup on an unknown class lists the known ones", %{ctx: ctx} do
+      assert {:error, reason} = run("cwe_lookup", ctx, %{"vuln_class" => "not_real"})
+      assert reason =~ "No CWE mapping"
+    end
+
+    test "roe_check classifies a shell command and blocks out-of-scope", %{ctx: ctx} do
+      {:ok, body} =
+        run("roe_check", ctx, %{
+          "roe" => %{"targets" => ["10.0.0.0/24"], "max_blast" => "cred_access"},
+          "roe_action" => %{"command" => "nmap -sV 8.8.8.8", "target" => "8.8.8.8"}
+        })
+
+      assert body =~ "block"
+      assert body =~ "recon"
+    end
+
+    test "roe_check allows in-scope recon", %{ctx: ctx} do
+      {:ok, body} =
+        run("roe_check", ctx, %{
+          "roe" => %{"targets" => ["10.0.0.0/24"]},
+          "roe_action" => %{"command" => "nmap 10.0.0.5", "target" => "10.0.0.5"}
+        })
+
+      assert body =~ "allow"
+    end
+  end
+
+  describe "whitebox_scan action" do
+    test "requires content", %{ctx: ctx} do
+      assert {:error, reason} = run("whitebox_scan", ctx, %{"whitebox" => %{"entry" => "x.ex"}})
+      assert reason =~ "content is required"
+    end
+  end
+
 end
