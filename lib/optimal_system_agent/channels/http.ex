@@ -132,7 +132,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           :unknown -> nil
         end
       rescue
-        _ -> nil
+        e ->
+          Logger.warning("health context_window lookup failed: #{Exception.message(e)}")
+          nil
       catch
         :exit, _ -> nil
       end
@@ -143,7 +145,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       try do
         OptimalSystemAgent.Agent.Effort.current() |> to_string()
       rescue
-        _ -> "medium"
+        e ->
+          Logger.warning("health effort lookup failed: #{Exception.message(e)}")
+          "medium"
       catch
         :exit, _ -> "medium"
       end
@@ -963,7 +967,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       &(Atom.to_string(&1) == provider)
     )
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("health provider_atom lookup failed: #{Exception.message(e)}")
+      nil
   catch
     :exit, _ -> nil
   end
@@ -982,7 +988,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       _ -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("health billing snapshot failed: #{Exception.message(e)}")
+      nil
   catch
     :exit, _ -> nil
   end
@@ -1013,7 +1021,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   defp active_usd_pricing?(provider, model) do
     OptimalSystemAgent.Budget.has_usd_pricing?(provider) or catalog_model_priced?(model)
   rescue
-    _ -> false
+    e ->
+      Logger.warning("health usd_pricing check failed: #{Exception.message(e)}")
+      false
   catch
     :exit, _ -> false
   end

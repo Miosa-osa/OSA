@@ -49,9 +49,21 @@ defmodule OptimalSystemAgent.OpenComputers.Executor do
     end
   end
 
-  defp mod_for_kind(kind) when is_binary(kind), do: mod_for_kind(String.to_existing_atom(kind))
+  defp mod_for_kind(kind) when is_binary(kind) do
+    case safe_existing_atom(kind) do
+      {:ok, atom} -> mod_for_kind(atom)
+      :error -> {:error, :unsupported_kind}
+    end
+  end
+
   defp mod_for_kind(:exec_on_host), do: {:ok, Exec}
   defp mod_for_kind(:dispatch_agent), do: {:ok, Agent}
   defp mod_for_kind(:stream_native_desktop), do: {:ok, Desktop}
   defp mod_for_kind(_), do: {:error, :unsupported_kind}
+
+  defp safe_existing_atom(str) do
+    {:ok, String.to_existing_atom(str)}
+  rescue
+    ArgumentError -> :error
+  end
 end

@@ -199,7 +199,9 @@ defmodule OptimalSystemAgent.Peer.Review do
       _ -> false
     end
   rescue
-    _ -> false
+    e ->
+      Logger.warning("[Peer.Review] approved? check failed: #{Exception.message(e)}")
+      false
   end
 
   @doc "Fetch a review record by artifact ID."
@@ -210,7 +212,9 @@ defmodule OptimalSystemAgent.Peer.Review do
       [] -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("[Peer.Review] get_review failed: #{Exception.message(e)}")
+      nil
   end
 
   @doc """
@@ -225,7 +229,9 @@ defmodule OptimalSystemAgent.Peer.Review do
     |> Enum.map(fn {_, review} -> review end)
     |> Enum.filter(&(&1.to_agent == agent_id and &1.status == :pending))
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[Peer.Review] pending_reviews_for failed: #{Exception.message(e)}")
+      []
   end
 
   @doc """
@@ -253,7 +259,9 @@ defmodule OptimalSystemAgent.Peer.Review do
         {:error, :no_review_found}
     end
   rescue
-    _ -> {:error, :review_table_unavailable}
+    e ->
+      Logger.warning("[Peer.Review] assert_approved failed: #{Exception.message(e)}")
+      {:error, :review_table_unavailable}
   end
 
   # ---------------------------------------------------------------------------

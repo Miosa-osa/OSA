@@ -1125,6 +1125,8 @@ end
 defmodule MiosaSignal do
   @moduledoc "Top-level Signal Theory module — wraps the 5-tuple signal struct."
 
+  require Logger
+
   @type signal_mode :: :execute | :build | :analyze | :maintain | :assist
   @type signal_genre :: :direct | :inform | :commit | :decide | :express
   @type signal_type :: :question | :request | :issue | :scheduling | :summary | :report | :general
@@ -1173,13 +1175,20 @@ defmodule MiosaSignal do
   end
 
   def from_cloud_event(%{"data" => data}) when is_map(data) do
-    new(for {k, v} <- data, into: %{}, do: {String.to_existing_atom(k), v})
-  rescue
-    _ -> new(%{})
+    new(for {k, v} <- data, into: %{}, do: {safe_key(k), v})
   end
 
   def from_cloud_event(_), do: new(%{})
 
   def measure_sn_ratio(%__MODULE__{weight: w}), do: w
   def measure_sn_ratio(_), do: 0.5
+
+  # WHY existing-atom-only: untrusted cloud-event keys must not mint atoms (DoS).
+  defp safe_key(k) do
+    String.to_existing_atom(k)
+  rescue
+    ArgumentError ->
+      Logger.warning("MiosaSignal.from_cloud_event: unknown key kept as string: #{inspect(k)}")
+      k
+  end
 end

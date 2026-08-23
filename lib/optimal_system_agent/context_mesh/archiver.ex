@@ -130,9 +130,21 @@ defmodule OptimalSystemAgent.ContextMesh.Archiver do
       {score, _} = Staleness.compute_staleness(stats)
       score >= @archive_staleness_threshold
     rescue
-      _ -> false
+      e ->
+        Logger.warning(
+          "[ContextMesh.Archiver] staleness check failed team=#{team_id} id=#{keeper_id}: " <>
+            Exception.message(e)
+        )
+
+        false
     catch
-      :exit, _ -> false
+      :exit, reason ->
+        Logger.warning(
+          "[ContextMesh.Archiver] staleness check exited team=#{team_id} id=#{keeper_id}: " <>
+            inspect(reason)
+        )
+
+        false
     end
   end
 
@@ -183,9 +195,21 @@ defmodule OptimalSystemAgent.ContextMesh.Archiver do
     try do
       OptimalSystemAgent.Events.Bus.emit(:system_event, Map.put(event, :channel, :context_mesh))
     rescue
-      _ -> :ok
+      e ->
+        Logger.warning(
+          "[ContextMesh.Archiver] persist event failed team=#{team_id} id=#{keeper_id}: " <>
+            Exception.message(e)
+        )
+
+        :ok
     catch
-      :exit, _ -> :ok
+      :exit, reason ->
+        Logger.warning(
+          "[ContextMesh.Archiver] persist event exited team=#{team_id} id=#{keeper_id}: " <>
+            inspect(reason)
+        )
+
+        :ok
     end
 
     :ok

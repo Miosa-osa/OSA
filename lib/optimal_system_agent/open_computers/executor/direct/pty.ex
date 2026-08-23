@@ -137,9 +137,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
         try do
           :exec.send(os_pid, {:winsize, rows, cols})
         rescue
-          _ -> :ok
+          e ->
+            Logger.warning("[OpenComputers.Pty] pty_resize failed: #{Exception.message(e)}")
+            :ok
         catch
-          _, _ -> :ok
+          kind, reason ->
+            Logger.warning("[OpenComputers.Pty] pty_resize failed: #{inspect({kind, reason})}")
+            :ok
         end
 
         {:noreply, state}
@@ -158,9 +162,16 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
         try do
           :exec.kill(os_pid, :sighup)
         rescue
-          _ -> :ok
+          e ->
+            Logger.warning("[OpenComputers.Pty] pty_close sighup failed: #{Exception.message(e)}")
+            :ok
         catch
-          _, _ -> :ok
+          kind, reason ->
+            Logger.warning(
+              "[OpenComputers.Pty] pty_close sighup failed: #{inspect({kind, reason})}"
+            )
+
+            :ok
         end
 
         {:noreply, %{state | sessions: Map.delete(state.sessions, session_id)}}
