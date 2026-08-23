@@ -508,6 +508,45 @@ defmodule OptimalSystemAgent.Security.SteerTest do
       assert String.contains?(text, "authoritative instruction")
     end
   end
+
+  describe "bridge to agent loop" do
+    # Criterion 5: the steer must reach the running agent loop, not just sit
+    # in SteerStore. inject/2 bridges into Agent.Loop.Steer.queue/2, the ETS
+    # queue that inject_pending_steer/1 in react_loop.ex drains at the next
+    # iteration boundary. This test asserts the directive is visible in the
+    # loop's queue after inject.
+    alias OptimalSystemAgent.Agent.Loop.Steer, as: LoopSteer
+
+    test "inject bridges into Agent.Loop.Steer queue", %{session_id: sid} do
+      # Clear any prior queue entries for this session
+      LoopSteer.drain(sid)
+
+      {:ok, _} = Steer.inject(sid, "Stop the nmap scan and pivot to /api/.")
+
+      # The directive should now be in the loop's ETS queue, ready for the
+      # next iteration boundary to fold into state.messages.
+      queued = LoopSteer.drain(sid)
+      assert length(queued) >= 1
+
+      # The queued text should contain the rendered <user_steer> block
+      queued_text = Enum.join(queued, "\n")
+      assert String.contains?(queued_text, "<user_steer>")
+      assert String.contains?(queued_text, "pivot to /api/")
+    end
+
+    test "consume clears SteerStore but loop queue is independent", %{session_id: sid} do
+      LoopSteer.drain(sid)
+
+      {:ok, _} = Steer.inject(sid, "test directive for loop bridge")
+      # SteerStore has it
+      assert Steer.pending?(sid)
+      # Loop queue has it
+      assert length(LoopSteer.drain(sid)) >= 1
+      # Consume clears SteerStore
+      Steer.consume(sid)
+      refute Steer.pending?(sid)
+    end
+  end
 end
 
 defmodule OptimalSystemAgent.BudgetPauseTest do

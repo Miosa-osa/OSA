@@ -58,6 +58,12 @@ defmodule OptimalSystemAgent.Security.Steer do
     with {:ok, _} <- SteerStore.ensure_started(session_id) do
       SteerStore.put(session_id, directive)
 
+      # Bridge into the agent loop's steer queue (Agent.Loop.Steer) so the
+      # directive is actually folded into the running turn at the next ReAct
+      # step boundary by inject_pending_steer/1 in react_loop.ex. Without this
+      # bridge, the directive sits in SteerStore and never reaches the loop.
+      OptimalSystemAgent.Agent.Loop.Steer.queue(session_id, __MODULE__.render(directive))
+
       Logger.info(
         "[Steer] directive injected for session #{session_id}: #{String.slice(body, 0, 80)}"
       )
