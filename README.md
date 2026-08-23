@@ -878,10 +878,21 @@ nothing below changes behaviour on a normal coding turn.
   CWE/OWASP mapping, and a code-fix section records `fix_before`/`fix_after`
   unified diffs per finding. A report gate drops anything missing vector, CWE,
   and evidence.
-- **Whitebox 0-day** - when the source is in the workspace, a Vulnhuntr-style
-  call-chain analyzer traces untrusted input to sinks, scores the finding, and
-  a variant scanner hunts similar unpatched sites from a known bug. CI mode
-  runs that pass headless and emits SARIF.
+- **Whitebox 0-day** - when the source is in the workspace, a source-to-sink
+  call-chain analyzer traces untrusted input across files to dangerous sinks,
+  judges each vulnerability class inside the chain, scores the finding, and a
+  variant scanner hunts similar unpatched sites from a known bug or CVE. CI
+  mode runs that pass headless and emits SARIF, failing on critical/high.
+- **Live confirmation, not slop** - a finding is only "confirmed" with an
+  append-only SHA-256 evidence chain and an *independent* skeptic pass; a
+  parent agent cannot self-grade its own finding. Blind classes require an
+  out-of-band receipt before they can be claimed. One vulnerability class is
+  worked at a time, and an empty discovery queue reads as "not assessed",
+  never "clean".
+- **Hunter collectors** - JS-secret extraction, CIDR/vhost mapping from tool
+  output, HAR intercept-and-replay (repeat gated by RoE), a login preflight
+  before any access-control test, and one auditor child fanned out per request
+  handler.
 - **Methodology & playbooks** - a phased engagement skill (scope -> recon ->
   vuln discovery -> exploitation -> post-exploit -> report) and playbooks for
   web-app, network, full-engagement, whitebox, CTF, CI scan, cloud, Kubernetes,
