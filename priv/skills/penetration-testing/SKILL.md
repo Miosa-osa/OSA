@@ -109,17 +109,79 @@ duration, concurrency. Deduplicate findings across tools.
    - `wpscan --url <url>` — WordPress-specific
    - `trivy fs /path` — dependency/container scanning
 
-2. **Manual testing (OWASP Top 10)**:
-   - **A03 Injection**: SQLi (`sqlmap -u <url> --batch`), command injection, LDAP injection
-   - **A01 Access Control**: IDOR, privilege escalation, missing auth checks
-   - **A07 Auth Failures**: weak passwords, session management, JWT issues
-   - **A10 SSRF**: internal endpoint access, cloud metadata (169.254.169.254)
-   - **A08 Integrity**: unsigned tokens, JWT alg confusion, deserialization
-   - **A02 Crypto**: weak TLS, hardcoded secrets, weak algorithms
-   - **A05 Misconfig**: default creds, verbose errors, security headers
-   - **A09 Logging**: sensitive data in logs, log injection
-   - **A04 Design**: missing rate limits, no threat model, fail-open
-   - **A06 Components**: known CVEs in dependencies
+2. **Manual testing — work the checklist, basics first.**
+
+   Test the cheap, high-signal classes on every parameter and endpoint BEFORE
+   reaching for exotic bugs: access control (IDOR/auth), injection (SQLi/XSS/
+   command), then the rest. Enumerate every input surface — URL params, path
+   segments, JSON/form bodies, headers (Cookie, Authorization, X-Forwarded-*,
+   Host, Referer), file uploads, WebSocket frames, GraphQL fields — and carry
+   each class across all of them. A class is only "checked" once you have tried
+   it against the relevant surfaces, not once you have read about it.
+
+   **A01 Broken Access Control** (test FIRST — highest hit rate):
+   - IDOR: increment/swap object ids, UUIDs, and filenames across a second
+     account; check reads AND writes
+   - Missing function-level auth: hit admin/privileged endpoints as a low-priv
+     user and unauthenticated
+   - Path traversal / LFI: `../`, encoded `%2e%2e%2f`, null byte, `....//`,
+     absolute paths, `php://filter`
+   - Forced browsing, mass assignment (add `role`/`is_admin`/`id` to a body),
+     CORS trust (`Origin:` reflection with credentials)
+   - Directory/`.git`/backup exposure
+
+   **A03 Injection** (the classic surface):
+   - SQLi: `sqlmap -u <url> --batch --level 3 --risk 2`; error/boolean/time
+     blind; second-order
+   - XSS: reflected, stored, DOM (sinks: `innerHTML`, `document.write`, hash);
+     try `"><svg onload=...>`, template-context breakouts, blind XSS via OOB
+   - Command injection: `; | && $() \`\`` and blind (time/OOB via
+     `interactsh-client`)
+   - SSTI: `${7*7}`, `{{7*7}}`, `<%= 7*7 %>` per engine, then RCE gadgets
+   - NoSQL: `[$ne]`, `[$gt]`, `{"$where":...}`; LDAP `*)(uid=*`; XPath
+     `' or '1'='1`
+   - XXE: external entity, OOB/blind, parameter entities, on any XML/SVG/DOCX
+     upload
+   - Open redirect, CRLF/header injection, host-header injection (password
+     reset poisoning, cache), template/GraphQL injection
+
+   **A07 Authentication Failures**:
+   - Weak/default creds, credential stuffing, username enumeration (timing +
+     message), lockout/rate-limit absence
+   - Session fixation, predictable/non-rotated tokens, logout not invalidating,
+     "remember me" secrets
+   - JWT issues (see step 3); OAuth/SSO flow flaws (redirect_uri, state, PKCE)
+   - MFA bypass, password-reset token weaknesses
+
+   **A04 Insecure Design / Business Logic**:
+   - Workflow abuse: skip steps, replay, negative/overflow quantities,
+     race conditions (parallel requests: coupons, balances, double-spend)
+   - Missing rate limits, fail-open logic, price/quantity tampering
+
+   **A10 SSRF**: internal endpoints, cloud metadata (`169.254.169.254`,
+   `metadata.google.internal`), `file://`/`gopher://`, DNS-rebinding, blind via
+   OOB.
+
+   **A08 Software & Data Integrity**: insecure deserialization (Java/PHP/Python
+   pickle/Ruby), unsigned/forgeable tokens, prototype pollution
+   (`__proto__`), unverified update/CI channels.
+
+   **A02 Cryptographic Failures**: weak TLS/ciphers (`testssl.sh`), hardcoded
+   secrets, weak hashing, predictable tokens, sensitive data in transit/at rest.
+
+   **A05 Security Misconfiguration**: default creds, verbose errors/stack
+   traces, missing security headers, directory listing, exposed actuator/debug
+   endpoints, subdomain takeover (dangling CNAME), permissive CORS.
+
+   **A06 Vulnerable Components**: known CVEs in detected products/deps
+   (`searchsploit`, `nuclei` CVE templates, `trivy`).
+
+   **A09 Logging & Monitoring**: sensitive data in logs, log injection, absence
+   of detection for the attacks above.
+
+   **Protocol/infra layer** (when in scope): HTTP request smuggling
+   (CL.TE/TE.CL), web cache poisoning/deception, WebSocket auth/CSWSH,
+   clickjacking (missing frame-ancestors).
 
 3. **JWT testing** (if JWT tokens found):
    - Decode: `jwt_tool <token>`
