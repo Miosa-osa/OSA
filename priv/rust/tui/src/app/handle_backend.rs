@@ -139,6 +139,15 @@ impl App {
     }
 
     pub(super) fn handle_backend_event(&mut self, event: BackendEvent) -> bool {
+        // Any event from the backend is proof of life for the active turn, so
+        // it resets the request-timeout idle clock. This is what lets a long
+        // but healthy turn survive — most importantly a goal-verifier skeptic
+        // panel, whose subagents each run several minutes and emit lifecycle /
+        // LLM events throughout. Harmless when no turn is processing: the
+        // timeout check is gated on `is_processing()`, and a fresh turn's
+        // `processing_start` dominates any stale value (see the `since`
+        // computation in `update.rs`).
+        self.last_turn_activity = Some(std::time::Instant::now());
         match event {
             BackendEvent::HealthResult(result) => {
                 self.handle_health_result(result);
