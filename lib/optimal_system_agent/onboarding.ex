@@ -275,6 +275,21 @@ defmodule OptimalSystemAgent.Onboarding do
         allow_free_text: true,
         models: [
           %{
+            id: "stealth/ox-alpha",
+            name: "Ox Alpha (free)",
+            ctx: 1_048_576,
+            tools: true,
+            recommended: true,
+            note: "FREE preview — 1M ctx stealth coding model, tops DeepSWE"
+          },
+          %{
+            id: "openai/gpt-oss-20b:free",
+            name: "GPT-OSS 20B (free)",
+            ctx: 131_072,
+            tools: true,
+            note: "free — strong open coding model, ~o3-mini"
+          },
+          %{
             id: "anthropic/claude-sonnet-4-6",
             name: "Claude Sonnet 4.6",
             ctx: 1_000_000,

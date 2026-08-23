@@ -6,7 +6,6 @@ defmodule OptimalSystemAgent.Agent.PersistedResult do
   context compaction (which may drop the subagent's output from the
   conversation), the parent agent can still retrieve the result.
 
-  Adapted from HackerAI's `persisted-result.ts`.
 
   ## Storage
 

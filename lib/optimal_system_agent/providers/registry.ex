@@ -1592,6 +1592,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   unavailable (e.g. GenServer not started) or does not yet know a model.
   """
   @static_context_windows %{
+    # OpenRouter stealth model (not yet in models.dev): Ox Alpha ships a
+    # 1,048,576-token context window. Without this row the context meter would
+    # fall back to a flat default and badly misreport occupancy on a 1M model.
+    "stealth/ox-alpha" => 1_048_576,
     # Anthropic — all Claude 4.x models have 1M context
     "claude-opus-4-6" => 1_000_000,
     "claude-sonnet-4-6" => 1_000_000,

@@ -399,4 +399,178 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
       NotesStore.stop("default")
     end
   end
+
+  describe "cvss_score / cwe_lookup / roe_check actions" do
+    test "cvss_score scores a valid vector and reports severity", %{ctx: ctx} do
+      {:ok, body} =
+        run("cvss_score", ctx, %{"cvss_vector" => "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"})
+
+      assert body =~ "9.8"
+      assert body =~ "critical"
+    end
+
+    test "cvss_score refuses a malformed vector instead of fabricating a score", %{ctx: ctx} do
+      assert {:error, reason} = run("cvss_score", ctx, %{"cvss_vector" => "garbage"})
+      assert reason =~ "Invalid CVSS"
+    end
+
+    test "cwe_lookup maps a class to CWE/OWASP/typical CVSS", %{ctx: ctx} do
+      {:ok, body} = run("cwe_lookup", ctx, %{"vuln_class" => "sqli"})
+      assert body =~ "CWE-89"
+      assert body =~ "A03"
+    end
+
+    test "cwe_lookup on an unknown class lists the known ones", %{ctx: ctx} do
+      assert {:error, reason} = run("cwe_lookup", ctx, %{"vuln_class" => "not_real"})
+      assert reason =~ "No CWE mapping"
+    end
+
+    test "roe_check classifies a shell command and blocks out-of-scope", %{ctx: ctx} do
+      {:ok, body} =
+        run("roe_check", ctx, %{
+          "roe" => %{"targets" => ["10.0.0.0/24"], "max_blast" => "cred_access"},
+          "roe_action" => %{"command" => "nmap -sV 8.8.8.8", "target" => "8.8.8.8"}
+        })
+
+      assert body =~ "block"
+      assert body =~ "recon"
+    end
+
+    test "roe_check allows in-scope recon", %{ctx: ctx} do
+      {:ok, body} =
+        run("roe_check", ctx, %{
+          "roe" => %{"targets" => ["10.0.0.0/24"]},
+          "roe_action" => %{"command" => "nmap 10.0.0.5", "target" => "10.0.0.5"}
+        })
+
+      assert body =~ "allow"
+    end
+  end
+
+  describe "whitebox_scan action" do
+    test "requires content", %{ctx: ctx} do
+      assert {:error, reason} = run("whitebox_scan", ctx, %{"whitebox" => %{"entry" => "x.ex"}})
+      assert reason =~ "content is required"
+    end
+  end
+
+  describe "report_gate / threat_lookup / recon_ingest / playbook whitebox" do
+    test "report_gate accepts a scored finding", %{ctx: ctx} do
+      {:ok, body} =
+        run("report_gate", ctx, %{
+          "finding" => %{
+            "vuln_class" => "sqli",
+            "cvss_vector" => "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "poc" => "id=1"
+          }
+        })
+
+      assert body =~ "eligible"
+      assert body =~ "CWE-89"
+    end
+
+    test "threat_lookup hits bundled KEV", %{ctx: ctx} do
+      {:ok, body} = run("threat_lookup", ctx, %{"cve" => "CVE-2021-44228"})
+      assert body =~ "KEV=true"
+    end
+
+    test "recon_ingest stores httpx notes", %{ctx: ctx} do
+      {:ok, body} =
+        run("recon_ingest", ctx, %{
+          "tool" => "httpx",
+          "format" => "jsonl",
+          "payload" => ~s({"url":"https://t.example/","status_code":200,"host":"t.example"})
+        })
+
+      assert body =~ "ingested 1"
+      {:ok, list} = run("note_list", ctx)
+      assert list =~ "t.example"
+    end
+
+    test "playbook_start accepts whitebox", %{ctx: ctx} do
+      {:ok, body} = run("playbook_start", ctx, %{"playbook_id" => "whitebox"})
+      assert body =~ "Whitebox"
+    end
+  end
+
+  describe "hunter collectors" do
+    test "js_secrets extracts an AWS key", %{ctx: ctx} do
+      {:ok, body} =
+        run("js_secrets", ctx, %{
+          "payload" => ~s(const k = "AKIAIOSFODNN7EXAMPLE";)
+        })
+
+      assert body =~ "aws_key"
+    end
+
+    test "vhost_candidates includes admin prefix", %{ctx: ctx} do
+      {:ok, body} = run("vhost_candidates", ctx, %{"domain" => "example.com"})
+      assert body =~ "admin.example.com"
+    end
+
+    test "owned_cidrs parses whois CIDR", %{ctx: ctx} do
+      {:ok, body} =
+        run("owned_cidrs", ctx, %{"payload" => "CIDR:           198.51.100.0/24\n"})
+
+      assert body =~ "198.51.100.0/24"
+    end
+
+    test "class_queue_assert fails closed when empty", %{ctx: ctx} do
+      assert {:error, reason} = run("class_queue_assert", ctx, %{"vuln_class" => "sqli"})
+      assert reason =~ "not assessed"
+    end
+
+    test "class_queue_put then assert", %{ctx: ctx} do
+      {:ok, _} =
+        run("class_queue_put", ctx, %{
+          "vuln_class" => "sqli",
+          "note" => %{"target" => "https://example.com/q?id=1"}
+        })
+
+      {:ok, body} = run("class_queue_assert", ctx, %{"vuln_class" => "sqli"})
+      assert body =~ "exploit allowed"
+    end
+
+    test "skeptic_promote rejects parent self-confirm", %{ctx: ctx} do
+      assert {:error, reason} =
+               run("skeptic_promote", ctx, %{
+                 "finding" => %{
+                   "vuln_class" => "sqli",
+                   "status" => "confirmed",
+                   "poc" => "id=1"
+                 }
+               })
+
+      assert reason =~ "security_validation"
+    end
+
+    test "http_ingest_har lists requests", %{ctx: ctx} do
+      har =
+        Jason.encode!(%{
+          "log" => %{
+            "entries" => [
+              %{
+                "request" => %{
+                  "method" => "GET",
+                  "url" => "https://example.com/api",
+                  "headers" => []
+                },
+                "response" => %{"status" => 200}
+              }
+            ]
+          }
+        })
+
+      {:ok, body} = run("http_ingest_har", ctx, %{"payload" => har})
+      assert body =~ "http ingested 1"
+      assert body =~ "/api"
+    end
+
+    test "parameters enum includes new collector actions" do
+      enum = get_in(SecurityIntel.parameters(), ["properties", "action", "enum"])
+      for a <- ~w(js_secrets oob_start http_repeat class_queue_assert skeptic_promote entry_fanout codefix_open_pr) do
+        assert a in enum
+      end
+    end
+  end
 end

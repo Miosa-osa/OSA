@@ -7,7 +7,7 @@ defmodule OptimalSystemAgent.Providers.Moderation do
   security-related but NOT in a forbidden category (sexual, hate, harassment,
   self-harm, violence), it authorizes the request for uncensored response.
 
-  This is the first layer of HackerAI's three-layer anti-flagging system:
+  This is the first layer of the three-layer anti-flagging system:
   1. Moderation pre-screen (this module) → determines if content is safe to uncensor
   2. Platform authorization annotation → injected into user message at provider boundary
   3. Content-filter error handling → graceful handling when provider still blocks

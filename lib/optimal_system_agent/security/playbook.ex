@@ -10,9 +10,15 @@ defmodule OptimalSystemAgent.Security.Playbook do
 
   ## Built-in playbooks
 
-  - `:web_app` — web application assessment (6 phases)
-  - `:network` — internal network pentest (6 phases)
-  - `:full_engagement` — combined recon + web + network + report (8 phases)
+  - `:web_app` - web application assessment (6 phases)
+  - `:network` - internal network pentest (6 phases)
+  - `:full_engagement` - combined recon + web + network + report (8 phases)
+  - `:whitebox` - source-to-sink 0-day review against code you already have
+  - `:ctf` - capture-the-flag (recon -> exploit -> flag)
+  - `:ci_scan` - headless continuous scan for CI (discover -> analyze -> SARIF)
+  - `:cloud_engagement` - cloud / IAM assessment (methodology only; live calls need RoE)
+  - `:kubernetes` - cluster assessment (methodology only; live calls need RoE)
+  - `:active_directory` - AD attack-path review (methodology only; live calls need RoE)
 
   ## State
 
@@ -239,6 +245,219 @@ defmodule OptimalSystemAgent.Security.Playbook do
     }
   ]
 
+  @whitebox_phases [
+    %{
+      name: "Scope the codebase",
+      entry_criteria: ["Repository path available", "Languages/frameworks identified"],
+      exit_criteria: [
+        "Entry points listed (routes, parsers, deserializers)",
+        "Trust boundaries noted"
+      ],
+      guidance:
+        "Whitebox 0-day pass. You already have the source. List remote-input entry points " <>
+          "and do not touch a live target. Use code_symbols / file_grep, not scanners."
+    },
+    %{
+      name: "Call-chain tracing",
+      entry_criteria: ["Entry points listed"],
+      exit_criteria: [
+        "Each entry traced toward a sink or ruled out",
+        "Findings recorded with source, sink, and call chain"
+      ],
+      guidance:
+        "security_intel action whitebox_analyze (or CallChainAnalyzer). Trace user input " <>
+          "to exec/query/render/file/SSRF sinks. A class is only checked once you tried it " <>
+          "on the relevant surfaces. Empty queue for a class is 'not assessed', not clean. " <>
+          "Basics first: IDOR/auth, SQLi/XSS/command, then the rest."
+    },
+    %{
+      name: "Variant analysis",
+      entry_criteria: ["At least one confirmed or high-confidence chain, or a seed CVE/patch"],
+      exit_criteria: ["Similar sites in the repo scanned", "Variants recorded or ruled out"],
+      guidance:
+        "security_intel action variant_scan. Seed from a known bug, patch diff, or CVE " <>
+          "description and hunt structurally similar unpatched instances."
+    },
+    %{
+      name: "Score and gate",
+      entry_criteria: ["Candidate findings exist"],
+      exit_criteria: [
+        "Each finding has CVSS vector + CWE",
+        "Ineligible findings dropped or marked needs-evidence"
+      ],
+      guidance:
+        "cvss_score + report_gate. A finding without CVSS, CWE, and a receipt (poc / " <>
+          "evidence_path / evidence_id) is not report-grade. Status=confirmed without a " <>
+          "receipt still fails the gate. Enrich with CweCatalog and ThreatIntel (KEV) when a CVE is known."
+    },
+    %{
+      name: "Report",
+      entry_criteria: ["Eligible findings scored"],
+      exit_criteria: ["SARIF generated", "Remediation notes attached"],
+      guidance:
+        "sarif_generate. Rank by CVSS then KEV. Include call-chain evidence, not payloads."
+    }
+  ]
+
+  @ctf_phases [
+    %{
+      name: "Recon the challenge",
+      entry_criteria: ["Challenge URL or files provided"],
+      exit_criteria: ["Services/files inventoried", "Flag format known if published"],
+      guidance:
+        "CTF mode: recon -> understand -> exploit -> flag. Inventory ports, files, and " <>
+          "clues. Stay inside the challenge host. Do not pivot to unrelated infrastructure."
+    },
+    %{
+      name: "Understand the mechanism",
+      entry_criteria: ["Inventory done"],
+      exit_criteria: ["Intended bug class hypothesized", "Input surface named"],
+      guidance:
+        "Read source if given (whitebox CTF) or fingerprint the service. Hypothesize one " <>
+          "class at a time (SQLi, IDOR, SSTI, pwn). Basics first."
+    },
+    %{
+      name: "Capture the flag",
+      entry_criteria: ["Hypothesis in hand"],
+      exit_criteria: ["Flag captured or challenge ruled unsolved with evidence"],
+      guidance:
+        "Reproduce the bug only against the challenge. Record the flag as an artifact note. " <>
+          "Stop after the flag - no persistence, no extra pivoting."
+    },
+    %{
+      name: "Writeup",
+      entry_criteria: ["Attempt complete"],
+      exit_criteria: ["Steps recorded", "Flag or failure reason stored"],
+      guidance: "Short writeup: surface, class, steps, flag. SARIF optional."
+    }
+  ]
+
+  @ci_scan_phases [
+    %{
+      name: "Discover entries",
+      entry_criteria: ["CI workspace checked out"],
+      exit_criteria: ["Entry files listed"],
+      guidance:
+        "CiScan.discover_entries/1. No live network. Fail closed if the repo root is missing."
+    },
+    %{
+      name: "Analyze",
+      entry_criteria: ["Entries listed"],
+      exit_criteria: ["Whitebox pass complete", "Static sink hits recorded"],
+      guidance:
+        "CiScan.run/1 with an injected analyzer in tests; in CI, whitebox_analyze plus a cheap " <>
+          "regex sink scan. Do not call production hosts."
+    },
+    %{
+      name: "Gate",
+      entry_criteria: ["Findings available"],
+      exit_criteria: ["Ineligible findings stripped", "Fail-on severity applied"],
+      guidance:
+        "report_gate + fail_on [:critical, :high]. Non-zero CI status only when scored, eligible " <>
+          "findings match the fail-on band."
+    },
+    %{
+      name: "Publish SARIF",
+      entry_criteria: ["Gate evaluated"],
+      exit_criteria: ["SARIF written to the configured path"],
+      guidance:
+        "sarif_generate / CiScan.sarif_from_findings. Code scanning consumers pick this up."
+    }
+  ]
+
+  @cloud_phases [
+    %{
+      name: "Scoping & RoE",
+      entry_criteria: ["Cloud accounts/projects declared", "RoE loaded"],
+      exit_criteria: ["Allowed accounts listed", "Forbidden actions listed"],
+      guidance:
+        "Load RoE first (roe_load). Live cloud API calls are in-scope only against those accounts. " <>
+          "Credential dumping and persistence are forbidden unless the RoE explicitly allows them."
+    },
+    %{
+      name: "Inventory",
+      entry_criteria: ["RoE loaded"],
+      exit_criteria: ["Principals, roles, and exposed services noted"],
+      guidance:
+        "Read-only inventory (aws/az/gcloud describe, CloudFox-style). Ingest into ShadowGraph. " <>
+          "No mutating API calls."
+    },
+    %{
+      name: "Attack-path review",
+      entry_criteria: ["Inventory recorded"],
+      exit_criteria: ["Privilege-escalation paths listed or none found"],
+      guidance:
+        "graph_attack_paths on IAM edges (CanAssume, HasPermission). Rank by path cost. Record as findings."
+    },
+    %{
+      name: "Report",
+      entry_criteria: ["Paths reviewed"],
+      exit_criteria: ["SARIF generated", "Remediation mapped to IAM changes"],
+      guidance:
+        "Score with CVSS. Do not include secret values in the report - reference redacted."
+    }
+  ]
+
+  @kubernetes_phases [
+    %{
+      name: "Scoping & RoE",
+      entry_criteria: ["Cluster/context declared", "RoE loaded"],
+      exit_criteria: ["In-scope namespaces listed"],
+      guidance: "RoE first. Default-deny: no exec into pods, no secret dump, unless RoE allows."
+    },
+    %{
+      name: "Cluster inventory",
+      entry_criteria: ["RoE loaded"],
+      exit_criteria: ["Workloads, RBAC, and exposed services noted"],
+      guidance: "Read-only kubectl get/describe. Ingest services and principals into the graph."
+    },
+    %{
+      name: "RBAC / escape paths",
+      entry_criteria: ["Inventory recorded"],
+      exit_criteria: ["Risky bindings and escape paths listed or ruled out"],
+      guidance:
+        "Look for cluster-admin bindings, hostPath, privileged pods, IMDS reachability. Record as findings."
+    },
+    %{
+      name: "Report",
+      entry_criteria: ["Review complete"],
+      exit_criteria: ["SARIF generated"],
+      guidance: "Score, gate, SARIF. Remediation in RBAC/PSA terms."
+    }
+  ]
+
+  @ad_phases [
+    %{
+      name: "Scoping & RoE",
+      entry_criteria: ["Domain/range declared", "RoE loaded"],
+      exit_criteria: ["In-scope DCs and OUs listed", "Coercion/relay forbidden unless allowed"],
+      guidance:
+        "RoE first. Password spray, coercion, and NTLM relay require an explicit allowed class. " <>
+          "Default-deny those."
+    },
+    %{
+      name: "Enumerate",
+      entry_criteria: ["RoE loaded"],
+      exit_criteria: ["Users/computers/groups noted or BloodHound JSON ingested"],
+      guidance:
+        "Prefer bloodhound_ingest of already-collected JSON over live collection. Live LDAP is " <>
+          "read-only and in-scope only."
+    },
+    %{
+      name: "Attack paths",
+      entry_criteria: ["Graph populated"],
+      exit_criteria: ["Shortest paths to high-value targets listed"],
+      guidance:
+        "graph_attack_paths (Dijkstra on MemberOf/AdminTo/GenericAll/WriteDacl/DCSync). Record paths as findings."
+    },
+    %{
+      name: "Report",
+      entry_criteria: ["Paths reviewed"],
+      exit_criteria: ["SARIF generated", "Tier-0 issues ranked"],
+      guidance: "Score, gate, SARIF. Remediation as ACL/tiering changes, not as exploit steps."
+    }
+  ]
+
   @playbooks %{
     web_app: %{id: :web_app, name: "Web Application Assessment", phases: @web_app_phases},
     network: %{id: :network, name: "Internal Network Pentest", phases: @network_phases},
@@ -246,6 +465,20 @@ defmodule OptimalSystemAgent.Security.Playbook do
       id: :full_engagement,
       name: "Full Engagement",
       phases: @full_engagement_phases
+    },
+    whitebox: %{id: :whitebox, name: "Whitebox 0-day Review", phases: @whitebox_phases},
+    ctf: %{id: :ctf, name: "Capture the Flag", phases: @ctf_phases},
+    ci_scan: %{id: :ci_scan, name: "CI Continuous Scan", phases: @ci_scan_phases},
+    cloud_engagement: %{
+      id: :cloud_engagement,
+      name: "Cloud / IAM Assessment",
+      phases: @cloud_phases
+    },
+    kubernetes: %{id: :kubernetes, name: "Kubernetes Assessment", phases: @kubernetes_phases},
+    active_directory: %{
+      id: :active_directory,
+      name: "Active Directory Attack-Path Review",
+      phases: @ad_phases
     }
   }
 

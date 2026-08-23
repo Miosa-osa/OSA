@@ -152,7 +152,9 @@ defmodule OptimalSystemAgent.Security.SarifReport do
         "target" => note.target,
         "cve" => note.cve,
         "noteKey" => note.key,
-        "source" => note.source
+        "source" => note.source,
+        "cvssScore" => note_cvss_score(note),
+        "cwe" => note_cwe(note)
       }
     }
   end
@@ -225,6 +227,26 @@ defmodule OptimalSystemAgent.Security.SarifReport do
   defp confidence_to_level(:medium), do: "warning"
   defp confidence_to_level(:low), do: "note"
   defp confidence_to_level(_), do: "warning"
+
+  # Prefer a computed CVSS base score (metadata or top-level) for SARIF
+  # security-severity; fall back to nil so consumers can ignore it.
+  defp note_cvss_score(note) do
+    cond do
+      is_number(Map.get(note, :cvss_score)) -> note.cvss_score
+      is_number(get_in(note, [:metadata, :cvss_score])) -> note.metadata.cvss_score
+      is_number(get_in(note, [:metadata, "cvss_score"])) -> note.metadata["cvss_score"]
+      true -> nil
+    end
+  end
+
+  defp note_cwe(note) do
+    cond do
+      is_binary(Map.get(note, :cwe)) -> note.cwe
+      is_binary(get_in(note, [:metadata, :cwe])) -> note.metadata.cwe
+      is_binary(get_in(note, [:metadata, "cwe"])) -> note.metadata["cwe"]
+      true -> nil
+    end
+  end
 
   defp tool_version do
     case Application.spec(:optimal_system_agent, :vsn) do

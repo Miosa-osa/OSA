@@ -7,7 +7,6 @@ defmodule OptimalSystemAgent.Sandbox.CostTracker do
   actually cost. When the agent switches providers mid-run, the cost segment
   for the old provider is closed and a new one opened.
 
-  Adapted from HackerAI's per-segment cost accounting in `tools/index.ts`.
 
   ## Usage
 

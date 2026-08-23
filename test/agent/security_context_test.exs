@@ -93,6 +93,8 @@ defmodule OptimalSystemAgent.Agent.SecurityContextTest do
       assert String.contains?(result, "Authorization Framework")
       assert String.contains?(result, "Behavioral Policy")
       assert String.contains?(result, "Do NOT refuse")
+      assert String.contains?(result, "how OSA actually pentests")
+      assert String.contains?(result, "Live beats source")
     end
   end
 

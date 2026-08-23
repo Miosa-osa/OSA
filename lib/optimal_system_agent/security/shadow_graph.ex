@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.ShadowGraph do
   @moduledoc """
   Attack surface knowledge graph — derives strategic insights from security notes.
 
-  Adapted from PentestAgent's ShadowGraph. Builds a directed graph from
+  Builds a directed graph from
   structured notes: nodes are hosts, services, credentials, vulnerabilities,
   and findings. Edges are relationships (HAS_SERVICE, AUTH_ACCESS, CONNECTS_TO,
   HAS_VULNERABILITY, HAS_FINDING).
