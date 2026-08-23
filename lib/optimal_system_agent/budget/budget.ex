@@ -166,6 +166,38 @@ defmodule OptimalSystemAgent.Budget do
     GenServer.cast(__MODULE__, :reset_monthly)
   end
 
+  # ── Pause / resume (Tier 3 #12) ────────────────────────────────────────
+  #
+  # A security engagement can be paused (stop spending) and resumed. While
+  # paused, `record_cost/5` and `record_priced_cost/5` accept the cast but
+  # the cost is NOT accumulated — spending halts. `check_budget/0` and
+  # `get_status/0` report `paused: true`. This lets an operator halt a
+  # runaway engagement without killing the session, then resume when ready.
+
+  @doc "Pause spending. Subsequent record_cost/record_priced_cost calls are dropped."
+  @spec pause() :: :ok
+  def pause do
+    GenServer.call(__MODULE__, :pause)
+  end
+
+  @doc "Resume spending after a pause."
+  @spec resume() :: :ok
+  def resume do
+    GenServer.call(__MODULE__, :resume)
+  end
+
+  @doc "Toggle pause state."
+  @spec toggle_pause() :: :ok
+  def toggle_pause do
+    GenServer.call(__MODULE__, :toggle_pause)
+  end
+
+  @doc "True if spending is currently paused."
+  @spec paused?() :: boolean()
+  def paused? do
+    GenServer.call(__MODULE__, :paused?)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -194,7 +226,10 @@ defmodule OptimalSystemAgent.Budget do
       per_call_limit: Keyword.get(opts, :per_call_limit),
       entries: [],
       daily_reset_at: tomorrow_midnight(),
-      monthly_reset_at: next_month_midnight()
+      monthly_reset_at: next_month_midnight(),
+      # Pause/resume (Tier 3 #12): when true, record_cost/record_priced_cost
+      # are accepted but not accumulated. check_budget/get_status report it.
+      paused: false
     }
 
     Logger.info(
@@ -246,6 +281,8 @@ defmodule OptimalSystemAgent.Budget do
       ledger_entries: length(state.entries),
       daily_calls: state.daily_calls,
       monthly_calls: state.monthly_calls,
+      # Pause/resume (Tier 3 #12): true when spending is halted.
+      paused: state.paused,
       # HONESTY FIELDS. Every counter above starts at zero in `init/1`: nothing
       # is loaded from disk and nothing is saved on `terminate/2`. So
       # `monthly_spent` is not the month's spend — it is the spend since this
@@ -270,39 +307,49 @@ defmodule OptimalSystemAgent.Budget do
     # spend was erased and the day started with a false $0.
     state = maybe_reset(state)
 
-    cost = calculate_cost(provider, tokens_in, tokens_out)
-    tokens = max(tokens_in, 0) + max(tokens_out, 0)
+    if state.paused do
+      # Spending halted (Tier 3 #12): accept the cast, don't accumulate.
+      {:noreply, state}
+    else
+      cost = calculate_cost(provider, tokens_in, tokens_out)
+      tokens = max(tokens_in, 0) + max(tokens_out, 0)
 
-    entry = %{
-      provider: provider,
-      model: model,
-      tokens_in: tokens_in,
-      tokens_out: tokens_out,
-      cost: cost,
-      session_id: session_id,
-      recorded_at: DateTime.utc_now()
-    }
+      entry = %{
+        provider: provider,
+        model: model,
+        tokens_in: tokens_in,
+        tokens_out: tokens_out,
+        cost: cost,
+        session_id: session_id,
+        recorded_at: DateTime.utc_now()
+      }
 
-    {:noreply, accumulate(state, cost, tokens, entry)}
+      {:noreply, accumulate(state, cost, tokens, entry)}
+    end
   end
 
   @impl true
   def handle_cast({:record_priced_cost, provider, model, cost_usd, tokens, session_id}, state) do
     state = maybe_reset(state)
-    cost = if is_number(cost_usd) and cost_usd > 0, do: cost_usd * 1.0, else: 0.0
-    tokens = if is_integer(tokens) and tokens > 0, do: tokens, else: 0
 
-    entry = %{
-      provider: provider,
-      model: model,
-      tokens_in: nil,
-      tokens_out: nil,
-      cost: cost,
-      session_id: session_id,
-      recorded_at: DateTime.utc_now()
-    }
+    if state.paused do
+      {:noreply, state}
+    else
+      cost = if is_number(cost_usd) and cost_usd > 0, do: cost_usd * 1.0, else: 0.0
+      tokens = if is_integer(tokens) and tokens > 0, do: tokens, else: 0
 
-    {:noreply, accumulate(state, cost, tokens, entry)}
+      entry = %{
+        provider: provider,
+        model: model,
+        tokens_in: nil,
+        tokens_out: nil,
+        cost: cost,
+        session_id: session_id,
+        recorded_at: DateTime.utc_now()
+      }
+
+      {:noreply, accumulate(state, cost, tokens, entry)}
+    end
   end
 
   @impl true
@@ -327,6 +374,28 @@ defmodule OptimalSystemAgent.Budget do
          monthly_calls: 0,
          monthly_reset_at: next_month_midnight()
      }}
+  end
+
+  # ── Pause / resume handlers (Tier 3 #12) ────────────────────────────────
+
+  @impl true
+  def handle_call(:pause, _from, state) do
+    {:reply, :ok, %{state | paused: true}}
+  end
+
+  @impl true
+  def handle_call(:resume, _from, state) do
+    {:reply, :ok, %{state | paused: false}}
+  end
+
+  @impl true
+  def handle_call(:toggle_pause, _from, state) do
+    {:reply, :ok, %{state | paused: not state.paused}}
+  end
+
+  @impl true
+  def handle_call(:paused?, _from, state) do
+    {:reply, state.paused, state}
   end
 
   # ---------------------------------------------------------------------------

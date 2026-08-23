@@ -1202,6 +1202,12 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "diff" => OptimalSystemAgent.Tools.Builtins.Diff,
       "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,
 
+      # ── Security intelligence layer ─────────────────────────────────────
+      # Deferred (should_defer? true): discovered via tool_search only during
+      # security tasks. Exposes structured notes, attack-surface graph, TDA,
+      # and vulnerability deduplication. See SecurityContext prompt section.
+      "security_intel" => OptimalSystemAgent.Tools.Builtins.SecurityIntel,
+
       # ── Workspace shape ────────────────────────────────────────────────
       # Classifies submodules / nested independent repos / workspace members,
       # which `git ls-files` collapses to a single entry each. Cached per root.
