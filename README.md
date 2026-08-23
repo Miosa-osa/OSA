@@ -874,11 +874,19 @@ nothing below changes behaviour on a normal coding turn.
   vulnerabilities and their relationships), LLM-assisted finding
   deduplication, and a task-difficulty assessment that steers explore-vs-exploit
   decisions.
-- **Reporting** — findings render to valid SARIF 2.1.0, and a code-fix section
-  records `fix_before`/`fix_after` unified diffs per finding.
-- **Methodology & playbooks** — a phased engagement skill (scope → recon → vuln
-  discovery → exploitation → post-exploit → report) and phased playbooks for
-  web-app, network, and full-engagement work with entry/exit criteria.
+- **Reporting** - findings render to valid SARIF 2.1.0 with CVSS v3.1 scores and
+  CWE/OWASP mapping, and a code-fix section records `fix_before`/`fix_after`
+  unified diffs per finding. A report gate drops anything missing vector, CWE,
+  and evidence.
+- **Whitebox 0-day** - when the source is in the workspace, a Vulnhuntr-style
+  call-chain analyzer traces untrusted input to sinks, scores the finding, and
+  a variant scanner hunts similar unpatched sites from a known bug. CI mode
+  runs that pass headless and emits SARIF.
+- **Methodology & playbooks** - a phased engagement skill (scope -> recon ->
+  vuln discovery -> exploitation -> post-exploit -> report) and playbooks for
+  web-app, network, full-engagement, whitebox, CTF, CI scan, cloud, Kubernetes,
+  and Active Directory. Live-target commands go through a Rules-of-Engagement
+  scope gate (CIDR/host/domain + blast-radius class).
 
 Authorization is explicit and scoped: OSA operates only within the target and
 mandate you give it, and the capability is meant for work you are permitted to

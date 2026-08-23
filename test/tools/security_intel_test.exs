@@ -454,4 +454,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
     end
   end
 
+  describe "report_gate / threat_lookup / recon_ingest / playbook whitebox" do
+    test "report_gate accepts a scored finding", %{ctx: ctx} do
+      {:ok, body} =
+        run("report_gate", ctx, %{
+          "finding" => %{
+            "vuln_class" => "sqli",
+            "cvss_vector" => "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "poc" => "id=1"
+          }
+        })
+
+      assert body =~ "eligible"
+      assert body =~ "CWE-89"
+    end
+
+    test "threat_lookup hits bundled KEV", %{ctx: ctx} do
+      {:ok, body} = run("threat_lookup", ctx, %{"cve" => "CVE-2021-44228"})
+      assert body =~ "KEV=true"
+    end
+
+    test "recon_ingest stores httpx notes", %{ctx: ctx} do
+      {:ok, body} =
+        run("recon_ingest", ctx, %{
+          "tool" => "httpx",
+          "format" => "jsonl",
+          "payload" => ~s({"url":"https://t.example/","status_code":200,"host":"t.example"})
+        })
+
+      assert body =~ "ingested 1"
+      {:ok, list} = run("note_list", ctx)
+      assert list =~ "t.example"
+    end
+
+    test "playbook_start accepts whitebox", %{ctx: ctx} do
+      {:ok, body} = run("playbook_start", ctx, %{"playbook_id" => "whitebox"})
+      assert body =~ "Whitebox"
+    end
+  end
 end

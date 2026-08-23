@@ -57,6 +57,8 @@ defmodule OptimalSystemAgent.Security.CweAndRoeTest do
       refute RoeGuard.in_scope?(c, "evil.com")
       # glob is single-label, not a wildcard-everything
       refute RoeGuard.in_scope?(c, "deep.web.staging.example.com")
+      assert RoeGuard.in_scope?(c, "https://app.example.com/admin")
+      refute RoeGuard.in_scope?(c, "https://evil.com/phish")
     end
   end
 

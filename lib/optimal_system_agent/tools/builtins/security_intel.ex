@@ -53,7 +53,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     Cvss,
     CweCatalog,
     CallChainAnalyzer,
-    RoeGuard
+    RoeGuard,
+    ReportGate,
+    ThreatIntel,
+    ReconIngest,
+    AttackPath,
+    AttackTaxonomy,
+    VariantAnalysis,
+    CiScan
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -108,7 +115,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "whitebox_scan",
             "cvss_score",
             "cwe_lookup",
-            "roe_check"
+            "roe_check",
+            "report_gate",
+            "threat_lookup",
+            "recon_ingest",
+            "graph_attack_paths",
+            "bloodhound_ingest",
+            "variant_scan",
+            "ci_scan",
+            "map_technique",
+            "coverage_report"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -275,6 +291,39 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "blast" => %{"type" => "string"},
             "target" => %{"type" => "string"}
           }
+        },
+        "finding" => %{
+          "type" => "object",
+          "description" => "report_gate / map_technique: a candidate finding to evaluate or tag"
+        },
+        "cve" => %{
+          "type" => "string",
+          "description" => "threat_lookup: CVE id (e.g. CVE-2021-44228)"
+        },
+        "tool" => %{
+          "type" => "string",
+          "description" => "recon_ingest: nmap | httpx | subfinder | nuclei | naabu"
+        },
+        "format" => %{
+          "type" => "string",
+          "description" => "recon_ingest: xml | jsonl | json | text"
+        },
+        "payload" => %{
+          "type" => "string",
+          "description" => "recon_ingest / bloodhound_ingest: raw tool output or JSON"
+        },
+        "from_id" => %{"type" => "string", "description" => "graph_attack_paths: source node id"},
+        "to_id" => %{
+          "type" => "string",
+          "description" => "graph_attack_paths: destination node id"
+        },
+        "root" => %{"type" => "string", "description" => "variant_scan / ci_scan: workspace path"},
+        "pattern" => %{"type" => "string", "description" => "variant_scan: literal or regex"},
+        "needle" => %{"type" => "string", "description" => "variant_scan: seed snippet"},
+        "technique_ids" => %{
+          "type" => "array",
+          "items" => %{"type" => "string"},
+          "description" => "coverage_report: ATT&CK technique ids already tried"
         }
       },
       "required" => ["action"]
@@ -327,6 +376,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "cvss_score" -> do_cvss_score(input)
       "cwe_lookup" -> do_cwe_lookup(input)
       "roe_check" -> do_roe_check(input)
+      "report_gate" -> do_report_gate(input)
+      "threat_lookup" -> do_threat_lookup(input)
+      "recon_ingest" -> do_recon_ingest(session_id, input)
+      "graph_attack_paths" -> do_graph_attack_paths(session_id, input)
+      "bloodhound_ingest" -> do_bloodhound_ingest(session_id, input)
+      "variant_scan" -> do_variant_scan(input)
+      "ci_scan" -> do_ci_scan(input)
+      "map_technique" -> do_map_technique(input)
+      "coverage_report" -> do_coverage_report(input)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -607,6 +665,192 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     {:ok,
      "RoE verdict: #{verdict}\nblast: #{action.blast}\ntarget: #{action[:target] || "-"}\nreason: #{reason}"}
   end
+
+  defp do_report_gate(input) do
+    finding = Map.get(input, "finding") || %{}
+
+    case ReportGate.evaluate(finding) do
+      {:ok, f} ->
+        {:ok, "eligible\nCWE #{f.cwe}\nOWASP #{f.owasp}\nCVSS #{f.cvss_score} (#{f.severity})"}
+
+      {:error, reasons} ->
+        {:error, "not report-grade: " <> Enum.join(reasons, "; ")}
+    end
+  end
+
+  defp do_threat_lookup(input) do
+    cve = Map.get(input, "cve") || get_in(input, ["finding", "cve"])
+
+    case cve && ThreatIntel.lookup(cve) do
+      {:ok, entry} ->
+        {:ok,
+         "#{entry["cve"]} KEV=true #{entry["shortName"]} (#{entry["vendor"]} #{entry["product"]})"}
+
+      :not_found ->
+        {:ok, "#{cve} is not on the bundled KEV list"}
+
+      _ ->
+        {:error, "threat_lookup requires 'cve'"}
+    end
+  end
+
+  defp do_recon_ingest(session_id, input) do
+    case ReconIngest.ingest(input) do
+      {:ok, []} ->
+        {:ok, "recon_ingest: no records"}
+
+      {:ok, notes} ->
+        with {:ok, _} <- NotesStore.ensure_started(session_id) do
+          notes
+          |> Enum.with_index(1)
+          |> Enum.each(fn {note, i} ->
+            key = "recon:#{note.source}:#{i}:#{note.target}"
+            NotesStore.put(session_id, key, note)
+          end)
+        end
+
+        {:ok, "ingested #{length(notes)} note(s) from #{Map.get(input, "tool")}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_graph_attack_paths(session_id, input) do
+    graph = session_graph(session_id)
+    from_id = Map.get(input, "from_id")
+    to_id = Map.get(input, "to_id")
+
+    cond do
+      is_binary(from_id) and is_binary(to_id) ->
+        case AttackPath.shortest_path(graph, from_id, to_id) do
+          {:ok, path} ->
+            {:ok, "cost #{path.cost}: " <> Enum.join(path.nodes, " -> ")}
+
+          :unreachable ->
+            {:ok, "no path from #{from_id} to #{to_id}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      is_binary(from_id) ->
+        paths = AttackPath.paths_from(graph, from_id, limit: 10)
+
+        body =
+          paths
+          |> Enum.map(fn p -> "  #{p.cost}  #{Enum.join(p.nodes, " -> ")}" end)
+          |> Enum.join("\n")
+
+        {:ok, if(body == "", do: "no paths from #{from_id}", else: "paths:\n#{body}")}
+
+      true ->
+        {:error, "graph_attack_paths requires 'from_id'"}
+    end
+  end
+
+  defp do_bloodhound_ingest(session_id, input) do
+    payload = Map.get(input, "payload") || ""
+    base = session_graph(session_id)
+
+    case AttackPath.ingest_bloodhound(base, payload) do
+      {:ok, graph} ->
+        AttackPath.store(session_id, graph)
+        {:ok, "ingested #{map_size(graph.nodes)} node(s), #{length(graph.edges)} edge(s)"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp session_graph(session_id) do
+    stored = AttackPath.fetch(session_id)
+
+    if stored.edges == [] and stored.nodes == %{} do
+      case NotesStore.ensure_started(session_id) do
+        {:ok, _} -> NotesStore.graph(session_id)
+        _ -> AttackPath.new()
+      end
+    else
+      stored
+    end
+  rescue
+    _ -> AttackPath.fetch(session_id)
+  end
+
+  defp do_variant_scan(input) do
+    opts =
+      [root: Map.get(input, "root")]
+      |> maybe_kw(:pattern, Map.get(input, "pattern"))
+      |> maybe_kw(:needle, Map.get(input, "needle"))
+
+    case VariantAnalysis.scan(opts) do
+      {:ok, []} ->
+        {:ok, "variant_scan: no hits"}
+
+      {:ok, hits} ->
+        body =
+          hits
+          |> Enum.take(30)
+          |> Enum.map(fn h -> "  #{h.path}:#{h.line}  #{h.fingerprint}  #{h.snippet}" end)
+          |> Enum.join("\n")
+
+        {:ok, "#{length(hits)} hit(s):\n#{body}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_ci_scan(input) do
+    root = Map.get(input, "root") || File.cwd!()
+
+    case CiScan.run(root: root) do
+      {:ok, report} ->
+        s = report.summary
+
+        {:ok,
+         "ci_scan entries=#{report.entries_scanned} failed=#{report.failed?} " <>
+           "critical=#{s.critical} high=#{s.high} medium=#{s.medium} low=#{s.low}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_map_technique(input) do
+    class = Map.get(input, "vuln_class")
+    finding = Map.get(input, "finding")
+
+    tag =
+      cond do
+        is_map(finding) -> AttackTaxonomy.tag(finding)
+        is_binary(class) -> AttackTaxonomy.tag(safe_atom(class))
+        true -> nil
+      end
+
+    case tag do
+      %{technique_id: id, name: name, tactic: tactic} ->
+        {:ok, "#{id} #{name} (#{tactic})"}
+
+      _ ->
+        {:error, "no ATT&CK mapping"}
+    end
+  end
+
+  defp do_coverage_report(input) do
+    ids = Map.get(input, "technique_ids") || []
+    report = AttackTaxonomy.coverage_report(ids)
+
+    {:ok,
+     "tried #{length(report.tried)} / #{length(report.tried) + length(report.untried)}\n" <>
+       "tactics covered: #{Enum.map_join(report.tactics_covered, ", ", &to_string/1)}\n" <>
+       "tactics missing: #{Enum.map_join(report.tactics_missing, ", ", &to_string/1)}"}
+  end
+
+  defp maybe_kw(opts, _k, nil), do: opts
+  defp maybe_kw(opts, _k, ""), do: opts
+  defp maybe_kw(opts, k, v), do: Keyword.put(opts, k, v)
 
   defp parse_roe_contract(nil), do: nil
 

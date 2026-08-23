@@ -196,7 +196,10 @@ defmodule OptimalSystemAgent.Security.RoeGuard do
   @doc "Is `target` covered by the contract's allowed targets (host, CIDR, or glob domain)?"
   @spec in_scope?(contract(), String.t()) :: boolean()
   def in_scope?(%{targets: targets}, target) when is_list(targets) do
-    Enum.any?(targets, &target_matches?(&1, target))
+    host = extract_host(target)
+
+    Enum.any?(targets, &target_matches?(&1, target)) or
+      (host != target and Enum.any?(targets, &target_matches?(&1, host)))
   end
 
   def in_scope?(_, _), do: false
@@ -217,6 +220,15 @@ defmodule OptimalSystemAgent.Security.RoeGuard do
 
   # No window, or no clock supplied: not a time-based block.
   defp within_window?(_, _), do: true
+
+  # URLs are scoped by host so `https://app.example.com/admin` matches
+  # `app.example.com`. Bare IPs and hostnames pass through unchanged.
+  defp extract_host(target) do
+    case URI.parse(target) do
+      %URI{host: host} when is_binary(host) and host != "" -> host
+      _ -> target
+    end
+  end
 
   defp target_matches?(rule, target) do
     cond do
