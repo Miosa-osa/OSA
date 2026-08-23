@@ -1434,6 +1434,26 @@ the optional, recommended layer when you want a deeper, shared knowledge base.
 Skills over code changes. Write a `SKILL.md`, share it with the community. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
+## Acknowledgments
+
+OSA is built and maintained by Roberto H. Luna. The people below contributed to,
+mentored, or advised its development over time. Roles describe historical
+contribution and do not imply current employment, source-code authorship, or
+ownership beyond what each description states.
+
+**Founder / Lead**
+
+- [Roberto H. Luna](https://github.com/robertohluna) - Founder / Lead Developer
+
+**Contributors**
+
+- Pedro Afonso - Contributor
+
+**Mentors / Advisors**
+
+- Thomas Long - Mentor / Advisor. Provided sustained mentorship and advisory
+  support during the development and evolution of MIOSA / OSA.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
