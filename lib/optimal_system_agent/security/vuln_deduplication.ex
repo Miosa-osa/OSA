@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.VulnDeduplication do
   @moduledoc """
   LLM-powered vulnerability deduplication for pentest findings.
 
-  Adapted from Strix's `dedupe.py`. When a new vulnerability finding is
+  When a new vulnerability finding is
   reported, this module determines whether it's a duplicate of an existing
   finding by comparing root cause, endpoint, parameter, and fix.
 

@@ -2,9 +2,7 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   @moduledoc """
   Whitebox 0-day discovery by LLM-driven source-to-sink call-chain analysis.
 
-  Adapted from Vulnhuntr's design (protectai/vulnhuntr) and Project Naptime /
-  Big Sleep's "let the model walk the code" loop. OSA's pentest capability was
-  blackbox (DAST) only - but OSA is a coding agent that usually HAS the target
+  OSA's pentest capability was blackbox (DAST) only - but OSA is a coding agent that usually HAS the target
   source, which is the strongest possible position to find a 0-day. This module
   is that whitebox pass.
 
@@ -88,11 +86,15 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
     * `:entry` - path label for the entry file (for the call chain trace)
     * `:content` - the entry file's source (required)
     * `:vuln_classes` - subset of `vuln_classes/0` to hunt (default: all)
-    * `:reader` - `fn symbol_or_path -> {:ok, source} | :not_found end`, resolves
-      a symbol/file the model asks to see next. Defaults to "not found" (so a
-      caller that passes no reader gets a single-file analysis).
+    * `:reader` - resolves a hop the model asks to see next. Called as
+      `reader.({:symbol, name, code_line})` when a `code_line` is present, then
+      `reader.({name, code_line})`, then `reader.(name)`. First `{:ok, source}`
+      wins. Defaults to "not found" (so a caller that passes no reader gets a
+      single-file analysis).
     * `:runner` - `fn messages -> {:ok, text} | {:error, reason}`, the LLM call.
     * `:max_depth` - call-chain hops before the trace stops (default #{@default_max_depth}).
+    * `:mode` - `:legacy` (default: one trace, then judge every class) or
+      `:per_class` (Vulnhuntr: class-focused trace, judge after each hop).
 
   Returns `{:ok, [finding]}`. Findings are only those the judge marked
   exploitable; each carries a CVSS score when the judge supplied a vector.
@@ -109,9 +111,16 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
       runner = Keyword.get(opts, :runner) || default_runner()
       max_depth = Keyword.get(opts, :max_depth, @default_max_depth)
       entry = Keyword.get(opts, :entry, "<entry>")
+      mode = Keyword.get(opts, :mode, :legacy)
 
-      chain = trace(entry, content, reader, runner, max_depth)
-      {:ok, judge(chain, classes, runner)}
+      case mode do
+        :per_class ->
+          {:ok, analyze_per_class(entry, content, classes, reader, runner, max_depth)}
+
+        _ ->
+          chain = trace(entry, content, reader, runner, max_depth)
+          {:ok, judge(chain, classes, runner)}
+      end
     end
   end
 
@@ -126,18 +135,22 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   defp do_trace(acc, _seen, _reader, _runner, 0), do: Enum.reverse(acc)
 
   defp do_trace([{label, source} | _] = acc, seen, reader, runner, depth) do
-    case ask_next_symbols(label, source, runner) do
+    {_handles, hops} = ask_next_symbols(label, source, runner)
+
+    case hops do
       [] ->
         Enum.reverse(acc)
 
-      symbols ->
+      hops ->
         {new_acc, new_seen} =
-          symbols
-          |> Enum.reject(&MapSet.member?(seen, &1))
-          |> Enum.reduce({acc, seen}, fn sym, {a, s} ->
-            case reader.(sym) do
-              {:ok, src} -> {[{sym, src} | a], MapSet.put(s, sym)}
-              _ -> {a, MapSet.put(s, sym)}
+          hops
+          |> Enum.reject(fn %{name: name} -> MapSet.member?(seen, name) end)
+          |> Enum.reduce({acc, seen}, fn hop, {a, s} ->
+            name = hop.name
+
+            case read_symbol(reader, hop) do
+              {:ok, src} -> {[{name, src} | a], MapSet.put(s, name)}
+              _ -> {a, MapSet.put(s, name)}
             end
           end)
 
@@ -149,19 +162,113 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
     end
   end
 
-  defp ask_next_symbols(label, source, runner) do
+  defp ask_next_symbols(label, source, runner, class \\ nil) do
     messages = [
-      %{role: "system", content: trace_system_prompt()},
+      %{role: "system", content: trace_system_prompt(class)},
       %{role: "user", content: "FILE: #{label}\n\n```\n#{cap(source)}\n```"}
     ]
 
     with {:ok, text} <- runner.(messages),
-         {:ok, %{"next_symbols" => syms}} when is_list(syms) <- extract_json(text) do
-      syms |> Enum.filter(&is_binary/1) |> Enum.take(8)
+         {:ok, json} when is_map(json) <- extract_json(text) do
+      hops =
+        case json["next_symbols"] do
+          syms when is_list(syms) ->
+            syms |> Enum.flat_map(&parse_hop/1) |> Enum.take(8)
+
+          _ ->
+            []
+        end
+
+      {json["handles_user_input"] == true, hops}
     else
-      _ -> []
+      _ -> {false, []}
     end
   end
+
+  # ── per_class: Vulnhuntr secondary hops (trace + judge per class) ───────────
+
+  defp analyze_per_class(entry, content, classes, reader, runner, max_depth) do
+    classes
+    |> Enum.take(@default_max_findings)
+    |> Enum.flat_map(fn class ->
+      case walk_class(entry, content, reader, runner, max_depth, class) do
+        :skip ->
+          []
+
+        {:finding, %{exploitable: true} = finding} ->
+          [finding]
+
+        {:finding, _} ->
+          []
+      end
+    end)
+  end
+
+  defp walk_class(entry, content, reader, runner, max_depth, class) do
+    {handles?, hops} = ask_next_symbols(entry, content, runner, class)
+
+    if handles? != true and hops == [] do
+      :skip
+    else
+      acc = [{entry, content}]
+      seen = MapSet.new([entry])
+      do_walk_class(acc, hops, seen, reader, runner, max_depth, class, nil)
+    end
+  end
+
+  defp do_walk_class(acc, _hops, _seen, _reader, runner, 0, class, last) do
+    {:finding, last || judge_one(class, render_chain(acc), runner)}
+  end
+
+  defp do_walk_class(acc, [], _seen, _reader, runner, _depth, class, last) do
+    {:finding, last || judge_one(class, render_chain(acc), runner)}
+  end
+
+  defp do_walk_class(acc, hops, seen, reader, runner, depth, class, last) do
+    {new_acc, new_seen, queued, finding, halt?} =
+      Enum.reduce_while(hops, {acc, seen, [], last, false}, fn hop, {a, s, q, f, _} ->
+        name = hop.name
+
+        if MapSet.member?(s, name) do
+          {:cont, {a, s, q, f, false}}
+        else
+          s2 = MapSet.put(s, name)
+
+          case read_symbol(reader, hop) do
+            {:ok, src} ->
+              a2 = a ++ [{name, src}]
+              f2 = judge_one(class, render_chain(a2), runner)
+
+              if early_stop?(f2) do
+                {:halt, {a2, s2, q, f2, true}}
+              else
+                {_h, more} = ask_next_symbols(name, src, runner, class)
+                more = Enum.reject(more, fn h -> MapSet.member?(s2, h.name) end)
+                {:cont, {a2, s2, q ++ more, f2, false}}
+              end
+
+            _ ->
+              {:cont, {a, s2, q, f, false}}
+          end
+        end
+      end)
+
+    cond do
+      halt? ->
+        {:finding, finding}
+
+      length(new_acc) == length(acc) ->
+        {:finding, finding || judge_one(class, render_chain(new_acc), runner)}
+
+      true ->
+        do_walk_class(new_acc, queued, new_seen, reader, runner, depth - 1, class, finding)
+    end
+  end
+
+  defp early_stop?(%{exploitable: true, confidence_0_10: n}) when is_integer(n) and n >= 7,
+    do: true
+
+  defp early_stop?(_), do: false
 
   # ── judge: vuln-class-specific exploitability analysis ──────────────────────
 
@@ -200,12 +307,17 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
       end
 
     catalog = CweCatalog.lookup(class)
+    source = to_s(json["source"])
+    band = confidence(json["confidence"])
+    numeric = confidence_numeric(json["confidence_0_10"], band)
+    {band, numeric} = cap_remote_confidence(source, band, numeric)
 
     %{
       vuln_class: class,
       exploitable: exploitable,
-      confidence: confidence(json["confidence"]),
-      source: to_s(json["source"]),
+      confidence: band,
+      confidence_0_10: numeric,
+      source: source,
       sink: to_s(json["sink"]),
       call_chain: (is_list(json["call_chain"]) && json["call_chain"]) || [],
       reasoning: to_s(json["reasoning"]),
@@ -221,25 +333,45 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   # ── prompts ─────────────────────────────────────────────────────────────
 
   @doc false
-  def trace_system_prompt do
+  def trace_system_prompt, do: trace_system_prompt(nil)
+
+  defp trace_system_prompt(class) do
+    class_bit = class_trace_focus(class)
+
     """
     You are a security code auditor mapping how UNTRUSTED user input flows
     through a codebase toward dangerous operations. You are given one file.
 
     Identify where remote/user-controlled data ENTERS (request params, bodies,
     headers, uploaded files, deserialized data) and which functions, methods, or
-    classes that tainted data is then passed INTO - the next hop in the call
-    chain. Name symbols precisely enough to look them up (function or method
-    name, or file path).
-
+    classes that tainted data is then passed INTO.
+    Always identify the next hop in the call chain.
+    Name symbols precisely enough to look them up (function or method name, or file path).
+    #{class_bit}
     Reply with ONE JSON object and nothing else:
 
         {"handles_user_input": true|false,
          "input_sources": ["<where untrusted data enters>"],
-         "next_symbols": ["<function/method/file to follow the taint into>"]}
+         "next_symbols": [{"name": "<function/method/file>", "code_line": "<the exact line it appears on>"}]}
 
-    If the file neither takes user input nor forwards data anywhere interesting,
-    return empty arrays. Do not speculate about symbols you cannot see.
+    `next_symbols` may also be a list of name strings. Prefer the object form:
+    the exact `code_line` is how a resolver disambiguates (Vulnhuntr/Jedi).
+    Do not request standard-library or third-party package internals - reason
+    from what you know. If the file neither takes user input nor forwards data
+    anywhere interesting, return empty arrays. Do not speculate about symbols
+    you cannot see.
+    """
+  end
+
+  defp class_trace_focus(nil), do: ""
+
+  defp class_trace_focus(class) do
+    """
+
+    This hop is hunting #{class_label(class)} (#{class_focus(class)}).
+    Prefer next_symbols that are sinks or taint-forwarding calls for this class,
+    and still return name+code_line so the resolver can disambiguate.
+    #{class_bypass_hint(class)}
     """
   end
 
@@ -262,10 +394,17 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
     the code. Missing sanitization you cannot see is NOT evidence - default to
     exploitable=false when uncertain.
 
+    Confidence is 0-10. 10 means you have the entire remote-input-to-sink path.
+    If the source is not a remote HTTP/API/RPC entry (CLI flag, local file,
+    test helper), you MUST set confidence_0_10 to 6 or below even if exploitable.
+
+    #{class_bypass_hint(class)}
+
     Reply with ONE JSON object and nothing else:
 
         {"exploitable": true|false,
          "confidence": "high"|"medium"|"low",
+         "confidence_0_10": 0,
          "source": "<file:symbol where the tainted input enters>",
          "sink": "<file:symbol of the dangerous operation>",
          "call_chain": ["<hop>", "..."],
@@ -307,6 +446,42 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   defp class_focus(:deserialization), do: "user input deserialized into objects"
   defp class_focus(_), do: "untrusted input reaching a dangerous operation"
 
+  # Vulnhuntr secondary prompts carry class-specific bypass *patterns* (not
+  # a payload cookbook). Keep them short and sink-focused.
+  defp class_bypass_hint(:sqli),
+    do: "Look for string concat / interpolation into SQL, second-order use, and ORM raw()."
+
+  defp class_bypass_hint(:xss),
+    do:
+      "Look for sinks that write into HTML/JS (innerHTML, unescaped templates) after a context break."
+
+  defp class_bypass_hint(:rce),
+    do: "Look for exec/system/eval/spawn with attacker-controlled arguments or shell=True."
+
+  defp class_bypass_hint(:ssrf),
+    do:
+      "Look for user-controlled URLs hitting the server's HTTP client, including redirects and DNS rebinding."
+
+  defp class_bypass_hint(:idor),
+    do: "Look for object ids taken from the request and used in a query with no ownership check."
+
+  defp class_bypass_hint(:lfi),
+    do: "Look for user-controlled file paths in include/read/open without canonicalization."
+
+  defp class_bypass_hint(:path_traversal),
+    do: "Look for path join with user segments and no resolve-against-root check."
+
+  defp class_bypass_hint(:xxe),
+    do: "Look for XML parsers with external entities left on, including SVG/DOCX uploads."
+
+  defp class_bypass_hint(:ssti),
+    do: "Look for user input passed to a template engine render/compile API."
+
+  defp class_bypass_hint(:deserialization),
+    do: "Look for pickle/Marshal/yaml.load/unserialize/binary_to_term of request data."
+
+  defp class_bypass_hint(_), do: ""
+
   # ── helpers ─────────────────────────────────────────────────────────────
 
   defp render_chain(chain) do
@@ -324,6 +499,74 @@ defmodule OptimalSystemAgent.Security.CallChainAnalyzer do
   defp confidence("high"), do: :high
   defp confidence("low"), do: :low
   defp confidence(_), do: :medium
+
+  defp confidence_numeric(n, _band) when is_integer(n) and n >= 0 and n <= 10, do: n
+  defp confidence_numeric(n, band) when is_float(n), do: confidence_numeric(trunc(n), band)
+  defp confidence_numeric(_, :high), do: 8
+  defp confidence_numeric(_, :low), do: 3
+  defp confidence_numeric(_, _), do: 5
+
+  # Vulnhuntr: non-remote entries cannot claim high certainty.
+  defp cap_remote_confidence(source, band, numeric) do
+    if remote_entry?(source) do
+      {band, numeric}
+    else
+      {min_band(band, :medium), min(numeric, 6)}
+    end
+  end
+
+  defp remote_entry?(source) do
+    s = String.downcase(source)
+
+    String.contains?(s, "http") or String.contains?(s, "request") or
+      String.contains?(s, "params") or String.contains?(s, "header") or
+      String.contains?(s, "cookie") or String.contains?(s, "body") or
+      String.contains?(s, "upload") or String.contains?(s, "rpc") or
+      String.contains?(s, "graphql") or String.contains?(s, "route")
+  end
+
+  defp min_band(:high, cap), do: cap
+  defp min_band(other, _cap), do: other
+
+  defp parse_hop(s) when is_binary(s) and s != "", do: [%{name: s, code_line: nil}]
+
+  defp parse_hop(%{"name" => s} = m) when is_binary(s) and s != "" do
+    [%{name: s, code_line: hop_code_line(m)}]
+  end
+
+  defp parse_hop(%{name: s} = m) when is_binary(s) and s != "" do
+    [%{name: s, code_line: hop_code_line(m)}]
+  end
+
+  defp parse_hop(_), do: []
+
+  defp hop_code_line(%{"code_line" => line}) when is_binary(line) and line != "", do: line
+  defp hop_code_line(%{code_line: line}) when is_binary(line) and line != "", do: line
+  defp hop_code_line(_), do: nil
+
+  # Seen-set keys on `name`. Try the most specific reader contract first.
+  defp read_symbol(reader, %{name: name, code_line: line}) do
+    args =
+      if is_binary(line) and line != "" do
+        [{:symbol, name, line}, {name, line}, name]
+      else
+        [name]
+      end
+
+    Enum.reduce_while(args, :not_found, fn arg, acc ->
+      case invoke_reader(reader, arg) do
+        {:ok, src} -> {:halt, {:ok, src}}
+        _ -> {:cont, acc}
+      end
+    end)
+  end
+
+  defp invoke_reader(reader, arg) do
+    reader.(arg)
+  rescue
+    FunctionClauseError -> :not_found
+    BadArityError -> :not_found
+  end
 
   defp to_s(v) when is_binary(v), do: v
   defp to_s(nil), do: ""

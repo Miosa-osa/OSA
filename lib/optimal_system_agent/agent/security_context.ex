@@ -88,7 +88,16 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
   @spec security_posture_block(map()) :: String.t() | nil
   def security_posture_block(state) do
     if security_task_active?(state) do
-      load_prompt_section("SECURITY_POSTURE.md")
+      posture = load_prompt_section("SECURITY_POSTURE.md")
+      method = load_prompt_section("SECURITY_METHOD.md")
+
+      [posture, method]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n\n")
+      |> case do
+        "" -> nil
+        text -> text
+      end
     end
   end
 
@@ -289,13 +298,7 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     - Chain scan results intelligently — use output from reconnaissance to inform targeted exploitation
     </scan_methodology>
 
-    <finding_quality>
-    Treat scanner output, tool hits, and suspicious behavior as leads until validated with evidence.
-    A vulnerability is report-ready only when it includes: affected asset, concrete evidence, reliable reproduction steps, demonstrated impact, remediation guidance, and confidence level.
-    Calibrate severity to actual demonstrated impact, not theoretical maximum.
-    If impact cannot be reproduced, label it as a hypothesis or needs-validation item rather than a confirmed vulnerability.
-    Deduplicate equivalent findings and consolidate repeated evidence.
-    </finding_quality>
+    #{finding_quality_block()}
 
     <maximize_parallel_tool_calls>
     Security assessments often require sequential workflows due to dependencies. However, when operations are truly independent, execute them concurrently.
@@ -411,13 +414,7 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     - Chain scan results intelligently — use output from reconnaissance to inform targeted exploitation
     </scan_methodology>
 
-    <finding_quality>
-    Treat scanner output, tool hits, and suspicious behavior as leads until validated with evidence.
-    A vulnerability is report-ready only when it includes: affected asset, concrete evidence, reliable reproduction steps, demonstrated impact, remediation guidance, and confidence level.
-    Calibrate severity to actual demonstrated impact, not theoretical maximum.
-    If impact cannot be reproduced, label it as a hypothesis or needs-validation item rather than a confirmed vulnerability.
-    Deduplicate equivalent findings and consolidate repeated evidence.
-    </finding_quality>
+    #{finding_quality_block()}
 
     <maximize_parallel_tool_calls>
     Security assessments often require sequential workflows due to dependencies. However, when operations are truly independent, execute them concurrently.
@@ -555,8 +552,24 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
 
     CODE FIXES — for each vulnerability with a concrete remediation, call `codefix_record` with a fix_before/fix_after code diff and an explanation. `codefix_report` renders all fixes as a unified-diff report section. A finding with a concrete fix is far more actionable than prose remediation guidance — include the actual code change, not "you should sanitize input".
 
-    WHITEBOX 0-DAY — when you have the source, this is the strongest pass. `whitebox_analyze` traces user input to sinks. `variant_scan` hunts similar unpatched sites from a known bug. `ci_scan` is the headless CI form. `cvss_score` + `report_gate` make a finding report-grade (CVSS vector, CWE, evidence). `roe_load` / `roe_check` are the hard gate before any live-target command.
+    WHITEBOX 0-DAY — when you have the source, this is the strongest pass. `whitebox_scan` traces user input to sinks (mode per_class). `variant_scan` hunts similar unpatched sites from a known bug. `ci_scan` is the headless CI form (`since` / `changed_files` for diff-scope). `cvss_score` + `report_gate` make a finding report-grade (CVSS vector, CWE, evidence). `roe_check` is the hard gate before any live-target command. `har_ingest` / `openapi_ingest` turn captured traffic and API specs into endpoint notes. `evidence_record` hashes a receipt onto the chain. `attack_tree_select` picks the next vuln class (basics first).
+
+    HUNTER COLLECTORS — `js_secrets` rips JS bundles for keys and internal URLs. `owned_cidrs` / `vhost_candidates` / `ingest_httpx` map CIDRs and vhosts from tool output. `oob_start` then `oob_host` then payload then `oob_poll` / `oob_receipt` for blind classes (`oob_require` before claiming a blind send). `http_ingest_har` / `http_list` / `http_view` / `http_repeat` (RoE required) is intercept+replay without a MITM daemon. `class_queue_put` then `class_queue_assert` is the exploit gate. `login_preflight` before IDOR/authz. `skeptic_promote` before calling a finding confirmed. `entry_fanout` one security-auditor per handler. `codefix_open_pr` opens the AutoFix PR.
     </security_intelligence_layer>
+    """
+  end
+
+  defp finding_quality_block do
+    """
+    <finding_quality>
+    Scanner hits and "this looks like SQLi" are leads, not findings.
+    A finding is report-ready only when it quotes a tool receipt (command output, HTTP pair, or hashed evidence_record), names the asset, has reproduction steps, demonstrated impact, a CVSS vector, a CWE, and a confidence score.
+    Confidence 0-10. Below 7 is not confirmed. If the entry is not remote HTTP/API/RPC, cap at 6.
+    Calibrate severity to demonstrated impact, not theoretical maximum.
+    An empty discovery queue for a class is "not assessed", not "clean."
+    Do not dismiss HTTP 500s, odd SSRFs, or tiny file uploads as low-impact without following one hop.
+    Deduplicate equivalent findings. Signal over volume.
+    </finding_quality>
     """
   end
 end

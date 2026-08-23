@@ -60,7 +60,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     AttackPath,
     AttackTaxonomy,
     VariantAnalysis,
-    CiScan
+    CiScan,
+    TrafficIngest,
+    Evidence,
+    AttackTree,
+    JsSecrets,
+    SurfaceMap,
+    Oob,
+    HttpReplay,
+    ClassQueue,
+    LoginPreflight,
+    FindingSkeptic,
+    EntryFanout,
+    CodeFixPr
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -124,7 +136,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "variant_scan",
             "ci_scan",
             "map_technique",
-            "coverage_report"
+            "coverage_report",
+            "har_ingest",
+            "openapi_ingest",
+            "evidence_record",
+            "attack_tree_select",
+            "js_secrets",
+            "owned_cidrs",
+            "vhost_candidates",
+            "ingest_httpx",
+            "oob_start",
+            "oob_host",
+            "oob_poll",
+            "oob_receipt",
+            "oob_require",
+            "http_ingest_har",
+            "http_list",
+            "http_view",
+            "http_repeat",
+            "class_queue_put",
+            "class_queue_assert",
+            "class_queue_status",
+            "login_preflight",
+            "skeptic_promote",
+            "entry_fanout",
+            "codefix_open_pr"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -324,6 +360,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
           "type" => "array",
           "items" => %{"type" => "string"},
           "description" => "coverage_report: ATT&CK technique ids already tried"
+        },
+        "domain" => %{
+          "type" => "string",
+          "description" => "vhost_candidates: parent domain"
+        },
+        "names" => %{
+          "type" => "array",
+          "items" => %{"type" => "string"},
+          "description" => "vhost_candidates: extra names (SANs, subfinder)"
+        },
+        "req_id" => %{
+          "type" => "string",
+          "description" => "http_view / http_repeat: captured request id"
+        },
+        "since" => %{
+          "type" => "string",
+          "description" => "ci_scan / entry_fanout: git ref for diff-scope"
+        },
+        "changed_files" => %{
+          "type" => "array",
+          "items" => %{"type" => "string"},
+          "description" => "ci_scan / entry_fanout: explicit relative paths"
+        },
+        "max" => %{
+          "type" => "integer",
+          "description" => "entry_fanout / js_secrets: cap"
+        },
+        "mode" => %{
+          "type" => "string",
+          "description" => "whitebox_scan: per_class (default) or legacy"
         }
       },
       "required" => ["action"]
@@ -385,6 +451,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "ci_scan" -> do_ci_scan(input)
       "map_technique" -> do_map_technique(input)
       "coverage_report" -> do_coverage_report(input)
+      "har_ingest" -> do_har_ingest(session_id, input)
+      "openapi_ingest" -> do_openapi_ingest(session_id, input)
+      "evidence_record" -> do_evidence_record(session_id, input)
+      "attack_tree_select" -> do_attack_tree_select(input)
+      "js_secrets" -> do_js_secrets(input)
+      "owned_cidrs" -> do_owned_cidrs(input)
+      "vhost_candidates" -> do_vhost_candidates(input)
+      "ingest_httpx" -> do_ingest_httpx(input)
+      "oob_start" -> do_oob_start(session_id)
+      "oob_host" -> do_oob_host(session_id)
+      "oob_poll" -> do_oob_poll(session_id)
+      "oob_receipt" -> do_oob_receipt(session_id)
+      "oob_require" -> do_oob_require(session_id)
+      "http_ingest_har" -> do_http_ingest_har(session_id, input)
+      "http_list" -> do_http_list(session_id, input)
+      "http_view" -> do_http_view(session_id, input)
+      "http_repeat" -> do_http_repeat(session_id, input)
+      "class_queue_put" -> do_class_queue_put(session_id, input)
+      "class_queue_assert" -> do_class_queue_assert(session_id, input)
+      "class_queue_status" -> do_class_queue_status(session_id, input)
+      "login_preflight" -> do_login_preflight(input)
+      "skeptic_promote" -> do_skeptic_promote(input)
+      "entry_fanout" -> do_entry_fanout(input)
+      "codefix_open_pr" -> do_codefix_open_pr(session_id, input)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -546,10 +636,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
           CallChainAnalyzer.vuln_classes()
       end
 
+    mode =
+      case Map.get(wb, "mode") || Map.get(input, "mode") do
+        "legacy" -> :legacy
+        :legacy -> :legacy
+        _ -> :per_class
+      end
+
     opts = [
       entry: Map.get(wb, "entry", "<entry>"),
       content: content,
-      vuln_classes: classes
+      vuln_classes: classes,
+      mode: mode
     ]
 
     case CallChainAnalyzer.analyze(opts) do
@@ -805,7 +903,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
   defp do_ci_scan(input) do
     root = Map.get(input, "root") || File.cwd!()
 
-    case CiScan.run(root: root) do
+    opts =
+      [root: root]
+      |> maybe_kw(:since, Map.get(input, "since"))
+      |> maybe_changed_files(Map.get(input, "changed_files"))
+
+    case CiScan.run(opts) do
       {:ok, report} ->
         s = report.summary
 
@@ -851,6 +954,352 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
   defp maybe_kw(opts, _k, nil), do: opts
   defp maybe_kw(opts, _k, ""), do: opts
   defp maybe_kw(opts, k, v), do: Keyword.put(opts, k, v)
+
+  defp maybe_changed_files(opts, files) when is_list(files) and files != [],
+    do: Keyword.put(opts, :changed_files, files)
+
+  defp maybe_changed_files(opts, _), do: opts
+
+  defp do_har_ingest(session_id, input) do
+    ingest_notes(session_id, TrafficIngest.har(Map.get(input, "payload", "")), "har")
+  end
+
+  defp do_openapi_ingest(session_id, input) do
+    ingest_notes(session_id, TrafficIngest.openapi(Map.get(input, "payload", "")), "openapi")
+  end
+
+  defp ingest_notes(_session_id, {:ok, []}, source), do: {:ok, "#{source}: no records"}
+
+  defp ingest_notes(session_id, {:ok, notes}, source) do
+    with {:ok, _} <- NotesStore.ensure_started(session_id) do
+      notes
+      |> Enum.with_index(1)
+      |> Enum.each(fn {note, i} ->
+        NotesStore.put(session_id, "#{source}:#{i}:#{note.target}", note)
+      end)
+    end
+
+    {:ok, "ingested #{length(notes)} #{source} note(s)"}
+  end
+
+  defp ingest_notes(_session_id, {:error, reason}, _source), do: {:error, reason}
+
+  defp do_evidence_record(session_id, input) do
+    opts =
+      [kind: Map.get(input, "kind", "artifact"), note: Map.get(input, "note", "")]
+      |> maybe_kw(:finding_key, Map.get(input, "key"))
+      |> maybe_kw(:path, Map.get(input, "path"))
+      |> maybe_kw(:bytes, Map.get(input, "payload"))
+
+    case Evidence.record(session_id, opts) do
+      {:ok, rec} -> {:ok, "evidence #{rec.id} sha256=#{rec.sha256} bytes=#{rec.bytes}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_attack_tree_select(_input) do
+    tree = AttackTree.new()
+
+    case AttackTree.select(tree) do
+      {:ok, class, new_tree} ->
+        {:ok, "next class: #{class}\n" <> AttackTree.render(new_tree)}
+
+      :done ->
+        {:ok, "attack tree exhausted"}
+    end
+  end
+
+  defp do_js_secrets(input) do
+    cond do
+      is_binary(Map.get(input, "root")) ->
+        max = Map.get(input, "max")
+        opts = if is_integer(max), do: [max_files: max], else: []
+
+        case JsSecrets.extract_dir(input["root"], opts) do
+          {:ok, hits} -> {:ok, JsSecrets.render(hits)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      is_binary(Map.get(input, "path")) ->
+        case JsSecrets.extract_file(input["path"]) do
+          {:ok, hits} -> {:ok, JsSecrets.render(hits)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      is_binary(Map.get(input, "payload")) ->
+        case JsSecrets.extract(input["payload"]) do
+          {:ok, hits} -> {:ok, JsSecrets.render(hits)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      true ->
+        {:error, "js_secrets requires payload, path, or root"}
+    end
+  end
+
+  defp do_owned_cidrs(input) do
+    case SurfaceMap.cidrs_from_whois(Map.get(input, "payload", "")) do
+      {:ok, cidrs} ->
+        {:ok, SurfaceMap.render(%{cidrs: cidrs, vhosts: [], live: []})}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_vhost_candidates(input) do
+    opts =
+      [domain: Map.get(input, "domain")]
+      |> maybe_kw(:names, Map.get(input, "names"))
+
+    case SurfaceMap.vhost_candidates(opts) do
+      {:ok, vhosts} -> {:ok, SurfaceMap.render(%{cidrs: [], vhosts: vhosts, live: []})}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_ingest_httpx(input) do
+    case SurfaceMap.ingest_httpx(Map.get(input, "payload", "")) do
+      {:ok, live} -> {:ok, SurfaceMap.render(%{cidrs: [], vhosts: [], live: live})}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_oob_start(session_id) do
+    case Oob.start(session_id) do
+      {:ok, session} -> {:ok, "oob host=#{session.host} status=#{session.status}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_oob_host(session_id) do
+    case Oob.host(session_id) do
+      {:ok, host} -> {:ok, host}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_oob_poll(session_id) do
+    case Oob.poll(session_id) do
+      {:ok, []} -> {:ok, "oob: no new hits"}
+      {:ok, hits} -> {:ok, "oob new hits=#{length(hits)}\n" <> inspect_oob_hits(hits)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_oob_receipt(session_id) do
+    Oob.receipt(session_id)
+  end
+
+  defp do_oob_require(session_id) do
+    case Oob.require_started(session_id) do
+      :ok -> {:ok, "oob listener running"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp inspect_oob_hits(hits) do
+    Enum.map_join(hits, "\n", fn h ->
+      "#{h.protocol} remote=#{h.remote || "-"} id=#{h.id}"
+    end)
+  end
+
+  defp do_http_ingest_har(session_id, input) do
+    case HttpReplay.ingest_har(session_id, Map.get(input, "payload", "")) do
+      {:ok, recs} ->
+        {:ok, "http ingested #{length(recs)}\n" <> HttpReplay.render_list(session_id)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_http_list(session_id, input) do
+    filters =
+      []
+      |> maybe_kw(:host, Map.get(input, "host"))
+      |> maybe_kw(:method, Map.get(input, "method"))
+      |> maybe_kw(:q, Map.get(input, "needle"))
+
+    recs = HttpReplay.list(session_id, filters)
+    {:ok, HttpReplay.render_list(session_id) <> "\n(#{length(recs)} listed)"}
+  end
+
+  defp do_http_view(session_id, input) do
+    case Map.get(input, "req_id") do
+      id when is_binary(id) and id != "" ->
+        case HttpReplay.view(session_id, id) do
+          {:ok, rec} ->
+            {:ok,
+             "#{rec.id} #{rec.method} #{rec.url} status=#{rec.status || "-"}\n" <>
+               "headers=#{inspect(rec.headers)}\nbody=#{rec.body || ""}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      _ ->
+        {:error, "http_view requires req_id"}
+    end
+  end
+
+  defp do_http_repeat(session_id, input) do
+    id = Map.get(input, "req_id")
+    roe = parse_roe_contract(Map.get(input, "roe"))
+
+    if not is_binary(id) or id == "" do
+      {:error, "http_repeat requires req_id"}
+    else
+      case HttpReplay.repeat(session_id, id, roe: roe || %{}, http_client: &default_http_client/1) do
+        {:ok, resp} ->
+          {:ok, "repeat #{resp.request_id} status=#{resp.status}\n#{resp.body}"}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp default_http_client(%{method: method, url: url, headers: headers, body: body}) do
+    method = method |> to_string() |> String.downcase() |> String.to_existing_atom()
+
+    opts = [
+      method: method,
+      url: url,
+      headers: headers,
+      retry: false,
+      redirect: false,
+      receive_timeout: 15_000
+    ]
+
+    opts = if is_binary(body) and body != "", do: Keyword.put(opts, :body, body), else: opts
+
+    case Req.request(opts) do
+      {:ok, resp} ->
+        resp_body = if is_binary(resp.body), do: resp.body, else: inspect(resp.body)
+        {:ok, %{status: resp.status, headers: resp.headers, body: resp_body}}
+
+      {:error, err} ->
+        {:error, Exception.message(err)}
+    end
+  rescue
+    ArgumentError -> {:error, "unsupported HTTP method"}
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp do_class_queue_put(session_id, input) do
+    class = input |> Map.get("vuln_class") |> safe_atom()
+    candidate = Map.get(input, "note") || %{}
+
+    candidate =
+      Map.put_new(candidate, "target", Map.get(input, "root") || Map.get(candidate, "target"))
+
+    case ClassQueue.put(session_id, class, stringify_keys_to_atoms(candidate)) do
+      {:ok, rec} -> {:ok, "queued #{class} id=#{rec.id} target=#{rec.target}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_class_queue_assert(session_id, input) do
+    class = input |> Map.get("vuln_class") |> safe_atom()
+
+    case ClassQueue.assert_exploit(session_id, class) do
+      :ok -> {:ok, "exploit allowed for #{class}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_class_queue_status(session_id, input) do
+    class = input |> Map.get("vuln_class") |> safe_atom()
+
+    if class in [:unknown, nil] do
+      {:ok, ClassQueue.render(session_id)}
+    else
+      {:ok, "#{class}: #{ClassQueue.status(session_id, class)}"}
+    end
+  end
+
+  defp stringify_keys_to_atoms(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {k, v}
+      {k, v} when is_binary(k) -> {String.to_atom(k), v}
+      pair -> pair
+    end)
+  rescue
+    ArgumentError ->
+      Map.new(map, fn
+        {k, v} when is_atom(k) -> {k, v}
+        {"target", v} -> {:target, v}
+        {"note", v} -> {:note, v}
+        {"id", v} -> {:id, v}
+        {k, v} -> {k, v}
+      end)
+  end
+
+  defp do_login_preflight(input) do
+    class = input |> Map.get("vuln_class") |> safe_atom()
+    session = Map.get(input, "note") || input
+
+    case LoginPreflight.assert_for(class, session) do
+      :ok -> {:ok, "login preflight ok for #{class}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_skeptic_promote(input) do
+    finding = Map.get(input, "finding") || %{}
+
+    case FindingSkeptic.promote(finding) do
+      {:ok, promoted} ->
+        {:ok, "independent confirmation accepted status=#{promoted.status}"}
+
+      {:error, reasons} ->
+        spec = FindingSkeptic.spawn_spec(finding)
+
+        {:error,
+         Enum.join(reasons, "; ") <>
+           "\nspawn create_agent profile=#{spec.profile} name=#{spec.name}"}
+    end
+  end
+
+  defp do_entry_fanout(input) do
+    root = Map.get(input, "root") || File.cwd!()
+
+    opts =
+      [max: Map.get(input, "max", 20), role: Map.get(input, "role", "security-auditor")]
+      |> maybe_changed_files(Map.get(input, "changed_files"))
+
+    case EntryFanout.plan(root, opts) do
+      {:ok, []} ->
+        {:ok, "entry_fanout: no entries under #{root}"}
+
+      {:ok, tasks} ->
+        {:ok,
+         EntryFanout.render(tasks) <> "\n\n" <> Jason.encode!(EntryFanout.delegate_payload(tasks))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_codefix_open_pr(session_id, input) do
+    cwd = Map.get(input, "root") || File.cwd!()
+
+    opts =
+      [cwd: cwd]
+      |> maybe_kw(:title, Map.get(input, "title"))
+      |> maybe_kw(:base, Map.get(input, "base"))
+      |> maybe_kw(:branch, Map.get(input, "branch"))
+
+    case CodeFixPr.open_pr(session_id, opts) do
+      {:ok, result} ->
+        {:ok,
+         "autofix pr=#{result.url || "none"} branch=#{result.branch} applied=#{length(result.applied)} skipped=#{length(result.skipped)}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp parse_roe_contract(nil), do: nil
 

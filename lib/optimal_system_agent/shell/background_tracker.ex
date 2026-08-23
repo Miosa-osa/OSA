@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTracker do
   ## Output file extraction
 
   `extract_output_files/1` parses a command string for output targets using
-  regex patterns adapted from HackerAI's `background-process-tracker.ts`:
+  regex patterns:
 
     * `nmap -oN file`, `-oX file`, `-oG file` — Nmap output flags
     * `nmap -oA prefix` — creates prefix.nmap, prefix.xml, prefix.gnmap

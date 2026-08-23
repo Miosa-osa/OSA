@@ -249,7 +249,10 @@ defmodule OptimalSystemAgent.Security.Playbook do
     %{
       name: "Scope the codebase",
       entry_criteria: ["Repository path available", "Languages/frameworks identified"],
-      exit_criteria: ["Entry points listed (routes, parsers, deserializers)", "Trust boundaries noted"],
+      exit_criteria: [
+        "Entry points listed (routes, parsers, deserializers)",
+        "Trust boundaries noted"
+      ],
       guidance:
         "Whitebox 0-day pass. You already have the source. List remote-input entry points " <>
           "and do not touch a live target. Use code_symbols / file_grep, not scanners."
@@ -264,7 +267,8 @@ defmodule OptimalSystemAgent.Security.Playbook do
       guidance:
         "security_intel action whitebox_analyze (or CallChainAnalyzer). Trace user input " <>
           "to exec/query/render/file/SSRF sinks. A class is only checked once you tried it " <>
-          "on the relevant surfaces. Basics first: IDOR/auth, SQLi/XSS/command, then the rest."
+          "on the relevant surfaces. Empty queue for a class is 'not assessed', not clean. " <>
+          "Basics first: IDOR/auth, SQLi/XSS/command, then the rest."
     },
     %{
       name: "Variant analysis",
@@ -282,14 +286,16 @@ defmodule OptimalSystemAgent.Security.Playbook do
         "Ineligible findings dropped or marked needs-evidence"
       ],
       guidance:
-        "cvss_score + report_gate. A finding without CVSS, CWE, and evidence (poc/evidence_path/" <>
-          "confirmed) is not report-grade. Enrich with CweCatalog and ThreatIntel (KEV) when a CVE is known."
+        "cvss_score + report_gate. A finding without CVSS, CWE, and a receipt (poc / " <>
+          "evidence_path / evidence_id) is not report-grade. Status=confirmed without a " <>
+          "receipt still fails the gate. Enrich with CweCatalog and ThreatIntel (KEV) when a CVE is known."
     },
     %{
       name: "Report",
       entry_criteria: ["Eligible findings scored"],
       exit_criteria: ["SARIF generated", "Remediation notes attached"],
-      guidance: "sarif_generate. Rank by CVSS then KEV. Include call-chain evidence, not payloads."
+      guidance:
+        "sarif_generate. Rank by CVSS then KEV. Include call-chain evidence, not payloads."
     }
   ]
 
@@ -331,7 +337,8 @@ defmodule OptimalSystemAgent.Security.Playbook do
       name: "Discover entries",
       entry_criteria: ["CI workspace checked out"],
       exit_criteria: ["Entry files listed"],
-      guidance: "CiScan.discover_entries/1. No live network. Fail closed if the repo root is missing."
+      guidance:
+        "CiScan.discover_entries/1. No live network. Fail closed if the repo root is missing."
     },
     %{
       name: "Analyze",
@@ -353,7 +360,8 @@ defmodule OptimalSystemAgent.Security.Playbook do
       name: "Publish SARIF",
       entry_criteria: ["Gate evaluated"],
       exit_criteria: ["SARIF written to the configured path"],
-      guidance: "sarif_generate / CiScan.sarif_from_findings. Code scanning consumers pick this up."
+      guidance:
+        "sarif_generate / CiScan.sarif_from_findings. Code scanning consumers pick this up."
     }
   ]
 
@@ -385,7 +393,8 @@ defmodule OptimalSystemAgent.Security.Playbook do
       name: "Report",
       entry_criteria: ["Paths reviewed"],
       exit_criteria: ["SARIF generated", "Remediation mapped to IAM changes"],
-      guidance: "Score with CVSS. Do not include secret values in the report - reference redacted."
+      guidance:
+        "Score with CVSS. Do not include secret values in the report - reference redacted."
     }
   ]
 

@@ -9,7 +9,6 @@ defmodule OptimalSystemAgent.Agent.SubagentRecovery do
   2. A fresh sandbox (if the sandbox was the problem)
   3. Reduced scope (if the task was too large)
 
-  Adapted from HackerAI's `runtime-recovery.ts`.
 
   ## Usage
 

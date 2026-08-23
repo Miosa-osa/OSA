@@ -38,8 +38,14 @@ defmodule OptimalSystemAgent.Security.ReportGateTest do
     refute ReportGate.eligible?(%{})
   end
 
-  test "confirmed status counts as evidence" do
+  test "confirmed status without a receipt is not evidence" do
     f = Map.merge(@eligible, %{poc: "", status: :confirmed})
+    assert {:error, reasons} = ReportGate.evaluate(f)
+    assert Enum.any?(reasons, &(&1 =~ "evidence"))
+  end
+
+  test "hashed evidence_id is a receipt" do
+    f = Map.merge(@eligible, %{poc: "", evidence_id: "ev-abc123def456"})
     assert {:ok, _} = ReportGate.evaluate(f)
   end
 

@@ -3,8 +3,9 @@ defmodule OptimalSystemAgent.Security.ReportGate do
   Report-eligibility gate for security findings.
 
   A finding that cannot be ranked (no CVSS), classified (no CWE), or shown
-  (no evidence) is not report-grade. This module is the cheap capstone of the
-  reporting foundation: score, map, or reject - never fabricate a severity.
+  (no receipt) is not report-grade. Status=confirmed is not a receipt.
+  This module is the cheap capstone of the reporting foundation: score, map,
+  or reject - never fabricate a severity.
   """
 
   alias OptimalSystemAgent.Security.{Cvss, CweCatalog}
@@ -41,7 +42,7 @@ defmodule OptimalSystemAgent.Security.ReportGate do
       |> maybe_add(not present?(cwe), "missing CWE")
       |> maybe_add(
         not has_evidence?(f),
-        "missing evidence (poc, evidence_path, or confirmed status)"
+        "missing evidence (poc, evidence_path, evidence_id, or evidence_sha256)"
       )
 
     if reasons == [] do
@@ -81,9 +82,11 @@ defmodule OptimalSystemAgent.Security.ReportGate do
 
   defp score_vector(_), do: {false, nil, nil, "missing CVSS vector"}
 
+  # A status label is not a receipt. Confirmed
+  # without a quoted artifact is still a rumor.
   defp has_evidence?(f) do
     present?(field(f, :poc)) or present?(field(f, :evidence_path)) or
-      field(f, :status) in [:confirmed, "confirmed"]
+      present?(field(f, :evidence_id)) or present?(field(f, :evidence_sha256))
   end
 
   defp vuln_class(f) do
@@ -103,7 +106,7 @@ defmodule OptimalSystemAgent.Security.ReportGate do
     end
   end
 
-  @known_keys ~w(vuln_class cvss_vector cwe owasp poc evidence_path status reasoning source sink)a
+  @known_keys ~w(vuln_class cvss_vector cwe owasp poc evidence_path evidence_id evidence_sha256 status reasoning source sink)a
 
   defp atomize(map) do
     Enum.reduce(map, %{}, fn

@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Security.TaskDifficultyAssessment do
   Task Difficulty Assessment (TDA) — four-dimension scoring that drives
   exploration vs exploitation decisions during a pentest.
 
-  Adapted from the PENTESTGPT V2 research paper (85% on XBOW benchmark).
+  A four-dimension explore-vs-exploit score for autonomous engagements.
   The paper identified that the difference between 42% and 85% success rate
   was driven by smart exploration/exploitation decisions, not just better tools.
 

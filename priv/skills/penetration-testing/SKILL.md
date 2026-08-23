@@ -60,6 +60,22 @@ this engagement. Targets provided in the conversation are the declared scope.
   drop tables, format, shutdown) or when the environment is local-host without
   Docker isolation
 
+## How the loop runs
+
+Do this even if you skip a playbook:
+
+1. Write the authorized target list. `roe_check` before packets.
+2. Recon until you have a map (hosts, vhosts, JS secrets, OpenAPI). Then stop expanding.
+3. One vuln class at a time. Basics first: IDOR/authz, injection, then the rest.
+4. Empty discovery queue for a class → skip exploit, status "not assessed" (not clean).
+5. Root orchestrates. Children recon / audit / validate / exploit. You do not
+   confirm your own finding - spawn `security_validation`.
+6. Whitebox maps (`whitebox_scan`). Live request confirms. A 500 is a clue.
+7. A finding quotes a tool receipt (output / HTTP pair / `evidence_record`).
+   Confidence 0-10; below 7 is not confirmed; non-remote entry caps at 6.
+8. Same payload three times → `attack_tree_select` or pivot. Blind classes get
+   interactsh running **before** the payload.
+
 ## Engagement Phases
 
 ### Phase 1: Scoping
@@ -195,7 +211,7 @@ duration, concurrency. Deduplicate findings across tools.
 5. **Whitebox 0-day pass (when you have the source - do this, it is the strongest position):**
    - Start a `:whitebox` playbook (`security_intel` `playbook_start` playbook_id=`whitebox`)
    - Discover entry points (routes, request parsers, deserializers)
-   - `whitebox_analyze`: LLM-guided source→sink call-chain tracing (Vulnhuntr-style).
+   - `whitebox_analyze`: LLM-guided source→sink call-chain tracing.
      A finding is only real when the judge names the exact source, exact sink, and
      why sanitization that is actually in the code does not neutralize it
    - `variant_scan`: seed from a known bug/CVE/patch and hunt similar unpatched sites

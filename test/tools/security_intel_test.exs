@@ -492,4 +492,85 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
       assert body =~ "Whitebox"
     end
   end
+
+  describe "hunter collectors" do
+    test "js_secrets extracts an AWS key", %{ctx: ctx} do
+      {:ok, body} =
+        run("js_secrets", ctx, %{
+          "payload" => ~s(const k = "AKIAIOSFODNN7EXAMPLE";)
+        })
+
+      assert body =~ "aws_key"
+    end
+
+    test "vhost_candidates includes admin prefix", %{ctx: ctx} do
+      {:ok, body} = run("vhost_candidates", ctx, %{"domain" => "example.com"})
+      assert body =~ "admin.example.com"
+    end
+
+    test "owned_cidrs parses whois CIDR", %{ctx: ctx} do
+      {:ok, body} =
+        run("owned_cidrs", ctx, %{"payload" => "CIDR:           198.51.100.0/24\n"})
+
+      assert body =~ "198.51.100.0/24"
+    end
+
+    test "class_queue_assert fails closed when empty", %{ctx: ctx} do
+      assert {:error, reason} = run("class_queue_assert", ctx, %{"vuln_class" => "sqli"})
+      assert reason =~ "not assessed"
+    end
+
+    test "class_queue_put then assert", %{ctx: ctx} do
+      {:ok, _} =
+        run("class_queue_put", ctx, %{
+          "vuln_class" => "sqli",
+          "note" => %{"target" => "https://example.com/q?id=1"}
+        })
+
+      {:ok, body} = run("class_queue_assert", ctx, %{"vuln_class" => "sqli"})
+      assert body =~ "exploit allowed"
+    end
+
+    test "skeptic_promote rejects parent self-confirm", %{ctx: ctx} do
+      assert {:error, reason} =
+               run("skeptic_promote", ctx, %{
+                 "finding" => %{
+                   "vuln_class" => "sqli",
+                   "status" => "confirmed",
+                   "poc" => "id=1"
+                 }
+               })
+
+      assert reason =~ "security_validation"
+    end
+
+    test "http_ingest_har lists requests", %{ctx: ctx} do
+      har =
+        Jason.encode!(%{
+          "log" => %{
+            "entries" => [
+              %{
+                "request" => %{
+                  "method" => "GET",
+                  "url" => "https://example.com/api",
+                  "headers" => []
+                },
+                "response" => %{"status" => 200}
+              }
+            ]
+          }
+        })
+
+      {:ok, body} = run("http_ingest_har", ctx, %{"payload" => har})
+      assert body =~ "http ingested 1"
+      assert body =~ "/api"
+    end
+
+    test "parameters enum includes new collector actions" do
+      enum = get_in(SecurityIntel.parameters(), ["properties", "action", "enum"])
+      for a <- ~w(js_secrets oob_start http_repeat class_queue_assert skeptic_promote entry_fanout codefix_open_pr) do
+        assert a in enum
+      end
+    end
+  end
 end

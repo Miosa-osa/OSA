@@ -7,7 +7,6 @@ defmodule OptimalSystemAgent.Tools.FailureReporter do
   telemetry system. The logging is fire-and-forget — it never changes the tool
   result or blocks execution.
 
-  Adapted from HackerAI's `tool-failure.ts` pattern.
 
   ## Usage
 
