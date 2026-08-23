@@ -393,6 +393,8 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     - If an approach fails, treat it as signal, refine it, and continue with another in-scope validation path.
     - Treat every in-scope target as if meaningful issues may still be hidden beneath initial results.
     </thorough_validation>
+
+    #{intelligence_layer_section()}
     """
   end
 
@@ -505,6 +507,39 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     - Persist through normal debugging and verification friction when reproducing or validating a security issue.
     - If an approach fails, treat it as signal, refine it, and continue with another in-scope validation path.
     </thorough_validation>
+
+    #{intelligence_layer_section()}
+    """
+  end
+
+  # ── Intelligence layer section (shared by sandbox + host contexts) ──────
+
+  defp intelligence_layer_section do
+    """
+    <security_intelligence_layer>
+    You have a structured intelligence layer available via the `security_intel` tool (deferred — use `tool_search` to load it, then call it). Use it to track engagement state and guide decisions throughout the assessment.
+
+    STRUCTURED NOTES — record every significant finding as a note with a category:
+    - `credential`: requires username + target + (password | protocol). Record every credential you obtain.
+    - `vulnerability`: requires target + (cve | weaknesses). Record confirmed vulns with cve if known.
+    - `finding`: requires target + (services | endpoints | technologies | port). Record recon results — services, endpoints, technologies discovered.
+    - `artifact`: requires target. Record evidence paths, screenshots, PoC files.
+    - `info`: no required fields. Anything else worth remembering.
+    Each note has a unique key, confidence (high/medium/low), and status (open/closed/filtered/confirmed/potential).
+    Use `note_create` to add, `note_list` to review, `note_get` to read one, `note_delete` to remove.
+
+    ATTACK-SURFACE GRAPH — the graph is built automatically from your notes. Query it for strategic insights:
+    - `graph_insights`: returns actionable patterns — "creds for host X but haven't scanned it", "host X has N services but no vulns found", "lateral movement opportunity from host Y to host Z". Run this between phases to decide what to test next.
+    - `graph_hosts`: list all discovered hosts.
+    - `graph_services`: list services for a specific host.
+    The graph is the orchestrator's map of the engagement — keep it current by recording findings as notes.
+
+    TASK DIFFICULTY ASSESSMENT (TDA) — when deciding whether to keep digging on the current finding or switch to a new approach, call `tda` with: steps_remaining, evidence_confidence, context_load, historical_success_rate, task_type. Returns :exploit (keep going) or :explore (switch) with a confidence score and reasoning. Use it to avoid rabbit-holing on low-confidence paths.
+
+    VULNERABILITY DEDUPLICATION — before reporting a new vulnerability, call `dedup` with the candidate finding. Checks the session's existing findings: dependency-CVE fast path (same CVE + same package = duplicate), then structural comparison (same endpoint + target + vuln type). "When uncertain, lean towards NOT duplicate" — reporting two distinct findings is better than silently merging different vulnerabilities.
+
+    DISCIPLINE: record findings as notes AS YOU GO, not at the end. The graph and dedup only work if notes are current. A stale graph leads to redundant work and missed lateral movement.
+    </security_intelligence_layer>
     """
   end
 end
