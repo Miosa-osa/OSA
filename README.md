@@ -401,7 +401,17 @@ Code execution routes through a pluggable sandbox layer. Backends:
 
 In *required* mode, host execution is blocked unless a real sandbox is
 available, so untrusted code never touches your machine. A dangerous-command
-guard screens every shell invocation regardless of backend.
+guard screens every shell invocation regardless of backend. Cloud backends are
+health-checked before a command is dispatched, so a long scan is never sent to
+a sandbox that is still booting or has a dead command transport, and per-backend
+runtime cost is tracked per session.
+
+The Docker backend's isolation profile — network, read-only root, and process
+limit — is configurable, so a locked-down default coexists with a
+network-enabled profile for the pentest image (see
+[Cybersecurity & pentest](#cybersecurity--pentest)). Defaults stay fully
+locked down: networking, a writable root, and a raised process limit are opt-in
+per run, never silent.
 
 ### Background agents and steer
 
@@ -414,6 +424,15 @@ Stop or interrupt any agent from the same view. Cancelling an agent cascades
 transitively to every sub-agent it spawned; a sibling can hand its context to
 another via peer-resume, and worktree work is snapshotted to a durable git ref
 before teardown so it stays inspectable even when discarded.
+
+Background agents are built to run for a full working day, not minutes. Time
+limits along the whole path are idle guards against a genuinely silent backend,
+not caps on how long real work may take: the streaming idle timeout tolerates a
+long quiet stretch while a model composes a large final answer, the subagent
+backstop is measured in shifts, and a stalled child is reported with an
+escalating, backing-off notice rather than killed and discarded. A subagent that
+runs long and finishes keeps its completed work even if a backstop later fires —
+the parent is told what it accomplished, not just that it timed out.
 Parent agents and sub-agents independently rank the compact skill catalog for
 their own task, then load only the selected `SKILL.md` body through `skill_view`.
 Each selection is checkpointed against that session, so one agent's workflow
@@ -426,7 +445,11 @@ you approve, with the plan itself written to a durable file so it survives a
 context reset or restart. For long autonomous runs, an independent read-only
 goal verifier periodically checks whether your actual *goal* was met (not
 just whether a file compiled) and a cross-turn goal tracker auto-pauses on a
-stall instead of spinning forever. While a durable goal is active, the TUI gives
+stall instead of spinning forever. The verifier is a skeptic panel — several
+independent reviewers that must refute a completion claim by majority before the
+goal keeps running — and it is allowed to take its time: the turn's activity
+clock resets on any backend progress, so a multi-minute panel is never mistaken
+for a hung turn and the goal is not paused out from under a healthy check. While a durable goal is active, the TUI gives
 it a dedicated footer row with its elapsed time and `/goal pause`, `/goal resume`,
 or `/goal stop` control, so the goal remains readable without widening the
 terminal. **Esc Esc** also drives the unified
@@ -670,7 +693,7 @@ possible.
 |---|---|
 | **Ollama Cloud** | Fast cloud inference, no GPU required — the recommended start |
 | **Ollama Local** | Runs on your machine, fully private, no API cost |
-| **Anthropic** | Claude Opus 5, Sonnet 5, Opus 4.x, Sonnet 4.6, Haiku 4.5 |
+| **Anthropic** | Claude Opus 5, Sonnet 5, Fable 5, Opus 4.x, Sonnet 4.6, Haiku 4.5 |
 | **OpenAI** | GPT-5.6 (`-terra`, `-sol`, `-luna`) |
 | **Google** | Gemini 3.6 Flash, 3.5 Flash / Flash-Lite, 3.1 Pro |
 | **xAI** | Grok 4.5, 4.3, Grok Build |
@@ -827,6 +850,39 @@ Large tool results are auto-persisted to disk and referenced by handle, so a
 big grep never blows the context window. `file_edit` carries a second,
 content-hash drift guard on top of the mtime/size check, so a same-second
 collision between two edits can never silently corrupt a file.
+
+### Cybersecurity & pentest
+
+OSA carries a first-class offensive-security capability for **authorized**
+engagements — pentests you are contracted for, CTFs, and security research. It
+stays dormant for ordinary work: the security posture, tooling, and prompt
+sections are injected only when a security task is actually active (a security
+skill in use, a pentest sandbox configured, or the task itself is one), and
+nothing below changes behaviour on a normal coding turn.
+
+- **Specialist agents** — a `pentester` (full-methodology engagements), a
+  `recon-specialist` (fast parallel enumeration), and an `exploit-developer`
+  (PoCs and bypasses), each with its own methodology and tool recipes.
+- **Pentest sandbox image** — a Kali-based image with 40+ tools (nmap, sqlmap,
+  nuclei, metasploit, hydra, ffuf, gobuster, impacket, hashcat, SecLists, a
+  browser for agent-driven web testing). Build it with
+  `docker build -t osa/pentest:latest -f docker/pentest/Dockerfile docker/pentest/`
+  and point a network-enabled Docker profile at it.
+- **Security-intelligence tool** — a single `security_intel` tool the security
+  agents reach for that ties together schema-validated engagement notes, a
+  ShadowGraph attack-surface knowledge graph (hosts, services, credentials,
+  vulnerabilities and their relationships), LLM-assisted finding
+  deduplication, and a task-difficulty assessment that steers explore-vs-exploit
+  decisions.
+- **Reporting** — findings render to valid SARIF 2.1.0, and a code-fix section
+  records `fix_before`/`fix_after` unified diffs per finding.
+- **Methodology & playbooks** — a phased engagement skill (scope → recon → vuln
+  discovery → exploitation → post-exploit → report) and phased playbooks for
+  web-app, network, and full-engagement work with entry/exit criteria.
+
+Authorization is explicit and scoped: OSA operates only within the target and
+mandate you give it, and the capability is meant for work you are permitted to
+perform.
 
 ### Identity and Memory
 
