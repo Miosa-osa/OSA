@@ -130,7 +130,7 @@ defmodule OptimalSystemAgent.Security.LoginSession do
 
     case preflight_mod() do
       {:ok, mod} ->
-        if function_exported?(mod, :assert_for, 2) do
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :assert_for, 2) do
           apply(mod, :assert_for, [class, artifacts])
         else
           fallback_assert(class, artifacts)
@@ -287,7 +287,7 @@ defmodule OptimalSystemAgent.Security.LoginSession do
 
     case preflight_mod() do
       {:ok, mod} ->
-        if function_exported?(mod, :check, 1) do
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :check, 1) do
           match?({:ok, :authenticated}, apply(mod, :check, [artifacts]))
         else
           fallback_authenticated?(artifacts)
