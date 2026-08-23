@@ -140,7 +140,18 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Wall-clock bound for a SINGLE skeptic (env-overridable via
   # `:goal_verifier_skeptic_timeout_ms`). See `panel_runner/0` for why the
   # generic subagent backstop is the wrong bound here.
-  @default_skeptic_timeout_ms 120_000
+  #
+  # Raised from 120s. A skeptic is not a classification call — it reads the
+  # repo (file_grep / file_glob / file_read) to judge the work, and on a slower
+  # cloud model that legitimately takes several minutes. At 120s the panel was
+  # reaped mid-search on every real engagement, and because a reaped skeptic
+  # counts as a non-vote (see `aggregate/1`), the panel returned no verdict and
+  # the goal could not be judged. The turn-level timeout is idle-based (it
+  # resets on any backend activity), so a panel that runs for minutes no longer
+  # risks killing the turn — which is what made the tight bound necessary
+  # before. Ten minutes gives a real review room to finish; override down for
+  # a fast local model.
+  @default_skeptic_timeout_ms 600_000
 
   # Tool inventory available to a skeptic (must stay a subset of ToolExecutor's
   # :read_only tier — enforced again, redundantly, by
@@ -1274,22 +1285,45 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   defp aggregate(results) do
-    total = length(results)
-    refuters = Enum.filter(results, & &1.refuted)
-    refuted_count = length(refuters)
-    needed = div(total, 2) + 1
+    # A skeptic that CRASHED or TIMED OUT produced no judgment about the WORK -
+    # only about the harness. `parse_skeptic_result/1` flags those `internal:
+    # true`. They used to be counted as substantive refutes, which meant a slow
+    # or flaky provider masqueraded as "your work is incomplete": on a slow
+    # cloud model two reaped skeptics were two "refutes", the majority tipped to
+    # :incomplete, and the goal could NEVER be judged complete no matter how
+    # finished it was. Decide the verdict only among skeptics that actually
+    # returned a verdict; a non-vote is not a vote against completion.
+    votes = Enum.reject(results, &(&1[:internal] == true))
 
-    cond do
-      refuted_count >= needed and majority_off_track?(refuters, needed) ->
-        {refuted_count, total, :off_track, off_track_reason(refuters), gap_list(refuters)}
+    case votes do
+      [] ->
+        # Every skeptic failed to produce a real verdict. We still cannot vouch
+        # for completion - nothing reviewed the work - so fail closed, but name
+        # it an infrastructure failure (not a substantive gap) so the tracker
+        # retries verification instead of churning the goal as if work were
+        # missing.
+        {0, length(results), :incomplete,
+         "verification could not run: no skeptic returned a verdict " <>
+           "(infrastructure failure, not a finding) - will retry", []}
 
-      refuted_count >= needed ->
-        {refuted_count, total, :incomplete, incomplete_reason(refuted_count, total),
-         gap_list(refuters)}
+      votes ->
+        total = length(votes)
+        refuters = Enum.filter(votes, & &1.refuted)
+        refuted_count = length(refuters)
+        needed = div(total, 2) + 1
 
-      true ->
-        {refuted_count, total, :complete,
-         "#{total - refuted_count}/#{total} skeptics found the goal met", []}
+        cond do
+          refuted_count >= needed and majority_off_track?(refuters, needed) ->
+            {refuted_count, total, :off_track, off_track_reason(refuters), gap_list(refuters)}
+
+          refuted_count >= needed ->
+            {refuted_count, total, :incomplete, incomplete_reason(refuted_count, total),
+             gap_list(refuters)}
+
+          true ->
+            {refuted_count, total, :complete,
+             "#{total - refuted_count}/#{total} skeptics found the goal met", []}
+        end
     end
   end
 

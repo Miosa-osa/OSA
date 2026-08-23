@@ -247,19 +247,56 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert result.refuted_count == 1
     end
 
-    test "a crashed/errored skeptic counts as a refute, not silently dropped", %{
+    test "a crashed/timed-out skeptic ABSTAINS — it is excluded, not counted as a refute", %{
       session_id: sid
     } do
+      # A crash/timeout is a harness failure, not a judgment about the work.
+      # Counting it as a refute let a slow provider permanently block a goal
+      # from ever completing. The real votes decide: here a genuine majority
+      # still refutes, and the excluded infra failure is not in the tally.
       mark_write(sid)
 
       stub_runner(fn _sid, _configs ->
-        [{:error, :timeout}, json_result(true), json_result(false)]
+        [{:error, :timeout}, json_result(true), json_result(true)]
       end)
 
       {result, _state} = GoalVerifier.verify(base_state(sid))
 
       assert result.refuted_count == 2
+      assert result.total == 2, "the timed-out skeptic is excluded from the denominator"
       assert result.verdict == :incomplete
+    end
+
+    test "an infra failure does not tip a genuine pass to incomplete", %{session_id: sid} do
+      # THE regression this fixes: with two of three skeptics reaped on a slow
+      # model, the old tally counted both as refutes (2/3) and the goal could
+      # never be judged complete. Now the single real vote — a pass — decides.
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [{:error, :timeout}, {:error, :timeout}, json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :complete,
+             "two infra failures must not masquerade as 'work incomplete' over a real pass"
+
+      assert result.refuted_count == 0
+      assert result.total == 1
+    end
+
+    test "a fully-failed panel fails closed but names it as infrastructure", %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [{:error, :timeout}, {:error, :timeout}, {:error, :timeout}]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert result.reason =~ "infrastructure"
     end
 
     test "empty panel result fails closed to :incomplete", %{session_id: sid} do
@@ -797,9 +834,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       {result, _state} = GoalVerifier.verify(base_state(sid))
 
-      # Still fail-closed on the VOTE — nothing vouched for completion.
+      # Still fail-closed on the VOTE — the two returned-but-unparseable
+      # responses count (a model that answered garbage did not vouch for
+      # completion), while the timed-out skeptic abstains and is excluded.
       assert result.verdict == :incomplete
-      assert result.refuted_count == 3
+      assert result.refuted_count == 2
 
       assert_receive {:goal_verifier_event, %{phase: :start}}, 2000
       assert_receive {:goal_verifier_event, %{phase: :done} = done}, 2000
