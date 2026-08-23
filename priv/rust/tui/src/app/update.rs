@@ -96,6 +96,24 @@ fn is_overlay_dismiss(key: crossterm::event::KeyEvent) -> bool {
     )
 }
 
+/// Reference instant the request-timeout idle clock is measured from.
+///
+/// The LATER of `processing_start` and the last backend activity: a fresh
+/// turn's `processing_start` is `now`, so it dominates any stale activity
+/// timestamp from a previous turn (no false immediate timeout); activity
+/// landing DURING this turn is more recent, so it dominates `processing_start`
+/// and keeps a healthy long turn (e.g. a multi-minute goal-verifier skeptic
+/// panel) alive. Only genuine silence lets the clock run out.
+fn timeout_since(
+    processing_start: std::time::Instant,
+    last_turn_activity: Option<std::time::Instant>,
+) -> std::time::Instant {
+    match last_turn_activity {
+        Some(a) if a > processing_start => a,
+        _ => processing_start,
+    }
+}
+
 impl App {
     /// Main update function. Returns true if the app should quit.
     pub fn update(&mut self, event: Event) -> bool {
@@ -1575,7 +1593,9 @@ impl App {
 
         if self.state.is_processing() {
             if let Some(start) = self.processing_start {
-                let elapsed = start.elapsed();
+                // Measure IDLE time, not total turn time. See `timeout_since`.
+                let since = timeout_since(start, self.last_turn_activity);
+                let elapsed = since.elapsed();
                 let timeout_secs = self.config.request_timeout_secs;
                 let warning_secs = (timeout_secs * 4) / 5; // 80% threshold
 
@@ -1684,5 +1704,37 @@ mod paste_path_tests {
         let s = path.to_string_lossy().to_string();
         assert!(paste_is_file_paths(&s));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn timeout_measures_from_recent_activity_not_turn_start() {
+        use std::time::{Duration, Instant};
+        // Turn started a while ago, but the backend spoke recently: the clock
+        // is measured from the recent activity, so a healthy long turn is not
+        // killed.
+        let start = Instant::now() - Duration::from_secs(1000);
+        let recent = Instant::now() - Duration::from_secs(2);
+        let since = super::timeout_since(start, Some(recent));
+        assert!(since.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn timeout_ignores_stale_activity_from_a_previous_turn() {
+        use std::time::{Duration, Instant};
+        // A fresh turn (start = now) with a leftover activity timestamp from
+        // before it must measure from the fresh start, not the stale value —
+        // otherwise the turn would time out the instant it began.
+        let start = Instant::now();
+        let stale = Instant::now() - Duration::from_secs(5000);
+        let since = super::timeout_since(start, Some(stale));
+        assert_eq!(since, start);
+    }
+
+    #[test]
+    fn timeout_falls_back_to_start_when_no_activity_yet() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now() - Duration::from_secs(3);
+        let since = super::timeout_since(start, None);
+        assert_eq!(since, start);
     }
 }
