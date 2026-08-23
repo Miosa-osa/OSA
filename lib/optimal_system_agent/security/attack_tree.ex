@@ -2,14 +2,13 @@ defmodule OptimalSystemAgent.Security.AttackTree do
   @moduledoc """
   Evidence-guided attack tree (EGATS-lite).
 
-  Deng et al. 2025: PentestGPT v1 sat at 42% on XBOW; v2 hit 85% because of
-  TDA + an evidence-guided attack tree, not more tools. OSA already has TDA.
-  This module is the missing tree: each vuln class is a node, UCB picks the
+  Difficulty assessment (TDA, which OSA already has) plus an evidence-guided
+  attack tree beats simply adding more tools. This module is that tree: each vuln class is a node, UCB picks the
   next class to work, and TDA can flip the whole tree from exploit to explore.
 
   No live target. The agent records visits/wins; `select/1` names the next
   class. Basics-first bias: access-control and injection start with a prior
-  so IDOR/SQLi get tried before exotic bugs - the Shinobi/CAPIE lesson.
+  so IDOR/SQLi get tried before exotic bugs.
   """
 
   alias OptimalSystemAgent.Security.TaskDifficultyAssessment

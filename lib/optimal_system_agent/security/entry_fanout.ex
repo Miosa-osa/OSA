@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Security.EntryFanout do
   @moduledoc """
-  Open-Kritt style per-entry-point fan-out.
+  Per-entry-point fan-out.
 
   Discovers request-handler files under a repo root (via `CiScan.discover_entries/2`)
   and builds one bounded whitebox task per file. The parent reviews candidates;
