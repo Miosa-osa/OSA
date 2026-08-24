@@ -89,12 +89,12 @@ pub struct HealthBilling {
     /// status line must never show a `$` figure — show token usage instead.
     #[serde(default)]
     pub usd_pricing: bool,
-    /// Per-session average cost per completed task in USD. Meaningful only once
-    /// `completed_tasks > 0`; `0.0` before the first task completes.
+    /// Cost per completed task (session spend amortised over turns) for the
+    /// active session. 0.0 when no task has completed; the status bar shows a
+    /// `$/task` chip only when completed_tasks > 0 and usd_pricing is true.
     #[serde(default)]
     pub cost_per_task_usd: f64,
-    /// Number of tasks completed this session. `0` until the first completes,
-    /// which is the guard for showing the `$/task` chip.
+    /// Completed tasks (turns) for the active session, the denominator of cost_per_task_usd.
     #[serde(default)]
     pub completed_tasks: u64,
 }
