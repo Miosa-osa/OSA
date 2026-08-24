@@ -18,7 +18,13 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
     "monorepo",
     "audit broadly"
   ]
-  @vision_phrases ~w(screenshot image diagram photo visual attached)
+  @vision_phrases ~w(screenshot screenshots image images diagram diagrams photo photos photograph)
+
+  # Soft requirements narrow the model pool but must never block a delegation
+  # on their own: vision is easily a false positive from an incidental keyword,
+  # and a provider pool may simply have no vision or huge-context model. Only
+  # :tools is a hard requirement.
+  @soft_requirements [:vision, :large_context]
 
   @doc "Resolve provider/model plus an operator-readable selection rationale."
   @spec resolve(String.t(), map(), keyword()) :: map()
@@ -44,7 +50,7 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
 
     [:tools]
     |> maybe_add(:large_context, contains_any?(normalized, @large_context_phrases))
-    |> maybe_add(:vision, contains_any?(normalized, @vision_phrases))
+    |> maybe_add(:vision, mentions_vision?(normalized))
   end
 
   defp choose(_task, config, requirements, opts) do
@@ -57,33 +63,34 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
     context_window = Keyword.get(opts, :context_window, &Registry.context_window/1)
     vision_capable = Keyword.get(opts, :vision_capable, &ImageBudget.vision_capable?/2)
 
-    selected =
+    find = fn reqs ->
       Enum.find_value(candidates, fn provider ->
         model = model_for.(tier, provider)
 
         if configured?.(provider) and
-             compatible?(
-               requirements,
-               provider,
-               model,
-               tool_call,
-               context_window,
-               vision_capable
-             ) do
+             compatible?(reqs, provider, model, tool_call, context_window, vision_capable) do
           {provider, model}
+        end
+      end)
+    end
+
+    # Walk the relaxation ladder: full requirements first, then progressively
+    # drop soft requirements so a missing vision/large-context model degrades
+    # to the best tools-capable model instead of blocking the delegation.
+    selected =
+      Enum.find_value(relaxation_ladder(requirements), fn reqs ->
+        case find.(reqs) do
+          {provider, model} -> {provider, model, reqs}
+          nil -> nil
         end
       end)
 
     case selected do
-      {provider, model} ->
-        reason =
-          "selected #{provider}/#{model} for task requirements: " <>
-            describe_requirements(requirements)
-
+      {provider, model, met} ->
         config
         |> Map.put(:provider, provider)
         |> Map.put(:model, model)
-        |> Map.put(:model_reason, reason)
+        |> Map.put(:model_reason, selection_reason(provider, model, met, requirements -- met))
         |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
 
       nil ->
@@ -97,6 +104,28 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
         |> Map.put(:model_reason, "delegation blocked because no capable model was found")
         |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
     end
+  end
+
+  # Full requirement set first, then the same set with each soft requirement
+  # dropped in turn (vision before large_context). Deduped, hard requirements
+  # (:tools) never dropped.
+  defp relaxation_ladder(requirements) do
+    @soft_requirements
+    |> Enum.reduce([requirements], fn soft, [current | _] = acc ->
+      if soft in current, do: [current -- [soft] | acc], else: acc
+    end)
+    |> Enum.reverse()
+    |> Enum.uniq()
+  end
+
+  defp selection_reason(provider, model, met, []) do
+    "selected #{provider}/#{model} for task requirements: " <> describe_requirements(met)
+  end
+
+  defp selection_reason(provider, model, met, dropped) do
+    "selected #{provider}/#{model} for task requirements: " <>
+      describe_requirements(met) <>
+      " (no configured model satisfied #{describe_requirements(dropped)}; proceeding without it)"
   end
 
   defp compatible?(requirements, provider, model, tool_call, context_window, vision_capable) do
@@ -133,6 +162,11 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   end
 
   defp contains_any?(text, phrases), do: Enum.any?(phrases, &String.contains?(text, &1))
+
+  # Word-boundary match so incidental substrings (imagemagick, visualize,
+  # reimagine) do not force a vision requirement onto a plain code task.
+  defp mentions_vision?(text),
+    do: Enum.any?(@vision_phrases, &Regex.match?(~r/\b#{&1}\b/u, text))
   defp maybe_add(list, item, true), do: list ++ [item]
   defp maybe_add(list, _item, false), do: list
 end
