@@ -36,6 +36,51 @@ defmodule OptimalSystemAgent.Providers.RegistryProviderResolutionTest do
   end
 
   describe "effective_context_window/2" do
+    # Pin the ":cloud" window resolution so it is deterministic. For an Ollama
+    # Cloud tag, Registry probes the live daemon's /api/show FIRST and only falls
+    # back to the static catalog on a miss. That makes the resolved window depend
+    # on the environment: a running daemon reports glm-5.2's real trained length
+    # (1,048,576) while a CI box with no daemon uses the catalog's 1,000,000 — and
+    # the ETS probe cache is process-global, so whichever sibling test probed the
+    # model first pinned the value for the rest of the run (the order/seed flake).
+    #
+    # Seeding the probe cache with the catalog window (the value these assertions
+    # document as the meter denominator) pins the resolution input directly, so
+    # the network/daemon/cache-leak variable is removed without weakening intent:
+    # 1M is still the trained window, still >> the 128k output cap, still not the
+    # 32k local ceiling. Cleaned up on exit so it doesn't leak to other modules.
+    @cloud_model "glm-5.2:cloud"
+    @cloud_window 1_000_000
+
+    setup do
+      if :ets.whereis(:osa_context_cache) == :undefined do
+        :ets.new(:osa_context_cache, [:set, :public, :named_table])
+      end
+
+      prev =
+        case :ets.lookup(:osa_context_cache, @cloud_model) do
+          [{_, v}] -> {:some, v}
+          [] -> :none
+        end
+
+      :ets.insert(:osa_context_cache, {@cloud_model, @cloud_window})
+
+      on_exit(fn ->
+        case :ets.whereis(:osa_context_cache) do
+          :undefined ->
+            :ok
+
+          _ ->
+            case prev do
+              {:some, v} -> :ets.insert(:osa_context_cache, {@cloud_model, v})
+              :none -> :ets.delete(:osa_context_cache, @cloud_model)
+            end
+        end
+      end)
+
+      :ok
+    end
+
     test "advertises the 1M window for a 1M-capable Claude model by default" do
       assert Registry.effective_context_window("claude-sonnet-4-6", :anthropic) == 1_000_000
     end
