@@ -155,6 +155,16 @@ impl AssistantStream {
     /// The part of the current message that is NOT yet in native scrollback —
     /// what the live preview must show, and what a flush hands over.
     pub(crate) fn tail(&self) -> &str {
+        // `settled` only ever advances to a markdown block boundary returned by
+        // `find_frozen_boundary`, which is always char-aligned — so this slice
+        // is safe. Pin that invariant in tests: if a future boundary-finder
+        // change lands `settled` mid-codepoint, fail loudly here instead of
+        // panicking on a real user's model output in production.
+        debug_assert!(
+            self.buf.is_char_boundary(self.settled),
+            "stream settled offset {} is not a char boundary",
+            self.settled
+        );
         &self.buf[self.settled..]
     }
 

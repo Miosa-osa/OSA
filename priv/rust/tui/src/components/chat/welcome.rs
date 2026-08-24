@@ -92,7 +92,12 @@ pub fn welcome_lines(
         let padded = if visible_len < inner {
             format!("{}{}", content, " ".repeat(inner - visible_len))
         } else {
-            content.chars().take(inner).collect()
+            // Truncate by DISPLAY WIDTH, not char count: `inner` is a column
+            // budget, so a wide-char (CJK/emoji) name in the greeting would
+            // otherwise overfill the line and push the right border out of
+            // alignment. `fit_cols` is the same width-aware helper the rest of
+            // the tree uses.
+            crate::util::fit_cols(content, inner)
         };
         Line::from(vec![
             Span::styled(left.to_string(), Style::default().fg(border_color)),

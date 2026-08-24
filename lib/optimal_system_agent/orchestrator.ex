@@ -449,7 +449,13 @@ defmodule OptimalSystemAgent.Orchestrator do
       # the *parent's* depth (0 for a top-level session, set by the delegate
       # handler from its UseContext). ToolFilter strips the child's spawning
       # tools once this reaches the configured max — the fork-bomb ceiling.
-      delegation_depth: Map.get(config, :delegation_depth, 0) + 1
+      delegation_depth: Map.get(config, :delegation_depth, 0) + 1,
+      # Per-subagent spend ceiling. nil = off (the default, so nothing changes
+      # for callers that don't set it); when present the child Loop aborts its
+      # own run mid-loop via `Loop.Limits.budget_exceeded?` once it crosses the
+      # cap, so a wide fan-out cannot burn unbounded spend. Enforced per child;
+      # the parent's own budget is independent.
+      max_budget_usd: Map.get(config, :max_budget_usd)
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches
