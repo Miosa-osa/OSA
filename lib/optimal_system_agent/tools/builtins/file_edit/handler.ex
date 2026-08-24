@@ -183,6 +183,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
                 operation: :edit
               })
 
+            # The :file_changed hook may be a formatter/linter that REWRITES the
+            # file. If so, the baseline recorded above (from OUR bytes) is now
+            # stale versus disk, and the NEXT edit would trip the read-before-
+            # edit / drift guard with a spurious "re-read the file first" — the
+            # rapid-edit churn users hit when a format-on-save hook is active.
+            # Re-capture from the final on-disk bytes so the guards reflect what
+            # is actually there.
+            refresh_write_baseline(session, expanded)
+
             # Generate unified diff (delegates to Utils.Diff for proper unified format)
             {diff_text, diff_stats} =
               OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
@@ -410,6 +419,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   # Returns "" when the hook reports nothing (the common case: no post-edit
   # validation hook registered). Always non-fatal — never raises into the caller.
   @spec file_changed_note(map()) :: String.t()
+  @doc false
+  # Re-capture the read-before-edit and drift baselines from a file's CURRENT
+  # on-disk bytes, after a `:file_changed` hook (e.g. a formatter) may have
+  # rewritten it. Without this, a format-on-save hook leaves every write's
+  # baseline stale and the next edit is falsely rejected as "re-read first".
+  # Best-effort: a vanished/unreadable file just leaves the prior baseline.
+  @spec refresh_write_baseline(term(), String.t()) :: :ok
+  def refresh_write_baseline(session, path) do
+    with {:ok, content} <- File.read(path),
+         {:ok, %{mtime: mtime, size: size}} <- File.stat(path, time: :posix) do
+      # record_write re-stats + re-hashes internally; pass the fresh content to
+      # DriftGuard so both guards agree with disk.
+      FileState.record_write(session, path)
+      DriftGuard.record(session, path, content, mtime, size)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   def file_changed_note(payload) do
     diagnostic =
       try do
