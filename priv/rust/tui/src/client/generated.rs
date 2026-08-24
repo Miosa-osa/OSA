@@ -89,6 +89,14 @@ pub struct HealthBilling {
     /// status line must never show a `$` figure — show token usage instead.
     #[serde(default)]
     pub usd_pricing: bool,
+    /// Per-session average cost per completed task in USD. Meaningful only once
+    /// `completed_tasks > 0`; `0.0` before the first task completes.
+    #[serde(default)]
+    pub cost_per_task_usd: f64,
+    /// Number of tasks completed this session. `0` until the first completes,
+    /// which is the guard for showing the `$/task` chip.
+    #[serde(default)]
+    pub completed_tasks: u64,
 }
 
 /// A structured `@`-mention carried onto the turn (composer `mentions::Attachment`
