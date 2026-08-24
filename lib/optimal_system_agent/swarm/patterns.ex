@@ -299,8 +299,19 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   @spec dispatch(String.t() | atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def dispatch(pattern, parent_id, task, opts \\ []) when is_binary(task) do
+    norm = normalize_pattern(pattern)
+
+    # Task-level lifecycle so an `orchestrate` swarm is VISIBLE in the TUI, the
+    # same way a `delegate` fan-out is. run_subagent already emits per-AGENT
+    # events, but this path never emitted the outer task grouping that
+    # Orchestrator.run_parallel wraps around a delegate fan-out, so a swarm
+    # showed up as loose agents with no "started / synthesizing / completed"
+    # frame. Best-effort; never affects execution.
+    team_id = "swarm:#{parent_id}:#{normalized_unique(task)}"
+    emit_task_event(parent_id, %{event: "orchestrator_task_started", task_id: team_id, strategy: to_string(norm)})
+
     result =
-      case normalize_pattern(pattern) do
+      case norm do
         :parallel -> parallel(parent_id, build_configs(:parallel, task, opts), opts)
         :pipeline -> pipeline(parent_id, build_configs(:pipeline, task, opts), opts)
         :debate -> debate(parent_id, build_configs(:debate, task, opts), opts)
@@ -309,11 +320,40 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         :auto -> auto_dispatch(parent_id, task, opts)
       end
 
+    emit_task_event(parent_id, %{event: "orchestrator_task_completed", task_id: team_id})
+
     case result do
       {:ok, results} -> {:ok, flatten_results(results)}
       {:error, _} = err -> err
       other -> {:ok, flatten_results(other)}
     end
+  end
+
+  # Broadcast a task-level orchestration event on the parent's session topic,
+  # in the exact shape the TUI's SSE parser expects (see
+  # Orchestrator.emit_event/2). Best-effort — a broadcast failure must never
+  # break a swarm.
+  defp emit_task_event(parent_id, event_data) do
+    full =
+      event_data
+      |> Map.put(:type, :system_event)
+      |> Map.put(:session_id, parent_id)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, full}
+    )
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # A stable-enough id fragment from the task text without Date/System time in
+  # hot equality paths — just a content hash, so the same dispatch reuses one id.
+  defp normalized_unique(task) do
+    :erlang.phash2(task)
   end
 
   @doc "Normalize a pattern name (string/atom) to a known pattern atom; :auto fallback."
