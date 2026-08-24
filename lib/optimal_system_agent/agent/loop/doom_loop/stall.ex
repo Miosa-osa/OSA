@@ -27,13 +27,24 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
                        apply_patch str_replace str_replace_editor create_file
                        file_append multi_edit)
 
-  # Investigation tools — reading/searching IS forward progress during a long
-  # autonomous research phase (exactly what hours-long work does). A window
-  # containing any of these is not a stall, so a legitimate read/analysis phase
-  # is never wrongly halted.
+  # Investigation tools — reading/searching/running-a-command IS forward
+  # progress during a long autonomous work phase (exactly what hours-long work
+  # does). A window containing any of these is not a stall, so a legitimate
+  # read/analysis/diagnose phase is never wrongly halted.
+  #
+  # Command execution (`shell_execute`, `bash`, `pty_*`, `task_output`) is
+  # included: an iterative debugging phase — run the linter, read the errors,
+  # run it again — is dominated by shell calls that each return NEW output, and
+  # without these a real fix-the-eslint-errors loop tripped the graded nudge
+  # ("no forward progress for 12 tool calls") mid-work. A genuinely stuck shell
+  # loop is still caught: IdenticalCall halts exact repeats and FailureSignature
+  # halts a command that keeps failing the same way — Stall is only for
+  # non-progress, and a command returning fresh output is progress.
   @progress_tools ~w(file_read read_file file_grep grep dir_list list_dir
                      file_glob glob file_search web_fetch web_search
-                     semantic_search code_symbols)
+                     semantic_search code_symbols
+                     shell_execute bash run_command sh
+                     pty_send pty_read pty_start task_output task_wait)
 
   # --- Stall detection ---
   #
