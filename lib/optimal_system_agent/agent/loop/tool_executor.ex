@@ -1306,6 +1306,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           modified_args
           |> Map.put("__session_id__", state.session_id)
           |> Map.put("__tool_use_id__", tool_call.id)
+          |> Map.put("__delegation_depth__", Map.get(state, :delegation_depth, 0))
           |> Map.put("__surface__", authority_surface(state))
 
         execute_tool(tool_call.name, enriched_args)
@@ -1316,6 +1317,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           tool_call.arguments
           |> Map.put("__session_id__", state.session_id)
           |> Map.put("__tool_use_id__", tool_call.id)
+          |> Map.put("__delegation_depth__", Map.get(state, :delegation_depth, 0))
           |> Map.put("__surface__", authority_surface(state))
 
         execute_tool(tool_call.name, enriched_args)

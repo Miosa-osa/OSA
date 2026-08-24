@@ -60,10 +60,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
     # nil strategy defaults to :auto (heuristic single-vs-pipeline decision).
     strategy = params["strategy"] || "auto"
 
-    Logger.info("[Orchestrate] strategy=#{strategy} task=#{String.slice(task, 0, 100)}")
+    # The caller's own delegation depth, injected by the agent loop's
+    # ToolExecutor. Threaded into every spawned config so `run_subagent`
+    # increments from the TRUE nesting level — without it, orchestrate-spawned
+    # children always started at depth 1, so a subagent that called orchestrate
+    # again reset the counter and the fork-bomb ceiling was never reached.
+    depth = params["__delegation_depth__"] || 0
+
+    Logger.info("[Orchestrate] strategy=#{strategy} depth=#{depth} task=#{String.slice(task, 0, 100)}")
 
     try do
-      case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task) do
+      case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task, depth: depth) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, "Orchestration failed: #{inspect(reason)}"}
       end
