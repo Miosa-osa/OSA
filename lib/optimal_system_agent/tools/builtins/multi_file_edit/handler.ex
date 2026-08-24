@@ -275,7 +275,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
               {:error, :ambiguous, count} ->
                 {:error, dp,
-                 "old_string found #{count} times — must be unique; add surrounding context"}
+                 "old_string found multiple times (#{count}) — must be unique; " <>
+                   "add surrounding context"}
 
               {:error, :disproportionate} ->
                 {:error, dp,
