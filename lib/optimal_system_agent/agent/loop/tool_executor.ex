@@ -804,19 +804,61 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # OBSERVABLE: both outcomes are announced above debug. An auto-ALLOW under the
   # bypass is the one that matters most — it is a permission decision taken with
   # no human in it — and it used to be entirely silent.
+  # True when the unattended budget-approval policy should allow this call:
+  # the operator enabled :budget_auto_approve AND a positive per-session cap is
+  # set AND spend is still under it. Strictly bounded — the loop still halts at
+  # the cap. Default OFF.
+  defp budget_policy_allows?(state) when is_map(state) do
+    cap = Map.get(state, :max_budget_usd)
+
+    Application.get_env(:optimal_system_agent, :budget_auto_approve, false) and
+      is_number(cap) and cap > 0 and
+      Map.get(state, :session_cost_usd, 0.0) < cap
+  end
+
+  defp budget_policy_allows?(_), do: false
+
   defp non_interactive_decision(tool_call, state) do
     sid = if is_map(state), do: Map.get(state, :session_id), else: nil
     why = Attendance.reason(state)
 
-    if Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false) do
-      Logger.warning(
-        "[permissions] auto-ALLOWED #{tool_call.name} without asking — unattended session " <>
-          "(#{why}) and :non_interactive_permission_bypass is set"
-      )
+    cond do
+      Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false) ->
+        Logger.warning(
+          "[permissions] auto-ALLOWED #{tool_call.name} without asking — unattended session " <>
+            "(#{why}) and :non_interactive_permission_bypass is set"
+        )
 
-      emit_non_interactive(:allow, tool_call.name, sid, why)
-      :allow
-    else
+        emit_non_interactive(:allow, tool_call.name, sid, why)
+        :allow
+
+      # Budget-policy approval (governance for unattended long runs): when the
+      # operator has enabled the policy AND set a per-session spend cap AND spend
+      # is still under it, an otherwise-fail-closed :ask is ALLOWED. This runs
+      # AFTER every security check (deny rules, circuit breaker, bypass-immune
+      # safety, plan mode, tier) — it only ever converts a would-fail-closed ask
+      # into an allow, never overrides a block. Autonomy stays strictly bounded
+      # by dollars: Loop.Limits.budget_exceeded? halts the whole run the moment
+      # the cap is crossed. Default OFF, so fail-closed behaviour is unchanged.
+      budget_policy_allows?(state) ->
+        cap = Map.get(state, :max_budget_usd)
+        spent = Map.get(state, :session_cost_usd, 0.0)
+
+        Logger.info(
+          "[permissions] auto-ALLOWED #{tool_call.name} — unattended within budget policy " <>
+            "($#{Float.round(spent / 1, 4)}/$#{cap})"
+        )
+
+        emit_non_interactive(:allow, tool_call.name, sid, why)
+        :allow
+
+      true -> nil
+    end
+    |> case do
+      :allow ->
+        :allow
+
+      nil ->
       Logger.info(
         "[permissions] auto-DENIED #{tool_call.name} — unattended session (#{why}), " <>
           "permissions fail closed"

@@ -95,6 +95,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(model, opts)
+      |> maybe_add_service_tier(opts)
       |> maybe_add_reasoning(model, opts)
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
@@ -281,6 +282,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> maybe_add_temperature(model, opts)
     |> maybe_add_tools(opts)
     |> maybe_add_max_tokens(model, opts)
+    |> maybe_add_service_tier(opts)
     |> maybe_add_reasoning(model, opts)
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
@@ -1316,6 +1318,23 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # field and require `max_completion_tokens`. Every other OpenAI-compatible
   # provider uses `max_tokens`. Route the value to the right key so o-series
   # calls don't 400 ("max_tokens is not supported with this model").
+  # OpenAI processing tier ("flex" ~50% cheaper + slower for non-urgent work,
+  # "priority" faster, "default"/"auto" standard). Added ONLY for the real
+  # OpenAI provider — other OpenAI-compatible backends (xAI/grok, OpenRouter,
+  # local) reject an unknown `service_tier` with a 422, so we never send it
+  # there. Off unless a caller (llm_client, from the task's speed priority) set
+  # :service_tier.
+  defp maybe_add_service_tier(body, opts) do
+    tier = Keyword.get(opts, :service_tier)
+    provider = Keyword.get(opts, :provider, image_provider(opts))
+
+    if is_binary(tier) and tier != "" and provider == :openai do
+      Map.put(body, :service_tier, tier)
+    else
+      body
+    end
+  end
+
   defp maybe_add_max_tokens(body, model, opts) do
     case Keyword.get(opts, :max_tokens) do
       nil ->

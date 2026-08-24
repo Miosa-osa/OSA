@@ -834,4 +834,23 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert body.stream_options == %{include_usage: true}
     end
   end
+
+  describe "service_tier (speed/cost priority)" do
+    @msgs [%{role: "user", content: "hi"}]
+
+    test "adds service_tier for the real OpenAI provider" do
+      body = OpenAICompat.build_stream_body("gpt-5", @msgs, provider: :openai, service_tier: "flex")
+      assert body.service_tier == "flex"
+    end
+
+    test "NEVER sends service_tier to other OpenAI-compatible backends (422 guard)" do
+      body = OpenAICompat.build_stream_body("grok-4.6", @msgs, provider: :xai, service_tier: "flex")
+      refute Map.has_key?(body, :service_tier)
+    end
+
+    test "omitted when no priority/service_tier is set" do
+      body = OpenAICompat.build_stream_body("gpt-5", @msgs, provider: :openai)
+      refute Map.has_key?(body, :service_tier)
+    end
+  end
 end

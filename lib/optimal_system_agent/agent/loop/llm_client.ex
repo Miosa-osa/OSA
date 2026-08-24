@@ -73,6 +73,30 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   def capped_retry_delay_ms(_), do: 0
 
+
+  # Map the session's speed priority to an OpenAI processing tier. Only OpenAI
+  # honours `service_tier`; openai_compat gates it to that provider, so setting
+  # it for any provider is safe (ignored elsewhere). :loose → "flex" (~50%
+  # cheaper, slower — right for long-horizon background work); :immediate →
+  # "priority" (faster); :standard / unknown → unset (provider default).
+  defp maybe_put_service_tier(opts, state) do
+    case service_tier_for(state) do
+      nil -> opts
+      tier -> Keyword.put_new(opts, :service_tier, tier)
+    end
+  end
+
+  defp service_tier_for(state) when is_map(state) do
+    case Map.get(state, :priority) do
+      :loose -> "flex"
+      :immediate -> "priority"
+      _ -> nil
+    end
+  end
+
+  defp service_tier_for(_), do: nil
+
+
   defp retry_after_cap_ms do
     case Application.get_env(:optimal_system_agent, :retry_after_cap_ms, @retry_after_cap_ms) do
       n when is_integer(n) and n > 0 -> n
@@ -236,6 +260,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    opts = maybe_put_service_tier(opts, state)
 
     # Session identity for the provider layer: it keys the prompt-cache
     # attributor's per-scope comparison, and on OpenAI it becomes the
@@ -304,7 +329,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   Returns {:ok, result} | {:error, reason}.
   """
-  def llm_chat_stream(%{session_id: session_id, provider: provider, model: model}, messages, opts) do
+  def llm_chat_stream(%{session_id: session_id, provider: provider, model: model} = state, messages, opts) do
     Logger.debug(
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
@@ -490,6 +515,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    opts = maybe_put_service_tier(opts, state)
     opts = maybe_put_session(opts, session_id)
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
