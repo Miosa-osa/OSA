@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
   alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
   alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
@@ -104,7 +105,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
     to_apply =
       Enum.filter(validation_results, fn
-        {:valid, _, _, _, _, _} -> true
+        {:valid, _, _, _, _, _, _} -> true
         _ -> false
       end)
 
@@ -147,7 +148,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
       Enum.map_join(already_applied, "\n", &"  - #{&1}: already applied (no change needed)")
 
     ok_lines =
-      Enum.map_join(to_apply, "\n", fn {:valid, dp, _ep, _o, _n, _c} ->
+      Enum.map_join(to_apply, "\n", fn {:valid, dp, _ep, _o, _n, _c, _nc} ->
         "  - #{dp}: would apply cleanly"
       end)
 
@@ -165,7 +166,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
         # post-edit validation hook synchronously per file, aggregating any
         # diagnostics into the observation (P1-4).
         edited_paths =
-          for {:valid, _dp, ep, _o, _n, _c} <- validation_results, do: ep
+          for {:valid, _dp, ep, _o, _n, _c, _nc} <- validation_results, do: ep
 
         Enum.each(edited_paths, &FileState.record_write(session, &1))
 
@@ -251,55 +252,51 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
       true ->
         case File.read(ep) do
           {:ok, content} ->
-            cond do
-              not String.contains?(content, old) ->
-                # Idempotency, inherited from single-file `file_edit`
-                # (`already_applied_or_not_found/3`) which `multi_file_edit`
-                # has its own apply logic and so never got.
-                #
-                # Why it matters MORE here: this batch is all-or-nothing, so a
-                # single already-applied hunk failed validation and reverted
-                # every other hunk. A retry after a partial success therefore
-                # could never succeed — the batch was permanently unusable and
-                # the model had no way out except editing files one at a time.
-                #
-                # Narrow, exactly as in `file_edit`: `new` must be non-empty
-                # AND actually present. A deletion (`new == ""`) is trivially
-                # "present" in every file, so treating it as applied would
-                # swallow every genuinely failed deletion — deletions keep the
-                # hard error.
-                if new != "" and String.contains?(content, new) do
-                  {:already_applied, dp}
-                else
-                  {:error, dp, "old_string not found in file"}
-                end
-
-              # Ambiguity guard mirroring single-file file_edit: apply_atomic uses
-              # global: false and would silently rewrite only the FIRST match,
-              # committing a wrong edit. Require a unique match.
-              occurrence_count(content, old) > 1 ->
-                {:error, dp,
-                 "old_string found multiple times — must be unique; add surrounding context"}
-
-              true ->
+            # Match with the SAME fuzzy cascade `file_edit` uses (exact ->
+            # line-endings -> whitespace -> deep fuzzy). Previously this tool
+            # matched with an exact `String.contains?/2` only, so an edit with
+            # trivial whitespace/line-ending drift failed here — then fell into
+            # the idempotency branch and, if `new_string` happened to be
+            # present, reported a FALSE "already applied" success while the same
+            # edit succeeded in `file_edit`. Unifying the matcher removes that
+            # divergence at the root.
+            case Matcher.replace(content, old, new, false) do
+              {:ok, new_content, _count, _stage} ->
                 # Read-before-edit / stale-write guard (P0-1). Any un-read or
                 # stale target fails the whole batch — no files modified.
-                #
-                # DriftGuard is the second, independent layer `file_edit`
-                # already runs (see `FileEdit.Handler.do_edit/6`) and this tool
-                # did not. Without it a file whose {mtime, size} happen to
-                # collide with the recorded ones — a same-second edit that
-                # keeps the length, which is exactly what a formatter or a
-                # sibling agent produces — passes `check_read/2`, and the batch
-                # then computes new content from THIS read and writes it over
-                # whatever is actually on disk, discarding the other change.
                 {mtime, size} = stat_or_zero(ep)
 
                 with :ok <- FileState.check_read(session, ep),
                      :ok <- DriftGuard.verify(session, ep, content, mtime, size) do
-                  {:valid, dp, ep, old, new, content}
+                  {:valid, dp, ep, old, new, content, new_content}
                 else
                   {:error, msg} -> {:error, dp, msg}
+                end
+
+              {:error, :ambiguous, count} ->
+                {:error, dp,
+                 "old_string found multiple times (#{count}) — must be unique; " <>
+                   "add surrounding context"}
+
+              {:error, :disproportionate} ->
+                {:error, dp,
+                 "old_string matched only approximately and the resulting change is " <>
+                   "disproportionate — re-read the file and copy old_string verbatim"}
+
+              {:error, {:replace_all_approximate, _}} ->
+                {:error, dp,
+                 "old_string matched only approximately — copy it verbatim and retry"}
+
+              {:error, :not_found} ->
+                # Genuinely absent even after fuzzy matching, so the idempotency
+                # check is now meaningful: old_string is really gone. Narrow,
+                # exactly as in `file_edit`: `new` must be non-empty AND present.
+                # A deletion (`new == ""`) is vacuously present, so it keeps the
+                # hard error rather than being swallowed.
+                if new != "" and String.contains?(content, new) do
+                  {:already_applied, dp}
+                else
+                  {:error, dp, "old_string not found in file"}
                 end
             end
 
@@ -317,10 +314,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
       {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}
       _ -> {0, 0}
     end
-  end
-
-  defp occurrence_count(content, old) do
-    (content |> String.split(old) |> length()) - 1
   end
 
   # POSIX {mtime, size} for DriftGuard, identical to `FileEdit.Handler`'s. A
@@ -369,12 +362,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
   defp apply_atomic(validation_results) do
     edits =
       Enum.map(validation_results, fn
-        {:valid, display_path, expanded_path, old, new, content} ->
+        {:valid, display_path, expanded_path, old, _new, content, new_content} ->
           %{
             display_path: display_path,
             expanded_path: expanded_path,
             content: content,
-            new_content: String.replace(content, old, new, global: false),
+            new_content: new_content,
             lines_changed: old |> String.split("\n") |> length()
           }
       end)
