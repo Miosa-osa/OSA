@@ -33,7 +33,13 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
         channel: :cli,
         messages: [],
         plan_mode: false,
-        working_dir: "/tmp"
+        working_dir: "/tmp",
+        # Pin the context window so token_budget/1 is deterministic. Without it,
+        # max_tok is derived from the GLOBALLY-active model, so an async sibling
+        # test that switched the active model flipped response_reserve from 8192
+        # to 4096 — the recurring `response_reserve is 8192` flake. 200k keeps
+        # response_reserve at its 8192 ceiling regardless of global model state.
+        effective_context_window: 200_000
       },
       overrides
     )
