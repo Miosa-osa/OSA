@@ -615,7 +615,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # and guard-safe (no function calls in guards) because the value is
   # normalized before dispatch rather than during it.
   defp canonicalize_stop_reason({:ok, resp}, state, usage) when is_map(resp) do
-    if StopReason.truncated?(resp) do
+    # The truncation excuse is ONLY for a generation cut off mid-output — a
+    # model writing a long answer that hit the ceiling. An *empty* generation
+    # (no visible content, no tool call) that reports a ceiling stop reason
+    # produced nothing to cut off; treating it as truncated makes the
+    # reasoning-only guard suppress it (a truncation "is neither progress nor a
+    # spin"), so a model that returns empty+`length` every time — observed on
+    # the OpenRouter reasoning models, which burn the output budget on hidden
+    # reasoning and return no visible content — spins forever, never counted,
+    # never halted. An empty generation is a spin regardless of why it stopped,
+    # so it must NOT get the truncation pass.
+    if StopReason.truncated?(resp) and not empty_generation?(resp) do
       raw = StopReason.raw(resp) || "unknown"
       output_tokens = Map.get(usage || %{}, :output_tokens, 0)
 
@@ -674,6 +684,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp canonicalize_stop_reason(result, state, _usage), do: {result, state}
+
+  # A generation that produced no visible content AND no tool call. Such a
+  # generation cannot have been "cut off mid-answer" — there is no answer to cut
+  # — so it is never a legitimate output-ceiling truncation, and the
+  # reasoning-only doom-loop guard must be allowed to count it.
+  defp empty_generation?(resp) when is_map(resp) do
+    content = Map.get(resp, :content) || Map.get(resp, "content")
+    tool_calls = Map.get(resp, :tool_calls) || Map.get(resp, "tool_calls") || []
+
+    blank_content? = is_nil(content) or String.trim(to_string(content)) == ""
+    blank_content? and (tool_calls == [] or is_nil(tool_calls))
+  end
+
+  defp empty_generation?(_), do: false
 
   # Max tokens recovery — response was truncated, bump limit and retry.
   #
