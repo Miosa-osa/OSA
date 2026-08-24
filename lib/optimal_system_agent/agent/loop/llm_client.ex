@@ -168,6 +168,59 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     id
   end
 
+  # Emit one repaired, non-empty text delta to every consumer: the retry
+  # one-way-door, the partial-recovery buffer, the local event bus, and the
+  # PubSub bridge the TUI reads. Factored out of the `:text_delta` callback arm
+  # so the arm can skip it when the stateful mojibake repair held the whole
+  # delta back as an incomplete sequence.
+  defp emit_text_delta(text, session_id, message_id, heartbeat) do
+    _ = heartbeat
+
+    # One-way door: this byte is about to be on the user's screen. Past this
+    # point a same-provider retry would re-emit it into the SAME live callback
+    # and the user would watch the paragraph appear twice, so the retry budget
+    # for this request collapses to zero. Runs in the stream task process, which
+    # is also the process `Resilience.with_retry/2` is looping in.
+    Resilience.mark_output_observed()
+
+    # WS5 — accumulate the partial text (reverse-prepended iodata; single writer
+    # = this stream task) so a hard abort can persist what the model had already
+    # produced.
+    try do
+      case :ets.lookup(:osa_stream_partial, session_id) do
+        [{^session_id, acc}] when is_list(acc) ->
+          :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+
+        _ ->
+          :ets.insert(:osa_stream_partial, {session_id, [text]})
+      end
+    rescue
+      ArgumentError -> :ok
+    end
+
+    Bus.emit(:system_event, %{
+      event: :streaming_token,
+      session_id: session_id,
+      message_id: message_id,
+      delta: text
+    })
+
+    # Bridge to PubSub for SSE delivery to TUI. `message_id` marks which
+    # assistant message this delta belongs to — the client starts a fresh buffer
+    # when it changes instead of appending onto the superseded one.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event,
+       %{
+         type: :streaming_token,
+         session_id: session_id,
+         message_id: message_id,
+         text: text
+       }}
+    )
+  end
+
   @doc """
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
@@ -277,70 +330,55 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       ArgumentError -> :ok
     end
 
+    # Start with an empty mojibake carry so a prior stream that aborted before
+    # its `:done` (leaving a held partial sequence in this reused task process)
+    # cannot prepend stale bytes onto this stream's first delta.
+    Process.delete({:moji_carry, session_id})
+
     caller = self()
 
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
-        # Every provider's streamed text funnels through here before it reaches
-        # the screen, the partial buffer, or the persisted transcript — so this
-        # is the ONE place to undo the UTF-8-as-Latin-1 corruption some backends
-        # emit (an em-dash arriving as the bytes for "â€""). Doing it per
-        # provider left gaps: the local Ollama path repaired, its cloud path
-        # (glm-*:cloud) did not, and every other provider not at all. `repair/1`
-        # is conservative — it only rewrites text that re-decodes to valid UTF-8
-        # with fewer mojibake markers, so clean tokens and legitimately accented
-        # text pass through untouched.
-        text = Mojibake.repair(text)
-        # One-way door: this byte is about to be on the user's screen. Past this
-        # point a same-provider retry would re-emit it into the SAME live
-        # callback and the user would watch the paragraph appear twice, so the
-        # retry budget for this request collapses to zero. Runs in the stream
-        # task process, which is also the process `Resilience.with_retry/2` is
-        # looping in (providers drive `into: :self` receive loops).
-        Resilience.mark_output_observed()
+        # Stateful mojibake repair. Per-delta repair cannot fix a corruption
+        # sequence split across two streamed chunks (a delta ending in a lone
+        # "â" has nothing to re-decode), which is the common case when a
+        # provider streams token-by-token — so we thread a carry buffer through
+        # the stream, holding an in-flight partial sequence until it is whole.
+        # The carry lives in the process dictionary because this callback runs
+        # in the single stream-task process for the whole request; it is flushed
+        # in the `:done` arm below.
+        {text, moji_carry} =
+          Mojibake.repair_stream(Process.get({:moji_carry, session_id}, ""), text)
 
-        # WS5 — accumulate the partial text (reverse-prepended iodata; single
-        # writer = this stream task) so a hard abort can persist what the model
-        # had already produced.
-        try do
-          case :ets.lookup(:osa_stream_partial, session_id) do
-            [{^session_id, acc}] when is_list(acc) ->
-              :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+        Process.put({:moji_carry, session_id}, moji_carry)
 
-            _ ->
-              :ets.insert(:osa_stream_partial, {session_id, [text]})
-          end
-        rescue
-          ArgumentError -> :ok
+        # Everything below emits to the screen/buffer/transcript; skip it when
+        # this delta was entirely held back as a possibly-incomplete sequence,
+        # so we neither broadcast an empty token nor burn the retry budget on
+        # output the user has not actually seen yet.
+        if text != "" do
+          emit_text_delta(text, session_id, message_id, heartbeat)
         end
 
-        Bus.emit(:system_event, %{
-          event: :streaming_token,
-          session_id: session_id,
-          message_id: message_id,
-          delta: text
-        })
-
-        # Bridge to PubSub for SSE delivery to TUI. `message_id` marks which
-        # assistant message this delta belongs to — the client starts a fresh
-        # buffer when it changes instead of appending a new generation onto the
-        # superseded one.
-        Phoenix.PubSub.broadcast(
-          OptimalSystemAgent.PubSub,
-          "osa:session:#{session_id}",
-          {:osa_event,
-           %{
-             type: :streaming_token,
-             session_id: session_id,
-             message_id: message_id,
-             text: text
-           }}
-        )
 
       {:done, result} ->
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
+
+        # Flush whatever the stateful mojibake repair was still holding as a
+        # possibly-incomplete sequence, so the live view is not missing the last
+        # few characters of the answer. Emitted as one final repaired delta.
+        case Process.get({:moji_carry, session_id}, "") do
+          "" ->
+            :ok
+
+          carry ->
+            flushed = Mojibake.flush(carry)
+            if flushed != "", do: emit_text_delta(flushed, session_id, message_id, heartbeat)
+        end
+
+        Process.delete({:moji_carry, session_id})
 
         # Repair the FINAL assembled content, not just the live deltas. This is
         # the string that is persisted to the transcript and re-rendered on

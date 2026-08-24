@@ -41,4 +41,47 @@ defmodule OptimalSystemAgent.Utils.MojibakeTest do
 
     assert Mojibake.repair(corrupt) == <<0xE2, 0x80, 0x94>>
   end
+
+  # A helper: the on-the-wire mojibake form of an original UTF-8 byte sequence -
+  # each byte re-encoded as its own UTF-8 char (latin1-as-utf8 double encoding).
+  defp corrupt(orig_bytes) do
+    orig_bytes |> :binary.bin_to_list() |> Enum.map_join(fn b -> <<b::utf8>> end)
+  end
+
+  describe "repair_stream/2 handles corruption split across streamed deltas" do
+    test "a sequence split mid-mojibake is repaired once whole" do
+      # "'" is E2 80 99; its mojibake is corrupt(<<0xE2,0x80,0x99>>). Split it
+      # between the first corrupted char and the rest, as a token stream would.
+      moji = corrupt(<<0xE2, 0x80, 0x99>>)
+      <<first::binary-size(2), rest::binary>> = moji
+      deltas = ["That", first, rest, "s the app"]
+
+      {out, carry} =
+        Enum.reduce(deltas, {"", ""}, fn d, {acc, carry} ->
+          {emit, new_carry} = Mojibake.repair_stream(carry, d)
+          {acc <> emit, new_carry}
+        end)
+
+      assert out <> Mojibake.flush(carry) == "That’s the app"
+    end
+
+    test "clean and legitimately-accented text streams through untouched" do
+      deltas = ["Hello ", "world ", "café ", "naïve"]
+
+      {out, carry} =
+        Enum.reduce(deltas, {"", ""}, fn d, {acc, carry} ->
+          {emit, new_carry} = Mojibake.repair_stream(carry, d)
+          {acc <> emit, new_carry}
+        end)
+
+      assert out <> Mojibake.flush(carry) == "Hello world café naïve"
+    end
+
+    test "a lone real accented word ending in a marker char is preserved" do
+      # a real "â" is a marker char; it must survive, only delayed by the carry.
+      {e1, c1} = Mojibake.repair_stream("", "goâ")
+      {e2, c2} = Mojibake.repair_stream(c1, " on")
+      assert e1 <> e2 <> Mojibake.flush(c2) == "goâ on"
+    end
+  end
 end
