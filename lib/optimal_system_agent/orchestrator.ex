@@ -154,38 +154,53 @@ defmodule OptimalSystemAgent.Orchestrator do
         # are re-sorted by original index below.
         cap = delegate_concurrency_cap()
 
-        results =
-          indexed_configs
-          |> Enum.chunk_every(cap)
-          |> Enum.flat_map(fn batch ->
-            # Spawn one batch as async Tasks. Thread the stable batch_id
-            # (team_id) and wave number into each config so run_subagent can
-            # carry them onto lifecycle events — the TUI groups per-workstream
-            # by batch_id and per-wave.
-            tasks =
-              Enum.map(batch, fn {config, original_idx} ->
-                config =
-                  config
-                  |> Map.put(:parent_session_id, parent_id)
-                  |> Map.put(:batch_id, team_id)
-                  |> Map.put(:wave, wave_num)
+        # Sliding-window fan-out. This used to `Enum.chunk_every(cap)` and run
+        # the wave in fixed batches, joining every agent in a batch before
+        # starting the next — so a fast agent stuck in a batch behind a slow one
+        # sat idle until the whole batch drained, wasting up to (batch-1) slots.
+        # `async_stream` instead keeps up to `cap` agents running at ALL times,
+        # refilling a slot the instant one finishes.
+        #
+        # Each stream worker owns its own subagent Task and runs the SAME
+        # two-clock `join_subagent_task/3` ladder it always did, so the
+        # per-config inner timeout and the brutal-kill backstop are preserved
+        # exactly (Task.yield/shutdown require the owner process, which is this
+        # worker). `timeout: :infinity` defers entirely to that inner ladder,
+        # which always returns; `ordered: true` yields results in input order —
+        # already original-index order within a wave — so no post-sort is needed.
+        # batch_id (team_id) + wave are threaded onto each config so the TUI can
+        # group per-workstream and per-wave.
+        OptimalSystemAgent.TaskSupervisor
+        |> Task.Supervisor.async_stream_nolink(
+          indexed_configs,
+          fn {config, _original_idx} ->
+            config =
+              config
+              |> Map.put(:parent_session_id, parent_id)
+              |> Map.put(:batch_id, team_id)
+              |> Map.put(:wave, wave_num)
 
-                {original_idx, subagent_join_timeout_ms(config),
-                 Task.Supervisor.async_nolink(
-                   OptimalSystemAgent.TaskSupervisor,
-                   fn -> run_subagent(config) end
-                 )}
-              end)
+            inner_timeout = subagent_join_timeout_ms(config)
 
-            Enum.map(tasks, fn {original_idx, inner_timeout, task} ->
-              {original_idx, join_subagent_task(task, await_timeout, inner_timeout)}
-            end)
-          end)
+            task =
+              Task.Supervisor.async_nolink(
+                OptimalSystemAgent.TaskSupervisor,
+                fn -> run_subagent(config) end
+              )
 
-        # Sort by original index to maintain order
-        results
-        |> Enum.sort_by(fn {idx, _} -> idx end)
-        |> Enum.map(fn {_, result} -> result end)
+            join_subagent_task(task, await_timeout, inner_timeout)
+          end,
+          max_concurrency: cap,
+          timeout: :infinity,
+          ordered: true
+        )
+        |> Enum.map(fn
+          {:ok, result} -> result
+          # A stream worker crashing (not the child — join_subagent_task already
+          # turns a child crash into {:error, {:crashed, _}}) is still a failure,
+          # never laundered into success.
+          {:exit, reason} -> {:error, {:crashed, reason}}
+        end)
       end)
 
     # Emit synthesizing
