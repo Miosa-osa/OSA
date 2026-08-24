@@ -54,9 +54,19 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   end
 
   defp choose(_task, config, requirements, opts) do
-    tier = Map.get(config, :tier, :specialist)
+    # Speed/priority tier: a latency-tolerance axis ORTHOGONAL to the quality
+    # tier. `:loose` (non-urgent, long-horizon work) trades speed/quality for
+    # cost — step the quality tier down one (floored at :specialist so tool use
+    # stays reliable) and prefer free/local providers first. `:immediate` steps
+    # up toward :elite for the best model. `:standard` (default) is unchanged.
+    priority = normalize_priority(Map.get(config, :priority))
+    tier = adjust_tier(Map.get(config, :tier, :specialist), priority)
     primary = Map.get(config, :provider) || default_provider()
-    candidates = Keyword.get(opts, :candidates, candidate_providers(primary))
+
+    candidates =
+      opts
+      |> Keyword.get(:candidates, candidate_providers(primary))
+      |> order_for_priority(priority)
     configured? = Keyword.get(opts, :configured?, &Registry.provider_configured?/1)
     model_for = Keyword.get(opts, :model_for, &Tier.model_for/2)
     tool_call = Keyword.get(opts, :tool_call, &ModelLimits.tool_call/2)
@@ -90,7 +100,11 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
         config
         |> Map.put(:provider, provider)
         |> Map.put(:model, model)
-        |> Map.put(:model_reason, selection_reason(provider, model, met, requirements -- met))
+        |> Map.put(:priority, priority)
+        |> Map.put(
+          :model_reason,
+          selection_reason(provider, model, met, requirements -- met) <> priority_note(priority)
+        )
         |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
 
       nil ->
@@ -142,6 +156,50 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
 
     tools_ok and context_ok and vision_ok
   end
+
+  # ── Speed / priority tier ─────────────────────────────────────────────
+
+  @priorities [:immediate, :standard, :loose]
+  # Best → cheapest. Quality tier ordering used to step a priority bias.
+  @tier_order [:elite, :specialist, :utility]
+
+  @spec normalize_priority(term()) :: :immediate | :standard | :loose
+  defp normalize_priority(p) when p in @priorities, do: p
+  defp normalize_priority("immediate"), do: :immediate
+  defp normalize_priority("loose"), do: :loose
+  defp normalize_priority(_), do: :standard
+
+  # :immediate → one tier better (toward :elite). :loose → one tier cheaper
+  # (toward :utility) but floored at :specialist, the minimum tier that calls
+  # tools reliably, so a loose task never lands on a model that can't act.
+  defp adjust_tier(tier, :standard), do: tier
+  defp adjust_tier(tier, :immediate), do: step_tier(tier, -1)
+
+  defp adjust_tier(tier, :loose) do
+    stepped = step_tier(tier, +1)
+    if tier_index(stepped) > tier_index(:specialist), do: :specialist, else: stepped
+  end
+
+  defp step_tier(tier, delta) do
+    idx = tier_index(tier)
+    new_idx = (idx + delta) |> min(length(@tier_order) - 1) |> max(0)
+    Enum.at(@tier_order, new_idx)
+  end
+
+  defp tier_index(tier), do: Enum.find_index(@tier_order, &(&1 == tier)) || 1
+
+  # Loose work prefers free/local providers (zero cost, prompt stays on the
+  # machine); if none is configured/capable the relaxation walk still reaches
+  # the paid candidates. Other priorities keep the caller's order (primary first).
+  defp order_for_priority(candidates, :loose) do
+    {free, paid} = Enum.split_with(candidates, &FallbackChain.free?/1)
+    free ++ paid
+  end
+
+  defp order_for_priority(candidates, _), do: candidates
+
+  defp priority_note(:standard), do: ""
+  defp priority_note(p), do: " [priority: #{p}]"
 
   defp candidate_providers(primary) do
     allowed = FallbackChain.cost_gated_chain(FallbackChain.chain(), primary)

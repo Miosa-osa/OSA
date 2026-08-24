@@ -238,7 +238,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # the child Loop aborts its own run once it crosses the cap, so a wide
       # fan-out cannot burn unbounded spend. Each child is capped independently.
       max_budget_usd:
-        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd"))
+        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")),
+      # Speed/cost tier, normalized by DelegationRouter (nil → :standard). Biases
+      # model tier + provider order toward cheaper/local for :loose long-horizon
+      # work and toward the best model for :immediate.
+      priority: Map.get(args, "priority")
     }
 
     DelegationRouter.resolve(child_task, config)
