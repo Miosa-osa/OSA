@@ -129,4 +129,71 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
     assert routed.provider == :first
     assert routed.model_reason =~ "proceeding without it"
   end
+
+  describe "speed/priority tier biases tier and provider order" do
+    # Capture the tier the router asks model_for for, so we can assert the
+    # priority bias without depending on a real model table.
+    defp capture_tier_router(task, config, extra \\ []) do
+      test_pid = self()
+
+      opts =
+        [
+          candidates: [:paid_primary, :free_local],
+          configured?: fn _ -> true end,
+          model_for: fn tier, provider ->
+            send(test_pid, {:asked, tier, provider})
+            "#{provider}-#{tier}-model"
+          end,
+          tool_call: fn _, _ -> true end,
+          context_window: fn _ -> 200_000 end,
+          vision_capable: fn _, _ -> true end
+        ] ++ extra
+
+      DelegationRouter.resolve(task, config, opts)
+    end
+
+    test "loose steps the quality tier DOWN one, floored at :specialist" do
+      # elite → specialist under loose
+      routed = capture_tier_router("do it", %{provider: :paid_primary, tier: :elite, priority: "loose"})
+      assert_received {:asked, :specialist, _}
+      assert routed.priority == :loose
+      assert routed.model_reason =~ "priority: loose"
+    end
+
+    test "loose never drops below :specialist (stays tool-capable)" do
+      capture_tier_router("do it", %{provider: :paid_primary, tier: :specialist, priority: "loose"})
+      # specialist stepped toward utility would be :utility, but loose is floored
+      assert_received {:asked, :specialist, _}
+    end
+
+    test "immediate steps the quality tier UP toward :elite" do
+      capture_tier_router("do it", %{provider: :paid_primary, tier: :specialist, priority: "immediate"})
+      assert_received {:asked, :elite, _}
+    end
+
+    test "loose prefers a free/local provider over the paid primary" do
+      # FallbackChain.free?/1 decides; :ollama is free in the default set. Use it
+      # as the free candidate so ordering puts it first for loose.
+      test_pid = self()
+
+      DelegationRouter.resolve("do it", %{provider: :openai, tier: :specialist, priority: "loose"},
+        candidates: [:openai, :ollama],
+        configured?: fn _ -> true end,
+        model_for: fn _tier, provider -> send(test_pid, {:picked, provider}); "#{provider}-m" end,
+        tool_call: fn _, _ -> true end,
+        context_window: fn _ -> 200_000 end,
+        vision_capable: fn _, _ -> true end
+      )
+
+      # The FIRST provider offered to model_for under loose must be the free one.
+      assert_received {:picked, :ollama}
+    end
+
+    test "standard (default) leaves tier and order unchanged" do
+      routed = capture_tier_router("do it", %{provider: :paid_primary, tier: :specialist})
+      assert_received {:asked, :specialist, :paid_primary}
+      assert routed.priority == :standard
+      refute routed.model_reason =~ "priority:"
+    end
+  end
 end

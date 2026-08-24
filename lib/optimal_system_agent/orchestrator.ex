@@ -470,7 +470,10 @@ defmodule OptimalSystemAgent.Orchestrator do
       # own run mid-loop via `Loop.Limits.budget_exceeded?` once it crosses the
       # cap, so a wide fan-out cannot burn unbounded spend. Enforced per child;
       # the parent's own budget is independent.
-      max_budget_usd: Map.get(config, :max_budget_usd)
+      max_budget_usd: Map.get(config, :max_budget_usd),
+      # Speed/cost priority (routes a service_tier for OpenAI; also set the
+      # quality tier + provider order in DelegationRouter).
+      priority: Map.get(config, :priority)
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches

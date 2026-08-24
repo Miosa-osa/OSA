@@ -175,7 +175,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Tri-mode delegation policy (primitive #34): :disabled | :explicit_only |
     # :proactive. nil defers to `config :optimal_system_agent, :delegation_policy`
     # (default :proactive). Read by ToolFilter + the delegate handler.
-    delegation_policy: nil
+    delegation_policy: nil,
+    # Speed/cost priority for this session (:immediate | :standard | :loose),
+    # inherited from the delegating task's config. Read by LLMClient to select a
+    # provider service_tier (OpenAI flex/priority) for cheaper long-horizon work.
+    priority: :standard
   ]
 
   @cancel_table :osa_cancel_flags
@@ -1197,6 +1201,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           default_permission_mode(),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       delegation_policy: Keyword.get(opts, :delegation_policy),
+      priority: Keyword.get(opts, :priority) || :standard,
       parent_session_id: Keyword.get(opts, :parent_session_id),
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),

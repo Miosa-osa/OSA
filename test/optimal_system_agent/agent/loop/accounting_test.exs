@@ -436,5 +436,17 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
       assert snap.input_tokens == 1_000_000
       assert Map.has_key?(snap, :max_budget_usd)
     end
+
+    test "reports $/completed-task amortised over turns" do
+      snap = Accounting.snapshot(%{session_cost_usd: 0.60, turn_count: 3})
+      assert snap.completed_tasks == 3
+      assert snap.cost_per_task_usd == 0.2
+    end
+
+    test "$/task is guarded before the first task completes (no divide-by-zero)" do
+      snap = Accounting.snapshot(%{session_cost_usd: 0.0, turn_count: 0})
+      assert snap.completed_tasks == 0
+      assert snap.cost_per_task_usd == 0.0
+    end
   end
 end
